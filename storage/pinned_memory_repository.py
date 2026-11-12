@@ -66,6 +66,14 @@ from custom_messages.enums import ChangeRefusal
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 from .change_ledger import ChangeRefused, PlannedChange, check_change, ensure_ledger_tables, record_change, save_review
 from .config import StorageSettings
+from .operation_outcomes import (
+    CommandOutcome,
+    StoredOutcome,
+    ensure_outcome_table,
+    purge_expired,
+    save_refusal,
+    stored_outcome,
+)
 from .pinned_memory_changes import MemoryWriter, planned_creation, planned_removal, planned_update
 from .postgres_connection import (
     PINNED_MEMORY_WRITE_LOCK_KEY,
@@ -91,6 +99,25 @@ class PinnedMemoryConflictError(ValueError):
     Agent tools report it with the shared reason ``changed_since_read``
     (``custom_messages.enums.ChangeRefusal``); the gateway reports it as a
     conflict. A ``ValueError`` like the repository's other refusals.
+    """
+
+
+class PinnedMemoryNotFoundError(ValueError):
+    """The fact or event a change names does not exist (in this bank and scope); nothing was changed.
+
+    A ``ValueError`` like the repository's other refusals; the team services answer
+    it as ``not_found`` rather than ``invalid_request``.
+    """
+
+
+class PinnedMemoryInputError(ValueError):
+    """The command itself is wrong (a missing field, bad tags, a time that cannot be read,
+    an event that cannot be undone); nothing was changed.
+
+    A ``ValueError`` like the repository's other refusals. The team services answer it as
+    ``invalid_request`` and store that answer; any other ``ValueError`` from the store is a
+    fault in stored data or in the code, answered ``runtime_error`` and logged
+    (``team_services.memory``).
     """
 
 
@@ -264,7 +291,14 @@ class PinnedMemoryRepository(Protocol):
         writer: MemoryWriter,
         source: Optional[dict[str, Any]] = None,
         actor: Optional[dict[str, Any]] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> dict[str, Any]: ...
+
+    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]: ...
+
+    def stored_command_outcome(self, command_outcome: CommandOutcome) -> Optional[StoredOutcome]: ...
+
+    def purge_command_outcomes(self, now: datetime) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -297,20 +331,46 @@ class _RelationalPinnedMemoryRepository:
             conn.commit()
 
     @contextmanager
-    def _checked_write(self) -> Iterator[Any]:
+    def _checked_write(self, command_outcome: Optional[CommandOutcome] = None) -> Iterator[Any]:
         """A write whose change is checked in the change ledger (module docstring).
 
         A refused change raises ``ChangeRefused`` inside the transaction, which
         then rolls back; what the request was shown is saved afterwards, and
-        the refusal goes on to the caller.
+        the refusal goes on to the caller. With ``command_outcome`` (a person's
+        command from the team services), a command already answered raises
+        ``OutcomeAlreadyStored`` under the lock before anything changes
+        (``storage.operation_outcomes``).
         """
 
         try:
             with self._write() as conn:
+                if command_outcome is not None:
+                    command_outcome.raise_if_stored(conn, self._dialect)
                 yield conn
         except ChangeRefused as refused:
             self._save_review(refused)
             raise
+
+    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]:
+        """Store a refused command's reply in a transaction of its own (``storage.operation_outcomes``).
+
+        Returns what is stored under the command's key now (``save_refusal``); a failed write raises.
+        """
+
+        with self._write() as conn:
+            return save_refusal(conn, self._dialect, command_outcome, reply)
+
+    def stored_command_outcome(self, command_outcome: CommandOutcome) -> Optional[StoredOutcome]:
+        """The reply already stored for this command's retry key, read without the write lock."""
+
+        with self._connect() as conn:
+            return stored_outcome(conn, self._dialect, command_outcome.team_id, command_outcome.retry_key)
+
+    def purge_command_outcomes(self, now: datetime) -> int:
+        """Delete stored replies past their retention (``storage.operation_outcomes``); how many were deleted."""
+
+        with self._write() as conn:
+            return purge_expired(conn, self._dialect, now)
 
     def _save_review(self, refused: ChangeRefused) -> None:
         if refused.review is None or repositories_are_read_only():
@@ -424,6 +484,8 @@ class _RelationalPinnedMemoryRepository:
             )
             # Fact changes are checked and recorded in the change ledger, in the same transaction.
             ensure_ledger_tables(conn, self._dialect)
+            # People's commands from the team services store their replies in the same transaction too.
+            ensure_outcome_table(conn)
             conn.commit()
 
 
@@ -587,20 +649,22 @@ class _RelationalPinnedMemoryRepository:
         writer: MemoryWriter,
         source: Optional[dict[str, Any]] = None,
         actor: Optional[dict[str, Any]] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> dict[str, Any]:
         """Reverse one event, only while the fact is still as that event left it (module docstring).
 
         Raises ``PinnedMemoryConflictError`` when the fact changed after the
         event, ``ChangeRefused`` when the change ledger refuses the writer's
-        change, and ``ValueError`` for an unknown event or an undo event.
+        change, ``PinnedMemoryNotFoundError`` for an unknown event and
+        ``ValueError`` for an undo event.
         """
 
-        with self._checked_write() as conn:
+        with self._checked_write(command_outcome) as conn:
             event = self._event(conn, event_id)
             if event is None:
-                raise ValueError(f"Memory event {event_id!r} was not found.")
+                raise PinnedMemoryNotFoundError(f"Memory event {event_id!r} was not found.")
             if event.event_type == "undo":
-                raise ValueError("Cannot undo an undo event.")
+                raise PinnedMemoryInputError("Cannot undo an undo event.")
             handler = _UNDO_HANDLERS.get(event.event_type)
             if handler is None:
                 raise ValueError(f"Unsupported memory event type for undo: {event.event_type}")
@@ -623,14 +687,16 @@ class _RelationalPinnedMemoryRepository:
                 actor=actor or {},
                 writer=writer,
             )
-            outcome = handler(self, undo)
-        return {
-            "undone_event_id": event_id,
-            "event_type": event.event_type,
-            "bank": event.bank,
-            "memory_id": event.memory_id,
-            **outcome,
-        }
+            result = {
+                "undone_event_id": event_id,
+                "event_type": event.event_type,
+                "bank": event.bank,
+                "memory_id": event.memory_id,
+                **handler(self, undo),
+            }
+            if command_outcome is not None:
+                command_outcome.save(conn, self._dialect, result)
+        return result
 
     def _undo_create(self, undo: "_Undo") -> dict[str, Any]:
         snapshot = dict(self._require_event_result_current(undo))
@@ -736,7 +802,7 @@ class _RelationalPinnedMemoryRepository:
             raise self._stale_undo(event, f"{label} was restored and changed after it. Undo its latest change instead.")
         before = dict(json.loads(event.before_json or "{}"))
         if not before:
-            raise ValueError("Cannot undo removal because the event has no prior fact snapshot.")
+            raise PinnedMemoryInputError("Cannot undo removal because the event has no prior fact snapshot.")
         return before
 
     def _has_later_event(self, conn: Any, event: PinnedMemoryEventRow) -> bool:
@@ -866,16 +932,17 @@ class _RelationalPinnedMemoryRepository:
         source: Optional[dict[str, Any]] = None,
         actor: Optional[dict[str, Any]] = None,
         writer: MemoryWriter,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> PinnedMemoryWriteResult:
         fact = str(fact_text or "").strip()
         if not fact:
-            raise ValueError("fact_text must be non-empty.")
+            raise PinnedMemoryInputError("fact_text must be non-empty.")
         normalized_source_key = str(source_key or "").strip() or None
         if normalized_source_key is not None and len(normalized_source_key) > 240:
-            raise ValueError("source_key must contain at most 240 characters.")
+            raise PinnedMemoryInputError("source_key must contain at most 240 characters.")
         # The free number is read under the write lock, so a create at the
         # same moment waits and then sees this one's number as taken.
-        with self._checked_write() as conn:
+        with self._checked_write(command_outcome) as conn:
             now = utc_now_iso()
             self._prune_scope(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, now_utc=now)
             if normalized_source_key is not None:
@@ -888,7 +955,10 @@ class _RelationalPinnedMemoryRepository:
                     (bank, team_id, canonical_user_id, normalized_source_key),
                 ).fetchone()
                 if existing is not None:
-                    return PinnedMemoryWriteResult(self._row_to_fact(existing), event_id=None)
+                    found = PinnedMemoryWriteResult(self._row_to_fact(existing), event_id=None)
+                    if command_outcome is not None:
+                        command_outcome.save(conn, self._dialect, found)
+                    return found
             rows = conn.execute(
                 f"""
                 SELECT memory_id
@@ -944,7 +1014,10 @@ class _RelationalPinnedMemoryRepository:
                 created_at=now,
             )
             self._record_ledger(conn, writer, planned, version=pinned_memory_record_digest_values(row_payload), now=now)
-        return PinnedMemoryWriteResult(PinnedMemoryFactRow(**row_payload), event_id)
+            created = PinnedMemoryWriteResult(PinnedMemoryFactRow(**row_payload), event_id)
+            if command_outcome is not None:
+                command_outcome.save(conn, self._dialect, created)
+        return created
 
     def _replace(
         self,
@@ -963,10 +1036,11 @@ class _RelationalPinnedMemoryRepository:
         actor: Optional[dict[str, Any]] = None,
         expected_record_digest: Optional[str] = None,
         writer: MemoryWriter,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> Optional[PinnedMemoryWriteResult]:
         """Change fact ``memory_id``; with ``expected_record_digest``, only while it is that version."""
 
-        with self._checked_write() as conn:
+        with self._checked_write(command_outcome) as conn:
             now = utc_now_iso()
             self._prune_scope(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, now_utc=now)
             row = self._get_row(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, memory_id=memory_id)
@@ -976,7 +1050,7 @@ class _RelationalPinnedMemoryRepository:
             before = dict(row)
             next_fact = str(fact_text if fact_text is not None else row["fact_text"]).strip()
             if not next_fact:
-                raise ValueError("fact_text must be non-empty.")
+                raise PinnedMemoryInputError("fact_text must be non-empty.")
             next_tags = _json_dumps(tags if tags is not None else json.loads(row["tags_json"] or "[]"), default=[])
             next_metadata = _json_dumps(metadata if metadata is not None else json.loads(row["metadata_json"] or "{}"), default={})
             next_invalid_after_utc = (
@@ -1041,7 +1115,10 @@ class _RelationalPinnedMemoryRepository:
             self._record_ledger(
                 conn, writer, planned, version=pinned_memory_record_digest_values(dict(after_row)), now=now
             )
-        return PinnedMemoryWriteResult(self._row_to_fact(after_row), event_id)
+            replaced = PinnedMemoryWriteResult(self._row_to_fact(after_row), event_id)
+            if command_outcome is not None:
+                command_outcome.save(conn, self._dialect, replaced)
+        return replaced
 
     def _delete(
         self,
@@ -1054,10 +1131,11 @@ class _RelationalPinnedMemoryRepository:
         actor: Optional[dict[str, Any]] = None,
         expected_record_digest: Optional[str] = None,
         writer: MemoryWriter,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> Optional[PinnedMemoryWriteResult]:
         """Delete fact ``memory_id``; with ``expected_record_digest``, only while it is that version."""
 
-        with self._checked_write() as conn:
+        with self._checked_write(command_outcome) as conn:
             now = utc_now_iso()
             self._prune_scope(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, now_utc=now)
             row = self._get_row(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, memory_id=memory_id)
@@ -1079,7 +1157,10 @@ class _RelationalPinnedMemoryRepository:
                 created_at=now,
             )
             self._record_ledger(conn, writer, planned, version="", now=now)
-        return PinnedMemoryWriteResult(self._row_to_fact(row), event_id)
+            deleted = PinnedMemoryWriteResult(self._row_to_fact(row), event_id)
+            if command_outcome is not None:
+                command_outcome.save(conn, self._dialect, deleted)
+        return deleted
 
     def _prune_scope(self, conn: Any, *, bank: str, team_id: str, canonical_user_id: str, now_utc: str) -> None:
         """Expire one scope's expired facts inside a write that already holds the lock."""

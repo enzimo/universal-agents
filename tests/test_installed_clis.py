@@ -355,6 +355,10 @@ def https_server(tmp_path: Path, monkeypatch):
     import socket
     import ssl
 
+    # The redirect uses a synthetic hostname resolved by the test itself.
+    # An environment proxy would resolve it elsewhere and bypass the deadline probe.
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setenv("NO_PROXY", "*")
     cert, key = _self_signed_certificate(tmp_path)
     trusted = ssl.create_default_context(cafile=str(cert))
     monkeypatch.setattr(ssl, "_create_default_https_context", lambda *args, **kwargs: trusted)

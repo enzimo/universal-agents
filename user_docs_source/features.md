@@ -18,7 +18,11 @@ to stop desktop alerts for this user in this browser.
 
 Reopening Settings returns to the tab you last used until you sign out or reload
 the page. **Team** lists running agents and all defined agent classes with their
-descriptions, including specialists that are not currently running.
+descriptions, including specialists that are not currently running. Each running agent
+shows whether it is Available, Busy, Paused, Not accepting work (for example while it
+starts, or when its process runs another release) or Exiting (for a minute after it
+stops). The skills column is filled when you open the tab or press **Refresh**: the
+gateway asks the agents for them then, not on a timer.
 
 **Access**, next to **Inbox**, is the access map: what each agent type can use
 and where that access came from, what each person has given, and every tool's
@@ -152,8 +156,9 @@ memory appears at the top of the first page.
 
 In chat apps other than Web Chat, `/usermem list` shows your personal memories
 and `/coremem list` the team's; `/help` lists their add, replace and delete
-forms, and the same rules apply as in Settings. You can also just ask the
-assistant "What do you remember about me?" or "Forget that".
+forms, and the same rules apply as in Settings. A list shows at most 100
+memories at once; ask for later ones with a range such as `range=101-200`. You
+can also just ask the assistant "What do you remember about me?" or "Forget that".
 
 The assistant changes or deletes a memory only as it last read it. If the
 memory changed in the meantime, for example from another chat or in Settings,
@@ -274,6 +279,21 @@ on (`agent.knowledge.enabled`).
   option. Only you (or the knowledge curator
   working for you) can publish your proposals; a proposal with private details
   asks for a second click before it reaches the team.
+
+Web Chat shows and saves at most 32,768 characters of text at a time, while
+agents may write longer pages when an administrator raises
+`agent.knowledge.limits.max_body_chars` (24,000 characters by default). Web Chat
+says so instead of opening a page, earlier revision, note or proposal with
+longer text, and refuses to save over it, revert it, archive it, publish it or
+withdraw it. Nothing is changed and nothing is cut: agents still read and change
+the whole text, the Knowledge Curator still reviews long proposals, and a team
+transfer carries all of it. If you type more than 32,768 characters, nothing is
+saved and your text stays in the editor. A page can also be too large for Web
+Chat as a whole, with its open notes, links and pages linking to it, mostly
+when a team raises the note limit or writes in a script that takes several
+bytes per character: Web Chat then says so the same way, and refuses a note or
+edit that would make a page too large. Administrators see how much knowledge
+is too long for Web Chat as a note on the Status page.
 
 ### Conversations
 
@@ -440,6 +460,12 @@ external-platform registration and `/user link` must
 be run on the platform whose identity is being linked. Broader session, memory,
 and topic commands are kept out of the browser command list.
 
+In channels that support topic commands, `/topics` lists your tags,
+`/tag_thread <tag[,tag]> [--private]` tags the current thread, and
+`/switch_topic <tag>` continues a matching thread. Tags use at most 64
+characters after normalization, with at most 20 tags per tagging command.
+Older oversized tags are left out of lists with a warning in the team log.
+
 The local CLI also supports `/reply <message-ref> <text>` and prints local
 `[msg_n]` references for that purpose. Other chat channels show plain replies
 without message-reference prefixes.
@@ -468,6 +494,24 @@ kind that takes the work over; an agent waiting on your answer or on an access
 decision stays up until it gets one; an access decision made while the agent
 restarted still reaches the task; and when a request ends, any work it handed to
 other agents stops too.
+
+When an agent leaves the team for good (it stops, or its process restarts after a
+crash), work that was sent to it by name and that it never started fails at once
+with a message saying so, so the agent that asked for it can decide what to do
+next: only that piece fails, and the rest of your request goes on. This also
+happens when the asking agent was itself restarted meanwhile: once it is back, it
+checks what it was waiting for. Work it had already started is not failed: a
+restarted agent picks it up from where it was saved, and work it handed back goes
+to another agent of the same kind. An agent that only stopped answering for a
+while is not given up on; its work is checked again later and times out as usual
+if it never comes back.
+
+The team lead can pause, resume or stop other agents. Only the team lead does
+this, never another agent, and never for itself: stopping the team lead would
+end its process without the approval a restart needs. The team has one lead: the
+team lead cannot start another TeamArchitect. When an agent's answer is
+lost, the team lead says it cannot tell whether the change happened, and checks
+the agent's state before asking again.
 
 A request that involves several agents is reported once, as your request.
 Administrators' notices name the kind of agent and what to check, never the
@@ -910,15 +954,16 @@ skills (full access to `fn:team_skills`); then it applies them itself and
 administrators get a notice for each one. Either way, Universal Agents checks
 the tree and report again just before it installs the managed copy, and a
 modified managed tree fails its activation check.
-The runtime immediately reloads TeamArchitect's AgentSkills cache and publishes
-a typed team refresh notice. Each idle skills-enabled specialist verifies the
-immutable installation receipt, reloads its own cache, and republishes its live
-skill list. A busy specialist defers the reload until its active turn finishes.
-A presence-heartbeat fingerprint check repairs that deferred refresh or a
-missed live notice. The Team roster may lag until refreshed presence arrives,
-but a successful install does not require a manager or system restart. If the
-exact semantic name remains unavailable after the next idle presence heartbeat,
-report it as a runtime defect rather than approving a restart workaround.
+The runtime immediately reloads TeamArchitect's AgentSkills cache and sends a
+typed team refresh notice. Each idle skills-enabled specialist verifies the
+immutable installation receipt and reloads its own cache. A busy specialist
+defers the reload until its active turn finishes. Each agent's own catalog
+check, every 20 seconds, repairs that deferred refresh or a missed notice. The
+Team page shows each agent's skills as of the last time someone opened the
+Team tab or pressed Refresh, but a successful install does not require a
+manager or system restart. If the exact semantic name remains unavailable after
+the next idle check, report it as a runtime defect rather than approving a
+restart workaround.
 Installing the skill does not activate it and does not approve its tools, shell
 commands, MCP calls, credentials, or future repository updates.
 
@@ -928,7 +973,10 @@ Restarting a supervised process is high risk because active work can be
 interrupted. Team Architect must stage an exact `manager`, `gateway`, or `all`
 plan first. The plan reports affected processes, the current task, tracked,
 runnable, and waiting counts, top-level task ids/states and delegated subtasks,
-plus team-visible active work for an `all` restart. Gateway session count is
+plus, for an `all` restart, what each other agent is running: Team Architect
+asks each one and waits a few seconds at most. If Team Architect cannot ask
+yet, for example just after it restarted, an `all` restart is refused with that
+reason; try again a minute later. Gateway session count is
 not visible to the agent, so the prompt states that connected sessions may
 need to reconnect rather than pretending the count is known.
 
@@ -938,20 +986,30 @@ chat). The request lists the tasks the restart may interrupt or delay: every
 task Team Architect holds, whether running, queued or waiting, and for an `all`
 restart also the work other agents are running. Work an agent does on a task
 Team Architect handed it counts as that task.
-The next plan step or a recovery task for that request is covered too.
+The next plan step or a recovery task for that request is covered too. An agent
+that did not answer is listed separately as not answering: what it is doing is
+unknown, and approving the restart means interrupting whatever that is. An agent
+that runs without a message session (the Status page explains why) cannot be
+asked at all; it is listed on a line of its own with the reason, and its work is
+unknown too.
 
 Your approval covers those tasks. Applying re-reads the running state first.
 If some listed tasks finished or changed state in the meantime, the restart
 still goes ahead. If a new task arrived that the restart would interrupt, such
 as another message or a scheduled run, the restart is refused and Team
-Architect must ask you again with a fresh plan that lists it. Approving a
+Architect must ask you again with a fresh plan that lists it. The same happens
+when an agent that answered no longer answers, or when an agent that did not
+answer turns out to be running a task that was not listed. Approving a
 settings change or a skill never approves a restart.
 
 The supervisor acts only on restart requests that record their approval: your
 approved request, your agreement with authorization off, or the authenticated
 gateway configuration editor. Other JSON is discarded. `manager`, `gateway`,
 and `all` restart supervised child process scopes; none reboots the host or
-container.
+container. An `all` restart, which the configuration editor asks for, also
+restarts the installation authority and the team services, before the other
+processes, so settings they read at start take effect; the team answers again
+once the team services serve.
 
 Tools are not attached to agent types any more, and getting a new tool never
 needs a restart: with authorization on, an agent's tools follow the access it
@@ -1188,8 +1246,12 @@ disappears once it is fixed:
 - **Problem**: something does not work now, for example a model provider
   rejected a key, an endpoint in the configuration has no key, an MCP server
   is not answering, a hosted MCP server set to run could not start, the
-  secure tool broker does not answer, TeamLead stopped reporting, or a disk
-  the instance uses is nearly full (95% by default).
+  secure tool broker does not answer, the team's records
+  show no running TeamLead, the gateway cannot see the team (the installation
+  refused its join, or it has not read the team's records), an agent cannot run its work because the team gave it
+  no session (the finding says why, for example the worker limit is reached,
+  and what to do), or a disk the instance uses is nearly full (95% by
+  default).
 - **Warning**: something works, but not as configured, for example a
   variable in `team.env` or the container environment that overrides a saved
   setting or a key saved with `/auth model`, memory search that stopped
@@ -1199,8 +1261,9 @@ disappears once it is fixed:
   default), or people's stored-data totals that are out of date, so they get
   no storage notices.
 - **Note**: a deliberate choice worth knowing, such as access checks turned
-  off, people whose work goes to their own model provider, or a message
-  server that sets no limit for stored messages.
+  off, people whose work goes to their own model provider, a message
+  server that sets no limit for stored messages, or knowledge pages, revisions,
+  notes or proposals too long to open in Web Chat.
 
 When new problems appear, administrators also get one Inbox notice that
 links to the page. Storage nearing its limit is told the same way, although

@@ -387,10 +387,6 @@ def _transport_agent_kwargs(config: dict[str, Any]) -> dict[str, Any]:
             "nats_work_max_age_seconds",
             TRANSPORT_DEFAULTS.work_max_age_seconds.value,
         ),
-        "nats_presence_max_age_seconds": config.get(
-            "nats_presence_max_age_seconds",
-            TRANSPORT_DEFAULTS.presence_max_age_seconds.value,
-        ),
         "nats_process_consumer_inactive_threshold_seconds": config.get(
             "nats_process_consumer_inactive_threshold_seconds",
             TRANSPORT_DEFAULTS.process_consumer_inactive_threshold_seconds.value,

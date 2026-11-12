@@ -6,23 +6,17 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from access_control.knowledge_access import knowledge_target
 from assistant_gateway.application.manager_client import GatewayManagerClient
 from assistant_gateway.application.ports import (
     GatewayIdGenerator,
     GatewayPrivateResourceAuthorizer,
 )
 from assistant_gateway.application.private_resources import (
-    PRIVATE_ACTION_CREATE,
     PRIVATE_ACTION_DELETE,
     PRIVATE_ACTION_READ,
     PRIVATE_ACTION_UPDATE,
     RESOURCE_CONVERSATION,
     RESOURCE_OBJECTIVE,
-    RESOURCE_SCHEDULE,
-    RESOURCE_TEAM_MEMORY,
-    RESOURCE_USER_MEMORY,
-    RESOURCE_TASK,
 )
 from assistant_gateway.application.request_context import (
     GatewayCommandPerson,
@@ -31,24 +25,16 @@ from assistant_gateway.application.request_context import (
 )
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.control_v1 import (
-    ManagerKnowledgeCommand,
-    ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
-    ManagerTopicCommand,
     PersonStandingCommandV1,
 )
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
 from custom_messages.enums import RequesterType
 
 
 GatewayManagerCommand = (
-    ManagerScheduleCommand
-    | ManagerMemoryCommand
-    | ManagerKnowledgeCommand
-    | ManagerRuntimeWorkCommand
-    | ManagerTopicCommand
+    ManagerRuntimeWorkCommand
 )
 # PersonStandingCommandV1 is not tied to a chat session; its gateway context
 # carries only the acting administrator's signed context.
@@ -75,7 +61,6 @@ class GatewayManagerCommandRequest:
     # context the envelope carries; the command itself names nobody.
     person: GatewayCommandPerson
     route: GatewayRequestRoute = GatewayRequestRoute()
-    target_agent_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,7 +68,7 @@ class _PrivateResourceTarget:
     resource_type: str
     resource_id: str
     action: str
-    # False for records every team member shares (team memory, team knowledge pages).
+    # False for records every team member shares.
     owned_by_person: bool = True
 
 
@@ -132,12 +117,7 @@ class GatewayManagerCommandService:
         """Check the command and build its envelope: (manager id, correlation id, envelope)."""
 
         self._authorize(request.command, session=request.session, person=request.person)
-        if request.target_agent_id is not None and not (
-            isinstance(request.command, ManagerRuntimeWorkCommand)
-            and request.command.action in {"list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"}
-        ):
-            raise ValueError("Only task controls may target a team member.")
-        manager_id = request.target_agent_id or self._require_manager_id()
+        manager_id = self._require_manager_id()
         correlation_id = self._id_generator.new_correlation_id()
         envelope = self._build_envelope(
             request,
@@ -243,60 +223,7 @@ class GatewayManagerCommandService:
         session: SessionRecord,
         person: GatewayCommandPerson,
     ) -> _PrivateResourceTarget:
-        if isinstance(command, ManagerScheduleCommand):
-            return _PrivateResourceTarget(
-                resource_type=RESOURCE_SCHEDULE,
-                resource_id=(
-                    command.schedule_id
-                    or f"session:{command.session_key or session.session_key}"
-                ),
-                action=(
-                    PRIVATE_ACTION_READ
-                    if command.action == "list"
-                    else PRIVATE_ACTION_DELETE
-                    if command.action == "remove"
-                    else PRIVATE_ACTION_UPDATE
-                ),
-            )
-        if isinstance(command, ManagerKnowledgeCommand):
-            # The same rule the manager applies (access_control.knowledge_access).
-            knowledge = knowledge_target(command.command, person_id=person.canonical_user_id)
-            return _PrivateResourceTarget(
-                resource_type=knowledge.resource_type,
-                resource_id=knowledge.resource_id,
-                action=knowledge.action,
-                owned_by_person=knowledge.owner_person_id is not None,
-            )
-        if isinstance(command, ManagerMemoryCommand):
-            memory_command = command.command
-            return _PrivateResourceTarget(
-                owned_by_person=memory_command.bank != "coremem",
-                resource_type=(
-                    RESOURCE_TEAM_MEMORY
-                    if memory_command.bank == "coremem"
-                    else RESOURCE_USER_MEMORY
-                ),
-                resource_id=(
-                    f"{memory_command.bank}:"
-                    f"{memory_command.memory_id or memory_command.event_id or 'collection'}"
-                ),
-                action=(
-                    PRIVATE_ACTION_READ
-                    if memory_command.action in {"list", "show"}
-                    else PRIVATE_ACTION_CREATE
-                    if memory_command.action == "create"
-                    else PRIVATE_ACTION_DELETE
-                    if memory_command.action == "delete"
-                    else PRIVATE_ACTION_UPDATE
-                ),
-            )
         if isinstance(command, ManagerRuntimeWorkCommand):
-            if command.action in {"list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"}:
-                return _PrivateResourceTarget(
-                    resource_type=RESOURCE_TASK,
-                    resource_id=command.target_task_id or f"user:{person.canonical_user_id}",
-                    action=PRIVATE_ACTION_READ if command.action in {"list_tasks", "list_finished_tasks"} else PRIVATE_ACTION_DELETE,
-                )
             if command.scope == "objective":
                 return _PrivateResourceTarget(
                     resource_type=RESOURCE_OBJECTIVE,
@@ -333,19 +260,7 @@ class GatewayManagerCommandService:
                     else PRIVATE_ACTION_UPDATE
                 ),
             )
-        return _PrivateResourceTarget(
-            resource_type=RESOURCE_CONVERSATION,
-            resource_id=(
-                command.conversation_id
-                or session.conversation_id
-                or f"session:{session.session_key}"
-            ),
-            action=(
-                PRIVATE_ACTION_UPDATE
-                if command.action == "tag_thread"
-                else PRIVATE_ACTION_READ
-            ),
-        )
+        raise TypeError(f"No private-resource rule for {type(command).__name__}.")
 
     def _build_envelope(
         self,

@@ -1,10 +1,10 @@
 """What an agent reports about itself on administrators' Status page.
 
-Each agent adds these findings to the status heartbeat it already publishes
-every 20 seconds (``AgentStatus.status_findings``); the gateway keeps the
-latest heartbeat per agent and drops agents that stopped reporting, so a
-fixed problem disappears with the next heartbeat. Before this, the same facts
-were only in logs or in the agent's own diagnostics.
+Each agent adds these findings to its status (``AgentStatus.status_findings``),
+which it gives when it is asked with ``agent.status``; the gateway asks the live
+agents when its Status page is checked (``assistant_gateway.team_view``), so a
+fixed problem disappears at the next check. Before this, the same facts were
+only in logs or in the agent's own diagnostics.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ def agent_status_findings(agent: Any) -> list[StatusFindingV1]:
         _stopped_receivers,
         _output_retention_overdue,
         _output_retention_grace,
+        _long_knowledge,
     ):
         try:
             findings.extend(check(agent, agent_type))
@@ -227,6 +228,14 @@ def _output_retention_grace(agent: Any, agent_type: str) -> list[StatusFindingV1
             source=agent_type,
         )
     ]
+
+
+def _long_knowledge(agent: Any, agent_type: str) -> list[StatusFindingV1]:
+    """Knowledge too long to open in Web Chat (only the team lead counts it, at most every 10 minutes, off the loop)."""
+
+    from custom_agents.long_knowledge import long_knowledge_findings
+
+    return long_knowledge_findings(agent, agent_type)
 
 
 __all__ = ["agent_status_findings"]

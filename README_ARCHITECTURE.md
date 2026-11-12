@@ -24,7 +24,7 @@ channel adapters and assistant gateway
           |                                        v
           |                                specialist runtimes
           |
-          +----> replies, control, and presence
+          +----> replies and control; signed agent and host records
 
 execution state ----> deterministic execution controller
                               |
@@ -41,8 +41,8 @@ The execution controller is a side service. Normal user requests travel from
 the gateway through NATS to the manager and specialists.
 
 NATS and JetStream are the inter-process transport. They carry work, replies,
-control messages, and presence, but they are not the business-state,
-authorization, or credential database.
+control messages, and the signed records of which agents and hosts are live, but
+they are not the business-state, authorization, or credential database.
 
 ## Component ownership
 
@@ -51,7 +51,7 @@ authorization, or credential database.
 | Assistant gateway | Canonical user identity, human channels, sessions, accepted requests, attachments, presentation history, and delivery |
 | `TeamArchitect` | Root Tasks, Plans, Objectives, schedules that require reasoning, delegation, recovery, and final synthesis |
 | Specialists | One assigned Task and its model and tool loop |
-| NATS and JetStream | Typed message delivery, shared worker queues read by pull consumers, routing, redelivery, control, and presence |
+| NATS and JetStream | Typed message delivery, shared worker queues read by pull consumers, routing, redelivery, control, and the signed agent and host records |
 | Domain repositories | Durable workflow, conversation, memory, authorization, gateway, and execution state |
 | Secure tool broker | Credential catalog, secret-free references, credential hydration and use, external provider access, and redaction. It always runs: every credentialed tool call (web research, GitHub, Google, Hugging Face, X, MCP servers) goes through it, so no setting turns it off |
 | Execution controller | Immutable code revisions, deterministic jobs, fenced attempts, and managed-service reconciliation |
@@ -103,22 +103,20 @@ receiver asks for its next message when it can act on it, and NATS never picks a
 receiver and pushes (decision of 2026-10-04). Workers of one type share one
 queue and ask for a task only while they are free. The transport adapter
 refuses a push listener on the work stream, and an architecture test fails when
-production code creates a deliver group or subscribes to NATS outside the
-adapter (`tests/test_runtime_architecture_boundaries.py`). Presence records let late
-joiners and the gateway discover live agents without turning presence into
-proof of identity or authority. Agent status requests and snapshots bypass the
-short broadcast age limit: a restarted manager must receive retained presence
-even when startup takes longer than 100 ms. Replay keeps the sender's original
-`last_seen_at`; liveness checks use that time and process evidence, so receiving
-an old snapshot does not make a stopped worker look newly alive.
-An explicit live probe accepts its correlated reply, or a presence snapshot
-whose sender time falls between the probe's start and arrival. Older retained
-snapshots remain discovery data and cannot verify an exact delegation target.
-Before changing discovery or acting on an exit, the receiver calls
-`custom_agents.agent_liveness.reconcile_received_status` to select the newest
-sender-written status from the message, memory and the shared database.
-An old exit cannot fail current work after a newer running status, and an old
-running snapshot cannot restore an agent whose newer status says it exited.
+production code creates a deliver group, subscribes to NATS outside the adapter
+and the protocol 1 kernel, or uses a raw NATS handle (publishing, requests,
+key-value and object-store buckets, streams, consumers) outside the modules it
+lists (`NATS_CLIENT_MODULES` in `tests/test_runtime_architecture_boundaries.py`).
+Protocol 1's request/reply and key-value calls live in `custom_transport.protocol1`
+rather than in the adapter: they sign and verify frames and records, which the
+adapter knows nothing about, and the list keeps them, the adapter and the topology
+code the only places that reach NATS directly (plan 13B.6). Agents learn who is
+live on their team from the team's signed agent records ("Agent records and who
+is live", "Agents asking each other"), not from presence messages: a record says
+an agent is live only while its host keeps reporting, so an old message can no
+longer make a stopped worker look alive. The gateway follows its team and its lead from
+the same records ("The gateway follows its team"), and the presence stream, the heartbeat
+and the broadcast subject were removed in step 7d.
 
 ## Work, scheduling, and recovery
 
@@ -295,7 +293,10 @@ each. They run in parallel on as many workers as the team allows:
 - **Lost workers.** A task whose worker died is taken over by a replacement, or
   handed back to the queue after a lost lease; each move to another worker is
   counted from claims, and after `max_retries_after_worker_loss` (3) moves the
-  task fails as `worker_lost`.
+  task fails as `worker_lost`. A move after a worker whose process runs another
+  message contract handed the task back is recorded but not counted: nothing
+  failed, and the requester reads that hand-back's cause, which the lead saved in
+  the team's database before it sent the task out again.
 - **When the requester wakes.** Its model runs again when every delegated task
   ended, at once when one failed with a typed reason, or when a
   `check_back_after_minutes` set on the delegation passed
@@ -692,11 +693,11 @@ Four repairs keep work from getting stuck in the first place:
   assumes every agent process of a team is a child of one supervisor run on one
   host: a process from another run counts as gone whatever host it names, so
   agent processes of a second runtime sharing the database are not supported.
-  Each agent writes only its own status row as it stops (marked exiting from
-  the moment its exit begins); the team lead stores other agents' presence only
-  when it is newer, never later than its own clock, and removes rows of agents
-  that are gone on its own timer, so a manager-only restart no longer makes
-  running startup agents look gone.
+  Each agent writes only its own status row, including as it stops (marked
+  exiting from the moment its exit begins); nobody else writes it (until step
+  7b the team lead also copied other agents' presence into it). The team lead
+  removes rows of agents that are gone on its own timer, so a manager-only
+  restart does not make running startup agents look gone.
 - A worker stays up while it holds any unfinished task, waiting ones included
   (`strands_team.worker_holds_work`); replies to a waiting task are addressed to
   it.
@@ -752,8 +753,9 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    after the lease was lost; then they fail with an explanation to the requester,
    their pending subtasks are asked to stop, and an access request they were
    waiting on is withdrawn so the reviewer is not left with an open item.
-4. It exits once it holds no unfinished task. Until then it keeps publishing
-   presence, so a starting worker of the same type does not adopt its tasks.
+4. It exits once it holds no unfinished task. Until then it keeps refreshing its own
+   status row and its record says it takes no work, so a starting worker of the same
+   type does not adopt its tasks (adoption is decided by launch records).
 
 The TeamLead accepts a handback only when the sender owns the stated launch, and
 saves it (`storage/worker_handback_repository.py`) before acting on it. Its runtime
@@ -798,7 +800,7 @@ original reply route so the result reaches the original requester:
 
 Runs of one schedule never overlap across workers. When a schedule comes due
 while an earlier run of it is unfinished on this agent, or on another worker
-whose presence is still live, the new occurrence is recorded as coalesced into
+whose own status row is still fresh, the new occurrence is recorded as coalesced into
 that run instead of starting a second task. A crashed worker's leftover receipt
 does not count, so it cannot block the schedule.
 
@@ -833,6 +835,64 @@ inspectable, including Tasks, runtime snapshots, schedules, Plans, Objectives,
 conversations, memory, authorization records, gateway sessions, and execution
 attempts. Agents still coordinate through NATS rather than polling one
 another's tables.
+
+Confirmed work survives a power loss (decisions 60, 75 and 82). The runtime
+records a message before it publishes it and saves a task before it
+acknowledges the message that brought it; with SQLite's `NORMAL` a power loss
+could undo those commits while NATS still treats the message as sent or
+delivered (a crashed process loses nothing either way). So:
+
+- Every SQLite connection commits with `synchronous=FULL`
+  (`storage.sqlite_connection.SQLITE_SYNCHRONOUS`), on macOS with `fullfsync`.
+  The setting is per connection and the database path is configurable, so it
+  applies to every database the module opens. The secure tool broker's
+  credential catalog (`secure_tool_broker.credential_catalog_store`) opens its
+  file itself and calls the same `configure_sqlite_connection`. A test parses
+  every tracked module and fails when one opens SQLite without that setup,
+  read-only or in memory (`tests/test_sqlite_connection.py`).
+- An agent process flushes its own records before it sends, not in each
+  commit (decision 82). A trivial task made about 31 commits between receiving
+  its task and publishing its reply, and with `FULL` each flushed the disk once
+  or twice: about 60 flushes, a reply 0.25 s later on a local container disk,
+  and "database is locked" for other writers on a disk that takes 0.6 s per
+  flush. Only what leaves the process needs those records on the disk. So in
+  an agent process (`custom_agents.commit_flushes`, called by `strands_main`)
+  the task runtime, conversation, agent status and storage-usage stores
+  (`connect_sqlite(defer_flush=True)`) commit with `NORMAL` and note their
+  file, and the NATS adapter awaits `custom_transport.send_barrier.before_send()`
+  before every publish, dead-letter copy, object upload, queued-task
+  withdrawal, acknowledgement and ending of a message; the barrier flushes the
+  noted files' write-ahead logs. One flush of a WAL file makes every commit in
+  it durable, whichever connection wrote it, so a power loss leaves the state
+  the agent had when it last sent something: what a crash at that moment
+  leaves, which recovery already handles. One flush runs at a time, on a
+  thread of its own (Strands runs synchronous tools on asyncio's shared pool),
+  and a file stays noted until a flush that started after its last commit
+  succeeds, so a sender arriving mid-flush waits. A failed flush stops all
+  later sends and acknowledgements of the process (a retried `fsync` can report
+  success for pages it never wrote) until it is restarted. The gateway, the
+  broker and every other store keep flushing in each commit. Measured: about 100 ms per short
+  task instead of 90 ms with `NORMAL` and 330 ms with `FULL` on every commit,
+  4 to 9 flushes instead of about 60.
+- Schema setup run outside a transaction (`CREATE ... IF NOT EXISTS`,
+  `ALTER TABLE ... ADD COLUMN`) commits without a flush in every process: it
+  re-runs at every start, and stores creating their tables on first use cost
+  an agent's first task about ten flushes and made services starting together
+  on a slow disk wait on each other.
+- A task save writes its snapshot, the consumed deferred message, the
+  schedule-run admission, custody and the change ledger's request row in one
+  transaction, and the covered stores write the change ledger inside their own
+  transactions, so these tables share `dbs/task_history.db`: SQLite keeps a
+  transaction atomic within one file, not across files in WAL mode.
+- The bundled NATS server's generated configuration sets
+  `jetstream { sync_interval: always }`, so a confirmed JetStream write is on
+  the disk too (about 4 ms per confirmed message or acknowledgement on that
+  disk), and a `max_control_line` that fits the largest host credential the
+  message contract allows (`docker.nats_service.contract_server_settings`).
+- All of it needs storage that flushes when asked: a local disk, or a network
+  share that passes the request on. Slow commits and flushes are logged
+  (`sqlite_commit_slow`, `sqlite_flush_slow`). The hermetic tests commit with
+  `NORMAL` in their own process (`tests/conftest.py`).
 
 A store whose writes read before they write takes turns between writers on
 both backends. In SQLite every write starts with `BEGIN IMMEDIATE`. In
@@ -1019,8 +1079,9 @@ knowledge base), plus task history:
   validity, tags, metadata, the importer key trusted imports use, timestamps,
   revision digest). The reserved `metadata.imported_from` record also stays in
   storage; tool and review views and context hydration keep ordinary skill
-  metadata, including onboarding progress. The Settings
-  memory controls get the same view without metadata (`pinned_memory_reply`).
+  metadata, including onboarding progress. People's memory commands and the
+  Settings memory controls get the same view without metadata
+  (`team_services.memory.wire_fact`).
   A Signal chat id is a phone number, so it never reaches a model or a reply.
   Several requests can change the same memory, and a model's change can arrive
   long after it read the fact (`storage/pinned_memory_repository.py`):
@@ -1582,7 +1643,7 @@ worker that cannot start never skips them, and once per occurrence, because
 the scheduler retries such an occurrence every 30 seconds. The manager keeps a
 record of each saved-output run (`state/output_retention.json`: time, last
 success, per kind items, files, bytes and failures), started at manager start;
-from it the manager's status heartbeat reports a Status page warning
+from it the manager's answer to `agent.status` reports a Status page warning
 (`output_retention_overdue`) when no run succeeded for two days. Filesystem
 permission errors and depth limits make a run incomplete and preserve its
 previous success time; expected skips such as links and busy builds do not.
@@ -2534,7 +2595,7 @@ A restart's approval covers the tasks the restart interrupts
 (`custom_agents/runtime_restart_service.py`). The plan records the runtime
 state and, from it, the tasks the restart would interrupt or delay: every
 request execution root the manager holds, whatever its state, and for an `all` restart
-the work other agents report running. Work on a task the manager delegated
+the work other agents are running. Work on a task the manager delegated
 counts as that task. Locally runnable plan-step and recovery tasks are grouped
 under that same root too: they have no `parent_task_id`, but the manager's
 execution graph records which request owns them. Finishing one step and
@@ -2550,12 +2611,56 @@ current task and other agents' queue counts, so any scheduled run, heartbeat
 item, finished worker or new message made an approved restart unusable, and
 with background work running a restart could rarely be applied. A refusal uses
 the approval up, as for any plan that no longer applies, and names the new
-tasks, so TeamArchitect stages a fresh plan that lists them. Plans need schema
-3: plans staged under the earlier rule are refused rather than converted,
-because their approval text promised the stricter rule. The review lists the
+tasks, so TeamArchitect stages a fresh plan that lists them. The review lists the
 tasks in one line of at most 1000 characters, naming them while they fit and
 always giving the exact count; a busy manager used to produce a longer line,
 which could not be shown for review at all.
+
+Other agents' work comes from their own answers. The team's agent records say
+which agents are live, but not which task each runs, so while it captures an
+`all` restart's state (when staging, before a person is asked, when applying,
+and for `get_runtime_restart_status`) the team lead sends every other live agent
+a full `agent.status` request and names each one's work by the task it reports.
+It asks them all at once and waits at most five seconds in total
+(`TEAM_STATUS_TIMEOUT_SECONDS`), however many agents there are. An agent that
+does not answer in time, refuses or cannot be reached is recorded as not
+answering (`answered: false`, with its task, counts and running flag left empty
+rather than false or zero) and counts as `<agent id>#not-answering`: the person
+approves interrupting whatever it runs, and the review lists those agents on a
+line of their own. An agent a live host runs without a session cannot be asked;
+its host's record lists it (`components`), so it is recorded too, under
+`<host>#<component>#no-session`, with why it has no session, and the review lists
+it on another line ("runs without a session, so nobody can ask what it is
+doing"). Every key an answer cannot set holds `#`, which no task id, agent id,
+host id or component may contain (the contract's id patterns), so one agent's
+answer can never equal another agent's key and switch off its re-check. The
+approval keys stay free of ages, counts and clocks, so the same work gives the
+same `runtime_state_digest`. On a re-check the same rule as
+for tasks applies: an agent that answered and no longer does is refused (it may
+now run a task nobody approved), one that did not answer and now reports a task
+outside the approved ones is refused (nobody can tell whether it started after
+planning), and one that did not answer either time keeps the approval, since a
+team with an agent that hangs is when a restart is needed most. When the team
+lead cannot ask yet (its process has not joined, its own session is not open, or
+it has not read the team's agents), an `all` restart is refused with that reason
+rather than shown as interrupting no other agent's work, or every other agent's;
+a `manager` restart does not need the team.
+
+The capture runs in the tool's worker thread (Strands runs synchronous tools
+there; `apply_change` describes and applies plans there). It runs the requests
+on a private event loop in that thread, and they reach the other agents through
+the process's host, which works on the team lead's own loop; that loop is free
+while the tool waits, so the capture never waits on a loop it blocks. A capture
+on an event loop is refused (`event=runtime_restart_capture_on_event_loop`).
+
+Plans need schema 4, which records whether each other agent answered. Plans of
+earlier schemas are refused rather than converted: schema 3 plans took other
+agents' work from what they reported on their own, and their review never said an
+agent was not answering. The stored version is read before the plan is
+validated, so approving, applying or checking such a plan gives one plain
+sentence (planned by another version, ask TeamArchitect to plan it again) and no
+validation detail. Plans last an hour, so only a plan staged just before an
+upgrade is affected.
 
 An installed MCP server is one team tool, `mcp:<name>`, in the `mcp_servers`
 tool set that members hold as a standard set (`access_catalog/catalog.py`,
@@ -2962,19 +3067,19 @@ The tool stages the exact change (`system_schedule` on the platform tool
 authorization off), and `apply_change` rebuilds the change from the stored
 request, checks that the schedule and the change are unchanged, and issues the
 permit in the approval's mode. Objective tools issue `held_access` permits for
-the Objective's own work-session schedule; gateway commands on schedules the
+the Objective's own work-session schedule; people's commands on schedules the
 runtime manages need a person who could approve such a change, decided by the
-manager with the person and roles from the command's gateway-signed context
-(`manager_control_runtime._may_change_system_schedules`, the same rule as the
-gateway's `PersonChangeCheck`, which the gateway keeps for showing controls).
-The manager awaits this storage and Cedar lookup on its bounded
-`TaskOperationRuntime` lane before checking the record digest or changing the
-schedule. A slow lookup leaves the event loop responsive; a cancelled command
-joins the lookup and stops before mutation.
-Every gateway-to-manager command (schedules, memory, topics, task and objective
-controls, person standing) names its person only through that signed context
-(`manager_control_runtime.verified_command_person`); the commands carry no
-person, roles or authority flag. Until 2026-10-07 the manager trusted a person
+team services with the person from the command token and their current roles
+from the people copy (`team_services.schedules.SystemScheduleCheck`, the
+gateway's own `PersonChangeCheck`, which the gateway also uses for showing
+controls). The decision runs in the team services' worker thread before the
+store checks the listed version and the permit, so a change made meanwhile is
+still caught in the write.
+The gateway-to-manager commands still in the team lead's process (task and
+objective controls, person standing) name their person only through the
+gateway-signed context (`manager_control_runtime.verified_command_person`), and
+the team services' commands only through the command token; neither carries a
+person, roles or an authority flag. Until 2026-10-07 the manager trusted a person
 and roles written in the command body, checked only against an unsigned copy,
 and a "may change system schedules" flag the gateway set. Scheduled
 workers get their tools like any agent type: `prepare_scheduled_job_access`
@@ -3125,10 +3230,9 @@ Older request rows are not inferred into the new running state, so leaving
 their tasks active would bypass the new busy-thread protection.
 
 Delivery receipts use the durable team-lead route, so they can wait for a
-replacement lead before discovery completes. Repeated publication of one
-receipt uses the same idempotency key. Presence replay follows the presence
-stream's retention period; its age still determines whether an agent is live.
-Queued model turns broadcast when work starts and finishes.
+replacement lead before the gateway sees it in the team's records. Repeated
+publication of one receipt uses the same idempotency key. An agent's record
+changes when its work starts and finishes, so the activity mesh follows it.
 
 Credential-form watches keep broker session and task identifiers in gateway
 storage and recover after restart. These local wait records contain no
@@ -3181,7 +3285,8 @@ controls for MCP connections and hosted servers
 (`assistant_gateway/installed_procedures.py`, listed, added or rejected in
 Settings → Team) then check with `PersonChangeCheck` what that person may
 change, from their current team roles. `assistant_gateway/team_presence.py`
-keeps the live team presence in memory. Every live Web Chat page (the
+shows the team as the gateway's team view builds it from the team's agent records at
+each read ("The gateway follows its team"); nothing is stored. Every live Web Chat page (the
 two-second event stream, `website_handlers/conversation.py`) carries it as
 `team_activity` for registered people, and one browser store
 (`assets/team_activity.mjs`) hands that copy to the sidebar activity mesh,
@@ -3447,9 +3552,11 @@ broker refusal until access or the server changes. Fixed tool groups,
 capability attachments and restart-to-attach were removed for this. Skills provide reusable instructions without loading every
 procedure into the base prompt. A reviewed managed-skill change commits an
 immutable local receipt before TeamArchitect sends an authority-free team
-reload hint. Running specialists verify that receipt, refresh their own SDK
-cache, and republish presence. Heartbeat fingerprint checks repair missed live
-hints without a process restart. External and hosted MCP tools enter through
+reload hint, the `skills.changed` event, which every agent process receives once
+and hands to each agent it runs; only the team lead's own session may send it.
+Running specialists verify that receipt and refresh their own SDK cache.
+Fingerprint checks at each heartbeat and each `agent.status` request repair
+missed hints without a process restart. External and hosted MCP tools enter through
 the same installed registry and the broker's per-call access check.
 
 A model often asks for several tool calls in one step, and Strands runs them
@@ -3722,7 +3829,9 @@ each read from the launcher's list of environment overrides (names only,
 configured endpoints, every agent's own findings carried in its status
 heartbeat (`AgentStatus.status_findings`, `custom_agents/status_findings.py`:
 MCP servers that do not load, degraded memory search, skill refresh errors,
-schedules for administrators, receive loops that stopped), whether TeamLead
+schedules for administrators, receive loops that stopped, and knowledge too long
+to open in Web Chat, which only the team lead counts, at most every ten minutes and
+in a thread of its own, `custom_agents/long_knowledge.py`), whether TeamLead
 reports, its own configuration and receive loops, and storage filling up
 (`assistant_gateway/storage_capacity.py`). A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
@@ -3794,13 +3903,13 @@ After publishing or withdrawing a proposal, the refreshed list supplies the
 count. If navigation discards that list or the list read fails, a fresh count
 read updates the badge without changing the viewer. Replies from an earlier
 sign-in cannot start these reads in the next person's session.
-The store lives in the manager's database, so the gateway's routes
-(`website_handlers/knowledge.py`) send one `ManagerKnowledgeCommand` per request
-through `GatewayManagerCommandService`, like Settings memories. The command names
-no person: the manager builds a person actor (`ActorKind.PERSON`) from the
-gateway-signed context only (`custom_agents/knowledge_command_runtime.py`,
-`verified_command_person`), so `personal/` is always the signed-in person's own
-space. Both sides check the same ownership rule
+The store lives in the team's database, so the gateway's routes
+(`website_handlers/knowledge.py`) send one `knowledge.*` command per request to
+the team services (`assistant_gateway/application/knowledge_pages.py`, converted
+by `knowledge_wire.py`), like Settings memories. The command names its person only
+by their opaque reference in the authority token: the team services build a person
+actor (`ActorKind.PERSON`) from it (`team_services/knowledge.py`), so `personal/`
+is always the signed-in person's own space. They check the ownership rule
 (`access_control/knowledge_access.py` over `access_control.ownership`): every
 team member reads and edits team pages, personal pages and proposals are their
 owner's. The knowledge service then applies its own rules: a person's team edit
@@ -3809,10 +3918,11 @@ content held for review needs an explicit confirmation, and saves carry the base
 revision so a concurrent change is a conflict, never an overwrite. Refusals and
 review flags carry kind, field and position, never the matched text. Archive and
 revert reasons are fixed by trusted code because they enter shared history. Pages
-show `[[links]]` as buttons: the manager resolves each one with the stored link
+show `[[links]]` as buttons: the team services resolve each one with the stored link
 rules, following merged names (`KnowledgeService.page_links`), and the browser
-replaces link syntax in rendered text nodes, never in code. The gateway replaces
-editor person ids with names before answering the browser. Like
+replaces link syntax in rendered text nodes, never in code. Replies name a person
+editor by reference; the gateway turns references into "You" or names before
+answering the browser. Like
 other Web Chat routes, these have no tool catalog levels: they are people's own
 controls behind the session, the write checks and the ownership rule.
 
@@ -3961,8 +4071,8 @@ stores, reverse proxies, and adapter hosts. Process separation and external
 services require operators to supply the corresponding network and workload
 identity controls.
 
-Runtime logs, task history, execution digests, schedule telemetry, presence,
-and anomaly records support diagnosis. The activity collector consumes curated
+Runtime logs, task history, execution digests, schedule telemetry, agent and host
+records, and anomaly records support diagnosis. The activity collector consumes curated
 events into a separate read model. It does not route Tasks or treat manager
 tables as its control plane.
 
@@ -3998,6 +4108,17 @@ the desktop app never offers an older version.
   statements do, so an instance kept in its own schema works. The default
   keeps older rows correct, as the change ledger's `*` does (see "Upgrading in
   place from 0.9" above).
+- **Gateway commands queued at the upgrade.** A durable gateway command whose
+  handler a release removed can still wait in the team lead's control queue when
+  the new release starts. Its class stays readable as a `RetiredGatewayCommand`
+  (`custom_messages.contracts.control_v1`, one list of retired classes), and the
+  lead tells the person in their chat that it was not carried out and should be
+  sent again (`custom_agents.retired_gateway_commands`; "people's memory
+  commands" under "Message hosts and their trust"), instead of setting it aside
+  as a dead letter that nobody answers. A response of the old type would not
+  reach anyone, because the gateway that waited for it restarted with the
+  upgrade. The model, its handler and the list go with the other upgrade steps
+  from 0.9.
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the
@@ -4173,7 +4294,27 @@ finish-import`; guide: `user_docs_source/team-transfer.md`).
   `team.env` travel encrypted in the file. The broker's stored credentials are
   encrypted and stored again by the broker itself, through two routes only the
   `operator` caller (`access_control.caller_tokens`) may use; the command never
-  holds those values.
+  holds those values. Generated secrets stay behind, except an external NATS
+  server's user and password: they travel when the instance's own settings
+  (saved `instance_config.yaml` plus `team.env`, or the environment with
+  environment secrets) name an external server. The export command's shell
+  does not decide, because it may hold variables the instance never used. The
+  server's address or credentials file from `team.env` or the environment, the
+  file itself and the image's `TEAM_LOCAL_NATS_ENABLED` switch do not travel
+  yet, so the export names what the new instance needs whenever the instance's
+  settings name an external server, login carried or not, and the import
+  refuses the login, with the steps, while the new instance's settings name a
+  local server. Because the launcher lays the container's environment over
+  `team.env`, the export also names any NATS address or login the instance
+  would use with the command's environment that it did not, comparing the
+  login by the variable each side reads (the instance a `_FILE` form first,
+  the export the plain value first); the guide's advice then puts the login
+  the instance runs with into `team.env` beside the address. An import that
+  cannot read the new instance's NATS address stops in its plan, before
+  writing, with an error naming only the variable and where it was read: the
+  same decision runs again after the write, where its error would hold the
+  host. One shared decision of local or external NATS that travels with the
+  transfer is a proposed follow-up.
 
 Transfer confidence relies primarily on integration tests with real repositories
 and HTTP routes, plus a process-level CLI/broker round trip. Parser tests and
@@ -4181,6 +4322,1007 @@ frozen previous-section fixtures cover conversions and refused edits. PostgreSQL
 and Sealbox acceptance require those services; file-store tests do not prove
 their deployment behavior. Browser checks cover unsaved edits, confirmation
 invalidation, selection changes and the validate/import sequence.
+
+## Message hosts and their trust
+
+The message contract (`contracts/messages/v1`, protocol 1) has every process that sends
+its messages sign them as a host, with a key of its own, and every receiver check who
+signed against records that chain to the installation's authority keys.
+
+**Where each kind of traffic runs (end of message contract phase 2).** Phase 2 moved to
+protocol 1 what the team services answer from shared stores, what an agent answers about
+itself, and who is live. Everything else, the work itself included, stays until phase 3 in
+the 0.9 message format: `MessageEnvelope` messages on the team's work stream
+(`<PREFIX>_WORK`) and on plain NATS subjects under the team's prefix. They name their
+sender without proving it (`agent_signature` is empty), so any process with the team's
+NATS login can send one in another's name. A person's request, a scheduled run and the
+gateway's durable commands to the lead (decision 67) still carry a signed task context,
+which proves whom the work is for (`access_control.task_identity`). The lead acts on those
+commands only with a context the gateway signed
+(`manager_control_runtime.verified_command_person`). A signed context is not tied to one
+message, so a process that holds one, such as an agent working for that person, could
+reuse it until it expires.
+
+| On protocol 1 (signed messages and records) | In the 0.9 message format until phase 3 |
+| --- | --- |
+| Joining, certificates, revocations (the installation authority) | Work on the work stream: people's requests, delegated tasks and what is sent about them (claims, handbacks, questions, stops, results), and notices to people and agents |
+| Agent sessions and placement (`sessions.*`) | Creating schedules, and scheduled runs and their signing (decision 66) |
+| People's memory, knowledge, topics and schedule lists and controls (`svc.team`) | The gateway's task cancel and inventory, Objectives and a person's standing, as durable commands to the lead's control mailbox (decision 67) |
+| The Tasks page's lists and removals and the context dump setting, relayed to the agent | The other three commands of decision 67, the gateway's task progress, parent-task probe and thread guidance, on `.operational` (decision 68) |
+| Asking an agent (`agent.status`, `.pause`, `.resume`, `.exit`, `task.probe`): other agents, and the gateway for `agent.status` | A lead's guidance for delegated work, through the holder's control mailbox (decision 59) |
+| The `skills.changed` team event | Dead letters: today's stream and notices (decision 71) |
+| Agent and host records: who is live, who leads, busy or idle | |
+
+The presence stream, the heartbeat broadcast, the broadcast subject and the gateway's
+discovery of the lead are gone ("The end of presence and fan-out" below). Upgrading in
+place from 0.9: the launcher creates the trust folder and keys, and the installation
+authority creates the `UA1_*` key-value buckets, which NATS lists as streams named
+`KV_UA1_*` (the authority's list below). The contract's work and dead-letter streams come
+in phase 3. The first start also deletes the team's old presence stream when the NATS
+login may delete streams (step 7d). What an external NATS server needs is in the user
+docs: the server version and settings in the configuration guide's "Surviving a power
+loss", and what the NATS login needs in the Docker guide's "Message host trust".
+
+`custom_transport.protocol1` is what a running host needs to sign and check messages:
+
+- **Keys** (`host_keys`): each host's Ed25519 application key and NATS user key, and
+  the installation authority's key, in the instance's `trust/` folder
+  (`InstanceLayout.trust_dir`), written whole, readable only by their owner and
+  created exclusively. The launcher creates missing keys; each process loads only its
+  own. All processes run as one operating-system user, so this keeps keys apart by
+  path, not by permission: a broken-into process could read another host's key file.
+  Remote hosts keep their keys on their own machines.
+- **The bootstrap bundle** (`bootstrap`): the authority public keys and the records a
+  new host needs before it has a certificate. The authority keys are the root of
+  trust, so only the launcher and the installation authority write the file, in the
+  owner-only trust folder; the records in it are verified like any other copy.
+- **Kept trust records** (`trust_state`): the revocations record the host holds, plus
+  any older one that still lists an entry the newer one left out early, and the
+  highest block-list sequence of each team survive a restart, as the contract
+  requires, so a host restarted from an older bundle never trusts a revoked key again.
+  Kept records are added before the bundle's and verified again; one that cannot be
+  checked yet (another installation's, before its agreement) stays kept and comes
+  first once it can. Saves are merged under a file lock, so two copies of one host
+  never drop each other's records; a failed save is retried at the next change. A
+  file that cannot be read is moved aside with an error and the host continues from
+  the bundle, since it reads the current record from the buckets when it starts.
+- **Live messages** (`live`): signed requests and replies over NATS with the host's
+  own reply inbox (`NatsTransportConfig.reply_inbox_runtime`; `request` refuses a
+  connection with another), every received frame checked by
+  `custom_messages.wire.frame.verify_frame` before a handler sees it, and refused
+  requests answered at once with only the refusal's code and known pointer. A served
+  address answers only on the requester's own inbox (`answer_subject`): NATS lets a
+  receiver answer once past its own grants, so an answer on a subject the requester
+  named, such as a JetStream API subject, would act with the receiver's rights. Each
+  request is handled in a task of its own: kinds run one at a time in arrival order
+  unless the caller lets them run side by side (handlers that only wait on another
+  host), an address holds at most 64 requests, and one that waited past its expiry is
+  not handled. The replay record keeps each frame only until it can no longer be
+  accepted, and lives in memory: only a frame's signer could reuse its id after a
+  restart.
+- **Signed records** (`state_records`): records in the key-value buckets, signed with
+  the identity the host has when it signs (a renewal switches frames and records
+  together), with compare-and-set for placements, and verified on every read; a record
+  stored under another key than its own is refused.
+- **Private files** (`private_files`): keys, the bundle and kept records are written
+  whole (a temporary file, flushed, then published and the folder flushed), 0600, in
+  folders that are 0700 at every level.
+
+Protocol 1 joins, requests, replies, refusals, events and key-value writes and
+deletions await
+`custom_transport.send_barrier.before_send()` before sending. They use the same
+flush barrier as the NATS adapter, so a power loss cannot undo an agent's local
+records after another process has acted on its message. A failed flush prevents
+the send. Hosts outside an agent process install no barrier and keep flushing
+each commit.
+
+**The installation authority** (`installation_authority`, `assistant_cli
+run-installation-authority`) vouches for the hosts. It runs no model. The launcher
+prepares the trust folder first (`docker.message_hosts`): it keeps the installation's
+id, which the authority's key file holds (a missing key file gives a new id, since a new
+key could check nothing the old one signed), creates any missing key, writes the hosts it
+starts with their public keys (`expected-hosts.json`; empty until the launcher starts
+message hosts) and the bundle's authority keys. It starts the authority once NATS and the
+team's message streams are ready and waits until the bundle carries the authority's
+certificate and a freshly signed revocations record; a host that joins before the authority
+serves waits for it (`joining.join`). A failed or interrupted start stops the authority and the services already
+started. The authority gets only the NATS login (`env_secrets`, renamed secrets included).
+The authority:
+
+- creates the key-value buckets, with the operator's `transport.replicas`. It is the
+  contract's topology owner: queued work streams come with queued work, and each team's
+  dead-letter stream with phase 3's dead letters (plan decision 71). Per-team buckets use
+  `custom_messages.wire.buckets.bucket_name` and every bucket's stream `bucket_stream`.
+  The contract disables rollup, stream deletion and purge, so writing one key cannot
+  erase the bucket. Repeated setup reconciles those settings without discarding records;
+- keeps its records current by the wall clock, checking every minute (`keep_current`), so
+  a laptop or a paused virtual machine that slept wakes to a current record within a
+  minute: it signs the revocations record again once it is six hours old (it lasts a day,
+  with an ever higher sequence, so a restored authority never writes a lower one), renews
+  its own certificate at two thirds of its life and signs with the new one from then on,
+  and once a day forgets old trust records and deletes from `UA1_CERTS` the certificates
+  receivers forget (`custom_messages.wire.trust.kept_for`; revoked ones stay). A failed
+  step is tried again a minute later. Hosts read the authority's renewed certificate from
+  `UA1_CERTS` when a reply names it, joining hosts too (`joining.join(fetch_trust=...)`,
+  the same lookup as `MessageHost.fetch_trust`): a host on another machine holds its own
+  copy of the bundle, made when it was set up, which never learns of the new certificate.
+  The contract's pre-join permissions (`joining_host.json`) do not let a host that has not
+  joined read `UA1_CERTS`; with one NATS login shared by every process in this phase the
+  lookup works for every host here, and per-host credentials need a decision on how a first
+  join gets the renewed certificate. When its NATS connection closes for good the
+  authority exits, so the launcher's supervisor sees it;
+- keeps in its own trust folder (`installation_authority.ledger`,
+  `trust/hosts/authority/issued.json`) the highest membership epoch it issued per host,
+  each renewal's answer for 7 days and the newest revocations record it signed. Each
+  record is checked by its own trust store, kept there, and only then written to the
+  bucket. So a lost or rewritten `UA1_CERTS` never makes one epoch name two certificates,
+  and a record the authority would refuse itself is never published;
+- uses a record it reads from `UA1_CERTS` (the revocations record it signs again, a
+  certificate it hands back) only when it verifies against the authority's own key:
+  every process shares one NATS login and can write there. A key whose record does not
+  verify counts for nothing, at any epoch. It signs the next revocations record from the
+  newest one it verified: in the bucket, the bundle, its kept copy, the ones its trust
+  store keeps (`trust-state.json`) or its memory. It writes
+  over a record that does not verify. When the bucket holds a record that does not verify
+  and it has verified none, it does not start, since an empty list would accept every
+  revoked host again; its log (`event=installation_authority_start_refused`) says to
+  restore the trust folder from the backup taken with the NATS data, or to delete that
+  record to start an empty list. A record dated ahead of the machine's clock is reported
+  as a clock to correct instead;
+- answers `host.join` and `host.renew`. A join from a host the launcher listed, with
+  that key, asking for no more than listed, in the listed connection class and
+  deployment, gets a 30-day certificate; any other join is denied, so a local
+  installation never takes in a host nobody approved. A host asking again with the keys
+  of its newest certificate, for the same grants, gets that certificate back while over a
+  third of its life is left; otherwise, or when it asks for other grants (an agent type
+  the launcher now lists, say), it gets a new one with the next membership epoch that
+  replaces it. A renewal is checked against the list too (`not_allowed` when the list no
+  longer covers its certificate) and gets a certificate that replaces the one signing it;
+  its answer is stored under its renewal id, so a host retrying after a lost reply gets
+  the same certificate. Every certificate states the profile it grants. While
+  the contract is a pre-release, a host running another contract digest gets
+  `protocol_mismatch`, naming the digest the authority runs. The digest is read before
+  the rest of a join or renewal (`verify_frame` marks such a frame `other_contract`), so
+  a host of another revision learns this even when that revision shapes the body
+  differently. The one exception is a renewal that only gives up the host's agents (its
+  profile without agent types or sessions, `HostProfile.giving_up`): it is answered on
+  any contract, when this revision can read it, with a certificate that grants no agents,
+  so a host on another contract can hand its agents over;
+- keeps every certificate it issued, so a restarted authority still recognises the
+  hosts that renew.
+
+Hosts join with `custom_transport.protocol1.joining`, which waits for an authority that
+is still starting and checks the returned certificate against the bundle's authority
+keys. The hosts still share one NATS login, so a join returns no NATS credential. That
+login therefore needs every right a host uses; for an external NATS server, the Docker
+guide's "Message host trust" says how to set it up.
+
+**Every host's upkeep** (`custom_transport.protocol1.host_runtime.MessageHost`): it joins,
+reads the authority's newest revocations record at start and every half hour, renews its
+certificate when two thirds of its life are gone (each renewal's id names the certificate,
+the release and the contract digest, so retries keep it and a host upgraded in place never
+gets an earlier renewal's stored answer back), and writes its own liveness record
+(`UA1_HOSTS`) every 10 seconds, each lasting 30 seconds, so a stopped host shows as gone
+within 30 seconds of its last write, as the presence heartbeat did, while one or two lost
+writes do not make a running host look gone; nothing moves because of it. Liveness has a
+loop of its own: the trust and certificate upkeep (the revocations record every half hour,
+forgetting trust records nothing can still need every six hours, `TrustStore.forget`,
+renewal when due) runs beside it, so a renewal that waits 30 seconds for the authority, one
+the authority keeps refusing, or a join for more agent types that holds the certificate's
+lock never delays or skips a write; once the host stops, no write goes out and a renewal
+still waiting is cut off (it is asked again with the same id). The record lists the parts of
+the host that are not healthy (`components`, at most 16, each with a code saying why), such
+as an agent whose session was refused, and then says the host is `degraded`, since it still
+serves the rest; a component the contract cannot carry is left out and logged
+(`protocol1_host_components_invalid`), so it never stops the record. When they change, the
+host writes its record again at once.
+It signs its frames and its records (its host record, and the placements, sessions and agent records it
+writes) with one identity, so a renewal switches all of them at once: a record still signed
+with the old certificate would name another certificate than its signer, or be refused once
+the old one's overlap ends. A host whose certificate lacks an agent type it now runs, such
+as a specialist the team created while it runs, joins again for it (`MessageHost.rejoin`):
+the join asks for the types its certificate names plus the new ones, the authority grants
+it whole or refuses it, and a granted join gives a certificate at the next membership epoch
+that the host signs everything with from then on. A type whose name no certificate can
+carry is not asked for, and the caller is told. When a frame or
+record names a certificate or an agent session this host does not hold yet, it reads it
+from `UA1_CERTS`, where the authority and the team services publish them, verifies it, and
+checks the frame again, once; a join reply too (`joining.join(fetch_trust=...)`). A lookup
+that fails is logged (`protocol1_trust_lookup_failed`) and the frame is refused as it was,
+at once.
+
+**A host on another contract.** While the contract's label is a pre-release, hosts of one
+installation refuse a peer whose contract digest differs (`kinds.CONTRACT_SHA256`, the one
+reading of it; joins, renewals and host records carry it). A host learns that it runs
+another contract than the installation from the team services' host record, which it reads
+when it starts and whenever it changes (`MessageHost.follow_contract`; only a record the team
+services signed counts, and the watch starts again after a NATS failure), or from a
+`protocol_mismatch` answer to its join or renewal. It logs both digests once
+(`protocol1_host_other_contract`) and tells its listeners, which drain its work; its record
+then says `draining` and, once it holds nothing, `drained`. From then on it renews only to
+give up its agents: a renewal for more is turned away, so it asks for none while it drains,
+and the renewal once drained gets a certificate that grants no agents. Readers cannot read
+the rest of such a host's record, only that it names another digest, and that it is
+authentic, and that its key and runtime name the host that signed it: a host writes only its
+own liveness record, so no host can say another runs another contract
+(`TrustStore._checked`). Under one launcher every process starts from the same release, so
+this happens only when a process is restarted on its own after the code under it changed.
+
+**The team services** (`team_services`, `assistant_cli run-team-services`) run as host
+`team-services` with the `team_services` role (plan decision 44; scheduled runs are still
+signed in the team lead's process, so no `scheduler` role), started by the launcher right
+after the authority. They use a placement or session they
+read from `UA1_PLACEMENT` or `UA1_CERTS` only when it verifies (signed by a team services
+host and stored under its own key), since every process shares one NATS login and can
+write there: one that does not counts as absent and is logged with its key and the
+refusal (`team_services_record_refused`), and a renewal or close signs again only the
+session they hold. One instance serves a team at a time:
+it takes the key `team_services.<team>` in `UA1_LOCKS` with compare-and-set, holding a
+30-second lease renewed every 10 seconds. The lock names the process instance, not only
+the runtime, so a second copy of the same host, or a restart while the old process still
+runs, waits as a standby, logs which instance serves, and takes over when the lease runs
+out or the first releases it on a clean stop. The lease is kept from the moment an instance
+takes the lock, also while it prepares to serve, and an instance that loses it before it
+serves serves nothing. A lock value no instance can have written (an empty one, or a lease
+ending later than a whole lease from now plus the clock tolerance: another process on the
+shared login, or a holder whose clock ran ahead) is taken over once the key's revision stayed
+unchanged for a lease (`team_services_lock_invalid`), since a live holder renews every 10
+seconds. A stop first stops taking requests and waits, at most 30 seconds, for the ones
+being handled to finish and be answered, so no change commits after the lock is released.
+It releases the lock even when
+unsubscribing or writing the last host record failed, after that record, so the next
+instance does not wait out the lease. Every instance runs as one host with one
+certificate, so an instance that takes the lock first signs with the host's newest
+certificate in `UA1_CERTS`, which the serving instance may have renewed while this one
+waited (a replaced certificate signs nothing new five minutes after its replacement, and
+readers and the authority then refuse it), renews it at once when it is due, and reads the
+current revocations record, since a standby may have waited longer than the one it read at
+start lasts. An
+instance that finds another holding the lock stops at once. A renewal that fails for another reason (NATS not answering in time, a
+short outage) is tried again every 2 seconds while the lease lasts, each failure logged
+(`team_services_lock_renew_failed`), and the instance keeps serving: its lease still keeps
+others out, and stopping would stop the whole team, because the launcher stops every
+service when one exits. When the lease runs out unrenewed it tries one last
+compare-and-set at the revision it wrote, cut off well before a standby may take over: it
+succeeds only when no other instance wrote the lock since, so nobody else served, and the
+instance keeps serving (`team_services_lock_lease_resumed`). That is what a laptop's sleep
+or a paused virtual machine looks like, since the event loop's timers stop with the machine
+while the wall clock runs on. Otherwise it stops (`team_services_lock_lease_ended`), since a
+standby may take over from then on. A NATS connection that closed for good stops it at once
+(`team_services_nats_closed`), and every lost lock ends the process with exit code 1. A renewal
+whose write reached NATS but whose answer was lost is recognised by the lock still naming
+this instance, not taken as a lost lock. Taking the lock follows the same rule: when NATS
+or the connection to it fails while a standby checks the lock, or while a first instance
+starts during a short outage, the attempt is tried again every 2 seconds until it succeeds
+or the process is stopped, logged the first time and whenever the error changes
+(`team_services_lock_acquire_failed`). The instance serves only after its own write of the
+lock succeeded, and a malformed lock record or a closed NATS connection still stops it.
+Every instance writes the same host record (`team-services` in `UA1_HOSTS`), so only the
+one that holds the lock writes it, once it serves: a standby never looks like the serving
+instance, the record appearing means the team services answer, and an instance that lost
+the lock writes it no more.
+They serve the team's address (`svc.team`) and answer, so far:
+
+- `sessions.open`: the host's certificate must allow the agent's type and have room under
+  its session limit, and the agent must not run on another host (agents stay on their
+  host; `already_placed` names it). The placement is written with compare-and-set, under a
+  sequence that never goes back, also after a close deleted the key (its signed sequence is
+  the placement's fencing token); the session, naming the placement's revision, is signed
+  into `UA1_CERTS`, and its start is the placement's `placed_at`, which each new placement
+  of an agent moves later. Only the team lead's type on a lead host gets the `lead` role;
+- `sessions.renew` and `sessions.close`, for sessions on the asking host. A renewal is
+  refused (`not_allowed`) for a session that has ended or whose placement is no longer the
+  one it was opened for (its host and `placed_at`), so a session closed earlier never comes
+  back when its agent is placed on the same host again. A close removes the session's own
+  placement unless the agent is handed over, never a newer placement of the agent; a session
+  that has already ended is not signed again (the answer is its recorded end), so a
+  repeated or late close changes nothing, while a retry still finishes a close whose
+  removal failed. A handover to another host comes with phase 3's custody windows: until
+  then a placement a `handed_over` close kept still names the old host, and only that host
+  may place the agent again. Every refusal is logged (`agent_session_refused`, with the
+  outcome, agent and host).
+  A host whose record names another contract digest gets no new placement (`sessions.open`
+  answers `not_allowed`, logged with both digests as `agent_session_refused_other_contract`);
+  its sessions are still renewed and closed, so it keeps receiving control messages for the
+  tasks it holds while it finishes or hands them back;
+- people's memory commands, `memory.list`, `.show`, `.create`, `.replace`, `.delete` and
+  `.undo` (`team_services.memory`), which the gateway sent the team lead's process as a
+  durable `ManagerMemoryCommand` until phase 2. They run the same memory service on the
+  same database, with the team lead's memory settings (its agent type's overrides
+  included, `assistant_gateway.runtime_config.lead_memory_config`), in a worker thread so
+  the lock and upkeep keep running. Memory commands run side by side (at most 16 at once,
+  `LiveHost.serve`): the store's write lock and the stored outcomes order them, and a slow
+  database must not hold up the session renewals queued behind them. The person comes
+  only from the command's authority token: a token presented by another host than the one
+  that signed it is refused `bad_authority` (contract "Who may present a token"); its
+  person reference is read back from the gateway's copy of the team's people
+  (`team_services.people`, `PeopleDirectory.person_by_ref`), and a person who is unknown,
+  disabled or removed, or a sender that is not a gateway, is answered `not_allowed`.
+  Agents' own memory operations (root task tokens) are not answered here yet; agents
+  still use their tools in their own process. The same ownership rule decides as before
+  (`access_control.ownership`). A person's command no longer records the chat it came
+  from with the fact's events. Replies fit the contract's limits (README "Reply size"): a
+  list returns as many facts as fit in one frame and says where to continue. Fact text
+  travels inline, at most 32,768 characters, until phase 3's blob references; a longer
+  fact (only agents and imports write one) is never cut or skipped, as plan decision 77
+  has it for knowledge: showing it explains why it cannot be shown, a list page ends just
+  before it (or explains it and where to continue), a change whose reply would carry it
+  is refused, and an undo that restores it answers without it. Only a command's own
+  mistakes are `invalid_request` (`PinnedMemoryInputError`); any other failure is logged
+  and answered `runtime_error`.
+  A memory command a 0.9 gateway queued in the team lead's control queue just before an
+  in-place upgrade is still read by the 0.10 lead, as a `RetiredGatewayCommand`
+  (`custom_messages.contracts.control_v1`), so it is no longer set aside as a dead letter
+  with no answer to the person (plan 13B.10). The lead never carries it out
+  (`custom_agents.retired_gateway_commands`). It sends the person the gateway signed for
+  a chat message in the chat the command came from: "Your memory command was sent before
+  the team was upgraded, so nothing was changed. Please send it again." It does not send
+  the old reply, because the restarted gateway drops a manager control reply nobody waits
+  for. A command without a valid gateway signature, one that names someone other than
+  the signed person, or one with no chat to answer in tells nobody
+  (`event=retired_gateway_command_unanswered`, with the reason, the command's class and
+  id); each answer is logged as `event=retired_gateway_command_answered`. A 0.9 lead's
+  reply that was still waiting on the gateway's reply route is read the same way and
+  dropped like any reply nobody waits for
+  (`event=gateway_unmatched_manager_control_response_dropped`), rather than set aside. The
+  retired classes are one list in the contract; a family that moves to the team services
+  later adds its old class name there.
+- the Web Chat Knowledge page's commands, `knowledge.list`, `.read`, `.history`, `.write`,
+  `.add_note`, `.archive`, `.revert`, `.list_contributions`, `.count_contributions`,
+  `.read_contribution`, `.publish_contribution` and `.withdraw_contribution`
+  (`team_services.knowledge`), the durable `ManagerKnowledgeCommand` until phase 2, on the
+  same knowledge service (`knowledge_base.service.knowledge_service_for`, shared with the
+  agents' tools), with the team's knowledge settings (`agent.knowledge`; agent types
+  cannot override them), which also decide whether the gateway shows the Knowledge page. Replies name a person editor by reference, and an agent by its type; a
+  type longer than the contract's 24 characters (the runtime allows 64 until phase 3,
+  plan decision 56) is shown as "Agent" and logged once. Page text travels inline, at
+  most 32,768 characters (`knowledge_base.records.INLINE_TEXT_MAX`), until the contract's
+  object store exists, while agents' tools read and write whole pages up to
+  `agent.knowledge.limits.max_body_chars` (24,000 by default, at most 500,000). No
+  knowledge may be lost or cut because of the limit: reading longer text (a page, an
+  earlier revision, an open note, a proposal or the page it changes) is answered
+  `runtime_error` with a plain message saying nothing was changed or cut, and a change
+  that would replace, hide, revert or decide text the person could not open is refused
+  the same way before anything is stored. A reply is also limited in bytes, one frame of
+  262,144 (`custom_messages.wire.sizes`): a list returns the rows that fit with
+  `next_offset`, and the gateway asks again until it has the browser's page of 20; a page
+  too large to show with its open notes, links and backlinks is refused plainly; and a
+  change measures its reply inside its own transaction, on the page as it leaves it, and
+  is rolled back and refused when it would not fit. Review flags are capped at the
+  contract's 100, and the message says how many there are. The gateway refuses longer
+  typed text and empty notes before sending, normalizes tags as the service stores them,
+  and keeps the browser's values within the contract's bounds. The team lead counts the
+  stored pages, earlier revisions, pending proposals and open notes over the limit, and
+  the pages probably too large for one reply, and reports them as a note on the Status
+  page (`custom_agents.long_knowledge`).
+  A Knowledge page command a 0.9 gateway queued before the upgrade
+  (`ManagerKnowledgeCommand`) is a retired command like the memory one above: the lead
+  tells the person it was not carried out;
+- the chat's topic commands, `topics.list_tags`, `.find_threads` and `.tag_thread`
+  (`team_services.topics`), on the same conversation store. All requested tags and
+  the reply commit in one transaction, with the retry key checked under the store's
+  write lock. An old retry never restores tags or privacy settings changed later.
+  Tags are at most 64 characters after normalization, with at most 20 per tagging
+  command. The gateway, agent tools and automatic tagger use `topic_tags`; invalid
+  typed input is refused in plain words before sending. Automatic oversized hashtags
+  are skipped with a warning. Existing oversized tags stay stored but are omitted
+  from lists with `event=topic_tags_omitted`, without logging the tag text. A queued
+  0.9 `ManagerTopicCommand` is retired like memory and knowledge commands: the person
+  is told nothing was carried out and to send it again.
+- people's schedule lists and controls, `schedules.list`, `.pause`, `.resume`, `.disable`
+  and `.remove` (`team_services.schedules`, the durable `ManagerScheduleCommand` until
+  phase 2), on the same schedule store and with the same rules
+  (`custom_agents.person_schedule_controls`). A person sees and changes only the
+  schedules they own. A system schedule changes only for people who could approve a
+  `system_schedule` change: the gateway's own rule (`PersonChangeCheck`, wrapped as
+  `team_services.schedules.SystemScheduleCheck`) with the person's current roles from the
+  people copy. A change names the version the person listed (`seen_version`, the
+  listing digest); the store checks it and the change's permit in its write
+  transaction, and stores the reply, with the new version, in that same transaction.
+  PostgreSQL locks the command's retry key before its schedule, so even concurrent
+  reuse of one request id with different schedule ids cannot make two changes.
+  A changed listing digest answers `changed_since_read`. A permit mismatch with an
+  unchanged listing digest answers `not_allowed` with a warning in the log, including
+  when a regular run advanced the next fire time during the permission check.
+  Storage failures answer `runtime_error` without storing a refusal; a lost commit
+  acknowledgement is answered from the stored outcome. A chat's own list names the chat by its
+  delivery reference (below). Creating schedules stays on the queued path until phase 3.
+  The team lead's scheduler wakes at once for its own changes; a change made here reaches
+  it at its next pass, within a minute.
+  Lists read a snapshot without pruning, restrict rows to the person's team and
+  ownership, and page by schedule id so scheduler advances do not move rows between
+  pages. Each reply fits the contract's byte limit and returns `next_offset` when
+  more rows remain. Long names are shortened only in the view, with a warning.
+  Run-note settings and state are included within the schema and frame limits;
+  oversized structured notes are omitted with a warning and remain stored unchanged.
+  An invalid saved optional time is omitted with a warning; `invalid_time_fields`
+  keeps an invalid pause's Resume control available without inventing a timestamp.
+  New pause writes reject invalid or zone-less stored times.
+  A queued 0.9 `ManagerScheduleCommand` is retired like the other command families:
+  the lead tells the person it was not carried out and asks them to send it again.
+
+**Delivery references** (`custom_transport.protocol1.delivery_refs`): a schedule list for
+one chat names that chat as `dr_` and a keyed hash (HMAC-SHA256) of the gateway's session
+key, so frames never carry session keys, chat ids or account ids (a Signal chat id is a
+phone number). The launcher creates the key in the trust folder
+(`InstanceLayout.trust_delivery_ref_key_path`, mode 0600) before any host starts, and the
+gateway and the team services read it, so both compute the same reference; the team
+services compare it with the reference of each schedule's stored session. An unkeyed hash
+would let anyone holding a frame test a guessed chat id. Without the key (a gateway or
+team services started without the launcher) a chat's own list is refused with a logged
+warning, and a person's list across chats still works.
+
+Every other operation is answered `unsupported` at once; today's team operations still
+run in the team lead's process and move here one family at a time.
+
+- people's task lists and removals, `tasks.list`, `.list_finished`, `.remove` and `.purge`,
+  and the team lead's context dump setting, `debug.dump` (`team_services.relays`): the agent
+  itself answers these, so the team services find its host in its placement and pass the
+  same body to its address (`ctl.agent.<agent>`) with the gateway's command token unchanged,
+  then answer with the agent's reply. `debug.dump` without an agent goes to the team lead.
+  An agent that runs nowhere is answered with a plain refusal. They use a placement only when
+  it verifies, as for sessions, so a forged or stale one never sends a command to another
+  agent, and one unreadable placement never hides the lead's.
+
+Every other operation is answered `unsupported` at once; today's team operations still
+run in the team lead's process and move here one family at a time.
+
+
+**Agent processes as hosts** (`custom_agents.agent_host`): the launcher starts the team
+lead's process as host `lead` (roles `lead_host` and `worker_host`) and each startup agent's
+process as a bounded host id derived from its label and a SHA-256 suffix (role `worker_host`), lists them for the authority, and tells
+each process its host id (`strands_main.py --host-runtime`). Every agent in the team lead's
+process has its own NATS connection and event loop, so the host joins once, on the first
+agent's connection, and each agent opens its own session when it connects
+(`sessions.open`, with its definition digest) and closes it as it leaves. Attaching never
+waits: joining and opening sessions retry in the background, and the agent's work on today's
+queues does not depend on them. A request to an agent runs on that agent's own loop and is
+answered signed as the agent (`custom_agents.relayed_task_controls`: the task controls run for
+the person the gateway's token names, read back from the people copy). Agent ids are new at
+every start, so a host first closes the sessions its earlier run left behind
+by reading the verified agent-session records in UA1_CERTS. A placement's KV revision
+cannot identify its session: certificate upkeep rewrites placements without changing
+the session id. A malformed or forged record, or one removed meanwhile, is skipped with a log line
+(`event=agent_host_record_refused`) and never keeps the agents from their sessions. The team
+lead's host may run any agent type in the instance's catalog, including specialists created
+while it runs: the launcher lists it with `agent_types_from_catalog`, the authority reads the
+catalog at each join, and a join asking for different grants gets a new certificate (a join
+asking for exactly the same gets its certificate back). A join with the key of the host's
+current certificate keeps the types that certificate grants, as a renewal does: removing a
+specialist from the catalog leaves its running worker running, and the lead's host asks for
+every type it holds again whenever it joins for a new one, so a removed type no longer gets
+every later join for a new specialist refused. The type leaves the certificate when the
+process restarts and asks for the catalog's types afresh. A host that meets a relayed frame
+whose token another host signed reads that host's certificate from `UA1_CERTS` too.
+
+Failed session closes stay in a pending list and retry every ten seconds while the host
+runs. A failed startup scan retries too. Refused openings double their delay only to
+five minutes, so refusals can continue for days without arithmetic overflow. Background
+openings, renewal, contract watching and drain steps log unexpected failures and retry.
+Startup type names must fit the contract's 24-character agent-type token and are checked
+when configuration is loaded. Runtime ids use a bounded readable label plus a digest,
+so replica labels cannot collide with a hyphenated type name. A manually started agent
+without --host-runtime logs that Tasks controls and live context dump changes need the
+team launcher.
+
+Relays run beside session operations, rather than holding the team-services command
+queue while an agent answers. Their ten-second deadline leaves time for the gateway's
+fifteen-second deadline. A missing agent, a slow answer and a refused command have
+different plain messages; a timeout says the result is still uncertain. Context dump
+routing uses the newest live lead session and matching placement on an accepting host,
+preferring it over a draining one. Lists return complete rows that fit the encoded
+frame limit, with next_offset; the gateway follows those offsets to fill the existing
+browser page. One purge returns at most 100 receipts; another reviewed purge removes
+remaining queued tasks.
+
+Agent commands that change state save admission and the final reply in the manager
+database using storage.relayed_command_outcomes. Retrying an older command returns
+its reply without undoing a newer command. Runtime settings and cancellation cannot
+share one transaction with this reply, so admission is saved first. A crash before the
+final reply leaves an explicit unknown result; a retry never carries that command out
+again. The person refreshes the queue or setting to inspect its actual result. Web Chat
+uses a typed live_applied result instead of parsing the reply text.
+
+Every running agent holds a session (plan 13B.5, decided 2026-11-06). Without one an agent
+has no address, so nothing can ask it anything and its exit goes unseen. So:
+
+- A refused session is asked for again, 5 seconds after the refusal and twice as long after
+  each further one, up to every 5 minutes, for as long as the agent runs, one opening at a
+  time: `limit_reached` (a worker leaving makes room; raising the worker limit takes a
+  restart of "all", which lists the lead's new limit), `already_placed` and `runtime_error`
+  alike. Each change of refusal is logged once (`event=agent_host_session_refused`), and so
+  is the opening that finally succeeds (`event=agent_host_session_opened`, with how many
+  refusals came before). Waiting for the first answer at start is not a refusal.
+- `not_allowed` for a type the host's certificate lacks, such as a specialist the team
+  created while the process runs: the host reads the team's agent catalog again, and when
+  the type is there it joins again for it (`MessageHost.rejoin`) and opens the session at
+  once. A type whose name no certificate can carry (over 24 characters, or characters other
+  than letters, digits, `-` and `_`) is never asked for.
+- While an agent has no session, its host's record lists it as an unhealthy component named
+  `<agent type>-<agent id>` (the type cut to 24 characters, other characters as `_`), with
+  why as its code: `session_limit_reached`, `session_not_allowed`, `session_type_not_granted`
+  (the authority did not add the type), `agent_type_not_certifiable`,
+  `session_already_placed`, `session_runtime_error`. A record holds 16 components, so with
+  more such agents the last is `more-agents` (`sessions_refused`). The host writes its record
+  again at once when the list changes. Readers of the team pass on what live hosts of the
+  team list (`custom_transport.protocol1.team_agents.TeamAgents.host_components`), since
+  such an agent has no record of its own.
+- Each opening that got an answer is followed by one with a new request id, and each daily
+  renewal has its own (the session and the sequence of the record it renews, as a digest),
+  kept only for retries of that one request. Session operations keep no stored reply;
+  repeating an open replaces its placement and session. A refused renewal opens a new session.
+
+**Agent records and who is live** (step 7a): each agent's host signs the agent's state into
+`UA1_AGENTS` (key `<team>.<agent>`: starting, idle, busy, paused or exiting, whether it
+accepts work, and its `display_name`, plan decision 69) when the agent reports a change
+(`custom_agents.agent_host.report_agent_state`, called wherever the agent refreshes its own
+state row, when a worker starts winding down after losing its launch lease, and when an
+agent begins draining for another contract). Starting and paused agents accept no new work.
+The agent reports `starting` until routes and recovery are ready. It writes at
+most every 2 seconds, so a burst of busy and idle turns costs one write. "Exiting" is
+written at once as the agent leaves, before its session closes, and the record is then
+removed, since agent ids are new at every start; a host's start also removes the records
+its earlier run left, read verified as its own (one that does not verify is left and
+logged). Unfinished removals and failed startup listings retry during upkeep. Removal
+checks the current signed record and deletes only that exact bucket revision, so a
+concurrent replacement survives. An unchanged record is signed again every minute with
+the current certificate; this also repairs removed records. A missing placement is
+reopened through the team services, which own placements. A record whose ownership
+cannot be verified is left in place rather than deleted on the strength of its key alone.
+Refreshes and unfinished exits run as separate supervised jobs, one of each per agent,
+so an agent waiting for a replacement session cannot prevent healthy agents refreshing.
+Closure is tracked per session, including one returned after its agent detached.
+Every agent record expires within three minutes, and the bucket enforces that lifetime
+even for unverifiable data, so abandoned records leave without a claim of ownership.
+This is a pre-release contract change: records without the new expiry are refused.
+Readers use `custom_transport.protocol1.team_agents.TeamAgents`, which
+watches `UA1_AGENTS`, `UA1_PLACEMENT`, `UA1_HOSTS` and the team's session records in
+`UA1_CERTS`, verifies each record's signature and bucket key, and counts an
+agent live while its record is not exiting, its placement names the type and host that signed the
+record, and that host's liveness record has not expired (checked again every 5 seconds,
+since an expired record gives no change), so a stopped host's agents drop out at most 35
+seconds after its last liveness write. Whether an agent is the team lead comes from its
+session's `agent_role`, which the team services signed. That session must name this agent,
+type and signing host and still be current; a role is never cached by session id alone.
+The host's liveness certificate must be at least the placement's `host_epoch`.
+Replay protection is kept per key and signing host, including after deletion. A refused
+record cannot consume another host's sequences. Temporary trust failures retry without
+waiting for an agent to change state; failed watches reopen and expiry checks continue.
+A reopened watch is no departure: the records already held stay until the new watch has
+caught up, and only those it did not deliver are removed then, as deletions; clearing them
+at once had made the gateway mark a healthy lead unavailable and available again.
+`ready` clears when the reader stops, `running` reports its state, and listeners can read
+`departure_reason` to distinguish exit from host unavailability. Duplicate names or lead
+roles produce no selected agent, since sorting attacker-chosen ids proves no authority.
+The view is replaced as a whole on
+each change, so agents on other threads read it without locks. The team lead's process and
+the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
+A record the reader cannot verify yet for a reason that can pass (the writer's certificate
+is not readable yet while hosts join, revocations not current, a record dated just ahead
+of its clock) is kept and verified again at each check, since placements and an idle
+agent's record are written only once (`event=team_agents_record_refused retrying=true`).
+A host record that names another contract digest is authentic but its body is not read, so
+the host's certificate epoch comes from the record's signer. The signed key still names
+that signer and the record still expires within 30 seconds; neither check depends on the
+other contract's body schema. Its agents stay in the view,
+so control messages about the tasks they hold still reach them, marked with that digest
+(`TeamAgent.other_contract`): they take no new work (`TeamAgent.takes_work`), the host is
+logged once with both digests (`event=team_agents_host_other_contract`), and
+`other_contract_hosts` lists such hosts for the Status page. A draining agent's own record
+says it takes no work too.
+
+**An agent process on another contract drains** (`custom_agents.agent_host`,
+`custom_agents.contract_drain`). When its host learns that the process runs another
+contract than the installation (from the team services' host record, which it follows from
+its join on, or from `protocol_mismatch`), it opens no session and asks for no refused one
+again; a join refused that way is not asked for again either. It drains every agent on the
+agent's own loop. Queued task work still runs on today's queues in this phase, so draining
+an agent means: it leaves the queues every agent of its type shares (its type's queue and,
+for the team lead, the team's), whose messages stay there for another agent of the type,
+which the lead's worker pools start when tasks wait, or for the next team lead; no agent
+starts in the process: every start goes through `AgentInstantiationService.launch`, which
+refuses while the process drains (`process_runs_another_message_contract`, logged once per
+request; the model's `instantiate_agent` is told plainly that the process takes no new work),
+and the controllers and the lead's takeover of dead agents' work do not ask while it drains.
+New delegation actions are refused too, so a running turn cannot create a subtask that
+this process's pool cannot start. Work already queued for another worker waits for a
+replacement team lead or its existing watchdog deadline; the process does not promise
+that work will finish locally while draining;
+no draining agent claims a due schedule, whose
+run would be a task of its own, so the schedule stays due and the next team lead, on the
+installation's contract, fires it once at its first scheduler pass (a run missed meanwhile
+is not made up, and a final run late beyond `missed_one_time_after_seconds` is turned off
+with a notice, as for any missed run); the turns in progress finish; a pool worker
+starts no task it has not started and, once its running turns ended, winds down as after a
+lost launch lease, returning those tasks to the team lead, which sends them out again on
+the type's queue, then exits (its handbacks carry the cause `other_message_contract`, so its
+log lines and the failure a requester is told name the other contract rather than a lost
+lease, and the lead counts none of them toward the interruption limit, since nothing
+failed); pool workers run in the team lead's process, so the lead
+drains with them, and what they return waits in the lead's queue for a team lead on the
+installation's contract. The team lead and startup agents have no way to hand a task
+back yet (that comes with `task.handback` and the queued work of protocol 1), so they
+finish what they already admitted. The host's record says `draining` meanwhile; its
+agents' sessions are still renewed, so requests about the tasks they hold still reach them.
+Startup counts as held work until recovery finishes, so a drain cannot close controls
+before saved tasks become visible. A draining startup restores its own work and adopts
+no work from gone agents. Pool-worker wind-down waits for recovery too, so it returns
+the complete set of saved tasks. Admission reads the leaf module `contract_drain_state`; drain
+execution can depend on turn and control handlers without creating an import cycle.
+Once no agent is starting or holds an unfinished task or a waiting request, the host closes their sessions
+(`exited`), removing their placements; its record says `drained` and it renews only to give its agents up
+(`event=agent_host_drained`). A process that never joined drains its agents the same way,
+with no record to write. Under one launcher this happens only when a process, such as the
+team lead's after a restart of `manager`, starts on code that changed under the running
+installation.
+
+**Agents asking each other** (step 7b, `custom_agents.agent_host`,
+`custom_agents.live_controls`, `custom_agents.team_directory`): each agent process reads
+the team's live agents once, as a supervised step of its host, and keeps every agent's
+in-memory directory (`known_agents`, the name-to-id map the model and messages use) in step
+with it on the agent's own loop. Each update replaces the directory with the whole view, as
+a plain callback in the order the views were read, so an older update can never put back an
+agent that left or remove one that came back. An entry says only what the records say: id,
+type, name, lead or not, paused, busy, and whether it accepts work; its `last_seen_at` is
+when this directory took the entry as it stands, not a time the other agent wrote. A name
+two live agents share names neither of them until one leaves (logged with both ids), so a
+second agent cannot take over a name. An agent whose host runs another contract stays in the
+directory, so the requests below about the tasks it holds still reach it, but its entry says
+it accepts no work and delegation passes it over.
+
+*Leaving for good.* The reader (`custom_transport.protocol1.team_agents`) says an agent left
+for good when its record said it was exiting, or when its session was closed: the team
+services re-sign a session with its end when its host closes it, as the agent exits or as
+the host's next start cleans up after a crash. That evidence often arrives after the agent
+already left the view (a reader that reconnects sees only the record's deletion, because the
+bucket keeps one value per key; the placement's deletion can be read before the exiting
+record), so the reader keeps a departed agent's last entry for ten minutes and tells its
+listeners once more, once, when the evidence comes. Only the team services' signed session
+or the agent's own last host count, so another host cannot fake an exit. One run of an agent
+can hold several sessions (a refused renewal, a missing placement or a lost open reply opens
+another, and the earlier one runs out seven days later), so only the agent's newest known
+session counts, and, for an agent the reader did not see leave, only while no placement of
+the agent is held and its held record does not name a session the reader lacks. Then every
+agent that delegated work to it by name (not only the lead) fails, at once, each subtask that
+still waits in the departed agent's own mailbox and that nobody took: the requester's
+delegated-task record shows no worker took it, and its message can still be withdrawn from
+the work stream. Only that subtask fails, as with the watchdog's timeout, a handback or a
+worker loss: the parent task and its other subtasks go on, and the parent's turn resumes to
+decide again. Subtasks of different requests are failed side by side, those of one request one
+after another. A subtask a worker took is left alone: a restarted agent takes it over from
+saved state and reports it again, and a handed-back one goes to another worker. An agent
+whose host only stopped reporting is not given up for; the subtask watchdog handles work that
+never comes back.
+
+A fresh reader also recognises agents that exited while its process was down, using the
+retained signed closed sessions without needing the old agent record or placement. It records
+those it finds at its first reading without telling anyone and logs one count
+(`event=team_agents_unseen_exits`): a process start can find weeks of them, and its agents
+have not restored their saved work yet. Instead each agent, once it has restored its saved
+work at the end of its start (`agent_host.report_restored_work`), waits until its process has
+read the view, reads its waiting subtasks once and fails those sent by name to an agent that
+is not live and left for good, the same way (`team_directory.check_departed_targets`). So a
+restarted requester fails what its departed workers never took, whichever comes first, and a
+start costs one read per restored agent. Exits found later, also after the reader's run
+restarts, are told as usual. The reader drops what it kept about a departure once the
+agent's last session record is deleted (about 37 days after a closed session ended). Beyond
+that the watchdog still decides overdue work. A handback records its worker in the delegated
+task's holder history even if the worker's claim never arrived: its new message belongs to
+the type queue and must never be withdrawn as an abandoned by-name task.
+
+Agents ask each other on `ctl.agent.<agent>`, signed with the asking agent's session, through
+`custom_agents.agent_requests` (`ask_agent`, `ask_each`, `announce`, `team_view`, which hold
+this process's host apart from the host's own module so the import graph stays free of
+loops). `cannot_ask` says when this process cannot ask yet (not joined, the agent's session
+not open, the view not read) and whether that clears by itself; callers that judge other
+agents by their answers then wait instead of counting everyone as silent. `ask_each` asks
+several agents at once under one deadline and keeps each answer or error apart.
+- Delegation by type reads the directory and sends nothing. By name, the requester waits up
+  to ten seconds for a just-started worker to take work in the view (a started worker took
+  3.6 s in the live tests), and the team lead also asks it for its basic status: one that
+  does not answer, is exiting or takes no work is refused at once. When it is the lead that
+  cannot ask yet (its own session is not open after a restart, or its process drains), it
+  waits within the same ten seconds while that clears by itself; otherwise the delegation is
+  refused with the lead's own reason (`requester_cannot_ask`), and the worker is not judged.
+  Other agents skip that ask; the contract lets only the lead's host, the team services and
+  the gateway send it.
+  The maintenance worker check accepts a started launch: the occurrence waits in the type's
+  queue.
+- The team lead's pause, resume and exit tool sends `agent.pause`, `agent.resume` and
+  `agent.exit`. A receiver obeys them only from the team lead's session, or from the team
+  services for pause and resume, and never from its own session: stopping the lead's agent
+  would end the manager process without the approval a restart needs. Anything else is
+  answered `not_allowed` and logged. The tool refuses to send them to the agent using it.
+  The old unsigned `ControlInstruction` exit, pause and resume are no longer obeyed: their
+  sender is whatever the message says, and any process with the team's NATS login can
+  publish one. An agent acts only on its `stop` for a task and drops any other, logged with
+  the sender it claims (`event=agent_control_instruction_dropped`). Nor can the lead start
+  another TeamArchitect (`manager_launch_forbidden`, for every kind of start): on the lead's
+  host its session would carry the lead role, and it could pause or stop the real lead.
+  It waits the request's whole lifetime (30 s), says nothing changed only when nothing can
+  have run, and says the outcome is unknown after a lost reply, `handler_failed` or an
+  unreadable answer.
+- The live status tool sends `agent.status` to all its targets at once, within ten seconds.
+  A basic answer, which any allowed sender gets, has the agent's state, queue, context and
+  budget measurements, skills and findings; a full one adds its diagnostics and goes only to
+  the team lead, checked against the sender's session. Tools are left out: the contract
+  names them by catalog ids, which the agent's tool list does not carry.
+- The subtask watchdog sends `task.probe` to the holder, or to every live worker of the
+  task's type, and only a worker that knows the task counts. One target's error counts as no
+  answer from it and never ends the probe or the scheduler pass. Any agent may delegate, so
+  worker hosts may send `task.probe` too, and every topology lets a task's requester ask its
+  holder (`requester_kinds` in `team-topologies.yaml`, plan decision 70). When this process
+  cannot ask yet for a reason that clears, the watchdog waits, up to one more timeout past a
+  subtask's deadline, rather than fail work that still runs.
+- The managed skill hint is the `skills.changed` team event, which every agent process
+  receives once and hands to every agent it runs.
+
+Agents no longer subscribe to presence or the broadcast subject, ignore status replies on
+`.operational`, and the team lead no longer writes other agents' rows in `agent_states`.
+Restart approvals name other agents' running work by task: the team lead asks each live
+agent for its full status while it captures an `all` restart's state, and shows an agent
+that does not answer, or that a host runs without a session, as unknown work (see the restart
+approvals under "Authorization and credentials").
+
+**The end of presence and fan-out** (step 7d): agents no longer publish presence. Each
+agent refreshes its own `agent_states` row and checks its skill catalog every 20 seconds
+(`UniversalAgent._self_refresh_loop`, `custom_agents.liveness_observation.SELF_REFRESH_SECONDS`):
+the row is the heartbeat the liveness rules read, and the check picks up a missed
+`skills.changed`. The presence stream, the broadcast subject, `TeamComms.broadcast_message`,
+the publish options for them and the JetStream push listener that only presence used are
+removed, so nothing on JetStream is pushed. The topology owner looks for an existing
+`<PREFIX>_PRESENCE` stream at start and deletes it (`event=nats_retired_stream_deleted`),
+which also removes the gateway's old durable consumer on it; a fresh install sends no delete
+(`NatsStreamTopology._delete_retired_streams`). Deleting is a one-time clean-up, not a
+condition for starting: a NATS login without the right to delete streams (an external
+server's login may only create and update them) logs `event=nats_retired_stream_not_deleted`
+with the stream and the manual step, and the start goes on. When per-host permissions apply
+(phase 3) the topology owner needs INFO and DELETE on retired stream names, or the clean-up
+goes. `transport.presence_max_age_seconds` is retired
+through versioned upgrade steps, so the running code reads only the current format: the
+instance configuration's step 12 -> 13 and `config.yaml`'s step 10 -> 11 remove it
+(`runtime_settings.transport.drop_retired_presence_setting`, with the usual backup of the
+old file), a current file that still names it is refused by name like other removed
+settings, and the team transfer's settings section (version 9) drops it from older exports
+(`RETIRED_PRESENCE_SETTING`, the one name for the path). The settings export reads the file
+through the upgrade steps (`read_upgraded_instance_config`), so an export taken after the
+code upgrade but before the launcher rewrote the file carries only what this version reads.
+The operational subject now carries only
+the gateway's task progress, parent-task probe and thread guidance, with their replies
+(plan decision 68). Every agent receives it, so an agent acts only on a command that names
+it by id or name (`UniversalAgent._operational_target_matches`; the gateway names the team
+lead in all three) and ignores one naming no agent with `event=operational_command_unaddressed`;
+other message types on it are dropped with `event=operational_message_ignored`. No agent
+publishes a status there: a status request left in a mailbox by a 0.9 sender is logged
+(`event=agent_status_request_ignored`) and not answered. A lead's guidance for a delegated
+task goes to the worker holding it through its control mailbox (`agent.<id>.control`,
+durable, read while it works; plan decision 59), and a subtask no worker has taken yet gets
+none. Only that guidance takes this route (`custom_transport.subjects._is_passed_on_guidance`,
+checked after the lead, gateway and type-queue routes): every other `TaskSteering` (status
+answers, input requests and their answers) and guidance sent to a type queue keep the
+routes they had, so a type queue's name never becomes a control mailbox nobody reads. The holder of each subtask
+comes from team-wide task custody first, then the parent's delegated-task records looked up
+by team and parent, then, for a subtask asked of an agent by name, the team's directory
+(`delegated_work_runtime.current_holders`): custody names the worker before its claim reaches
+the lead and after a takeover whose claim is not recorded yet, and records looked up by parent
+are found after the lead restarted with a new id. Each copy's id is
+`<guidance key>:<subtask id>`, so passing guidance on again is safe: NATS drops a repeat within
+its duplicate window and the worker ignores a key it saved. A copy that could not be sent,
+or a subtask whose holder could not be read, is logged with its ids
+(`event=task_steering_forward_failed`, `event=delegated_task_holders_unreadable`) without
+stopping the others, and the lead answers `pending` instead of `accepted`; the gateway keeps
+the guidance and sends it again, and the lead, finding the key already saved, passes it on
+again rather than answering "duplicate". Because the gateway keeps a thread's later messages
+behind a held one, the lead gives up after `GUIDANCE_PASS_ON_ATTEMPTS` (4) sends of the held
+guidance (at most about a minute on the gateway's 15-second retry timer, sooner when the person
+writes again in the thread or the gateway is woken), answers `accepted` naming the subtasks it
+could not reach and logs
+`event=task_steering_forward_abandoned`; its own task applies the guidance either way. The
+skill hint is no longer a message type.
+
+Agents now find each other only through the records, which only an agent holding a session
+has, so a run with several agents needs the launcher (`docker/launch_headless.py`, which
+the container and the desktop app use). Tests and `scripts/launch_agent_type.py` start an
+agent without `--host-runtime`, so without a host and a session: it still works through its
+queues, but other agents, the gateway (its Team and Status pages) and restart approvals do
+not see it, and it can neither ask nor be asked anything.
+
+**The gateway follows its team** (step 7c, `assistant_gateway.team_view`): the gateway's
+host reads the team's live agents once it has joined (the same reader the agents use), and
+the gateway acts on that view in four places.
+
+- *The route to the team lead.* One `TeamLeadFollower` compares the manager client's route
+  with the records and is its only writer while the gateway runs; comparing state instead
+  of following events means a change it missed, records read late, a clock that steps back
+  or a failed attempt cannot leave a dead or wrong route, since the next check repairs it.
+  At start, before the transitions start and before the chat apps set their hooks and
+  notices, it waits up to 15 seconds for a lead in the records (not only for the records):
+  at a normal team start the gateway reads them before the lead has written its own, and
+  deciding then had marked the lead unavailable and available again (Telegram paused and
+  resumed, a false Status notice). A lead found then is routed to directly, also in place
+  of the route the previous run saved; read records without a lead clear a saved route with
+  one unavailable transition; records not read yet keep it (chats may still reach a live
+  lead), and it is checked as soon as they are read. Afterwards it checks on every change
+  and every 5 seconds, and a differing route goes through the usual transitions (the
+  current lead unavailable, so replies waiting on a dead route are failed, then the new one
+  available). Among several lead records it keeps the current lead while it is live, and
+  otherwise takes the one whose record changed last (a crashed run's lead has not changed
+  since the crash); it never flips between them (`event=gateway_multiple_leads`). A lead
+  whose process runs another contract takes no new chats but finishes the tasks it holds,
+  so the replies people wait for are kept, and failed only if that lead then leaves. A join
+  the installation refused for good clears the route whenever it comes. The lead saying it
+  leaves makes it unavailable at once; a lead whose host stopped reporting is unavailable
+  at most 35 seconds after the host's last liveness write (its record's 30 seconds plus the
+  reader's 5-second check), about the 30 seconds after which the presence heartbeat counted
+  it gone. The manager client keeps no clock: the presence-era ordering by report times is
+  gone with the presence.
+- *The Team page.* Members are built from the records each time a page reads them, so a
+  change shows at once and a member is listed while its records say it is live, whether or
+  not it answers anything; one that left is shown as exiting for a minute, and the reader's
+  own stop or restart is no departure. Labels: Available, Busy, Paused, Not accepting work
+  (a member whose record takes no new work, such as one on another contract, unless it is
+  busy with work it holds) and Exiting. A blank display name shows as `Agent_<id>`, and one
+  member that does not fit the page is logged and left out instead of breaking everyone's
+  list.
+- *Details on demand* (decision 69). Skills, an agent's own Status page findings and
+  whether a busy agent could start more are not in the records; the gateway asks for them
+  with `agent.status` (basic) when the Team tab is opened or refreshed and when the Status
+  page is checked, at most once in 10 seconds, one round at a time, at most 16 asks at
+  once, never of agents on another contract. Answers stay with their member while it is
+  shown; an answered capacity counts only while the member's record is the one it was asked
+  under, so an agent that finished is not still Busy.
+- *The Status page.* The view gives the gateway's own judgement of the team: whether a lead
+  record is live (any counts: answers play no part), what the hosts' records list, and
+  whether the gateway can see the team at all (a refused join, saying why and what to do,
+  or records not read for longer than the start's wait). An agent whose session was refused
+  has no record and no address, so it cannot report findings; the hosts' records list it
+  instead (`host_findings`): one problem per process and reason, naming the agents
+  (`<agent type>-<agent id>`), saying why in plain words (the worker limit reached, a type
+  the process may not run, a type name no certificate can carry, ...) and what to do. It
+  goes once the session opens or the agent stops; starting up, before the first answer, is
+  no finding. A host whose record names another contract digest than the gateway's gets one
+  problem naming both digests and saying to install one release everywhere and restart the
+  whole team. The agents' own findings come last, with the source their record names, and
+  the page waits for them at most about one ask, so an agent cannot hide or stand in for a
+  gateway finding and one that does not answer does not hold the page. A gateway without a
+  message host (command-line runs, or a service on an instance the launcher never prepared)
+  has no records: it keeps its saved route, does not judge the team on its Status page, and
+  says so once (`event=gateway_team_view_unavailable`).
+
+Each part of the view (the reader, the details) and the follower run supervised: one that
+fails or ends early is logged and started again after 5 seconds, doubling to 5 minutes,
+and stopping the gateway never waits for the records to be read. Before this the gateway
+asked for the lead on the operational subject at start ("discovery"), followed presence,
+and polled the lead's consumer and heartbeat every 5 seconds; all three are removed, with
+the transport adapter's consumer probe. Agent status messages that still arrive on the
+gateway's routes are ignored, never shown.
+
+**Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
+in the manager database): a change command is carried out once however often it is
+retried. The store that makes the change checks for a stored reply under its write
+lock, before changing anything, and stores the reply under the team and the command's
+retry key (the frame's idempotency key) in the same transaction as the change
+(`CommandOutcome`, passed to the memory, knowledge and conversation stores' writes). A repeat is looked
+up first, so it gets its stored reply even if its body would no longer pass the checks;
+the knowledge and topic commands look again after a failure (`team_services.outcomes`), which
+finds a change whose commit's acknowledgement was lost. Every final
+refusal is stored too, in a transaction of its own (a refused person, refused access, a
+wrong command, a change the store refused), except outcomes that ask for a retry
+(`runtime_error`, `record_busy` and others); a refusal that cannot be stored is answered
+`runtime_error` instead, so the command is decided again rather than answered
+differently later. Each reply records the person the command acted for: the retry key
+comes from the sender's request id alone, so another person's command under a reused id
+is refused and never shown that reply, and removing a person deletes the replies of
+their commands with their task records (`storage.person_departure_repository`), since a
+reply can quote their memory. Replies are kept seven days, the longest life of an
+authority token, and deleted when a new one is stored and by the team services' upkeep;
+a repeated key with another body gets the stored reply, and both body digests are
+logged. A reply that shows the result as readers see it after the commit (a knowledge
+page with its links in and notes) cannot be built in the change's transaction, so the
+change stores a receipt instead (a stored reply whose only key is `receipt`): what it
+changed, by id, and the review kinds the person confirmed, never page text. The reply is
+built from the receipt after the commit, on the first try and every retry alike; a retry
+gets the same outcome for the same records, shown as they are then. When the reply
+cannot be built, the change is already made, so the request is answered
+`handler_failed` (result unknown), never as refused
+(`team_services.outcomes.AnswerUnknown`). The table is created when a store that uses it opens, so an older database gets
+it at its first start on this version.
+
+**People's commands from the gateway** (`assistant_gateway.application.team_commands`):
+the gateway reads the person's reference from the access store, after writing the
+team's copy of the person when it differs from its own records (a failed copy write is
+otherwise retried only at the person's next change or the gateway's next start, so a
+demoted administrator could still change team memory, and a person added meanwhile
+could not act at all); when that write fails, the command is not sent and the person is
+told why (`PeopleDirectorySync.person_ref`). It gives each command a
+fresh `request_id` (a UUIDv7, the contract's "Fresh ids"), and sends it through its host
+(`assistant_gateway.team_services_client`); it no longer checks memory access itself,
+since the team services decide. When no answer comes in time, it sends the same command
+once more under the same request id, so a slow change is answered from its stored reply
+and never carried out twice; after that the person is told the change may still be made.
+Refusals, unavailable team services and gateway errors reach people as plain sentences,
+and a body the contract would refuse (an empty or over-long fact, a replace that changes
+nothing, too many tags) is refused before it is sent. For memory,
+`assistant_gateway.pinned_memory_commands.RuntimePinnedMemoryCodec` keeps the chat
+grammar and rendering: times a person writes are read in their own time zone before
+sending (the contract carries UTC times), `never` clears an expiry, a list asks for at
+most 100 facts, and the typed reply becomes the view the Settings page and the chat
+renderer use. For schedules (`assistant_gateway.application.schedule_management`), the
+Schedules page sends the version it listed; a chat or CLI command names only the schedule,
+so the gateway lists the person's schedules first and acts on the version it finds. A
+typed pause time uses the person's time zone unless it includes an offset; a daylight
+saving gap or ambiguous time requires an explicit offset. Invalid input and service
+failures are shown as explanations, never an empty list or a generic missing schedule.
+A gateway started without the launcher runs no host, so its memory and schedule commands say
+the team services cannot be reached.
+
+They also look after their own records every half hour (`SessionService.maintain`): after
+they renew, they write each placement an earlier certificate of theirs signed again under
+the current one, the same placement (body and `placed_at` unchanged) under the next
+sequence, since a reader that forgot the old certificate refuses what it signed (contract
+"State reports outlive certificates"); and they delete from `UA1_CERTS` the sessions
+receivers have forgotten (`custom_messages.wire.trust.kept_for`). Signing a placement again
+gives it a new revision, which is why a session's placement is recognised by its host and
+`placed_at`, not by the revision it names.
+
+**The gateway as a host** (`assistant_gateway.message_host.GatewayMessageHost`): the
+launcher lists the gateway (host `gateway`, role `gateway`) beside the team services, and
+the gateway service joins in the background when its NATS runtime connects, so nothing
+else in the gateway waits for the authority. Only the gateway service runs this host
+(`NatsGatewayManagerRuntime.for_gateway_service`): command-line runs (`ask`, `chat`,
+`cron`, `heartbeat`) open a gateway of their own, and a second process joining as host
+`gateway` would load the gateway's key and mark the running gateway's host record
+`drained` when it ended, so they run none. The gateway sends a person's operation to the
+team services with a command token
+(`custom_transport.protocol1.authority_tokens.command_token`): signed with the gateway's
+own key, bound to that one command (the body field the contract names for the kind,
+`request_id` for most), lasting at most five minutes, and naming the person only by their
+**person reference** (`TeamPersonV1.person_ref`, `p-` and 22 random URL-safe characters,
+plan decision 64); anything else is refused before it is signed. People's canonical ids
+can be names or chat handles, so they never travel in frames. The reference is stored
+with the person in the access store's people table (`access_people.person_ref`, unique
+per team), and created for existing people when an older store is opened. The store
+keeps the reference it holds whenever the people copy is written again, checked inside
+its write transaction, and a full copy drops only people it found in the store before it
+read the gateway's records, so a writer that read the copy before another stored someone
+(the running gateway and a command-line run both copy people) neither drops them nor
+gives them a second reference.
+`AccessRepository.team_person_by_ref` turns a reference back into the person, whatever
+their standing: a receiver checks that the person is active and holds the roles the
+operation needs before it acts for them. The team transfer does not carry the people
+copy, so a moved team's people get new references; nothing outside the instance keeps
+them. After this upgrade an instance cannot go back to 0.9 in place: 0.9 refuses people
+records that carry a reference. A gateway service on an instance whose launcher never
+prepared the message hosts has no bootstrap bundle, so it runs no host and logs
+`event=gateway_host_not_prepared`; one started by hand on an instance the launcher
+prepared joins like any other. Answers to the join that cannot change while the process
+runs (`denied`: the launcher listed another key, team or connection; `protocol_mismatch`)
+end the joining, and a person's command then says why; a join that waits for approval or
+an authority that does not answer is asked again every 10 seconds. Stopping cancels a
+join still under way (it can wait two minutes for the authority), and a joined host
+writes its last record (`drained`) before the gateway closes its connection.
+
+**Starting and restarting the authority and the team services** (`docker.message_hosts.MessageServices`).
+The launcher starts the team lead, the startup agents and the gateway only once the team
+services serve. Once they hold the lock, answer at `svc.team` and have written their host
+record, they write `runtime/team-services-serving.json` naming their process
+(`team_services.serving`); the
+launcher removes that file before it starts them and waits until it names the process it
+started. A cleanly stopped instance releases the lock, so the next one serves at once.
+After an unclean stop the new instance waits until the stopped one's lease runs out (up to
+38 seconds), and the launcher waits with it, for at most 98 seconds, saying every 10
+seconds what it waits for (`message_service_waiting`); then the launch is refused. A
+process that is not ready in time, or whose wait ends any other way, is stopped, so nothing
+a failed start began keeps running, and a stop signal during the wait (`docker stop`,
+Ctrl+C) stops what started, the team services releasing their lock, and ends the launch
+cleanly (`message_services_start_stopped`). A
+restart of everything (the configuration editor's, or an approved `all` restart) stops the
+other processes, then the team services and the authority. It then writes
+`expected-hosts.json` again from the saved configuration, and starts the authority, the
+team services and the rest in that order, each once the one before is ready, with each
+process's copies of saved settings recomputed (`docker.settings_environment`). So the
+authority approves what the saved settings allow now, and the team services read their
+settings again. If either cannot start again, the runtime stops.
 
 ## Certificate trust
 

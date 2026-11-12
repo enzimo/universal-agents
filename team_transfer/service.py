@@ -88,6 +88,8 @@ def _section_versions(sections: Sequence[TransferSection]) -> dict[str, int]:
 class ExportReport:
     path: Path
     manifest: TransferManifestV1
+    # The sections' notices for the operator, in section order (SectionExport.notices).
+    notices: tuple[str, ...] = ()
 
 
 def export_source(config_path: str | Path) -> ExportSource:
@@ -141,7 +143,9 @@ def export_team(
     keys = derive_keys(passphrase, derivation)
     writer = TransferWriter.create(out_path)
     try:
-        entries = [_export_section(section, source, writer, keys) for section in chosen]
+        exported = [_export_section(section, source, writer, keys) for section in chosen]
+        entries = [entry for entry, _notices in exported]
+        notices = tuple(notice for _entry, section_notices in exported for notice in section_notices)
         manifest = TransferManifestV1(
             application_version=application_version(),
             exported_at_utc=utc_now_iso(),
@@ -155,7 +159,7 @@ def export_team(
     except BaseException:
         writer.discard()
         raise
-    return ExportReport(writer.destination, signed)
+    return ExportReport(writer.destination, signed, notices)
 
 
 def _export_section(
@@ -163,7 +167,9 @@ def _export_section(
     source: ExportSource,
     writer: TransferWriter,
     keys: TransferKeys,
-) -> SectionEntryV1:
+) -> tuple[SectionEntryV1, list[str]]:
+    """Writes one section into the file; returns its manifest entry and its notices for the operator."""
+
     exported = section.export(source, SectionFiles(section.name, writer, keys))
     if section.encrypted:
         if exported.ciphertext is None:
@@ -178,7 +184,7 @@ def _export_section(
             records=exported.records,
         )
         writer.add_section(document)
-    return SectionEntryV1(
+    entry = SectionEntryV1(
         name=section.name,
         schema_version=section.schema_version,
         record_count=exported.record_count
@@ -186,6 +192,7 @@ def _export_section(
         else len(exported.records),
         encrypted=section.encrypted,
     )
+    return entry, list(exported.notices)
 
 
 # -- import ----------------------------------------------------------------------

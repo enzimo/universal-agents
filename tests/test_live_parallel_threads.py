@@ -13,10 +13,13 @@ import pytest
 from assistant_gateway.application.route_context import GatewayRouteContextV1
 from assistant_gateway.application.website_application import WebTaskListRequestV1
 from assistant_gateway.application.website_tasks import list_tasks
+from custom_agents.relayed_task_controls import RELAYED_HANDLERS
 from assistant_gateway.domain.sessions import ParallelSettingOutcome
 from custom_messages.enums import ProgressState
 from id_generation import new_id
 from tests.broker_access_support import use_gateway_key
+from storage.access_repository import AccessRepository
+from tests.team_services_support import checked_reply, relayed_frame
 from tests.test_live_busy_thread_guidance import (
     WAIT_SECONDS, _answer, _ScriptedLead, _team, _Turn, _wait_until,
 )
@@ -26,6 +29,26 @@ from tests.test_live_multi_agent_state_boundaries import (
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
+
+
+class _RelayToLead:
+    """The gateway's team commands, relayed to the lead as the team services do (team_services.relays).
+
+    The command reaches the lead's relayed handlers (custom_agents.relayed_task_controls) with
+    the person named by reference, read back from the people copy the gateway wrote.
+    """
+
+    def __init__(self, team) -> None:
+        self.team = team
+
+    async def request(self, kind: str, body: dict, *, person_id: str) -> dict:
+        config, lead = self.team.config, self.team.lead
+        person = AccessRepository(config.manager_storage_settings).team_person(config.manager.team_id, person_id)
+        assert person is not None, "the gateway records its people at start"
+        # In an instance the gateway and the lead share one database; here the lead has its own.
+        AccessRepository(lead.task_manager.storage_settings).record_person(person)
+        frame = relayed_frame(str(lead.team_id), kind, body, person_ref=person.person_ref)
+        return checked_reply(kind, await RELAYED_HANDLERS[kind](lead, frame))
 
 
 async def test_new_thread_is_listed_while_busy_and_finishes_while_other_thread_waits(
@@ -64,8 +87,9 @@ async def test_new_thread_is_listed_while_busy_and_finishes_while_other_thread_w
             second_id = team.root_tasks_named("SECOND-REQUEST")[0].task_id
             await _wait_until(lambda: team.lead.task_manager.get_task_info(second_id) is not None)
 
-            # This is the same typed service the authenticated Tasks endpoint uses.
-            inventory = await list_tasks(team.gateway._operational_controls, WebTaskListRequestV1(
+            # The same typed service the authenticated Tasks endpoint uses, with the team services'
+            # relay to the lead's own handlers in process (this team runs no message hosts).
+            inventory = await list_tasks(_RelayToLead(team), WebTaskListRequestV1(
                 context=GatewayRouteContextV1(
                     session_key=second_session, canonical_user_id=team.config.user.canonical_user_id,
                 ),

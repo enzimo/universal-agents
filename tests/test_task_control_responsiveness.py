@@ -1,10 +1,17 @@
 """Exercise controls through the real subscription while a model turn is held."""
 
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+from custom_agents.pending_work_runtime import schedule_pending_work
+from custom_agents.relayed_task_controls import RELAYED_HANDLERS
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from storage.access_repository import AccessRepository
+from tests.team_services_support import relayed_frame
 
 from assistant_gateway.gateway import MANAGER_CONTROL_TIMEOUT_SECONDS
 from custom_agents.conversation_runtime import ensure_task_conversation_context
@@ -34,6 +41,10 @@ def gateway_signed_commands(monkeypatch):
     forget_task_context_keys()
     yield
     forget_task_context_keys()
+
+
+RELAYED_KINDS = {"list_tasks": "tasks.list", "purge_tasks": "tasks.purge", "remove_task": "tasks.remove"}
+OWNER_REF = "p-OwnerOwnerOwnerOwnerOw"
 
 
 @pytest.mark.live
@@ -110,6 +121,30 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
             await warning.ack()
 
         cancelled: list[str] = []  # the last exchange's cancellation replies
+        # The person the gateway's command token names, in the gateway's copy of the people.
+        AccessRepository(agent.task_manager.storage_settings).record_person(TeamPersonV1(
+            team_id=team, person_id="owner", person_ref=OWNER_REF, standing=PersonStanding.ACTIVE,
+            roles=("member",), changed_at_utc=datetime.now(timezone.utc)))
+
+        async def relayed(action, **kwargs):
+            """A person's task-list command as the team services relay it to this agent's host."""
+
+            kind = RELAYED_KINDS[action]
+            body = {"agent": agent.id, **kwargs}
+            if kind == "tasks.list":
+                body.update(offset=0, limit=20)
+            reply = await RELAYED_HANDLERS[kind](agent, relayed_frame(team, kind, body, person_ref=OWNER_REF))
+            # Each stopped request also gets its final reply, its cancellation.
+            cancelled.clear()
+            while True:
+                try:
+                    received = await asyncio.wait_for(responses.get(), 1.0)
+                except asyncio.TimeoutError:
+                    return reply
+                await received.ack()
+                content = received.envelope.msg_content
+                assert isinstance(content, Task) and content.task_state[-1][0].value == "cancelled"
+                cancelled.append(content.task_id)
 
         async def exchange(action, **kwargs):
             command = ManagerRuntimeWorkCommand(
@@ -142,7 +177,9 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
             assert content.command_id == command.command_id
             return content
 
-        await exchange("list_tasks")
+        await relayed("list_tasks")
+        # The queued work starts as it does after any delivery; the relayed list does not touch the mailbox.
+        schedule_pending_work(agent)
         await asyncio.wait_for(entered.wait(), 3)
         if is_team_lead:
             # Real durable chat delivery must receive a rejection while the model
@@ -174,23 +211,25 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
             assert not release.is_set()
             assert not agent.deferred_inbox.messages
             await rejection.ack()
-        view = await exchange("list_tasks")
-        assert view.current_task_count == 1
-        purged = await exchange("purge_tasks", inventory_digest=view.inventory_digest)
-        assert purged.success and purged.task_total == 1
-        assert len(purged.cancellation_receipts) == 49
+        view = await relayed("list_tasks")
+        assert view["current_count"] == 1
+        purged = await relayed("purge_tasks", seen_queue_digest=view["queue_digest"])
+        assert purged["outcome"] == "ok" and purged["all_confirmed"] and purged["removed"] == 49
         # Each purged request's requester is told, so a waiting chat thread is freed.
         assert sorted(cancelled) == sorted(f"queued_{index}" for index in range(49))
+        assert (await relayed("list_tasks"))["total"] == 1
         assert not release.is_set()
-        stopped = (await exchange("cancel") if is_team_lead else
-                   await exchange("remove_task", target_task_id="held", inventory_digest=purged.inventory_digest))
-        assert stopped.success
+        if is_team_lead:
+            assert (await exchange("cancel")).success
+        else:
+            stopped = await relayed("remove_task", task_id="held", seen_queue_digest=purged["queue_digest"])
+            assert stopped["outcome"] == "ok" and stopped["all_confirmed"]
         assert cancelled == ["held"], "one final reply, from the stopped turn"
         assert agent.task_manager.is_execution_cancelled("held")
         assert agent._conversation_store.get_turn_by_task_id("held")["task_status"] == "cancelled"
         agent._conversation_summary_generator.summarize_turn.assert_not_called()
         agent._conversation_compactor.compact_if_needed.assert_not_called()
-        assert (await exchange("list_tasks")).task_total == 0
+        assert (await relayed("list_tasks"))["total"] == 0
         if agent._pending_work_task is not None:
             await asyncio.wait_for(asyncio.shield(agent._pending_work_task), 3)
             assert not agent._pending_work_task.cancelled()

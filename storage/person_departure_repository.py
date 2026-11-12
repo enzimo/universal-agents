@@ -7,8 +7,8 @@ conversations, and their own knowledge (personal pages, pending team
 contributions, knowledge edit log). When an administrator removes a person (``/user remove``):
 
 - their task records (with the after-action report reviews about their work),
-  objectives and memory-review jobs are deleted at once
-  (``delete_person_records``);
+  objectives, memory-review jobs and the stored replies of their commands are
+  deleted at once (``delete_person_records``);
 - their personal memory, conversations and own knowledge are held (``hold_person_records``):
   the rows move, in one transaction, into ``person_held_rows`` as JSON and
   leave the tables agents read, so no agent sees them. ``/user restore``
@@ -60,6 +60,7 @@ from storage.change_ledger import (
     CHANGE_REVIEWS_TABLE,
 )
 from storage.config import StorageSettings
+from storage.operation_outcomes import OUTCOME_PERSON_COLUMN, OUTCOMES_TABLE
 from storage.pinned_memory_repository import USERMEM_BANK
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
 from storage.schema_setup import begin_schema_setup
@@ -293,6 +294,9 @@ class PersonDepartureRepository:
             _RecordSet(CHANGE_LEDGER_TABLE, CHANGE_PERSON_COLUMN, person),
             _RecordSet(CHANGE_REVIEWS_TABLE, CHANGE_PERSON_COLUMN, person),
             _RecordSet(CHANGE_CASES_TABLE, CHANGE_PERSON_COLUMN, person),
+            # The stored replies of their commands (storage.operation_outcomes): kept only for
+            # retries, and they can quote the person's memory, so they are not held.
+            _RecordSet(OUTCOMES_TABLE, OUTCOME_PERSON_COLUMN, person),
         ]
         if objectives:
             sets += [

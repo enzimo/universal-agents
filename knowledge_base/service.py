@@ -29,7 +29,7 @@ The service decides:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
 
@@ -41,6 +41,7 @@ from access_control.ownership import (
 )
 from id_generation import new_id
 from knowledge_base.records import (
+    ConfirmedChange,
     ActivityReport,
     PageProblems,
     CODE_CONFLICT,
@@ -69,6 +70,7 @@ from knowledge_base.records import (
 )
 from knowledge_base.sensitive_content import SensitiveContentRules
 from knowledge_base.text import link_targets, overlaps, query_terms, slugify, text_fingerprint, written_links
+from storage.operation_outcomes import CommandOutcome
 from storage.knowledge_repository import utc_text
 from knowledge_base.vocabulary import (
     CONTRIBUTION_ID_PREFIX,
@@ -262,18 +264,22 @@ class KnowledgeService:
         limit: int,
         offset: int = 0,
         status: PageStatus = PageStatus.ACTIVE,
+        page_type: str = "",
+        tag: str = "",
     ) -> tuple[list[SearchHit], int]:
-        """One page of a person's page list in one space, and how many pages match in all.
+        """One page of a person's page list, and how many pages match in all.
 
         For the Web Chat Knowledge page, which pages 20 at a time with a total
         (``ui/DESIGN.md``); ``search`` stays bounded by ``search.max_results``
-        for agents. Spaces follow the same rules as ``search``. Active pages
+        for agents. Spaces, and the type and tag filters, follow the same rules
+        as ``search``, and the total counts with the same filters. Active pages
         are shown by default; archived pages can be listed separately to restore them.
         """
 
         self._require_enabled()
         spaces = self._readable_spaces(actor, space)
         terms = query_terms(query)
+        filters = {"page_type": _page_type(page_type) if page_type else "", "tag": slugify(tag) if tag else ""}
         hits = self._repository.search(
             team_id=actor.team_id,
             reader_person_id=actor.work_person_id,
@@ -282,13 +288,15 @@ class KnowledgeService:
             limit=min(max(int(limit), 1), _BROWSE_PAGE_LIMIT),
             offset=max(int(offset), 0),
             status=status,
+            **filters,
         )
         total = self._repository.count_pages(
-            team_id=actor.team_id, reader_person_id=actor.work_person_id, spaces=spaces, terms=terms, status=status
+            team_id=actor.team_id, reader_person_id=actor.work_person_id, spaces=spaces, terms=terms, status=status,
+            **filters,
         )
         return hits, total
 
-    def page_links(self, page: KnowledgePage, body: str) -> list[PageLink]:
+    def page_links(self, page: KnowledgePage, body: str, *, check_exists: bool = True) -> list[PageLink]:
         """Where each ``[[link]]`` in ``body`` (shown on ``page``) leads, for the Web Chat Knowledge page.
 
         The same rules as the stored links (``link_targets``): a bare name stays
@@ -296,6 +304,8 @@ class KnowledgeService:
         A merged page's name counts as existing, because opening it reaches the
         page it was merged into. Only pages the reader of ``page`` may read are
         named: a personal link stays in ``page``'s own person's space.
+        ``check_exists`` False reads nothing and marks every link missing (for
+        sizing a reply inside a change's transaction, ``team_services.knowledge``).
         """
 
         links: list[PageLink] = []
@@ -305,7 +315,7 @@ class KnowledgeService:
                 continue
             space, slug = resolved[0]
             key = PageKey(page.team_id, space, page.owner_person_id if space is KnowledgeSpace.PERSONAL else "", slug)
-            exists = (
+            exists = check_exists and (
                 self._repository.get_redirect_target(key) is not None or self._repository.get_page(key) is not None
             )
             links.append(PageLink(written=written, space=space.value, slug=slug, exists=exists))
@@ -335,6 +345,20 @@ class KnowledgeService:
             pending_contributions=pending,
             redirected_from=redirected_from,
         )
+
+    def backlinks_to_name(self, actor: KnowledgeActor, reference: str) -> list[KnowledgePage]:
+        """The backlinks ``read`` would show for a page not created yet: pages the actor may read that link to its name.
+
+        For sizing a new page's reply before it is saved (``team_services.knowledge``).
+        """
+
+        key = self.page_key(actor, reference)
+        stand_in = KnowledgePage(
+            page_id="", team_id=key.team_id, space=key.space, owner_person_id=key.owner_person_id, slug=key.slug,
+            title="", page_type="", summary="", tags=(), body="", status=PageStatus.ACTIVE, revision=0,
+            frozen_until_utc=None, created_at_utc="", updated_at_utc="", updated_by_kind="", updated_by_agent_type="",
+        )
+        return self._repository.backlinks(stand_in, reader_person_id=actor.work_person_id, limit=_BACKLINKS_SHOWN)
 
     def history(self, actor: KnowledgeActor, reference: str, *, limit: int = 10) -> tuple[KnowledgePage, list[KnowledgeRevision]]:
         page = self._existing_page(actor, reference)
@@ -370,8 +394,13 @@ class KnowledgeService:
         change_summary: str = "",
         confirm_review: bool = False,
         write_key: Optional[KnowledgeWriteKey] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> WriteResult:
-        """Create (``base_revision`` 0) or edit a page, or propose the change when it needs review."""
+        """Create (``base_revision`` 0) or edit a page, or propose the change when it needs review.
+
+        ``command_outcome``: a person's command from the team services, whose outcome the
+        store keeps with the change (``storage.operation_outcomes``).
+        """
 
         self._require_enabled()
         receipt = self._write_receipt(actor, write_key)
@@ -380,7 +409,7 @@ class KnowledgeService:
         try:
             return self._write_draft(
                 actor, reference, draft, base_revision=base_revision, change_summary=change_summary,
-                confirm_review=confirm_review, write_key=write_key,
+                confirm_review=confirm_review, write_key=write_key, command_outcome=command_outcome,
             )
         except KnowledgeError:
             # Another identical call may commit after the initial receipt read
@@ -401,6 +430,7 @@ class KnowledgeService:
         change_summary: str,
         confirm_review: bool,
         write_key: Optional[KnowledgeWriteKey],
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> WriteResult:
         """Validate and save the draft; the write dispatcher handles committed retries."""
 
@@ -451,6 +481,7 @@ class KnowledgeService:
             limits=self._limits_for(actor),
             now=self._clock(),
             write_key=write_key,
+            command_outcome=_confirming(command_outcome, review),
         )
         receipt = self._write_receipt(actor, write_key)
         return WriteResult(page=page, review_kinds=review, receipt=receipt)
@@ -477,7 +508,10 @@ class KnowledgeService:
             {"page_id": target.page_id, "redirects_to": target.reference()},
         )
 
-    def add_note(self, actor: KnowledgeActor, reference: str, note: str, *, confirm_review: bool = False) -> WriteResult:
+    def add_note(
+        self, actor: KnowledgeActor, reference: str, note: str, *, confirm_review: bool = False,
+        command_outcome: Optional[CommandOutcome] = None,
+    ) -> WriteResult:
         page = self._existing_page(actor, reference)
         text = (note or "").strip()
         if not text:
@@ -493,14 +527,18 @@ class KnowledgeService:
             return self._propose(actor, page.key, ContributionKind.NOTE, draft, page, page.revision, "", review)
         self._require_review_confirmed(actor, review, confirm_review, page_id=page.page_id)
         stored = self._repository.add_note(
-            page, body=text, actor=actor, limits=self._limits_for(actor), now=self._clock()
+            page, body=text, actor=actor, limits=self._limits_for(actor), now=self._clock(),
+            command_outcome=_confirming(command_outcome, review),
         )
         if stored.page_id != page.page_id:
             # The store follows a merge that committed after our initial read.
             page = self._existing_page(actor, page.reference())
         return WriteResult(page=page, note=stored, review_kinds=review)
 
-    def archive(self, actor: KnowledgeActor, reference: str, *, base_revision: int, reason: str) -> WriteResult:
+    def archive(
+        self, actor: KnowledgeActor, reference: str, *, base_revision: int, reason: str,
+        command_outcome: Optional[CommandOutcome] = None,
+    ) -> WriteResult:
         page = self._existing_page(actor, reference)
         if page.status is PageStatus.ARCHIVED:
             raise KnowledgeError(CODE_INVALID, f"{page.reference()} is already archived.")
@@ -523,6 +561,7 @@ class KnowledgeService:
             self._change(page.key, base_revision, draft, PageStatus.ARCHIVED, ChangeKind.ARCHIVE, summary, actor),
             limits=self._limits_for(actor),
             now=self._clock(),
+            command_outcome=command_outcome,
         )
         return WriteResult(page=changed)
 
@@ -597,6 +636,7 @@ class KnowledgeService:
         base_revision: int = 0,
         note: Optional[str] = None,
         page: str = "",
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> WriteResult:
         """Publish one pending contribution to the team space, optionally as an edited version.
 
@@ -660,7 +700,8 @@ class KnowledgeService:
                 )
             self._require_not_blocked(actor, (text,), page_id=current.page_id, action=WriteAction.NOTE)
             stored = self._repository.add_note(
-                current, body=text, actor=actor, limits=None, now=self._clock(), contribution_id=contribution_id
+                current, body=text, actor=actor, limits=None, now=self._clock(), contribution_id=contribution_id,
+                command_outcome=command_outcome,
             )
             if stored.page_id != current.page_id:
                 current = self._existing_page(actor, current.reference())
@@ -698,6 +739,7 @@ class KnowledgeService:
             self._change(key, revision, page_draft, status, kind, summary, actor, contribution_id=contribution_id),
             limits=None,
             now=self._clock(),
+            command_outcome=command_outcome,
         )
         return WriteResult(page=published)
 
@@ -711,10 +753,13 @@ class KnowledgeService:
             contribution_id, status=ContributionStatus.REJECTED, actor=actor, reason=text, now=self._clock()
         )
 
-    def withdraw_contribution(self, actor: KnowledgeActor, contribution_id: str) -> KnowledgeContribution:
+    def withdraw_contribution(
+        self, actor: KnowledgeActor, contribution_id: str, *, command_outcome: Optional[CommandOutcome] = None
+    ) -> KnowledgeContribution:
         self._pending(actor, contribution_id)
         return self._repository.decide_contribution(
-            contribution_id, status=ContributionStatus.WITHDRAWN, actor=actor, reason="withdrawn", now=self._clock()
+            contribution_id, status=ContributionStatus.WITHDRAWN, actor=actor, reason="withdrawn", now=self._clock(),
+            command_outcome=command_outcome,
         )
 
     def _pending(self, actor: KnowledgeActor, contribution_id: str) -> KnowledgeContribution:
@@ -732,7 +777,8 @@ class KnowledgeService:
     # curator is the guard the limits report to.
 
     def revert(
-        self, actor: KnowledgeActor, reference: str, *, to_revision: int, base_revision: int, reason: str
+        self, actor: KnowledgeActor, reference: str, *, to_revision: int, base_revision: int, reason: str,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> WriteResult:
         """Make an earlier revision current again, as a new revision."""
 
@@ -763,6 +809,7 @@ class KnowledgeService:
             ),
             limits=None,
             now=self._clock(),
+            command_outcome=command_outcome,
         )
         return WriteResult(page=changed)
 
@@ -1194,3 +1241,35 @@ __all__ = [
     "PageView",
     "WriteResult",
 ]
+
+
+def _confirming(outcome: Optional[CommandOutcome], review: tuple[str, ...]) -> Optional[CommandOutcome]:
+    """``outcome``, whose stored receipt also names the review kinds the person confirmed (``ConfirmedChange``)."""
+
+    if outcome is None:
+        return None
+    reply_for = outcome.reply_for
+    return replace(outcome, reply_for=lambda result: reply_for(ConfirmedChange(result, review)))
+
+
+def knowledge_service_for(
+    repository: KnowledgeRepository,
+    *,
+    settings: KnowledgeSettings,
+    personal_memory: Any = None,
+    logger: Optional[logging.Logger] = None,
+) -> KnowledgeService:
+    """The knowledge service on a store, with a person's memories for the overlap check.
+
+    One builder for agents' tools (``custom_tools.providers.knowledge.knowledge_service``)
+    and the team services' people's commands (``team_services.knowledge``), so both apply
+    the same settings. ``personal_memory`` is the pinned memory store, or None.
+    """
+
+    def personal_texts(person_id: str) -> list[str]:
+        if personal_memory is None:
+            return []
+        return [fact.fact_text for fact in personal_memory.list_usermem(canonical_user_id=person_id)]
+
+    return KnowledgeService(repository, settings=settings, personal_texts=personal_texts, logger=logger)
+

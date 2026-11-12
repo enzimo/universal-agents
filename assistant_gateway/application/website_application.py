@@ -118,7 +118,7 @@ class WebMemoryConflictError(ValueError):
 class WebTeamMemberStatusV1(WebsiteContractV1):
     """Redacted availability state for one team member."""
 
-    key: Literal["available", "busy", "paused", "stale", "exiting"]
+    key: Literal["available", "busy", "paused", "not_accepting", "exiting"]
     label: str = Field(min_length=1, max_length=80)
     tone: Literal["success", "warning", "neutral", "danger"]
 

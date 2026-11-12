@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+import logging
 import os
 from pathlib import Path
 import signal
@@ -18,6 +19,7 @@ from assistant_gateway.config import (
     INSTANCE_CONFIG_SCHEMA_VERSION,
     StartupAgentSettings,
 )
+from docker import message_hosts
 from docker.launch_headless import (
     append_headless_startup_notice,
     build_parser,
@@ -1483,6 +1485,141 @@ def test_a_runtime_restart_reuses_the_scoped_environments(monkeypatch) -> None:
         assert env == envs[name], name
 
 
+class _SupervisedProcess:
+    """A child that runs until it is stopped; a second team lead exits at once, ending the run."""
+
+    def __init__(self, name: str, events: list[str]):
+        self.name, self.events, self.code = name, events, None
+        self.pid = len(events)
+        if name == "manager" and events.count("start:manager") > 1:
+            self.code = 0
+
+    def poll(self):
+        return self.code
+
+    def terminate(self) -> None:
+        self.events.append(f"stop:{self.name}")
+        self.code = 0
+
+    def kill(self) -> None:
+        self.code = -9
+
+    def wait(self, timeout=None):
+        return self.code
+
+
+def _supervised_with_message_services(tmp_path: Path, monkeypatch, *, restart_team_services):
+    """run_supervised with real MessageServices and one restart of everything; returns the events and the run."""
+
+    from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts
+    from runtime_settings.instance_layout import InstanceLayout
+
+    events: list[str] = []
+    handlers: dict = {}
+    requests = iter([{"scope": "all", "reason": "Config editor requested restart", "request_path": "r"}])
+    limits = iter([2, 5])
+
+    def hosts() -> dict[str, ExpectedHost]:
+        # As the saved configuration lists them; the operator raised a host's session limit meanwhile.
+        limit = next(limits)
+        events.append(f"hosts:{limit}")
+        return {"lead-host": ExpectedHost("lead-host", "lead-host.0123", "AAAA", frozenset({"lead_host"}),
+                                          frozenset({"team_test"}), frozenset({"researcher"}), limit)}
+
+    def start_authority(layout, command, env, *, cwd, stop_requested):
+        listed = read_expected_hosts(layout.trust_expected_hosts_path)["lead-host"].session_limit
+        events.append(f"start:authority:{env.get('REFRESHED', 'launch')}:limit={listed}")
+        return _SupervisedProcess("authority", events)
+
+    def start_team_services(layout, command, env, *, cwd, stop_requested):
+        events.append(f"start:team-services:{env.get('REFRESHED', 'launch')}")
+        if events.count("start:authority:installation authority:limit=5"):
+            return restart_team_services(events, handlers)
+        return _SupervisedProcess("team-services", events)
+
+    def fake_popen(command, **_kwargs):
+        events.append(f"start:{command[0]}")
+        return _SupervisedProcess(command[0], events)
+
+    monkeypatch.setattr(message_hosts, "start_installation_authority", start_authority)
+    monkeypatch.setattr(message_hosts, "start_team_services", start_team_services)
+    monkeypatch.setattr("docker.launch_headless.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("docker.launch_headless.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("docker.launch_headless.signal.signal", handlers.__setitem__)
+    monkeypatch.setattr("docker.launch_headless.pop_runtime_restart_request", lambda _path: next(requests, None))
+    services = message_hosts.MessageServices(InstanceLayout.at(tmp_path), hosts, ["authority"], {}, ["team-services"],
+                                             {}, cwd=tmp_path)
+    assert services.start() is True  # what the launcher does before it supervises
+
+    code = run_supervised(
+        manager_command=["manager"],
+        startup_agent_commands=(("Coder", ["agent"]),),
+        gateway_command=["gateway"],
+        activity_collector_command=["activity"],
+        external_processes=(("nats", _SupervisedProcess("nats", events)),),
+        manager_env={},
+        gateway_env={},
+        activity_collector_env={},
+        startup_agent_envs={"Coder": {}},
+        # Recomputes each restarted process's copies of saved settings (docker.settings_environment).
+        settings_environment=SimpleNamespace(refresh=lambda env, process: {**env, "REFRESHED": process}),
+        message_services=services,
+    )
+    return events, code
+
+
+def test_a_restart_of_everything_restarts_the_authority_and_the_team_services_first(tmp_path: Path, monkeypatch) -> None:
+    """Plan 13B.2: they read the approved hosts and their settings at start, so the configuration editor's
+    restart restarts them too, before the hosts that need them, with the expected hosts written again first."""
+
+    events, code = _supervised_with_message_services(
+        tmp_path, monkeypatch, restart_team_services=lambda events, _handlers: _SupervisedProcess("team-services", events)
+    )
+
+    assert code == 0
+    restart = events.index("stop:gateway")
+    assert events[:restart] == [
+        "hosts:2", "start:authority:launch:limit=2", "start:team-services:launch",
+        "start:manager", "start:agent", "start:activity", "start:gateway",
+    ]
+    assert events[restart:restart + 13] == [
+        # The others first, then the team services and the authority, the reverse of their start.
+        "stop:gateway", "stop:activity", "stop:agent", "stop:manager", "stop:team-services", "stop:authority",
+        # The raised limit is approved before the authority starts again; each restarted process reads its saved
+        # settings again; the team lead and the others start only once both are ready.
+        "hosts:5", "start:authority:installation authority:limit=5", "start:team-services:team services",
+        "start:manager", "start:agent", "start:activity", "start:gateway",
+    ]
+    # The second team lead ends the run: everything stops, the authority and the team services after the others.
+    assert events[restart + 13:] == [
+        "stop:gateway", "stop:activity", "stop:agent", "stop:team-services", "stop:authority", "stop:nats",
+    ]
+
+
+def test_a_restart_whose_team_services_cannot_start_again_stops_the_runtime(tmp_path: Path, monkeypatch, caplog) -> None:
+    def fail(_events, _handlers):
+        raise RuntimeError("The team services did not get ready within 98 seconds: they join and take the team's lock")
+
+    events, code = _supervised_with_message_services(tmp_path, monkeypatch, restart_team_services=fail)
+
+    assert code == 1
+    assert "event=runtime_restart_failed" in caplog.text and "did not get ready within 98 seconds" in caplog.text
+    assert events.count("start:manager") == 1, "nothing else starts without the team services"
+    assert events[-2:] == ["stop:authority", "stop:nats"]
+
+
+def test_a_stop_while_the_restarted_team_services_start_ends_the_run_cleanly(tmp_path: Path, monkeypatch) -> None:
+    def stopped_meanwhile(events, handlers):
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
+        return _SupervisedProcess("team-services", events)
+
+    events, code = _supervised_with_message_services(tmp_path, monkeypatch, restart_team_services=stopped_meanwhile)
+
+    assert code == 0
+    assert events.count("start:manager") == 1
+    assert events[-3:] == ["stop:team-services", "stop:authority", "stop:nats"]
+
+
 def test_finish_import_step_runs_only_when_onboarding_left_credentials(tmp_path: Path) -> None:
     from docker.launch_headless import build_finish_import_task
 
@@ -1892,7 +2029,7 @@ async def ignore(_envelope):
 async def gateway(config):
     wait_for("manager.checked", 10)
     runtime = NatsGatewayManagerRuntime.from_gateway_config(config)
-    await runtime.connect(on_response=ignore, on_operational=ignore, on_presence=ignore)
+    await runtime.connect(on_response=ignore, on_operational=ignore)
     (folder / "gateway.connected").touch()
     await asyncio.sleep(60)
 
@@ -1907,7 +2044,6 @@ async def manager(config):
             replicas=transport.replicas,
             duplicate_window_seconds=transport.duplicate_window_seconds,
             work_max_age_seconds=transport.work_max_age_seconds,
-            presence_max_age_seconds=transport.presence_max_age_seconds,
             user=transport.nats_user,
             password=transport.nats_password,
         ),
@@ -1943,7 +2079,7 @@ def _delete_streams(nats_url: str, settings, mapper) -> None:
         connection = await nats.connect(servers=[nats_url], user=settings.nats_user, password=settings.nats_password)
         try:
             jetstream = connection.jetstream()
-            for name in (mapper.work_stream_name(), mapper.presence_stream_name(), mapper.dead_letter_stream_name()):
+            for name in (mapper.work_stream_name(), mapper.dead_letter_stream_name()):
                 try:
                     await jetstream.delete_stream(name)
                 except NotFoundError:
@@ -1982,8 +2118,207 @@ def _prepare_launch(tmp_path: Path, monkeypatch, *, team_id: str, env: Mapping[s
         "validate_memory_graph_embedding_preflight": lambda *_args, **_kwargs: None,
     }.items():
         monkeypatch.setattr(lh, name, replacement)
+    for name in ("start_installation_authority", "start_team_services"):
+        monkeypatch.setattr(message_hosts, name, lambda *_args, **_kwargs: _StandInProcess())
     monkeypatch.setattr(lh.signal, "signal", lambda *_args: None)
     return config_path
+
+
+class _StandInProcess:
+    """A started process that keeps running, for launches whose services the tests replace."""
+
+    returncode = None
+    pid = 0
+
+    def poll(self) -> None:
+        return None
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    def send_signal(self, _signum: int) -> None:
+        pass
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+def test_the_authority_and_the_team_services_start_after_the_streams_each_ready_before_the_services(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """docker.message_hosts: the trust folder, the authority, then the team services, before any other host starts."""
+
+    import docker.launch_headless as lh
+    from env_secrets import PROCESS_INSTALLATION_AUTHORITY
+    from installation_authority.expected_hosts import read_expected_hosts
+
+    config_path = _prepare_launch(
+        tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "false", "NATS_PASSWORD": "nats"}
+    )
+    steps: list[tuple[str, object]] = []
+    authority = _StandInProcess()
+
+    def start(layout, command, env, *, cwd, stop_requested):
+        steps.append(("authority", (layout, command, env)))
+        return authority
+
+    team_services = _StandInProcess()
+
+    def start_team_services(layout, command, env, *, cwd, stop_requested):
+        # The real one returns only once they serve (docker.message_hosts.start_team_services).
+        steps.append(("team services", (command, env)))
+        return team_services
+
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: steps.append(("streams", env)))
+    monkeypatch.setattr(message_hosts, "start_installation_authority", start)
+    monkeypatch.setattr(message_hosts, "start_team_services", start_team_services)
+    monkeypatch.setattr(lh, "run_supervised", lambda **kwargs: steps.append(("services", kwargs)) or 0)
+
+    assert lh.main() == 0
+    assert [name for name, _ in steps] == ["streams", "authority", "team services", "services"]
+    layout, command, env = steps[1][1]
+    assert layout.trust_bootstrap_path.exists() and command[-3:] == ["run-installation-authority", "--config",
+                                                                    str(config_path)]
+    assert env["NATS_PASSWORD"] == "nats" and "SECURE_TOOL_BROKER_TOKEN" not in env
+    command, env = steps[2][1]
+    assert command[-3:] == ["run-team-services", "--config", str(config_path)] and env["NATS_PASSWORD"] == "nats"
+    assert "SECURE_TOOL_BROKER_TOKEN" not in env
+    # The team services and the gateway are hosts the authority approves without asking anyone.
+    expected = read_expected_hosts(layout.trust_expected_hosts_path)
+    assert expected["team-services"].roles == {"team_services"}
+    assert expected["gateway"].roles == {"gateway"} and expected["gateway"].teams == {"team_test"}
+    # The agent processes: the team lead's may run any type in the catalog, a startup agent's its one type.
+    assert expected["lead"].roles == {"lead_host", "worker_host"} and expected["lead"].agent_types_from_catalog
+    startup_hosts = [host for runtime, host in expected.items() if runtime.startswith("agent-")]
+    assert startup_hosts and all(host.roles == {"worker_host"} and host.session_limit == 1
+                                 and len(host.agent_types) == 1 for host in startup_hosts)
+    services = steps[3][1]["message_services"]
+    assert services.processes() == (("installation authority", authority), ("team services", team_services))
+    assert PROCESS_INSTALLATION_AUTHORITY == "installation_authority"
+    # The hosts to approve are read from the saved configuration each time, so a restart takes a saved change.
+    saved = GatewayInstanceConfig.load_saved(config_path)
+    saved.manager.team_id = "team_renamed"
+    saved.save(config_path)
+    assert services.hosts()["team-services"].teams == {"team_renamed"}
+
+
+@pytest.mark.parametrize("failing", ["authority", "team services"])
+def test_a_launch_stops_when_the_authority_or_the_team_services_cannot_start(
+    tmp_path: Path, monkeypatch, caplog, failing: str
+) -> None:
+    import docker.launch_headless as lh
+
+    _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "false"})
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+    stopped: list[str] = []
+    authority = _StandInProcess()
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError(f"The {failing} exited with code 1 before getting ready.")
+
+    monkeypatch.setattr(message_hosts, "start_installation_authority",
+                        fail if failing == "authority" else lambda *_args, **_kwargs: authority)
+    monkeypatch.setattr(message_hosts, "start_team_services", fail)
+    monkeypatch.setattr(lh, "terminate_process", lambda process, name: stopped.append(name))
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: pytest.fail("no service may start"))
+    assert lh.main() == 2
+    assert "event=message_services_start_failed" in caplog.text
+    assert f"The {failing} exited with code 1" in caplog.text
+    # A running authority is stopped with the launch.
+    assert stopped == ([] if failing == "authority" else ["installation authority"])
+
+
+def test_a_renamed_secret_never_reaches_the_installation_authority_or_the_team_services(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Both get the NATS login only, also when a secret's variable has a configured name."""
+
+    import docker.launch_headless as lh
+    from docker import message_hosts
+
+    config_path = _prepare_launch(
+        tmp_path, monkeypatch, team_id="team_test",
+        env={"TEAM_LOCAL_NATS_ENABLED": "false", "NATS_PASSWORD": "nats", "TEAM_WEB_CHAT_TOKEN": "web"},
+    )
+    config = GatewayInstanceConfig.load(config_path)
+    config.interactive_apps.internal_website.web_chat_token_env_var = "TEAM_WEB_CHAT_TOKEN"
+    config.save(config_path)
+    environments: list[Mapping[str, str]] = []
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+    for name in ("start_installation_authority", "start_team_services"):
+        monkeypatch.setattr(message_hosts, name, lambda _layout, _command, env, **_kwargs:
+                            environments.append(env) or _StandInProcess())
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: 0)
+
+    assert lh.main() == 0
+    assert len(environments) == 2
+    for environment in environments:
+        assert environment["NATS_PASSWORD"] == "nats" and "TEAM_WEB_CHAT_TOKEN" not in environment
+
+
+@pytest.mark.parametrize("interrupted_at", ["authority", "team services"])
+def test_an_interrupted_message_services_start_stops_the_services_already_started(
+    tmp_path: Path, monkeypatch, interrupted_at: str
+) -> None:
+    """Ctrl+C while waiting for the authority or the team services stops what started, then ends the launch."""
+
+    import docker.launch_headless as lh
+    from docker import message_hosts
+
+    _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "false"})
+    stopped: list[object] = []
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    authority = _StandInProcess()
+    monkeypatch.setattr(message_hosts, "start_installation_authority",
+                        interrupted if interrupted_at == "authority" else lambda *_args, **_kwargs: authority)
+    monkeypatch.setattr(message_hosts, "start_team_services", interrupted)
+    monkeypatch.setattr(lh, "terminate_process", lambda process, name: stopped.append(name))
+    monkeypatch.setattr(lh, "stop_external_processes", lambda processes, cleanup: stopped.append("external"))
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: pytest.fail("no service may start"))
+    with pytest.raises(KeyboardInterrupt):
+        lh.main()
+    assert stopped == (["external"] if interrupted_at == "authority" else ["installation authority", "external"])
+
+
+def test_a_stop_signal_while_the_message_services_start_stops_them_and_ends_the_launch_cleanly(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """``docker stop`` or Ctrl+C while the launcher waits for the team services (minutes after an unclean stop)
+    stops what started, so the team services release their lock, and ends the launch without an error."""
+
+    import docker.launch_headless as lh
+    from docker import message_hosts
+
+    install_handler = signal.signal
+    _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "false"})
+    monkeypatch.setattr(lh.signal, "signal", install_handler)  # the launch's handlers are the subject here
+    stopped: list[str] = []
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+    authority, team_services = _StandInProcess(), _StandInProcess()
+    monkeypatch.setattr(message_hosts, "start_installation_authority", lambda *_args, **_kwargs: authority)
+
+    def waiting_for_the_team_services(*_args, stop_requested, **_kwargs):
+        os.kill(os.getpid(), signal.SIGINT)  # Ctrl+C, as the launcher waits
+        assert stop_requested(), "the stop reached the wait"
+        return team_services
+
+    monkeypatch.setattr(message_hosts, "start_team_services", waiting_for_the_team_services)
+    monkeypatch.setattr(lh, "terminate_process", lambda process, name: stopped.append(name))
+    monkeypatch.setattr(lh, "stop_external_processes", lambda processes, cleanup: stopped.append("external"))
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: pytest.fail("no service may start"))
+    previous = signal.getsignal(signal.SIGINT)
+    with caplog.at_level(logging.INFO):
+        assert lh.main() == 0
+    assert stopped == ["team services", "installation authority", "external"]
+    assert "event=message_services_start_stopped" in caplog.text
+    assert signal.getsignal(signal.SIGINT) is previous, "the launcher's own handlers come back"
 
 
 def test_launch_sets_up_the_message_streams_with_the_gateway_environment_just_before_the_services(
@@ -2256,7 +2591,7 @@ def test_stream_setup_creates_the_streams_participants_check_and_a_repeat_change
         connection = await nats.connect(servers=[env["NATS_URL"]], user=settings.nats_user, password=settings.nats_password)
         try:
             jetstream = connection.jetstream()
-            names = (mapper.work_stream_name(), mapper.presence_stream_name(), mapper.dead_letter_stream_name())
+            names = (mapper.work_stream_name(), mapper.dead_letter_stream_name())
             return {name: (await jetstream.stream_info(name)).created for name in names}
         finally:
             await connection.close()
@@ -2268,7 +2603,7 @@ def test_stream_setup_creates_the_streams_participants_check_and_a_repeat_change
 
     try:
         names = prepare_message_streams(config_path, env)
-        assert names == (mapper.work_stream_name(), mapper.presence_stream_name(), mapper.dead_letter_stream_name())
+        assert names == (mapper.work_stream_name(), mapper.dead_letter_stream_name())
         asyncio.run(participant_check())
         first = asyncio.run(created_times())
         assert prepare_message_streams(config_path, env) == names
@@ -2304,3 +2639,22 @@ def test_stream_setup_connects_to_nothing_without_jetstream(tmp_path: Path) -> N
     # A port nothing listens on: a connection attempt would retry for minutes.
     env = {"NATS_URL": "nats://127.0.0.1:9", "NATS_JETSTREAM_ENABLED": "false"}
     assert prepare_message_streams(config_path, env) == ()
+
+
+def test_each_agent_process_is_told_its_host(tmp_path: Path, monkeypatch) -> None:
+    """The launcher passes each agent process the host id it listed for the authority."""
+
+    import docker.launch_headless as lh
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    config_path = _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env={"NATS_PASSWORD": "nats"})
+    config = GatewayInstanceConfig.load_for_process(config_path)
+    manager = lh.build_manager_command(config)
+    assert manager[manager.index("--host-runtime") + 1] == "lead"
+    commands = lh.build_startup_agent_commands(config)
+    hosts = lh.agent_process_hosts(config, commands)
+    for label, command in commands:
+        runtime = command[command.index("--host-runtime") + 1]
+        assert runtime in hosts
+        assert hosts[runtime].agent_types == {lh.startup_agent_type(label)}
+

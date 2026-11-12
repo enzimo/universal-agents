@@ -4,9 +4,13 @@ import os
 import sys
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    # Imported where the fixture runs: it loads nats-py, which unmarked tests do not need.
+    from tests.live_nats_support import OwnedStreams
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -20,6 +24,14 @@ from tests.upgrade_schemas import (  # noqa: E402,F401 - pytest hooks: --upgrade
     pytest_runtest_setup,
     pytest_unconfigure,
 )
+import storage.sqlite_connection as _sqlite_connection  # noqa: E402
+
+# The product commits with synchronous=FULL, so a commit survives a power loss
+# (storage.sqlite_connection). No test cuts the power, and the extra disk flushes
+# made the store tests about six times slower, so tests in this process commit with
+# NORMAL. tests/test_sqlite_connection.py checks the product's setting in a fresh
+# process; child processes the tests start keep the product's setting.
+_sqlite_connection.SQLITE_SYNCHRONOUS = "NORMAL"
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -115,6 +127,25 @@ def restore_process_environment_between_tests():
         if os.environ != saved:
             os.environ.clear()
             os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def delete_streams_a_live_nats_test_created(
+    request: pytest.FixtureRequest,
+) -> Generator[OwnedStreams | None, None, None]:
+    """Remove the streams a test marked ``nats`` created on the shared server, passed or failed.
+
+    Yields the recorder (``None`` for other tests). See
+    ``tests.live_nats_support.deleting_created_streams``.
+    """
+
+    if request.node.get_closest_marker("nats") is None:
+        yield None
+        return
+    from tests.live_nats_support import deleting_created_streams
+
+    with deleting_created_streams() as ownership:
+        yield ownership
 
 
 @pytest.fixture

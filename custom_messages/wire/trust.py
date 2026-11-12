@@ -98,6 +98,8 @@ SESSION_REACH = timedelta(seconds=STATE_RECORDS["agent_session"].max_lifetime_se
 # Runtime ids that would read as another installation's sender slot (x-<installation>)
 # or a system id such as the installation scope (_install); transport.yaml defines both.
 RESERVED_RUNTIME_PREFIXES = (PEER_SENDER_SLOT.split("{", 1)[0], INSTALLATION_SCOPE[:1])
+
+
 # Where each trust record's body says when it ends; the record's own expiry, when it
 # has one, must say the same, so the record has one validity window.
 BODY_END = {"certificate": "expires_at", "agent_session": "ends_at", "agreement": "expires_at", "revocations": "expires_at"}
@@ -111,6 +113,21 @@ WRITER_AUTHORITY = "authority"
 # record, so its installation traffic (join and renewal replies) is accepted without a
 # current record, and a host whose record expired can still renew and reconnect.
 AUTHORITY_HOST_ROLE = "installation_authority"
+
+
+def kept_for(record: str) -> Optional[timedelta]:
+    """How long after its newest version was written a receiver keeps a trust record; ``None`` for never.
+
+    README "Trust over time", "Forgetting": the record's ``max_lifetime_seconds`` plus the
+    replay retention and the clock tolerance, and for a certificate an agent session's
+    reach more. The revocations record is never forgotten. ``TrustStore.forget`` uses
+    this, and so do writers, which delete a record from ``UA1_CERTS`` once receivers forget it.
+    """
+
+    lifetime = STATE_RECORDS[record].max_lifetime_seconds
+    if record == REVOCATIONS or lifetime is None:
+        return None
+    return timedelta(seconds=lifetime) + RETENTION + SKEW + (SESSION_REACH if record == CERTIFICATE else timedelta())
 
 
 def within(start: datetime, end: datetime, moment: datetime) -> bool:
@@ -342,6 +359,15 @@ class TrustStore:
         replaced_at = self._replacements.get((certificate.installation, certificate.runtime, certificate.certificate_id))
         return certificate if replaced_at is None else replace(certificate, replaced_at=replaced_at)
 
+    def held_record(self, record: str, key: str) -> Optional[tuple[int, str]]:
+        """The sequence and digest of the newest trust record held under ``key``, if any.
+
+        A host's liveness record names its certificate by this digest (README, "State records").
+        """
+
+        held = self._sequences.get((record, key))
+        return None if held is None else (held.sequence, held.digest)
+
     def agent_session(self, installation: str, team: str, session: str) -> Optional[AgentSession]:
         return self._sessions.get((installation, team, session))
 
@@ -534,10 +560,14 @@ class TrustStore:
             # The longest lifetime counts from when a record was written, so that time has come.
             raise FrameRefused("not_yet_valid", "a trust record is not dated ahead of the receiver's clock", at="/issued_at")
         if report and document.record == HOST:
-            theirs = self._other_contract(raw)
+            theirs = self.other_contract(raw.get("body"))
             if theirs is not None:
                 # Authentic, but shaped by another contract: the reader decides what it means.
                 assert signer is not None
+                self._check_own_record_of_another_contract(document, raw, signer)
+                # A different body schema cannot remove this protocol's signed
+                # lifetime limit. Otherwise a stopped host could remain live forever.
+                self._check_record_dates(document, spec, None, issued_at)
                 return VerifiedRecord(document=document, body=None, signer=signer, digest=digest,
                                       other_contract=True, their_contract_sha256=theirs)
         try:
@@ -550,19 +580,20 @@ class TrustStore:
             self._check_state_report(document, body, signer)
         return VerifiedRecord(document=document, body=body, signer=signer, digest=digest)
 
-    def _other_contract(self, raw: Mapping[str, Any]) -> Optional[str]:
-        """The contract digest a host record names, read before its body, when it is not this receiver's own.
+    def other_contract(self, body: Any) -> Optional[str]:
+        """The contract digest a host record's, join's or renewal's body names, read before the rest of it,
+        when it is not this receiver's own.
 
-        While the label is a pre-release, two contracts can share it and shape a host record
-        differently, so a reader reads the digest on its own before the rest of the body
-        (README, "Versions"). It sends that host no new work, places no agent on it and logs
-        both digests; it still counts the host's custody windows from these records. A record
-        without a well-formed digest is read strictly, and refused there.
+        While the label is a pre-release, two contracts can share it and shape these bodies
+        differently, so a receiver reads the digest on its own before the rest of the body
+        (README, "Versions"): ``verify`` for a host record, ``verify_frame`` for a join or
+        renewal. A reader of host records sends that host no new work, places no agent on it
+        and logs both digests; it still counts the host's custody windows from these records.
+        A body without a well-formed digest is read strictly, and refused there.
         """
 
         if not PROTOCOL.endswith("-pre"):
             return None
-        body = raw.get("body")
         theirs = body.get("contract_sha256") if isinstance(body, Mapping) else None
         if isinstance(theirs, str) and _CONTRACT_DIGEST.fullmatch(theirs) and theirs != self.contract_sha256:
             return theirs
@@ -720,10 +751,9 @@ class TrustStore:
         newer one replaces it.
         """
 
-        lifetime = STATE_RECORDS[record].max_lifetime_seconds
-        if record == REVOCATIONS or lifetime is None or self._forgotten_at is None:
+        kept = kept_for(record)
+        if kept is None or self._forgotten_at is None:
             return False
-        kept = timedelta(seconds=lifetime) + RETENTION + SKEW + (SESSION_REACH if record == CERTIFICATE else timedelta())
         return self._forgotten_at - issued_at >= kept
 
     def _revoked_certificate(self, record: str, entry: Any) -> bool:
@@ -793,6 +823,20 @@ class TrustStore:
                                 ("people", [entry.person for entry in body.people])):
             if len(set(ids)) != len(ids):
                 raise FrameRefused("invalid_body", f"a block list names an entry of {field_name} twice", at=f"/body/{field_name}")
+
+    def _check_own_record_of_another_contract(self, document: State, raw: Mapping[str, Any],
+                                              signer: HostCertificate) -> None:
+        """A host still writes only its own liveness (``_check_host_record``), also on another contract.
+
+        The body is not read, so the key and the body's runtime, as received, must name the
+        signer; otherwise any host could say another, the team services included, runs
+        another contract and make readers drain it.
+        """
+
+        self._expect_key(document, signer.runtime)
+        body = raw.get("body")
+        if not isinstance(body, Mapping) or body.get("runtime") != signer.runtime:
+            raise FrameRefused("invalid_body", "a host writes only its own liveness record", at="/body/runtime")
 
     def _check_host_record(self, document: State, body: Any, signer: HostCertificate) -> None:
         """A host writes only its own liveness, naming the certificate it signs with and no more sessions than it allows.
@@ -891,6 +935,14 @@ class TrustStore:
         return str(body.installation)
 
     def _keep_session(self, document: State, body: Any, signer: Optional[HostCertificate]) -> tuple[str, str, str]:
+        session = self._session(document, body, signer)
+        entry = (session.installation, session.team, session.session)
+        self._sessions[entry] = session
+        return entry
+
+    def _session(self, document: State, body: Any, signer: Optional[HostCertificate]) -> AgentSession:
+        """A checked session record: signed by a team services host of its own team, under its own key."""
+
         assert signer is not None  # sessions are host-signed (registry signer: host)
         self._same_installation(document, body.installation)
         if body.team not in signer.teams:
@@ -900,13 +952,24 @@ class TrustStore:
         started_at, ends_at = parse_timestamp(body.started_at), parse_timestamp(body.ends_at)
         if ends_at <= started_at:
             raise FrameRefused("invalid_body", "a session must end after it starts", at="/body/ends_at")
-        entry = (body.installation, body.team, body.session)
-        self._sessions[entry] = AgentSession(
+        return AgentSession(
             session=body.session, installation=body.installation, team=body.team, agent=body.agent,
             agent_type=body.agent_type, agent_role=body.agent_role, runtime=body.runtime,
             placement_revision=body.placement_revision, started_at=started_at, ends_at=ends_at, signer=signer,
         )
-        return entry
+
+    def issued_session(self, raw: Mapping[str, Any]) -> AgentSession:
+        """Verify a session record carried in a sessions.open or sessions.renew reply, without keeping it.
+
+        ``raw`` is the record's JSON object as received inside the frame, which its
+        signature covers. The host that asked keeps it afterwards with ``add``, so it can
+        sign frames for the agent.
+        """
+
+        if raw.get("record") != AGENT_SESSION:
+            raise FrameRefused("invalid_body", "a session reply returns an agent session record", at="/record")
+        record = self._checked(raw)
+        return self._session(record.document, record.body, record.signer)
 
     def _keep_agreement(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> str:
         if body.installation != self.installation or body.peer == self.installation:

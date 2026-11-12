@@ -11,14 +11,8 @@ from assistant_gateway.application.website_application import (
     WebTaskListRequestV1,
     WebTaskControlRequestV1,
 )
-from assistant_gateway.application.website_tasks import list_tasks, control_tasks
+from assistant_gateway.application.website_tasks import QUEUE_CHANGED_TEXT, list_tasks, control_tasks
 from assistant_gateway.store import GatewayStateStore
-from custom_messages.contracts.control_v1 import (
-    FinishedTaskSummary,
-    ManagerRuntimeWorkCommand,
-    RuntimeWorkSummary,
-)
-from custom_messages.enums import ProgressState
 from test_gateway_website_app import (
     _config,
     _UserTokenStatefulFakeGateway,
@@ -26,27 +20,20 @@ from test_gateway_website_app import (
 )
 
 
-@pytest.mark.parametrize("action,expected", [("list_tasks", "private.read"), ("list_finished_tasks", "private.read"), ("remove_task", "private.delete"), ("purge_tasks", "private.delete")])
-def test_task_manager_commands_authorize_the_actual_operation(action, expected):
-    from assistant_gateway.application.manager_commands import GatewayManagerCommandService
+class _TeamCommands:
+    """Stands in for the team services: records each command and answers with ``replies[kind]``."""
 
-    command = ManagerRuntimeWorkCommand(
-        action=action, scope="user", target_task_id="root" if action == "remove_task" else None,
-    )
-    from assistant_gateway.application.request_context import GatewayCommandPerson
+    def __init__(self, replies: dict) -> None:
+        self.replies = replies
+        self.sent: list[tuple[str, dict, str]] = []
 
-    target = GatewayManagerCommandService._private_resource_target(
-        command,
-        session=SimpleNamespace(),
-        person=GatewayCommandPerson(canonical_user_id="owner", team_id="team", roles=("member",)),
-    )
-    assert target.resource_type == "Task"
-    assert target.action == expected
-    assert target.resource_id == ("root" if action == "remove_task" else "user:owner")
+    async def request(self, kind: str, body: dict, *, person_id: str) -> dict:
+        self.sent.append((kind, body, person_id))
+        return self.replies[kind]
 
 
 @pytest.mark.asyncio
-async def test_task_service_projects_manager_state_and_forwards_exact_removal():
+async def test_task_service_projects_the_agents_reply_and_forwards_exact_removal():
     context = GatewayRouteContextV1(
         session_key="session",
         canonical_user_id="owner",
@@ -54,63 +41,41 @@ async def test_task_service_projects_manager_state_and_forwards_exact_removal():
         user_id="user",
         chat_id="web-chat",
     )
-    response = ManagerRuntimeWorkCommand(
-        action="list_tasks",
-        scope="user",
-        success=True,
-        inventory_digest="a" * 64,
-        task_total=1,
-        current_task_count=1,
-        roots=[
-            RuntimeWorkSummary(
-                root_task_id="root",
-                state=ProgressState.IN_PROGRESS,
-                problem_statement="Current task",
-                is_current=True,
-                is_parallel=True,
-            )
-        ],
-    )
-    controls = SimpleNamespace(
-        stop=AsyncMock(
-            return_value=SimpleNamespace(
-                raw_envelope=SimpleNamespace(msg_content=response)
-            )
-        )
-    )
-    result = await list_tasks(
-        controls, WebTaskListRequestV1(context=context, agent_id="worker", offset=20)
-    )
-    assert result.tasks[0].is_current
-    assert result.tasks[0].is_parallel
-    assert result.current_count == 1
-    sent = controls.stop.call_args.args[0]
-    assert sent.action == "list_tasks"
-    assert sent.task_offset == 20
-    assert sent.route.canonical_user_id == "owner"
-    await control_tasks(
-        controls,
-        WebTaskControlRequestV1(
-            context=context, agent_id="worker", action="remove", task_id="root", inventory_digest="a" * 64
-        ),
-    )
-    sent = controls.stop.call_args.args[0]
-    assert sent.action == "remove_task"
-    assert sent.target_task_id == "root"
-    assert sent.inventory_digest == "a" * 64
-    response.finished_tasks = [FinishedTaskSummary(task_id="done", state="completed", problem_statement="Overnight work", owner_agent_id="stopped", answer="Result")]
-    response.inventory_digest = None
-    history = await list_tasks(controls, WebTaskListRequestV1(context=context, agent_id="worker", view="finished", limit=10))
-    assert history.tasks[0].answer == "Result"
-    assert history.tasks[0].owner_agent_id == "stopped"
-    assert controls.stop.call_args.args[0].action == "list_finished_tasks"
+    team = _TeamCommands({
+        "tasks.list": {"outcome": "ok", "tasks": [{"task_id": "root", "state": "in_progress",
+                                                    "problem_statement": "Current task", "is_current": True,
+                                                    "is_parallel": True}],
+                       "total": 1, "queued_count": 0, "current_count": 1, "queue_digest": "a" * 64},
+        "tasks.remove": {"outcome": "ok", "receipts": [{"root_task_id": "root", "cancelled_task_count": 1,
+                                                        "stop_signals_sent": 1, "unconfirmed_worker_count": 0,
+                                                        "state": "confirmed"}],
+                         "removed": 1, "queue_digest": "b" * 64, "all_confirmed": True},
+        "tasks.purge": {"outcome": "queue_changed", "current_digest": "c" * 64, "message": "Changed."},
+        "tasks.list_finished": {"outcome": "ok", "tasks": [{"task_id": "done", "state": "completed",
+                                                             "problem_statement": "Overnight work",
+                                                             "owner_agent_id": "stopped", "answer": "Result"}],
+                                "total": 1},
+    })
+    result = await list_tasks(team, WebTaskListRequestV1(context=context, agent_id="worker", offset=20))
+    assert result.tasks[0].is_current and result.tasks[0].is_parallel and result.current_count == 1
+    assert result.inventory_digest == "a" * 64
+    assert team.sent[-1] == ("tasks.list", {"agent": "worker", "offset": 20, "limit": 20}, "owner")
+    removed = await control_tasks(team, WebTaskControlRequestV1(
+        context=context, agent_id="worker", action="remove", task_id="root", inventory_digest="a" * 64))
+    kind, body, _person = team.sent[-1]
+    assert (kind, body["task_id"], body["seen_queue_digest"]) == ("tasks.remove", "root", "a" * 64)
+    assert removed.success and removed.cancellation_receipts[0].confirmed is True
+    assert removed.message.startswith("Removed 1 task.")
+    changed = await control_tasks(team, WebTaskControlRequestV1(
+        context=context, agent_id="worker", action="purge", inventory_digest="a" * 64))
+    assert (changed.success, changed.message) == (False, QUEUE_CHANGED_TEXT)
+    history = await list_tasks(team, WebTaskListRequestV1(context=context, agent_id="worker", view="finished",
+                                                          limit=10))
+    assert (history.tasks[0].answer, history.tasks[0].owner_agent_id) == ("Result", "stopped")
+    assert team.sent[-1][0] == "tasks.list_finished"
     with pytest.raises(ValueError, match="Choose a task"):
-        await control_tasks(
-            controls,
-            WebTaskControlRequestV1(
-                context=context, agent_id="worker", action="remove", inventory_digest="a" * 64
-            ),
-        )
+        await control_tasks(team, WebTaskControlRequestV1(
+            context=context, agent_id="worker", action="remove", inventory_digest="a" * 64))
 
 
 @pytest.mark.asyncio
@@ -227,7 +192,7 @@ async def test_task_agent_selection_requires_current_team_presence():
     )
     app = object.__new__(WebsiteOperationsApplication)
     app._team = SimpleNamespace(list_web_chat_team_members=lambda **_kwargs: WebTeamMemberListV1(members=(member,)))
-    app._operational_controls = SimpleNamespace(stop=AsyncMock())
+    app._team_commands = SimpleNamespace(request=AsyncMock())
     context = GatewayRouteContextV1(session_key="session", canonical_user_id="owner",
                                          channel_name="website", user_id="owner", chat_id="web-chat")
     with pytest.raises(ValueError, match="no longer available"):
@@ -235,5 +200,5 @@ async def test_task_agent_selection_requires_current_team_presence():
     with pytest.raises(ValueError, match="no longer available"):
         await app.control_web_chat_tasks(WebTaskControlRequestV1(context=context, agent_id="other-team",
                                          action="purge", inventory_digest="a" * 64))
-    app._operational_controls.stop.assert_not_awaited()
+    app._team_commands.request.assert_not_awaited()
     app._require_task_agent("worker")

@@ -346,10 +346,13 @@ class GatewayManagerControlCommandService:
             return await self._execute_mcp_control(request)
         schedule_selection = _parse_schedule_control(command)
         if schedule_selection is not None:
-            return await self._execute_schedule_control(
-                request,
-                schedule_selection,
-            )
+            from assistant_gateway.application.schedule_management import ScheduleControlRefused
+            from assistant_gateway.application.team_commands import TeamCommandRefused, TeamServicesUnavailable
+
+            try:
+                return await self._execute_schedule_control(request, schedule_selection)
+            except (ScheduleControlRefused, TeamCommandRefused, TeamServicesUnavailable) as error:
+                return ManagerControlCommandResult(session_key=request.current_session_key, text=str(error))
         selection = _parse_runtime_control(command)
         if isinstance(selection, str):
             return ManagerControlCommandResult(

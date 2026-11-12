@@ -42,7 +42,7 @@ def _stopping_agent(**extra):
         _pending_work_timers=set(),
         _owned_tasks=set(),
         _local_schedule_task=None,
-        _presence_task=None,
+        _self_refresh_task=None,
         _scheduler_task=None,
         _agent_state_store=None,
         _logger=logging.getLogger("test_agent_background_work"),

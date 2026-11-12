@@ -323,7 +323,7 @@ export function createTeamControls({
     state.lastSeenCells = new Map();
     if (!members.length) {
       nodes.push(emptyState(document,
-        "No live team presence is available yet. Agents appear after the gateway receives their status heartbeat."));
+        "No running agents yet. An agent appears here once it has started and joined the team."));
       return nodes;
     }
     const { wrap, body } = table(document, "team-table-wrap", "team-table team-members-table",

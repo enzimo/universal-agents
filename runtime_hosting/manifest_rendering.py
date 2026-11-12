@@ -67,7 +67,6 @@ def _transport_manifest(config: GatewayInstanceConfig) -> RuntimeNatsManifestV1:
         max_deliver=transport.max_deliver,
         duplicate_window_seconds=transport.duplicate_window_seconds,
         work_max_age_seconds=transport.work_max_age_seconds,
-        presence_max_age_seconds=transport.presence_max_age_seconds,
         process_consumer_inactive_threshold_seconds=(
             transport.process_consumer_inactive_threshold_seconds
         ),

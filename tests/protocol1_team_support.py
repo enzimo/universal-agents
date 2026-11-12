@@ -1,0 +1,102 @@
+"""Protocol 1 for live tests that run real agents in this process, as the launcher sets it up.
+
+The installation authority, the team services and this process's message host (the team
+lead's host, ``custom_agents.agent_host``) run on the shared live NATS server; agents this
+test starts afterwards attach to the host on their own, as under the launcher
+(``strands_main.py --host-runtime``). Use it as ``async with protocol1_team(...) as host``.
+
+When it ends, also after a failure, it deletes the test's installation and team keys in the
+protocol 1 buckets every run on the server shares (``_remove_what_the_team_left``). The streams
+and buckets this process created for the team go at the end of the test, through the ``nats``
+marker (``tests.live_nats_support``), so every caller must be marked ``nats``;
+``protocol1_team`` fails at once without it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
+from typing import AsyncIterator, Iterable
+
+import nats
+from nats.js.errors import NoKeysError, NotFoundError
+
+from custom_agents.agent_host import AgentProcessHost, lead_host_profile
+from custom_agents.agent_requests import configure_process_host
+from custom_agents.live_controls import EVENT_HANDLERS, LIVE_CONTROL_HANDLERS
+from custom_agents.relayed_task_controls import RELAYED_HANDLERS
+from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
+from custom_transport.protocol1.host_runtime import MessageHost
+from docker import message_hosts
+from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
+from live_nats_client import nats_connect_options, nats_transport_config_from_env
+from runtime_settings.instance_layout import InstanceLayout
+from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
+
+# Through the tests package, as tests/conftest.py imports it: the recorder state lives in that
+# module object, and a path-based import would load a second copy with none.
+from tests.live_nats_support import require_stream_recorder
+
+
+async def _connect(stack: AsyncExitStack, runtime: str):
+    connection = await nats.connect(**nats_connect_options(nats_transport_config_from_env()),
+                                    inbox_prefix=f"_INBOX.{runtime}".encode(), allow_reconnect=False)
+    stack.push_async_callback(connection.close)
+    return connection
+
+
+async def _remove_what_the_team_left(nc, installation: str, team: str) -> None:
+    """Delete this test's installation and team keys in the ``UA1_*`` buckets every run on the server shares.
+
+    The buckets stay, and only the keys under this test's own installation and team ids go: no
+    stream deletion can do that. The team's own buckets and streams are deleted by the ``nats``
+    marker, which knows which of them this process created. Host records (``UA1_HOSTS``, keyed by
+    host id alone, which other runs share) expire on their own within a minute.
+    """
+
+    jetstream = nc.jetstream()
+    owned = {"UA1_CERTS": (f"host.{installation}.", f"revocations.{installation}", f"session.{installation}.{team}."),
+             "UA1_AGENTS": (f"{team}.",), "UA1_PLACEMENT": (f"{team}.",),
+             "UA1_LOCKS": (f"team_services.{team}",)}
+    for name, filters in owned.items():
+        with contextlib.suppress(NotFoundError, NoKeysError):
+            bucket = await jetstream.key_value(name)
+            # The contract forbids purging bucket streams. Delete only this
+            # test's keys with ordinary markers, which keep other teams intact.
+            for key in await bucket.keys():
+                if any(key.startswith(prefix) if prefix.endswith(".") else key == prefix for prefix in filters):
+                    await bucket.delete(key)
+
+
+@asynccontextmanager
+async def protocol1_team(tmp_path: Path, team_id: str, agent_types: Iterable[str], *,
+                         session_limit: int = 8) -> AsyncIterator[AgentProcessHost]:
+    require_stream_recorder("protocol1_team")
+    layout = InstanceLayout.at(tmp_path / "protocol1")
+    lead_profile = lead_host_profile(team_id, agent_types, session_limit)
+    services_profile = team_services_profile(team_id)
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        hosts = {profile.runtime: message_hosts.expected_host(layout, profile)
+                 for profile in (services_profile, lead_profile)}
+        installation = message_hosts.prepare_message_host_trust(layout, hosts)
+        authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME))
+        authority_nc = await _connect(stack, AUTHORITY_RUNTIME)
+        await authority.start(authority_nc, teams=[team_id])
+        services = MessageHost(layout, services_profile, await _connect(stack, TEAM_SERVICES_RUNTIME))
+        serving = asyncio.create_task(serve_team(services, team_id, stop))
+        host = AgentProcessHost(layout, lead_profile, team_id, handlers={**RELAYED_HANDLERS, **LIVE_CONTROL_HANDLERS},
+                                event_handlers=dict(EVENT_HANDLERS))
+        configure_process_host(host)
+        try:
+            yield host
+        finally:
+            configure_process_host(None)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(host.stop(), timeout=10)
+            stop.set()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(serving, timeout=10)
+            await _remove_what_the_team_left(authority_nc, installation, team_id)

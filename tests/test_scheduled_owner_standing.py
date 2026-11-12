@@ -24,7 +24,7 @@ import pytest
 from access_control.identity import ISSUER_SCHEDULER, ContextVerifier
 from custom_agents.scheduled_runtime import enqueue_fired_scheduled_task
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
@@ -66,7 +66,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _record_ann(world, standing: PersonStanding, roles: tuple[str, ...] = ()) -> None:
     AccessRepository(world.tasks.storage_settings).replace_people(
         TEAM,
-        [TeamPersonV1(team_id=TEAM, person_id=ANN, standing=standing, roles=roles, changed_at_utc=NOW)],
+        [TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=ANN, standing=standing, roles=roles, changed_at_utc=NOW)],
         at=NOW,
     )
 
