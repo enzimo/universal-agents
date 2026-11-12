@@ -3,7 +3,8 @@
 These tests assemble real prompts with a real task manager (its plan-step and
 recovery links and its saved history), a real SQLite conversation store and
 the default context engine. They cover: the team lead's follow-up naming the
-newest 20 files of earlier turns however little history the prompt shows;
+newest 20 files of earlier turns however little history the prompt shows,
+also after a real context epoch summarized the earlier turns;
 files received while a request ran (guidance, answers) named with the current
 request, for the team lead and for a specialist; plan-step and recovery
 prompts naming their request's files; and the earlier list only for the
@@ -22,6 +23,8 @@ import pytest
 from custom_agents.context_engine import ContextAssemblyRequest, ContextEngineAdapters, DefaultContextEngine
 from custom_agents.context_engine.base import AssembledContext
 from custom_agents.conversation_attachments import EARLIER_FILES_HEADING, REQUEST_FILES_HEADING
+from custom_agents.conversation_compaction.base import ConversationCompactionConfig
+from custom_agents.conversation_compaction.heuristic_compactor import HeuristicSlidingWindowCompactor
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.steering_history_events import QUERY_ANSWER_FILES_KEY
 from custom_agents.task_manager import TaskManager
@@ -268,6 +271,38 @@ def test_a_follow_up_names_the_newest_20_earlier_files_however_little_history_it
     assert earlier[0].startswith("- att_t1_00.png (attachment_id att_t1_00, image, image/png, 4 bytes, sent in turn 2)")
     assert not any(str(layout.uploads_dir) in line or "ab" * 32 in line for line in earlier)
     assert _section(prompt, REQUEST_FILES_HEADING) == []
+
+
+def test_the_newest_20_earlier_files_are_named_after_a_context_epoch_summarized_their_turn(
+    instance: _Instance,
+) -> None:
+    """The real post-turn compaction summarizes turn 1; its files keep their places in the bounded list."""
+
+    layout = instance.layout
+    instance.turn("task_turn_1", [_file(layout, f"att_t1_{index:02d}") for index in range(15)])
+    instance.turn("task_turn_2", [_file(layout, f"att_t2_{index:02d}") for index in range(10)])
+    # What conversation_runtime runs after turn 2 finished, keeping one raw turn.
+    HeuristicSlidingWindowCompactor(
+        ConversationCompactionConfig(context_window_tokens=200_000, min_recent_turns=1, max_recent_turns=1)
+    ).compact_if_needed(store=instance.store, conversation_id=CONVERSATION, latest_request_text="")
+    epoch = instance.store.get_latest_context_epoch(CONVERSATION)
+    assert epoch is not None and epoch["status"] == "active" and int(epoch["through_turn_index"]) == 1
+    instance.turn(ROOT, [])
+    instance.task(ROOT, conversation_id=CONVERSATION)
+
+    assembled = instance.assembled(ROOT)
+
+    # The thread view shows turn 1 only through the epoch's summary.
+    assert assembled.context_epoch_id == epoch["context_epoch_id"]
+    assert "### Turn 1 [" not in assembled.prompt and "### Turn 2 [" in assembled.prompt
+    earlier = _section(assembled.prompt, EARLIER_FILES_HEADING)
+    # Newest first: turn 2's 10 files, then turn 1's newest 10, each with its turn.
+    assert _listed_ids(earlier) == [f"att_t2_{index:02d}" for index in range(9, -1, -1)] + [
+        f"att_t1_{index:02d}" for index in range(14, 4, -1)
+    ]
+    assert [line.endswith("sent in turn 2)") for line in earlier].count(True) == 10
+    assert [line.endswith("sent in turn 1)") for line in earlier].count(True) == 10
+    assert not any(str(layout.uploads_dir) in line or "ab" * 32 in line for line in earlier)
 
 
 def _long_conversation(instance: _Instance, *, with_files: bool) -> AssembledContext:

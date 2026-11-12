@@ -208,16 +208,9 @@ def inspect_user_attachment(
     }
     if source.upload is None:
         payload["local_path"] = str(source.path)
-    if copy_to_workspace:
-        if source.upload is None:
-            return _json_result(
-                "error", {"error": "copy_to_workspace needs an attachment_id."}
-            )
-        try:
-            # Only reading the upload is handled: a failure writing the task's own folder is raised as before.
-            payload["workspace_path"] = str(_copy_into_task_folder(source.upload))
-        except UploadUnreadable as exc:
-            return exc.result
+    upload_to_copy = source.upload if copy_to_workspace else None
+    if copy_to_workspace and upload_to_copy is None:
+        return _json_result("error", {"error": "copy_to_workspace needs an attachment_id."})
     try:
         payload["inspection"] = _inspection(source, content_type, max_chars=requested_chars, max_lines=requested_lines)
     except UploadUnreadable as exc:
@@ -226,6 +219,15 @@ def inspect_user_attachment(
     except (OSError, file_access.PathPolicyError) as exc:
         # Only a file named by path fails here: an upload's read failures are UploadUnreadable.
         return _json_result("error", {"error": str(exc), "path": str(source.path)})
+    if upload_to_copy is not None:
+        # The copy is the last read of the upload: if it is removed before or during any read, the
+        # result is an error and the task's folders hold no copy; a result with workspace_path always
+        # means the copy was made. Only reading the upload is handled: a failure writing the task's own
+        # folder is raised as before.
+        try:
+            payload["workspace_path"] = str(_copy_into_task_folder(upload_to_copy))
+        except UploadUnreadable as exc:
+            return exc.result
     return _json_result("success", payload)
 
 

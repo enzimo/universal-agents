@@ -1225,8 +1225,10 @@ class DelegateTaskAction(BaseModel):
         description="Optional worker-origin metadata for manager-mediated escalations.",
     )
     # None (left out; also every action saved before this field existed)
-    # passes the delegating task's own files, as before; a list, [] included,
-    # passes exactly the files it names (``delegation_runtime.selected_attachments``).
+    # passes the files of the request's own message: the delegating task's own
+    # files, or for a plan step or recovery task its request's
+    # (``delegation_runtime._give_subtask_files``); a list, [] included, passes
+    # exactly the files it names (``delegation_runtime.selected_attachments``).
     attachment_ids: Optional[List[str]] = Field(default=None, description=DELEGATION_ATTACHMENT_IDS_DESCRIPTION)
 
     @model_validator(mode="after")

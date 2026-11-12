@@ -437,6 +437,55 @@ async def test_a_copy_whose_read_fails_part_way_leaves_no_partial_file(
 
 
 @pytest.mark.asyncio
+async def test_an_upload_removed_between_the_inspection_and_the_copy_leaves_no_copy(
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The copy is the last read: a file removed after the inspection gives an error and no copy."""
+
+    upload = instance.layout.uploads_dir / "session_alice" / "att_notes"
+    inspected = inspection_tool_module._inspection
+
+    def inspect_then_remove(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = inspected(*args, **kwargs)
+        upload.unlink()
+        return result
+
+    monkeypatch.setattr(inspection_tool_module, "_inspection", inspect_then_remove)
+    instance.use(ROOT)
+
+    status, payload, _ = await _call(inspect_user_attachment, {"attachment_id": "att_notes", "copy_to_workspace": True})
+
+    assert status == "error" and "no longer stored" in payload["error"] and "workspace_path" not in payload
+    _assert_names_no_storage(instance, payload)
+    assert _files_in_person_folder(instance) == []
+
+
+@pytest.mark.asyncio
+async def test_an_upload_removed_after_its_copy_still_gives_the_copy_and_its_inspection(
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing reads the upload after the copy, so a removal then does not hide a copy that was made."""
+
+    copied = inspection_tool_module.copy_upload
+
+    def copy_then_remove(upload: Any, target: Path) -> Path:
+        made = copied(upload, target)
+        upload.path.unlink()
+        return made
+
+    monkeypatch.setattr(inspection_tool_module, "copy_upload", copy_then_remove)
+    instance.use(ROOT)
+
+    status, payload, _ = await _call(inspect_user_attachment, {"attachment_id": "att_notes", "copy_to_workspace": True})
+
+    assert status == "success", payload
+    assert [line["text"] for line in payload["inspection"]["lines"]] == ["line one", "line two"]
+    assert _files_in_person_folder(instance) == [Path(payload["workspace_path"])]
+    assert Path(payload["workspace_path"]).read_bytes() == NOTES
+    assert "session_alice" not in json.dumps(payload) and "storage_refs" not in payload["attachment"]
+
+
+@pytest.mark.asyncio
 async def test_a_file_with_no_copy_in_this_instances_uploads_needs_a_remote_copy(
     instance: _Instance, tmp_path: Path
 ) -> None:
