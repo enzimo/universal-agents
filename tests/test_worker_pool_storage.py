@@ -173,6 +173,27 @@ def test_waits_are_read_by_parent_whoever_set_them(settings):
     assert repository.waits_for_parents("t", ()) == ()
 
 
+def test_a_check_back_time_is_taken_only_while_due_and_only_once(settings):
+    repository = DelegatedTaskRepository(settings)
+    at = datetime.now(timezone.utc)
+    repository.set_check_back(team_id="t", parent_task_id="p", requester_agent_id="lead_before", at=at)
+    repository.record_progress(team_id="t", parent_task_id="p", requester_agent_id="lead_before",
+                               counts={"queued": 2}, at=at)
+
+    assert not repository.take_due_check_back("t", "p", now=at - timedelta(seconds=1))
+    assert repository.get_wait("t", "p").check_back_at_utc == at
+    assert not repository.take_due_check_back("other_team", "p", now=at)
+    assert repository.take_due_check_back("t", "p", now=at)
+    wait = repository.get_wait("t", "p")
+    assert (wait.check_back_at_utc, wait.requester_agent_id, wait.last_progress_counts) == (
+        None, "lead_before", {"queued": 2}
+    )
+    assert not repository.take_due_check_back("t", "p", now=at + timedelta(hours=1))
+    # No wait: nothing is taken and none is created.
+    assert not repository.take_due_check_back("t", "unknown", now=at)
+    assert repository.get_wait("t", "unknown") is None
+
+
 def test_prune_keeps_open_work(settings):
     repository = DelegatedTaskRepository(settings)
     _publish(repository, task_id="open")

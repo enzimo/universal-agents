@@ -509,6 +509,26 @@ class DelegatedTaskRepository:
             team_id, parent_task_id, requester_agent_id, check_back_at_utc=at
         )
 
+    def take_due_check_back(self, team_id: str, parent_task_id: str, *, now: datetime) -> bool:
+        """Clear the parent's check-back time only if it is still set and due; True when cleared.
+
+        The scheduler pass reads every wait once and then wakes the due parents one by
+        one, each running its model turn before the next, so its reading can be minutes
+        old by the time it reaches a parent. That parent's own turn may meanwhile have set
+        a later time (``record_check_back``) or cleared it. Reading and clearing in one
+        write transaction takes only a time that is still due, and takes it once.
+        """
+
+        with self._connect() as conn:
+            conn.begin_write()
+            wait = self._read_wait(conn, team_id, parent_task_id)
+            if wait is None or wait.check_back_at_utc is None or wait.check_back_at_utc > now:
+                conn.commit()
+                return False
+            self._write_wait(conn, wait.model_copy(update={"check_back_at_utc": None, "updated_at_utc": _now()}))
+            conn.commit()
+            return True
+
     def record_progress(
         self,
         *,

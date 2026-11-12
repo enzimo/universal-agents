@@ -300,6 +300,58 @@ async def test_a_check_back_waits_for_a_later_pass_while_its_request_runs_a_turn
     resume.assert_awaited_once()
 
 
+def _add_waiting_request(agent, *, root_id: str, child_id: str) -> None:
+    """A second request of the same person, waiting on one delegated task."""
+
+    manager = agent.task_manager
+    context = GatewayContext(canonical_user_id="jordan", session_key=f"s_{root_id}", delivery_mode="interactive")
+    manager.add_task(
+        Task(task_id=root_id, task_type=MessageMetaType.REQUEST, problem_statement="Other"),
+        MessageHeader(from_agent_id="gateway", response_routing_key="gateway_reply"),
+        MessageMeta(gateway_context=context, requester_type=RequesterType.USER_REQUESTER),
+        owner_person_id="jordan",
+    )
+    manager.update_main_task_state(root_id, ProgressState.IN_PROGRESS, _iso())
+    manager.add_subtask(
+        root_id,
+        Task(task_id=child_id, parent_task_id=root_id, task_type=MessageMetaType.REQUEST, problem_statement="Fetch"),
+        MessageHeader(from_agent_id="lead", to_routing_path="team_WebResearchAgent"),
+        MessageMeta(to_named_agent_type="WebResearchAgent", gateway_context=context),
+    )
+    record_publication(agent, subtask_id=child_id, parent_task_id=root_id, named_agent_type="WebResearchAgent",
+                       target_agent_name=None, publish_sequence=99)
+    manager.update_main_task_state(root_id, ProgressState.WAITING, _iso())
+
+
+@pytest.mark.asyncio
+async def test_a_check_back_moved_while_an_earlier_wake_ran_its_turn_keeps_its_new_time(tmp_path, monkeypatch):
+    """Regression (PR #116 review): the pass read every wait once, then ran each wake's turn
+    before the next. A request whose own turn meanwhile set a later check-back time had that
+    time erased and was woken at once from the pass's old reading."""
+
+    agent, _ = _lead(tmp_path, monkeypatch, children=1)
+    _add_waiting_request(agent, root_id="root2", child_id="child2")
+    repository = delegated_tasks(agent)
+    for parent in ("root", "root2"):
+        repository.set_check_back(team_id="team", parent_task_id=parent, requester_agent_id="lead", at=NOW)
+    later = NOW + timedelta(minutes=30)
+    woken: list[str] = []
+
+    async def turn(_agent, parent, _directive):
+        woken.append(parent.task.task_id)
+        if parent.task.task_id == "root":
+            # While root's turn runs, root2's own turn asks to be looked at in 30 minutes.
+            repository.set_check_back(team_id="team", parent_task_id="root2", requester_agent_id="lead", at=later)
+
+    monkeypatch.setattr("custom_agents.task_resume_runtime.resume_task_with_directive", turn)
+    assert await delegation_wake.wake_due_check_backs(agent, now=NOW + timedelta(minutes=1)) == 1
+    assert woken == ["root"]
+    assert repository.get_wait("team", "root2").check_back_at_utc == later
+
+    assert await delegation_wake.wake_due_check_backs(agent, now=later) == 1
+    assert woken == ["root", "root2"]
+
+
 def _capture_lanes(agent, monkeypatch) -> list[list[str]]:
     seen: list[list[str]] = []
 

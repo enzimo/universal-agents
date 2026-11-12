@@ -5251,8 +5251,11 @@ from older transfers (`RETIRED_CONCURRENCY_SETTING`). Worker pools control concu
 obsolete value had no effect.
 
 The watchdog, delegated-work progress notes and check-back timers find records by parents
-in the recovered task tree, rather than by the requester's earlier agent id. The watchdog
-prefers current task custody over an older worker claim. During a mixed-contract upgrade,
+in the recovered task tree, rather than by the requester's earlier agent id. The check-back
+pass reads those waits once, but each wake runs its request's turn before the next, so it
+clears a time only if the time is still due when the pass reaches that request
+(`DelegatedTaskRepository.take_due_check_back`); a later time the request's own turn set
+meanwhile is kept. The watchdog prefers current task custody over an older worker claim. During a mixed-contract upgrade,
 the gateway tracks retained waiting replies separately for each draining lead, and every
 unavailable transition except a refused join leaves them out
 (`GatewayManagerTransition.kept_replies`), so a lead that leaves, whether it drained or left

@@ -199,6 +199,12 @@ async def wake_due_check_backs(agent: Any, *, now: Optional[datetime] = None) ->
     execution lane runs a turn now keeps its check-back time, and a later pass
     wakes it. Before the parallel lanes, the whole pass skipped this while any
     turn ran.
+
+    One read finds the candidates, but each wake runs its parent's turn before
+    the next, so a later parent's own turn may have moved or cleared its time
+    meanwhile. A time is therefore taken only if it is still due when the pass
+    reaches it (``take_due_check_back``); clearing from the first read erased
+    a later time the model had set and woke the request early.
     """
 
     moment = now or datetime.now(timezone.utc)
@@ -210,15 +216,16 @@ async def wake_due_check_backs(agent: Any, *, now: Optional[datetime] = None) ->
             continue
         if agent._execution_lanes.lane_busy(await lane_of(agent, wait.parent_task_id)):
             continue
-        await run(
-            partial(
-                repository.set_check_back,
-                team_id=str(agent.team_id),
-                parent_task_id=wait.parent_task_id,
-                requester_agent_id=str(agent.id),
-                at=None,
+        if not await run(
+            partial(repository.take_due_check_back, str(agent.team_id), wait.parent_task_id, now=moment)
+        ):
+            logger.info(
+                "A check-back time changed after this pass read it; nothing to wake now. "
+                "event=delegation_check_back_moved agent_id=%s task_id=%s",
+                agent.id,
+                wait.parent_task_id,
             )
-        )
+            continue
         directive = await run(
             partial(
                 _decision_directive,
