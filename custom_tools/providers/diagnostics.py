@@ -32,6 +32,7 @@ from custom_tools.runtime_context import (
     bound_task_id,
     get_agent_ref,
 )
+from storage.turn_attachments import summarize_file_records
 
 if TYPE_CHECKING:
     from custom_agents.strands_agent import UniversalAgent
@@ -147,7 +148,10 @@ def _sanitize_recovery_value(value: Any, redactions: Dict[str, str]) -> Any:
 def _recovery_history_entry_payload(
     entry: Any, redactions: Dict[str, str]
 ) -> Dict[str, Any]:
-    details = _sanitize_recovery_value(getattr(entry, "details", {}) or {}, redactions)
+    # File records in details (sent files, held guidance) show no storage paths.
+    details = _sanitize_recovery_value(
+        summarize_file_records(getattr(entry, "details", {}) or {}), redactions
+    )
     return {
         "timestamp": getattr(entry, "timestamp", None),
         "source": getattr(

@@ -81,12 +81,15 @@ def test_shared_prompt_asks_to_resend_a_file_only_when_the_slice_and_the_tools_c
     # The Conversation Attachments section lists only the newest 20 earlier
     # files, so "not listed" alone must not mean "ask again": a recorded file
     # past the newest 20 is still in get_conversation_context_slice and opens
-    # by id. A deleted file is listed, so it is named by the tools' result code.
+    # by id. The slice must be this conversation's: the person's other
+    # conversations open in it, but their files do not open by id. A deleted
+    # file is listed, so it is named by the tools' result code.
     rule = next(line for line in shared_agent_base_prompt.splitlines() if "Conversation Attachments" in line)
     assert (
-        "Ask them to send it again only when neither that list nor `get_conversation_context_slice` has it" in rule
+        "Ask them to send it again only when neither that list nor `get_conversation_context_slice` for this "
+        "conversation has it" in rule
     )
-    assert f"opening it returns `{RESULT_UPLOAD_UNAVAILABLE}`" in rule
+    assert f"or when opening it returns `{RESULT_UPLOAD_UNAVAILABLE}`" in rule
     assert "if it is not listed" not in rule
 
 

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,11 +53,41 @@ TURN_ATTACHMENT_SUMMARY_FIELDS = (
 )
 
 
+# Every dumped file record (``UserTaskAttachment``) has this field and no other
+# message contract does. It says where the bytes are, so it marks a file record.
+_STORAGE_REFS_FIELD = "storage_refs"
+
+
+def _summary_fields(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {field: record.get(field) for field in TURN_ATTACHMENT_SUMMARY_FIELDS}
+
+
 def attachment_summary(attachment: UserTaskAttachment) -> dict[str, Any]:
     """The descriptive fields of one file record, without where it is stored."""
 
-    dumped = attachment.model_dump(mode="json")
-    return {field: dumped.get(field) for field in TURN_ATTACHMENT_SUMMARY_FIELDS}
+    return _summary_fields(attachment.model_dump(mode="json"))
+
+
+def summarize_file_records(value: Any) -> Any:
+    """A copy of ``value`` with every file record in it reduced to ``attachment_summary``'s fields.
+
+    For views that show a model stored values holding file records, such as
+    task history ``details``. The history keeps full records, because trusted
+    code reads where the bytes are from them (``TaskAttachments``) and a
+    restart rebuilds held guidance from its stored copy, so those views filter
+    what they show instead. A file record is any mapping with
+    ``storage_refs``, which every dumped ``UserTaskAttachment`` has. Other
+    mappings, lists and tuples are copied with their items filtered; ``value``
+    is not changed.
+    """
+
+    if isinstance(value, Mapping):
+        if _STORAGE_REFS_FIELD in value:
+            return _summary_fields(value)
+        return {key: summarize_file_records(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [summarize_file_records(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)

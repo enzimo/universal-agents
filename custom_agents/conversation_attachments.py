@@ -217,7 +217,10 @@ def task_files_details(
 
     For the files of one accepted guidance, interrupt answer or question
     answer (``message_id``: its steering id or the question's
-    ``task_query_id``), after ``keep_upload_files`` checked them.
+    ``task_query_id``), after ``keep_upload_files`` checked them. The records
+    are full, because ``TaskAttachments`` reads where the bytes are from them;
+    views that show history to models reduce them with
+    ``storage.turn_attachments.summarize_file_records``.
     """
 
     return {

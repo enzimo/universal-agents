@@ -3552,7 +3552,12 @@ departure, archive and history clean-up move or delete whole turns, so a
 turn's file list goes with its turn. Records leave the runtime only as
 descriptions (id, name, type, size and turn,
 `storage.turn_attachments.TURN_ATTACHMENT_SUMMARY_FIELDS`), never with storage
-paths.
+paths. The task's history keeps full records, because trusted code reads where
+the bytes are from them and a restart rebuilds held guidance from its stored
+copy, so the views that show history to models (`get_task_history_window`,
+`get_recovery_context` and the first recovery prompt, and the turn summary
+prompt) reduce every record they show with
+`storage.turn_attachments.summarize_file_records`.
 
 What a task may use is decided in one place,
 `custom_agents.conversation_attachments.TaskAttachments`, which the prompt,

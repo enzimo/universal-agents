@@ -12,6 +12,7 @@ from default_values import LLM_DEFAULTS
 from custom_messages.contracts.task_v1 import Task, TaskAnswer
 from custom_messages.enums import TaskHistoryType
 from custom_agents.strands_model_factory import StrandsModelFactoryConfig, build_strands_model
+from storage.turn_attachments import summarize_file_records
 
 
 def stringify_task_answer(answer: Any) -> str:
@@ -342,7 +343,8 @@ class LLMTurnSummaryGenerator:
                     "entry_type": getattr(entry.entry_type, "value", entry.entry_type),
                     "importance": getattr(entry.importance, "value", entry.importance),
                     "summary": entry.summary,
-                    "details": entry.details,
+                    # File records in details (sent files, held guidance) show no storage paths.
+                    "details": summarize_file_records(entry.details),
                     "related_task_id": entry.related_task_id,
                 }
                 for entry in (request.task.execution_history or [])

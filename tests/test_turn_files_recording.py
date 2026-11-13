@@ -20,11 +20,16 @@ working for Ann (signed task context). Covers:
   its turn or the model's text, at admission and on guidance and answers;
 - a delegated task keeps no files from guidance, and the lead sends guidance
   on without files;
-- an answer refused as stale keeps none of its files.
+- an answer refused as stale keeps none of its files;
+- the views that show the task's history to models (the history window, an
+  isolated recovery's context and the turn summary prompt) name kept files
+  without where their bytes are, while the stored records keep it.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +52,7 @@ from custom_agents.conversation_attachments import (
     task_files_details,
 )
 from custom_agents.conversation_store import ConversationStore
+from custom_agents.conversation_summary import ConversationSummaryConfig, LLMTurnSummaryGenerator, TurnSummaryRequest
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import (
     _build_interrupt_response_blocks,
@@ -57,9 +63,13 @@ from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserT
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskSteering
 from custom_messages.enums import MessageMetaType, RequesterType, TaskSteeringStatus, TaskSteeringType
+from custom_tools.providers.diagnostics import get_recovery_context
+from custom_tools.providers.heartbeat import get_task_history_window
 from runtime_settings.instance_layout import InstanceLayout
 from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.task_work_support import use_agent
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, SESSION, TEAM, _admit, _lead
+from tests.test_conversation_summary import _RecordingSummaryModel
 
 pytestmark = pytest.mark.integration
 
@@ -641,3 +651,59 @@ async def test_an_answer_refused_as_stale_keeps_none_of_its_files(lead, layout: 
     assert _turn_files(lead) == before_turn
     assert _files_entries(lead.task_manager) == []
     assert _own(lead.task_manager, lead._conversation_store) == before_own
+
+
+# --- What models see of the task's history -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_history_views_name_kept_files_without_where_their_bytes_are(
+    lead, layout: InstanceLayout, statuses
+) -> None:
+    # The history keeps full records (the files entries, and the guidance copy
+    # held for a restart), with where the bytes are; models read history through
+    # get_task_history_window, get_recovery_context and the turn summary prompt.
+    files = [_upload(layout, "page two.png"), _upload(layout, "pan.png")]
+    await _send(lead, _steering(TaskSteeringType.PROACTIVE_GUIDANCE, files[:1], "guide_views", "Here is page two."))
+    await _send(lead, _steering(TaskSteeringType.INTERRUPT_RESPONSE, files[1:], "answer_views", "This pan."))
+    assert [status for _id, status, _reason in statuses] == [TaskSteeringStatus.ACCEPTED] * 2
+    history = lead.task_manager.get_task_info(TASK).task.execution_history
+    stored = json.dumps([entry.details for entry in history])
+    assert all(str(file.local_path()) in stored for file in files)
+
+    use_agent(lead, TASK)
+    # Strands runs these synchronous tools off the event loop that owns the task manager.
+    window = await asyncio.to_thread(get_task_history_window._tool_func, task_id=TASK, limit=100)
+    await lead.task_manager.operations_runtime.run(lead.task_manager.set_task_plan, TASK, "Read both pages.")
+    recovery = await lead.task_manager.operations_runtime.run(
+        lead.task_manager.start_isolated_recovery_task,
+        TASK,
+        failure_type="delegated_specialist_timeout",
+        failure_summary="A step timed out.",
+        recovery_brief="Decide how to finish reading the recipe.",
+        recovery_task_id="task_recipe_recovery",
+        header=MessageHeader(from_agent_id="lead"),
+        meta=MessageMeta(conversation_id=CONVERSATION),
+    )
+    assert recovery is not None
+    use_agent(lead, recovery.task.task_id)
+    recovery_text = await asyncio.to_thread(get_recovery_context._tool_func, detail_level="recent_history", max_entries=30)
+    model = _RecordingSummaryModel()
+    generator = LLMTurnSummaryGenerator(
+        config=ConversationSummaryConfig(), logger=logging.getLogger("test"), summarization_model=model
+    )
+    await asyncio.to_thread(generator.summarize_turn, TurnSummaryRequest(task=lead.task_manager.get_task_info(TASK).task))
+    [summary_call] = model.calls
+
+    views = {"history window": window, "recovery": recovery_text, "summary prompt": json.dumps(summary_call)}
+    showing_paths = [view for view, text in views.items() if str(layout.uploads_dir) in text or "storage_refs" in text]
+    assert showing_paths == []
+    for view, text in views.items():
+        for file in files:
+            assert file.sha256 not in text, view
+            # The recovery view keeps no runtime ids (its own rule), so it names files by their other fields.
+            assert (file.filename if view == "recovery" else file.attachment_id) in text, view
+        assert "image/png" in text, view
+    # The views filter copies: the stored records still say where the bytes are.
+    after = json.dumps([entry.details for entry in lead.task_manager.get_task_info(TASK).task.execution_history])
+    assert all(str(file.local_path()) in after for file in files)

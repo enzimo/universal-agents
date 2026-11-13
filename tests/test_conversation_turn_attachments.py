@@ -3,7 +3,8 @@
 Runs against SQLite and, with ``LIVE_TEST_POSTGRES_DSN``, a real PostgreSQL
 server (one schema per test): the column is added in place on both, merges
 into one turn from many threads lose nothing, and lookups read newest turns
-first in batches.
+first in batches. Also checks the filter that reduces file records in history
+views (``summarize_file_records``).
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from storage.conversation_repository import (
 )
 from storage.postgres_connection import connect_postgres
 from storage.sqlite_connection import connect_sqlite
-from storage.turn_attachments import TURN_ATTACHMENT_SUMMARY_FIELDS
+from storage.turn_attachments import TURN_ATTACHMENT_SUMMARY_FIELDS, attachment_summary, summarize_file_records
 
 CONVERSATION = "conv_files"
 OWNER = "usr_ann"
@@ -371,3 +372,21 @@ def test_a_persons_storage_notice_counts_their_turns_file_records(backend: _Back
 
     record_bytes = len(f"[{_file('att_photo').model_dump_json()}]") - len("[]")
     assert repo.stored_text_bytes_by_owner()[OWNER] - without_files >= record_bytes
+
+
+def test_history_views_reduce_every_file_record_and_leave_the_stored_value_alone() -> None:
+    photo = _file("att_photo", caption="the pan")
+    # A guidance entry: its held copy nests the record two levels down.
+    details = {
+        "event": "steering_accepted",
+        "steering": {"guidance_text": "This pan.", "attachments": (photo.model_dump(mode="json"),)},
+        "task_files": [photo.model_dump()],
+    }
+    stored = repr(details)
+
+    shown = summarize_file_records(details)
+
+    assert shown["steering"]["attachments"] == [attachment_summary(photo)]
+    assert shown["task_files"] == [attachment_summary(photo)]
+    assert shown["event"] == "steering_accepted" and shown["steering"]["guidance_text"] == "This pan."
+    assert repr(details) == stored
