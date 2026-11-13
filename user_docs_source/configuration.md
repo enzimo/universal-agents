@@ -371,8 +371,11 @@ While an upload is kept, agents can open it again later in the same
 conversation: you can say "use the photo I sent earlier", and the team lead
 can pass the file to a specialist. This covers files sent with a request,
 with a follow-up message while the request runs, and with an answer to an
-agent's question. After the retention period the agent says the file is no
-longer stored, and you send it again. Files sent before version 0.10 are not
+agent's question. Files sent with a follow-up message or an answer are kept
+only when your chat account is linked to you as a member of the team; from an
+account that is not linked, the team reads your words but not the files. After
+the retention period the agent says the file is no longer stored, and you send
+it again. Files sent before version 0.10 are not
 listed for later messages; send them again if you need them.
 
 A person's folder is named after their user id: generated ids such as

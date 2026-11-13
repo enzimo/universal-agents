@@ -3845,9 +3845,16 @@ restart. Files on guidance or an answer for a person's request are kept only
 when the message's signed context names the person the task works for, and
 answer files only on the answer to a question the task itself asked
 (`conversation_attachments.sent_files_refusal`, `answer_files_refusal`);
-otherwise the text is handled and the files are dropped with a warning.
+otherwise the text is handled and the files are dropped with a warning
+(`event=guidance_files_refused`, `event=answer_files_refused`).
 Rationale: any process on the team's NATS can address the team lead, and these
-files become part of the person's conversation. Turn records that the
+files become part of the person's conversation. The gateway signs a chat
+message for the person the chat account is linked to (an active team member's
+linked account; for Web Chat, the signed-in person). A message from a chat
+account linked to nobody is signed for nobody, so the files sent with its
+guidance or answer are dropped the same way (`reason=no_verified_person`),
+while its text still counts. `tests/test_gateway_signed_answer_files.py` sends
+a gateway-signed answer with a file through the transport into the team lead. Turn records that the
 conversation tools show carry no storage location (`turn_attachment_summary`:
 id, name, type, kind, size); only the lookup below reads whole records. One
 column on the existing turn row, not a new table: departure and history
