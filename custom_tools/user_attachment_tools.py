@@ -15,7 +15,7 @@ import io
 import shutil
 import mimetypes
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -27,7 +27,6 @@ from custom_tools.task_uploads import (
     described,
     open_task_upload,
     read_failed,
-    remote_copy_required,
     tool_result,
 )
 from custom_tools.workspace_scope import current_workspace_scope
@@ -191,8 +190,8 @@ def inspect_user_attachment(
 
     When a file cannot be opened, `result` says why: `unknown_attachment_id`
     (this task may not use that id; `available_attachments` lists the files
-    it may use), `upload_unavailable` (the file was deleted; ask the person to
-    send it again), or `remote_copy_required` (it is stored on another host;
+    it may use), `upload_unavailable` (the file was deleted or cannot be read
+    here; ask the person to send it again), or `remote_copy_required` (it is stored on another host;
     report this to the team lead instead of pasting bytes or base64 into task
     messages).
 
@@ -213,9 +212,15 @@ def inspect_user_attachment(
         if copy_to_workspace:
             return tool_result("error", {"error": "copy_to_workspace needs an attachment_id."})
         payload["local_path"] = str(source.path)  # the path the caller named, in the task's folders
+    if copy_to_workspace and source.upload is not None:
+        try:
+            copied = _copy_into_task_folder(source.upload)
+        except (OSError, file_access.PathPolicyError) as exc:
+            return _read_failed(source, exc)
+        payload["workspace_path"] = str(copied)
+        # Inspect the copy: the same bytes, still readable if the upload is deleted meanwhile.
+        source = replace(source, copy=copied)
     try:
-        if copy_to_workspace and source.upload is not None:
-            payload["workspace_path"] = str(_copy_into_task_folder(source.upload))
         payload["inspection"] = _inspection(source, content_type, max_chars=requested_chars, max_lines=requested_lines)
     except (OSError, file_access.PathPolicyError) as exc:
         return _read_failed(source, exc)
@@ -227,11 +232,14 @@ class _Source:
     """The file to inspect: an upload the task may use (by id) or a file in the task's folders (by path).
 
     ``path`` is where the bytes are; it is shown only for a file named by path.
+    ``copy`` is the upload's copy in the task's folder once
+    ``copy_to_workspace`` made it; the inspection then reads the copy.
     """
 
     path: Path
     size_bytes: int
     upload: Optional[TaskUpload] = None
+    copy: Optional[Path] = None
 
     def summary(self) -> Dict[str, Any]:
         if self.upload is not None:
@@ -239,8 +247,10 @@ class _Source:
         return _path_summary(self.path, self.size_bytes)
 
     def read(self, *, max_bytes: int) -> bytes:
-        """The bytes, read once: an upload from its upload folder, a file through the agent file library."""
+        """The bytes, read once: an upload from its upload folder, a file or a copy through the agent file library."""
 
+        if self.copy is not None:
+            return file_access.read_bytes(self.copy, max_bytes=max_bytes)[1]
         if self.upload is not None:
             return self.upload.located.read_bytes(max_bytes=max_bytes)
         return file_access.read_bytes(self.path, max_bytes=max_bytes)[1]
@@ -261,19 +271,23 @@ def _source(attachment_id: str, path: str) -> _Source | Dict[str, Any]:
     except Exception as exc:
         return tool_result("error", {"error": str(exc), "path": path})
     if entry is None or not stat.S_ISREG(entry.st_mode):
-        return remote_copy_required(
-            {
-                "attachment": _path_summary(location.path),
-                "local_path": str(location.path),
-                "reason": "local attachment path is unavailable to this agent",
-            }
-        )
+        # A path names a file in this task's own folders: missing or a folder, it is not a person's upload.
+        return tool_result("error", {"error": "Local file is unavailable.", "path": str(location.path)})
     return _Source(location.path, entry.st_size)
 
 
 def _read_failed(source: _Source, exc: OSError) -> Dict[str, Any]:
-    """The result when the file could not be read or copied; an upload's error never shows where it is stored."""
+    """The result when the file could not be read or copied; an upload's error never shows where it is stored.
 
+    Once the upload was copied, an error comes from reading the copy in the
+    task's own folder: it names only that folder and keeps ``workspace_path``,
+    so the copy is never lost behind an error that asks for the file again.
+    """
+
+    if source.copy is not None:
+        return tool_result(
+            "error", {"error": str(exc), "attachment": source.summary(), "workspace_path": str(source.copy)}
+        )
     if source.upload is None:
         return tool_result("error", {"error": str(exc), "path": str(source.path)})
     return tool_result("error", read_failed(source.upload.attachment, exc))

@@ -42,6 +42,7 @@ from custom_agents.conversation_attachments import (
     UPLOAD_FILE_MISSING,
     UPLOAD_GONE_MESSAGE,
     UPLOAD_OUTSIDE_FOLDERS,
+    UPLOAD_UNREADABLE,
     LocatedUpload,
     TaskAttachments,
     UnavailableUpload,
@@ -184,10 +185,14 @@ def _not_in_scope(scope: TaskAttachments, attachment_id: str) -> dict[str, Any]:
 
 
 def _unavailable(attachment: UserTaskAttachment, located: UnavailableUpload) -> dict[str, Any]:
-    """The result for a file the task may use whose bytes cannot be read here (``locate_upload`` logged it)."""
+    """The result for a file the task may use whose bytes cannot be read here (``locate_upload`` logged it).
+
+    A deleted file and one this host cannot read are both ``upload_unavailable``:
+    either way the person can send it again.
+    """
 
     payload = {"attachment": described(attachment), "reason": located.reason, "error": located.message}
-    if located.reason == UPLOAD_FILE_MISSING:
+    if located.reason in {UPLOAD_FILE_MISSING, UPLOAD_UNREADABLE}:
         return tool_result("error", {**payload, "result": RESULT_UPLOAD_UNAVAILABLE})
     if located.reason == UPLOAD_OUTSIDE_FOLDERS:
         return tool_result("error", {**payload, "result": RESULT_REFUSED})

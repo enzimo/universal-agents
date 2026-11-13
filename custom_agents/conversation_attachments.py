@@ -120,10 +120,14 @@ files are not vouched for by the gateway): it is resolved, following any
 links in it, and a record whose resolved path lies anywhere else is refused
 and logged. The bytes are then read from that folder one component of the
 resolved path at a time without following links (``LocatedUpload.read_bytes``),
-so a link put in the file's place after the check is refused. The attachment tools open
+so a link put in the file's place after the check is refused. A file that
+cannot be checked for any other reason (no permission, a link loop, an I/O
+error) is unreadable here (``UPLOAD_UNREADABLE``): the error is logged with
+the ids, and the model gets a fixed text, never the error's, which names
+where the file is stored. The attachment tools open
 files by id through ``custom_tools.task_uploads``, and a turn reads the images
 on its own message for the model's direct image input the same way
-(``custom_agents.sdk.strands.turn``).
+(``custom_agents.sdk.strands.turn``), skipping any it cannot read.
 """
 
 from __future__ import annotations
@@ -250,12 +254,19 @@ UPLOAD_NO_LOCAL_COPY = "no_local_copy"
 UPLOAD_NOT_ON_THIS_HOST = "not_on_this_host"
 UPLOAD_FILE_MISSING = "file_missing"
 UPLOAD_OUTSIDE_FOLDERS = "outside_upload_folders"
+UPLOAD_UNREADABLE = "unreadable"
 # What the model is told about an upload whose file was deleted, whether before
 # it was found (``locate_upload``) or while it was being read
 # (``custom_tools.task_uploads.read_failed``).
 UPLOAD_GONE_MESSAGE = (
     "This file is no longer stored: uploads are deleted after the team's upload retention period "
     "or when their person leaves the team. Ask the person to send it again."
+)
+# What the model is told about an upload this host has but cannot read
+# (``UPLOAD_UNREADABLE``): a fixed text, since the error's own names the path.
+UPLOAD_UNREADABLE_MESSAGE = (
+    "This file is stored on this host but could not be read; the error was logged for the team's operators. "
+    "If the request needs it, ask the person to send it again."
 )
 
 
@@ -945,7 +956,10 @@ def locate_upload(
     one of ``folders``; anything else is refused and logged with the ids.
     Inside a folder that exists here, a missing file was deleted (upload
     retention, or its person left the team); when the folder is not here, the
-    file is on another host.
+    file is on another host. Any other error while checking the file (no
+    permission, a link loop, an I/O error) makes it unreadable here: logged
+    with the ids and the error number, and never shown to the model, because
+    its text names where the file is stored.
     """
 
     local_path = attachment.local_path()
@@ -963,6 +977,17 @@ def locate_upload(
         entry = resolved.stat()
     except (FileNotFoundError, NotADirectoryError):
         entry = None
+    except OSError as exc:
+        logger.warning(
+            "An upload's file could not be checked, so it is not opened. "
+            "event=attachment_upload_unreadable attachment_id=%s task_id=%s conversation_id=%s error_type=%s errno=%s",
+            attachment.attachment_id,
+            task_id,
+            conversation_id or "-",
+            type(exc).__name__,
+            exc.errno,
+        )
+        return UnavailableUpload(UPLOAD_UNREADABLE, UPLOAD_UNREADABLE_MESSAGE)
     if entry is not None and stat.S_ISREG(entry.st_mode):
         return LocatedUpload(resolved, entry.st_size, folder)
     if folder.is_dir():
@@ -1029,7 +1054,10 @@ def admit_request_files(
         not_kept,
     )
     entry = TaskHistoryEntry(
-        summary=f"{not_kept} file(s) sent with this request were not accepted; the person must send them again.",
+        summary=(
+            f"{not_kept} file(s) sent with this request were not accepted; if the request needs them, the person "
+            "must send them again."
+        ),
         importance=TaskHistoryImportance.HIGH,
         details={"event": REQUEST_FILES_NOT_KEPT_EVENT, REQUEST_FILES_NOT_KEPT_KEY: not_kept},
     )
@@ -1233,6 +1261,8 @@ __all__ = [
     "UPLOAD_NOT_ON_THIS_HOST",
     "UPLOAD_NO_LOCAL_COPY",
     "UPLOAD_OUTSIDE_FOLDERS",
+    "UPLOAD_UNREADABLE",
+    "UPLOAD_UNREADABLE_MESSAGE",
     "AdmittedRequestFiles",
     "AttachmentSelectionError",
     "LocatedUpload",

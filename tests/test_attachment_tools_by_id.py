@@ -14,6 +14,12 @@ conversation stores and the gateway's own upload storage, for Ann's team lead
   also when it is deleted after it was found and before it is read;
 - an upload that cannot be opened safely is not read, and the error does not
   say where it is stored; a failed copy into the task's folder says why;
+- an upload this host cannot check (a link loop, no permission) gives
+  ``upload_unavailable`` without its location, logged with the ids;
+- a copy made before the upload is deleted is inspected and reported, and an
+  error reading the copy keeps its ``workspace_path``;
+- a workspace path that is missing or a folder is a plain error, not
+  ``remote_copy_required``;
 - an id outside the task's scope gives ``unknown_attachment_id`` with the
   files it may use: work for another person in Ann's conversation, Ann's
   other conversation, and a delegated task, which opens only the files its
@@ -54,7 +60,9 @@ from custom_tools.task_uploads import (
     RESULT_UNKNOWN_ATTACHMENT,
     RESULT_UPLOAD_UNAVAILABLE,
 )
+from custom_tools import user_attachment_tools
 from custom_tools.user_attachment_tools import inspect_user_attachment
+from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.instance_layout import InstanceLayout
 from tests.broker_access_support import context_verify_keys, forget_task_context_keys
 from tests.task_work_support import use_agent
@@ -321,6 +329,100 @@ async def test_a_failed_copy_into_the_task_folder_says_why(earlier, monkeypatch)
     assert _payload(result)["error"] == "The folder users/ann is full."
     _no_storage_details(result, earlier["layout"])
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["link_loop", "no_permission"])
+async def test_an_upload_this_host_cannot_check_answers_upload_unavailable_without_its_location(
+    earlier, caplog, cause: str
+) -> None:
+    """SEC-2: any error while checking an upload (not only "not found") gives a fixed answer and no path."""
+
+    csv: UserTaskAttachment = earlier["csv"]
+    earlier["lead"].supports_image_input = True
+    upload = Path(csv.local_path())
+    if cause == "link_loop":
+        upload.unlink()
+        upload.symlink_to(upload.with_name("loop_back"))
+        upload.with_name("loop_back").symlink_to(upload)
+    elif os.geteuid() == 0:
+        pytest.skip("root reads a folder without permissions")
+    else:
+        upload.parent.chmod(0)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="custom_agents.conversation_attachments"):
+            results = [_inspect(csv.attachment_id), _inspect(csv.attachment_id, copy_to_workspace=True), _load(csv.attachment_id)]
+    finally:
+        upload.parent.chmod(0o755)
+
+    for result in results:
+        assert result["status"] == "error", result
+        payload = _payload(result)
+        assert (payload["result"], payload["reason"]) == (RESULT_UPLOAD_UNAVAILABLE, "unreadable")
+        assert "send it again" in payload["error"]
+        assert payload["attachment"]["attachment_id"] == csv.attachment_id
+        assert "workspace_path" not in payload
+        _no_storage_details(result, earlier["layout"])
+    unreadable = [record.getMessage() for record in caplog.records if "event=attachment_upload_unreadable" in record.getMessage()]
+    assert len(unreadable) == 3
+    assert all(f"attachment_id={csv.attachment_id} task_id={FOLLOW_UP}" in message for message in unreadable)
+    assert not any(str(earlier["layout"].uploads_dir) in message for message in unreadable)
+
+
+@pytest.mark.asyncio
+async def test_a_copy_made_before_the_upload_is_deleted_is_inspected_and_reported(earlier, monkeypatch) -> None:
+    """FAIL-3: upload retention deletes the upload right after the copy; the copy's result is not lost."""
+
+    csv: UserTaskAttachment = earlier["csv"]
+    copy_into_task_folder = user_attachment_tools._copy_into_task_folder
+
+    def copy_then_retention(upload: Any) -> Path:
+        copied = copy_into_task_folder(upload)
+        Path(upload.attachment.local_path()).unlink()
+        return copied
+
+    monkeypatch.setattr(user_attachment_tools, "_copy_into_task_folder", copy_then_retention)
+
+    result = _inspect(csv.attachment_id, copy_to_workspace=True)
+
+    assert result["status"] == "success", result
+    payload = _payload(result)
+    assert Path(payload["workspace_path"]).read_text(encoding="utf-8") == CSV_TEXT
+    assert [line["text"] for line in payload["inspection"]["lines"]] == ["plant,water", "fig,weekly"]
+    _no_storage_details(result, earlier["layout"])
+
+
+@pytest.mark.asyncio
+async def test_an_error_reading_the_copy_keeps_its_workspace_path(earlier, monkeypatch) -> None:
+    def unreadable_copy(*_args: Any, **_kwargs: Any) -> Any:
+        raise file_access.PathPolicyError("The file uploads/notes.csv cannot be read.", reason_code="denied")
+
+    monkeypatch.setattr(file_access, "read_bytes", unreadable_copy)
+
+    result = _inspect(earlier["csv"].attachment_id, copy_to_workspace=True)
+
+    assert result["status"] == "error"
+    payload = _payload(result)
+    assert payload["error"] == "The file uploads/notes.csv cannot be read."
+    assert Path(payload["workspace_path"]).read_text(encoding="utf-8") == CSV_TEXT
+    assert "result" not in payload  # neither upload_unavailable nor a request to send the file again
+    _no_storage_details(result, earlier["layout"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["missing", "folder"])
+async def test_a_workspace_path_that_is_not_a_file_is_not_a_remote_copy(earlier, target: str) -> None:
+    """A path names a file in the task's own folders: a typo or a folder is not a person's upload on another host."""
+
+    home = current_workspace_scope().home
+    home.mkdir(parents=True, exist_ok=True)
+    named = home / "notes-typo.csv" if target == "missing" else home
+
+    for result in (inspect_user_attachment._tool_func(path=str(named)), _load(path=str(named))):
+        assert result["status"] == "error", result
+        payload = _payload(result)
+        assert payload["error"] == "Local file is unavailable."
+        assert "result" not in payload and "remote_copy_required" not in _texts(result)
 
 # --- Files outside the task's scope ----------------------------------------------------------------
 

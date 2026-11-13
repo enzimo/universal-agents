@@ -255,7 +255,8 @@ def load_local_media_for_model_context(
 
     When a file the person sent cannot be loaded, `result` says why, as for
     inspect_user_attachment: `unknown_attachment_id`, `upload_unavailable`
-    (deleted; ask the person to send it again) or `remote_copy_required`.
+    (deleted or unreadable here; ask the person to send it again) or
+    `remote_copy_required`.
     """
     media = _media_source(str(path or "").strip(), str(attachment_id or "").strip())
     if isinstance(media, dict):

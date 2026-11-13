@@ -3596,9 +3596,15 @@ from that folder one path component at a time without following links, so a
 link put in its place after the check is refused (`custom_tools.task_uploads`,
 `access_control.safe_open`). A turn's direct image input reads its images the
 same way. A file that cannot be opened says why: `unknown_attachment_id`
-(with the files the task may use), `upload_unavailable` (deleted),
-`remote_copy_required` (stored on another host) or `refused` (a record that
-points outside the upload folders). No result includes a storage path.
+(with the files the task may use), `upload_unavailable` (deleted, or this
+host cannot read it: any error checking it other than "not found", such as
+no permission or a link loop, is logged with the ids and answered with a
+fixed text), `remote_copy_required` (stored on another host) or `refused` (a
+record that points outside the upload folders). No result includes a storage
+path, and a turn's direct image input skips an image it cannot read instead of
+failing. `copy_to_workspace` inspects the copy it made, so a deletion right
+after the copy cannot hide it. A `path` that is missing or a folder is a
+plain error: it names a file in the task's own folders, not an upload.
 
 Choosing files for a specialist. Every model-facing delegation has an optional
 `attachment_ids`: left out, the new task gets the delegating task's own files

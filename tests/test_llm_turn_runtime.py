@@ -339,6 +339,43 @@ def test_direct_image_input_reads_a_delegated_tasks_images_only_from_the_upload_
     assert not any(str(tmp_path) in str(item) for item in diagnostics)
 
 
+def test_direct_image_input_skips_an_upload_this_host_cannot_check_and_the_turn_goes_on(tmp_path, caplog) -> None:
+    """SEC-2: an error other than "not found" while checking an image (here a link loop) skips that image.
+
+    Before, the error left the prompt build and failed the whole turn.
+    """
+
+    good = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
+    looped = tmp_path / "state" / "uploads" / "conv_1" / "looped.png"
+    looped.symlink_to(looped.with_name("loop_back.png"))
+    looped.with_name("loop_back.png").symlink_to(looped)
+    task = Task(
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photos.",
+        attachments=[
+            _image_attachment(good).model_copy(
+                update={
+                    "attachment_id": "att_looped",
+                    "storage_refs": [AttachmentStorageRef(storage_type="local", path=str(looped))],
+                }
+            ),
+            _image_attachment(good).model_copy(update={"attachment_id": "att_good"}),
+        ],
+    )
+
+    with caplog.at_level("WARNING"):
+        prompt = turn_executor_for(_vision_agent(tmp_path))._build_strands_prompt_input(
+            "full prompt", task, conversation_id="conv_1"
+        )
+
+    assert isinstance(prompt, list)
+    assert [block["image"]["source"]["bytes"] for block in prompt if "image" in block] == [b"\x89PNG upload"]
+    assert any(
+        "event=attachment_upload_unreadable attachment_id=att_looped" in record.getMessage() for record in caplog.records
+    )
+    assert str(tmp_path) not in caplog.text
+
+
 def test_direct_image_input_skips_an_upload_over_the_size_limit_before_reading_it(
     tmp_path, monkeypatch
 ) -> None:
