@@ -11,6 +11,7 @@ file is still stored; and how files are named to a model.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 from pathlib import Path
@@ -23,9 +24,11 @@ from custom_agents.conversation_attachments import (
     UPLOAD_AVAILABLE,
     UPLOAD_DELETED,
     UPLOAD_REMOTE,
+    UPLOAD_UNREADABLE,
     AttachmentSelectionError,
     attachment_scope,
     describe_attachment,
+    locate_upload,
     received_attachments,
     request_files,
     save_turn_attachments,
@@ -314,6 +317,24 @@ def test_a_link_to_a_request_no_longer_held_falls_back_to_the_tasks_own_files(ru
     assert request_files(runtime.manager, "task_unknown") is None
 
 
+def test_a_recovery_task_for_an_ended_step_reaches_its_request_without_a_warning(runtime: _Runtime, caplog) -> None:
+    runtime.plan_step("step_2")
+    runtime.recovery("recovery_1", "step_2")
+    # The step ends: archived and removed from the held tasks; its link stays.
+    assert runtime.manager.remove_task("step_2")
+
+    with caplog.at_level(logging.DEBUG, logger="custom_agents.conversation_attachments"):
+        for _ in range(3):  # every prompt and tool call reads it
+            request = request_files(runtime.manager, "recovery_1")
+
+    assert (request.request_task_id, request.conversation_id) == (ROOT, CONVERSATION)
+    assert _ids(request.files) == ["att_list"]
+    ours = [record for record in caplog.records if record.name == "custom_agents.conversation_attachments"]
+    assert [record.levelno for record in ours] == [logging.DEBUG] * 3
+    assert "event=attachment_request_link_ended task_id=recovery_1 ended_task_ids=step_2" in caplog.text
+    assert "attachment_request_missing" not in caplog.text
+
+
 def test_earlier_conversation_files_are_only_for_the_team_lead_working_for_their_owner(
     runtime: _Runtime, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -487,3 +508,83 @@ def test_a_file_is_named_for_a_model_without_where_it_is_stored(runtime: _Runtim
     shown = describe_attachment(odd)
     assert "\n" not in shown and shown.startswith("line one line two x") and "…" in shown
     assert str(runtime.layout.root) not in shown
+
+
+def _stat_fails(monkeypatch: pytest.MonkeyPatch, path: Path, error: OSError) -> None:
+    """Looking the stored file up raises ``error``, as a permission or disk fault would; other paths are untouched."""
+
+    real_stat = os.stat
+    target = os.path.realpath(path)
+
+    def failing_stat(value, *args, **kwargs):
+        if os.fspath(value) == target:
+            raise error
+        return real_stat(value, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", failing_stat)
+
+
+def _path(attachment: UserTaskAttachment) -> Path:
+    return Path(attachment.local_path())
+
+
+@pytest.mark.parametrize(
+    "fault, error_type, error_number",
+    [
+        (PermissionError(errno.EACCES, os.strerror(errno.EACCES)), "PermissionError", errno.EACCES),
+        (OSError(errno.EIO, os.strerror(errno.EIO)), "OSError", errno.EIO),
+    ],
+)
+def test_a_stored_file_that_cannot_be_read_is_not_called_removed(
+    runtime: _Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fault, error_type, error_number
+) -> None:
+    attachment = _file(runtime.layout, "att_fault")
+    _stat_fails(monkeypatch, _path(attachment), fault)
+
+    with caplog.at_level(logging.INFO, logger="custom_agents.conversation_attachments"):
+        location = locate_upload(attachment, runtime.layout.uploads_dir, task_id=ROOT)
+
+    assert (location.state, location.path, location.size_bytes) == (UPLOAD_UNREADABLE, None, None)
+    [logged] = [record for record in caplog.records if "event=attachment_upload_unreadable" in record.getMessage()]
+    assert logged.levelno == logging.WARNING
+    assert f"task_id={ROOT} attachment_id=att_fault error_type={error_type} errno={error_number}" in logged.getMessage()
+    assert str(runtime.layout.root) not in caplog.text and "session_alice" not in caplog.text
+
+
+def test_a_removed_upload_or_folder_is_gone_and_anything_but_a_file_is_unreadable(
+    runtime: _Runtime, caplog: pytest.LogCaptureFixture
+) -> None:
+    uploads = runtime.layout.uploads_dir
+    stored = _file(runtime.layout, "att_here")
+    removed = _file(runtime.layout, "att_removed", stored=False)
+    # The upload's folder was replaced by a file: looking inside it raises NotADirectoryError.
+    (uploads / "session_gone").write_bytes(b"not a folder")
+    in_gone_folder = UserTaskAttachment(
+        attachment_id="att_in_gone", filename="x.png", size_bytes=4, sha256="0" * 64,
+        storage_refs=[AttachmentStorageRef(storage_type="local", path=str(uploads / "session_gone" / "att_in_gone"))],
+    )
+    a_folder = _file(runtime.layout, "att_folder", stored=False)
+    _path(a_folder).mkdir(parents=True)
+
+    with caplog.at_level(logging.INFO, logger="custom_agents.conversation_attachments"):
+        found = locate_upload(stored, uploads, task_id=ROOT)
+        states = [locate_upload(item, uploads, task_id=ROOT).state for item in (removed, in_gone_folder, a_folder)]
+
+    assert (found.state, found.path, found.size_bytes) == (UPLOAD_AVAILABLE, _path(stored).resolve(), 4)
+    assert states == [UPLOAD_DELETED, UPLOAD_DELETED, UPLOAD_UNREADABLE]
+    [logged] = [record.getMessage() for record in caplog.records if record.levelno >= logging.INFO]
+    assert f"event=attachment_upload_unreadable task_id={ROOT} attachment_id=att_folder" in logged
+    assert "error_type=not_a_regular_file" in logged
+
+
+def test_a_delegation_passes_on_a_file_it_cannot_read_now(
+    runtime: _Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _stat_fails(monkeypatch, runtime.layout.uploads_dir / "session_alice" / "att_list", PermissionError(errno.EACCES, "denied"))
+
+    with caplog.at_level(logging.WARNING, logger="custom_agents.conversation_attachments"):
+        chosen = select_attachments(runtime.scope(ROOT), ["att_list"], uploads_dir=runtime.layout.uploads_dir)
+
+    # The fault may clear; the specialist's tool says so if it does not.
+    assert _ids(chosen) == ["att_list"]
+    assert f"event=attachment_upload_unreadable task_id={ROOT} attachment_id=att_list" in caplog.text

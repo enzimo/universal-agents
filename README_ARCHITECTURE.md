@@ -3888,7 +3888,13 @@ the task's scope; the media loader still takes a `path` for a file in the
 task's folders (exactly one of the two). A file whose upload is gone answers
 that it is no longer stored and that the person can send it again; a record
 with no copy on this machine answers `remote_copy_required`, for the team
-lead.
+lead. A file that is there but cannot be read (a permission or disk fault)
+answers with a fixed message that it could not be read, never "no longer
+stored", and logs `event=attachment_upload_unreadable` with the task and
+attachment ids and the error number, never the path
+(`conversation_attachments.locate_upload`: one look-up gives the state and
+the size, so no error between the check and the read carries the path into
+a result). A delegation still passes such a file on: the fault may clear.
 
 Choosing files for a specialist. The team lead's `delegate_task` action takes
 optional `attachment_ids` in every schema variant its models use; the

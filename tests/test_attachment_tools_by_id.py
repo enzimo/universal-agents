@@ -394,6 +394,65 @@ async def test_an_upload_that_cannot_be_read_gives_a_fixed_message_and_logs_no_p
     assert str(instance.layout.root) not in logged.getMessage() and "session_alice" not in logged.getMessage()
 
 
+
+def _lookup_fails(monkeypatch: pytest.MonkeyPatch, path: Path, error: OSError) -> None:
+    """Looking up the stored file raises ``error``, as a permission or disk fault would; other paths are untouched."""
+
+    real_stat = os.stat
+    target = os.path.realpath(path)
+
+    def failing_stat(value: Any, *args: Any, **kwargs: Any) -> Any:
+        if os.fspath(value) == target:
+            raise error
+        return real_stat(value, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", failing_stat)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [errno.EACCES, errno.EIO])
+@pytest.mark.parametrize("tool", [inspect_user_attachment, load_local_media_for_model_context])
+async def test_a_stored_file_that_cannot_be_looked_up_gives_a_fixed_message_and_logs_no_path(
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fault: int, tool: Any
+) -> None:
+    error = PermissionError(fault, os.strerror(fault)) if fault == errno.EACCES else OSError(fault, os.strerror(fault))
+    _lookup_fails(monkeypatch, instance.layout.uploads_dir / "session_alice" / "att_photo", error)
+    instance.use(ROOT)
+
+    with caplog.at_level(logging.INFO):
+        status, payload, blocks = await _call(tool, {"attachment_id": "att_photo"})
+
+    # Not "no longer stored": the file is there, so the person need not resend it yet.
+    assert (status, blocks) == ("error", [])
+    assert payload["error"].startswith("This file could not be read.") and "no longer stored" not in payload["error"]
+    assert payload["attachment"]["attachment_id"] == "att_photo"
+    _assert_names_no_storage(instance, payload)
+    [logged] = [record for record in caplog.records if "event=attachment_upload_unreadable" in record.getMessage()]
+    assert logged.levelno == logging.WARNING
+    assert f"task_id={ROOT} attachment_id=att_photo error_type={type(error).__name__} errno={fault}" in (
+        logged.getMessage()
+    )
+    assert str(instance.layout.root) not in caplog.text and "session_alice" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", [inspect_user_attachment, load_local_media_for_model_context])
+async def test_an_upload_whose_folder_is_gone_says_it_is_no_longer_stored(
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, tool: Any
+) -> None:
+    _lookup_fails(
+        monkeypatch,
+        instance.layout.uploads_dir / "session_alice" / "att_photo",
+        NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR)),
+    )
+    instance.use(ROOT)
+
+    status, payload, blocks = await _call(tool, {"attachment_id": "att_photo"})
+
+    assert (status, blocks) == ("error", [])
+    assert "no longer stored" in payload["error"] and "send it again" in payload["error"]
+    _assert_names_no_storage(instance, payload)
+
 class _FailsAfterFirstRead:
     """An upload's reader whose second read fails, as a disk error part way through a copy would."""
 

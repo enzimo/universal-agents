@@ -27,8 +27,10 @@ request produces one message however many agents work on it. Conditions:
 - ``task_no_progress``: in progress on a live agent with no new history entry.
 - ``task_files_sent_before_upgrade``: unfinished work holds a file record that
   places the file outside this instance's ``state/uploads``
-  (``conversation_attachments.locate_upload`` answers ``remote``, the rule by
-  which both file tools answer ``remote_copy_required``): a file sent with the
+  (``conversation_attachments.stored_upload_path`` finds no copy there, the
+  rule by which both file tools answer ``remote_copy_required``; it decides
+  from the record and reads no file, so a fault reading an upload is not
+  logged on every pass): a file sent with the
   task, or one the person sent while it ran, with guidance or with an answer
   (``conversation_attachments.received_attachments``, the files the tools offer
   by id). Reported at once, to the person only, and closed with no message.
@@ -69,7 +71,7 @@ from typing import Any, Iterable
 from access_control.identity import IdentityRejected
 from custom_agents.instance_delivery_context import configured_owner_route
 from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc, retain_decisions
-from custom_agents.conversation_attachments import UPLOAD_REMOTE, locate_upload, received_attachments, shown_name
+from custom_agents.conversation_attachments import received_attachments, shown_name, stored_upload_path
 from custom_agents.liveness_observation import heartbeat_checks_deferred
 from custom_agents.runtime_paths import agent_layout
 from custom_agents.stuck_work import (
@@ -465,7 +467,7 @@ class StuckTasks:
         for task in held.values():
             try:
                 sent = [*task.record.task.attachments, *received_attachments(task.record.task)]
-                old = [attachment for attachment in sent if locate_upload(attachment, uploads_dir).state == UPLOAD_REMOTE]
+                old = [attachment for attachment in sent if stored_upload_path(attachment, uploads_dir) is None]
             except Exception as exc:
                 # The error's text may name a stored path, so only its type is logged.
                 logger.warning(

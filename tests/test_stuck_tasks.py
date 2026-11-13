@@ -8,7 +8,9 @@ the lead publishes, captured at ``team_comms``.
 
 from __future__ import annotations
 
+import errno
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -656,6 +658,27 @@ async def test_files_this_instance_stored_are_not_reported_as_sent_before_the_up
     assert not notices(lead) and not admin_notices(lead) and not chats(lead)
     assert not open_incidents(lead)
 
+
+
+@pytest.mark.asyncio
+async def test_the_check_reads_no_upload_so_a_fault_reading_one_is_not_logged_on_every_pass(lead, caplog, monkeypatch):
+    kept = stored_file(lead, "att_kept", "report.pdf", folder=UPLOADS_FOLDER)
+    real_stat, target = os.stat, os.path.realpath(kept.local_path())
+
+    def denied(value, *args, **kwargs):  # the uploads disk refuses this file
+        if os.fspath(value) == target:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+        return real_stat(value, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", denied)
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING, files=[kept])])
+    caplog.set_level(logging.INFO)
+    now = datetime.now(timezone.utc)
+    for minute in range(2):
+        await report_stuck_tasks(lead, now=now + timedelta(minutes=minute))
+
+    assert "attachment_upload_unreadable" not in caplog.text
+    assert not notices(lead) and not admin_notices(lead) and not chats(lead) and not open_incidents(lead)
 
 @pytest.mark.asyncio
 async def test_a_task_whose_files_cannot_be_checked_is_skipped_and_other_notices_still_go_out(lead, caplog):

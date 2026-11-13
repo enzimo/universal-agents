@@ -20,7 +20,12 @@ the time a tool reads it, and no lock spans the two processes. Opening the
 file is therefore the real check: its failure becomes ``UploadUnreadable``,
 whose result says "no longer stored" when the file was removed and gives a
 fixed message otherwise, never an operating-system error, which would name
-the storage path (its folder name carries chat identifiers).
+the storage path (its folder name carries chat identifiers). Finding the file
+follows the same rule (``conversation_attachments.locate_upload``): removed
+(``UPLOAD_GONE_ERRORS``) is "no longer stored", any other fault is the fixed
+message, logged as ``event=attachment_upload_unreadable`` with the task and
+attachment ids and the error number, and the size comes from that one
+look-up, so nothing between the check and the read can raise with the path.
 """
 
 from __future__ import annotations
@@ -33,13 +38,16 @@ from typing import Any, BinaryIO, Optional
 
 from custom_agents.access_runtime import verified_person_id
 from custom_agents.conversation_attachments import (
-    UPLOAD_DELETED,
+    UPLOAD_AVAILABLE,
+    UPLOAD_GONE_ERRORS,
     UPLOAD_REMOTE,
+    UPLOAD_UNREADABLE,
     AttachmentScope,
     SentFile,
     attachment_scope,
     attachment_summary,
     locate_upload,
+    log_unreadable_upload,
     request_files,
 )
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
@@ -106,6 +114,8 @@ def upload_by_id(attachment_id: str) -> OpenedUpload | dict[str, Any]:
       (at most 20, newest first after the request's own);
     - removed from this instance (its retention ended, or its person was
       removed): ``error`` saying it is no longer stored;
+    - there but unreadable (a permission or disk fault): ``error`` with a
+      fixed message, logged with the ids and the error number;
     - no copy on this runtime: ``remote_copy_required``, for the team lead.
     """
 
@@ -128,8 +138,7 @@ def upload_by_id(attachment_id: str) -> OpenedUpload | dict[str, Any]:
                 "available_attachments": [attachment_summary(file) for file in available],
             },
         )
-    location = locate_upload(found.attachment, runtime_layout(agent).uploads_dir)
-    size_bytes = _size(location.path) if location.path is not None else None
+    location = locate_upload(found.attachment, runtime_layout(agent).uploads_dir, task_id=bound_task_id())
     if location.state == UPLOAD_REMOTE:
         return tool_result(
             STATUS_REMOTE_COPY_REQUIRED,
@@ -139,9 +148,11 @@ def upload_by_id(attachment_id: str) -> OpenedUpload | dict[str, Any]:
                 "team_lead_action": REMOTE_COPY_ACTION,
             },
         )
-    if location.state == UPLOAD_DELETED or location.path is None or size_bytes is None:
+    if location.state == UPLOAD_UNREADABLE:
+        return _could_not_read(found)
+    if location.state != UPLOAD_AVAILABLE or location.path is None or location.size_bytes is None:
         return _no_longer_stored(found)
-    return OpenedUpload(found, location.path, size_bytes)
+    return OpenedUpload(found, location.path, location.size_bytes)
 
 
 class UploadUnreadable(Exception):
@@ -203,28 +214,22 @@ def _read(upload: OpenedUpload, reader: BinaryIO, size: int) -> bytes:
 def _unreadable(upload: OpenedUpload, exc: OSError) -> UploadUnreadable:
     """The failure as the tools report it: removed means no longer stored; anything else, a fixed message."""
 
-    if isinstance(exc, FileNotFoundError):
+    if isinstance(exc, UPLOAD_GONE_ERRORS):
         return UploadUnreadable(_no_longer_stored(upload.sent))
     # The error's text names the storage path, so only its type and number are logged.
-    logger.warning(
-        "A file the person sent could not be read. event=attachment_upload_unreadable task_id=%s "
-        "attachment_id=%s error_type=%s errno=%s",
-        bound_task_id(),
-        upload.attachment.attachment_id,
-        type(exc).__name__,
-        exc.errno,
-    )
-    return UploadUnreadable(
-        tool_result(
-            STATUS_ERROR,
-            {
-                "error": (
-                    "This file could not be read. Try again later; if it still fails, ask the person to "
-                    "send it again."
-                ),
-                "attachment": upload.summary(),
-            },
-        )
+    log_unreadable_upload(bound_task_id(), upload.attachment.attachment_id, type(exc).__name__, exc.errno)
+    return UploadUnreadable(_could_not_read(upload.sent))
+
+
+def _could_not_read(found: SentFile) -> dict[str, Any]:
+    """The result for a stored file that cannot be read (a permission or disk fault); the fault is logged by the caller."""
+
+    return tool_result(
+        STATUS_ERROR,
+        {
+            "error": "This file could not be read. Try again later; if it still fails, ask the person to send it again.",
+            "attachment": attachment_summary(found),
+        },
     )
 
 
@@ -246,12 +251,3 @@ def _no_longer_stored(found: SentFile) -> dict[str, Any]:
             "attachment": attachment_summary(found),
         },
     )
-
-
-def _size(path: Path) -> Optional[int]:
-    """The file's size, or None when it was removed after it was found."""
-
-    try:
-        return path.stat().st_size
-    except FileNotFoundError:
-        return None

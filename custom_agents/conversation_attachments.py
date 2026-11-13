@@ -55,6 +55,7 @@ import asyncio
 import logging
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Optional
@@ -98,10 +99,15 @@ SENDER_NOT_VERIFIED = _NO_VERIFIED_PERSON
 ANSWER_NOT_A_RESPONSE = "not_an_answer"
 ANSWER_TO_NO_QUESTION = "no_question"
 
-UploadState = Literal["available", "deleted", "remote"]
+UploadState = Literal["available", "deleted", "remote", "unreadable"]
 UPLOAD_AVAILABLE: UploadState = "available"
 UPLOAD_DELETED: UploadState = "deleted"
 UPLOAD_REMOTE: UploadState = "remote"
+UPLOAD_UNREADABLE: UploadState = "unreadable"
+# The errors that mean a stored upload is gone (its retention ended, a clean-up
+# or its person's removal deleted it, with its folder); any other error reading
+# it is a fault to report, not a deletion.
+UPLOAD_GONE_ERRORS: tuple[type[OSError], ...] = (FileNotFoundError, NotADirectoryError)
 
 
 def attachment_records(values: Iterable[Any]) -> list[dict[str, Any]]:
@@ -290,12 +296,23 @@ def request_files(task_manager: Any, task_id: str) -> Optional[RequestFiles]:
     chain = _request_chain(task_manager, task_id)
     infos = [(chain_id, task_manager.get_task_info(chain_id)) for chain_id in chain]
     known = [(chain_id, info) for chain_id, info in infos if info is not None]
-    if len(known) != len(infos):
+    missing = ",".join(chain_id for chain_id, info in infos if info is None)
+    if infos[-1][1] is None:
+        # The request itself ended (or its link is wrong) while this task runs.
         logger.warning(
             "A task's request is no longer held; only the files of the tasks still held are used. "
             "event=attachment_request_missing task_id=%s missing_task_ids=%s",
             task_id,
-            ",".join(chain_id for chain_id, info in infos if info is None),
+            missing,
+        )
+    elif missing:
+        # A plan step that ended while its recovery task runs: normal, and read
+        # on every prompt and tool call, so not a warning.
+        logger.debug(
+            "A plan step or recovery task between a task and its request has ended; the request's files "
+            "are used. event=attachment_request_link_ended task_id=%s ended_task_ids=%s",
+            task_id,
+            missing,
         )
     request_id, request_info = known[-1]
     files: dict[str, UserTaskAttachment] = {}
@@ -480,27 +497,28 @@ def _conversation_refusal(conversation_store: Any, conversation_id: str, person_
 
 @dataclass(frozen=True)
 class UploadLocation:
-    """Whether this runtime holds a file, and its real path when it does (``locate_upload``)."""
+    """Whether this runtime holds a file, with its real path and size when it does (``locate_upload``)."""
 
     state: UploadState
     path: Optional[Path] = None
+    size_bytes: Optional[int] = None
 
 
-def locate_upload(attachment: UserTaskAttachment, uploads_dir: Path) -> UploadLocation:
-    """Where this runtime holds the file: ``available`` with its real path, ``deleted`` or ``remote``.
+def stored_upload_path(attachment: UserTaskAttachment, uploads_dir: Path) -> Optional[str]:
+    """The real path of the file's copy in this instance's ``state/uploads``; None when it has none there.
 
-    A local copy counts only inside this instance's ``state/uploads``
-    (``InstanceLayout.uploads_dir``), compared as real paths. Inside it but
-    gone means the upload was removed (its retention ended, or its person was
-    removed). A path anywhere else is not a copy this runtime may open: the
-    file was stored on another machine, or the record is not one the gateway
-    made. Agents cannot write in ``state/uploads``, so the real path checked
-    here is the file that is opened.
+    Decides from the record alone and never reads the file, so a check that
+    only needs to know whether a record is this runtime's (the upgrade notice,
+    ``custom_agents.stuck_tasks``) logs nothing about a file it cannot read.
+    A local copy counts only inside ``state/uploads`` (``InstanceLayout.uploads_dir``),
+    compared as real paths. A path anywhere else is not a copy this runtime may
+    open: the file was stored on another machine, or the record is not one the
+    gateway made.
     """
 
     path = attachment.local_path()
     if not path:
-        return UploadLocation(UPLOAD_REMOTE)
+        return None
     root = os.path.realpath(uploads_dir)
     resolved = os.path.realpath(path)
     if os.path.commonpath([root, resolved]) != root or resolved == root:
@@ -509,16 +527,56 @@ def locate_upload(attachment: UserTaskAttachment, uploads_dir: Path) -> UploadLo
             "event=attachment_outside_uploads attachment_id=%s",
             attachment.attachment_id,
         )
+        return None
+    return resolved
+
+
+def log_unreadable_upload(task_id: Optional[str], attachment_id: str, error_type: str, error_number: Optional[int]) -> None:
+    """Report an upload that is there but cannot be read. The error's text names the storage path, so it is never logged."""
+
+    logger.warning(
+        "A file the person sent could not be read. event=attachment_upload_unreadable task_id=%s "
+        "attachment_id=%s error_type=%s errno=%s",
+        task_id,
+        attachment_id,
+        error_type,
+        error_number,
+    )
+
+
+def locate_upload(attachment: UserTaskAttachment, uploads_dir: Path, *, task_id: Optional[str] = None) -> UploadLocation:
+    """Where this runtime holds the file: ``available`` (real path and size), ``deleted``, ``unreadable`` or ``remote``.
+
+    ``remote``: no copy in ``state/uploads`` (``stored_upload_path``). Otherwise
+    one look-up of the file decides: gone (``UPLOAD_GONE_ERRORS``) means the
+    upload was removed (its retention ended, a clean-up, or its person was
+    removed); any other error, or something there that is not a regular file,
+    is ``unreadable`` (a permission or disk fault) and is logged for
+    ``task_id``. Agents cannot write in ``state/uploads``, so the real path
+    checked here is the file that is opened, and the size comes from the same
+    look-up, so no error between the check and the size can carry the path out.
+    """
+
+    resolved = stored_upload_path(attachment, uploads_dir)
+    if resolved is None:
         return UploadLocation(UPLOAD_REMOTE)
-    if not os.path.isfile(resolved):
+    try:
+        found = os.stat(resolved)
+    except UPLOAD_GONE_ERRORS:
         return UploadLocation(UPLOAD_DELETED)
-    return UploadLocation(UPLOAD_AVAILABLE, Path(resolved))
+    except OSError as exc:
+        log_unreadable_upload(task_id, attachment.attachment_id, type(exc).__name__, exc.errno)
+        return UploadLocation(UPLOAD_UNREADABLE)
+    if not stat.S_ISREG(found.st_mode):
+        log_unreadable_upload(task_id, attachment.attachment_id, "not_a_regular_file", None)
+        return UploadLocation(UPLOAD_UNREADABLE)
+    return UploadLocation(UPLOAD_AVAILABLE, Path(resolved), found.st_size)
 
 
-def upload_state(attachment: UserTaskAttachment, uploads_dir: Path) -> UploadState:
-    """Whether this runtime holds the file: ``available``, ``deleted`` or ``remote`` (``locate_upload``)."""
+def upload_state(attachment: UserTaskAttachment, uploads_dir: Path, *, task_id: Optional[str] = None) -> UploadState:
+    """Whether this runtime holds the file (``locate_upload``): ``available``, ``deleted``, ``unreadable`` or ``remote``."""
 
-    return locate_upload(attachment, uploads_dir).state
+    return locate_upload(attachment, uploads_dir, task_id=task_id).state
 
 
 def attachment_summary(sent: SentFile | UserTaskAttachment) -> dict[str, Any]:
@@ -637,7 +695,9 @@ def select_attachments(scope: AttachmentScope, attachment_ids: list[str], *, upl
 
     Raises ``AttachmentSelectionError`` when it names more than
     ``MAX_SELECTED_ATTACHMENTS`` files, an id this task may not use, or a file
-    whose upload is gone; the message lists the files it may use.
+    whose upload is gone; the message lists the files it may use. A file that
+    is there but cannot be read now is passed on: the fault may clear, it is
+    logged, and the specialist's tool says so when it opens the file.
     """
 
     wanted = list(dict.fromkeys(str(value or "").strip() for value in attachment_ids))
@@ -654,7 +714,7 @@ def select_attachments(scope: AttachmentScope, attachment_ids: list[str], *, upl
         found = scope.find(attachment_id)
         if found is None:
             unknown.append(attachment_id)
-        elif upload_state(found.attachment, uploads_dir) == UPLOAD_DELETED:
+        elif upload_state(found.attachment, uploads_dir, task_id=scope.request.task_id) == UPLOAD_DELETED:
             deleted.append(attachment_id)
         else:
             selected.append(found.attachment)
