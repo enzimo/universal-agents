@@ -5,6 +5,7 @@ from tests.llm_turn_fixtures import turn_executor_for
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -278,8 +279,9 @@ def test_build_strands_prompt_input_includes_image_blocks_when_supported(
         attachments=[_image_attachment(image_path)],
     )
 
-    prompt = turn_executor_for(_vision_agent(tmp_path))._build_strands_prompt_input(
-        "full prompt", task, conversation_id="conv_1"
+    executor = turn_executor_for(_vision_agent(tmp_path))
+    prompt = executor._build_strands_prompt_input(
+        "full prompt", task, direct_images=executor._collect_direct_model_image_blocks(task, conversation_id="conv_1")
     )
 
     assert isinstance(prompt, list)
@@ -288,6 +290,60 @@ def test_build_strands_prompt_input_includes_image_blocks_when_supported(
     assert prompt[1]["text"].startswith("Direct image attachment:")
     assert prompt[2]["image"]["format"] == "png"
     assert prompt[2]["image"]["source"]["bytes"] == image_path.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_reads_its_images_and_their_settings_once_off_the_event_loop(tmp_path, monkeypatch) -> None:
+    """CONC-2 and GEN-7: the settings load and the image reads ran on the event loop, on every attempt.
+
+    The turn re-invokes the model once (late guidance); both calls get the
+    image, which was read once, in a thread.
+    """
+
+    from collections import deque
+
+    from custom_agents.conversation_attachments import UploadFolders
+    from tests.test_runtime_owner_boundaries import build_turn_owner
+
+    image = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
+    loads: list[bool] = []
+    for_agent = UploadFolders.for_agent.__func__
+
+    def recorded(cls, agent):
+        try:
+            asyncio.get_running_loop()
+            loads.append(True)
+        except RuntimeError:
+            loads.append(False)
+        return for_agent(cls, agent)
+
+    monkeypatch.setattr(UploadFolders, "for_agent", classmethod(recorded))
+    prompts: list[Any] = []
+
+    async def invoke(prompt, **_kwargs):
+        prompts.append(prompt)
+        return result
+
+    executor, result = build_turn_owner(
+        invoke=invoke,
+        guidance=deque(["", "Use the corrected photo notes", ""]),
+        committed=[],
+        cleared=[],
+        settings_overrides={"supports_image_input": True, "instance_root": str(tmp_path)},
+    )
+    task = Task(
+        task_id="task_photo",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photo.",
+        attachments=[_image_attachment(image)],
+    )
+
+    await executor.process_llm_interaction(task, MessageHeader(), MessageMeta(conversation_id="conv_1"))
+
+    assert len(prompts) == 2
+    for prompt in prompts:
+        assert [block["image"]["source"]["bytes"] for block in prompt if "image" in block] == [b"\x89PNG upload"]
+    assert loads == [False]  # once for the turn, in a thread
 
 
 def test_direct_image_input_reads_a_delegated_tasks_images_only_from_the_upload_folders(
@@ -363,10 +419,10 @@ def test_direct_image_input_skips_an_upload_this_host_cannot_check_and_the_turn_
         ],
     )
 
+    executor = turn_executor_for(_vision_agent(tmp_path))
     with caplog.at_level("WARNING"):
-        prompt = turn_executor_for(_vision_agent(tmp_path))._build_strands_prompt_input(
-            "full prompt", task, conversation_id="conv_1"
-        )
+        images = executor._collect_direct_model_image_blocks(task, conversation_id="conv_1")
+    prompt = executor._build_strands_prompt_input("full prompt", task, direct_images=images)
 
     assert isinstance(prompt, list)
     assert [block["image"]["source"]["bytes"] for block in prompt if "image" in block] == [b"\x89PNG upload"]

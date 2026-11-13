@@ -155,8 +155,7 @@ async def keep_sent_files(
         log_refused_files(attachments, DELEGATED_TASK_REASON, task_id=task_id, conversation_id=conversation_id)
         return []
     root_info = request.info
-    folders = await asyncio.to_thread(UploadFolders.for_agent, agent)
-    kept = keep_upload_files(attachments, folders, task_id=task_id, conversation_id=conversation_id)
+    kept = await _kept_upload_files(agent, attachments, task_id=task_id, conversation_id=conversation_id)
     if not kept:
         return kept
     names = ", ".join(attachment.filename for attachment in kept)
@@ -187,6 +186,22 @@ async def keep_sent_files(
             _ids(kept),
         )
     return kept
+
+
+async def _kept_upload_files(
+    agent: Any, attachments: Sequence[UserTaskAttachment], *, task_id: str, conversation_id: Optional[str]
+) -> list[UserTaskAttachment]:
+    """``attachments`` without the records outside this host's upload folders (``keep_upload_files``, logged).
+
+    Runs in a thread: finding the folders loads the instance settings, and
+    each record's path is resolved on the file system.
+    """
+
+    def check() -> list[UserTaskAttachment]:
+        folders = UploadFolders.for_agent(agent)
+        return keep_upload_files(attachments, folders, task_id=task_id, conversation_id=conversation_id)
+
+    return await asyncio.to_thread(check)
 
 
 async def _files_entry(agent: Any, task_id: str, summary: str, details: dict[str, Any]) -> Optional[Any]:
@@ -324,8 +339,7 @@ async def keep_escalation_result_files(agent: Any, subtask_info: Any, result: Ta
     if not decision.allowed:
         _log_refused_result_files(agent, result, decision.reason, parent_id, subtask_info)
         return
-    folders = await asyncio.to_thread(UploadFolders.for_agent, agent)
-    kept = keep_upload_files(result.attachments, folders, task_id=parent_id, conversation_id=conversation_id)
+    kept = await _kept_upload_files(agent, result.attachments, task_id=parent_id, conversation_id=conversation_id)
     if not kept:
         return
     names = ", ".join(attachment.filename for attachment in kept)

@@ -641,9 +641,12 @@ async def _subtask_files(
     A plan step or recovery task finds its request (``step_request``, on the
     task manager's operation lane): its own files include the request's, so
     left out it sends them as a delegation from the request does. Left out,
-    only these records are read; ids are looked up among them, then the
-    parent's conversation's or its request's (the conversation store is read
-    off the event loop). An empty list reads nothing. Logs which case applied.
+    only these records are read, from the task records already in hand. Ids
+    are looked up among them, then in the parent's conversation or its
+    request's: the whole choice (loading the scope, looking the ids up and,
+    for an unknown id, listing the choices) runs in a thread, because each
+    lookup reads the conversation store. An empty list reads nothing.
+    ``AttachmentSelectionError`` propagates. Logs which case applied.
     """
 
     request_info = None
@@ -653,15 +656,15 @@ async def _subtask_files(
         find = partial(step_request, task_manager, is_team_lead=bool(getattr(self, "is_team_lead", False)))
         request_info = await task_manager.operations_runtime.run(find, parent_task_info)
     if attachment_ids:
-        scope = await asyncio.to_thread(
-            TaskAttachments.load,
+        files = await asyncio.to_thread(
+            _named_files,
             parent_task_info,
             getattr(self, "_conversation_store", None),
-            request_info=request_info,
+            request_info,
+            list(attachment_ids),
         )
     else:
-        scope = TaskAttachments.load(parent_task_info, None, request_info=request_info)
-    files = delegated_files(scope, attachment_ids)
+        files = delegated_files(TaskAttachments.load(parent_task_info, None, request_info=request_info), attachment_ids)
     self._logger.info(
         "A delegated task gets its files. event=delegated_task_files choice=%s parent_task_id=%s subtask_id=%s "
         "attachment_ids=%s",
@@ -671,6 +674,15 @@ async def _subtask_files(
         ",".join(attachment.attachment_id for attachment in files) or "-",
     )
     return files
+
+
+def _named_files(
+    parent_task_info: TaskInfo, conversation_store: Any, request_info: Any, attachment_ids: Sequence[str]
+) -> list[UserTaskAttachment]:
+    """The files ``attachment_ids`` name for a subtask of ``parent_task_info``; blocking, so run in a thread."""
+
+    scope = TaskAttachments.load(parent_task_info, conversation_store, request_info=request_info)
+    return delegated_files(scope, attachment_ids)
 
 
 @staticmethod

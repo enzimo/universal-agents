@@ -31,11 +31,14 @@ file and a file sent with guidance. Each delegation goes through the outbox:
   answer to an earlier step, which the escalation's result carries to the
   run;
 - a worker can pass on only the files it was given, never its request's
-  conversation.
+  conversation;
+- choosing named files (an earlier turn's, or an unknown id with its list of
+  choices) reads the conversation store only off the event loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -333,6 +336,45 @@ async def test_an_unknown_id_fails_the_delegation_and_shows_the_files_it_may_use
     listed = [line.split("`")[1] for line in error.splitlines() if line.startswith("- `")]
     assert listed == [files.page_two.attachment_id, files.page.attachment_id, files.photo.attachment_id]
     assert str(layout.uploads_dir) not in error and "storage_refs" not in error
+
+
+def _store_reads_on_the_event_loop(store: Any) -> list[str]:
+    """Record each conversation store read made by a thread running an event loop (the agent's)."""
+
+    on_loop: list[str] = []
+    for name in ("list_turn_attachments", "get_thread", "last_turn_without_file_records"):
+        original = getattr(store, name)
+
+        def read(*args: Any, __original: Any = original, __name: str = name, **kwargs: Any) -> Any:
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(__name)
+            except RuntimeError:
+                pass  # a worker thread
+            return __original(*args, **kwargs)
+
+        setattr(store, name, read)
+    return on_loop
+
+
+@pytest.mark.parametrize("named", ["earlier_turn", "unknown"])
+@pytest.mark.asyncio
+async def test_choosing_named_files_never_reads_the_conversation_store_on_the_event_loop(
+    lead: tuple[Any, _Files], named: str
+) -> None:
+    """CONC-1: an earlier turn's id and an unknown id both look the conversation's files up."""
+
+    agent, files = lead
+    on_loop = _store_reads_on_the_event_loop(agent._conversation_store)
+
+    if named == "earlier_turn":
+        await _run_turn(agent, TASK, [_delegation([files.photo.attachment_id])])
+        assert _last_sent(agent, Task).msg_content.attachments == [files.photo]
+    else:
+        with pytest.raises(TurnActionRecoveryScheduled):
+            await _run_turn(agent, TASK, [_delegation(["att_missing"])])
+
+    assert on_loop == []
 
 
 @pytest.mark.parametrize("flag", ["plan_step_task", "isolated_recovery_task"])
