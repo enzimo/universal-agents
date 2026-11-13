@@ -117,6 +117,9 @@ _ANSWER_MESSAGE = "question_answer"
 # answer it is a context taken from another message
 # (``custom_agents.conversation_attachments`` words each for the log).
 CONTEXT_NAMES_NO_TASK = "context_names_no_task"
+# ``escalation_result_files_access``'s reason for work for no person; the
+# worker's log explains it (``custom_agents.sent_files_runtime``).
+WORK_FOR_A_PERSON_REQUIRED = "work_for_a_person_required"
 
 
 @dataclass(frozen=True)
@@ -335,7 +338,7 @@ def escalation_result_files_access(*, person_id: str | None, task_id: str) -> Ow
 
     if _person(person_id):
         return OwnershipDecision(True, "work_for_a_person")
-    return _denied("work_for_a_person_required", None, RESOURCE_TASK, task_id, PRIVATE_UPDATE)
+    return _denied(WORK_FOR_A_PERSON_REQUIRED, None, RESOURCE_TASK, task_id, PRIVATE_UPDATE)
 
 
 def request_context_id(task: Task) -> str:
@@ -536,6 +539,7 @@ __all__ = [
     "RESOURCE_TEAM_MEMORY",
     "RESOURCE_USER_MEMORY",
     "WORKSPACE_FILE_READ",
+    "WORK_FOR_A_PERSON_REQUIRED",
     "answer_context_id",
     "conversation_continuation",
     "conversation_files_access",

@@ -4,7 +4,9 @@ Uses the real admission path, the real steering handler, real SQLite task and
 conversation stores and the gateway's own upload storage, for a team lead
 working for Ann (signed task context). Covers:
 
-- the request's own files are kept on its conversation turn at admission;
+- the request's own files are kept on its conversation turn at admission,
+  and the task keeps the same records (the turn is marked as not knowing
+  them all when any was dropped);
 - guidance and answer files are added to the turn and recorded in the task's
   history before the message is acknowledged, named by id in the text the
   model reads, and stay the task's own files after the guidance is read and
@@ -53,7 +55,8 @@ from custom_agents import sent_files_runtime, task_message_runtime, task_steerin
 from custom_agents.conversation_attachments import (
     TASK_FILES_EVENT,
     TaskAttachments,
-    request_files_kept,
+    UploadFolders,
+    admit_request_files,
     task_files_details,
 )
 from custom_agents.conversation_store import ConversationStore
@@ -231,7 +234,7 @@ def _messages(caplog: pytest.LogCaptureFixture, event: str) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_admission_keeps_the_requests_files_on_its_turn_but_not_records_outside_the_upload_folders(
+async def test_admission_keeps_the_requests_files_but_not_records_outside_the_upload_folders(
     tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
 ) -> None:
     agent = _lead(tmp_path, layout)
@@ -241,6 +244,8 @@ async def test_admission_keeps_the_requests_files_on_its_turn_but_not_records_ou
         await _admit(agent, task_id=TASK, text="Read this recipe.", attachments=[page, _outside(layout)])
 
     assert _turn_files(agent) == [page.attachment_id]
+    assert agent.task_manager.get_task_info(TASK).task.attachments == [page]  # the task keeps what its turn keeps
+    assert agent._conversation_store.get_turn_by_task_id(TASK)["attachments_recorded"] is False
     listed = agent._conversation_store.list_turn_attachments(CONVERSATION)
     assert [entry.attachment for entry in listed] == [page]
     assert _messages(caplog, "attachment_outside_upload_folders")[0].endswith(
@@ -636,7 +641,8 @@ async def test_a_request_keeps_only_files_the_gateway_sent_for_it(
     assert info.owner_person_id == ANN  # the copied signature is valid for Ann
     assert info.task.attachments == []
     assert _files_entries(lead.task_manager, "task_forged") == []
-    assert lead._conversation_store.get_turn_by_task_id("task_forged")["attachments"] == []
+    forged_turn = lead._conversation_store.get_turn_by_task_id("task_forged")
+    assert (forged_turn["attachments"], forged_turn["attachments_recorded"]) == ([], False)
     listed = lead._conversation_store.list_turn_attachments(CONVERSATION)
     assert bobs.attachment_id not in [entry.attachment.attachment_id for entry in listed]
     found, unknown = TaskAttachments.load(info, lead._conversation_store).find([bobs.attachment_id])
@@ -658,12 +664,17 @@ def test_a_copy_of_the_request_with_other_files_keeps_none(
     admitted = lead.task_manager.get_task_info(TASK)
     copy = admitted.task.model_copy(update={"attachments": [bobs]})
 
-    with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
-        kept = request_files_kept(copy, _copied_task_context(lead), team_id=TEAM, person_id=ANN)
-        unchanged = request_files_kept(admitted.task, _copied_task_context(lead), team_id=TEAM, person_id=ANN)
+    def folders() -> UploadFolders:
+        return UploadFolders.for_agent(lead)
 
-    assert kept.attachments == []
-    assert unchanged.attachments == admitted.task.attachments
+    with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
+        kept = admit_request_files(copy, _copied_task_context(lead), team_id=TEAM, person_id=ANN, folders=folders)
+        unchanged = admit_request_files(
+            admitted.task, _copied_task_context(lead), team_id=TEAM, person_id=ANN, folders=folders
+        )
+
+    assert (kept.task.attachments, kept.not_kept) == ([], 1)
+    assert (unchanged.task.attachments, unchanged.not_kept) == (admitted.task.attachments, 0)
     [refused] = _messages(caplog, "sent_file_refused")
     assert f"reason=context_not_for_message attachment_id={bobs.attachment_id} task_id={TASK}" in refused
 
@@ -695,6 +706,7 @@ async def test_a_request_signed_before_the_update_is_admitted_without_its_files_
     assert info.owner_person_id == ANN  # the request itself is admitted for Ann
     assert info.task.attachments == []
     assert _turn_files(agent) == []
+    assert agent._conversation_store.get_turn_by_task_id(TASK)["attachments_recorded"] is False
     [refused] = _messages(caplog, "sent_file_refused")
     assert f"reason=context_names_no_task attachment_id={photo.attachment_id} task_id={TASK}" in refused
     assert "names no task" in refused and "the person must send the file again" in refused

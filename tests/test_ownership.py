@@ -218,7 +218,6 @@ def test_a_conversations_files_follow_the_same_rule_as_continuing_it(person, own
     assert files.allowed is allowed
 
 
-
 @pytest.mark.parametrize(
     ("person", "request_person", "reason"),
     [
@@ -257,6 +256,7 @@ def test_only_work_for_a_person_keeps_the_files_its_escalations_answers_brought(
     refused = [record.getMessage() for record in caplog.records if "event=private_access_refused" in record.getMessage()]
     assert bool(refused) is not allowed
     assert all("resource_id=task_run" in message for message in refused)
+
 
 def _file(attachment_id: str = "att_1", path: str = "/uploads/web/att_1.png") -> UserTaskAttachment:
     return UserTaskAttachment(

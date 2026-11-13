@@ -152,6 +152,7 @@ class ConversationStore:
         memory_review_status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
         attachments: Sequence[UserTaskAttachment] = (),
+        request_files_known: bool = True,
     ) -> dict[str, Any]:
         return self._repository.append_turn(
             conversation_id=conversation_id,
@@ -171,6 +172,7 @@ class ConversationStore:
             memory_review_status=memory_review_status,
             owner_canonical_user_id=owner_canonical_user_id,
             attachments=attachments,
+            request_files_known=request_files_known,
         )
 
     def merge_turn_attachments(

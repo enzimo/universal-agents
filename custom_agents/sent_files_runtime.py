@@ -81,7 +81,7 @@ from collections.abc import Sequence
 from functools import partial
 from typing import Any, Optional
 
-from access_control.ownership import OwnershipDecision, escalation_result_files_access
+from access_control.ownership import WORK_FOR_A_PERSON_REQUIRED, OwnershipDecision, escalation_result_files_access
 from custom_agents.conversation_attachments import (
     DELEGATED_TASK_REASON,
     ESCALATION_RESULT_MESSAGE_TYPE,
@@ -99,6 +99,15 @@ from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, TaskHistoryImportance, TaskHistoryType
 
+
+# Why a delegated task's result brings no files to its waiting task
+# (``keep_escalation_result_files``): it is not an escalation's result, or the
+# waiting task works for no person (``escalation_result_files_access``'s reason).
+NOT_AN_ESCALATION_REASON = "not_an_escalation"
+_RESULT_REFUSAL_TEXT = {
+    NOT_AN_ESCALATION_REASON: "only an escalation's result may bring files",
+    WORK_FOR_A_PERSON_REQUIRED: "the task works for no person, so it keeps no person's files",
+}
 
 async def keep_sent_files(
     agent: Any,
@@ -303,26 +312,16 @@ async def keep_escalation_result_files(agent: Any, subtask_info: Any, result: Ta
     parent_id = subtask_info.task.parent_task_id
     conversation_id = getattr(subtask_info.meta, "conversation_id", None)
     if getattr(subtask_info.meta, "manager_escalation", None) is None:
-        _log_refused_result_files(
-            agent, result, "not_an_escalation", "only an escalation's result may", parent_id, subtask_info
-        )
+        _log_refused_result_files(agent, result, NOT_AN_ESCALATION_REASON, parent_id, subtask_info)
         return
     task_manager = agent.task_manager
     parent_info = await task_manager.operations_runtime.run(task_manager.get_task_info, parent_id)
     if parent_info is None:
-        agent._logger.warning(
-            "A task ended before the files its escalation's result brought were recorded. "
-            "event=escalation_result_files_task_gone task_id=%s escalation_task_id=%s attachment_ids=%s",
-            parent_id,
-            subtask_info.task.task_id,
-            _ids(result.attachments),
-        )
+        _log_result_files_task_gone(agent, parent_id, subtask_info, result.attachments)
         return
     decision = escalation_result_files_access(person_id=parent_info.owner_person_id, task_id=parent_id)
     if not decision.allowed:
-        _log_refused_result_files(
-            agent, result, decision.reason, "the task works for no person", parent_id, subtask_info
-        )
+        _log_refused_result_files(agent, result, decision.reason, parent_id, subtask_info)
         return
     folders = await asyncio.to_thread(UploadFolders.for_agent, agent)
     kept = keep_upload_files(result.attachments, folders, task_id=parent_id, conversation_id=conversation_id)
@@ -334,13 +333,7 @@ async def keep_escalation_result_files(agent: Any, subtask_info: Any, result: Ta
     )
     summary = f"Files sent with the result of escalation {subtask_info.task.task_id} accepted: {names}"
     if await _files_entry(agent, parent_id, summary, details) is None:
-        agent._logger.warning(
-            "A task ended before the files its escalation's result brought were recorded. "
-            "event=escalation_result_files_task_gone task_id=%s escalation_task_id=%s attachment_ids=%s",
-            parent_id,
-            subtask_info.task.task_id,
-            _ids(kept),
-        )
+        _log_result_files_task_gone(agent, parent_id, subtask_info, kept)
         return
     await asyncio.to_thread(
         record_turn_attachments,
@@ -352,10 +345,11 @@ async def keep_escalation_result_files(agent: Any, subtask_info: Any, result: Ta
 
 
 def _log_refused_result_files(
-    agent: Any, result: Task, reason: str, explanation: str, task_id: Optional[str], subtask_info: Any
+    agent: Any, result: Task, reason: str, task_id: Optional[str], subtask_info: Any
 ) -> None:
-    """One warning per file a delegated task's result brought that is not kept, with the ids and why."""
+    """One warning per file a delegated task's result brought that is not kept, with the ids and why (``reason``)."""
 
+    explanation = _RESULT_REFUSAL_TEXT.get(reason, "it is not kept for this task")
     for attachment in result.attachments:
         agent._logger.warning(
             "A delegated task's result brought a file that was not kept: %s. "
@@ -367,6 +361,18 @@ def _log_refused_result_files(
             subtask_info.task.task_id,
         )
 
+
+
+def _log_result_files_task_gone(
+    agent: Any, task_id: Optional[str], subtask_info: Any, attachments: Sequence[UserTaskAttachment]
+) -> None:
+    agent._logger.warning(
+        "A task ended before the files its escalation's result brought were recorded. "
+        "event=escalation_result_files_task_gone task_id=%s escalation_task_id=%s attachment_ids=%s",
+        task_id,
+        subtask_info.task.task_id,
+        _ids(attachments),
+    )
 
 def _ids(attachments: Sequence[UserTaskAttachment]) -> str:
     return ",".join(attachment.attachment_id for attachment in attachments)

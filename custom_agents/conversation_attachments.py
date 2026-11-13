@@ -21,7 +21,7 @@ Which files are kept at all, before anything is saved:
   message's own signed context names all three and has the id derived from
   the message's key and its file records
   (``access_control.ownership.sent_files_access``, checked by
-  ``request_files_kept`` at admission, ``steering_files_check`` for guidance
+  ``admit_request_files`` at admission, ``steering_files_check`` for guidance
   and interrupt answers and ``answer_files_check`` for answers to
   questions). Other agent processes also send tasks and steering
   messages, every worker of a request holds a copy of its signed context,
@@ -49,10 +49,17 @@ Which files are kept at all, before anything is saved:
   (``access_control.ownership.escalation_result_files_access``): the lead
   answers a maintenance run's escalation for the schedule's administrator,
   and work for no person keeps none of that person's files.
-- Files history entries are written only by this runtime after admission, so
-  any a task message arrives with are dropped (``without_incoming_files_entries``).
-- Both writers then drop records that point outside this host's upload
-  folders (``keep_upload_files``).
+- Files history entries are written only by this runtime, so any a task
+  message arrives with are dropped (``without_incoming_files_entries``).
+- Records that point outside this host's upload folders are dropped too
+  (``keep_upload_files``), before anything is saved.
+- A top-level request goes through one admission rule for both checks
+  (``admit_request_files``), so the task's own files and its conversation
+  turn hold the same records. When any of its files is dropped, its turn is
+  saved as not knowing all of its request's files (``attachments_recorded``
+  0, ``storage.turn_attachments``) and its history records how many were
+  dropped (``REQUEST_FILES_NOT_KEPT_EVENT``), saved with the task when it is
+  admitted.
 
 So every source ``TaskAttachments`` reads was written only after these checks.
 
@@ -122,7 +129,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -145,8 +152,8 @@ from access_control.ownership import (
 from custom_agents.task_context_runtime import context_verifier
 from custom_messages.contracts.access_v2 import TaskContextV1
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
-from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
-from custom_messages.enums import MessageMetaType, TaskHistoryType
+from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskQuery, TaskSteering
+from custom_messages.enums import MessageMetaType, TaskHistoryImportance, TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import INVENTORY_LIMIT, TurnAttachment, attachment_summary
 
@@ -175,6 +182,16 @@ UNRECORDED_TURNS_NOTE = (
 # ``UserTaskAttachment`` dumps). Written only by ``task_files_details``.
 TASK_FILES_EVENT = "task_files_accepted"
 TASK_FILES_KEY = "task_files"
+# The task-history event recording how many of a top-level request's own
+# files were not kept at admission (``admit_request_files``), and the
+# ``details`` key holding that count. Written only there, into the admitted
+# task before ``add_task`` saves it, so the request's prompt can say they
+# must be sent again.
+REQUEST_FILES_NOT_KEPT_EVENT = "request_files_not_kept"
+REQUEST_FILES_NOT_KEPT_KEY = "not_kept_count"
+# The task-history events only this runtime writes; a message arriving with
+# any of them has them dropped (``without_incoming_files_entries``).
+_RUNTIME_FILE_EVENTS = frozenset({TASK_FILES_EVENT, REQUEST_FILES_NOT_KEPT_EVENT})
 # The ``message_type`` of a files entry for a person's answer to a question
 # (``TaskQuery``); guidance and interrupt answers use their steering type.
 QUESTION_ANSWER_MESSAGE_TYPE = "question_answer"
@@ -914,17 +931,71 @@ def locate_upload(
     return UnavailableUpload(UPLOAD_NOT_ON_THIS_HOST, "This file is stored on another host, not where this agent runs.")
 
 
-def request_files_kept(task: Task, meta: Any, *, team_id: str, person_id: Optional[str]) -> Task:
-    """A top-level request as admitted: with its files only when the gateway vouches for them.
+@dataclass(frozen=True)
+class AdmittedRequestFiles:
+    """A top-level request as admitted (``admit_request_files``), and how many of its files it did not keep.
 
-    ``meta`` is the request's message meta; ``person_id`` is whom the task
-    verifiably works for. Refused files are dropped from the task, so they
-    are neither on its turn nor among its own files (module docstring).
+    ``task`` holds only the files it keeps. When ``not_kept`` is above 0 its
+    history also holds one ``REQUEST_FILES_NOT_KEPT_EVENT`` entry with that
+    count, which ``TaskManager.add_task`` saves with the task in its first
+    write. Its conversation turn records exactly ``task.attachments`` and is
+    marked as not knowing all of its request's files when any were dropped
+    (``conversation_runtime.ensure_task_conversation_context``).
     """
 
-    if not task.attachments:
-        return task
+    task: Task
+    not_kept: int = 0
+
+
+def admit_request_files(
+    task: Task,
+    meta: Any,
+    *,
+    team_id: str,
+    person_id: Optional[str],
+    folders: Callable[[], UploadFolders],
+) -> AdmittedRequestFiles:
+    """The one admission rule for a top-level request's files (module docstring).
+
+    ``meta`` is the request's message meta; ``person_id`` is whom the task
+    verifiably works for. The files stay only when the gateway vouches for
+    them (``sent_files_access``) and each lies in this host's upload folders
+    (``keep_upload_files``; ``folders`` reads them, only when files are left
+    to check). Each dropped file is logged with why. The task's own files and
+    its turn then hold the same records. Blocking (it verifies the signed
+    context and reads settings): run it in a thread from async code.
+    """
+
+    sent = list(task.attachments or [])
+    if not sent:
+        return AdmittedRequestFiles(task)
     conversation_id = _text(getattr(meta, "conversation_id", None))
+    vouched = _vouched_request_files(task, meta, team_id=team_id, person_id=person_id, conversation_id=conversation_id)
+    kept = keep_upload_files(vouched, folders() if vouched else None, task_id=task.task_id, conversation_id=conversation_id)
+    not_kept = len(sent) - len(kept)
+    if not not_kept:
+        return AdmittedRequestFiles(task)
+    logger.info(
+        "Files sent with a request were not kept; the request is admitted without them. "
+        "event=request_files_not_kept task_id=%s conversation_id=%s count=%d",
+        task.task_id,
+        conversation_id or "-",
+        not_kept,
+    )
+    entry = TaskHistoryEntry(
+        summary=f"{not_kept} file(s) sent with this request were not accepted; the person must send them again.",
+        importance=TaskHistoryImportance.HIGH,
+        details={"event": REQUEST_FILES_NOT_KEPT_EVENT, REQUEST_FILES_NOT_KEPT_KEY: not_kept},
+    )
+    history = [*list(task.execution_history or []), entry]
+    return AdmittedRequestFiles(task.model_copy(update={"attachments": kept, "execution_history": history}), not_kept)
+
+
+def _vouched_request_files(
+    task: Task, meta: Any, *, team_id: str, person_id: Optional[str], conversation_id: Optional[str]
+) -> list[UserTaskAttachment]:
+    """The request's files when the gateway vouches it sent them for this request; none (logged) otherwise."""
+
     decision = sent_files_access(
         sender=_verified_sender(meta, team_id),
         task_id=task.task_id,
@@ -933,11 +1004,11 @@ def request_files_kept(task: Task, meta: Any, *, team_id: str, person_id: Option
         message_context_id=request_context_id(task),
     )
     if decision.allowed:
-        return task
+        return list(task.attachments)
     log_refused_files(
         task.attachments, decision.reason, task_id=task.task_id, conversation_id=conversation_id, request=True
     )
-    return task.model_copy(update={"attachments": []})
+    return []
 
 
 def steering_files_check(task_info: Any, steering: TaskSteering, meta: Any, *, team_id: str) -> OwnershipDecision:
@@ -992,7 +1063,7 @@ def log_refused_files(
 ) -> None:
     """One warning per file a message brought that is not kept, saying why (``_REFUSAL_TEXT``).
 
-    ``request`` is set for a new request's files (``request_files_kept``),
+    ``request`` is set for a new request's files (``admit_request_files``),
     the only message whose context names no task because the gateway signed
     it before the update (``_QUEUED_REQUEST_TEXT``).
     """
@@ -1016,12 +1087,17 @@ def log_refused_files(
 def without_incoming_files_entries(task: Task) -> Task:
     """``task`` without the files entries its message arrived with (module docstring).
 
-    Only this runtime writes them, after admission; requests and delegated
-    tasks arrive with none, so any found are dropped and logged.
+    Only this runtime writes them (``_RUNTIME_FILE_EVENTS``: files entries,
+    and the count of a request's files not kept at admission); requests and
+    delegated tasks arrive with none, so any found are dropped and logged.
     """
 
     history = list(task.execution_history or [])
-    kept = [entry for entry in history if (getattr(entry, "details", None) or {}).get("event") != TASK_FILES_EVENT]
+    kept = [
+        entry
+        for entry in history
+        if (getattr(entry, "details", None) or {}).get("event") not in _RUNTIME_FILE_EVENTS
+    ]
     if len(kept) == len(history):
         return task
     logger.warning(
@@ -1097,6 +1173,8 @@ __all__ = [
     "INVENTORY_LIMIT",
     "NOT_AN_ANSWER_REASON",
     "QUESTION_ANSWER_MESSAGE_TYPE",
+    "REQUEST_FILES_NOT_KEPT_EVENT",
+    "REQUEST_FILES_NOT_KEPT_KEY",
     "ROOT_DELEGATED",
     "ROOT_NOT_HELD",
     "ROOT_OTHER_PERSON",
@@ -1108,12 +1186,14 @@ __all__ = [
     "UPLOAD_NOT_ON_THIS_HOST",
     "UPLOAD_NO_LOCAL_COPY",
     "UPLOAD_OUTSIDE_FOLDERS",
+    "AdmittedRequestFiles",
     "AttachmentSelectionError",
     "LocatedUpload",
     "RequestLink",
     "TaskAttachments",
     "UnavailableUpload",
     "UploadFolders",
+    "admit_request_files",
     "answer_files",
     "answer_files_check",
     "delegated_files",
@@ -1123,7 +1203,6 @@ __all__ = [
     "linked_request",
     "locate_upload",
     "log_refused_files",
-    "request_files_kept",
     "sent_file_lines",
     "steering_files_check",
     "step_request",

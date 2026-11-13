@@ -251,6 +251,7 @@ class ConversationRepository(Protocol):
         memory_review_status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
         attachments: Sequence[UserTaskAttachment] = (),
+        request_files_known: bool = True,
     ) -> dict[str, Any]: ...
 
     def merge_turn_attachments(
@@ -594,9 +595,10 @@ class _RelationalConversationRepository:
             self._ensure_column(conn, "conversation_task_links", "gateway_context_json", "TEXT")
             # The turn's files (storage.turn_attachments); NULL or [] when none were recorded.
             self._ensure_column(conn, "conversation_task_links", "attachments_json", "TEXT")
-            # 1 once the turn's own request files are known: append_turn writes it, nothing
-            # else changes it. Rows saved before turns kept their files read 0, also after
-            # files sent later are merged into them (storage.turn_attachments).
+            # 1 when all of the turn's own request files are recorded, 0 when some or all
+            # are not (not kept at admission, or the row was saved before turns kept their
+            # files): append_turn writes it, nothing else changes it, and merging files
+            # sent later leaves it as it is (storage.turn_attachments).
             self._ensure_column(
                 conn, "conversation_task_links", "attachments_recorded", "INTEGER NOT NULL DEFAULT 0"
             )
@@ -696,10 +698,12 @@ class _RelationalConversationRepository:
                 ON conversation_task_links(conversation_id, turn_index)
                 """
             )
-            # Only turns saved before turns kept their files (attachments_recorded
-            # 0) are in it, so finding a conversation's latest such turn
-            # (last_turn_without_file_records, asked for every prompt) reads
-            # a few entries, and none in conversations started after the upgrade.
+            # Only turns whose request files are not all recorded
+            # (attachments_recorded 0: saved before turns kept their files, or
+            # with request files not kept at admission) are in it, so finding a
+            # conversation's latest such turn (last_turn_without_file_records,
+            # asked for every prompt) reads a few entries, and usually none in
+            # conversations started after the upgrade.
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_conversation_task_links_request_files_unknown
@@ -1052,13 +1056,17 @@ class _RelationalConversationRepository:
         memory_review_status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
         attachments: Sequence[UserTaskAttachment] = (),
+        request_files_known: bool = True,
     ) -> dict[str, Any]:
         """Record a new turn with the request's own files; an existing turn is returned unchanged.
 
-        ``attachments`` are trusted records only (the caller checked them,
-        ``custom_agents.conversation_runtime``); files that arrive later are
-        added with ``merge_turn_attachments``. The turn is marked
-        ``attachments_recorded``: its request's files are known, none included.
+        ``attachments`` are trusted records only (admitted by
+        ``custom_agents.conversation_attachments.admit_request_files``);
+        files that arrive later are added with ``merge_turn_attachments``.
+        ``request_files_known`` becomes the turn's ``attachments_recorded``
+        marker: True when ``attachments`` are all the files sent with the
+        request (none included), False when some or all of them were not
+        kept at admission, so their records are not here.
         """
 
         existing = self.get_turn_by_task_id(task_id)
@@ -1132,7 +1140,7 @@ class _RelationalConversationRepository:
                     "[]",
                     json.dumps(gateway_context or {}),
                     encode_turn_attachments(turn_attachments),
-                    1,
+                    1 if request_files_known else 0,
                     initial_memory_review_status,
                     now_ts,
                     now_ts,
@@ -1171,8 +1179,10 @@ class _RelationalConversationRepository:
         ``append_turn``.
 
         The turn's ``attachments_recorded`` marker is left as it is: a turn
-        saved before turns kept their files lists the merged files, and its
-        request's own files stay unknown.
+        whose request's files are not all recorded (saved before turns kept
+        their files, or some were not kept at admission) lists the merged
+        files beside any request files it has, and the missing request files
+        stay unknown.
         """
 
         bind = self._dialect.bind
@@ -1269,10 +1279,13 @@ class _RelationalConversationRepository:
     def last_turn_without_file_records(
         self, conversation_id: str, *, exclude_task_id: Optional[str] = None
     ) -> Optional[int]:
-        """The latest turn saved before turns kept their files, or None when every turn has its record.
+        """The latest turn whose request's files are not all recorded, or None when every turn has them.
 
-        The request files of such turns (``attachments_recorded`` 0) are not
-        listed and cannot be opened by id; files sent to them later can be.
+        Such a turn (``attachments_recorded`` 0) was saved before turns kept
+        their files, or some or all of its request's files were not kept at
+        admission. The missing files are not listed and cannot be opened by
+        id; the files it does list (kept request files, files sent to it
+        later) can be.
         ``exclude_task_id`` leaves one turn out, such as that of the task
         asking, which holds its own request's files.
         """

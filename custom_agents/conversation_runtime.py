@@ -28,11 +28,13 @@ hands continues in a conversation of its new person
 ``custom_agents.schedule_context_refresh``,
 ``custom_agents.heartbeat_store.item_conversation_for_run``).
 
-Which files a turn keeps: the request's own files when the turn is recorded,
-and files sent with its guidance and answers while it runs
-(``record_turn_attachments``). Only records whose local copy lies in this
-host's upload folders are saved (``custom_agents.conversation_attachments.
-keep_upload_files``); later turns of the conversation find them by id.
+Which files a turn keeps: the request's own files as admission kept them
+(``custom_agents.conversation_attachments.admit_request_files``, passed in
+whole as ``request_files``), and files sent with its guidance and answers
+while it runs (``record_turn_attachments``), which the caller checked the
+same way (``keep_upload_files``). The turn records exactly the files the
+task itself keeps, and is marked as not knowing all of its request's files
+when admission dropped any. Later turns of the conversation find them by id.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from functools import partial
 from typing import Any, Dict, List, Optional
 
 from access_control.ownership import conversation_continuation
-from custom_agents.conversation_attachments import UploadFolders, keep_upload_files
+from custom_agents.conversation_attachments import AdmittedRequestFiles
 from custom_agents.conversation_summary import (
     ConversationSummaryGenerator,
     TurnSummaryRequest,
@@ -155,15 +157,18 @@ def ensure_task_conversation_context(
     msg_meta: MessageMeta,
     owner_person_id: Optional[str],
     owner_named_agent_type: Optional[str] = None,
-    upload_folders: Optional[UploadFolders] = None,
+    request_files: Optional[AdmittedRequestFiles] = None,
 ) -> MessageMeta:
     """Record a top-level task as the next turn of its conversation (a new thread when there is none).
 
     ``owner_person_id`` is the person the task verifiably works for (module
     docstring); None for work for no person. Raises ``ValueError`` (logged)
-    when the named conversation belongs to someone else. The turn keeps the
-    task's files that lie in ``upload_folders`` (module docstring; None keeps
-    only files without a local copy).
+    when the named conversation belongs to someone else. The turn records
+    exactly the files of ``request_files`` (the admission result for
+    ``task_request``) and is marked as not knowing all of its request's files
+    when admission dropped any. Without it (a scheduled run, whose payload
+    carries no files) the turn records none, so no caller can save records
+    that were not checked.
     """
 
     if task_request.parent_task_id is not None or conversation_store is None:
@@ -249,12 +254,8 @@ def ensure_task_conversation_context(
         ),
         task_status=ProgressState.ACCEPTED.value,
         owner_canonical_user_id=owner_canonical_user_id,
-        attachments=keep_upload_files(
-            task_request.attachments or [],
-            upload_folders,
-            task_id=task_request.task_id,
-            conversation_id=normalized_meta.conversation_id,
-        ),
+        attachments=list(request_files.task.attachments) if request_files is not None else [],
+        request_files_known=request_files is None or request_files.not_kept == 0,
     )
     return normalized_meta
 

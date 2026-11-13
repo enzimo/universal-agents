@@ -121,6 +121,7 @@ def _turn(
     files: tuple[UserTaskAttachment, ...] = (),
     *,
     conversation_id: str = CONVERSATION,
+    request_files_known: bool = True,
 ) -> dict[str, Any]:
     return repo.append_turn(
         conversation_id=conversation_id,
@@ -133,6 +134,7 @@ def _turn(
         problem_text=f"Request {task_id}",
         owner_canonical_user_id=OWNER,
         attachments=files,
+        request_files_known=request_files_known,
     )
 
 
@@ -336,6 +338,29 @@ def test_a_conversation_started_after_the_upgrade_has_no_unrecorded_turns(backen
     assert repo.last_turn_without_file_records(CONVERSATION) is None
     assert all(turn["attachments_recorded"] for turn in repo.get_conversation_turns(conversation_id=CONVERSATION))
 
+
+
+def test_a_turn_whose_request_files_were_not_all_kept_is_saved_as_not_knowing_them(backend: _Backend) -> None:
+    """Admission dropped one of a request's files: the turn lists the kept one and is marked 0."""
+
+    repo = backend.open()
+    _thread(repo)
+    _turn(repo, "task_1", (_file("att_photo"),))
+    partly = _turn(repo, "task_2", (_file("att_kept"),), request_files_known=False)
+    _turn(repo, "task_3")
+
+    assert ([item["attachment_id"] for item in partly["attachments"]], partly["attachments_recorded"]) == (
+        ["att_kept"],
+        False,
+    )
+    assert repo.last_turn_without_file_records(CONVERSATION) == 2
+    assert repo.last_turn_without_file_records(CONVERSATION, exclude_task_id="task_2") is None
+    # A file sent later is merged into it without changing the marker, also after the store is opened again.
+    assert repo.merge_turn_attachments(conversation_id=CONVERSATION, task_id="task_2", attachments=[_file("att_late")]) == 1
+    reopened = backend.open()
+    recorded = {turn["task_id"]: turn["attachments_recorded"] for turn in reopened.get_conversation_turns(conversation_id=CONVERSATION)}
+    assert recorded == {"task_1": True, "task_2": False, "task_3": True}
+    assert _listed(reopened) == [(2, "task_2", "att_late"), (2, "task_2", "att_kept"), (1, "task_1", "att_photo")]
 
 def test_unreadable_stored_files_are_logged_and_skipped(backend: _Backend, caplog: pytest.LogCaptureFixture) -> None:
     repo = backend.open()
