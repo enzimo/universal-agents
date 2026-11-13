@@ -60,7 +60,13 @@ RESULT_UNKNOWN_ATTACHMENT = "unknown_attachment_id"
 RESULT_UPLOAD_UNAVAILABLE = "upload_unavailable"
 RESULT_REMOTE_COPY_REQUIRED = "remote_copy_required"
 RESULT_REFUSED = "refused"
-REMOTE_COPY_ACTION = "Request a gateway-backed NATS Object Store mirror for this attachment."
+# What an agent can do when an upload cannot be read where it runs (no local
+# copy, or another host): no agent tool copies files between hosts, so the
+# person sends it again.
+REMOTE_COPY_NEXT_STEP = (
+    "This file cannot be read where this agent runs. The team lead asks the person to send it again; any other "
+    "agent says in its result that it could not open the file."
+)
 
 
 def tool_result(status: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -111,11 +117,12 @@ def read_failed(attachment: UserTaskAttachment, exc: OSError) -> dict[str, Any]:
 
 
 def remote_copy_required(payload: dict[str, Any]) -> dict[str, Any]:
-    """The result telling the agent to ask the team lead for a copy of a file this host cannot read."""
+    """The result for an upload this host has no copy of (none on disk, or stored on another host).
 
-    return tool_result(
-        "error", {**payload, "result": RESULT_REMOTE_COPY_REQUIRED, "team_lead_action": REMOTE_COPY_ACTION}
-    )
+    ``next_step`` says what the agent can actually do (``REMOTE_COPY_NEXT_STEP``).
+    """
+
+    return tool_result("error", {**payload, "result": RESULT_REMOTE_COPY_REQUIRED, "next_step": REMOTE_COPY_NEXT_STEP})
 
 
 @dataclass(frozen=True)
@@ -200,7 +207,7 @@ def _unavailable(attachment: UserTaskAttachment, located: UnavailableUpload) -> 
 
 
 __all__ = [
-    "REMOTE_COPY_ACTION",
+    "REMOTE_COPY_NEXT_STEP",
     "RESULT_REFUSED",
     "RESULT_REMOTE_COPY_REQUIRED",
     "RESULT_UNKNOWN_ATTACHMENT",

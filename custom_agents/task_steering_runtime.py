@@ -34,7 +34,11 @@ the task, the message and the files (``_refuse_steering``: the files this
 delivery kept, and those the task's history records for the message's
 ``steering_id``, which resends keep). A resend whose task is no longer held
 here at all cannot read its record and logs nothing; its files stay on the
-conversation turn.
+conversation turn. A resend of a message the task already took (its guidance
+entry, or its answer's resumed turn or recovery entry, is in the history) can
+be refused too, when its task has ended or steering was turned off; nothing
+was lost, so that only logs ``event=sent_files_taken_message_resend_refused``
+at info level (``_message_was_taken``).
 """
 
 from __future__ import annotations
@@ -105,6 +109,13 @@ from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 logger = logging.getLogger(__name__)
 GUIDANCE_ACCEPTED_EVENT = "task_steering_proactive_guidance_accepted"
 GUIDANCE_APPLIED_EVENT = "task_steering_proactive_guidance_applied"
+# History events that record an interrupt answer as taken: by the resumed
+# live turn, or as restart-safe recovery guidance. With the guidance events
+# above, they tell a resend of a message that was used from one that was lost
+# (``_message_was_taken``).
+INTERRUPT_RESUMED_EVENT = "task_steering_interrupt_resumed"
+INTERRUPT_RESPONSE_RECOVERY_EVENT = "task_steering_interrupt_response_recovery"
+_ANSWER_TAKEN_EVENTS = frozenset({INTERRUPT_RESUMED_EVENT, INTERRUPT_RESPONSE_RECOVERY_EVENT})
 
 
 @dataclass
@@ -363,7 +374,7 @@ def _record_interrupted_turn_resumed(
         entry_type=TaskHistoryType.TASK_EVENT,
         importance=TaskHistoryImportance.HIGH,
         details={
-            "event": "task_steering_interrupt_resumed",
+            "event": INTERRUPT_RESUMED_EVENT,
             "steering_id": steering_id,
         },
     )
@@ -538,6 +549,16 @@ def _warn_files_kept_for_refused_message(
         kept.setdefault(attachment.attachment_id, attachment)
     if not kept:
         return
+    if not kept_now and _message_was_taken(task_info, steering):
+        # A resend of a message that was used: its files are the task's as they should be.
+        agent._logger.info(
+            "A resend of a message the task already took was refused; its files stay with the task. "
+            "event=sent_files_taken_message_resend_refused task_id=%s steering_id=%s attachment_ids=%s",
+            task_info.task.task_id,
+            steering.steering_id,
+            ",".join(kept),
+        )
+        return
     agent._logger.warning(
         "A message was refused after its files were kept: they stay on the task's conversation turn and "
         "among its files, but the person is told the message was not used. "
@@ -546,6 +567,26 @@ def _warn_files_kept_for_refused_message(
         steering.steering_id,
         steering.steering_type.value,
         ",".join(kept),
+    )
+
+
+def _message_was_taken(task_info: Any, steering: TaskSteering) -> bool:
+    """Whether the task's history records this guidance or interrupt answer as taken.
+
+    A guidance is taken once its own entry is written (its key is among
+    ``_saved_proactive_guidance``'s); an answer once its resumed turn or its
+    recovery guidance is recorded (``_ANSWER_TAKEN_EVENTS``). A refused
+    resend of such a message is a duplicate that came too late, not a message
+    lost after its files were kept.
+    """
+
+    if steering.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE:
+        _pending, taken = _saved_proactive_guidance(task_info)
+        return (steering.idempotency_key or steering.steering_id) in taken
+    return any(
+        (entry.details or {}).get("event") in _ANSWER_TAKEN_EVENTS
+        and (entry.details or {}).get("steering_id") == steering.steering_id
+        for entry in list(task_info.task.execution_history or [])
     )
 
 
@@ -977,7 +1018,7 @@ async def _take_interrupt_response(
         entry_type=TaskHistoryType.TASK_EVENT,
         importance=TaskHistoryImportance.HIGH,
         details={
-            "event": "task_steering_interrupt_response_recovery",
+            "event": INTERRUPT_RESPONSE_RECOVERY_EVENT,
             "steering_id": steering.steering_id,
         },
     )

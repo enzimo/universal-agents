@@ -19,7 +19,8 @@ conversation stores and the gateway's own upload storage, for Ann's team lead
 - a copy made before the upload is deleted is inspected and reported, and an
   error reading the copy keeps its ``workspace_path``;
 - a workspace path that is missing or a folder is a plain error, not
-  ``remote_copy_required``;
+  ``remote_copy_required``, and ``remote_copy_required`` names a next step an
+  agent can take;
 - an id outside the task's scope gives ``unknown_attachment_id`` with the
   files it may use: work for another person in Ann's conversation, Ann's
   other conversation, and a delegated task, which opens only the files its
@@ -49,6 +50,7 @@ from assistant_gateway.inbound_attachments import (
     store_inbound_attachment_bytes_with_policy,
 )
 from custom_agents import task_message_runtime, task_steering_runtime
+from custom_agents.conversation_attachments import UPLOAD_NO_LOCAL_COPY, UnavailableUpload
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
@@ -423,6 +425,28 @@ async def test_a_workspace_path_that_is_not_a_file_is_not_a_remote_copy(earlier,
         payload = _payload(result)
         assert payload["error"] == "Local file is unavailable."
         assert "result" not in payload and "remote_copy_required" not in _texts(result)
+
+
+def test_a_file_this_host_has_no_copy_of_says_what_the_agent_can_do() -> None:
+    """GEN-2: remote_copy_required names a next step an agent can take, not a mirror nobody can arrange."""
+
+    record = UserTaskAttachment(
+        attachment_id="att_elsewhere",
+        filename="scan.pdf",
+        content_type="application/pdf",
+        kind="document",
+        size_bytes=3,
+        sha256="0" * 64,
+        storage_refs=[],
+    )
+    result = task_uploads._unavailable(
+        record, UnavailableUpload(UPLOAD_NO_LOCAL_COPY, "This file has no copy stored on a host's disk.")
+    )
+
+    payload = _payload(result)
+    assert (result["status"], payload["result"]) == ("error", "remote_copy_required")
+    assert payload["next_step"] == task_uploads.REMOTE_COPY_NEXT_STEP
+    assert "team_lead_action" not in payload
 
 # --- Files outside the task's scope ----------------------------------------------------------------
 

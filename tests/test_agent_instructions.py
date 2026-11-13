@@ -132,3 +132,27 @@ def test_shared_prompt_includes_multi_user_onboarding_recipe() -> None:
     assert "/docs/newuser/telegram" in shared_agent_base_prompt
     assert "/docs/newuser/photon" in shared_agent_base_prompt
     assert "/user disable <canonical_user_id>" in shared_agent_base_prompt
+
+
+def test_no_agent_text_asks_for_an_object_store_mirror_for_a_file_this_host_cannot_read() -> None:
+    """GEN-2: no agent tool can arrange such a mirror; the texts say what agents can do instead."""
+
+    from assistant_gateway.config import DeliverySettings
+    from custom_agents.instance_delivery_context import render_delivery_settings_context
+    from custom_tools.local_media_context_tool import load_local_media_for_model_context
+    from custom_tools.task_uploads import REMOTE_COPY_NEXT_STEP
+    from custom_tools.user_attachment_tools import inspect_user_attachment
+
+    texts = {
+        "agent instructions": shared_agent_base_prompt,
+        "delivery context": render_delivery_settings_context(DeliverySettings()),
+        "skill template": (RUNTIME_OPERATIONS_WORKFLOWS_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8"),
+        "inspect tool": inspect_user_attachment.tool_spec["description"],
+        "media tool": load_local_media_for_model_context.tool_spec["description"],
+        "tool result": REMOTE_COPY_NEXT_STEP,
+    }
+    for name, text in texts.items():
+        assert "mirror" not in text.lower() and "Object Store" not in text, name
+    for name in ("agent instructions", "delivery context", "skill template", "tool result"):
+        flattened = " ".join(texts[name].split())
+        assert "send it again" in flattened and "could not open the file" in flattened, name

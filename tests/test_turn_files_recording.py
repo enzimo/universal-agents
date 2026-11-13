@@ -29,7 +29,8 @@ working for Ann (signed task context). Covers:
 - an answer refused as stale keeps none of its files, and a guidance or an
   answer refused after its files were kept is logged with those files, also
   when an earlier delivery kept them and the resend is refused (task ended,
-  mid-turn steering turned off, no live session after a restart);
+  mid-turn steering turned off, no live session after a restart), while a
+  late resend of a message the task did take is not reported as lost;
 - a guidance restored from before the update names only files the task can
   open and says how many others came with it;
 - the views that show the task's history to models (the history window, an
@@ -846,6 +847,37 @@ async def test_a_resend_refused_after_an_earlier_delivery_kept_its_files_is_logg
         f"task_id={TASK} steering_id={steering.steering_id} steering_type={steering.steering_type.value} "
         f"attachment_ids={photo.attachment_id}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("taken", ["guidance_then_task_ended", "guidance_then_steering_off", "answer_then_task_ended"])
+async def test_a_late_resend_of_a_message_the_task_took_is_not_reported_as_lost(
+    lead, layout: InstanceLayout, statuses, monkeypatch, caplog: pytest.LogCaptureFixture, taken: str
+) -> None:
+    """The message was taken in full, but its ACCEPTED status never went out (a restart), so the gateway sends
+    it again after the task ended or steering was turned off: refused as before, and nothing was lost."""
+
+    photo = _upload(layout, "pan.png")
+    if taken.startswith("answer"):
+        # No live session: the answer is taken as restart-safe recovery guidance.
+        steering = _steering(TaskSteeringType.INTERRUPT_RESPONSE, [photo], "answer_taken", "This pan.")
+    else:
+        steering = _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [photo], "guide_taken", "Use this pan.")
+    await _send(lead, steering)
+    assert statuses[-1][1] == TaskSteeringStatus.ACCEPTED
+    lead._processed_task_steering_ids.clear()  # a restart
+    if taken.endswith("steering_off"):
+        monkeypatch.setattr(task_steering_runtime, "mid_turn_steering_enabled", lambda _agent: False)
+    else:
+        lead.task_manager.get_task_info(TASK).state = ProgressState.COMPLETED
+
+    with caplog.at_level(logging.INFO):
+        await _send(lead, steering)
+
+    assert statuses[-1][1] in {TaskSteeringStatus.STALE, TaskSteeringStatus.REJECTED}
+    assert _messages(caplog, "sent_files_kept_message_refused") == []
+    [noted] = _messages(caplog, "sent_files_taken_message_resend_refused")
+    assert f"task_id={TASK} steering_id={steering.steering_id} attachment_ids={photo.attachment_id}" in noted
 
 
 def _saved_before_the_update(lead, steering: TaskSteering) -> None:

@@ -3551,8 +3551,11 @@ task and its turn hold the same records. Admission writes them with its turn;
 guidance and answers are merged into it in one write transaction that
 adds each id once, so concurrent merges lose nothing and a retry adds nothing
 twice. The list is a column on the turn row rather than a table because
-departure, archive and history clean-up move or delete whole turns, so a
-turn's file list goes with its turn. Records leave the runtime only as
+person departure moves whole turn rows out of the conversation store and back
+(hold and restore, `storage/person_departure_repository.py`), so a turn's
+file list goes with its turn without a second table to move. Nothing else
+deletes or moves turn rows: the task archive only reads them, and output
+retention keeps conversations. Records leave the runtime only as
 descriptions (id, name, type, size and turn,
 `storage.turn_attachments.TURN_ATTACHMENT_SUMMARY_FIELDS`), never with storage
 paths. The task's history keeps full records, because trusted code reads where
@@ -3681,6 +3684,13 @@ Limits:
 - Guidance the lead sends on to a working specialist carries no files (a
   worker's files are the ones its delegation named); its text says how many
   came with it and that the team lead has them.
+- The team lead's record of a worker's escalation is delegated work: it uses
+  only the files it was given (the worker's, and those of the answers to its
+  questions) and never the conversation's earlier files. A file sent in an
+  earlier turn that the lead did not pass on with the delegation cannot be
+  opened there; the person is asked to send it again, or the request's own
+  turn names it in a new delegation once the worker returns. Widening the
+  escalation's scope to the conversation is a possible follow-up.
 - A guidance or an interrupt answer can be refused after its files were
   kept, because the files are recorded before the message itself: when its
   task ends between the files entry and the guidance entry; for an answer,
@@ -3693,7 +3703,10 @@ Limits:
   every such refusal logs `event=sent_files_kept_message_refused` with the
   task, message and file ids, found from this delivery and from the task's
   history for the message's `steering_id`. A resend whose task is no longer
-  held at all cannot read its record and logs nothing.
+  held at all cannot read its record and logs nothing. A late resend of a
+  message the task did take (its guidance or answer is recorded in the
+  history) is refused the same way when the task has ended, but nothing was
+  lost: it logs `event=sent_files_taken_message_resend_refused` at info level.
 
 ### Model provider keys
 

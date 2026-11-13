@@ -191,9 +191,10 @@ def inspect_user_attachment(
     When a file cannot be opened, `result` says why: `unknown_attachment_id`
     (this task may not use that id; `available_attachments` lists the files
     it may use), `upload_unavailable` (the file was deleted or cannot be read
-    here; ask the person to send it again), or `remote_copy_required` (it is stored on another host;
-    report this to the team lead instead of pasting bytes or base64 into task
-    messages).
+    here; ask the person to send it again), or `remote_copy_required` (no copy
+    of it is on this host; `next_step` says what to do: the team lead asks the
+    person to send it again, any other agent reports it in its result). Never
+    paste bytes or base64 into task messages instead.
 
     Uploads are stored where shell and Python cannot reach them. Set
     `copy_to_workspace=true` with an `attachment_id` to copy the file into this

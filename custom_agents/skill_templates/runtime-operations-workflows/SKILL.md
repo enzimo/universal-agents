@@ -1346,8 +1346,9 @@ document (by `attachment_id`) or one in this task's folders (by path), use
 into the next inner-loop LLM input and should be used only for direct
 model-visible inspection. A file that cannot be opened says why:
 `unknown_attachment_id` lists the files the task may use;
-`upload_unavailable` means it was deleted, so ask the person to send it
-again, as for a file the list says was sent before files were recorded.
+`upload_unavailable` means it was deleted or cannot be read here, so ask the
+person to send it again, as for a file the list says was not recorded or not
+accepted.
 When delegating, `attachment_ids` chooses the files the new task gets: left
 out sends this task's own files, `[]` sends none, and ids send exactly those. Native image insertion requires
 `supports_image_input=true`; native document insertion requires
@@ -1355,10 +1356,11 @@ out sends this task's own files, `[]` sends none, and ids send exactly those. Na
 tools even when native file input is disabled. `supports_audio_input` records
 provider capability but does not create a universal native-audio bridge; use a
 purpose-built transcription or provider adapter. If `inspect_user_attachment` returns
-`remote_copy_required`, report that result to the Team Lead so the Team Lead can
-coordinate a gateway-backed NATS Object Store mirror. Do not paste raw bytes,
-base64, or full binary content into task text, steering guidance, or user
-notifications.
+`remote_copy_required`, no copy of the file is where this agent runs and no
+agent tool can copy it here: the Team Lead asks the person to send it again,
+and a specialist says in its result that it could not open the file. Do not
+paste raw bytes, base64, or full binary content into task text, steering
+guidance, or user notifications.
 
 ## Whole-goal specialist and delegation scenarios
 
