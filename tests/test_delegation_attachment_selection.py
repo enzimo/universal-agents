@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 from strands.tools.structured_output.structured_output_tool import convert_pydantic_to_tool_spec
 
+import custom_agents.delegation_runtime as delegation_runtime
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.structured_llm_messages import (
     COMPATIBLE_MODEL_AGENT_TURN_DECISION_FORCE_PROMPT,
@@ -331,6 +333,28 @@ async def test_a_request_not_signed_for_the_conversations_person_cannot_pass_its
     lead.agent.team_comms.send_message.reset_mock()
     assert _ids((await lead.delegate(["att_list"])).attachments) == ["att_list"]
 
+
+
+@pytest.mark.asyncio
+async def test_the_person_is_resolved_off_the_event_loop_for_the_task_being_handled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead = _Lead(tmp_path)
+    calls: list[tuple[str, str | None]] = []
+    resolve = delegation_runtime.verified_person_id
+
+    def recording(agent: Any) -> str | None:
+        person = resolve(agent)
+        calls.append((threading.current_thread().name, person))
+        return person
+
+    monkeypatch.setattr(delegation_runtime, "verified_person_id", recording)
+    loop_thread = threading.current_thread().name
+
+    # att_photo is an earlier turn's file: offered only for the verified person.
+    assert _ids((await lead.delegate(["att_photo"])).attachments) == ["att_photo"]
+    [(thread, person)] = calls
+    assert thread != loop_thread and person == PERSON
 
 def _escalation(attachment_ids: Any = LEFT_OUT) -> dict[str, Any]:
     action: dict[str, Any] = {

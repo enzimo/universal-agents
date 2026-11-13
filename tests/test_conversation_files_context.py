@@ -26,6 +26,7 @@ from custom_agents.conversation_attachments import EARLIER_FILES_HEADING, REQUES
 from custom_agents.conversation_compaction.base import ConversationCompactionConfig
 from custom_agents.conversation_compaction.heuristic_compactor import HeuristicSlidingWindowCompactor
 from custom_agents.conversation_store import ConversationStore
+from custom_agents.prompt_context_sanitization import render_current_request_context
 from custom_agents.steering_history_events import QUERY_ANSWER_FILES_KEY
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import _record_guidance_history
@@ -451,3 +452,19 @@ def test_earlier_files_are_named_only_for_the_person_who_owns_the_conversation(
     assert _section(prompt, EARLIER_FILES_HEADING) == [] and "att_receipt" not in prompt
     # The owner's own prompt names it.
     assert _listed_ids(_section(instance.prompt(ROOT), EARLIER_FILES_HEADING)) == ["att_receipt"]
+
+
+def test_the_current_messages_files_are_named_by_id_without_where_they_are_stored(tmp_path: Path) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    task = Task(
+        task_id=ROOT, task_type=MessageMetaType.REQUEST, problem_statement="Read the recipe.",
+        attachments=[_file(layout, "att_recipe", filename="recipe.jpg")],
+    )
+
+    rendered = render_current_request_context(task, _meta(CONVERSATION))
+
+    lines = rendered.split("Current Request Attachments:")[1].strip().splitlines()
+    assert lines[0] == (
+        f"- recipe.jpg (id=att_recipe, kind=image, type=image/png, size=4 bytes, sha256={'ab' * 32})"
+    )
+    assert "local_path" not in rendered and str(layout.root) not in rendered and "session_alice" not in rendered

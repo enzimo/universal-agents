@@ -14,6 +14,7 @@ same scope the lead's prompt and tools use.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from custom_tools.runtime_context import bound_task_id
 from datetime import datetime, timezone
@@ -71,7 +72,10 @@ async def selected_attachments(agent: Any, attachment_ids: Optional[list[str]]) 
     task_manager = agent.task_manager
     conversation_store = getattr(agent, "_conversation_store", None)
     is_team_lead = bool(getattr(agent, "is_team_lead", False))
-    person_id = verified_person_id(agent)
+    # For a scheduled run the person comes from its schedule run identity,
+    # which may read the schedule and people stores, so off the event loop.
+    # asyncio.to_thread copies this context, so the bound task id goes along.
+    person_id = await asyncio.to_thread(verified_person_id, agent)
     uploads_dir = agent_layout(agent).uploads_dir
 
     def select() -> list[UserTaskAttachment]:

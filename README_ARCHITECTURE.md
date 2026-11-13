@@ -3868,8 +3868,8 @@ turns, and only when the person the task is verified to work for (its signed
 context or schedule run identity, never a message field) may read that
 conversation (`access_control.ownership`). Specialists, including a worker's
 scheduled run that continues its owner's conversation, never read a
-conversation: they get their own task's files and the ones the team lead
-chose for them. An id outside the scope is "not found", with no hint that it
+conversation: they get their own task's files, the ones the team lead
+chose for them and the files of guidance passed on to them. An id outside the scope is "not found", with no hint that it
 exists in another conversation, and ids must match a strict pattern, so a
 path is never taken as an id.
 
@@ -3902,7 +3902,12 @@ specialists' schemas leave the field out, and the outbox refuses it from any
 agent but the team lead. Left out, the new task gets the files of the
 request's own message: for a plan step or recovery task the request's, for a
 specialist's escalation the files it came with. A list gives exactly the files
-it names, `[]` none. The ids are looked up in the same scope right before the
+it names, `[]` none. The choice is made once, when the task is delegated:
+guidance the person sends later is passed on with its files to every
+specialist holding a subtask of the request
+(`task_steering_runtime._forwarded_guidance_envelope`), whatever
+`attachment_ids` gave it, so `[]` does not keep later files from a
+specialist. The ids are looked up in the same scope right before the
 subtask is created (the outbox's `local_commit` phase), so an unknown, removed
 or excess id (more than 20) creates nothing and goes back to the model with
 the files it can pass, without storage locations

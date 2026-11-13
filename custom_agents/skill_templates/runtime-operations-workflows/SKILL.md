@@ -1435,9 +1435,11 @@ notifications.
 The team lead chooses which of the person's files a delegated task gets with
 `attachment_ids` on `delegate_task`. Left out, the task gets the files that
 came with the request's own message (for a specialist's escalation, the files
-it came with); a list passes exactly those files and `[]` passes none. An id
-the task cannot use creates nothing, and the team lead is shown the files it
-can pass. A reply to a specialist's escalation carries no files: when the
+it came with); a list passes exactly those files and `[]` passes none. Files
+the person sends later as guidance still go to every specialist already
+working on the request, whatever `attachment_ids` gave it. An id the task
+cannot use creates nothing, and the team lead is shown the files it can
+pass. A reply to a specialist's escalation carries no files: when the
 person answers an escalation with files, the team lead delegates the work
 that needs them from the escalation with their ids.
 

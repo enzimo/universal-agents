@@ -140,13 +140,17 @@ def test_instructions_open_the_persons_files_by_id_and_say_what_a_delegation_pas
     assert "with the `attachment_id` of a file the person sent, or with a `path`" in shared_agent_base_prompt
     assert "choose which of the person's files a delegated task gets with `attachment_ids`" in shared_agent_base_prompt
     assert "A reply to a specialist's escalation cannot carry files" in shared_agent_base_prompt
+    later = "Files the person sends later as guidance still go to every specialist already working on the"
+    assert later in shared_agent_base_prompt
 
     team_lead = (
         Path(__file__).resolve().parents[1] / "ua_definitions/agent_definitions/prompts/team_architect.md"
     ).read_text(encoding="utf-8")
     assert "Choose the person's files the specialist needs with `attachment_ids`" in team_lead
     assert "A reply to a specialist's escalation cannot carry files" in team_lead
+    assert later in team_lead
 
     skill = (RUNTIME_OPERATIONS_WORKFLOWS_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     assert "`attachment_ids` on `delegate_task`" in skill
+    assert " ".join(later.split()) in " ".join(skill.split())
     assert "use `load_local_media_for_model_context` with the `attachment_id`" in skill

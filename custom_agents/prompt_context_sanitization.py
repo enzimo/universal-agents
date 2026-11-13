@@ -281,17 +281,19 @@ def render_incoming_message_summary(
 
 
 def _render_attachment_summary(attachments: Any) -> list[str]:
+    """The current message's files by name and id, never where they are stored.
+
+    Models open a file by ``attachment_id`` (``custom_tools.attachment_uploads``);
+    a storage path would only invite a path the tools refuse, and its folder
+    name carries chat identifiers.
+    """
+
     values = list(attachments or [])
     if not values:
         return []
     lines = ["Current Request Attachments:"]
     for attachment in values[:20]:
-        local_path = None
-        for ref in list(getattr(attachment, "storage_refs", None) or []):
-            if getattr(ref, "storage_type", None) == "local" and getattr(ref, "path", None):
-                local_path = ref.path
-                break
-        rendered = (
+        lines.append(
             f"- {getattr(attachment, 'filename', 'attachment')} "
             f"(id={getattr(attachment, 'attachment_id', '')}, "
             f"kind={getattr(attachment, 'kind', 'other')}, "
@@ -299,9 +301,6 @@ def _render_attachment_summary(attachments: Any) -> list[str]:
             f"size={getattr(attachment, 'size_bytes', 0)} bytes, "
             f"sha256={getattr(attachment, 'sha256', '')})"
         )
-        if local_path:
-            rendered += f"; local_path={local_path}"
-        lines.append(rendered)
     if len(values) > 20:
         lines.append(f"- {len(values) - 20} additional attachment(s) omitted from prompt summary.")
     lines.append(
