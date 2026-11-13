@@ -467,10 +467,10 @@ def test_build_docker_image_script_passes_database_version_overrides(tmp_path: P
             "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
             "CAPTURE_FILE": str(capture),
             "POSTGRES_MAJOR": "18",
-            "POSTGRES_VERSION": "18.4-1.pgdg13+1",
-            "PGVECTOR_PACKAGE_VERSION": "0.8.5-1.pgdg13+1",
+            "POSTGRES_VERSION": "18.7-1.pgdg13+2",
+            "PGVECTOR_PACKAGE_VERSION": "0.8.7-1.pgdg13+2",
             "SQLITE_VERSION": "3.46.1-7+deb13u1",
-            "NATS_SERVER_VERSION": "v2.15.1",
+            "NATS_SERVER_VERSION": "v2.15.3",
         },
         check=True,
         capture_output=True,
@@ -479,10 +479,10 @@ def test_build_docker_image_script_passes_database_version_overrides(tmp_path: P
 
     args = capture.read_text(encoding="utf-8").splitlines()
     assert "POSTGRES_MAJOR=18" in args
-    assert "POSTGRES_VERSION=18.4-1.pgdg13+1" in args
-    assert "PGVECTOR_PACKAGE_VERSION=0.8.5-1.pgdg13+1" in args
+    assert "POSTGRES_VERSION=18.7-1.pgdg13+2" in args
+    assert "PGVECTOR_PACKAGE_VERSION=0.8.7-1.pgdg13+2" in args
     assert "SQLITE_VERSION=3.46.1-7+deb13u1" in args
-    assert "NATS_SERVER_VERSION=v2.15.1" in args
+    assert "NATS_SERVER_VERSION=v2.15.3" in args
 
 
 def test_build_docker_image_script_passes_sealbox_build_args(tmp_path: Path) -> None:
@@ -565,7 +565,7 @@ def test_dockerfiles_build_and_validate_rust_runtime_tools() -> None:
     dockerignore = (Path.cwd() / ".dockerignore").read_text(encoding="utf-8")
 
     for content in (dockerfile, bundle_dockerfile):
-        assert "FROM rust:1.95.0-slim-trixie AS rust-tools-builder" in content
+        assert "FROM rust:1.100.0-slim-trixie AS rust-tools-builder" in content
         assert "COPY rust/ua-anydoc-cli/Cargo.toml" in content
         assert "COPY rust/vendor /src/rust/vendor" in content
         assert "COPY rust/ua-anydoc-cli/src" in content
@@ -686,14 +686,14 @@ def test_dockerfiles_install_checksum_pinned_node_24_optionally() -> None:
 
     for content in (dockerfile, bundle_dockerfile):
         assert "ARG INSTALL_NODEJS=false" in content
-        assert "ARG NODEJS_VERSION=24.20.0" in content
+        assert "ARG NODEJS_VERSION=24.22.3" in content
         assert (
             "ARG NODEJS_SHA256_AMD64="
-            "855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec"
+            "061ec3e3062115705b56b51fa9cc330ab50d34b6969387d4e4b1a50c6809acc2"
         ) in content
         assert (
             "ARG NODEJS_SHA256_ARM64="
-            "3515603e2487879a39bc75716f1a2affd027500c64ba50e845cf72cb33219013"
+            "261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8"
         ) in content
         assert "INSTALL_NODEJS must be true or false" in content
         assert 'if [ "${INSTALL_NODEJS}" = "true" ]' in content
@@ -788,8 +788,8 @@ def test_dockerfiles_make_database_packages_optional() -> None:
     assert "ARG INSTALL_POSTGRES=false" in dockerfile
     assert "ARG INSTALL_SQLITE=false" in dockerfile
     assert "ARG POSTGRES_MAJOR=18" in dockerfile
-    assert "ARG POSTGRES_VERSION=18.4-1.pgdg13+1" in dockerfile
-    assert "ARG PGVECTOR_PACKAGE_VERSION=0.8.5-1.pgdg13+1" in dockerfile
+    assert "ARG POSTGRES_VERSION=18.7-1.pgdg13+2" in dockerfile
+    assert "ARG PGVECTOR_PACKAGE_VERSION=0.8.7-1.pgdg13+2" in dockerfile
     assert "ARG INSTALL_POSTGRES=true" in bundle_dockerfile
     assert "ARG INSTALL_SQLITE=true" in bundle_dockerfile
     for content in (dockerfile, bundle_dockerfile):
@@ -813,8 +813,8 @@ def test_dockerfiles_make_nats_server_optional() -> None:
 
     assert "ARG INSTALL_NATS=true" in dockerfile
     assert "ARG INSTALL_NATS=true" in bundle_dockerfile
-    assert "ARG NATS_SERVER_VERSION=v2.15.1" in dockerfile
-    assert "ARG NATS_SERVER_VERSION=v2.15.1" in bundle_dockerfile
+    assert "ARG NATS_SERVER_VERSION=v2.15.3" in dockerfile
+    assert "ARG NATS_SERVER_VERSION=v2.15.3" in bundle_dockerfile
     assert "ENV TEAM_BUNDLE_INSTALL_NATS=${INSTALL_NATS}" in bundle_dockerfile
     for content in (dockerfile, bundle_dockerfile):
         assert 'if [ "${INSTALL_NATS}" = "true" ]' in content

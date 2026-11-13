@@ -241,7 +241,7 @@ def begin(config: dict) -> None:
         "NATS_DOCKER_CONTAINER": f"ua-ci-{job_id}-nats",
         "UA_CI_POSTGRES": f"ua-ci-{job_id}-postgres",
         "CARGO_HOME": str(cache / "cargo"),
-        "RUSTUP_TOOLCHAIN": "1.95.0",
+        "RUSTUP_TOOLCHAIN": "1.100.0",
         "CARGO_INCREMENTAL": "0",
         "CARGO_BUILD_JOBS": str(config.get("build_jobs", 2)),
         "npm_config_cache": str(cache / "npm"),
