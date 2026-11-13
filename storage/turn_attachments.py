@@ -11,11 +11,17 @@ the store only through ``list_turn_attachments`` for trusted callers. Generic
 turn reads, which reach models through prompts and conversation tools, carry
 the descriptive fields only (``TURN_ATTACHMENT_SUMMARY_FIELDS``).
 
-A NULL column means the turn was saved before turns kept their files; ``[]``
-means it had none. Models are told the difference, so they do not read an
-unrecorded turn as one without files: turn reads carry
-``attachments_recorded`` and the prompt's file list says up to which turn
-files were not recorded (``last_turn_without_file_records``).
+A NULL or ``[]`` list only means no files are recorded. Whether the turn's
+request files are known is kept apart, in the row's ``attachments_recorded``
+marker: ``append_turn`` sets it when it records the request's files (none
+included), and nothing else changes it. A turn saved before turns kept their
+files reads 0; files sent to it later (guidance, answers) are merged into its
+list, and its request's own files stay unknown. The marker is a column of its
+own, not a list encoding, so readers keep using the plain list. Models are
+told the difference, so they do not read an unrecorded turn as one without
+files: turn reads carry ``attachments_recorded`` and the prompt's file list
+says up to which turn files were not recorded
+(``last_turn_without_file_records``).
 """
 
 from __future__ import annotations

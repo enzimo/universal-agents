@@ -129,11 +129,18 @@ def _turn(
 
 
 def saved_before_upgrade(store: ConversationStore, *task_ids: str) -> None:
-    """Make the turns of ``task_ids`` look saved before turns kept their files (no file record)."""
+    """Make the turns of ``task_ids`` look saved before turns kept their files.
+
+    Such rows got the columns when the store was opened after the upgrade: no
+    file list, and the request-files marker at its default 0.
+    """
 
     with connect_sqlite(store._db_path) as conn:
         for task_id in task_ids:
-            conn.execute("UPDATE conversation_task_links SET attachments_json = NULL WHERE task_id = ?", (task_id,))
+            conn.execute(
+                "UPDATE conversation_task_links SET attachments_json = NULL, attachments_recorded = 0 WHERE task_id = ?",
+                (task_id,),
+            )
         conn.commit()
 
 

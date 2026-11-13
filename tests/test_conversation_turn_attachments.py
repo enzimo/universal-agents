@@ -277,13 +277,14 @@ def test_lookups_read_past_the_first_batch_of_turns(backend: _Backend) -> None:
     ]
 
 
-def test_turns_saved_before_the_upgrade_say_their_files_were_not_recorded(backend: _Backend) -> None:
+def test_turns_saved_before_the_upgrade_say_their_request_files_are_unknown(backend: _Backend) -> None:
     repo = backend.open()
     _thread(repo)
     _turn(repo, "task_old")
     _turn(repo, "task_old_running")
     # The table as it was before turns kept their files.
-    backend.execute("DROP INDEX idx_conversation_task_links_unrecorded_files")
+    backend.execute("DROP INDEX idx_conversation_task_links_request_files_unknown")
+    backend.execute("ALTER TABLE conversation_task_links DROP COLUMN attachments_recorded")
     backend.execute("ALTER TABLE conversation_task_links DROP COLUMN attachments_json")
 
     upgraded = backend.open()
@@ -295,19 +296,34 @@ def test_turns_saved_before_the_upgrade_say_their_files_were_not_recorded(backen
     assert upgraded.last_turn_without_file_records(CONVERSATION) == 2
     assert upgraded.last_turn_without_file_records(CONVERSATION, exclude_task_id="task_old_running") == 1
     assert upgraded.last_turn_without_file_records("conv_none") is None
-    # A file sent while an old turn still runs is recorded on it.
+    # A file sent while an old turn still runs is listed on it; the files of
+    # its request stay unknown, so the turn is still not recorded.
     assert upgraded.merge_turn_attachments(
         conversation_id=CONVERSATION, task_id="task_old_running", attachments=[_file("att_late")]
     ) == 1
-    assert upgraded.get_turn_by_task_id("task_old_running")["attachments_recorded"] is True
-    assert upgraded.last_turn_without_file_records(CONVERSATION) == 1
+    running = upgraded.get_turn_by_task_id("task_old_running")
+    assert ([item["attachment_id"] for item in running["attachments"]], running["attachments_recorded"]) == (
+        ["att_late"],
+        False,
+    )
+    assert upgraded.last_turn_without_file_records(CONVERSATION) == 2
     # New turns record their files, none included.
     _turn(upgraded, "task_new", (_file("att_new"),))
     _turn(upgraded, "task_new_empty")
     empty = upgraded.get_turn_by_task_id("task_new_empty")
     assert (empty["attachments"], empty["attachments_recorded"]) == ([], True)
-    assert upgraded.last_turn_without_file_records(CONVERSATION) == 1
+    assert upgraded.last_turn_without_file_records(CONVERSATION) == 2
     assert _listed(upgraded) == [(3, "task_new", "att_new"), (2, "task_old_running", "att_late")]
+    # Later merges into either kind of turn leave the marker as it is, also after the store is opened again.
+    for task_id in ("task_old_running", "task_new_empty"):
+        assert upgraded.merge_turn_attachments(
+            conversation_id=CONVERSATION, task_id=task_id, attachments=[_file(f"att_more_{task_id}")]
+        ) == 1
+    reopened = backend.open()
+    recorded = {turn["task_id"]: turn["attachments_recorded"] for turn in reopened.get_conversation_turns(conversation_id=CONVERSATION)}
+    assert recorded == {"task_old": False, "task_old_running": False, "task_new": True, "task_new_empty": True}
+    assert reopened.last_turn_without_file_records(CONVERSATION) == 2
+    assert reopened.last_turn_without_file_records(CONVERSATION, exclude_task_id="task_old_running") == 1
 
 
 def test_a_conversation_started_after_the_upgrade_has_no_unrecorded_turns(backend: _Backend) -> None:

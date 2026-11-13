@@ -183,7 +183,7 @@ TURN_SELECT_COLUMNS = """
     execution_history_text, turn_summary_text, user_request_summary,
     assistant_response_summary, context_summary_text, artifact_summary_json,
     summary_generator, summary_generated_at, tool_artifact_manifest_json,
-    gateway_context_json, attachments_json,
+    gateway_context_json, attachments_json, attachments_recorded,
     memory_review_status, memory_review_job_id, memory_review_queued_at_utc,
     memory_reviewed_at_utc, memory_reviewed_by_agent_id,
     created_at, updated_at
@@ -576,6 +576,7 @@ class _RelationalConversationRepository:
                     tool_artifact_manifest_json TEXT,
                     gateway_context_json TEXT,
                     attachments_json TEXT,
+                    attachments_recorded INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT,
                     updated_at TEXT,
                     PRIMARY KEY (conversation_id, task_id)
@@ -591,8 +592,14 @@ class _RelationalConversationRepository:
             self._ensure_column(conn, "conversation_task_links", "summary_generator", "TEXT")
             self._ensure_column(conn, "conversation_task_links", "summary_generated_at", "TEXT")
             self._ensure_column(conn, "conversation_task_links", "gateway_context_json", "TEXT")
-            # The turn's files (storage.turn_attachments); NULL on turns saved before turns kept them.
+            # The turn's files (storage.turn_attachments); NULL or [] when none were recorded.
             self._ensure_column(conn, "conversation_task_links", "attachments_json", "TEXT")
+            # 1 once the turn's own request files are known: append_turn writes it, nothing
+            # else changes it. Rows saved before turns kept their files read 0, also after
+            # files sent later are merged into them (storage.turn_attachments).
+            self._ensure_column(
+                conn, "conversation_task_links", "attachments_recorded", "INTEGER NOT NULL DEFAULT 0"
+            )
             self._ensure_column(
                 conn,
                 "conversation_task_links",
@@ -689,15 +696,15 @@ class _RelationalConversationRepository:
                 ON conversation_task_links(conversation_id, turn_index)
                 """
             )
-            # Only turns saved before turns kept their files (attachments_json
-            # NULL) are in it, so finding a conversation's latest such turn
+            # Only turns saved before turns kept their files (attachments_recorded
+            # 0) are in it, so finding a conversation's latest such turn
             # (last_turn_without_file_records, asked for every prompt) reads
             # a few entries, and none in conversations started after the upgrade.
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_conversation_task_links_unrecorded_files
+                CREATE INDEX IF NOT EXISTS idx_conversation_task_links_request_files_unknown
                 ON conversation_task_links(conversation_id, turn_index)
-                WHERE attachments_json IS NULL
+                WHERE attachments_recorded = 0
                 """
             )
             conn.execute(
@@ -1004,9 +1011,10 @@ class _RelationalConversationRepository:
             "tool_artifact_manifest": manifest,
             "gateway_context": gateway_context if isinstance(gateway_context, dict) else {},
             "attachments": self._turn_attachment_summaries(row),
-            # False on turns saved before turns kept their files: their files
-            # are unknown, not absent (storage.turn_attachments).
-            "attachments_recorded": row["attachments_json"] is not None,
+            # False on turns saved before turns kept their files: their request's
+            # files are unknown, not absent, even when files sent later are
+            # listed (storage.turn_attachments).
+            "attachments_recorded": bool(row["attachments_recorded"]),
             "memory_review_status": row["memory_review_status"] or TURN_MEMORY_REVIEW_UNREVIEWED,
             "memory_review_job_id": row["memory_review_job_id"],
             "memory_review_queued_at_utc": row["memory_review_queued_at_utc"],
@@ -1049,7 +1057,8 @@ class _RelationalConversationRepository:
 
         ``attachments`` are trusted records only (the caller checked them,
         ``custom_agents.conversation_runtime``); files that arrive later are
-        added with ``merge_turn_attachments``.
+        added with ``merge_turn_attachments``. The turn is marked
+        ``attachments_recorded``: its request's files are known, none included.
         """
 
         existing = self.get_turn_by_task_id(task_id)
@@ -1087,10 +1096,10 @@ class _RelationalConversationRepository:
                     execution_history_text, turn_summary_text, user_request_summary,
                     assistant_response_summary, context_summary_text, artifact_summary_json,
                     summary_generator, summary_generated_at, tool_artifact_manifest_json,
-                    gateway_context_json, attachments_json,
+                    gateway_context_json, attachments_json, attachments_recorded,
                     memory_review_status,
                     created_at, updated_at
-                ) VALUES ({", ".join([self._dialect.bind] * 33)})
+                ) VALUES ({", ".join([self._dialect.bind] * 34)})
                 """,
                 (
                     conversation_id,
@@ -1123,6 +1132,7 @@ class _RelationalConversationRepository:
                     "[]",
                     json.dumps(gateway_context or {}),
                     encode_turn_attachments(turn_attachments),
+                    1,
                     initial_memory_review_status,
                     now_ts,
                     now_ts,
@@ -1159,6 +1169,10 @@ class _RelationalConversationRepository:
         until commit. Ids already recorded are skipped, so a retried merge adds
         nothing twice. ``attachments`` are trusted records only, as for
         ``append_turn``.
+
+        The turn's ``attachments_recorded`` marker is left as it is: a turn
+        saved before turns kept their files lists the merged files, and its
+        request's own files stay unknown.
         """
 
         bind = self._dialect.bind
@@ -1257,9 +1271,10 @@ class _RelationalConversationRepository:
     ) -> Optional[int]:
         """The latest turn saved before turns kept their files, or None when every turn has its record.
 
-        Files sent in such turns (``attachments_json`` NULL) are not listed and
-        cannot be opened by id. ``exclude_task_id`` leaves one turn out, such
-        as that of the task asking, which holds its own request's files.
+        The request files of such turns (``attachments_recorded`` 0) are not
+        listed and cannot be opened by id; files sent to them later can be.
+        ``exclude_task_id`` leaves one turn out, such as that of the task
+        asking, which holds its own request's files.
         """
 
         bind = self._dialect.bind
@@ -1272,7 +1287,7 @@ class _RelationalConversationRepository:
             row = conn.execute(
                 f"""
                 SELECT MAX(turn_index) FROM conversation_task_links
-                WHERE conversation_id = {bind} AND attachments_json IS NULL{other_turns}
+                WHERE conversation_id = {bind} AND attachments_recorded = 0{other_turns}
                 """,
                 params,
             ).fetchone()
