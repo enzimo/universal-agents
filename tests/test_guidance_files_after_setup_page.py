@@ -38,10 +38,20 @@ The scenario is checked on its own (``test_the_scenario_reaches_each_step``),
 so a page refused for another reason, or a correlation id other than the one
 delegation gives, fails as a broken setup rather than passing unseen.
 
+The test drives the escalation because it is the delegated task whose page
+can open. A specialist's own page never does: only the team lead's questions
+reach the person's chat (``message_routing.requester_bound_primary_route``),
+so the chat never waits for a specialist's task, and its page goes to the
+chat's credential handoff, which refuses any sender but the manager before
+the request is touched
+(``test_gateway_credential_handoff.py::test_delegated_setup_rejects_untrusted_lineage_even_on_redelivery``).
+
 Run against a copy whose store drops the ``active_task_id`` condition, the
 page moves the request to the escalation, the guidance is addressed and
-signed to it, and the lead refuses its file as ``delegated_task``; the saved
-run is in the change's review notes.
+signed to it, and the lead refuses its file as ``delegated_task``. The store
+test
+``test_gateway_question_store.py::test_a_sibling_task_cannot_change_a_running_request_or_its_conversation``
+pins the same condition: its ``coordination`` cases fail without it.
 """
 
 from __future__ import annotations

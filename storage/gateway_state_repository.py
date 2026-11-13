@@ -2582,9 +2582,9 @@ class _RelationalGatewayStateRepository:
     ) -> None:
         """Atomically bind a gateway request to its current runtime task and state.
 
-        A running request (``run_state`` set) changes only for the task it
-        already names, so a delegated task's setup page or steering reply
-        never moves it: the person's guidance, its signed context and its
+        A request with a run state (running or finished) changes only for the
+        task it already names, so a delegated task's setup page or steering
+        reply never moves it: the person's guidance, its signed context and its
         files stay on the request's own task
         (tests/test_guidance_files_after_setup_page.py). Rows without a run
         state (controls, guidance rows) follow the task given.
