@@ -94,12 +94,12 @@ pub fn with_annotation_ids(source: &str) -> Result<PolicySet, String> {
     let mut set = PolicySet::new();
     for template in parsed.templates() {
         let id = template.annotation("id").ok_or("template without @id")?;
-        set.add_template(template.new_id(PolicyId::from_str(id).map_err(|e| e.to_string())?))
+        set.add_template(template.new_id(PolicyId::new(id)))
             .map_err(|e| format!("{e:?}"))?;
     }
     for policy in parsed.policies() {
         let id = policy.annotation("id").ok_or("policy without @id")?;
-        set.add(policy.new_id(PolicyId::from_str(id).map_err(|e| e.to_string())?))
+        set.add(policy.new_id(PolicyId::new(id)))
             .map_err(|e| format!("{e:?}"))?;
     }
     Ok(set)
@@ -168,8 +168,8 @@ impl AccessEvaluator {
             }
         }
         for link in &request.links {
-            let template = PolicyId::from_str(&link.template).map_err(|e| e.to_string())?;
-            let new_id = PolicyId::from_str(&link.id).map_err(|e| e.to_string())?;
+            let template = PolicyId::new(&link.template);
+            let new_id = PolicyId::new(&link.id);
             let mut slots = HashMap::new();
             if let Some(principal) = &link.principal {
                 slots.insert(SlotId::principal(), uid(principal)?);

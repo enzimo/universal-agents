@@ -111,7 +111,7 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
           echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
       - name: Ensure pinned Rust toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal --no-self-update
+        run: rustup toolchain install 1.100.0 --profile minimal --no-self-update
       - name: Build Cedar evaluator
         run: cargo build --locked --workspace
       - name: Validate the shipped access policies
@@ -166,7 +166,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.20.0"
+          node-version: "24.22.3"
           package-manager-cache: false
       - name: Install Photon sidecar dependencies
         working-directory: assistant_gateway/interactive_apps/photon_sidecar
@@ -198,7 +198,7 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
           echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
       - name: Ensure pinned Rust toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal --no-self-update
+        run: rustup toolchain install 1.100.0 --profile minimal --no-self-update
       - name: Build Cedar evaluator
         run: cargo build --locked --workspace
       - name: Install dependencies
@@ -249,7 +249,7 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
           echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
       - name: Ensure pinned Rust toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal --no-self-update
+        run: rustup toolchain install 1.100.0 --profile minimal --no-self-update
       - name: Build Cedar evaluator
         run: cargo build --locked --workspace
       - name: Install dependencies

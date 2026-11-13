@@ -26,9 +26,9 @@ def main():
     LOG.info("Native platform: %s %s", platform.system(), platform.machine())
     run("git", "--version")
     run("node", "-e", "if (+process.versions.node.split('.')[0] < 22) process.exit(1)")
-    run("cargo", "+1.95.0", "--version")
-    run("cargo", "+1.95.0", "clippy", "--version")
-    run("rustup", "run", "1.95.0", "rustfmt", "--version")
+    run("cargo", "+1.100.0", "--version")
+    run("cargo", "+1.100.0", "clippy", "--version")
+    run("rustup", "run", "1.100.0", "rustfmt", "--version")
     run(sys.executable, "-m", "unittest", "discover", "-s", ".github/runner", "-v")
     run(sys.executable, ".github/runner/cache_smoke.py")
     if platform.system() in {"Darwin", "Linux"}:
@@ -49,7 +49,7 @@ def main():
                 "list",
                 "--installed",
                 "--toolchain",
-                "1.95.0",
+                "1.100.0",
             ],
             text=True,
         )

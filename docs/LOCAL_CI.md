@@ -68,7 +68,7 @@ pinned SHA-256 through a JavaScript action before running any shell steps. The
 download makes up to four attempts for temporary HTTP and network failures, with a
 30-second deadline per attempt. Checksum mismatches and permanent HTTP errors
 stop before extraction. Shell steps retain the RTK wrapper. Python 3.13 and
-Node.js 24.20.0 are set up by pinned actions. Hosted runners do not use the local cleanup hooks, build caches,
+Node.js 24.22.3 are set up by pinned actions. Hosted runners do not use the local cleanup hooks, build caches,
 `UA_CI_PYTHON`, or the local Python relocation helper. Their machines are disposable.
 
 In the repository's **Settings > Pages > Build and deployment**, set **Source** to
@@ -129,8 +129,8 @@ job state. After rollout, dispatch **Local runner preflight** for each repositor
 inspect cleanup, and confirm both Linux runners, Windows and macOS are online.
 Do not create release tags or run publishing workflows to validate runners.
 
-Provision RTK 0.48.0, system Python 3.12+, Node.js 22+, Git, Rust 1.95.0,
-Docker, Buildx, QEMU/binfmt, and GitHub CLI 2.100.0. Sidecar jobs select Node.js 24.20.0. Runtime
+Provision RTK 0.48.0, system Python 3.12+, Node.js 22+, Git, Rust 1.100.0,
+Docker, Buildx, QEMU/binfmt, and GitHub CLI 2.100.0. Sidecar jobs select Node.js 24.22.3. Runtime
 installation checks use Python 3.12 and 3.13; other Python CI selects 3.13.
 The isolated SkillSpector environment uses the provisioned system Python from
 `UA_CI_PYTHON`. Its restricted subprocess environment removes `LD_LIBRARY_PATH`,

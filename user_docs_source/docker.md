@@ -131,7 +131,7 @@ Photon iMessage requires Node.js 24.5 or newer. The Dockerfiles always include
 the small Photon sidecar source tree, but they install its npm dependencies only
 when Node.js is enabled with `--nodejs` / `INSTALL_NODEJS=true`. Browser
 onboarding disables the Photon setup option when a compatible Node.js runtime
-is absent. Maintained images install the official Node.js 24.20.0 archive for
+is absent. Maintained images install the official Node.js 24.22.3 archive for
 their architecture, verify its pinned SHA-256 checksum, and use Node's native
 WebSocket implementation for Spectrum's inbound Fusor stream.
 
@@ -244,7 +244,7 @@ time; if both are running, wait for one to finish before starting another.
 
 ### NATS 2.15 upgrades
 
-The container images and native installer include NATS Server 2.15.1. NATS
+The container images and native installer include NATS Server 2.15.3. NATS
 2.15 adds a default limit of 1,000 consumers per stream. A team uses several
 consumers per agent, and object-store watchers use consumers too. Existing
 stream configuration may still report `max_consumers: -1` while the server

@@ -16,7 +16,7 @@ def main():
     if os.environ.get("UA_CI_BUILD_CACHE_VERSION") != "1":
         raise RuntimeError("Install the reviewed bounded-cache hooks first")
     wrapper = os.environ["RUSTC_WRAPPER"]
-    compiler = run("rustup", "which", "rustc", "--toolchain", "1.95.0").strip()
+    compiler = run("rustup", "which", "rustc", "--toolchain", "1.100.0").strip()
     with tempfile.TemporaryDirectory(prefix="compiler-probe-", dir=os.environ["UA_CI_CACHE"]) as tmp:
         path = Path(tmp)
         source = path / "probe.rs"

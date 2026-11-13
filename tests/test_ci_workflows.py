@@ -128,7 +128,7 @@ def test_photon_sidecar_ci_uses_the_pinned_node_24_runtime() -> None:
         "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
     )
     assert setup_node["with"] == {
-        "node-version": "24.20.0",
+        "node-version": "24.22.3",
         "package-manager-cache": "false",
     }
     assert install["working-directory"] == (
@@ -153,7 +153,7 @@ def test_photon_sidecar_dependency_audit_blocks_moderate_findings() -> None:
         if step.get("name") == "Audit Photon sidecar production dependencies"
     )
 
-    assert setup_node["with"]["node-version"] == "24.20.0"
+    assert setup_node["with"]["node-version"] == "24.22.3"
     assert setup_node["with"]["package-manager-cache"] == "false"
     assert audit["working-directory"] == (
         "assistant_gateway/interactive_apps/photon_sidecar"

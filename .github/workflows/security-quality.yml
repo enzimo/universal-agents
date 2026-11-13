@@ -50,7 +50,7 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
           echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
       - name: Ensure pinned Rust toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal --no-self-update --component rustfmt,clippy
+        run: rustup toolchain install 1.100.0 --profile minimal --no-self-update --component rustfmt,clippy
       - name: Install dependencies
         run: python -m pip install --require-hashes -r requirements-dev.lock.txt
       - name: Ruff security-sensitive modules
