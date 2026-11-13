@@ -3608,6 +3608,11 @@ path, and a turn's direct image input skips an image it cannot read instead of
 failing. `copy_to_workspace` inspects the copy it made, so a deletion right
 after the copy cannot hide it. A `path` that is missing or a folder is a
 plain error: it names a file in the task's own folders, not an upload.
+`remote_copy_required` comes with a `next_step` an agent can take: no agent
+tool copies files between hosts, and a file sent again is stored where the
+gateway stores uploads, so a specialist reports that it could not open the
+file and the team lead opens it itself; if the lead gets this result, it tells
+the person the file cannot be opened here.
 
 Choosing files for a specialist. Every model-facing delegation has an optional
 `attachment_ids`: left out, the new task gets the delegating task's own files

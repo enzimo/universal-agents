@@ -192,9 +192,10 @@ def inspect_user_attachment(
     (this task may not use that id; `available_attachments` lists the files
     it may use), `upload_unavailable` (the file was deleted or cannot be read
     here; ask the person to send it again), or `remote_copy_required` (no copy
-    of it is on this host; `next_step` says what to do: the team lead asks the
-    person to send it again, any other agent reports it in its result). Never
-    paste bytes or base64 into task messages instead.
+    of it is on this host; `next_step` says what to do: a specialist reports it
+    in its result and the team lead opens the file itself; the team lead tells
+    the person it cannot be opened here). Never paste bytes or base64 into task
+    messages instead.
 
     Uploads are stored where shell and Python cannot reach them. Set
     `copy_to_workspace=true` with an `attachment_id` to copy the file into this

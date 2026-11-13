@@ -1356,11 +1356,13 @@ out sends this task's own files, `[]` sends none, and ids send exactly those. Na
 tools even when native file input is disabled. `supports_audio_input` records
 provider capability but does not create a universal native-audio bridge; use a
 purpose-built transcription or provider adapter. If `inspect_user_attachment` returns
-`remote_copy_required`, no copy of the file is where this agent runs and no
-agent tool can copy it here: the Team Lead asks the person to send it again,
-and a specialist says in its result that it could not open the file. Do not
-paste raw bytes, base64, or full binary content into task text, steering
-guidance, or user notifications.
+`remote_copy_required`, the file is not stored where this agent runs and no
+agent tool can copy it here: a specialist says in its result that it could
+not open the file, and the Team Lead opens it itself and does that part of the
+work. If the Team Lead gets this result, it tells the person the file cannot
+be opened here; a file sent again is stored in the same place. Do not paste
+raw bytes, base64, or full binary content into task text, steering guidance,
+or user notifications.
 
 ## Whole-goal specialist and delegation scenarios
 

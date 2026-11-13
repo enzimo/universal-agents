@@ -60,12 +60,15 @@ RESULT_UNKNOWN_ATTACHMENT = "unknown_attachment_id"
 RESULT_UPLOAD_UNAVAILABLE = "upload_unavailable"
 RESULT_REMOTE_COPY_REQUIRED = "remote_copy_required"
 RESULT_REFUSED = "refused"
-# What an agent can do when an upload cannot be read where it runs (no local
-# copy, or another host): no agent tool copies files between hosts, so the
-# person sends it again.
+# What an agent can do when an upload is not stored where it runs (no local
+# copy, or another host). No agent tool copies files between hosts, and a file
+# sent again is stored where the gateway stores uploads, the team lead's host,
+# so asking for it again does not help a specialist elsewhere: the lead opens
+# the file and does that part of the work itself.
 REMOTE_COPY_NEXT_STEP = (
-    "This file cannot be read where this agent runs. The team lead asks the person to send it again; any other "
-    "agent says in its result that it could not open the file."
+    "This file is not stored where this agent runs, and no agent tool can copy it here. A specialist says in its "
+    "result that it could not open the file; the team lead opens it itself and does that part of the work. If the "
+    "team lead gets this result, it tells the person the file cannot be opened here."
 )
 
 

@@ -154,5 +154,8 @@ def test_no_agent_text_asks_for_an_object_store_mirror_for_a_file_this_host_cann
     for name, text in texts.items():
         assert "mirror" not in text.lower() and "Object Store" not in text, name
     for name in ("agent instructions", "delivery context", "skill template", "tool result"):
-        flattened = " ".join(texts[name].split())
-        assert "send it again" in flattened and "could not open the file" in flattened, name
+        flattened = " ".join(texts[name].split()).lower()
+        # A file sent again is stored where the gateway stores uploads, so asking for it again does not help.
+        assert "could not open the file" in flattened and "opens it itself" in flattened, name
+        assert "cannot be opened here" in flattened, name
+    assert "again" not in REMOTE_COPY_NEXT_STEP
