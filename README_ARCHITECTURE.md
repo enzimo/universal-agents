@@ -3848,13 +3848,23 @@ answer files only on the answer to a question the task itself asked
 otherwise the text is handled and the files are dropped with a warning
 (`event=guidance_files_refused`, `event=answer_files_refused`).
 Rationale: any process on the team's NATS can address the team lead, and these
-files become part of the person's conversation. The gateway signs a chat
-message for the person the chat account is linked to (an active team member's
-linked account; for Web Chat, the signed-in person). A message from a chat
-account linked to nobody is signed for nobody, so the files sent with its
-guidance or answer are dropped the same way (`reason=no_verified_person`),
-while its text still counts. `tests/test_gateway_signed_answer_files.py` sends
-a gateway-signed answer with a file through the transport into the team lead. Turn records that the
+files become part of the person's conversation. Who a message is signed for:
+with gateway users on (`gateway.users.enabled`, the default), a chat account
+linked to nobody cannot send requests or follow-up messages at all: the gateway
+refuses them and says how to link the account
+(`request_context.admit_interactive_route`). An answer to a question is signed
+for the owner of the chat session it is given in, or else for the person the
+account is linked to; an answer with neither reaches the team lead with its
+text and without its files (`reason=no_verified_person`). With gateway users
+off, messages from chat apps are signed for nobody, so files sent there with
+guidance or an answer are never kept and the earlier files of a conversation
+are not offered; a request's own files still are. Web Chat and the console sign
+for their signed-in person in both modes. This changed from 0.9, where the
+tools also opened the files of guidance a running request had received, from
+any sender; no setting restores that, because files that become part of a
+person's conversation need a verified person.
+`tests/test_gateway_signed_answer_files.py` sends a gateway-signed answer with
+a file through the transport into the team lead. Turn records that the
 conversation tools show carry no storage location (`turn_attachment_summary`:
 id, name, type, kind, size); only the lookup below reads whole records. One
 column on the existing turn row, not a new table: departure and history
