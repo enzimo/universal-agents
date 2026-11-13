@@ -3614,7 +3614,15 @@ the lead does for it. The lead's result for the escalation carries exactly
 those answer files (`answer_files`) back to the worker, which keeps the ones
 inside its upload folders as its task's own, and on the run's conversation
 turn for a scheduled run. An escalation linked to another person's request
-keeps none.
+keeps none. Whether work for a request shares its files is decided by
+`access_control.ownership.request_files_access` (same person only). A worker
+keeps the files only when its task works for a person
+(`access_control.ownership.escalation_result_files_access`): the lead answers
+a maintenance run's escalation for the schedule's administrator
+(`sign_system_escalation`), so those files are the administrator's and stay on
+the lead's record of the escalation. The maintenance run, which works for no
+person, keeps none; otherwise later runs for no person would list them and
+could copy them into `workspaces/agents`, which every person's work can read.
 
 Limits:
 

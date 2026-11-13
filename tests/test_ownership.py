@@ -20,10 +20,12 @@ from access_control.ownership import (
     answer_context_id,
     conversation_continuation,
     conversation_files_access,
+    escalation_result_files_access,
     named_task_access,
     objective_access,
     private_access,
     request_context_id,
+    request_files_access,
     sent_files_access,
     steering_context_id,
 )
@@ -215,6 +217,46 @@ def test_a_conversations_files_follow_the_same_rule_as_continuing_it(person, own
     assert (files.allowed, files.reason) == (continuation.allowed, continuation.reason)
     assert files.allowed is allowed
 
+
+
+@pytest.mark.parametrize(
+    ("person", "request_person", "reason"),
+    [
+        ("usr_a", "usr_a", "same_person_request"),
+        (None, None, "no_person_request"),
+        (" ", None, "no_person_request"),  # blank is no person
+        ("usr_b", "usr_a", "same_person_request_required"),
+        (None, "usr_a", "same_person_request_required"),
+        ("usr_a", None, "same_person_request_required"),
+    ],
+)
+def test_work_for_a_request_shares_its_files_only_when_it_works_for_the_same_person(
+    person, request_person, reason, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("INFO", logger="access_control.ownership"):
+        decision = request_files_access(person_id=person, request_person_id=request_person, request_task_id="task_req")
+
+    assert (decision.allowed, decision.reason) == (reason != "same_person_request_required", reason)
+    refusals = [record.getMessage() for record in caplog.records if "event=private_access_refused" in record.getMessage()]
+    if decision.allowed:
+        assert refusals == []
+    else:
+        [refused] = refusals
+        assert "reason=same_person_request_required" in refused and "resource_id=task_req" in refused
+
+
+@pytest.mark.parametrize(("person", "allowed"), [("usr_a", True), (None, False), ("  ", False)])
+def test_only_work_for_a_person_keeps_the_files_its_escalations_answers_brought(
+    person, allowed, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("INFO", logger="access_control.ownership"):
+        decision = escalation_result_files_access(person_id=person, task_id="task_run")
+
+    assert decision.allowed is allowed
+    assert decision.reason == ("work_for_a_person" if allowed else "work_for_a_person_required")
+    refused = [record.getMessage() for record in caplog.records if "event=private_access_refused" in record.getMessage()]
+    assert bool(refused) is not allowed
+    assert all("resource_id=task_run" in message for message in refused)
 
 def _file(attachment_id: str = "att_1", path: str = "/uploads/web/att_1.png") -> UserTaskAttachment:
     return UserTaskAttachment(

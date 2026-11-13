@@ -42,7 +42,7 @@ is (``_delegated_task_keeps_files``):
   or maintenance run is a top-level task in the worker's own process, so the
   escalation runs for no task here. The files are kept on the escalation
   only; the run's conversation turn is in the worker, which keeps them there
-  when the result arrives.
+  when the result arrives (a job run; a maintenance run keeps none, below).
 - Work the lead does for such an escalation (a plan step of it, or a
   specialist it asked for the run that needs the person): the links end at
   the run's escalation, which is that work's request when it works for the
@@ -66,7 +66,12 @@ its escalating task's own, and on that task's conversation turn when it is
 its own request (a job run) (``keep_escalation_result_files``): it trusts
 the result as it trusts its task's ``Task.attachments``, because it comes
 from the agent that held the escalation, and it never reads the lead's
-conversations.
+conversations. Only a task that works for a person keeps them
+(``access_control.ownership.escalation_result_files_access``). The lead
+answers a maintenance run's escalation for the schedule's administrator
+(``task_context_runtime.sign_system_escalation``), so those files are the
+administrator's: they stay on the lead's record of the escalation, and the
+run, which works for no person, keeps none (logged).
 """
 
 from __future__ import annotations
@@ -76,7 +81,7 @@ from collections.abc import Sequence
 from functools import partial
 from typing import Any, Optional
 
-from access_control.ownership import OwnershipDecision
+from access_control.ownership import OwnershipDecision, escalation_result_files_access
 from custom_agents.conversation_attachments import (
     DELEGATED_TASK_REASON,
     ESCALATION_RESULT_MESSAGE_TYPE,
@@ -277,11 +282,14 @@ async def keep_escalation_result_files(agent: Any, subtask_info: Any, result: Ta
     escalated (its parent is the task that waits) and ``result`` the result
     its holder sent (``task_message_runtime._handle_task_response`` checked
     the sender). Only an escalation's result brings files
-    (``result_with_answer_files``); records outside this host's upload
+    (``result_with_answer_files``), and only a parent that works for a person
+    keeps them (``access_control.ownership.escalation_result_files_access``):
+    a maintenance run for no person keeps none of the administrator's files
+    its escalation's answers brought. Records outside this host's upload
     folders are dropped. The rest are written to the parent's history as one
     files entry, so the parent's turn lists them and the attachment tools
-    open them by id. When the parent is its own request (a scheduled job or
-    maintenance run that escalated), they are then merged into its
+    open them by id. When the parent is its own request (a scheduled job
+    run that escalated), they are then merged into its
     conversation turn as well, as the team lead does for a request, so later
     turns of that conversation list and open them; for a delegated parent
     this adds nothing. The entry comes first and decides, as in
@@ -295,14 +303,26 @@ async def keep_escalation_result_files(agent: Any, subtask_info: Any, result: Ta
     parent_id = subtask_info.task.parent_task_id
     conversation_id = getattr(subtask_info.meta, "conversation_id", None)
     if getattr(subtask_info.meta, "manager_escalation", None) is None:
-        for attachment in result.attachments:
-            agent._logger.warning(
-                "A delegated task's result brought a file, but only an escalation's result may; it was not kept. "
-                "event=result_file_refused reason=not_an_escalation attachment_id=%s task_id=%s subtask_id=%s",
-                attachment.attachment_id,
-                parent_id,
-                subtask_info.task.task_id,
-            )
+        _log_refused_result_files(
+            agent, result, "not_an_escalation", "only an escalation's result may", parent_id, subtask_info
+        )
+        return
+    task_manager = agent.task_manager
+    parent_info = await task_manager.operations_runtime.run(task_manager.get_task_info, parent_id)
+    if parent_info is None:
+        agent._logger.warning(
+            "A task ended before the files its escalation's result brought were recorded. "
+            "event=escalation_result_files_task_gone task_id=%s escalation_task_id=%s attachment_ids=%s",
+            parent_id,
+            subtask_info.task.task_id,
+            _ids(result.attachments),
+        )
+        return
+    decision = escalation_result_files_access(person_id=parent_info.owner_person_id, task_id=parent_id)
+    if not decision.allowed:
+        _log_refused_result_files(
+            agent, result, decision.reason, "the task works for no person", parent_id, subtask_info
+        )
         return
     folders = await asyncio.to_thread(UploadFolders.for_agent, agent)
     kept = keep_upload_files(result.attachments, folders, task_id=parent_id, conversation_id=conversation_id)
@@ -322,15 +342,29 @@ async def keep_escalation_result_files(agent: Any, subtask_info: Any, result: Ta
             _ids(kept),
         )
         return
-    task_manager = agent.task_manager
-    parent_info = await task_manager.operations_runtime.run(task_manager.get_task_info, parent_id)
-    if parent_info is not None:
-        await asyncio.to_thread(
-            record_turn_attachments,
-            getattr(agent, "_conversation_store", None),
-            parent_info,
-            kept,
-            logger=agent._logger,
+    await asyncio.to_thread(
+        record_turn_attachments,
+        getattr(agent, "_conversation_store", None),
+        parent_info,
+        kept,
+        logger=agent._logger,
+    )
+
+
+def _log_refused_result_files(
+    agent: Any, result: Task, reason: str, explanation: str, task_id: Optional[str], subtask_info: Any
+) -> None:
+    """One warning per file a delegated task's result brought that is not kept, with the ids and why."""
+
+    for attachment in result.attachments:
+        agent._logger.warning(
+            "A delegated task's result brought a file that was not kept: %s. "
+            "event=result_file_refused reason=%s attachment_id=%s task_id=%s subtask_id=%s",
+            explanation,
+            reason,
+            attachment.attachment_id,
+            task_id,
+            subtask_info.task.task_id,
         )
 
 

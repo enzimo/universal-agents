@@ -74,17 +74,17 @@ from custom_agents.structured_llm_messages import (
     TaskQueryAction,
     TaskResponseAction,
 )
-from custom_agents.task_context_runtime import context_verifier
+from custom_agents.task_context_runtime import context_verifier, sign_system_context
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.delegated_work_v1 import DelegatedTaskClaimedV1
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import ManagerEscalationContext, MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import GatewayContext, ManagerEscalationContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskStatus
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType, TaskHistoryType
 from custom_messages.transport_codec import decode_envelope, encode_envelope
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import forget_task_context_keys, use_gateway_key
+from tests.broker_access_support import forget_task_context_keys, use_gateway_key, use_scheduler_key
 from tests.task_work_support import use_agent
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, TEAM, _admit, _answer, _lead
 from tests.test_gateway_parallel_threads import _send, _web_chat_thread
@@ -108,6 +108,7 @@ WORKER_ID = "worker_1"
 WORKER_TYPE = "WebResearchAgent"
 QUESTION = "Which diet must the recipe suit?"
 NOW = "2026-11-12T00:00:00+00:00"
+MAINTENANCE_CONVERSATION = "conv_maintenance"
 
 
 @pytest.fixture(autouse=True)
@@ -830,3 +831,79 @@ async def test_a_worker_keeps_files_only_from_its_escalations_results_and_only_f
     assert f"reason=not_an_escalation attachment_id={other.attachment_id} task_id=task_work subtask_id=task_helper" in refused
     [outside] = _messages(caplog, "attachment_outside_upload_folders")
     assert "task_id=task_work" in outside
+
+
+async def _admit_maintenance_run(worker: Any, task_id: str) -> None:
+    """Admit a maintenance run as the scheduler signs one: system work for no person, in its own conversation."""
+
+    meta = MessageMeta(
+        conversation_id=MAINTENANCE_CONVERSATION,
+        msg_correlation_id=f"corr_{task_id}",
+        requester_type=RequesterType.AGENT_REQUESTER,
+        gateway_context=GatewayContext(),
+    )
+    sign_system_context(meta, team_id=TEAM, schedule_id="sched_maintenance")
+    task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="Weekly maintenance check.")
+    await task_message_runtime._handle_task_request(
+        worker, task, MessageHeader(from_agent_id="scheduler", response_routing_key="scheduler_response"), meta
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_maintenance_run_keeps_none_of_the_files_its_escalations_answer_brought(
+    tmp_path: Path, layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """SEC-1: work for no person must not keep an administrator's answer files.
+
+    A maintenance run works for no person. The team lead answers its
+    escalation for the maintenance schedule's owner, an administrator
+    (``task_context_runtime.sign_system_escalation``, covered in
+    ``test_internal_improvement_access``), and its result carries the files
+    the administrator answered with. Before this change the run kept them,
+    and so did its ownerless conversation: the next run for no person listed
+    and opened them, and could copy them into ``workspaces/agents``, which
+    every person's work reads. A run for a person keeps them (the job-run
+    test above).
+    """
+
+    use_scheduler_key(monkeypatch)
+    worker = _worker(tmp_path, layout)
+    object.__setattr__(worker, "access_role", "system")  # a built-in system agent runs maintenance
+    await _admit_maintenance_run(worker, "task_maintenance_1")
+    assert worker.task_manager.get_task_info("task_maintenance_1").owner_person_id is None
+    await _turn(worker, "task_maintenance_1", [_escalate()])
+    [escalation] = [item for item in worker.task_manager.get_subtasks("task_maintenance_1") if item.meta.manager_escalation]
+    # The administrator's upload, as the gateway stored it from their own chat.
+    private = _upload(layout, "admin-private.png", session_key="web:admin-session", conversation_id="conv_admin")
+    result = Task(
+        task_id=escalation.task.task_id,
+        parent_task_id="task_maintenance_1",
+        task_type=MessageMetaType.RESPONSE,
+        answer="Here is the file.",
+        attachments=[private],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await keep_escalation_result_files(worker, escalation, result)
+
+    store = worker._conversation_store
+    assert _files_entries(worker.task_manager, "task_maintenance_1") == []
+    assert _own(worker.task_manager, store, "task_maintenance_1") == []
+    assert store.get_turn_by_task_id("task_maintenance_1")["attachments"] == []
+    [refused] = _messages(caplog, "result_file_refused")
+    assert refused.endswith(
+        f"reason=work_for_a_person_required attachment_id={private.attachment_id} task_id=task_maintenance_1 "
+        f"subtask_id={escalation.task.task_id}"
+    )
+    # The next run for no person in the same conversation can neither list, open nor copy it.
+    await _admit_maintenance_run(worker, "task_maintenance_2")
+    later = worker.task_manager.get_task_info("task_maintenance_2")
+    scope = TaskAttachments.for_task(worker.task_manager, later, store, is_team_lead=False)
+    assert scope.conversation_id == MAINTENANCE_CONVERSATION
+    assert scope.find([private.attachment_id]) == ([], [private.attachment_id])
+    assert scope.choices() == []
+    use_agent(worker, "task_maintenance_2")
+    for copy in (False, True):
+        opened = inspect_user_attachment._tool_func(attachment_id=private.attachment_id, copy_to_workspace=copy)
+        assert opened["status"] == "error" and '"result": "unknown_attachment_id"' in opened["content"][0]["text"]
+    assert not (layout.workspaces_dir / "agents" / "uploads").exists()

@@ -42,7 +42,12 @@ decided by ``sent_files_access``: only files the gateway vouches it sent for
 that task, in that conversation, for that person, with a signed context
 bound to that one message and its files (``request_context_id``,
 ``steering_context_id``, ``answer_context_id``; see its docstring for why a
-context another agent process holds or overheard cannot pass).
+context another agent process holds or overheard cannot pass). Work done for
+a request (a plan step, an isolated recovery task, work the team lead does
+for an escalation) shares the request's files only when both work for the
+same person (``request_files_access``), and the files people's answers bring
+back to a worker with its escalation's result stay only with work for a
+person (``escalation_result_files_access``).
 
 Objectives are the team lead's records, all kept in its one durable scope, so
 its Objective tools ask ``objective_access`` which ones a task may reach: the
@@ -289,6 +294,50 @@ def sent_files_access(
     return _denied(reason, person_id, RESOURCE_CONVERSATION, conversation_id or "", PRIVATE_UPDATE)
 
 
+def request_files_access(
+    *, person_id: str | None, request_person_id: str | None, request_task_id: str
+) -> OwnershipDecision:
+    """Whether work done for a request may use the request's files: read, keep and pass them on.
+
+    A plan step, an isolated recovery task, or work the team lead does for a
+    worker's escalation runs for a request (found only through the task
+    manager's links, ``custom_agents.conversation_attachments.linked_request``).
+    The request's files and the files sent to that work are the request's
+    person's private records, so the work shares them only when it works for
+    that same person (``person_id``, its own verified person recorded at
+    admission; ``request_person_id``, the request's). As in
+    ``named_task_access``, work for no person shares only with a request for
+    no person: a missing person and a person differ in both directions.
+    """
+
+    person = _person(person_id)
+    owner = _person(request_person_id)
+    if person == owner:
+        return OwnershipDecision(True, "same_person_request" if person else "no_person_request")
+    return _denied("same_person_request_required", person, RESOURCE_TASK, request_task_id, PRIVATE_READ)
+
+
+def escalation_result_files_access(*, person_id: str | None, task_id: str) -> OwnershipDecision:
+    """Whether a worker's task keeps the files the team lead's result for its escalation brought.
+
+    Those files came with people's answers to the escalation's questions, and
+    the lead carries only answers the gateway vouched for the escalation's
+    person (``sent_files_access``). An escalation from work for a person
+    carries that person's signed context, so the files are that person's own
+    and stay with the work (``person_id``, whom the waiting task verifiably
+    works for). Work for no person keeps none: the lead re-signs its
+    escalation for the maintenance schedule's owner, an administrator
+    (``custom_agents.task_context_runtime.sign_system_escalation``), so the
+    files are that administrator's, while the run's conversation belongs to
+    nobody (later runs for no person would list and open them) and its home
+    folder, ``workspaces/agents``, is readable by every person's work.
+    """
+
+    if _person(person_id):
+        return OwnershipDecision(True, "work_for_a_person")
+    return _denied("work_for_a_person_required", None, RESOURCE_TASK, task_id, PRIVATE_UPDATE)
+
+
 def request_context_id(task: Task) -> str:
     """The id of the signed context the gateway issues for the new request ``task`` (``sent_files_access``)."""
 
@@ -490,10 +539,12 @@ __all__ = [
     "answer_context_id",
     "conversation_continuation",
     "conversation_files_access",
+    "escalation_result_files_access",
     "named_task_access",
     "objective_access",
     "private_access",
     "request_context_id",
+    "request_files_access",
     "sent_files_access",
     "steering_context_id",
     "system_work_schedule_access",

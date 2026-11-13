@@ -44,7 +44,11 @@ Which files are kept at all, before anything is saved:
   lead's result for the escalation carries them, and only them
   (``answer_files``), to the worker, which keeps the ones in the upload
   folders as its task's own (``ESCALATION_RESULT_MESSAGE_TYPE``), and on its
-  conversation turn when that task is its own request (a job run).
+  conversation turn when that task is its own request (a job run), but only
+  when that task works for a person
+  (``access_control.ownership.escalation_result_files_access``): the lead
+  answers a maintenance run's escalation for the schedule's administrator,
+  and work for no person keeps none of that person's files.
 - Files history entries are written only by this runtime after admission, so
   any a task message arrives with are dropped (``without_incoming_files_entries``).
 - Both writers then drop records that point outside this host's upload
@@ -74,7 +78,8 @@ What a task may use (``TaskAttachments``):
   files. The request is found only through the task manager's plan-step and
   recovery links (``linked_request``), must be a top-level task held here
   or the team lead's escalation from a worker's own run, and must work for
-  the step's person; otherwise the step uses only its own files (logged).
+  the step's person (``access_control.ownership.request_files_access``);
+  otherwise the step uses only its own files (logged).
   A step of such an escalation uses the escalation's own files (the run's
   files it was sent with, and its answers' files), never a conversation.
   A delegated task (a worker's, or the team lead's record of an escalation)
@@ -133,6 +138,7 @@ from access_control.ownership import (
     answer_context_id,
     conversation_files_access,
     request_context_id,
+    request_files_access,
     sent_files_access,
     steering_context_id,
 )
@@ -324,9 +330,10 @@ class RequestLink:
     never from a message or a model. ``root_task_id`` is the task it runs for
     (None when the task is its own request, or its parent is not held here);
     ``info`` is that task when it may share the task's files: a request
-    working for the same person (``owner_person_id``, recorded at admission
-    from verified identity). Otherwise ``reason`` says why not:
-    ``ROOT_NOT_HELD``, ``ROOT_DELEGATED`` or ``ROOT_OTHER_PERSON``.
+    working for the same person (``access_control.ownership.request_files_access``
+    on the persons recorded at admission from verified identity). Otherwise
+    ``reason`` says why not: ``ROOT_NOT_HELD``, ``ROOT_DELEGATED`` or
+    ``ROOT_OTHER_PERSON``.
     """
 
     root_task_id: Optional[str] = None
@@ -352,8 +359,9 @@ def linked_request(task_manager: Any, task_info: Any, *, is_team_lead: bool) -> 
     delegated work and its escalations) runs for it as work for a person's
     request runs for that request. Any other delegated task is
     ``ROOT_DELEGATED``. Both kinds of request must work for the task's
-    person. Reading (``step_request``) and keeping a person's files
-    (``sent_files_runtime``) use this one rule.
+    person (``access_control.ownership.request_files_access``). Reading
+    (``step_request``) and keeping a person's files (``sent_files_runtime``)
+    use this one rule.
 
     Calls the task manager directly: run it on the task manager's operation
     lane from async code.
@@ -368,7 +376,10 @@ def linked_request(task_manager: Any, task_info: Any, *, is_team_lead: bool) -> 
         return RequestLink(root_id, reason=ROOT_NOT_HELD)
     if root_info.task.parent_task_id is not None and not team_lead_escalation(root_info, is_team_lead=is_team_lead):
         return RequestLink(root_id, reason=ROOT_DELEGATED)
-    if root_info.owner_person_id != task_info.owner_person_id:
+    decision = request_files_access(
+        person_id=task_info.owner_person_id, request_person_id=root_info.owner_person_id, request_task_id=root_id
+    )
+    if not decision.allowed:
         return RequestLink(root_id, reason=ROOT_OTHER_PERSON)
     return RequestLink(root_id, info=root_info)
 
