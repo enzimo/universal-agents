@@ -6,6 +6,7 @@ from custom_agents.strands_team import (
     RUNTIME_OPERATIONS_WORKFLOWS_SKILL_DIR,
     SECURE_CREDENTIAL_WORKFLOWS_SKILL_DIR,
 )
+from custom_tools.task_uploads import RESULT_UPLOAD_UNAVAILABLE
 
 
 def test_shared_prompt_keeps_secure_cli_details_in_skill() -> None:
@@ -74,6 +75,19 @@ def test_access_prompt_names_the_access_tools_and_the_only_way_to_ask() -> None:
     assert "access_denied" in ACCESS_PROMPT_RULE and "Never ask people to grant access in chat" in ACCESS_PROMPT_RULE
     assert ACCESS_PROMPT_RULE in shared_agent_base_prompt
     assert "denial_receipt" not in shared_agent_base_prompt
+
+
+def test_shared_prompt_asks_to_resend_a_file_only_when_the_slice_and_the_tools_cannot_find_it() -> None:
+    # The Conversation Attachments section lists only the newest 20 earlier
+    # files, so "not listed" alone must not mean "ask again": a recorded file
+    # past the newest 20 is still in get_conversation_context_slice and opens
+    # by id. A deleted file is listed, so it is named by the tools' result code.
+    rule = next(line for line in shared_agent_base_prompt.splitlines() if "Conversation Attachments" in line)
+    assert (
+        "Ask them to send it again only when neither that list nor `get_conversation_context_slice` has it" in rule
+    )
+    assert f"opening it returns `{RESULT_UPLOAD_UNAVAILABLE}`" in rule
+    assert "if it is not listed" not in rule
 
 
 def test_shared_prompt_prohibits_generated_site_url_guessing() -> None:
