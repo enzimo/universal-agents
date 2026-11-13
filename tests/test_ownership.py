@@ -271,7 +271,8 @@ def _sent(**changes) -> TaskContextV1:
         (None, "gateway_context_required"),
         (_sent(issuer="scheduler"), "sender_not_gateway"),
         (_sent(person_id="usr_b"), "another_person"),
-        (_sent(root_task_id=None), "another_task"),
+        # As the gateway signed a request before the update: no task named.
+        (_sent(root_task_id=None), "context_names_no_task"),
         (_sent(root_task_id="task_2"), "another_task"),
         (_sent(conversation_id=None), "another_conversation"),
         (_sent(conversation_id="c2"), "another_conversation"),

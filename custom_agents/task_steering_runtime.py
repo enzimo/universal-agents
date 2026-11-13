@@ -14,6 +14,14 @@ answer text. They then stay usable by id after the guidance is read and after
 a restart (``custom_agents.conversation_attachments``). Guidance sent on to
 the task's workers carries no files: a worker's files are the ones its
 delegation named.
+
+A message can still be refused as stale after its files were kept: a
+guidance whose task ends between its files entry and the guidance entry, and
+an interrupt answer whose live session ends while its files are recorded
+with the restart fallback off. The files then stay on the turn and among the
+task's files while the person is told the message was not used; a warning
+names the task, the message and the files
+(``event=sent_files_kept_message_refused``).
 """
 
 from __future__ import annotations
@@ -467,8 +475,45 @@ async def _accept_sent_files(
     return steering.model_copy(update={"attachments": kept}) if kept is not None else None
 
 
+async def _keep_guidance(
+    agent: Any, task_info: Any, steering: TaskSteering, msg_meta: MessageMeta
+) -> Optional[TaskSteering]:
+    """The guidance as taken, after recording its files and then itself; None when its task is gone."""
+
+    task_id = task_info.task.task_id
+    accepted = await _accept_sent_files(agent, task_info, steering, msg_meta)
+    if accepted is None:
+        return None
+    if not await _record_guidance_history(agent, task_id, accepted, applied=False):
+        # The task ended between its files entry and the guidance entry.
+        _warn_files_kept_for_refused_message(agent, task_id, accepted)
+        return None
+    return accepted
+
+
 def _steering_subject(steering: TaskSteering) -> str:
     return "a guidance" if steering.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE else "an answer"
+
+
+def _warn_files_kept_for_refused_message(agent: Any, task_id: str, accepted: TaskSteering) -> None:
+    """Log that a message refused as stale had its files kept already (module docstring).
+
+    ``accepted`` is the copy ``_accept_sent_files`` returned: its files are
+    on the task's conversation turn and among its files, while the person is
+    told the message was not used.
+    """
+
+    if not accepted.attachments:
+        return
+    agent._logger.warning(
+        "A message was refused after its files were kept: they stay on the task's conversation turn and "
+        "among its files, but the person is told the message was not used. "
+        "event=sent_files_kept_message_refused task_id=%s steering_id=%s steering_type=%s attachment_ids=%s",
+        task_id,
+        accepted.steering_id,
+        accepted.steering_type.value,
+        ",".join(attachment.attachment_id for attachment in accepted.attachments),
+    )
 
 
 async def _forward_proactive_guidance_to_pending_subtasks(
@@ -707,8 +752,8 @@ async def handle_task_steering_message(
             return
         # Acknowledge only after the complete guidance is in the task's durable
         # history. Restart reconstructs pending guidance and deduplication there.
-        accepted = await _accept_sent_files(agent, task_info, steering, msg_meta)
-        if accepted is None or not await _record_guidance_history(agent, task_id, accepted, applied=False):
+        accepted = await _keep_guidance(agent, task_info, steering, msg_meta)
+        if accepted is None:
             await _send_steering_status_response(
                 agent, steering, msg_header, msg_meta,
                 status=TaskSteeringStatus.STALE,
@@ -765,6 +810,8 @@ async def _take_interrupt_response(
 
     The answer is refused as stale before its files are kept when neither
     path can take it: no live session and the restart fallback turned off.
+    When the live session ends while its files are recorded, it is refused
+    after they were kept, with a warning (module docstring).
     """
 
     task_id = task_info.task.task_id
@@ -811,6 +858,7 @@ async def _take_interrupt_response(
 
     if not restart_allowed:
         # Only when the live session ended while the files were recorded.
+        _warn_files_kept_for_refused_message(agent, task_id, steering)
         await _send_steering_status_response(
             agent,
             steering,

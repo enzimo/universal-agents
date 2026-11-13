@@ -18,9 +18,12 @@ working for Ann (signed task context). Covers:
   agent process received (sent again with other files, under a new key or
   under the same key after a restart) gets none of its files onto the task,
   its turn or the model's text, at admission and on guidance and answers;
+- a request the gateway signed before the update (its context names no task)
+  is admitted without its files, logged with its own reason;
 - a delegated task keeps no files from guidance, and the lead sends guidance
   on without files;
-- an answer refused as stale keeps none of its files;
+- an answer refused as stale keeps none of its files, and a guidance or an
+  answer refused after its files were kept is logged with those files;
 - the views that show the task's history to models (the history window, an
   isolated recovery's context and the turn summary prompt) name kept files
   without where their bytes are, while the stored records keep it.
@@ -44,7 +47,7 @@ from assistant_gateway.inbound_attachments import (
     store_inbound_attachment_bytes_with_policy,
 )
 from access_control.ownership import steering_context_id
-from custom_agents import task_message_runtime, task_steering_runtime
+from custom_agents import sent_files_runtime, task_message_runtime, task_steering_runtime
 from custom_agents.conversation_attachments import (
     TASK_FILES_EVENT,
     TaskAttachments,
@@ -636,21 +639,101 @@ def test_a_copy_of_the_request_with_other_files_keeps_none(
     assert f"reason=context_not_for_message attachment_id={bobs.attachment_id} task_id={TASK}" in refused
 
 
-# --- A refused answer ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_a_request_signed_before_the_update_is_admitted_without_its_files_and_says_why(
+    tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A request still queued for the lead when the instance was updated: the gateway before the update
+    signed only the team, the person and their roles, so the context names no task."""
+
+    agent = _lead(tmp_path, layout)
+    photo = _upload(layout, "photo.png")
+    task = Task(task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="What is in it?", attachments=[photo])
+    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    meta = MessageMeta(
+        conversation_id=CONVERSATION,
+        msg_correlation_id="corr_queued",
+        requester_type=RequesterType.USER_REQUESTER,
+        gateway_context=GatewayContext(canonical_user_id=ANN, session_key=SESSION, task_context=signed),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
+        await task_message_runtime._handle_task_request(
+            agent, task, MessageHeader(from_agent_id="gateway", response_routing_key="gateway_route"), meta
+        )
+
+    info = agent.task_manager.get_task_info(TASK)
+    assert info.owner_person_id == ANN  # the request itself is admitted for Ann
+    assert info.task.attachments == []
+    assert _turn_files(agent) == []
+    [refused] = _messages(caplog, "sent_file_refused")
+    assert f"reason=context_names_no_task attachment_id={photo.attachment_id} task_id={TASK}" in refused
+    assert "names no task" in refused and "the person must send the file again" in refused
+
+
+# --- Refused guidance and answers ---------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_an_answer_refused_as_stale_keeps_none_of_its_files(lead, layout: InstanceLayout, statuses, monkeypatch) -> None:
+async def test_an_answer_refused_as_stale_keeps_none_of_its_files(
+    lead, layout: InstanceLayout, statuses, monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setattr(task_steering_runtime, "mid_turn_steering_config", lambda _agent: {"allow_restart_fallback": False})
     before_turn, before_own = _turn_files(lead), _own(lead.task_manager, lead._conversation_store)
     photo = _upload(layout, "pan.png")
 
-    await _send(lead, _steering(TaskSteeringType.INTERRUPT_RESPONSE, [photo], "answer_late", "This pan."))
+    with caplog.at_level(logging.WARNING):
+        await _send(lead, _steering(TaskSteeringType.INTERRUPT_RESPONSE, [photo], "answer_late", "This pan."))
 
     assert statuses[0][1:] == (TaskSteeringStatus.STALE, "Live Strands interrupt session is no longer available.")
     assert _turn_files(lead) == before_turn
     assert _files_entries(lead.task_manager) == []
     assert _own(lead.task_manager, lead._conversation_store) == before_own
+    assert _messages(caplog, "sent_files_kept_message_refused") == []  # nothing was kept
+
+
+def _after_the_turn_merge(monkeypatch: pytest.MonkeyPatch, then) -> None:
+    """Run ``then`` once a message's files are merged into the turn, as the lead's other work could
+    while the handler waits for the merge."""
+
+    merge = sent_files_runtime.record_turn_attachments
+
+    def merge_then(*args, **kwargs):
+        added = merge(*args, **kwargs)
+        then()
+        return added
+
+    monkeypatch.setattr(sent_files_runtime, "record_turn_attachments", merge_then)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [TaskSteeringType.PROACTIVE_GUIDANCE, TaskSteeringType.INTERRUPT_RESPONSE])
+async def test_a_message_refused_after_its_files_were_kept_is_logged_with_them(
+    lead, layout: InstanceLayout, statuses, monkeypatch, caplog: pytest.LogCaptureFixture, kind
+) -> None:
+    # The window sent_files_runtime names: the task's files entry and the turn are written, then
+    # the request's turn finishes before the guidance is recorded, or the live session waiting for
+    # the answer ends while the restart fallback is off.
+    if kind == TaskSteeringType.PROACTIVE_GUIDANCE:
+        _after_the_turn_merge(monkeypatch, lambda: lead.task_manager.task_state.tasks.pop(TASK))
+    else:
+        monkeypatch.setattr(
+            task_steering_runtime, "mid_turn_steering_config", lambda _agent: {"allow_restart_fallback": False}
+        )
+        lead._interrupted_turn_sessions[TASK] = object()
+        _after_the_turn_merge(monkeypatch, lambda: lead._interrupted_turn_sessions.pop(TASK))
+    photo = _upload(layout, "pan.png")
+    steering = _steering(kind, [photo], "late", "This pan.")
+
+    with caplog.at_level(logging.WARNING):
+        await _send(lead, steering)
+
+    assert [status for _id, status, _reason in statuses] == [TaskSteeringStatus.STALE]
+    assert photo.attachment_id in _turn_files(lead)
+    [warning] = _messages(caplog, "sent_files_kept_message_refused")
+    assert warning.endswith(
+        f"task_id={TASK} steering_id={steering.steering_id} steering_type={kind.value} attachment_ids={photo.attachment_id}"
+    )
 
 
 # --- What models see of the task's history -----------------------------------------------------------
@@ -687,7 +770,8 @@ async def test_history_views_name_kept_files_without_where_their_bytes_are(
     )
     assert recovery is not None
     use_agent(lead, recovery.task.task_id)
-    recovery_text = await asyncio.to_thread(get_recovery_context._tool_func, detail_level="recent_history", max_entries=30)
+    # "all" covers both history sections: recent_history and failure_window.
+    recovery_text = await asyncio.to_thread(get_recovery_context._tool_func, detail_level="all", max_entries=30)
     model = _RecordingSummaryModel()
     generator = LLMTurnSummaryGenerator(
         config=ConversationSummaryConfig(), logger=logging.getLogger("test"), summarization_model=model

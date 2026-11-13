@@ -3636,6 +3636,20 @@ Limits:
 - Only the same conversation and person: no task lists or opens another
   conversation's or another person's files, and the team transfer carries no
   conversations or their files.
+- A request still waiting in the team lead's queue when the instance is
+  updated to this version starts with its text but without its files: the
+  gateway before the update signed its context without naming the task, so
+  the lead refuses them, one warning per file
+  (`event=sent_file_refused reason=context_names_no_task`). The person must
+  send those files again; operators can let queued requests start before
+  updating. Guidance and answers are signed each time the gateway sends them,
+  so they are not affected.
+- A guidance or an interrupt answer can be refused as stale after its files
+  were kept: when its task ends between the files entry and the guidance
+  entry, or, for an answer, when the live session ends meanwhile with the
+  restart fallback off. The files then stay on the turn and among the task's
+  files while the person is told the message was not used; the lead logs
+  `event=sent_files_kept_message_refused` with the task, message and file ids.
 
 ### Model provider keys
 

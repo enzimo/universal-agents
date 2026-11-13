@@ -126,6 +126,7 @@ from pydantic import ValidationError
 from access_control import safe_open
 from access_control.identity import IdentityRejected
 from access_control.ownership import (
+    CONTEXT_NAMES_NO_TASK,
     OwnershipDecision,
     answer_context_id,
     conversation_files_access,
@@ -185,12 +186,17 @@ TASK_NOT_FOUND_REASON = "task_not_found"
 ROOT_NOT_HELD = "not_held"
 ROOT_DELEGATED = "delegated"
 ROOT_OTHER_PERSON = "other_person"
-# What ``log_refused_files`` says for those reasons; any other reason is the
+# What ``log_refused_files`` says for those reasons and for a request signed
+# before the update (``CONTEXT_NAMES_NO_TASK``); any other reason is the
 # gateway's rule (``sent_files_access``) refusing the files.
 _REFUSAL_TEXT = {
     DELEGATED_TASK_REASON: "the task it was sent to is delegated work that keeps no files from this message",
     NOT_AN_ANSWER_REASON: "only a person's answer to a question brings files",
     TASK_NOT_FOUND_REASON: "the task it was sent to is not held here",
+    CONTEXT_NAMES_NO_TASK: (
+        "its signed context names no task, as the context of a request the gateway signed before the update "
+        "that started keeping each message's files does; the person must send the file again"
+    ),
 }
 _NOT_VOUCHED_TEXT = "the gateway does not vouch that it sent it for this task"
 # Set by ``TaskManager`` on the copies of a worker's entries in its lead's history.

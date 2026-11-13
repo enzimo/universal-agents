@@ -105,6 +105,12 @@ _CREATABLE = frozenset(
 _REQUEST_MESSAGE = "request"
 _STEERING_MESSAGE = "steering"
 _ANSWER_MESSAGE = "question_answer"
+# ``sent_files_access``'s reason for a gateway context that names no task.
+# Gateways before the update that started keeping each message's files signed
+# a request's context without one, so this is how a request still queued for
+# the team lead across that update arrives (``custom_agents.conversation_attachments``
+# words it for the log).
+CONTEXT_NAMES_NO_TASK = "context_names_no_task"
 
 
 @dataclass(frozen=True)
@@ -236,7 +242,12 @@ def sent_files_access(
     answer to a question, which names the task that asked: the request, a
     plan step or isolated recovery task of it, or the team lead's record of
     a worker's escalation (``assistant_gateway.application.request_context``,
-    ``assistant_gateway.application.clarification``). This rule decides only
+    ``assistant_gateway.application.clarification``). A gateway context that
+    names no task is refused as ``CONTEXT_NAMES_NO_TASK`` rather than
+    ``another_task``, because the gateway never signs one for a message with
+    files: on a request it is the context a gateway from before this rule
+    signed, for a request still queued when the instance was updated, whose
+    files the person must send again. This rule decides only
     whether the gateway vouches for the files; which tasks then keep them is
     the agent runtime's decision (``custom_agents.sent_files_runtime``).
 
@@ -261,6 +272,8 @@ def sent_files_access(
         reason = "sender_not_gateway"
     elif _person(sender.person_id) != _person(person_id):
         reason = "another_person"
+    elif not sender.root_task_id:
+        reason = CONTEXT_NAMES_NO_TASK
     elif not task_id or sender.root_task_id != task_id:
         reason = "another_task"
     elif not conversation_id or sender.conversation_id != conversation_id:

@@ -352,7 +352,10 @@ Until then, the assistant can use a file sent earlier in the same chat, for
 example "the photo I sent yesterday", without it being sent again; files sent
 with an answer to the assistant's question count too. It cannot reach files
 from another chat or another person, nor files sent before the team's update
-that started keeping each message's files; send those again.
+that started keeping each message's files; send those again. The same holds
+for files sent with a request that was still waiting to start when the team
+was updated: the request runs, but without its files. To avoid this, update
+when no requests are waiting, or ask people to send those files again.
 
 A person's folder is named after their user id: generated ids such as
 `usr_3f9a1b2c4d5e` are used as they are, and other ids become a readable name

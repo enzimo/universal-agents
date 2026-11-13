@@ -10,10 +10,14 @@ it arrived. The files kept are written to the task's history as one files
 entry and added to its conversation turn, so they stay the task's own after
 the message is read and after a restart. The task's entry is written first
 and decides: when the task has ended, nothing else is recorded and the
-handler drops the message, so a message keeps its files exactly when it is
-taken. The handler then carries on with a copy of the message holding only
-those files, so a refused file is never saved, queued, shown to the model or
-sent on.
+handler drops the message. The handler then carries on with a copy of the
+message holding only those files, so a refused file is never saved, queued,
+shown to the model or sent on. One window remains in which a message is
+refused after its files were kept: a guidance whose task ends before the
+guidance itself is recorded, or an interrupt answer whose live session ends
+meanwhile while the restart fallback is off. Those files stay the task's,
+and the steering handler logs it (``event=sent_files_kept_message_refused``,
+``custom_agents.task_steering_runtime``).
 
 A plan step or an isolated recovery task (``custom_agents.task_manager_plans``)
 is a task of its own with a conversation id of its own and no conversation
