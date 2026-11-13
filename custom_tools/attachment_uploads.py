@@ -22,7 +22,8 @@ whose result says "no longer stored" when the file was removed and gives a
 fixed message otherwise, never an operating-system error, which would name
 the storage path (its folder name carries chat identifiers). Finding the file
 follows the same rule (``conversation_attachments.locate_upload``): removed
-(``UPLOAD_GONE_ERRORS``) is "no longer stored", any other fault is the fixed
+(``UPLOAD_GONE_ERRORS``, the file or its folder is missing) is "no longer
+stored", any other fault is the fixed
 message, logged as ``event=attachment_upload_unreadable`` with the task and
 attachment ids and the error number, and the size comes from that one
 look-up, so nothing between the check and the read can raise with the path.

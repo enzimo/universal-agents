@@ -20,6 +20,7 @@ import errno
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -410,12 +411,14 @@ def _lookup_fails(monkeypatch: pytest.MonkeyPatch, path: Path, error: OSError) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", [errno.EACCES, errno.EIO])
+# A permission fault, a disk fault, and a file where the upload's folder should
+# be (no removal leaves that, so it is a fault, not a deletion).
+@pytest.mark.parametrize("fault", [errno.EACCES, errno.EIO, errno.ENOTDIR])
 @pytest.mark.parametrize("tool", [inspect_user_attachment, load_local_media_for_model_context])
 async def test_a_stored_file_that_cannot_be_looked_up_gives_a_fixed_message_and_logs_no_path(
     instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fault: int, tool: Any
 ) -> None:
-    error = PermissionError(fault, os.strerror(fault)) if fault == errno.EACCES else OSError(fault, os.strerror(fault))
+    error = OSError(fault, os.strerror(fault))  # PermissionError, OSError, NotADirectoryError
     _lookup_fails(monkeypatch, instance.layout.uploads_dir / "session_alice" / "att_photo", error)
     instance.use(ROOT)
 
@@ -437,14 +440,9 @@ async def test_a_stored_file_that_cannot_be_looked_up_gives_a_fixed_message_and_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool", [inspect_user_attachment, load_local_media_for_model_context])
-async def test_an_upload_whose_folder_is_gone_says_it_is_no_longer_stored(
-    instance: _Instance, monkeypatch: pytest.MonkeyPatch, tool: Any
-) -> None:
-    _lookup_fails(
-        monkeypatch,
-        instance.layout.uploads_dir / "session_alice" / "att_photo",
-        NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR)),
-    )
+async def test_an_upload_whose_folder_is_gone_says_it_is_no_longer_stored(instance: _Instance, tool: Any) -> None:
+    # A clean-up or a person's removal deleted the whole session folder.
+    shutil.rmtree(instance.layout.uploads_dir / "session_alice")
     instance.use(ROOT)
 
     status, payload, blocks = await _call(tool, {"attachment_id": "att_photo"})

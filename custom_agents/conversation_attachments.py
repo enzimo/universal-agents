@@ -104,10 +104,12 @@ UPLOAD_AVAILABLE: UploadState = "available"
 UPLOAD_DELETED: UploadState = "deleted"
 UPLOAD_REMOTE: UploadState = "remote"
 UPLOAD_UNREADABLE: UploadState = "unreadable"
-# The errors that mean a stored upload is gone (its retention ended, a clean-up
-# or its person's removal deleted it, with its folder); any other error reading
-# it is a fault to report, not a deletion.
-UPLOAD_GONE_ERRORS: tuple[type[OSError], ...] = (FileNotFoundError, NotADirectoryError)
+# The errors that mean a stored upload is gone: its retention ended, or a
+# clean-up or its person's removal deleted it, with or without its folder.
+# A removal never leaves a file where a folder should be, so NotADirectoryError
+# is a layout fault under state/uploads: like any other error reading the
+# upload, it is reported as unreadable, not as a deletion.
+UPLOAD_GONE_ERRORS: tuple[type[OSError], ...] = (FileNotFoundError,)
 
 
 def attachment_records(values: Iterable[Any]) -> list[dict[str, Any]]:
@@ -548,10 +550,11 @@ def locate_upload(attachment: UserTaskAttachment, uploads_dir: Path, *, task_id:
     """Where this runtime holds the file: ``available`` (real path and size), ``deleted``, ``unreadable`` or ``remote``.
 
     ``remote``: no copy in ``state/uploads`` (``stored_upload_path``). Otherwise
-    one look-up of the file decides: gone (``UPLOAD_GONE_ERRORS``) means the
-    upload was removed (its retention ended, a clean-up, or its person was
-    removed); any other error, or something there that is not a regular file,
-    is ``unreadable`` (a permission or disk fault) and is logged for
+    one look-up of the file decides: gone (``UPLOAD_GONE_ERRORS``: the file or
+    its folder is missing) means the upload was removed (its retention ended,
+    a clean-up, or its person was removed); any other error, or something there
+    that is not a regular file, is ``unreadable`` (a permission, disk or layout
+    fault) and is logged for
     ``task_id``. Agents cannot write in ``state/uploads``, so the real path
     checked here is the file that is opened, and the size comes from the same
     look-up, so no error between the check and the size can carry the path out.

@@ -551,30 +551,46 @@ def test_a_stored_file_that_cannot_be_read_is_not_called_removed(
     assert str(runtime.layout.root) not in caplog.text and "session_alice" not in caplog.text
 
 
-def test_a_removed_upload_or_folder_is_gone_and_anything_but_a_file_is_unreadable(
+def test_a_removed_upload_or_folder_is_gone_and_a_layout_fault_is_unreadable(
     runtime: _Runtime, caplog: pytest.LogCaptureFixture
 ) -> None:
     uploads = runtime.layout.uploads_dir
+
+    def at(path: Path, attachment_id: str) -> UserTaskAttachment:
+        return UserTaskAttachment(
+            attachment_id=attachment_id, filename="x.png", size_bytes=4, sha256="0" * 64,
+            storage_refs=[AttachmentStorageRef(storage_type="local", path=str(path))],
+        )
+
     stored = _file(runtime.layout, "att_here")
     removed = _file(runtime.layout, "att_removed", stored=False)
-    # The upload's folder was replaced by a file: looking inside it raises NotADirectoryError.
-    (uploads / "session_gone").write_bytes(b"not a folder")
-    in_gone_folder = UserTaskAttachment(
-        attachment_id="att_in_gone", filename="x.png", size_bytes=4, sha256="0" * 64,
-        storage_refs=[AttachmentStorageRef(storage_type="local", path=str(uploads / "session_gone" / "att_in_gone"))],
-    )
+    # A clean-up removed the upload's whole folder.
+    in_removed_folder = at(uploads / "session_removed" / "att_in_removed", "att_in_removed")
+    # A file sits where the upload's folder should be: looking inside it raises
+    # NotADirectoryError, which no removal produces.
+    (uploads / "session_file").write_bytes(b"not a folder")
+    under_a_file = at(uploads / "session_file" / "att_under_file", "att_under_file")
     a_folder = _file(runtime.layout, "att_folder", stored=False)
     _path(a_folder).mkdir(parents=True)
 
     with caplog.at_level(logging.INFO, logger="custom_agents.conversation_attachments"):
         found = locate_upload(stored, uploads, task_id=ROOT)
-        states = [locate_upload(item, uploads, task_id=ROOT).state for item in (removed, in_gone_folder, a_folder)]
+        states = [
+            locate_upload(item, uploads, task_id=ROOT).state
+            for item in (removed, in_removed_folder, under_a_file, a_folder)
+        ]
 
     assert (found.state, found.path, found.size_bytes) == (UPLOAD_AVAILABLE, _path(stored).resolve(), 4)
-    assert states == [UPLOAD_DELETED, UPLOAD_DELETED, UPLOAD_UNREADABLE]
-    [logged] = [record.getMessage() for record in caplog.records if record.levelno >= logging.INFO]
-    assert f"event=attachment_upload_unreadable task_id={ROOT} attachment_id=att_folder" in logged
-    assert "error_type=not_a_regular_file" in logged
+    assert states == [UPLOAD_DELETED, UPLOAD_DELETED, UPLOAD_UNREADABLE, UPLOAD_UNREADABLE]
+    logged = [record.getMessage() for record in caplog.records if record.levelno >= logging.INFO]
+    assert len(logged) == 2
+    assert all(record.levelno == logging.WARNING for record in caplog.records if record.levelno >= logging.INFO)
+    assert (
+        f"event=attachment_upload_unreadable task_id={ROOT} attachment_id=att_under_file "
+        f"error_type=NotADirectoryError errno={errno.ENOTDIR}"
+    ) in logged[0]
+    assert "attachment_id=att_folder error_type=not_a_regular_file" in logged[1]
+    assert str(runtime.layout.root) not in caplog.text and "session_file" not in caplog.text
 
 
 def test_a_delegation_passes_on_a_file_it_cannot_read_now(
