@@ -3668,17 +3668,32 @@ Limits:
   as not recording its request's files and its prompt says how many were not
   accepted (previous bullet), so the model asks for them when it needs them.
   The person must send those files again; operators can let queued requests
-  start before updating. Guidance and interrupt answers are signed again each time the
-  gateway sends them, and the gateway before the update sent no files with
-  answers to questions, so they are not affected. On a guidance or an answer
-  the same reason means a context taken from another message, and the warning
-  says only that the gateway does not vouch for the file.
-- A guidance or an interrupt answer can be refused as stale after its files
-  were kept: when its task ends between the files entry and the guidance
-  entry, or, for an answer, when the live session ends meanwhile with the
-  restart fallback off. The files then stay on the turn and among the task's
-  files while the person is told the message was not used; the lead logs
-  `event=sent_files_kept_message_refused` with the task, message and file ids.
+  start before updating. Guidance and interrupt answers are signed again
+  each time the gateway sends them, and the gateway before the update sent no
+  files with answers to questions, so their signing is not affected. On a
+  guidance or an answer the same reason means a context taken from another
+  message, and the warning says only that the gateway does not vouch for the
+  file. A guidance the lead accepted before the update and had not applied
+  yet is restored from its history with its text, but its files were never
+  recorded as the task's: its block names only files the task can open and
+  says how many others came with it, so the model asks for them if it needs
+  them.
+- Guidance the lead sends on to a working specialist carries no files (a
+  worker's files are the ones its delegation named); its text says how many
+  came with it and that the team lead has them.
+- A guidance or an interrupt answer can be refused after its files were
+  kept, because the files are recorded before the message itself: when its
+  task ends between the files entry and the guidance entry; for an answer,
+  when the live session ends meanwhile with the restart fallback off; or when
+  an earlier delivery recorded the files and then failed or stopped before
+  the message was recorded, and the gateway's resend is refused (the task
+  has ended, no live session is left after a restart with the fallback off,
+  or mid-turn steering was turned off). The files then stay on the turn and
+  among the task's files while the person is told the message was not used;
+  every such refusal logs `event=sent_files_kept_message_refused` with the
+  task, message and file ids, found from this delivery and from the task's
+  history for the message's `steering_id`. A resend whose task is no longer
+  held at all cannot read its record and logs nothing.
 
 ### Model provider keys
 

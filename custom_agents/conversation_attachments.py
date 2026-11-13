@@ -717,6 +717,24 @@ def _unique(attachments: Iterable[UserTaskAttachment]) -> tuple[UserTaskAttachme
     return tuple(unique.values())
 
 
+def kept_message_files(task: Any, message_id: str) -> tuple[UserTaskAttachment, ...]:
+    """The files this task's own files entries record for one message (``message_id``), one per id.
+
+    For a guidance or an interrupt answer the id is its ``steering_id``,
+    which the gateway keeps across resends, so a resend can tell that an
+    earlier delivery already kept its files
+    (``custom_agents.task_steering_runtime``).
+    """
+
+    unique: dict[str, UserTaskAttachment] = {}
+    for entry in list(task.execution_history or []):
+        details = getattr(entry, "details", None) or {}
+        if _written_by_this_task(entry, details) and details.get("message_id") == message_id:
+            for attachment in _recorded_files(task.task_id, details.get(TASK_FILES_KEY)):
+                unique.setdefault(attachment.attachment_id, attachment)
+    return tuple(unique.values())
+
+
 def answer_files(task: Any) -> tuple[UserTaskAttachment, ...]:
     """The files people's answers to the task's questions brought, as kept for it, one per id, in arrival order.
 
@@ -1277,6 +1295,7 @@ __all__ = [
     "describe_file",
     "inventory_text",
     "keep_upload_files",
+    "kept_message_files",
     "linked_request",
     "locate_upload",
     "log_refused_files",

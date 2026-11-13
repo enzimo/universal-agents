@@ -25,9 +25,13 @@ working for Ann (signed task context). Covers:
   guidance or interrupt answer under the gateway's status-check context
   (which names no task either) keeps none, without that advice;
 - a delegated task keeps no files from guidance, and the lead sends guidance
-  on without files;
+  on without files, saying how many came with it;
 - an answer refused as stale keeps none of its files, and a guidance or an
-  answer refused after its files were kept is logged with those files;
+  answer refused after its files were kept is logged with those files, also
+  when an earlier delivery kept them and the resend is refused (task ended,
+  mid-turn steering turned off, no live session after a restart);
+- a guidance restored from before the update names only files the task can
+  open and says how many others came with it;
 - the views that show the task's history to models (the history window, an
   isolated recovery's context and the turn summary prompt) name kept files
   without where their bytes are, while the stored records keep it.
@@ -70,7 +74,14 @@ from custom_agents.task_steering_runtime import (
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskSteering
-from custom_messages.enums import MessageMetaType, RequesterType, TaskSteeringStatus, TaskSteeringType
+from custom_messages.enums import (
+    MessageMetaType,
+    ProgressState,
+    RequesterType,
+    TaskHistoryImportance,
+    TaskSteeringStatus,
+    TaskSteeringType,
+)
 from custom_tools.providers.diagnostics import get_recovery_context
 from custom_tools.providers.heartbeat import get_task_history_window
 from runtime_settings.instance_layout import InstanceLayout
@@ -376,11 +387,16 @@ async def test_the_lead_sends_guidance_on_to_its_workers_without_files(lead, lay
     page_two = _upload(layout, "page two.png")
 
     await _send(lead, _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [page_two], "guide_on", "Use page two too."))
+    await _send(lead, _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [], "guide_plain", "And keep it short."))
 
-    [envelope] = sent
-    assert envelope.msg_content.target_task_id == "task_child"
-    assert envelope.msg_content.guidance_text == "Use page two too."
-    assert envelope.msg_content.attachments == []
+    with_file, without = sent
+    assert with_file.msg_content.target_task_id == "task_child"
+    # The worker learns a file came with it and who has it (review GEN-5), but gets none.
+    assert with_file.msg_content.guidance_text == (
+        "Use page two too.\n\n1 file(s) came with this guidance; the team lead has them."
+    )
+    assert with_file.msg_content.attachments == []
+    assert without.msg_content.guidance_text == "And keep it short."
     # The lead itself keeps the file; it can name it in a new delegation.
     assert page_two.attachment_id in _own(lead.task_manager, lead._conversation_store)
 
@@ -776,6 +792,101 @@ async def test_a_message_refused_after_its_files_were_kept_is_logged_with_them(
         f"task_id={TASK} steering_id={steering.steering_id} steering_type={kind.value} attachment_ids={photo.attachment_id}"
     )
 
+
+async def _first_delivery_stops_after_keeping_files(monkeypatch: pytest.MonkeyPatch, lead, steering: TaskSteering) -> None:
+    """The first delivery records the message's files and then stops before the message itself is recorded
+    (a store error, or the process stopping), so no status is sent and the gateway sends it again later."""
+
+    keep = task_steering_runtime.keep_sent_files
+
+    async def keep_then_stop(*args: Any, **kwargs: Any) -> Any:
+        await keep(*args, **kwargs)
+        raise OSError("the process stopped after recording the files")
+
+    monkeypatch.setattr(task_steering_runtime, "keep_sent_files", keep_then_stop)
+    with pytest.raises(OSError):
+        await _send(lead, steering)
+    monkeypatch.setattr(task_steering_runtime, "keep_sent_files", keep)
+    # A restart: the live session and the handler's memory of seen messages are gone.
+    lead._interrupted_turn_sessions.pop(TASK, None)
+    lead._processed_task_steering_ids.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refused_because", ["task_ended", "steering_turned_off", "no_live_session"])
+async def test_a_resend_refused_after_an_earlier_delivery_kept_its_files_is_logged_with_them(
+    lead, layout: InstanceLayout, statuses, monkeypatch, caplog: pytest.LogCaptureFixture, refused_because: str
+) -> None:
+    """FAIL-1: the resend of a message whose files an earlier delivery kept is refused; the files stay,
+    and the refusal says so with the message and file ids."""
+
+    photo = _upload(layout, "pan.png")
+    if refused_because == "no_live_session":
+        monkeypatch.setattr(task_steering_runtime, "mid_turn_steering_config", lambda _agent: {"allow_restart_fallback": False})
+        lead._interrupted_turn_sessions[TASK] = object()
+        steering = _steering(TaskSteeringType.INTERRUPT_RESPONSE, [photo], "answer_resent", "This pan.")
+    else:
+        steering = _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [photo], "guide_resent", "Use this pan.")
+    await _first_delivery_stops_after_keeping_files(monkeypatch, lead, steering)
+    assert statuses == [] and photo.attachment_id in _turn_files(lead)
+    if refused_because == "task_ended":
+        lead.task_manager.get_task_info(TASK).state = ProgressState.COMPLETED
+    elif refused_because == "steering_turned_off":
+        monkeypatch.setattr(task_steering_runtime, "mid_turn_steering_enabled", lambda _agent: False)
+
+    with caplog.at_level(logging.WARNING):
+        await _send(lead, steering)
+
+    assert [status for _id, status, _reason in statuses] == [
+        TaskSteeringStatus.REJECTED if refused_because == "steering_turned_off" else TaskSteeringStatus.STALE
+    ]
+    assert photo.attachment_id in _turn_files(lead)
+    [warning] = _messages(caplog, "sent_files_kept_message_refused")
+    assert warning.endswith(
+        f"task_id={TASK} steering_id={steering.steering_id} steering_type={steering.steering_type.value} "
+        f"attachment_ids={photo.attachment_id}"
+    )
+
+
+def _saved_before_the_update(lead, steering: TaskSteering) -> None:
+    """Guidance the lead accepted before the update: the whole message saved in its history, files included,
+    and no files entry, as the runtime before the update wrote it."""
+
+    lead.task_manager.append_history_entry(
+        TASK,
+        f"Mid-turn proactive steering accepted: {steering.guidance_text}",
+        importance=TaskHistoryImportance.HIGH,
+        details={
+            "event": task_steering_runtime.GUIDANCE_ACCEPTED_EVENT,
+            "steering_id": steering.steering_id,
+            "conversation_id": steering.conversation_id,
+            "dedupe_key": steering.idempotency_key or steering.steering_id,
+            "steering": steering.model_dump(mode="json"),
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_guidance_restored_from_before_the_update_names_only_files_the_task_can_open(
+    lead, layout: InstanceLayout, statuses
+) -> None:
+    """GEN-3: a restored guidance names no id the tools refuse, and says how many of its files cannot be opened."""
+
+    old_photo, new_page = _upload(layout, "receipt.png"), _upload(layout, "page two.png")
+    _saved_before_the_update(
+        lead, _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [old_photo], "guide_old", "Use this receipt instead.")
+    )
+    await _send(lead, _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [new_page], "guide_new", "Here is page two."))
+    # A restart: only the history is left.
+    lead._pending_proactive_task_steering.clear()
+
+    text = await consume_pending_proactive_guidance_message(lead, TASK)
+
+    assert "- Use this receipt instead." in text and "- Here is page two." in text
+    assert old_photo.attachment_id not in text
+    assert "1 file(s) sent with this guidance were saved before files were recorded, so they cannot be opened" in text
+    assert f"`{new_page.attachment_id}` page two.png" in text
+    assert old_photo.attachment_id not in _own(lead.task_manager, lead._conversation_store)
 
 # --- What models see of the task's history -----------------------------------------------------------
 
