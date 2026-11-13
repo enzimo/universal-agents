@@ -371,8 +371,9 @@ def test_the_inventory_says_up_to_which_turn_files_were_not_recorded(layout, sto
     assert "- `att_photo` att_photo.png (image/png, image, 10 bytes; turn 3, task task_new)" in text
     assert text.splitlines()[-1] == UNRECORDED_TURNS_NOTE.format(turn=2)
     assert UNRECORDED_TURNS_NOTE.format(turn=2) == (
-        "Turns up to turn 2 were saved before files were recorded: files sent in them are not listed and "
-        "cannot be opened by id. If the person refers to one, ask them to send it again."
+        "Turns up to turn 2 were saved before files were recorded: files sent with them are not listed and "
+        "cannot be opened by id (only files sent later, while one of them still ran, may be). If the person "
+        "refers to a file that is not listed, ask them to send it again."
     )
 
 

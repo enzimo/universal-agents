@@ -147,8 +147,9 @@ def get_conversation_turns(
     Each turn lists its files in `attachments` (id, name, type and size); open
     one with inspect_user_attachment by its attachment_id.
     `attachments_recorded` is false on turns saved before files were
-    recorded: files sent in them are unknown and cannot be opened, so ask the
-    person to send them again.
+    recorded: the files sent with them are unknown and cannot be opened, so
+    ask the person to send them again. Such a turn's `attachments` lists only
+    files sent to it later, while it still ran.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -199,8 +200,10 @@ def _conversation_turn_summary_payload(
     # The turn's files, descriptive fields only (the store's turn rows carry no
     # storage references); a model opens one by its attachment_id.
     attachments = turn.get("attachments") or []
-    # A turn saved before turns kept their files has no count: its files are
-    # unknown, not absent (storage.turn_attachments).
+    # A turn saved before turns kept their files has no count: its request's
+    # files are unknown, not absent, and its list holds only files sent to it
+    # later (storage.turn_attachments). The count stays null rather than
+    # counting those, so it never reads as "all the files it received".
     recorded = bool(turn.get("attachments_recorded"))
     return {
         "turn_index": turn.get("turn_index"),
@@ -467,8 +470,9 @@ def get_conversation_context_slice(
     `mode="full"` returns the full stored turn rows, with every file of each
     turn. The limit is capped at 50.
     `attachments_recorded` is false (and `attachment_count` null) on turns
-    saved before files were recorded: files sent in them are unknown and
-    cannot be opened, so ask the person to send them again.
+    saved before files were recorded: the files sent with them are unknown
+    and cannot be opened, so ask the person to send them again. Such a turn's
+    `attachments` lists only files sent to it later, while it still ran.
     """
     agent = get_agent_ref()
     if agent is None:

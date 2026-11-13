@@ -26,7 +26,8 @@ context). Covers:
   turn's files (at most 20 per turn in the slice summary, with the count)
   without storage references;
 - a turn saved before files were recorded is marked as such in the prompt
-  and in slices, not shown as a turn without files;
+  and in slices, not shown as a turn without files, also after a guidance
+  file sent to it later is listed (its request's files stay unknown);
 - no prompt or tool output shows where an upload is stored.
 """
 
@@ -53,15 +54,24 @@ from custom_agents.conversation_attachments import (
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.envelope_v1 import CommsMessage
 from custom_messages.contracts.task_v1 import TaskSteering
-from custom_messages.enums import ProgressState, TaskSteeringType
+from custom_messages.enums import ProgressState, TaskSteeringStatus, TaskSteeringType
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from custom_tools.providers.context_memory import get_conversation_context_slice, get_conversation_turns
+from custom_tools.task_uploads import RESULT_UNKNOWN_ATTACHMENT
 from default_values import AGENT_DEFAULTS
 from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import TURN_ATTACHMENT_SUMMARY_FIELDS
 from tests.task_work_support import use_agent
 from tests.test_conversation_attachments import saved_before_upgrade
-from tests.test_conversation_attachments_regression import ANN, CONVERSATION, TEAM, _admit, _answer, _lead
+from tests.test_conversation_attachments_regression import (
+    ANN,
+    CONVERSATION,
+    TEAM,
+    _admit,
+    _answer,
+    _lead,
+    _payload,
+)
 from tests.test_turn_files_recording import (  # noqa: F401  (autouse fixtures)
     _gateway_meta,
     _no_background_work,
@@ -74,6 +84,8 @@ from tests.test_turn_files_recording import (  # noqa: F401  (autouse fixtures)
 pytestmark = pytest.mark.integration
 
 FIRST, CURRENT = "task_first", "task_current"
+# A request that was still running when the instance was updated.
+RUNNING = "task_running"
 
 
 @pytest.fixture
@@ -429,6 +441,74 @@ async def test_a_turn_saved_before_files_were_recorded_is_not_shown_as_a_turn_wi
     for payload in (full, listed_turns):
         recorded = {turn["task_id"]: turn["attachments_recorded"] for turn in payload["turns"]}
         assert recorded == {FIRST: False, CURRENT: True}
+
+
+@pytest.mark.asyncio
+async def test_a_file_sent_to_a_turn_saved_before_files_were_recorded_leaves_its_requests_files_unknown(
+    lead: Any,
+    layout: InstanceLayout,
+    statuses: list[tuple[str, TaskSteeringStatus, str]],  # noqa: F811 - the imported pytest fixture
+) -> None:
+    """A request saved before the upgrade that receives a file afterwards (review finding FAIL-1).
+
+    Both of Ann's turns were saved before turns kept their files, and the
+    second request was still running when the instance was updated. The
+    guidance file she sends it afterwards goes through the real steering
+    handler into that turn's list. A later request then lists that file, but
+    still says the turn's own files are unknown, and the request's photo
+    cannot be opened by id.
+    """
+
+    store = lead._conversation_store
+    old_photo = _upload(layout, "old pot.png")
+    await _admit(lead, task_id=RUNNING, text="Which pot suits this plant?", attachments=[old_photo])
+    saved_before_upgrade(store, FIRST, RUNNING)
+    late = _upload(layout, "pot sizes.png")
+    guidance = TaskSteering(
+        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
+        target_task_id=RUNNING,
+        conversation_id=CONVERSATION,
+        guidance_text="Here are the sizes the shop has.",
+        idempotency_key="key_pot_sizes",
+        attachments=[late],
+    )
+    await _send(lead, guidance, _gateway_meta(guidance, task_id=RUNNING))
+    assert [status for _id, status, _reason in statuses] == [TaskSteeringStatus.ACCEPTED]
+    await _answer(lead, RUNNING, "The 30 cm pot.")
+    await _admit(lead, task_id=CURRENT, text="Use the photo of my old pot again.", attachments=[])
+    use_agent(lead, CURRENT)
+
+    # The late file is on the old turn, which still says its request's files are unknown.
+    running_turn = store.get_turn_by_task_id(RUNNING)
+    assert [item["attachment_id"] for item in running_turn["attachments"]] == [late.attachment_id]
+    assert running_turn["attachments_recorded"] is False
+    note = UNRECORDED_TURNS_NOTE.format(turn=2)
+    # The follow-up's prompt lists the late file, and the note still covers turn 2.
+    assembly = _assemble(lead)
+    listed = _section(assembly, CONVERSATION_ATTACHMENTS_SECTION)
+    assert _listed_ids(listed) == [late.attachment_id]
+    assert listed.splitlines()[-1] == note
+    assert old_photo.attachment_id not in assembly.prompt and str(layout.uploads_dir) not in assembly.prompt
+    # The request's own photo is unknown, with the same note; the late file opens.
+    unknown = _payload(inspect_user_attachment._tool_func(attachment_id=old_photo.attachment_id))
+    assert (unknown["result"], unknown["note"]) == (RESULT_UNKNOWN_ATTACHMENT, note)
+    assert [item["attachment_id"] for item in unknown["available_attachments"]] == [late.attachment_id]
+    assert inspect_user_attachment._tool_func(attachment_id=late.attachment_id)["status"] == "success"
+    # The slice shows the late file on turn 2, which stays unrecorded and uncounted.
+    summary = json.loads(get_conversation_context_slice._tool_func(conversation_id=CONVERSATION, mode="summary"))
+    turns = {
+        turn["task_id"]: (
+            [item["attachment_id"] for item in turn["attachments"]],
+            turn["attachments_recorded"],
+            turn["attachment_count"],
+        )
+        for turn in summary["turns"]
+    }
+    assert turns == {
+        FIRST: ([], False, None),
+        RUNNING: ([late.attachment_id], False, None),
+        CURRENT: ([], True, 0),
+    }
 
 
 @pytest.mark.asyncio

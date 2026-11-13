@@ -3611,11 +3611,15 @@ keeps none.
 
 Limits:
 
-- Turns saved before turns kept their files have no records. There is no
-  backfill: the gateway's records are not a trusted per-turn source on the
-  agent side, and a backfill would be a migration. The list says up to which
-  turn (`UNRECORDED_TURNS_NOTE`), and the model asks the person to send such a
-  file again.
+- Turns saved before turns kept their files have no record of their
+  requests' files. There is no backfill: the gateway's records are not a
+  trusted per-turn source on the agent side, and a backfill would be a
+  migration. Whether a turn's request files are known is a column of its own
+  (`attachments_recorded`, set only when the turn is saved), so files sent to
+  such a turn later, while its request still ran (guidance, answers), are
+  recorded and listed without making its request's files look known. The
+  list says up to which turn files were not recorded (`UNRECORDED_TURNS_NOTE`),
+  and the model asks the person to send such a file again.
 - A file list and the file's bytes are deleted separately. The list follows
   its turn row; the bytes are deleted by upload retention
   (`attachments.retention_days`, by age) and when a person is removed

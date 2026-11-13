@@ -79,9 +79,11 @@ What a task may use (``TaskAttachments``):
   files it was sent with, and its answers' files), never a conversation.
   A delegated task (a worker's, or the team lead's record of an escalation)
   never reads conversation records: it uses only the files it was given.
-  Turns saved before turns kept their files have no records; the prompt's
-  list says up to which turn (``last_unrecorded_turn``), so the person is
-  asked to send such files again.
+  Turns saved before turns kept their files have no records of their
+  requests' files (files sent to them later, while they still ran, are
+  recorded and listed); the prompt's list says up to which turn
+  (``last_unrecorded_turn``), so the person is asked to send such files
+  again.
 
 Which files a delegation sends (``delegated_files``): the model chooses with
 ``attachment_ids`` on its delegate_task action. Left out, the new task gets
@@ -147,10 +149,14 @@ logger = logging.getLogger(__name__)
 CONVERSATION_ATTACHMENTS_HEADING = "Conversation Attachments:"
 CONVERSATION_ATTACHMENTS_SECTION = "conversation_attachments"
 # The list's last line when earlier turns were saved before turns kept their
-# files, so a model does not read them as turns without files.
+# files, so a model does not read them as turns without files. Files sent to
+# such a turn later, while its request still ran (guidance, answers), are
+# recorded and listed; the files sent with its request are not
+# (``storage.turn_attachments``).
 UNRECORDED_TURNS_NOTE = (
-    "Turns up to turn {turn} were saved before files were recorded: files sent in them are not listed and "
-    "cannot be opened by id. If the person refers to one, ask them to send it again."
+    "Turns up to turn {turn} were saved before files were recorded: files sent with them are not listed and "
+    "cannot be opened by id (only files sent later, while one of them still ran, may be). If the person refers "
+    "to a file that is not listed, ask them to send it again."
 )
 # The task-history event that records the files a task accepted with a
 # guidance or an answer, and the ``details`` key holding them (full
