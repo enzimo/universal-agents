@@ -19,7 +19,9 @@ working for Ann (signed task context). Covers:
   under the same key after a restart) gets none of its files onto the task,
   its turn or the model's text, at admission and on guidance and answers;
 - a request the gateway signed before the update (its context names no task)
-  is admitted without its files, logged with its own reason;
+  is admitted without its files, logged with its own reason and advice; a
+  guidance or interrupt answer under the gateway's status-check context
+  (which names no task either) keeps none, without that advice;
 - a delegated task keeps no files from guidance, and the lead sends guidance
   on without files;
 - an answer refused as stale keeps none of its files, and a guidance or an
@@ -546,6 +548,33 @@ async def test_a_guidance_context_every_agent_process_received_vouches_for_no_ot
     _assert_not_kept(lead, bobs, before_turn, before_own)
     [refused] = _messages(caplog, "sent_file_refused")
     assert f"reason=context_not_for_message attachment_id={bobs.attachment_id} task_id={TASK}" in refused
+
+
+@pytest.mark.parametrize("kind", [TaskSteeringType.PROACTIVE_GUIDANCE, TaskSteeringType.INTERRUPT_RESPONSE])
+@pytest.mark.asyncio
+async def test_a_status_check_context_on_guidance_keeps_no_files_and_is_not_blamed_on_the_update(
+    lead, layout: InstanceLayout, statuses, caplog: pytest.LogCaptureFixture, kind: TaskSteeringType
+) -> None:
+    """The gateway's status check carries Ann's context naming no task, on the subject every agent process
+    receives. A faulty one puts it on guidance with a file: refused for naming no task, and the warning
+    does not send the operator after a request queued across the update."""
+
+    before_turn, before_own = _turn_files(lead), _own(lead.task_manager, lead._conversation_store)
+    scan = _upload(layout, "scan.png")
+    status_check = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    meta = MessageMeta(
+        conversation_id=CONVERSATION,
+        is_response_requested=True,
+        gateway_context=GatewayContext(canonical_user_id=ANN, session_key=SESSION, task_context=status_check),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
+        await _send(lead, _steering(kind, [scan], f"probe_{kind.value}", "Look."), meta)
+
+    _assert_not_kept(lead, scan, before_turn, before_own)
+    [refused] = _messages(caplog, "sent_file_refused")
+    assert f"reason=context_names_no_task attachment_id={scan.attachment_id} task_id={TASK}" in refused
+    assert "does not vouch" in refused and "send the file again" not in refused
 
 
 @pytest.mark.asyncio

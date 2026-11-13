@@ -107,9 +107,10 @@ _STEERING_MESSAGE = "steering"
 _ANSWER_MESSAGE = "question_answer"
 # ``sent_files_access``'s reason for a gateway context that names no task.
 # Gateways before the update that started keeping each message's files signed
-# a request's context without one, so this is how a request still queued for
-# the team lead across that update arrives (``custom_agents.conversation_attachments``
-# words it for the log).
+# a request's context without one, so on a request this is how one still
+# queued for the team lead across that update arrives; on a guidance or an
+# answer it is a context taken from another message
+# (``custom_agents.conversation_attachments`` words each for the log).
 CONTEXT_NAMES_NO_TASK = "context_names_no_task"
 
 
@@ -247,7 +248,10 @@ def sent_files_access(
     ``another_task``, because the gateway never signs one for a message with
     files: on a request it is the context a gateway from before this rule
     signed, for a request still queued when the instance was updated, whose
-    files the person must send again. This rule decides only
+    files the person must send again. Guidance and interrupt answers are
+    signed again each time they are sent, and that gateway sent no files with
+    answers to questions, so on those it is a context taken from another
+    message, such as the gateway's status check. This rule decides only
     whether the gateway vouches for the files; which tasks then keep them is
     the agent runtime's decision (``custom_agents.sent_files_runtime``).
 

@@ -12,8 +12,10 @@ tool call runs for may use, and where on this host their bytes are:
   that works for its conversation's person, the files earlier turns of that
   conversation received (``TaskAttachments``). A delegated task (a worker's)
   uses only the files its delegation named;
-- bytes are read only from below this host's upload folders, without
-  following links (``locate_upload``, ``LocatedUpload``).
+- bytes are read only from below this host's upload folders: the record's
+  path is resolved (links in it followed) and must lie inside one, and the
+  file is then opened from that folder without following links
+  (``locate_upload``, ``LocatedUpload``).
 
 A file the task may not use, or whose bytes cannot be read here, comes back as
 the tool result to return. Results describe files by their descriptive fields

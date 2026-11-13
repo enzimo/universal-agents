@@ -440,7 +440,8 @@ def _direct_image_input(
 
     The bytes are read the way the attachment tools read uploads
     (``custom_agents.conversation_attachments``): only from inside this host's
-    upload folders, without following links. A delegated task's records are
+    upload folders, where the record's resolved path must lie, then opened
+    from that folder without following links. A delegated task's records are
     not vouched for by the gateway, so a record pointing anywhere else is
     skipped (``locate_upload`` logs ``event=attachment_outside_upload_folders``),
     and the size is checked before anything is read.

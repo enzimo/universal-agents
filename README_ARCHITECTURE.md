@@ -3587,9 +3587,11 @@ message.
 
 Opening a file. `inspect_user_attachment` and `load_local_media_for_model_context`
 take an `attachment_id`; a path still works for files in the task's folders.
-The id must be one the task may use, and the bytes are read only from the
-upload folders without following links (`custom_tools.task_uploads`,
-`access_control.safe_open`); a turn's direct image input reads its images the
+The id must be one the task may use. The record's path is resolved (links in
+it are followed) and must lie inside an upload folder; the file is then opened
+from that folder one path component at a time without following links, so a
+link put in its place after the check is refused (`custom_tools.task_uploads`,
+`access_control.safe_open`). A turn's direct image input reads its images the
 same way. A file that cannot be opened says why: `unknown_attachment_id`
 (with the files the task may use), `upload_unavailable` (deleted),
 `remote_copy_required` (stored on another host) or `refused` (a record that
@@ -3631,8 +3633,8 @@ Limits:
   its turn row; the bytes are deleted by upload retention
   (`attachments.retention_days`, by age) and when a person is removed
   (`assistant_gateway/person_departure.py`). A listed file whose bytes are
-  gone answers `upload_unavailable`, and a file deleted while it is being read
-  gives a short error without a path.
+  gone answers `upload_unavailable`, and so does a file deleted while it is
+  being read; both ask for the file to be sent again, without a path.
 - Only the same conversation and person: no task lists or opens another
   conversation's or another person's files, and the team transfer carries no
   conversations or their files.
@@ -3642,8 +3644,11 @@ Limits:
   the lead refuses them, one warning per file
   (`event=sent_file_refused reason=context_names_no_task`). The person must
   send those files again; operators can let queued requests start before
-  updating. Guidance and answers are signed each time the gateway sends them,
-  so they are not affected.
+  updating. Guidance and interrupt answers are signed again each time the
+  gateway sends them, and the gateway before the update sent no files with
+  answers to questions, so they are not affected. On a guidance or an answer
+  the same reason means a context taken from another message, and the warning
+  says only that the gateway does not vouch for the file.
 - A guidance or an interrupt answer can be refused as stale after its files
   were kept: when its task ends between the files entry and the guidance
   entry, or, for an answer, when the live session ends meanwhile with the

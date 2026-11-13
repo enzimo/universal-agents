@@ -102,9 +102,11 @@ storage references or paths.
 Where bytes are read from (``UploadFolders``, ``locate_upload``): only from
 inside this host's upload folders, ``state/uploads`` and the adapter host's
 upload folder. A record's path is not trusted by itself (a delegated task's
-files are not vouched for by the gateway): a record pointing anywhere else
-is refused and logged. The bytes are then read from that folder without
-following links (``LocatedUpload.read_bytes``). The attachment tools open
+files are not vouched for by the gateway): it is resolved, following any
+links in it, and a record whose resolved path lies anywhere else is refused
+and logged. The bytes are then read from that folder one component of the
+resolved path at a time without following links (``LocatedUpload.read_bytes``),
+so a link put in the file's place after the check is refused. The attachment tools open
 files by id through ``custom_tools.task_uploads``, and a turn reads the images
 on its own message for the model's direct image input the same way
 (``custom_agents.sdk.strands.turn``).
@@ -186,19 +188,26 @@ TASK_NOT_FOUND_REASON = "task_not_found"
 ROOT_NOT_HELD = "not_held"
 ROOT_DELEGATED = "delegated"
 ROOT_OTHER_PERSON = "other_person"
-# What ``log_refused_files`` says for those reasons and for a request signed
-# before the update (``CONTEXT_NAMES_NO_TASK``); any other reason is the
+# What ``log_refused_files`` says for those reasons; any other reason is the
 # gateway's rule (``sent_files_access``) refusing the files.
 _REFUSAL_TEXT = {
     DELEGATED_TASK_REASON: "the task it was sent to is delegated work that keeps no files from this message",
     NOT_AN_ANSWER_REASON: "only a person's answer to a question brings files",
     TASK_NOT_FOUND_REASON: "the task it was sent to is not held here",
-    CONTEXT_NAMES_NO_TASK: (
-        "its signed context names no task, as the context of a request the gateway signed before the update "
-        "that started keeping each message's files does; the person must send the file again"
-    ),
 }
 _NOT_VOUCHED_TEXT = "the gateway does not vouch that it sent it for this task"
+# What ``log_refused_files`` says for a new request whose signed context names
+# no task (``CONTEXT_NAMES_NO_TASK``): the gateway before the update that
+# started keeping each message's files signed a request's context without one,
+# so this is a request still queued for the lead across that update. Only a
+# request gets this text. Guidance and interrupt answers are signed again each
+# time the gateway sends them, and that gateway sent no files with answers to
+# questions, so on those messages the reason means a context taken from another
+# message, such as the gateway's status check, and gets ``_NOT_VOUCHED_TEXT``.
+_QUEUED_REQUEST_TEXT = (
+    "its signed context names no task, as a request's context the gateway signed before the update that started "
+    "keeping each message's files does; the person must send the file again"
+)
 # Set by ``TaskManager`` on the copies of a worker's entries in its lead's history.
 _BUBBLED_ENTRY_KEY = "bubbled_entry_id"
 
@@ -914,7 +923,9 @@ def request_files_kept(task: Task, meta: Any, *, team_id: str, person_id: Option
     )
     if decision.allowed:
         return task
-    log_refused_files(task.attachments, decision.reason, task_id=task.task_id, conversation_id=conversation_id)
+    log_refused_files(
+        task.attachments, decision.reason, task_id=task.task_id, conversation_id=conversation_id, request=True
+    )
     return task.model_copy(update={"attachments": []})
 
 
@@ -961,11 +972,24 @@ def _sent_to_task_check(task_info: Any, meta: Any, team_id: str, message_context
 
 
 def log_refused_files(
-    attachments: Iterable[UserTaskAttachment], reason: str, *, task_id: str, conversation_id: Optional[str]
+    attachments: Iterable[UserTaskAttachment],
+    reason: str,
+    *,
+    task_id: str,
+    conversation_id: Optional[str],
+    request: bool = False,
 ) -> None:
-    """One warning per file a message brought that is not kept, saying why (``_REFUSAL_TEXT``)."""
+    """One warning per file a message brought that is not kept, saying why (``_REFUSAL_TEXT``).
 
-    explanation = _REFUSAL_TEXT.get(reason, _NOT_VOUCHED_TEXT)
+    ``request`` is set for a new request's files (``request_files_kept``),
+    the only message whose context names no task because the gateway signed
+    it before the update (``_QUEUED_REQUEST_TEXT``).
+    """
+
+    if request and reason == CONTEXT_NAMES_NO_TASK:
+        explanation = _QUEUED_REQUEST_TEXT
+    else:
+        explanation = _REFUSAL_TEXT.get(reason, _NOT_VOUCHED_TEXT)
     for attachment in attachments:
         logger.warning(
             "A file on a message was not kept: %s. "
