@@ -348,6 +348,17 @@ Retention**; the next cleanup uses it, without a restart. Everyone signed in
 sees the current numbers there. Once an upload is deleted, opening it from an
 older chat message says the attachment was not found.
 
+Until then, the assistant can use a file sent earlier in the same chat, for
+example "the photo I sent yesterday", without it being sent again; files sent
+with an answer to the assistant's question count too. It cannot reach files
+from another chat or another person, nor files sent before the team's update
+that started keeping each message's files; send those again. The same holds
+for files sent with a request that was still waiting to start when the team
+was updated: the request runs, but without its files. To avoid this, update
+when no requests are waiting; otherwise ask people to send those files again.
+Whenever files sent with a request could not be accepted, the assistant is
+told how many, and asks for them again if the request needs them.
+
 A person's folder is named after their user id: generated ids such as
 `usr_3f9a1b2c4d5e` are used as they are, and other ids become a readable name
 plus a short hash.

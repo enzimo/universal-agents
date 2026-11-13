@@ -67,7 +67,7 @@ def test_load_local_media_for_model_context_returns_image_block(
 def test_load_local_media_for_model_context_returns_document_block(
     workspace: Path,
 ) -> None:
-    doc_path = workspace / "Quarterly Report.pdf"
+    doc_path = workspace / "Quarterly  Report_v2.pdf"
     doc_bytes = b"%PDF-1.4\nfake-pdf"
     doc_path.write_bytes(doc_bytes)
 
@@ -76,10 +76,11 @@ def test_load_local_media_for_model_context_returns_document_block(
     metadata = _metadata(result)
     assert result["status"] == "success"
     assert metadata["media_kind"] == "document"
+    # Bedrock accepts only letters, digits, single spaces, hyphens, parentheses and square brackets.
     assert result["content"][1] == {
         "document": {
             "format": "pdf",
-            "name": "Quarterly_Report",
+            "name": "Quarterly Report v2",
             "source": {"bytes": doc_bytes},
         }
     }

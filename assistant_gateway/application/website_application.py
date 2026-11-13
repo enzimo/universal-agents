@@ -7,6 +7,7 @@ from custom_messages.contracts.access_v2 import ChangeApprovalRecordV1
 from custom_messages.contracts.control_v1 import KnowledgeCommandPayload, KnowledgeCommandResultPayload
 from custom_messages.contracts.status_v1 import StatusReportV1
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -29,6 +30,7 @@ from assistant_gateway.application.gateway_application import (
 from assistant_gateway.application.procedures import ProcedureApplication
 from assistant_gateway.application.web_chat_threads import WebChatThread
 from assistant_gateway.application.route_context import GatewayRouteContextV1
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from runtime_settings.appearance import ACCENT_SHARE_RANGE, DARK_INTEGER_RANGES
 
 
@@ -932,8 +934,9 @@ class WebTranscriptApplication(Protocol):
         conversation_id: str | None,
         client_request_id: str,
         user_text: str,
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> tuple[WebTranscriptMessageV1, bool] | None:
-        """Persist local input and report whether this caller owns execution."""
+        """Persist local input (with the files sent with it) and report whether this caller owns execution."""
 
     def record_local_response(
         self,

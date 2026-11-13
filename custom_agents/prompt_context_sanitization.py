@@ -11,6 +11,10 @@ from custom_messages.contracts.task_v1 import Task, TaskQuery
 
 _SECTION_HEADER_RE = re.compile(r"^\[([^\]\n]+)\]\s*$", re.MULTILINE)
 
+# The most files "Current Request Attachments" lists; the context engine's
+# list of earlier files leaves out exactly those it shows.
+CURRENT_REQUEST_ATTACHMENT_LIMIT = 20
+
 
 def parse_bracketed_prompt_sections(text: str | None) -> dict[str, str]:
     """Parse gateway-style `[Section]` prompt blocks without changing payloads."""
@@ -270,17 +274,18 @@ def render_incoming_message_summary(
 
 
 def _render_attachment_summary(attachments: Any) -> list[str]:
+    """The current request's files by name, id, type and size.
+
+    Never where they are stored: models open uploads by ``attachment_id``
+    only (``custom_agents.conversation_attachments``).
+    """
+
     values = list(attachments or [])
     if not values:
         return []
     lines = ["Current Request Attachments:"]
-    for attachment in values[:20]:
-        local_path = None
-        for ref in list(getattr(attachment, "storage_refs", None) or []):
-            if getattr(ref, "storage_type", None) == "local" and getattr(ref, "path", None):
-                local_path = ref.path
-                break
-        rendered = (
+    for attachment in values[:CURRENT_REQUEST_ATTACHMENT_LIMIT]:
+        lines.append(
             f"- {getattr(attachment, 'filename', 'attachment')} "
             f"(id={getattr(attachment, 'attachment_id', '')}, "
             f"kind={getattr(attachment, 'kind', 'other')}, "
@@ -288,11 +293,10 @@ def _render_attachment_summary(attachments: Any) -> list[str]:
             f"size={getattr(attachment, 'size_bytes', 0)} bytes, "
             f"sha256={getattr(attachment, 'sha256', '')})"
         )
-        if local_path:
-            rendered += f"; local_path={local_path}"
-        lines.append(rendered)
-    if len(values) > 20:
-        lines.append(f"- {len(values) - 20} additional attachment(s) omitted from prompt summary.")
+    if len(values) > CURRENT_REQUEST_ATTACHMENT_LIMIT:
+        lines.append(
+            f"- {len(values) - CURRENT_REQUEST_ATTACHMENT_LIMIT} additional attachment(s) omitted from prompt summary."
+        )
     lines.append(
         "Supported images may be included as direct model image input when the active model allows it; "
         "use inspect_user_attachment for metadata, text extraction, unsupported media, or fallback inspection. "

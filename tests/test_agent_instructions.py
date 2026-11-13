@@ -6,6 +6,7 @@ from custom_agents.strands_team import (
     RUNTIME_OPERATIONS_WORKFLOWS_SKILL_DIR,
     SECURE_CREDENTIAL_WORKFLOWS_SKILL_DIR,
 )
+from custom_tools.task_uploads import RESULT_UPLOAD_UNAVAILABLE
 
 
 def test_shared_prompt_keeps_secure_cli_details_in_skill() -> None:
@@ -76,6 +77,22 @@ def test_access_prompt_names_the_access_tools_and_the_only_way_to_ask() -> None:
     assert "denial_receipt" not in shared_agent_base_prompt
 
 
+def test_shared_prompt_asks_to_resend_a_file_only_when_the_slice_and_the_tools_cannot_find_it() -> None:
+    # The Conversation Attachments section lists only the newest 20 earlier
+    # files, so "not listed" alone must not mean "ask again": a recorded file
+    # past the newest 20 is still in get_conversation_context_slice and opens
+    # by id. The slice must be this conversation's: the person's other
+    # conversations open in it, but their files do not open by id. A deleted
+    # file is listed, so it is named by the tools' result code.
+    rule = next(line for line in shared_agent_base_prompt.splitlines() if "Conversation Attachments" in line)
+    assert (
+        "Ask them to send it again only when neither that list nor `get_conversation_context_slice` for this "
+        "conversation has it" in rule
+    )
+    assert f"or when opening it returns `{RESULT_UPLOAD_UNAVAILABLE}`" in rule
+    assert "if it is not listed" not in rule
+
+
 def test_shared_prompt_prohibits_generated_site_url_guessing() -> None:
     assert "never guess or synthesize the URL" in shared_agent_base_prompt
     assert "exact `site_url` returned by `publish_single_page_site`" in shared_agent_base_prompt
@@ -115,3 +132,30 @@ def test_shared_prompt_includes_multi_user_onboarding_recipe() -> None:
     assert "/docs/newuser/telegram" in shared_agent_base_prompt
     assert "/docs/newuser/photon" in shared_agent_base_prompt
     assert "/user disable <canonical_user_id>" in shared_agent_base_prompt
+
+
+def test_no_agent_text_asks_for_an_object_store_mirror_for_a_file_this_host_cannot_read() -> None:
+    """GEN-2: no agent tool can arrange such a mirror; the texts say what agents can do instead."""
+
+    from assistant_gateway.config import DeliverySettings
+    from custom_agents.instance_delivery_context import render_delivery_settings_context
+    from custom_tools.local_media_context_tool import load_local_media_for_model_context
+    from custom_tools.task_uploads import REMOTE_COPY_NEXT_STEP
+    from custom_tools.user_attachment_tools import inspect_user_attachment
+
+    texts = {
+        "agent instructions": shared_agent_base_prompt,
+        "delivery context": render_delivery_settings_context(DeliverySettings()),
+        "skill template": (RUNTIME_OPERATIONS_WORKFLOWS_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8"),
+        "inspect tool": inspect_user_attachment.tool_spec["description"],
+        "media tool": load_local_media_for_model_context.tool_spec["description"],
+        "tool result": REMOTE_COPY_NEXT_STEP,
+    }
+    for name, text in texts.items():
+        assert "mirror" not in text.lower() and "Object Store" not in text, name
+    for name in ("agent instructions", "delivery context", "skill template", "tool result"):
+        flattened = " ".join(texts[name].split()).lower()
+        # A file sent again is stored where the gateway stores uploads, so asking for it again does not help.
+        assert "could not open the file" in flattened and "opens it itself" in flattened, name
+        assert "cannot be opened here" in flattened, name
+    assert "again" not in REMOTE_COPY_NEXT_STEP

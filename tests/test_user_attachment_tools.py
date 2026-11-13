@@ -66,6 +66,8 @@ def _set_person_agent(attachment: UserTaskAttachment, layout, person: str) -> No
         get_task_info=lambda task_id: (
             SimpleNamespace(task=task, meta=meta) if task_id == "task_1" else None
         ),
+        # The task is its own request: no plan-step, recovery or delegation links.
+        resolve_root_task_id=lambda task_id: task_id,
         storage_settings=resolve_storage_settings(
             {"backend": "sqlite", "sqlite": {"path": str(layout.root / "manager.db")}}
         ),

@@ -30,6 +30,7 @@ from custom_tools.runtime_context import (
 )
 from storage.change_ledger import ChangeRefused
 from storage.heartbeat_repository import heartbeat_item_version
+from storage.turn_attachments import summarize_file_records
 from id_generation import (
     HEARTBEAT_SCHEDULE_ID_PREFIX,
     HEARTBEAT_SOURCE_ID_PREFIX,
@@ -531,7 +532,8 @@ def get_task_history_window(
             "start_index": start_index,
             "limit": limit,
             "returned": len(entries),
-            "entries": [entry.model_dump() for entry in entries],
+            # File records in entries (sent files, held guidance) show no storage paths.
+            "entries": [summarize_file_records(entry.model_dump()) for entry in entries],
         },
         default=str,
     )

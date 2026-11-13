@@ -206,7 +206,7 @@ async def test_steering_guidance_shows_its_replied_message() -> None:
         replied_message=RepliedMessage(author="assistant", text="Daily Gmail check: nothing urgent."),
     )
 
-    block = await _guidance_block(SimpleNamespace(), None, [steering])
+    block = await _guidance_block(SimpleNamespace(), None, [steering], frozenset())
 
     assert block.splitlines()[:2] == [
         "- expected",

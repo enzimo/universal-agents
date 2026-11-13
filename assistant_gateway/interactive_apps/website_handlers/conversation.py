@@ -418,10 +418,6 @@ class WebsiteConversationHandlers:
             if not uploads and self.application.is_task_progress_status_request(text)
             else await self.application.waiting_question_id(session_key)
         )
-        if uploads and waiting_question_id:
-            raise web.HTTPBadRequest(
-                text="Attachments are not supported while answering a pending task query."
-            )
         # Saved under the checked conversation's own key, which names its owner
         # (the browser may name the conversation by an alias).
         attachments = self._store_web_chat_uploads(
@@ -558,13 +554,14 @@ class WebsiteConversationHandlers:
             return response, tuple(
                 message for message in exchange if message is not None
             )
-        # The handler refuses files while a question waits, before saving them.
+        # An answer keeps its files on the person's message, as a request does.
         acceptance = self.application.transcripts.record_local_user_message(
             owner_canonical_user_id=owner,
             session_key=session_key,
             conversation_id=conversation_id,
             client_request_id=client_request_id,
             user_text=text,
+            attachments=attachments,
         )
         if acceptance is None:
             raise web.HTTPNotFound(text="Thread not found.")
@@ -584,11 +581,13 @@ class WebsiteConversationHandlers:
                 conversation_id=conversation_id,
                 exchange=exchange,
             )
-        # The answer names the question found before the send was accepted.
+        # The answer names the question found before the send was accepted,
+        # and brings the files sent with it (files alone answer with task_text).
         response = await self.application.reply_to_pending_query(
             session_key=session_key,
             task_query_id=waiting_question_id,
-            response_text=text,
+            response_text=task_text,
+            attachments=attachments,
         )
         reply = self.application.transcripts.record_local_response(
             owner_canonical_user_id=owner,

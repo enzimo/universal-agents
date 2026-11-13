@@ -51,6 +51,7 @@ from custom_agents.structured_llm_messages import (
     TurnAction,
 )
 from custom_agents.task_runtime_coordinator import RuntimeBatchInterrupted
+from custom_agents.sent_files_runtime import result_with_answer_files
 from custom_agents.tool_call_limits import (
     compact_debug_preview as _compact_debug_preview,
 )
@@ -1259,6 +1260,9 @@ async def _execute_turn_action_record(
     content = await self._apply_runtime_content_defaults(
         comms_message.msg_content, incoming_content
     )
+    # The result of a worker's escalation carries the files the person's
+    # answers to its questions brought; the model never chooses them.
+    content = await result_with_answer_files(self, content, incoming_content)
     comms_message.msg_content = content
     await self.task_manager.operations_runtime.run(
         self.task_manager.mark_turn_action_record,
@@ -1370,7 +1374,11 @@ async def _execute_turn_action_record(
                         f"{existing_delegated_task_id}, but the local task record is missing."
                     )
             else:
-                task_info = await self._create_subtask_request(comms_message)
+                # The model names the subtask's files by id only (``delegated_files``).
+                task_info = await self._create_subtask_request(
+                    comms_message,
+                    attachment_ids=action.attachment_ids if isinstance(action, DelegateTaskAction) else None,
+                )
                 delegated_target_verified = task_info is not None
             if not task_info:
                 raise RuntimeError(

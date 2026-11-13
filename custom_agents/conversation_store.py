@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any, Optional
 
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from default_values import STORAGE_DEFAULTS
 from storage.backends import STORAGE_BACKEND_SQLITE
 from storage.config import StorageSettings, resolve_storage_settings
@@ -13,6 +15,7 @@ from storage.conversation_repository import (
     create_conversation_repository,
     default_synopsis,
 )
+from storage.turn_attachments import TurnAttachment
 
 
 class ConversationStore:
@@ -148,6 +151,8 @@ class ConversationStore:
         task_status: str = "accepted",
         memory_review_status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        attachments: Sequence[UserTaskAttachment] = (),
+        request_files_known: bool = True,
     ) -> dict[str, Any]:
         return self._repository.append_turn(
             conversation_id=conversation_id,
@@ -166,7 +171,40 @@ class ConversationStore:
             task_status=task_status,
             memory_review_status=memory_review_status,
             owner_canonical_user_id=owner_canonical_user_id,
+            attachments=attachments,
+            request_files_known=request_files_known,
         )
+
+    def merge_turn_attachments(
+        self,
+        *,
+        conversation_id: str,
+        task_id: str,
+        attachments: Sequence[UserTaskAttachment],
+    ) -> Optional[int]:
+        return self._repository.merge_turn_attachments(
+            conversation_id=conversation_id,
+            task_id=task_id,
+            attachments=attachments,
+        )
+
+    def list_turn_attachments(
+        self,
+        conversation_id: str,
+        *,
+        attachment_ids: Optional[Collection[str]] = None,
+        limit: Optional[int] = None,
+    ) -> list[TurnAttachment]:
+        return self._repository.list_turn_attachments(
+            conversation_id,
+            attachment_ids=attachment_ids,
+            limit=limit,
+        )
+
+    def last_turn_without_file_records(
+        self, conversation_id: str, *, exclude_task_id: Optional[str] = None
+    ) -> Optional[int]:
+        return self._repository.last_turn_without_file_records(conversation_id, exclude_task_id=exclude_task_id)
 
     def append_clarification(
         self,

@@ -27,6 +27,14 @@ hands continues in a conversation of its new person
 (``custom_agents.person_departure_runtime``,
 ``custom_agents.schedule_context_refresh``,
 ``custom_agents.heartbeat_store.item_conversation_for_run``).
+
+Which files a turn keeps: the request's own files as admission kept them
+(``custom_agents.conversation_attachments.admit_request_files``, passed in
+whole as ``request_files``), and files sent with its guidance and answers
+while it runs (``record_turn_attachments``), which the caller checked the
+same way (``keep_upload_files``). The turn records exactly the files the
+task itself keeps, and is marked as not knowing all of its request's files
+when admission dropped any. Later turns of the conversation find them by id.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ from functools import partial
 from typing import Any, Dict, List, Optional
 
 from access_control.ownership import conversation_continuation
+from custom_agents.conversation_attachments import AdmittedRequestFiles
 from custom_agents.conversation_summary import (
     ConversationSummaryGenerator,
     TurnSummaryRequest,
@@ -48,6 +57,7 @@ from custom_messages.contracts.routing_v1 import (
     MessageHeader,
     MessageMeta,
 )
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import (
     MessageMetaType,
@@ -147,12 +157,18 @@ def ensure_task_conversation_context(
     msg_meta: MessageMeta,
     owner_person_id: Optional[str],
     owner_named_agent_type: Optional[str] = None,
+    request_files: Optional[AdmittedRequestFiles] = None,
 ) -> MessageMeta:
     """Record a top-level task as the next turn of its conversation (a new thread when there is none).
 
     ``owner_person_id`` is the person the task verifiably works for (module
     docstring); None for work for no person. Raises ``ValueError`` (logged)
-    when the named conversation belongs to someone else.
+    when the named conversation belongs to someone else. The turn records
+    exactly the files of ``request_files`` (the admission result for
+    ``task_request``) and is marked as not knowing all of its request's files
+    when admission dropped any. Without it (a scheduled run, whose payload
+    carries no files) the turn records none, so no caller can save records
+    that were not checked.
     """
 
     if task_request.parent_task_id is not None or conversation_store is None:
@@ -238,8 +254,56 @@ def ensure_task_conversation_context(
         ),
         task_status=ProgressState.ACCEPTED.value,
         owner_canonical_user_id=owner_canonical_user_id,
+        attachments=list(request_files.task.attachments) if request_files is not None else [],
+        request_files_known=request_files is None or request_files.not_kept == 0,
     )
     return normalized_meta
+
+
+def record_turn_attachments(
+    conversation_store: Any,
+    task_info: Any,
+    attachments: List[UserTaskAttachment],
+    *,
+    logger: logging.Logger = logger,
+) -> Optional[int]:
+    """Add the files of a guidance or answer to the turn of the top-level task in ``task_info``.
+
+    ``attachments`` are records ``keep_upload_files`` kept. Returns how many
+    were new, or None when nothing was recorded: a delegated task, no store,
+    no conversation, no files, or no turn row (logged). Store errors
+    propagate, so the caller does not acknowledge the message and its sender
+    sends it again; the merge adds each file once.
+    """
+
+    task = task_info.task
+    if task.parent_task_id is not None or conversation_store is None or not attachments:
+        return None
+    conversation_id = str(getattr(task_info.meta, "conversation_id", "") or "").strip()
+    if not conversation_id:
+        return None
+    ids = ",".join(attachment.attachment_id for attachment in attachments)
+    added: Optional[int] = conversation_store.merge_turn_attachments(
+        conversation_id=conversation_id, task_id=task.task_id, attachments=attachments
+    )
+    if added is None:
+        logger.warning(
+            "A task has no conversation turn, so the files sent while it ran stay with the task only. "
+            "event=conversation_turn_missing_for_attachments conversation_id=%s task_id=%s attachment_ids=%s",
+            conversation_id,
+            task.task_id,
+            ids,
+        )
+        return None
+    logger.info(
+        "Recorded files sent while a task ran in its conversation turn. "
+        "event=conversation_turn_attachments_merged conversation_id=%s task_id=%s attachment_ids=%s added=%d",
+        conversation_id,
+        task.task_id,
+        ids,
+        added,
+    )
+    return added
 
 
 def build_conversation_prompt_context(

@@ -647,8 +647,11 @@ class SignedTaskContextV1(AccessContractModel):
 
 
 # The prefix of a schedule run's own context id, so it can never equal the id
-# of a signed task context (``task_context_...``).
+# of a signed task context (``task_context_...`` or ``message_context_...``).
 SCHEDULE_RUN_ID_PREFIX = "schedule_run"
+# The prefix of the id of a signed context bound to one message that brings a
+# person's files (``access_control.ownership.request_context_id``).
+MESSAGE_CONTEXT_ID_PREFIX = "message_context"
 
 
 class SchedulePermitV1(AccessContractModel):
@@ -1569,6 +1572,7 @@ __all__ = [
     "GrantStatus",
     "GrantV1",
     "LIFETIME_RANK",
+    "MESSAGE_CONTEXT_ID_PREFIX",
     "SignInService",
     "SignedTaskContextV1",
     "SCHEDULE_RUN_ID_PREFIX",

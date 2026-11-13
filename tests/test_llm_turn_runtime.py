@@ -5,6 +5,7 @@ from tests.llm_turn_fixtures import turn_executor_for
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -250,21 +251,38 @@ async def test_provider_context_retry_is_suppressed_after_tool_activity() -> Non
     assert details["suppression_reason"] == "tool_activity_started"
 
 
+def _write(path, data: bytes):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _vision_agent(instance_root) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="agent_vision",
+        supports_image_input=True,
+        instance_root=str(instance_root),
+        _logger=_quiet_logger(),
+    )
+
+
 def test_build_strands_prompt_input_includes_image_blocks_when_supported(
     tmp_path,
 ) -> None:
-    image_path = tmp_path / "mystery.png"
-    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+    image_path = _write(
+        tmp_path / "state" / "uploads" / "conv_1" / "mystery.png",
+        b"\x89PNG\r\n\x1a\nimage-bytes",
+    )
     task = Task(
         task_type=MessageMetaType.REQUEST,
         problem_statement="Can you see this?",
         attachments=[_image_attachment(image_path)],
     )
-    agent = SimpleNamespace(
-        id="agent_vision", supports_image_input=True, _logger=_quiet_logger()
-    )
 
-    prompt = turn_executor_for(agent)._build_strands_prompt_input("full prompt", task)
+    executor = turn_executor_for(_vision_agent(tmp_path))
+    prompt = executor._build_strands_prompt_input(
+        "full prompt", task, direct_images=executor._collect_direct_model_image_blocks(task, conversation_id="conv_1")
+    )
 
     assert isinstance(prompt, list)
     assert prompt[0]["text"].startswith("full prompt")
@@ -272,6 +290,279 @@ def test_build_strands_prompt_input_includes_image_blocks_when_supported(
     assert prompt[1]["text"].startswith("Direct image attachment:")
     assert prompt[2]["image"]["format"] == "png"
     assert prompt[2]["image"]["source"]["bytes"] == image_path.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_reads_its_images_and_their_settings_once_off_the_event_loop(tmp_path, monkeypatch) -> None:
+    """CONC-2 and GEN-7: the settings load and the image reads ran on the event loop, on every attempt.
+
+    The turn re-invokes the model once (late guidance); both calls get the
+    image, which was read once, in a thread.
+    """
+
+    from collections import deque
+
+    from custom_agents.conversation_attachments import UploadFolders
+    from tests.test_runtime_owner_boundaries import build_turn_owner
+
+    image = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
+    loads: list[bool] = []
+    for_agent = UploadFolders.for_agent.__func__
+
+    def recorded(cls, agent):
+        try:
+            asyncio.get_running_loop()
+            loads.append(True)
+        except RuntimeError:
+            loads.append(False)
+        return for_agent(cls, agent)
+
+    monkeypatch.setattr(UploadFolders, "for_agent", classmethod(recorded))
+    prompts: list[Any] = []
+
+    async def invoke(prompt, **_kwargs):
+        prompts.append(prompt)
+        return result
+
+    executor, result = build_turn_owner(
+        invoke=invoke,
+        guidance=deque(["", "Use the corrected photo notes", ""]),
+        committed=[],
+        cleared=[],
+        settings_overrides={"supports_image_input": True, "instance_root": str(tmp_path)},
+    )
+    task = Task(
+        task_id="task_photo",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photo.",
+        attachments=[_image_attachment(image)],
+    )
+
+    await executor.process_llm_interaction(task, MessageHeader(), MessageMeta(conversation_id="conv_1"))
+
+    assert len(prompts) == 2
+    for prompt in prompts:
+        assert [block["image"]["source"]["bytes"] for block in prompt if "image" in block] == [b"\x89PNG upload"]
+    assert loads == [False]  # once for the turn, in a thread
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("first_takes_images", "fallback_takes_images"), [(True, False), (False, True)])
+async def test_after_an_inline_failover_each_attempt_sends_images_only_if_its_model_takes_them(
+    tmp_path, monkeypatch, first_takes_images: bool, fallback_takes_images: bool
+) -> None:
+    """POST-1: the turn's images are read once, but an inline failover can change whether the model takes them.
+
+    A text-only fallback must get no image block (it can reject them and fail
+    the turn); an image fallback after a text-only first model must get the
+    image. The images are still read at most once, off the event loop.
+    """
+
+    from collections import deque
+    from dataclasses import replace
+
+    from custom_agents.conversation_attachments import UploadFolders
+    from tests.test_runtime_owner_boundaries import build_turn_owner
+
+    image = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
+    loads: list[bool] = []
+    for_agent = UploadFolders.for_agent.__func__
+
+    def recorded(cls, agent):
+        try:
+            asyncio.get_running_loop()
+            loads.append(True)
+        except RuntimeError:
+            loads.append(False)
+        return for_agent(cls, agent)
+
+    monkeypatch.setattr(UploadFolders, "for_agent", classmethod(recorded))
+    prompts: list[Any] = []
+
+    async def invoke(prompt, **_kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            raise RuntimeError("primary model provider is unavailable")
+        return result
+
+    executor, result = build_turn_owner(
+        invoke=invoke,
+        guidance=deque(["", ""]),
+        committed=[],
+        cleared=[],
+        settings_overrides={"supports_image_input": first_takes_images, "instance_root": str(tmp_path)},
+    )
+    current = {"settings": executor.read_settings()}
+    executor.read_settings = lambda: current["settings"]
+
+    async def fail_over(**_kwargs):
+        # The configured fallback replaces the turn's model and its settings, then retries inline.
+        current["settings"] = replace(current["settings"], supports_image_input=fallback_takes_images)
+        return _failover_outcome(retry_inline=True)
+
+    executor.effects = replace(executor.effects, handle_provider_failure=fail_over, should_notify_user=lambda: False)
+    task = Task(
+        task_id="task_photo",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photo.",
+        attachments=[_image_attachment(image)],
+    )
+
+    await executor.process_llm_interaction(task, MessageHeader(), MessageMeta(conversation_id="conv_1"))
+
+    def images(prompt: Any) -> list[bytes]:
+        return [block["image"]["source"]["bytes"] for block in prompt if "image" in block] if isinstance(prompt, list) else []
+
+    assert len(prompts) == 2
+    assert images(prompts[0]) == ([b"\x89PNG upload"] if first_takes_images else [])
+    assert images(prompts[1]) == ([b"\x89PNG upload"] if fallback_takes_images else [])
+    assert loads == [False]  # read once for the turn, in a thread, when a model first took images
+
+
+def test_direct_image_input_reads_a_delegated_tasks_images_only_from_the_upload_folders(
+    tmp_path, caplog
+) -> None:
+    """A delegated task's file records are not vouched for by the gateway.
+
+    Records pointing at the instance's own state, at another person's folder,
+    or at a link in the upload folder that leads outside it give the model no
+    image; the upload inside ``state/uploads`` still does.
+    """
+
+    upload = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
+    state_file = _write(tmp_path / "state" / "secret.png", b"\x89PNG state")
+    private = _write(tmp_path / "workspaces" / "users" / "usr_bob" / "private.png", b"\x89PNG bob")
+    link = tmp_path / "state" / "uploads" / "conv_1" / "link.png"
+    link.symlink_to(state_file)
+    records = [
+        _image_attachment(path).model_copy(update={"attachment_id": f"att_{name}"})
+        for name, path in (("state", state_file), ("bob", private), ("link", link), ("upload", upload))
+    ]
+    task = Task(
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photos.",
+        parent_task_id="task_parent",
+        attachments=records,
+    )
+
+    with caplog.at_level("WARNING"):
+        blocks, diagnostics = turn_executor_for(
+            _vision_agent(tmp_path)
+        )._collect_direct_model_image_blocks(task, conversation_id="conv_1")
+
+    images = [block["image"]["source"]["bytes"] for block in blocks if "image" in block]
+    assert images == [b"\x89PNG upload"]
+    assert {item["attachment_id"]: (item["status"], item.get("reason")) for item in diagnostics} == {
+        "att_state": ("skipped", "outside_upload_folders"),
+        "att_bob": ("skipped", "outside_upload_folders"),
+        "att_link": ("skipped", "outside_upload_folders"),
+        "att_upload": ("included", None),
+    }
+    refused = [
+        record.getMessage()
+        for record in caplog.records
+        if "event=attachment_outside_upload_folders" in record.getMessage()
+    ]
+    assert len(refused) == 3
+    assert all(f"task_id={task.task_id}" in message for message in refused)
+    assert not any(str(tmp_path) in str(item) for item in diagnostics)
+
+
+def test_direct_image_input_skips_an_upload_this_host_cannot_check_and_the_turn_goes_on(tmp_path, caplog) -> None:
+    """SEC-2: an error other than "not found" while checking an image (here a link loop) skips that image.
+
+    Before, the error left the prompt build and failed the whole turn.
+    """
+
+    good = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
+    looped = tmp_path / "state" / "uploads" / "conv_1" / "looped.png"
+    looped.symlink_to(looped.with_name("loop_back.png"))
+    looped.with_name("loop_back.png").symlink_to(looped)
+    task = Task(
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photos.",
+        attachments=[
+            _image_attachment(good).model_copy(
+                update={
+                    "attachment_id": "att_looped",
+                    "storage_refs": [AttachmentStorageRef(storage_type="local", path=str(looped))],
+                }
+            ),
+            _image_attachment(good).model_copy(update={"attachment_id": "att_good"}),
+        ],
+    )
+
+    executor = turn_executor_for(_vision_agent(tmp_path))
+    with caplog.at_level("WARNING"):
+        images = executor._collect_direct_model_image_blocks(task, conversation_id="conv_1")
+    prompt = executor._build_strands_prompt_input("full prompt", task, direct_images=images)
+
+    assert isinstance(prompt, list)
+    assert [block["image"]["source"]["bytes"] for block in prompt if "image" in block] == [b"\x89PNG upload"]
+    assert any(
+        "event=attachment_upload_unreadable attachment_id=att_looped" in record.getMessage() for record in caplog.records
+    )
+    assert str(tmp_path) not in caplog.text
+
+
+def test_direct_image_input_skips_an_upload_over_the_size_limit_before_reading_it(
+    tmp_path, monkeypatch
+) -> None:
+    from custom_agents.conversation_attachments import LocatedUpload
+
+    upload = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG" + bytes(60))
+    monkeypatch.setattr("custom_agents.sdk.strands.turn.DIRECT_MODEL_IMAGE_MAX_BYTES", 16)
+
+    def no_read(*_args, **_kwargs):
+        raise AssertionError("an image over the limit was read")
+
+    monkeypatch.setattr(LocatedUpload, "read_bytes", no_read)
+    task = Task(
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photo.",
+        attachments=[_image_attachment(upload)],
+    )
+
+    blocks, diagnostics = turn_executor_for(
+        _vision_agent(tmp_path)
+    )._collect_direct_model_image_blocks(task, conversation_id="conv_1")
+
+    assert blocks == []
+    assert diagnostics[0]["reason"] == "image_too_large_for_direct_model_input"
+    assert (diagnostics[0]["size_bytes"], diagnostics[0]["max_bytes"]) == (64, 16)
+
+
+def test_direct_image_input_refuses_an_upload_swapped_for_a_link_after_the_check(
+    tmp_path, monkeypatch
+) -> None:
+    """The bytes are read from the upload folder without following links, so a swap is not followed."""
+
+    from custom_agents import conversation_attachments
+
+    upload = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
+    secret = _write(tmp_path / "state" / "secret.png", b"\x89PNG secret")
+    located = conversation_attachments.locate_upload
+
+    def swap_after_check(*args, **kwargs):
+        result = located(*args, **kwargs)
+        upload.unlink()
+        upload.symlink_to(secret)
+        return result
+
+    monkeypatch.setattr("custom_agents.sdk.strands.turn.locate_upload", swap_after_check)
+    task = Task(
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photo.",
+        attachments=[_image_attachment(upload)],
+    )
+
+    blocks, diagnostics = turn_executor_for(
+        _vision_agent(tmp_path)
+    )._collect_direct_model_image_blocks(task, conversation_id="conv_1")
+
+    assert blocks == []
+    assert diagnostics[0]["status"] == "skipped"
+    assert diagnostics[0]["reason"] == "read_refused"
 
 
 def test_litellm_formatter_preserves_direct_image_block_as_image_url() -> None:

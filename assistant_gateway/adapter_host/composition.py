@@ -40,11 +40,6 @@ from storage.config import StorageSettings
 LOGGER = logging.getLogger(__name__)
 
 
-def _resolve_instance_path(instance_root: Path, raw_path: str) -> Path:
-    path = Path(raw_path).expanduser()
-    return path.resolve() if path.is_absolute() else (instance_root / path).resolve()
-
-
 @dataclass(frozen=True)
 class ExternalAdapterRoute:
     """Operator-owned channel-to-plugin delivery route."""
@@ -109,9 +104,7 @@ def build_adapter_host_policy(
             limits=limits,
             lease_seconds=settings.lease_seconds,
             upload_ticket_ttl_seconds=settings.upload_ticket_ttl_seconds,
-            upload_dir=_resolve_instance_path(
-                config.instance_root_path, settings.upload_dir
-            ),
+            upload_dir=settings.resolved_upload_dir(config.instance_root_path),
         ),
         tuple(routes),
     )

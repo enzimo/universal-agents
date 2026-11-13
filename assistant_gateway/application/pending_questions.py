@@ -59,6 +59,9 @@ QUESTION_WAITING_INTRO_TEXT = (
     "A question is waiting for your answer, so this message was not sent. "
     "Reply to answer it:"
 )
+# Put first in the reply when a message with files was not sent as an answer,
+# so the person does not assume the files reached the request.
+ANSWER_FILES_NOT_SENT_TEXT = "The files you attached were not sent. Send them again if you still need them."
 
 QUESTION_MESSAGE_TYPE = "task_query"
 NOTE_MESSAGE_TYPE = "system_status"

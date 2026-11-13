@@ -22,6 +22,7 @@ class FakeGatewayApplication:
     def __init__(self) -> None:
         self.sent_user_messages: list[tuple[str, str]] = []
         self.query_replies: list[tuple[str, str]] = []
+        self.query_reply_attachments: list[list] = []
         self.replied_messages: list = []
         self.added_jobs: list[dict] = []
         self.deliveries_released: list[str] = []
@@ -98,10 +99,11 @@ class FakeGatewayApplication:
         return None
 
     async def reply_to_pending_query(
-        self, *, session_key: str, task_query_id: str, response_text: str, replied_message=None
+        self, *, session_key: str, task_query_id: str, response_text: str, replied_message=None, attachments=None
     ):
         assert self.waiting_questions.pop(session_key) == task_query_id
         self.query_replies.append((session_key, response_text))
+        self.query_reply_attachments.append(list(attachments or []))
         return GatewayApplicationResponse(
             text=f"query_reply:{response_text}",
             conversation_id="conv_1",
