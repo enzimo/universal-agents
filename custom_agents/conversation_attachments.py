@@ -152,11 +152,14 @@ CONVERSATION_ATTACHMENTS_SECTION = "conversation_attachments"
 # files, so a model does not read them as turns without files. Files sent to
 # such a turn later, while its request still ran (guidance, answers), are
 # recorded and listed; the files sent with its request are not
-# (``storage.turn_attachments``).
+# (``storage.turn_attachments``). Its request to send a file again covers only
+# those requests' files: a recorded file the list leaves out (past its newest
+# ``INVENTORY_LIMIT``) still opens by id.
 UNRECORDED_TURNS_NOTE = (
-    "Turns up to turn {turn} were saved before files were recorded: files sent with them are not listed and "
-    "cannot be opened by id (only files sent later, while one of them still ran, may be). If the person refers "
-    "to a file that is not listed, ask them to send it again."
+    "Turns up to turn {turn} were saved before files were recorded: the files sent with those requests are not "
+    "listed and cannot be opened by id (files sent to them later, while they still ran, are listed and opened "
+    "like any other file). If the person refers to a file sent with one of those requests, ask them to send it "
+    "again."
 )
 # The task-history event that records the files a task accepted with a
 # guidance or an answer, and the ``details`` key holding them (full
@@ -531,9 +534,11 @@ class TaskAttachments:
     def last_unrecorded_turn(self) -> Optional[int]:
         """The latest earlier turn of its conversation saved before turns kept their files, or None.
 
-        Files sent in such a turn are unknown: they are not listed and cannot
-        be opened by id. Asked only within the conversation scope, and never
-        about the task's own turn, whose request files it holds itself.
+        The files sent with such a turn's request are unknown: they are not
+        listed and cannot be opened by id. Files sent to it later, while it
+        still ran, are recorded, listed and opened like any other. Asked only
+        within the conversation scope, and never about the task's own turn,
+        whose request files it holds itself.
         """
 
         if not self.conversation_id:

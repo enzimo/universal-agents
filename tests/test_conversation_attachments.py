@@ -371,10 +371,31 @@ def test_the_inventory_says_up_to_which_turn_files_were_not_recorded(layout, sto
     assert "- `att_photo` att_photo.png (image/png, image, 10 bytes; turn 3, task task_new)" in text
     assert text.splitlines()[-1] == UNRECORDED_TURNS_NOTE.format(turn=2)
     assert UNRECORDED_TURNS_NOTE.format(turn=2) == (
-        "Turns up to turn 2 were saved before files were recorded: files sent with them are not listed and "
-        "cannot be opened by id (only files sent later, while one of them still ran, may be). If the person "
-        "refers to a file that is not listed, ask them to send it again."
+        "Turns up to turn 2 were saved before files were recorded: the files sent with those requests are not "
+        "listed and cannot be opened by id (files sent to them later, while they still ran, are listed and opened "
+        "like any other file). If the person refers to a file sent with one of those requests, ask them to send it "
+        "again."
     )
+
+
+def test_the_unrecorded_turns_note_does_not_cover_recorded_files_past_the_newest_twenty(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_old", [])
+    saved_before_upgrade(store, "task_old")
+    _turn(store, "task_turn_2", [_upload(layout.uploads_dir, "att_recorded_old")])
+    _turn(store, "task_turn_3", [_upload(layout.uploads_dir, f"att_new_{index:02d}") for index in range(INVENTORY_LIMIT)])
+    scope = TaskAttachments.load(_task_info(), store)
+
+    lines = inventory_text(scope).splitlines()
+
+    # The recorded turn-2 file is past the newest 20: left out of the list, which
+    # points to the slice, and still opened by id.
+    assert not any("att_recorded_old" in line for line in lines)
+    assert lines[-2].startswith(f"Only the newest {INVENTORY_LIMIT} are listed.")
+    assert _ids(scope.find(["att_recorded_old"])[0]) == ["att_recorded_old"]
+    # The note after it asks again only for turn 1's request files, not for every file left out.
+    assert lines[-1] == UNRECORDED_TURNS_NOTE.format(turn=1)
+    assert "a file sent with one of those requests" in lines[-1] and "a file that is not listed" not in lines[-1]
 
 
 def test_unrecorded_turns_are_noted_without_files_and_only_inside_the_conversation_scope(layout, store) -> None:

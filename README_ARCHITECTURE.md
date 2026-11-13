@@ -3619,7 +3619,9 @@ Limits:
   such a turn later, while its request still ran (guidance, answers), are
   recorded and listed without making its request's files look known. The
   list says up to which turn files were not recorded (`UNRECORDED_TURNS_NOTE`),
-  and the model asks the person to send such a file again.
+  and the model asks the person to send a file sent with one of those requests
+  again. The note covers only those requests' files: a recorded file left out
+  of the newest 20 still opens by id.
 - A file list and the file's bytes are deleted separately. The list follows
   its turn row; the bytes are deleted by upload retention
   (`attachments.retention_days`, by age) and when a person is removed
