@@ -22,6 +22,8 @@ from assistant_gateway.application.gateway_application import (
     GatewayDeliveryEvent,
 )
 from assistant_gateway.attachments import gateway_staged_attachment_reader
+from assistant_gateway.inbound_attachments import gateway_inbound_attachment_policy
+from assistant_gateway.interactive_apps.host_ports import LocalInteractiveAppAttachmentStore
 from runtime_settings.interactive_apps import INTERACTIVE_APP_EXECUTION_ADAPTER_HOST
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.contracts.adapter_host_v1 import (
@@ -138,9 +140,13 @@ class GatewayAdapterHostRuntime:
             logger=LOGGER,
         )
         holder: dict[str, AdapterHostApplicationService] = {}
+        # Hosted chats' files are saved where in-process chats save theirs.
         handler = GatewayAdapterRequestHandler(
             application,
             lambda: holder["service"],
+            attachments=LocalInteractiveAppAttachmentStore(
+                gateway_inbound_attachment_policy(config), application
+            ),
         )
         self.service = AdapterHostApplicationService(
             repository,

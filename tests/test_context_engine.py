@@ -62,6 +62,10 @@ class _TaskManager:
     def render_earlier_turn_work_markdown(self, task_id) -> str:
         return ""
 
+    def get_task_info(self, task_id):
+        # Holds no tasks, so a prompt names no files (tests/test_conversation_files_context.py covers them).
+        return None
+
 
 class _ConversationCompactor:
     def compact_if_needed(self, **kwargs):

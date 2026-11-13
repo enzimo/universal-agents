@@ -147,8 +147,10 @@ still needs it, they send it again; do not resend it for them.
 The runtime itself watches for stuck work and tells the person (Inbox and chat):
 an agent that stopped while holding a request (a replacement of its type is
 started and takes the work over), a handed-back task nobody picked up, long waits
-on an access decision or on the person's answer, and work with no progress for
-hours. Work a request handed to other agents stops when the request ends. When
+on an access decision or on the person's answer, work with no progress for
+hours, and, once after an upgrade from 0.9, a request holding files sent through
+a chat app the adapter host runs (the person is asked to send them again). Work
+a request handed to other agents stops when the request ends. When
 a person asks about such a notice, look at the task's history and current state
 (`list_task_queue`), explain it in plain words, and if they want it stopped,
 give them `/stop task <task_id>`; do not resend or recreate the request.
@@ -1407,13 +1409,19 @@ not recopy or re-encode the image first.
 
 ## User-Provided Attachments
 
-User-uploaded files arrive on `Task.attachments` or `TaskSteering.attachments`
-as structured metadata references. Use `inspect_user_attachment` for bounded
-local inspection. If you have located an image or supported document file
-in this task's folders and need the model itself to directly examine it, use
-`load_local_media_for_model_context`; that tool inserts native content blocks
-into the next inner-loop LLM input and should be used only for direct
-model-visible inspection. Native image insertion requires
+User-uploaded files arrive as structured metadata references with a request
+(`Task.attachments`), with guidance (`TaskSteering.attachments`) or with an
+answer to a question. The prompt names each file with its `attachment_id`;
+the team lead's prompt also lists the newest 20 files sent earlier in the
+same conversation, and those stay usable in later turns. Use
+`inspect_user_attachment` with the `attachment_id` for bounded inspection. If
+the model itself needs to directly examine an image or supported document,
+use `load_local_media_for_model_context` with the `attachment_id` of a file
+the person sent, or with the `path` of a file in this task's folders; that
+tool inserts native content blocks into the next inner-loop LLM input and
+should be used only for direct model-visible inspection. A file that is no
+longer stored was deleted (past the team's file retention period, or by a
+history clean-up); ask the person to send it again. Native image insertion requires
 `supports_image_input=true`; native document insertion requires
 `supports_file_input=true`. Text/Markdown files remain inspectable through file
 tools even when native file input is disabled. `supports_audio_input` records
@@ -1423,6 +1431,19 @@ purpose-built transcription or provider adapter. If `inspect_user_attachment` re
 coordinate a gateway-backed NATS Object Store mirror. Do not paste raw bytes,
 base64, or full binary content into task text, steering guidance, or user
 notifications.
+
+The team lead chooses which of the person's files a delegated task gets with
+`attachment_ids` on `delegate_task`. Left out, the task gets the files that
+came with the request's own message (for a specialist's escalation, the files
+it came with); a list passes exactly those files and `[]` passes none. Files
+the person sends later as guidance also go to the specialists already
+working on tasks delegated from the request itself, whatever `attachment_ids`
+gave them; specialists working for a plan step or a recovery task get them
+only when the team lead passes them with `attachment_ids`. An id the task
+cannot use creates nothing, and the team lead is shown the files it can
+pass. A reply to a specialist's escalation carries no files: when the
+person answers an escalation with files, the team lead delegates the work
+that needs them from the escalation with their ids.
 
 ## Whole-goal specialist and delegation scenarios
 

@@ -20,6 +20,12 @@ from custom_agents.context_engine.thread_renderer import (
     BudgetedThreadContextRenderer,
     BudgetedThreadContextRendererConfig,
 )
+from custom_agents.conversation_attachments import (
+    ScopeFiles,
+    render_earlier_files,
+    render_request_files,
+    task_attachment_scope,
+)
 from custom_agents.conversation_compaction.base import CompactionResult
 from custom_agents.filtered_tool_result_context import (
     FilteredToolResultConversationManager,
@@ -245,11 +251,22 @@ class DefaultContextEngine:
             if incoming_task is not None
             else ""
         )
+        # The files this task may name (custom_agents.conversation_attachments),
+        # read once: the request's other files go with the current request,
+        # earlier turns' files get their own section below.
+        scope_files = self._scope_files(request) if incoming_task is not None else None
+        # Rendered before the thread so the thread's budget leaves room for it.
+        earlier_files = render_earlier_files(scope_files) if scope_files is not None else ""
         if incoming_task is not None:
             current_request_context = render_current_request_context(
                 incoming_task,
                 request.incoming_meta,
                 continuing=bool(earlier_turn_work),
+                request_file_lines=render_request_files(
+                    scope_files, shown_ids=(attachment.attachment_id for attachment in incoming_task.attachments)
+                )
+                if scope_files is not None
+                else (),
             )
             if current_request_context:
                 sections.append(
@@ -325,7 +342,7 @@ class DefaultContextEngine:
                     available_thread_tokens = self._available_thread_tokens(
                         sections=sections,
                         incoming_message_summary=self._render_incoming_message_context(request),
-                        pending_pinned_texts=[execution_digest, markdown_summary],
+                        pending_pinned_texts=[execution_digest, markdown_summary, earlier_files],
                     )
                     rendered_thread = self.thread_renderer.render(
                         store=self.conversation_store,
@@ -382,6 +399,19 @@ class DefaultContextEngine:
                     pinned=True,
                     source="TaskManager.render_task_runtime_timing_markdown",
                 )
+
+        # Pinned: the files of earlier turns stay named however much of the
+        # conversation's history the prompt shows; the thread's budget above
+        # counts this section, so the thread makes room for it.
+        self._append_prompt_section(
+            sections,
+            prompt_parts,
+            name="conversation_files",
+            text=earlier_files,
+            priority=75,
+            pinned=True,
+            source="conversation_attachments.render_earlier_files",
+        )
 
         incoming_message_context = self._render_incoming_message_context(request)
         self._append_prompt_section(
@@ -604,6 +634,26 @@ class DefaultContextEngine:
         reserved += sum(section.estimated_tokens for section in sections)
         reserved += sum(self.estimate_tokens(text) for text in pending_pinned_texts if text)
         return max(0, soft_limit - reserved)
+
+    def _scope_files(self, request: ContextAssemblyRequest) -> Optional[ScopeFiles]:
+        """The files the task may name, for its prompt; None for a task this agent does not hold.
+
+        The scope follows the task's trusted id (a plan step's or recovery
+        task's request through the task manager's links) and the person its
+        original metadata is verified to work for; only the team lead's own
+        top-level request reaches its conversation's earlier turns.
+        """
+
+        if request.execution_task_id is None:
+            return None
+        scope = task_attachment_scope(
+            self.task_manager,
+            request.execution_task_id,
+            conversation_store=self.conversation_store,
+            is_team_lead=self.is_team_lead,
+            person_id=self.adapters.verified_person_of(request.identity_meta),
+        )
+        return scope.files() if scope is not None else None
 
     def _tool_setup_context(self, request: ContextAssemblyRequest, degraded_sections: set[str]) -> str:
         """TeamLead's line of the person's known tool setup states (empty when degraded or for others)."""

@@ -367,6 +367,21 @@ Retention**; the next cleanup uses it, without a restart. Everyone signed in
 sees the current numbers there. Once an upload is deleted, opening it from an
 older chat message says the attachment was not found.
 
+While an upload is kept, agents can open it again later in the same
+conversation: you can say "use the photo I sent earlier", and the team lead
+can pass the file to a specialist. This covers files sent with a request,
+with a follow-up message while the request runs, and with an answer to an
+agent's question. Files sent with a follow-up message or an answer are kept
+only when your chat account is linked to you as a member of the team. Until it
+is linked, the team does not accept your messages, and an answer it does
+accept arrives without its files. If your team runs without gateway users
+(`gateway.users.enabled: false`), files sent with a follow-up message or an
+answer in a chat app are not kept and earlier files are not offered; Web Chat
+keeps them. After
+the retention period the agent says the file is no longer stored, and you send
+it again. Files sent before version 0.10 are not
+listed for later messages; send them again if you need them.
+
 A person's folder is named after their user id: generated ids such as
 `usr_3f9a1b2c4d5e` are used as they are, and other ids become a readable name
 plus a short hash.

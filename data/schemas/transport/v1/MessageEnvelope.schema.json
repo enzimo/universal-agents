@@ -6076,6 +6076,14 @@
           "title": "Allowed Decisions",
           "type": "array"
         },
+        "attachments": {
+          "description": "Files the person sent with this answer, as the gateway stored them. Set only by the gateway on a person's answer; binary bytes are stored outside the message.",
+          "items": {
+            "$ref": "#/$defs/UserTaskAttachment"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
         "choice_mode": {
           "anyOf": [
             {

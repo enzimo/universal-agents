@@ -94,11 +94,11 @@ class _RecordingLead:
         return [answer.task_query_id for answer in self.answers()]
 
 
-def _config(tmp_path: Path) -> GatewayInstanceConfig:
+def _config(tmp_path: Path, *, team_id: str = "team_test") -> GatewayInstanceConfig:
     config = GatewayInstanceConfig.create(
         instance_name="test_instance",
         instance_root=str(tmp_path / "instance"),
-        team_id="team_test",
+        team_id=team_id,
         timezone="UTC",
         manager_agent_id="manager_1234",
     )
@@ -110,9 +110,9 @@ def _config(tmp_path: Path) -> GatewayInstanceConfig:
 class _Chat:
     """One chat with the real gateway, its store and the recording lead."""
 
-    def __init__(self, tmp_path: Path, *, channel: str = "telegram") -> None:
+    def __init__(self, tmp_path: Path, *, channel: str = "telegram", team_id: str = "team_test") -> None:
         self.tmp_path = tmp_path
-        self.config = _config(tmp_path)
+        self.config = _config(tmp_path, team_id=team_id)
         self.lead = _RecordingLead()
         self.shown: list = []
         self.gateway = self._start()

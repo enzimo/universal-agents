@@ -698,9 +698,13 @@ lead reads every agent's saved work in its team (read-only) and reports one
 incident per request and condition: the agent holding the work stopped reporting
 in, a handed-back task nobody picked up, an access decision or a question to the
 person still waiting (reminders after a day), or no progress while in progress.
-Thresholds live in `agent.schedule_maintenance.stuck_tasks`. The person comes
-from the root task's signed context (read, never used to authorize); without one
-only administrators are told, and their notices never quote the request. The
+Thresholds live in `agent.schedule_maintenance.stuck_tasks`. One more
+condition, `task_files_sent_before_upgrade`, is an upgrade step told at once
+and closed with no message ("Upgrading an instance in place"). The person comes
+from the root task's signed context (read, never used to authorize). Without
+one, the request's own chat (its gateway reply route, never a configured
+person's chat) still gets the message, and administrators are told; their
+notices never quote the request. The
 task monitor also observes its own scheduler cadence
 (`custom_agents.liveness_observation`). After a pause longer than the normal
 60-second scheduler wait plus one 20-second heartbeat interval, it gives
@@ -3490,6 +3494,27 @@ conversation's owner. A file saved for a refused send would otherwise stay as
 a stray until the cleanup below, and in another person's conversation it would
 count as theirs.
 
+Chat apps the operator runs in the adapter host (`execution: adapter_host`)
+save each file a person sends with their own attachment store (in
+`adapter-host-attachments` beside the adapter host's client state), send it
+into the adapter host's transfer folder
+(`interactive_apps.adapter_host.upload_dir`) and then send the message naming
+it. The adapter host then removes its own copy, also when sending failed
+(`adapter_host/remote_host.py`, `RemoteChannelBridge`); a message is never
+sent twice. The gateway checks those files with the same upload policy as the
+chat apps it runs itself (`inbound_attachments.gateway_inbound_attachment_policy`;
+all files of a message before any is saved), saves them in `state/uploads`
+under the chat's session and removes the transfer copies
+(`adapter_host/gateway_application.py`). When the policy refuses a file, the
+person gets the reason in the chat, as in the chat apps the gateway runs, and
+nothing of the message is sent on. So a person's file is kept in one folder
+that agents open by id in later turns ("Files a person sent in a
+conversation" below), and that the retention below, history clean-up and
+person departure cover. A message is handled once (a failure
+marks it failed), so its transfer copies are removed even when its files are
+refused or a later file of it cannot be found. Files the gateway sends to a
+hosted chat are downloaded beside the client state and not removed yet.
+
 The gateway deletes uploads older than the internal website's
 `attachments.retention_days` (90 by default, 0 keeps them) when it starts and
 every six hours after (`assistant_gateway/upload_retention.py`). Its database
@@ -3791,6 +3816,182 @@ after the provider actually rejects the request, and then after older ones.
 A result counts as read only after Strands returns a successful model response
 that its hooks accept. Failed, cancelled or retried calls leave the attempted
 results unread, including a successful response discarded by a retry hook.
+
+### Files a person sent in a conversation
+
+A person can come back to a file in a later message ("use the photo I sent
+earlier"), and the team lead can hand any of those files to a specialist.
+Before, a file was known only on the message it came with: a follow-up turn
+had no record of it, and files sent with guidance were lost once their turn
+ended.
+
+What is saved, and by whom. The gateway stores every upload in
+`state/uploads` and sends its record (`UserTaskAttachment`: id, name, type,
+size, digest and where it is stored) with the message. Trusted code in the
+team lead's process saves those records with the request's conversation turn
+(`conversation_task_links.attachments_json`, `storage/conversation_repository.py`):
+the request's own files when the task is admitted
+(`conversation_runtime.ensure_task_conversation_context`), and the files sent
+with guidance while it runs (`task_steering_runtime`) or with an answer to a
+question it asked (`TaskQuery.attachments`, set only by the gateway;
+`task_message_runtime`). Files that arrive while a plan step or recovery task
+runs go to the turn of the request it serves. A merge adds only ids the turn
+does not hold yet, in one write under the store's write lock (`BEGIN
+IMMEDIATE` on SQLite, its advisory transaction lock on PostgreSQL), so
+guidance and answers arriving together lose nothing. The save runs before the
+guidance or answer is recorded or acknowledged: when it fails, the gateway
+sends the guidance again or the answer is delivered again, and the merge
+makes the repeat harmless. The task's history keeps each guidance's and
+answer's files as well, so they survive the guidance queue being emptied and a
+restart. Files on guidance or an answer for a person's request are kept only
+when the message's signed context names the person the task works for, and
+answer files only on the answer to a question the task itself asked
+(`conversation_attachments.sent_files_refusal`, `answer_files_refusal`);
+otherwise the text is handled and the files are dropped with a warning
+(`event=guidance_files_refused`, `event=answer_files_refused`).
+Rationale: any process on the team's NATS can address the team lead, and these
+files become part of the person's conversation. Who a message is signed for:
+with gateway users on (`gateway.users.enabled`, the default), a chat account
+linked to nobody cannot send requests or follow-up messages at all: the gateway
+refuses them and says how to link the account
+(`request_context.admit_interactive_route`). An answer to a question is signed
+for the owner of the chat session it is given in, or else for the person the
+account is linked to; an answer with neither reaches the team lead with its
+text and without its files (`reason=no_verified_person`). With gateway users
+off, messages from chat apps are signed for nobody, so files sent there with
+guidance or an answer are never kept and the earlier files of a conversation
+are not offered; a request's own files still are. Web Chat and the console sign
+for their signed-in person in both modes. This changed from 0.9, where the
+tools also opened the files of guidance a running request had received, from
+any sender; no setting restores that, because files that become part of a
+person's conversation need a verified person.
+`tests/test_gateway_signed_answer_files.py` round-trips a gateway-signed answer
+with a file through the transport codec (encode and decode, as NATS delivery
+does) into the team lead's answer handler; it does not run a NATS server. Turn
+records that the
+conversation tools show carry no storage location (`turn_attachment_summary`:
+id, name, type, kind, size); only the lookup below reads whole records. One
+column on the existing turn row, not a new table: departure and history
+clean-up move or delete whole turn rows, so a turn's file list goes with its
+turn. The files themselves are deleted separately, by the gateway from its own
+upload records (`storage/gateway_state_repository.py`): by age for retention
+and, in a clean-up, by time, not by turn. So a partial clean-up can delete a
+kept turn's file while its list still names it (Limitations below).
+
+What a task may open (`custom_agents/conversation_attachments.py`,
+`AttachmentScope`). A task serves a request: itself, or for a plan step or an
+isolated recovery task the request it was made for, followed only through the
+task manager's own plan-step and recovery links, never through delegation.
+Every task may use its request's files, the files received while it ran, and
+its own. The team lead, working on a person's top-level request, may also use
+the files saved with that request's turn and with the conversation's earlier
+turns, and only when the person the task is verified to work for (its signed
+context or schedule run identity, never a message field) may read that
+conversation (`access_control.ownership`). Specialists, including a worker's
+scheduled run that continues its owner's conversation, never read a
+conversation: they get their own task's files, the ones the team lead
+chose for them and the files of guidance passed on to them. An id outside the scope is "not found", with no hint that it
+exists in another conversation, and ids must match a strict pattern, so a
+path is never taken as an id.
+
+Prompts. The current request's files that its message does not show are
+listed with the request (`Other Files For This Request`). The team lead's
+prompt lists the newest 20 files of earlier turns, newest first, each with its
+turn, in a section of its own (`Earlier Files In This Conversation`). The
+thread budget keeps room for that section, and it does not depend on how much
+of the conversation's history the prompt shows or on a context epoch. Images
+are not attached again; the model opens a file by id when it needs it. The
+conversation slice tools show each turn's file names and ids, not the files.
+
+Opening a file. `inspect_user_attachment` and
+`load_local_media_for_model_context` take an `attachment_id` and look it up in
+the task's scope; the media loader still takes a `path` for a file in the
+task's folders (exactly one of the two). A file whose upload is gone answers
+that it is no longer stored and that the person can send it again; a record
+with no copy on this machine answers `remote_copy_required`, for the team
+lead. A file that is there but cannot be read (a permission, disk or layout
+fault, such as a file where the upload's folder should be) answers with a
+fixed message that it could not be read, never "no longer stored", and logs `event=attachment_upload_unreadable` with the task and
+attachment ids and the error number, never the path
+(`conversation_attachments.locate_upload`: one look-up gives the state and
+the size, so no error between the check and the read carries the path into
+a result). A delegation still passes such a file on: the fault may clear.
+
+Choosing files for a specialist. The team lead's `delegate_task` action takes
+optional `attachment_ids` in every schema variant its models use; the
+specialists' schemas leave the field out, and the outbox refuses it from any
+agent but the team lead. Left out, the new task gets the files of the
+request's own message: for a plan step or recovery task the request's, for a
+specialist's escalation the files it came with. A list gives exactly the files
+it names, `[]` none. The choice is made once, when the task is delegated.
+Guidance the person sends later goes to the request's own task, and the team
+lead passes it on, with its files, to that task's unfinished delegated
+subtasks that a worker already holds (`task_manager.get_pending_subtasks`,
+`task_steering_runtime._forwarded_guidance_envelope`), whatever
+`attachment_ids` gave them, so `[]` does not keep later files from those
+specialists. Subtasks of a plan step or recovery task, and subtasks no
+worker has taken yet, get no copy: their specialists get later files only
+when the team lead passes them by id. The ids are looked up in the same scope right before the
+subtask is created (the outbox's `local_commit` phase), so an unknown, removed
+or excess id (more than 20) creates nothing and goes back to the model with
+the files it can pass, without storage locations
+(`delegation_runtime.selected_attachments`). The new task carries the stored
+records, never anything the model wrote. Rationale: the model names ids
+only, never paths, and a retry after the subtask exists never looks the ids
+up again.
+
+Limitations:
+
+- Turns saved before this release have no file list, so their files are
+  neither listed nor found by id; there is no backfill.
+- A file past the upload retention period cannot be opened; the person sends
+  it again. "No longer stored" means gone from this runtime's `state/uploads`,
+  which holds while the gateway and the team lead run on one machine.
+- A partial history clean-up (one that keeps a conversation's newer turns)
+  deletes the uploads older than the first kept turn's earliest transcript or
+  request row (`_history_cut_end`). The gateway stores a message's files a
+  moment before it writes that message's rows, so the first kept turn's own
+  file is deleted while its file list still names it: the file stays listed,
+  and opening or delegating it answers that it is no longer stored. This is
+  older gateway behavior that the file lists make visible. It is not fixed
+  here; the follow-up deletes uploads by the turns a clean-up deletes, not by
+  time.
+- Files sent with an answer to a question stay with the conversation of the
+  chat they were sent in. The gateway records each upload under the
+  conversation of the chat, or Web Chat page, it came from, and a clean-up
+  deletes uploads by that record; the team lead lists an answer's files with
+  the turn of the request the question serves, which can be another
+  conversation (a scheduled run with its own conversation, or a request in
+  another Web Chat thread). A clean-up of the request's conversation then
+  leaves the file stored until the upload retention ends, and a clean-up of
+  the chat's conversation deletes it while the request's turn still lists it,
+  so the tools answer that it is no longer stored. Moving the gateway's record
+  to the question's conversation would not fix this: a question that a plan
+  step or recovery task asks carries that task's own private conversation id
+  (`task_manager_plans`), not the request's. The same follow-up (a clean-up
+  deletes the uploads its deleted turns list) covers answers too.
+- Files a chat app run by the adapter host sent before 0.10 are recorded in
+  the adapter host's transfer folder, and the tools open only `state/uploads`:
+  for a request still running or queued at the upgrade they answer
+  `remote_copy_required`, although the file is still on disk (an image already
+  in the model's context still reaches it). There is no fallback and no
+  migration; the person is told which files to send again ("Upgrading an
+  instance in place").
+- Copies in that transfer folder made before this release, and copies of a
+  message the gateway never handled, stay there: retention, history clean-up
+  and person removal cover only `state/uploads`, and the adapter host's own
+  prune deletes its rows, not their files. Follow-up: delete each expired
+  row's transfer file.
+- Protocol 1's `task.answer` message has no files field. Answers still travel
+  in the older message, which carries `TaskQuery.attachments`; moving answers
+  to protocol 1 needs that field.
+- A reply to a specialist's escalation carries no files, so the specialist
+  that escalated does not get the files the person sends with the answer. The
+  team lead hands them on by delegating the work that needs them from the
+  escalation with `attachment_ids`.
+- The interrupt answer path (`INTERRUPT_RESPONSE`) carries no files. No tool
+  interrupt reaches the chat today; one added later needs the same handling.
+- The team transfer carries no conversations, so it does not change.
 
 ### Model provider keys
 
@@ -4269,6 +4470,38 @@ the desktop app never offers an older version.
   reach anyone, because the gateway that waited for it restarted with the
   upgrade. The model, its handler and the list go with the other upgrade steps
   from 0.9.
+- **Hosted-chat files in unfinished work.** Up to 0.9 the adapter host
+  recorded the files of the chat apps it runs (`execution: "adapter_host"`) in
+  its own transfer folder; from 0.10 the file tools open only `state/uploads`
+  ("Files a person sent in a conversation"), with no fallback and no migration
+  of the old files. Chat apps the gateway runs (`execution: "in_process"`, the
+  default) and Web Chat already stored their files in `state/uploads`, so
+  they are not affected. A request
+  still running or queued at the upgrade cannot open such a file with its
+  tools, so its pull request carries `breaking-change` and says to finish that
+  work before upgrading. Work that was not finished is reported by the team
+  lead's stuck-task check (`custom_agents.stuck_tasks`, condition
+  `task_files_sent_before_upgrade`): on each pass it reads every agent's saved
+  work, finds file records outside `state/uploads` (the rule by which the tools
+  answer `remote_copy_required`) and tells the person in the request's signed
+  context, once and at once, in the Inbox and the request's chat, which files
+  to send again. It reads each task's own files and the files the person sent
+  while it ran, with guidance (also the copy a worker got for its subtask) or
+  with an answer (`conversation_attachments.received_attachments`, the files
+  the tools offer by id), so guidance sent through such a chat app before the
+  upgrade, or held by the gateway and sent again after it, is reported too.
+  The files of a request's subtasks, plan steps and recovery tasks (found
+  through the plan-step and recovery links in the team lead's saved work) go
+  into the request's one notice. Without a verified person (also every
+  chat-app request on a team with gateway users off) the message goes only to
+  the request's own chat, the chat the files came from, never to a configured
+  person's chat, and administrators are told the number of files, with no
+  names. It reads saved records only: it opens,
+  moves and copies no file and scans no folder. Limits: it runs only while the
+  stuck-task check is on (`agent.schedule_maintenance.stuck_tasks.enabled`, on
+  by default); work still queued when the team lead starts is reported on the
+  first pass after an agent takes it; work whose request has ended is not
+  reported. The condition goes with the other upgrade steps from 0.9.
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the

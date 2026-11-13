@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 
 from assistant_gateway.application.access_reviews import (
@@ -214,8 +215,14 @@ class GatewayApplication(Protocol):
         task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> GatewayApplicationResponse:
-        """Answer the named question waiting in a chat."""
+        """Answer the named question waiting in a chat, with the files the person sent with the answer.
+
+        ``attachments`` are files the gateway already checked and stored for
+        this chat. When the answer is not sent, the reply says the files were
+        not sent either.
+        """
 
     async def list_scheduled_jobs(
         self,

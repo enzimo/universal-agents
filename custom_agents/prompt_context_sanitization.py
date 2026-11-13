@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from custom_messages.contracts.replied_message_v1 import RepliedMessage
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -42,8 +42,18 @@ CONTINUING_REQUEST_LABEL = (
 
 
 def render_current_request_context(
-    task: Task, meta: Optional[MessageMeta], *, continuing: bool = False
+    task: Task,
+    meta: Optional[MessageMeta],
+    *,
+    continuing: bool = False,
+    request_file_lines: Sequence[str] = (),
 ) -> str:
+    """The current request as the prompt's final section.
+
+    ``request_file_lines`` names the request's other files, the ones its
+    message does not carry (``conversation_attachments.render_request_files``).
+    """
+
     sections = parse_bracketed_prompt_sections(task.problem_statement)
     request_text = extract_display_request_text(task.problem_statement) or "(no request text provided)"
     lines = []
@@ -79,9 +89,10 @@ def render_current_request_context(
     lines.extend([CONTINUING_REQUEST_LABEL if continuing else "Current Request:", request_text])
     lines.extend(_replied_message_block(getattr(task, "replied_message", None)))
     attachment_lines = _render_attachment_summary(getattr(task, "attachments", None))
-    if attachment_lines:
-        lines.append("")
-        lines.extend(attachment_lines)
+    for block in (attachment_lines, list(request_file_lines)):
+        if block:
+            lines.append("")
+            lines.extend(block)
     return "\n".join(lines).strip()
 
 
@@ -270,17 +281,19 @@ def render_incoming_message_summary(
 
 
 def _render_attachment_summary(attachments: Any) -> list[str]:
+    """The current message's files by name and id, never where they are stored.
+
+    Models open a file by ``attachment_id`` (``custom_tools.attachment_uploads``);
+    a storage path would only invite a path the tools refuse, and its folder
+    name carries chat identifiers.
+    """
+
     values = list(attachments or [])
     if not values:
         return []
     lines = ["Current Request Attachments:"]
     for attachment in values[:20]:
-        local_path = None
-        for ref in list(getattr(attachment, "storage_refs", None) or []):
-            if getattr(ref, "storage_type", None) == "local" and getattr(ref, "path", None):
-                local_path = ref.path
-                break
-        rendered = (
+        lines.append(
             f"- {getattr(attachment, 'filename', 'attachment')} "
             f"(id={getattr(attachment, 'attachment_id', '')}, "
             f"kind={getattr(attachment, 'kind', 'other')}, "
@@ -288,9 +301,6 @@ def _render_attachment_summary(attachments: Any) -> list[str]:
             f"size={getattr(attachment, 'size_bytes', 0)} bytes, "
             f"sha256={getattr(attachment, 'sha256', '')})"
         )
-        if local_path:
-            rendered += f"; local_path={local_path}"
-        lines.append(rendered)
     if len(values) > 20:
         lines.append(f"- {len(values) - 20} additional attachment(s) omitted from prompt summary.")
     lines.append(

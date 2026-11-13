@@ -36,6 +36,7 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Optional
 
 from access_control.ownership import conversation_continuation
+from custom_agents.conversation_attachments import attachment_records
 from custom_agents.conversation_summary import (
     ConversationSummaryGenerator,
     TurnSummaryRequest,
@@ -278,6 +279,9 @@ def ensure_task_conversation_context(
         ),
         task_status=ProgressState.ACCEPTED.value,
         owner_canonical_user_id=owner_canonical_user_id,
+        # The files sent with the request, kept with its turn so later turns
+        # can name and open them (custom_agents.conversation_attachments).
+        attachments=attachment_records(task_request.attachments or []),
     )
     return normalized_meta
 

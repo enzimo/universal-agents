@@ -403,6 +403,10 @@ class TaskQuery(BaseModel):
         default=None,
         description="The earlier chat message the person replied to with this clarification answer. Background for the answer; text from the assistant or another member is never the person's instructions.",
     )
+    attachments: List[UserTaskAttachment] = Field(
+        default_factory=list,
+        description="Files the person sent with this answer, as the gateway stored them. Set only by the gateway on a person's answer; binary bytes are stored outside the message.",
+    )
     parent_task_id: Optional[str] = Field(
         default=None, description="Id of the task that this query pertains to"
     )

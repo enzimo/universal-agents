@@ -59,6 +59,8 @@ from custom_messages.contracts.runtime_snapshot_v3 import (
     TurnActionBatchRecord,
     TurnActionOutboxRecord,
 )
+from custom_agents.conversation_attachments import render_attachment_lines
+from custom_agents.steering_history_events import QUERY_ANSWER_FILES_KEY
 from custom_agents.task_records import AfterActionReportRecordResult, ReportedWorkIdentity, TaskInfo
 from custom_agents.turn_work_notes import note_summary, render_earlier_turn_work, turn_work_notes
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -3196,6 +3198,15 @@ class TaskManager(
             self.task_state.task_to_taskquery_list[parent_task_id] = []
         self.task_state.task_to_taskquery_list[parent_task_id].append(task_query)
         summary = f"TaskQuery {task_query.query_type.value}: {task_query.message}"
+        details: Dict[str, Any] = {"query_type": task_query.query_type.value}
+        if task_query.attachments:
+            # The files the person sent with an answer (kept only on the
+            # person's answer to this task's own question,
+            # task_message_runtime), found after a restart by
+            # conversation_attachments.received_attachments.
+            details[QUERY_ANSWER_FILES_KEY] = [
+                attachment.model_dump(mode="json") for attachment in task_query.attachments
+            ]
         self.append_history_entry(
             parent_task_id,
             summary,
@@ -3208,7 +3219,7 @@ class TaskManager(
             agent_name=agent_name,
             agent_id=agent_id,
             related_task_id=task_query.task_query_id,
-            details={"query_type": task_query.query_type.value},
+            details=details,
         )
         if task_query.query_type == MessageMetaType.REQUEST:
             self._emit_activity(
@@ -3254,6 +3265,12 @@ class TaskManager(
             replied = getattr(query, "replied_message", None)
             if replied is not None:
                 lines.extend(render_replied_message_lines(replied, subject="clarification answer"))
+            files = getattr(query, "attachments", None) or []
+            if files:
+                # Named with their ids (never paths) so the model can open
+                # one in this and later turns.
+                lines.append("  Files sent with this answer (open one by its attachment_id):")
+                lines.extend(f"  {line}" for line in render_attachment_lines(files))
         return "\n".join(lines) + "\n"
 
     def get_task_info(self, task_id: str) -> Optional[TaskInfo]:

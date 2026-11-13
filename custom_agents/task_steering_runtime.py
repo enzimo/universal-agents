@@ -54,12 +54,21 @@ from custom_messages.enums import (
     TaskSteeringStatusCode,
     TaskSteeringType,
 )
+from custom_agents.conversation_attachments import (
+    render_attachment_lines,
+    save_sent_files,
+    sent_files_refusal,
+)
+from custom_agents.steering_history_events import (
+    GUIDANCE_ACCEPTED_EVENT,
+    GUIDANCE_APPLIED_EVENT,
+    GUIDANCE_STEERING_KEY,
+    HISTORY_EVENT_KEY,
+)
 from id_generation import new_id
 from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 
 logger = logging.getLogger(__name__)
-GUIDANCE_ACCEPTED_EVENT = "task_steering_proactive_guidance_accepted"
-GUIDANCE_APPLIED_EVENT = "task_steering_proactive_guidance_applied"
 
 
 @dataclass
@@ -396,6 +405,37 @@ async def _send_steering_status_response(
     await agent.team_comms.send_message(message=envelope, routing_key=routing_key)
 
 
+async def _with_the_persons_files_only(
+    agent: Any, task_info: Any, steering: TaskSteering, msg_header: MessageHeader, msg_meta: MessageMeta
+) -> TaskSteering:
+    """The steering as received, or without its files when its person did not send them.
+
+    Files on steering for a top-level task are saved with the person's
+    conversation turn, so they are kept only when the message is verified to
+    work for the person the task works for (``sent_files_refusal``). Otherwise
+    the text is handled as usual and the files are dropped everywhere: the
+    turn, the task's history, the guidance the model reads and the copies
+    passed on to workers.
+    """
+
+    if not steering.attachments:
+        return steering
+    refusal = await sent_files_refusal(agent, task_info, msg_meta)
+    if refusal is None:
+        return steering
+    agent._logger.warning(
+        "Files sent with steering were not kept: the message is not verified to come from the person the task "
+        "works for. Its text is handled as usual. event=guidance_files_refused task_id=%s sender=%s reason=%s "
+        "steering_type=%s attachment_ids=%s",
+        task_info.task.task_id,
+        msg_header.from_agent_id,
+        refusal,
+        steering.steering_type.value,
+        ",".join(attachment.attachment_id for attachment in steering.attachments),
+    )
+    return steering.model_copy(update={"attachments": []})
+
+
 async def _record_guidance_history(
     agent: Any, task_id: str, steering: TaskSteering, *, applied: bool = False
 ) -> bool:
@@ -412,13 +452,13 @@ async def _record_guidance_history(
         entry_type=TaskHistoryType.TASK_EVENT,
         importance=TaskHistoryImportance.HIGH,
         details={
-            "event": GUIDANCE_APPLIED_EVENT
+            HISTORY_EVENT_KEY: GUIDANCE_APPLIED_EVENT
             if applied
             else GUIDANCE_ACCEPTED_EVENT,
             "steering_id": steering.steering_id,
             "conversation_id": steering.conversation_id,
             "dedupe_key": steering.idempotency_key or steering.steering_id,
-            **({"steering": steering.model_dump(mode="json")} if not applied else {}),
+            **({GUIDANCE_STEERING_KEY: steering.model_dump(mode="json")} if not applied else {}),
         },
     )
     return entry is not None
@@ -792,6 +832,7 @@ async def handle_task_steering_message(
         )
         return
 
+    steering = await _with_the_persons_files_only(agent, task_info, steering, msg_header, msg_meta)
     seen = agent._processed_task_steering_ids
     dedupe_key = steering.idempotency_key or steering.steering_id
     _saved_guidance, saved_keys = _saved_proactive_guidance(task_info)
@@ -822,8 +863,11 @@ async def handle_task_steering_message(
                 reason="Proactive guidance must include guidance_text.",
             )
             return
-        # Acknowledge only after the complete guidance is in the task's durable
-        # history. Restart reconstructs pending guidance and deduplication there.
+        # Its files first, so a failed save leaves the guidance unrecorded and
+        # unanswered, to be sent again. Acknowledge only after the complete
+        # guidance is in the task's durable history. Restart reconstructs
+        # pending guidance, its files and deduplication there.
+        await save_sent_files(agent, task_id, steering.attachments)
         if not await _record_guidance_history(agent, task_id, steering, applied=False):
             await _send_steering_status_response(
                 agent, steering, msg_header, msg_meta,
@@ -1345,7 +1389,7 @@ def _saved_proactive_guidance(
     read_by_turn: set[str] = set()
     for entry in getattr(getattr(task_info, "task", None), "execution_history", []) or []:
         details = entry.details or {}
-        event = details.get("event")
+        event = details.get(HISTORY_EVENT_KEY)
         if event == "turn_action_batch_prepared" and batch_exists(details.get("batch_id", "")):
             for key in read_by_turn:
                 pending.pop(key, None)
@@ -1359,8 +1403,8 @@ def _saved_proactive_guidance(
         seen.add(key)
         if event == GUIDANCE_APPLIED_EVENT:
             read_by_turn.add(key)
-        elif "steering" in details:
-            pending[key] = TaskSteering.model_validate(details["steering"])
+        elif GUIDANCE_STEERING_KEY in details:
+            pending[key] = TaskSteering.model_validate(details[GUIDANCE_STEERING_KEY])
     return pending, seen
 
 
@@ -1445,12 +1489,19 @@ async def _guidance_block(
         if task_id:
             if not await _record_guidance_history(agent, task_id, item, applied=True):
                 raise RuntimeCustodyLost(agent.id, CustodyStore.TASK_RUNTIME)
-        lines.append(f"- {item.guidance_text}")
-        if item.replied_message is not None:
-            lines.extend(
-                f"  {line}"
-                for line in render_replied_message_lines(
-                    item.replied_message, subject="guidance"
-                )
-            )
+        lines.extend(_guidance_item_lines(item))
     return "\n".join(lines)
+
+
+def _guidance_item_lines(item: TaskSteering) -> list[str]:
+    """One guidance item for the model: its text, the message it replied to, and its files."""
+
+    lines = [f"- {item.guidance_text}"]
+    if item.replied_message is not None:
+        lines.extend(f"  {line}" for line in render_replied_message_lines(item.replied_message, subject="guidance"))
+    if item.attachments:
+        # Named with their ids so the model can open them after this
+        # guidance has been read (custom_agents.conversation_attachments).
+        lines.append("  Files sent with this guidance (open one by its attachment_id):")
+        lines.extend(f"  {line}" for line in render_attachment_lines(item.attachments))
+    return lines

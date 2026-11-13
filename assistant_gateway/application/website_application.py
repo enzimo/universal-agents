@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from assistant_gateway.application.file_retention_page import FileRetentionPage
 from custom_messages.contracts.access_v2 import ChangeApprovalRecordV1
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.control_v1 import KnowledgeCommandPayload, KnowledgeCommandResultPayload
 from custom_messages.contracts.status_v1 import StatusReportV1
 
@@ -944,8 +945,9 @@ class WebTranscriptApplication(Protocol):
         conversation_id: str | None,
         client_request_id: str,
         user_text: str,
+        attachments: tuple[UserTaskAttachment, ...] = (),
     ) -> tuple[WebTranscriptMessageV1, bool] | None:
-        """Persist local input and report whether this caller owns execution."""
+        """Persist local input, with the files sent with it, and report whether this caller owns execution."""
 
     def record_local_response(
         self,

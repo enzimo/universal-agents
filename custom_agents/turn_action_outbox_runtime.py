@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from pydantic import ValidationError
 from default_values import AGENT_DEFAULTS
 
+from custom_agents.delegation_runtime import selected_attachments
 from custom_agents.delegated_work_runtime import (
     delegation_holder,
     end_unpublished_delegation,
@@ -161,6 +162,12 @@ def _validate_manager_mediated_worker_delegation(self, action: TurnAction) -> No
                            "Finish locally or report that this work needs the restarted team.")
     if getattr(self, "named_agent_type", None) == TEAM_ARCHITECT_AGENT_TYPE:
         return
+    if action.attachment_ids is not None:
+        # Specialists' schemas have no attachment_ids (ModelWorkerDelegateTaskAction);
+        # an escalation gets the specialist's own task's files.
+        raise RuntimeError(
+            "Only TeamArchitect chooses which files a delegated task gets; leave attachment_ids out."
+        )
     if (
         action.manager_escalation is not None
         and action.target_named_agent_type == TEAM_ARCHITECT_AGENT_TYPE
@@ -1375,7 +1382,13 @@ async def _execute_turn_action_record(
                         f"{existing_delegated_task_id}, but the local task record is missing."
                     )
             else:
-                task_info = await self._create_subtask_request(comms_message)
+                # Resolved only when the task is about to be created; an id the
+                # task may not pass raises before anything is committed, and the
+                # model is shown the files it can pass (model recovery).
+                chosen = await selected_attachments(
+                    self, action.attachment_ids if isinstance(action, DelegateTaskAction) else None
+                )
+                task_info = await self._create_subtask_request(comms_message, chosen_files=chosen)
                 delegated_target_verified = task_info is not None
             if not task_info:
                 raise RuntimeError(

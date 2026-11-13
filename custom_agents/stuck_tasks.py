@@ -25,12 +25,43 @@ request produces one message however many agents work on it. Conditions:
 - ``task_waiting_for_answer``: the task asked the person a question (a
   recoverable pause) that is still unanswered.
 - ``task_no_progress``: in progress on a live agent with no new history entry.
+- ``task_files_sent_before_upgrade``: unfinished work holds a file record that
+  places the file outside this instance's ``state/uploads``
+  (``conversation_attachments.stored_upload_path`` finds no copy there, the
+  rule by which both file tools answer ``remote_copy_required``; it decides
+  from the record and reads no file, so a fault reading an upload is not
+  logged on every pass): a file sent with the
+  task, or one the person sent while it ran, with guidance or with an answer
+  (``conversation_attachments.received_attachments``, the files the tools offer
+  by id). Reported at once, to the person only, and closed with no message.
+  Without a verified person (also every chat-app request on a team with
+  gateway users off) the message goes only to the request's own chat, the
+  chat the files came from, and administrators get the number of files. Only
+  a request is reported, with the files of all its work: its subtasks and its plan steps and recovery tasks
+  (tasks of the team lead with no parent, linked to the request in the lead's
+  saved work), and their subtasks. Work still held after its request ended is
+  not reported.
+
+Files sent before the upgrade. Up to 0.9 the adapter host recorded the files of
+chat apps it runs (``execution: "adapter_host"``) in its own transfer folder,
+and the file tools opened them there. From 0.10 the gateway stores every file
+in ``state/uploads`` and the tools open nothing else, so a request still
+running or queued at the upgrade cannot open such a file with its tools again
+(images still reach a vision model directly). The person is told which files
+to send again. Nothing is opened, moved or copied: the check reads the saved
+records only. A check that fails for one task is logged
+(``event=stuck_task_upgrade_files_check_failed``) and skips that task, so it
+never stops the other conditions. This is an upgrade step from 0.9: remove it
+with the other upgrade steps from 0.9 once 0.11 ships (README_ARCHITECTURE.md,
+"Upgrading an instance in place").
 
 Who is told: the person in the root task's signed context (read with
 ``check_expiry=False``, which reads facts and authorizes nothing, because a
 stuck task can outlive its context), or the owner of the schedule a run
-belongs to. Without a verified person only administrators are told.
-Administrators' notices never quote the request; tasks are private.
+belongs to. Without a verified person, the request's own chat (its gateway
+reply route, never a configured person's chat) still gets the message, and
+administrators are told. Administrators' notices never quote the request;
+tasks are private.
 """
 
 from __future__ import annotations
@@ -43,7 +74,9 @@ from typing import Any, Iterable
 from access_control.identity import IdentityRejected
 from custom_agents.instance_delivery_context import configured_owner_route
 from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc, retain_decisions
+from custom_agents.conversation_attachments import received_attachments, shown_name, stored_upload_path
 from custom_agents.liveness_observation import heartbeat_checks_deferred
+from custom_agents.runtime_paths import agent_layout
 from custom_agents.stuck_work import (
     ChatRoute,
     Recovery,
@@ -73,6 +106,7 @@ TASK_HANDBACK_UNCLAIMED = "task_handback_unclaimed"
 TASK_WAITING_FOR_ACCESS = "task_waiting_for_access_decision"
 TASK_WAITING_FOR_ANSWER = "task_waiting_for_answer"
 TASK_NO_PROGRESS = "task_no_progress"
+TASK_FILES_SENT_BEFORE_UPGRADE = "task_files_sent_before_upgrade"
 # A recoverable pause still waiting for the person (RecoverablePauseRecord.status).
 PAUSE_PENDING = "pending"
 
@@ -81,6 +115,8 @@ TERMINAL_STATES = frozenset(
 )
 EXECUTING_STATES = frozenset({ProgressState.IN_PROGRESS, ProgressState.RETRYING})
 _LABEL_LENGTH = 80
+# File names a person's notice shows; it counts the rest.
+_SHOWN_FILES = 5
 
 
 def request_chat_route(
@@ -89,7 +125,10 @@ def request_chat_route(
     """The person's chat for a request: its reply route, else the configured user's chat.
 
     ``agent_ids`` are agents' own routes (the manager, the agents that held
-    the work), never a chat.
+    the work), never a chat. The configured user's chat belongs to a person,
+    so it is used only for a verified ``person_id``: work verified for nobody
+    (an unsigned request, or a chat app's request on a team with gateway users
+    off) reaches only its own chat, the one it came from, or no chat.
     """
     context = getattr(meta, "gateway_context", None)
     route = getattr(header, "response_routing_key", None)
@@ -187,6 +226,51 @@ class StuckTasks:
             current = held[parent]
         return current
 
+    @staticmethod
+    def made_for(owners: Iterable[OwnerWork]) -> dict[str, str]:
+        """Each plan step and isolated recovery task, and the task it was made for.
+
+        A plan step or recovery task is a task of the team lead with no parent
+        that works for another task. These are the task manager's own links
+        (``plan_step_task_links``, ``recovery_links``), the ones
+        ``conversation_attachments._request_chain`` follows.
+        """
+        links: dict[str, str] = {}
+        for owner in owners:
+            links.update(
+                {task_id: link.original_task_id for task_id, link in owner.snapshot.recovery_links.items()}
+            )
+            links.update(
+                {task_id: link.root_task_id for task_id, link in owner.snapshot.plan_step_task_links.items()}
+            )
+        return links
+
+    @staticmethod
+    def request_of(held: dict[str, HeldTask], made_for: dict[str, str], task: HeldTask) -> HeldTask | None:
+        """The request a task's work serves, or None when no agent holds it any more.
+
+        Follows a held task's parent, and otherwise the link of a plan step or
+        recovery task, also when that step itself has ended (a recovery task
+        for an ended step still serves the request).
+        """
+        current_id = task.record.task_id
+        seen = {current_id}
+        while True:
+            current = held.get(current_id)
+            parent = current.record.task.parent_task_id if current is not None else None
+            next_id = parent or made_for.get(current_id)
+            if not next_id:
+                return current
+            if next_id in seen:
+                logger.warning(
+                    "A task's parents and plan links loop; it is not reported as part of a request. "
+                    "event=stuck_task_request_links_loop task_id=%s",
+                    task.record.task_id,
+                )
+                return None
+            seen.add(next_id)
+            current_id = next_id
+
     def owner_gone_since(self, owner: OwnerWork, now: datetime) -> datetime | None:
         """When an agent other than the lead stopped, or None while it may still run.
 
@@ -256,12 +340,13 @@ class StuckTasks:
         since: datetime,
         agent_ids: set[str],
         agent_type: str | None,
+        file_names: tuple[str, ...] = (),
     ) -> StuckFinding:
         identity = self.identity_of(meta)
         person = identity.person_id if identity is not None else None
         subject, description = _work_description(identity)
         label, when = self.label(root_task), self._when(meta, since)
-        text, admin_text, tell_admins = _texts(reason, when, agent_type, description)
+        text, admin_text, tell_admins = _texts(reason, when, agent_type, description, file_names)
         return StuckFinding(
             subject_kind=TASK_SUBJECT,
             subject_id=root_task.task_id,
@@ -271,6 +356,7 @@ class StuckTasks:
             person_id=person,
             tell_administrators=tell_admins,
             message=StuckMessage(title=f'Your request "{label}" {_TITLES[reason]}', text=text),
+            # Without a verified person only the request's own chat (``request_chat_route``).
             chat_route=self.chat_route(header, meta, person, agent_ids),
             administrator_message=StuckMessage(title=f"{subject} {_TITLES[reason]}", text=admin_text),
         )
@@ -294,6 +380,7 @@ class StuckTasks:
         live_owners = self._owners_gone(owners, held, now, add)
         self._handbacks(now, held, agent_ids, found)
         self._waiting_for_access(now, held, add)
+        self._files_sent_before_upgrade(now, held, self.made_for(owners), agent_ids, found)
         for owner in owners:
             if owner.owner_agent_id in live_owners:
                 self._live_owner_waits(owner, held, now, add)
@@ -360,9 +447,67 @@ class StuckTasks:
                 ),
             )
 
+    def _files_sent_before_upgrade(
+        self,
+        now: datetime,
+        held: dict[str, HeldTask],
+        made_for: dict[str, str],
+        agent_ids: set[str],
+        found: dict[tuple[str, str], StuckFinding],
+    ) -> None:
+        """One finding per request whose unfinished work holds files stored before the upgrade.
+
+        The work of a request's plan steps and recovery tasks, and of their
+        subtasks, counts as the request's, so the person gets one notice. A
+        task's files are the ones sent with it and the ones the person sent
+        while it ran, with guidance (also a worker's forwarded copy) or with an
+        answer: ``received_attachments`` reads them from the task's history as
+        the file tools do.
+        """
+        uploads_dir = agent_layout(self.agent).uploads_dir
+        files_by_request: dict[str, dict[str, str]] = {}  # request task id -> attachment id -> file name
+        for task in held.values():
+            try:
+                sent = [*task.record.task.attachments, *received_attachments(task.record.task)]
+                old = [attachment for attachment in sent if stored_upload_path(attachment, uploads_dir) is None]
+            except Exception as exc:
+                # The error's text may name a stored path, so only its type is logged.
+                logger.warning(
+                    "Could not check a task's files for files sent before the upgrade; skipped it. "
+                    "event=stuck_task_upgrade_files_check_failed task_id=%s error_type=%s",
+                    task.record.task_id,
+                    type(exc).__name__,
+                )
+                continue
+            if not old:
+                continue
+            request = self.request_of(held, made_for, task)
+            if request is None:
+                # No agent holds this task's request any more: the request
+                # ended, and a stop may not have reached the task yet. The
+                # person has nothing left to send files again for, so nothing
+                # is reported (an open incident for the request closes silently).
+                continue
+            files = files_by_request.setdefault(request.record.task_id, {})
+            for attachment in old:
+                files.setdefault(attachment.attachment_id, attachment.filename)
+        for request_id, files in files_by_request.items():
+            request = held[request_id]
+            found.setdefault(
+                (request_id, TASK_FILES_SENT_BEFORE_UPGRADE),
+                self._finding(
+                    request.record.task, request.record.header, request.record.meta,
+                    reason=TASK_FILES_SENT_BEFORE_UPGRADE, since=now, agent_ids=agent_ids,
+                    agent_type=request.owner_named_agent_type, file_names=tuple(files.values()),
+                ),
+            )
+
     # -- recovery -----------------------------------------------------------------
 
-    def recovery(self, incident: StuckWorkIncidentV1) -> Recovery:
+    def recovery(self, incident: StuckWorkIncidentV1) -> Recovery | None:
+        if incident.incident_key == TASK_FILES_SENT_BEFORE_UPGRADE:
+            # Nothing is working again: the request ended or no longer holds such a file.
+            return None
         owners = self.owners()
         held = self.held_tasks(owners)
         task = held.get(incident.subject_id)
@@ -396,6 +541,7 @@ _TITLES = {
     TASK_WAITING_FOR_ACCESS: "is waiting for an access decision",
     TASK_WAITING_FOR_ANSWER: "is waiting for your answer",
     TASK_NO_PROGRESS: "has made no progress",
+    TASK_FILES_SENT_BEFORE_UPGRADE: "needs files sent again",
 }
 
 
@@ -410,9 +556,28 @@ def _work_description(identity: TaskContextV1 | SchedulePermitV1 | None) -> tupl
     return "System work", "system work"
 
 
-def _texts(reason: str, when: str, agent_type: str | None, work: str) -> tuple[str, str, bool]:
+def _shown_files(file_names: tuple[str, ...]) -> str:
+    shown = ", ".join(shown_name(name) for name in file_names[:_SHOWN_FILES])
+    more = len(file_names) - _SHOWN_FILES
+    return f"{shown} and {more} more" if more > 0 else shown
+
+
+def _texts(
+    reason: str, when: str, agent_type: str | None, work: str, file_names: tuple[str, ...] = ()
+) -> tuple[str, str, bool]:
     """(person text, administrator text, whether administrators are told)."""
     kind = agent_type or "agent"
+    if reason == TASK_FILES_SENT_BEFORE_UPGRADE:
+        count = len(file_names)
+        return (
+            f"It uses files you sent before the team was upgraded ({_shown_files(file_names)}). "
+            "The team can no longer open them with its tools. If the request still needs them, "
+            "send them again in this chat.",
+            f"Unfinished work ({work}) uses {count} file{'s' if count != 1 else ''} sent before the "
+            "upgrade through a chat app the adapter host runs. The team can no longer open them "
+            "with its tools; they need to be sent again.",
+            False,
+        )
     if reason == TASK_OWNER_GONE:
         return (
             f"The agent working on it stopped responding {when}. The team lead starts "
