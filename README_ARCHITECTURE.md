@@ -3921,6 +3921,20 @@ Limitations:
   older gateway behavior that the file lists make visible. It is not fixed
   here; the follow-up deletes uploads by the turns a clean-up deletes, not by
   time.
+- Files sent with an answer to a question stay with the conversation of the
+  chat they were sent in. The gateway records each upload under the
+  conversation of the chat, or Web Chat page, it came from, and a clean-up
+  deletes uploads by that record; the team lead lists an answer's files with
+  the turn of the request the question serves, which can be another
+  conversation (a scheduled run with its own conversation, or a request in
+  another Web Chat thread). A clean-up of the request's conversation then
+  leaves the file stored until the upload retention ends, and a clean-up of
+  the chat's conversation deletes it while the request's turn still lists it,
+  so the tools answer that it is no longer stored. Moving the gateway's record
+  to the question's conversation would not fix this: a question that a plan
+  step or recovery task asks carries that task's own private conversation id
+  (`task_manager_plans`), not the request's. The same follow-up (a clean-up
+  deletes the uploads its deleted turns list) covers answers too.
 - Files a chat app run by the adapter host sent before 0.10 are recorded in
   the adapter host's transfer folder, and the tools open only `state/uploads`:
   for a request still running or queued at the upgrade they answer
@@ -4436,10 +4450,16 @@ the desktop app never offers an older version.
   work, finds file records outside `state/uploads` (the rule by which the tools
   answer `remote_copy_required`) and tells the person in the request's signed
   context, once and at once, in the Inbox and the request's chat, which files
-  to send again. The files of a request's subtasks, plan steps and recovery
-  tasks (found through the plan-step and recovery links in the team lead's
-  saved work) go into the request's one notice. Without a verified person only administrators are told, with
-  the number of files and no names. It reads saved records only: it opens,
+  to send again. It reads each task's own files and the files the person sent
+  while it ran, with guidance (also the copy a worker got for its subtask) or
+  with an answer (`conversation_attachments.received_attachments`, the files
+  the tools offer by id), so guidance sent through such a chat app before the
+  upgrade, or held by the gateway and sent again after it, is reported too.
+  The files of a request's subtasks, plan steps and recovery tasks (found
+  through the plan-step and recovery links in the team lead's saved work) go
+  into the request's one notice. Without a verified person no chat message is
+  sent, because the person's text names the files; only administrators are
+  told, with the number of files and no names. It reads saved records only: it opens,
   moves and copies no file and scans no folder. Limits: it runs only while the
   stuck-task check is on (`agent.schedule_maintenance.stuck_tasks.enabled`, on
   by default); work still queued when the team lead starts is reported on the

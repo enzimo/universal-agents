@@ -371,7 +371,11 @@ much is older than 30, 90, 180 and 365 days.
   conversation that is only partly deleted keeps its newer messages, and in
   Web Chat it is then named after its earliest remaining message. A file sent
   with that earliest remaining message can be deleted with the older ones; if
-  the team says it is no longer stored, send it again. A Web Chat
+  the team says it is no longer stored, send it again. A file you send with
+  your answer to a question stays with the chat you sent it in, also when the
+  question came from scheduled work with its own conversation: cleaning up
+  that chat deletes the file, cleaning up the scheduled work's conversation
+  does not. A Web Chat
   thread left empty disappears from the list; another chat continues, and its
   next message starts a new conversation.
 - **Who decides.** Only you. Each clean-up waits for you in the Inbox, where

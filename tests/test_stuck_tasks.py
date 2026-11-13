@@ -51,13 +51,20 @@ from custom_messages.contracts.runtime_snapshot_v3 import (
     RuntimeSnapshotV3,
     TaskSnapshotRecord,
 )
-from custom_messages.contracts.task_v1 import Task
+from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskSteering
 from custom_messages.contracts.worker_handback_v1 import (
     HandedBackTaskV1,
     WorkerLeaseLossEvidenceV1,
     WorkerTaskHandbackV1,
 )
-from custom_messages.enums import ControlType, MessageMetaType, ProgressState, RequesterType
+from custom_messages.enums import (
+    ControlType,
+    MessageMetaType,
+    ProgressState,
+    RequesterType,
+    TaskHistoryType,
+    TaskSteeringType,
+)
 from runtime_settings.instance_layout import InstanceLayout
 from storage.access_repository import AccessRepository
 from storage.stuck_work_repository import StuckWorkRepository
@@ -460,6 +467,59 @@ async def test_a_request_holding_files_sent_before_the_upgrade_tells_its_person_
     assert "event=stuck_work_closed_silently" in caplog.text
 
 
+
+def guidance_09(files, key="corr-guidance-1"):
+    """Guidance the person sent while the task ran, as 0.9 recorded its acceptance in the task's history.
+
+    The keys are spelled out (not the runtime's constants) so the test pins
+    what 0.9 wrote; workers record a forwarded copy the same way.
+    """
+    steering = TaskSteering(
+        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
+        conversation_id="conv-1",
+        guidance_text="Use this receipt too",
+        attachments=list(files),
+        idempotency_key=key,
+    )
+    return TaskHistoryEntry(
+        entry_type=TaskHistoryType.TASK_EVENT,
+        summary="Mid-turn proactive steering accepted: Use this receipt too",
+        details={
+            "event": "task_steering_proactive_guidance_accepted",
+            "steering_id": steering.steering_id,
+            "conversation_id": "conv-1",
+            "dedupe_key": key,
+            "steering": steering.model_dump(mode="json"),
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("holders", [("root",), ("child-a",), ("root", "child-a")])
+async def test_a_file_sent_as_guidance_before_the_upgrade_is_named_once_in_its_requests_notice(lead, holders):
+    """The request's own history, a worker's forwarded copy, or both: one notice naming the file once."""
+    old = stored_file(lead, "att_guide", "receipt.png", folder=ADAPTER_HOST_FOLDER)
+    root = record("root", state=ProgressState.WAITING)
+    child = record("child-a", parent="root", route="lead")
+    for held in (root, child):
+        if held.task_id in holders:
+            held.task.execution_history = [guidance_09([old])]
+    save(lead, "lead", "TeamArchitect", [root])
+    save(lead, "worker-1", "WebResearchAgent", [child])
+    seen(lead, "worker-1")
+    await report_stuck_tasks(lead, now=datetime.now(timezone.utc))
+
+    (notice,) = notices(lead)
+    assert notice.title == f'Your request "{REQUEST}" needs files sent again'
+    assert "files you sent before the team was upgraded (receipt.png)." in notice.summary
+    assert notice.summary.count("receipt.png") == 1 and no_storage_path(notice.summary)
+    (envelope,) = chats(lead)
+    assert envelope.msg_content.text.count("receipt.png") == 1
+    assert [(incident.subject_id, incident.reason) for incident in open_incidents(lead)] == [
+        ("root", TASK_FILES_SENT_BEFORE_UPGRADE)
+    ]
+    assert not admin_notices(lead)
+
 @pytest.mark.asyncio
 async def test_a_subtask_still_held_after_its_request_ended_sends_no_second_notice(lead):
     old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
@@ -576,6 +636,9 @@ async def test_files_sent_before_the_upgrade_of_unverified_work_tell_administrat
     save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING, signed=False, files=[old])])
     await report_stuck_tasks(lead, now=datetime.now(timezone.utc))
     assert not notices(lead)
+    # The request's chat has a reply route, but the person's text names the
+    # files and nobody is verified to be that person: no chat gets anything.
+    assert chats(lead) == []
     (admin,) = admin_notices(lead)
     assert admin.title == "A task needs files sent again"
     assert "uses 1 file sent before the upgrade" in admin.summary

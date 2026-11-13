@@ -28,9 +28,13 @@ request produces one message however many agents work on it. Conditions:
 - ``task_files_sent_before_upgrade``: unfinished work holds a file record that
   places the file outside this instance's ``state/uploads``
   (``conversation_attachments.locate_upload`` answers ``remote``, the rule by
-  which both file tools answer ``remote_copy_required``). Reported at once, to
-  the person only, and closed with no message. Only a request is reported, with
-  the files of all its work: its subtasks and its plan steps and recovery tasks
+  which both file tools answer ``remote_copy_required``): a file sent with the
+  task, or one the person sent while it ran, with guidance or with an answer
+  (``conversation_attachments.received_attachments``, the files the tools offer
+  by id). Reported at once, to the person only, and closed with no message.
+  Without a verified person no chat message is sent, because the person's text
+  names the files; administrators get the number of files. Only a request is
+  reported, with the files of all its work: its subtasks and its plan steps and recovery tasks
   (tasks of the team lead with no parent, linked to the request in the lead's
   saved work), and their subtasks. Work still held after its request ended is
   not reported.
@@ -65,7 +69,7 @@ from typing import Any, Iterable
 from access_control.identity import IdentityRejected
 from custom_agents.instance_delivery_context import configured_owner_route
 from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc, retain_decisions
-from custom_agents.conversation_attachments import UPLOAD_REMOTE, locate_upload, shown_name
+from custom_agents.conversation_attachments import UPLOAD_REMOTE, locate_upload, received_attachments, shown_name
 from custom_agents.liveness_observation import heartbeat_checks_deferred
 from custom_agents.runtime_paths import agent_layout
 from custom_agents.stuck_work import (
@@ -335,6 +339,11 @@ class StuckTasks:
         subject, description = _work_description(identity)
         label, when = self.label(root_task), self._when(meta, since)
         text, admin_text, tell_admins = _texts(reason, when, agent_type, description, file_names)
+        # The person's text of the files condition names the files. Without a
+        # verified person it goes to no chat; administrators get the count
+        # (the engine tells them whenever there is no person).
+        names_files = reason == TASK_FILES_SENT_BEFORE_UPGRADE
+        chat_route = None if names_files and person is None else self.chat_route(header, meta, person, agent_ids)
         return StuckFinding(
             subject_kind=TASK_SUBJECT,
             subject_id=root_task.task_id,
@@ -344,7 +353,7 @@ class StuckTasks:
             person_id=person,
             tell_administrators=tell_admins,
             message=StuckMessage(title=f'Your request "{label}" {_TITLES[reason]}', text=text),
-            chat_route=self.chat_route(header, meta, person, agent_ids),
+            chat_route=chat_route,
             administrator_message=StuckMessage(title=f"{subject} {_TITLES[reason]}", text=admin_text),
         )
 
@@ -445,17 +454,18 @@ class StuckTasks:
         """One finding per request whose unfinished work holds files stored before the upgrade.
 
         The work of a request's plan steps and recovery tasks, and of their
-        subtasks, counts as the request's, so the person gets one notice.
+        subtasks, counts as the request's, so the person gets one notice. A
+        task's files are the ones sent with it and the ones the person sent
+        while it ran, with guidance (also a worker's forwarded copy) or with an
+        answer: ``received_attachments`` reads them from the task's history as
+        the file tools do.
         """
         uploads_dir = agent_layout(self.agent).uploads_dir
         files_by_request: dict[str, dict[str, str]] = {}  # request task id -> attachment id -> file name
         for task in held.values():
             try:
-                old = [
-                    attachment
-                    for attachment in task.record.task.attachments
-                    if locate_upload(attachment, uploads_dir).state == UPLOAD_REMOTE
-                ]
+                sent = [*task.record.task.attachments, *received_attachments(task.record.task)]
+                old = [attachment for attachment in sent if locate_upload(attachment, uploads_dir).state == UPLOAD_REMOTE]
             except Exception as exc:
                 # The error's text may name a stored path, so only its type is logged.
                 logger.warning(
