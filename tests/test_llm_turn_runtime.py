@@ -346,6 +346,79 @@ async def test_a_turn_reads_its_images_and_their_settings_once_off_the_event_loo
     assert loads == [False]  # once for the turn, in a thread
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("first_takes_images", "fallback_takes_images"), [(True, False), (False, True)])
+async def test_after_an_inline_failover_each_attempt_sends_images_only_if_its_model_takes_them(
+    tmp_path, monkeypatch, first_takes_images: bool, fallback_takes_images: bool
+) -> None:
+    """POST-1: the turn's images are read once, but an inline failover can change whether the model takes them.
+
+    A text-only fallback must get no image block (it can reject them and fail
+    the turn); an image fallback after a text-only first model must get the
+    image. The images are still read at most once, off the event loop.
+    """
+
+    from collections import deque
+    from dataclasses import replace
+
+    from custom_agents.conversation_attachments import UploadFolders
+    from tests.test_runtime_owner_boundaries import build_turn_owner
+
+    image = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
+    loads: list[bool] = []
+    for_agent = UploadFolders.for_agent.__func__
+
+    def recorded(cls, agent):
+        try:
+            asyncio.get_running_loop()
+            loads.append(True)
+        except RuntimeError:
+            loads.append(False)
+        return for_agent(cls, agent)
+
+    monkeypatch.setattr(UploadFolders, "for_agent", classmethod(recorded))
+    prompts: list[Any] = []
+
+    async def invoke(prompt, **_kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            raise RuntimeError("primary model provider is unavailable")
+        return result
+
+    executor, result = build_turn_owner(
+        invoke=invoke,
+        guidance=deque(["", ""]),
+        committed=[],
+        cleared=[],
+        settings_overrides={"supports_image_input": first_takes_images, "instance_root": str(tmp_path)},
+    )
+    current = {"settings": executor.read_settings()}
+    executor.read_settings = lambda: current["settings"]
+
+    async def fail_over(**_kwargs):
+        # The configured fallback replaces the turn's model and its settings, then retries inline.
+        current["settings"] = replace(current["settings"], supports_image_input=fallback_takes_images)
+        return _failover_outcome(retry_inline=True)
+
+    executor.effects = replace(executor.effects, handle_provider_failure=fail_over, should_notify_user=lambda: False)
+    task = Task(
+        task_id="task_photo",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photo.",
+        attachments=[_image_attachment(image)],
+    )
+
+    await executor.process_llm_interaction(task, MessageHeader(), MessageMeta(conversation_id="conv_1"))
+
+    def images(prompt: Any) -> list[bytes]:
+        return [block["image"]["source"]["bytes"] for block in prompt if "image" in block] if isinstance(prompt, list) else []
+
+    assert len(prompts) == 2
+    assert images(prompts[0]) == ([b"\x89PNG upload"] if first_takes_images else [])
+    assert images(prompts[1]) == ([b"\x89PNG upload"] if fallback_takes_images else [])
+    assert loads == [False]  # read once for the turn, in a thread, when a model first took images
+
+
 def test_direct_image_input_reads_a_delegated_tasks_images_only_from_the_upload_folders(
     tmp_path, caplog
 ) -> None:

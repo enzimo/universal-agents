@@ -732,10 +732,12 @@ class _TurnState:
     start_notes: TurnStartNotes | None = None
     start_notes_handed_over: bool = False
     # The image uploads on the turn's message as native input blocks, and one
-    # diagnostic per image, read once before the first model call
-    # (LLMTurnExecutor._read_direct_images): the message does not change
-    # between attempts, so retries reuse them.
-    direct_images: tuple[list[ContentBlock], list[dict[str, Any]]] = field(default_factory=lambda: ([], []))
+    # diagnostic per image, read at most once per turn, the first time an
+    # attempt's model takes images (LLMTurnExecutor._direct_images_for_attempt);
+    # None until then. The message does not change between attempts, so later
+    # attempts reuse them, but each attempt includes them only when its own
+    # model takes images: an inline failover can change the model.
+    direct_images: tuple[list[ContentBlock], list[dict[str, Any]]] | None = None
 
 
 class LLMTurnExecutor:
@@ -1000,21 +1002,28 @@ class LLMTurnExecutor:
             if _is_image_attachment(attachment)
         ]
 
-    async def _read_direct_images(self, turn: _TurnState) -> tuple[list[ContentBlock], list[dict[str, Any]]]:
-        """The turn's direct image input, read once, off the event loop (``_collect_direct_model_image_blocks``).
+    async def _direct_images_for_attempt(self, turn: _TurnState) -> tuple[list[ContentBlock], list[dict[str, Any]]]:
+        """The direct image input for one model call: the turn's images when the current model takes images.
 
-        Reading it loads the instance settings for the upload folders and reads
-        up to ``DIRECT_MODEL_IMAGE_MAX_BYTES`` per image, so it runs in a
-        thread, and only when the message has images the model can take.
+        Whether to include them is decided for each attempt from the current
+        settings, never from the model the turn started with: an inline
+        failover (``_recover_after_provider_failure``) can switch to a model
+        that takes no images, or to one that does. Reading them loads the
+        instance settings for the upload folders and reads up to
+        ``DIRECT_MODEL_IMAGE_MAX_BYTES`` per image, so it runs in a thread,
+        at most once per turn (``_TurnState.direct_images``), the first time
+        an attempt's model takes them.
         """
 
         if not self._direct_images(turn.prompt_content):
             return [], []
-        return await asyncio.to_thread(
-            self._collect_direct_model_image_blocks,
-            turn.prompt_content,
-            conversation_id=getattr(turn.msg_meta, "conversation_id", None),
-        )
+        if turn.direct_images is None:
+            turn.direct_images = await asyncio.to_thread(
+                self._collect_direct_model_image_blocks,
+                turn.prompt_content,
+                conversation_id=getattr(turn.msg_meta, "conversation_id", None),
+            )
+        return turn.direct_images
 
     def _collect_direct_model_image_blocks(
         self, msg_content: ContentType, *, conversation_id: Optional[str] = None
@@ -1023,7 +1032,7 @@ class LLMTurnExecutor:
 
         Only when the model takes image input. Each image is read the way the
         attachment tools read uploads (``_direct_image_input``). Blocking: a
-        turn calls it once, in a thread (``_read_direct_images``).
+        turn calls it at most once, in a thread (``_direct_images_for_attempt``).
         """
 
         images = self._direct_images(msg_content)
@@ -1051,8 +1060,9 @@ class LLMTurnExecutor:
     ) -> str | list[ContentBlock]:
         """The model input for one attempt: the prompt, then the turn's image blocks.
 
-        ``direct_images`` were read once for the turn (``_read_direct_images``),
-        so building the input for a retry reads no file and no settings.
+        ``direct_images`` are this attempt's (``_direct_images_for_attempt``):
+        none when the current model takes no images, so building the input
+        reads no file and no settings.
         """
 
         attachments = list(getattr(msg_content, "attachments", None) or [])
@@ -2539,13 +2549,12 @@ class LLMTurnExecutor:
             turn.strands_invocation_attempt = 0
             turn.reasoning_summary_repair_attempted = False
             turn.invocation_started = time.monotonic()
-            turn.direct_images = await self._read_direct_images(turn)
             while True:
                 try:
                     strands_prompt_input = self._build_strands_prompt_input(
                         turn.full_prompt,
                         turn.prompt_content,
-                        direct_images=turn.direct_images,
+                        direct_images=await self._direct_images_for_attempt(turn),
                     )
                     prompt_input_summary = _strands_prompt_input_summary(
                         strands_prompt_input
