@@ -701,8 +701,10 @@ person still waiting (reminders after a day), or no progress while in progress.
 Thresholds live in `agent.schedule_maintenance.stuck_tasks`. One more
 condition, `task_files_sent_before_upgrade`, is an upgrade step told at once
 and closed with no message ("Upgrading an instance in place"). The person comes
-from the root task's signed context (read, never used to authorize); without one
-only administrators are told, and their notices never quote the request. The
+from the root task's signed context (read, never used to authorize). Without
+one, the request's own chat (its gateway reply route, never a configured
+person's chat) still gets the message, and administrators are told; their
+notices never quote the request. The
 task monitor also observes its own scheduler cadence
 (`custom_agents.liveness_observation`). After a pause longer than the normal
 60-second scheduler wait plus one 20-second heartbeat interval, it gives
@@ -4488,9 +4490,11 @@ the desktop app never offers an older version.
   upgrade, or held by the gateway and sent again after it, is reported too.
   The files of a request's subtasks, plan steps and recovery tasks (found
   through the plan-step and recovery links in the team lead's saved work) go
-  into the request's one notice. Without a verified person no chat message is
-  sent, because the person's text names the files; only administrators are
-  told, with the number of files and no names. It reads saved records only: it opens,
+  into the request's one notice. Without a verified person (also every
+  chat-app request on a team with gateway users off) the message goes only to
+  the request's own chat, the chat the files came from, never to a configured
+  person's chat, and administrators are told the number of files, with no
+  names. It reads saved records only: it opens,
   moves and copies no file and scans no folder. Limits: it runs only while the
   stuck-task check is on (`agent.schedule_maintenance.stuck_tasks.enabled`, on
   by default); work still queued when the team lead starts is reported on the

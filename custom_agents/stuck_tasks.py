@@ -34,9 +34,10 @@ request produces one message however many agents work on it. Conditions:
   task, or one the person sent while it ran, with guidance or with an answer
   (``conversation_attachments.received_attachments``, the files the tools offer
   by id). Reported at once, to the person only, and closed with no message.
-  Without a verified person no chat message is sent, because the person's text
-  names the files; administrators get the number of files. Only a request is
-  reported, with the files of all its work: its subtasks and its plan steps and recovery tasks
+  Without a verified person (also every chat-app request on a team with
+  gateway users off) the message goes only to the request's own chat, the
+  chat the files came from, and administrators get the number of files. Only
+  a request is reported, with the files of all its work: its subtasks and its plan steps and recovery tasks
   (tasks of the team lead with no parent, linked to the request in the lead's
   saved work), and their subtasks. Work still held after its request ended is
   not reported.
@@ -57,8 +58,10 @@ with the other upgrade steps from 0.9 once 0.11 ships (README_ARCHITECTURE.md,
 Who is told: the person in the root task's signed context (read with
 ``check_expiry=False``, which reads facts and authorizes nothing, because a
 stuck task can outlive its context), or the owner of the schedule a run
-belongs to. Without a verified person only administrators are told.
-Administrators' notices never quote the request; tasks are private.
+belongs to. Without a verified person, the request's own chat (its gateway
+reply route, never a configured person's chat) still gets the message, and
+administrators are told. Administrators' notices never quote the request;
+tasks are private.
 """
 
 from __future__ import annotations
@@ -122,7 +125,10 @@ def request_chat_route(
     """The person's chat for a request: its reply route, else the configured user's chat.
 
     ``agent_ids`` are agents' own routes (the manager, the agents that held
-    the work), never a chat.
+    the work), never a chat. The configured user's chat belongs to a person,
+    so it is used only for a verified ``person_id``: work verified for nobody
+    (an unsigned request, or a chat app's request on a team with gateway users
+    off) reaches only its own chat, the one it came from, or no chat.
     """
     context = getattr(meta, "gateway_context", None)
     route = getattr(header, "response_routing_key", None)
@@ -341,11 +347,6 @@ class StuckTasks:
         subject, description = _work_description(identity)
         label, when = self.label(root_task), self._when(meta, since)
         text, admin_text, tell_admins = _texts(reason, when, agent_type, description, file_names)
-        # The person's text of the files condition names the files. Without a
-        # verified person it goes to no chat; administrators get the count
-        # (the engine tells them whenever there is no person).
-        names_files = reason == TASK_FILES_SENT_BEFORE_UPGRADE
-        chat_route = None if names_files and person is None else self.chat_route(header, meta, person, agent_ids)
         return StuckFinding(
             subject_kind=TASK_SUBJECT,
             subject_id=root_task.task_id,
@@ -355,7 +356,8 @@ class StuckTasks:
             person_id=person,
             tell_administrators=tell_admins,
             message=StuckMessage(title=f'Your request "{label}" {_TITLES[reason]}', text=text),
-            chat_route=chat_route,
+            # Without a verified person only the request's own chat (``request_chat_route``).
+            chat_route=self.chat_route(header, meta, person, agent_ids),
             administrator_message=StuckMessage(title=f"{subject} {_TITLES[reason]}", text=admin_text),
         )
 

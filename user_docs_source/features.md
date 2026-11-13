@@ -492,6 +492,10 @@ ended; check the task history for its actual progress.
 That last notice asks you to send the files again. It gets no "cleared"
 message: it ends when the request ends.
 
+When the team cannot tell whose request it is (for example on a team with
+gateway users off), the message still goes to the chat the request came from,
+and administrators get an Inbox notice that does not quote the request.
+
 Some of these are repaired automatically before you would be told: when the
 agent holding your request stops, the team lead starts another agent of the same
 kind that takes the work over; an agent waiting on your answer or on an access

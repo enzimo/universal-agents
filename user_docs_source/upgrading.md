@@ -26,8 +26,11 @@ supported, because it may not read what a newer one saved.
   apps the gateway runs itself (`execution: "in_process"`, the default) and
   Web Chat need nothing. For a chat app in the adapter host, first let
   requests that use files sent through it finish. After the upgrade the team
-  can no longer open those files with its tools; the person each such request
-  works for is told in the Inbox and in the chat which files to send again.
+  can no longer open those files with its tools. The chat each such request
+  came from is told which files to send again, and the person it works for
+  also gets the notice in the Inbox. On a team with gateway users off nobody
+  is verified, so the chat gets the message and administrators get an Inbox
+  notice with the number of files.
 - **From 0.9 with an external NATS server:** prepare the server first. 0.10
   needs NATS Server 2.15.1 or later with two server settings
   ([Surviving a power loss](configuration.md#surviving-a-power-loss)), and more

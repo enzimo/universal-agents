@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from access_control.people import PERSON_ROLE_ADMIN, PERSON_ROLE_OWNER
+import custom_agents.stuck_tasks as stuck_tasks_module
 from custom_agents import task_context_runtime
 from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.liveness_observation import observe_liveness
@@ -632,21 +633,69 @@ async def test_a_plan_step_still_held_after_its_request_ended_sends_no_notice(le
     assert not open_incidents(lead)
 
 
+def verified_for_nobody(task_record, sender):
+    """The request as a sender no person is verified for sent it.
+
+    ``unsigned``: a gateway context with no signed task context (its
+    ``canonical_user_id`` is only a claim). ``signed_for_nobody``: a chat app's
+    request on a team with gateway users off, which the gateway signs for no
+    person.
+    """
+    if sender == "signed_for_nobody":
+        task_record.meta.gateway_context = task_record.meta.gateway_context.model_copy(
+            update={
+                "canonical_user_id": None,
+                "task_context": context_signer().issue(team_id="team", person_id=None, person_roles=()),
+            }
+        )
+    return task_record
+
+
 @pytest.mark.asyncio
-async def test_files_sent_before_the_upgrade_of_unverified_work_tell_administrators_no_names(lead):
+@pytest.mark.parametrize("sender", ["unsigned", "signed_for_nobody"])
+async def test_files_sent_before_the_upgrade_of_unverified_work_go_to_the_requests_own_chat(lead, sender):
     old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
-    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING, signed=False, files=[old])])
+    root = verified_for_nobody(record("root", state=ProgressState.WAITING, signed=False, files=[old]), sender)
+    save(lead, "lead", "TeamArchitect", [root])
     await report_stuck_tasks(lead, now=datetime.now(timezone.utc))
+
+    # No person to give an Inbox notice to: the chat the files came from gets the message.
     assert not notices(lead)
-    # The request's chat has a reply route, but the person's text names the
-    # files and nobody is verified to be that person: no chat gets anything.
-    assert chats(lead) == []
+    (envelope,) = chats(lead)
+    assert envelope.msg_header.to_routing_path == GATEWAY_ROUTE
+    assert "photo.png" in envelope.msg_content.text and no_storage_path(envelope.msg_content.text)
     (admin,) = admin_notices(lead)
-    assert admin.title == "A task needs files sent again"
+    assert admin.title.endswith("needs files sent again")
     assert "uses 1 file sent before the upgrade" in admin.summary
     assert "photo.png" not in admin.title + admin.summary
     assert REQUEST not in admin.title + admin.summary
     assert no_storage_path(admin.summary)
+
+
+@pytest.mark.asyncio
+async def test_unverified_work_with_no_chat_of_its_own_never_uses_a_configured_persons_chat(lead, monkeypatch):
+    asked = []
+
+    def configured_route(config_path, person_id):  # the configured user's chat, as instance config gives it
+        asked.append(person_id)
+        return "gateway.instance.owner", GatewayContext(session_key="telegram:owner", channel_name="telegram")
+
+    monkeypatch.setattr(stuck_tasks_module, "configured_owner_route", configured_route)
+    old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
+    other = stored_file(lead, "att_other", "chart.png", folder=ADAPTER_HOST_FOLDER)
+    # Both requests' reply route is an agent's own, so neither has a chat of its own.
+    nobodys = record("nobodys", state=ProgressState.WAITING, signed=False, route="lead", files=[old])
+    jordans = record("jordans", state=ProgressState.WAITING, route="lead", files=[other])
+    save(lead, "lead", "TeamArchitect", [nobodys, jordans])
+    await report_stuck_tasks(lead, now=datetime.now(timezone.utc))
+
+    # Only the verified request falls back to its person's configured chat.
+    assert asked == ["jordan"]
+    (envelope,) = chats(lead)
+    assert envelope.msg_header.to_routing_path == "gateway.instance.owner"
+    assert envelope.msg_content.source_task_id == "jordans" and "chart.png" in envelope.msg_content.text
+    (admin,) = admin_notices(lead)
+    assert "uses 1 file sent before the upgrade" in admin.summary and "photo.png" not in admin.summary
 
 
 @pytest.mark.asyncio
