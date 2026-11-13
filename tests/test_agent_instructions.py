@@ -140,7 +140,7 @@ def test_instructions_open_the_persons_files_by_id_and_say_what_a_delegation_pas
     assert "with the `attachment_id` of a file the person sent, or with a `path`" in shared_agent_base_prompt
     assert "choose which of the person's files a delegated task gets with `attachment_ids`" in shared_agent_base_prompt
     assert "A reply to a specialist's escalation cannot carry files" in shared_agent_base_prompt
-    later = "Files the person sends later as guidance still go to every specialist already working on the"
+    later = "Files the person sends later as guidance also go to the specialists already working on tasks delegated"
     assert later in shared_agent_base_prompt
 
     team_lead = (

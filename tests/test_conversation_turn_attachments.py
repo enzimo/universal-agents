@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -215,3 +218,43 @@ def test_files_added_to_one_turn_at_once_from_several_stores_are_all_kept_once(d
     assert len(saved) == len(set(saved)) == len(expected)
     assert set(saved) == expected
     assert saved[0] == "att_first"
+
+
+class _MergingStore:
+    """A store that only counts merges; ``wait`` holds every merge until it is set."""
+
+    def __init__(self, wait: threading.Event | None = None) -> None:
+        self.wait = wait
+
+    def merge_turn_attachments(self, **_: Any) -> list[dict[str, Any]]:
+        if self.wait is not None:
+            self.wait.wait(10)
+        return []
+
+
+def test_the_concurrent_merge_helper_fails_at_once_when_a_store_does_not_open() -> None:
+    opened: list[int] = []
+    lock = threading.Lock()
+
+    def open_repository() -> _MergingStore:
+        with lock:
+            opened.append(len(opened))
+            first = len(opened) == 1
+        if first:
+            raise RuntimeError("database is locked while opening the store")
+        return _MergingStore()
+
+    started = time.monotonic()
+    with pytest.raises(AssertionError, match="database is locked"):
+        merge_from_threads(open_repository, "conv_1", "task_1", writers=3, files_each=1)
+    # The other writers stopped instead of waiting for the one that failed.
+    assert time.monotonic() - started < 10
+
+
+def test_the_concurrent_merge_helper_fails_when_a_writer_never_finishes() -> None:
+    release = threading.Event()
+    try:
+        with pytest.raises(AssertionError, match="still running"):
+            merge_from_threads(lambda: _MergingStore(release), "conv_1", "task_1", writers=2, files_each=1, join_timeout=0.5)
+    finally:
+        release.set()

@@ -51,9 +51,10 @@ QUESTION = "Which receipt do you mean?"
 class _Lead:
     """One instance's uploads folder and stores, and the team lead holding the request ``ROOT``, which asked."""
 
-    def __init__(self, storage, tmp_path: Path) -> None:
+    def __init__(self, storage, tmp_path: Path, *, person: str = PERSON) -> None:
         self.storage = storage
         self.tmp_path = tmp_path
+        self.person = person  # whom the request ``ROOT`` works for
         self.layout = InstanceLayout.at(tmp_path / "instance")
         self.layout.ensure_directories()
         self.manager = self.open_manager()
@@ -101,9 +102,9 @@ class _Lead:
             conversation_store=self.store, team_id=TEAM, owner_agent_id=LEAD, owner_agent_name="Lead",
             task_request=task, msg_header=header,
             msg_meta=MessageMeta(conversation_id=conversation_id, msg_correlation_id=f"corr_{task_id}"),
-            owner_person_id=PERSON,
+            owner_person_id=self.person,
         )
-        assert self.manager.add_task(task, header, meta, owner_person_id=PERSON)
+        assert self.manager.add_task(task, header, meta, owner_person_id=self.person)
         return str(meta.conversation_id)
 
     def task(

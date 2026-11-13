@@ -3902,12 +3902,15 @@ specialists' schemas leave the field out, and the outbox refuses it from any
 agent but the team lead. Left out, the new task gets the files of the
 request's own message: for a plan step or recovery task the request's, for a
 specialist's escalation the files it came with. A list gives exactly the files
-it names, `[]` none. The choice is made once, when the task is delegated:
-guidance the person sends later is passed on with its files to every
-specialist holding a subtask of the request
-(`task_steering_runtime._forwarded_guidance_envelope`), whatever
-`attachment_ids` gave it, so `[]` does not keep later files from a
-specialist. The ids are looked up in the same scope right before the
+it names, `[]` none. The choice is made once, when the task is delegated.
+Guidance the person sends later goes to the request's own task, and the team
+lead passes it on, with its files, to that task's unfinished delegated
+subtasks that a worker already holds (`task_manager.get_pending_subtasks`,
+`task_steering_runtime._forwarded_guidance_envelope`), whatever
+`attachment_ids` gave them, so `[]` does not keep later files from those
+specialists. Subtasks of a plan step or recovery task, and subtasks no
+worker has taken yet, get no copy: their specialists get later files only
+when the team lead passes them by id. The ids are looked up in the same scope right before the
 subtask is created (the outbox's `local_commit` phase), so an unknown, removed
 or excess id (more than 20) creates nothing and goes back to the model with
 the files it can pass, without storage locations
