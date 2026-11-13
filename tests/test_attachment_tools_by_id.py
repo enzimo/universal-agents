@@ -432,7 +432,7 @@ async def test_an_id_from_a_turn_saved_before_files_were_recorded_says_so(earlie
     result = _inspect(photo.attachment_id)
 
     assert _unknown(result, photo.attachment_id) == []
-    assert _payload(result)["note"].startswith("Turns up to turn 1 were saved before files were recorded")
+    assert _payload(result)["note"].startswith("Some files sent with earlier requests (the latest in turn 1)")
 
 
 # --- An answer's files after a restart --------------------------------------------------------------

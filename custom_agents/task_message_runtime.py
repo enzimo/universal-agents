@@ -1449,7 +1449,6 @@ async def _handle_task_request(
     schedule_pending_work(self)
 
 
-
 async def _admit_request_turn(
     self: Any,
     task_request: Task,
@@ -1496,6 +1495,7 @@ async def _admit_request_turn(
         await self._send_task_error_response(task_request, msg_header, msg_meta, str(exc))
         return None
     return request_files.task, meta
+
 
 async def _handle_delivery_receipt(
     self,

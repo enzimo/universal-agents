@@ -23,6 +23,9 @@ from assistant_gateway.config import GatewayInstanceConfig
 from custom_agents.conversation_attachments import (
     CONVERSATION_ATTACHMENTS_HEADING,
     INVENTORY_LIMIT,
+    REQUEST_FILES_NOT_KEPT_EVENT,
+    REQUEST_FILES_NOT_KEPT_KEY,
+    REQUEST_FILES_NOT_KEPT_NOTE,
     TASK_FILES_EVENT,
     TASK_FILES_KEY,
     UPLOAD_FILE_MISSING,
@@ -371,10 +374,10 @@ def test_the_inventory_says_up_to_which_turn_files_were_not_recorded(layout, sto
     assert "- `att_photo` att_photo.png (image/png, image, 10 bytes; turn 3, task task_new)" in text
     assert text.splitlines()[-1] == UNRECORDED_TURNS_NOTE.format(turn=2)
     assert UNRECORDED_TURNS_NOTE.format(turn=2) == (
-        "Turns up to turn 2 were saved before files were recorded: the files sent with those requests are not "
-        "listed and cannot be opened by id (files sent to them later, while they still ran, are listed and opened "
-        "like any other file). If the person refers to a file sent with one of those requests, ask them to send it "
-        "again."
+        "Some files sent with earlier requests (the latest in turn 2) are not recorded, because those turns were "
+        "saved before files were recorded or some of their files were not accepted. Recorded files are listed and "
+        "open by id as usual. If the person refers to a file from one of those requests that is not listed here or "
+        "by get_conversation_context_slice, ask them to send it again."
     )
 
 
@@ -395,7 +398,8 @@ def test_the_unrecorded_turns_note_does_not_cover_recorded_files_past_the_newest
     assert _ids(scope.find(["att_recorded_old"])[0]) == ["att_recorded_old"]
     # The note after it asks again only for turn 1's request files, not for every file left out.
     assert lines[-1] == UNRECORDED_TURNS_NOTE.format(turn=1)
-    assert "a file sent with one of those requests" in lines[-1] and "a file that is not listed" not in lines[-1]
+    assert "a file from one of those requests that is not listed here or by get_conversation_context_slice" in lines[-1]
+    assert "a file that is not listed" not in lines[-1]
 
 
 def test_unrecorded_turns_are_noted_without_files_and_only_inside_the_conversation_scope(layout, store) -> None:
@@ -473,6 +477,45 @@ def test_only_files_entries_this_task_wrote_are_its_own_files(layout, store) -> 
     scope = TaskAttachments.load(info, store)
 
     assert _ids(list(scope.own)) == ["att_mine"]
+
+
+def _not_kept(count: Any) -> dict[str, Any]:
+    """History details of a request's count of files not kept, as admission writes them."""
+
+    return {"event": REQUEST_FILES_NOT_KEPT_EVENT, REQUEST_FILES_NOT_KEPT_KEY: count}
+
+
+def test_the_request_and_its_steps_say_how_many_request_files_were_not_accepted(layout, store, caplog) -> None:
+    """The count comes only from the request's own entries; copies of a worker's and unreadable ones are skipped."""
+
+    _thread(store)
+    _turn(store, CURRENT, [])
+    request = _task_info(history=[_not_kept(2), {**_not_kept(5), "bubbled_entry_id": "task_hist_worker"}, _not_kept("x")])
+    request.task.execution_history.append(
+        TaskHistoryEntry(summary="[Subtask child]", entry_type=TaskHistoryType.SUBTASK_EVENT, details=_not_kept(3))
+    )
+    step = TaskInfo(
+        Task(task_id="task_step", task_type=MessageMetaType.REQUEST, problem_statement="step"),
+        MessageHeader(from_agent_id="lead"),
+        MessageMeta(conversation_id="conv_step"),
+        owner_person_id=ANN,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        scope = TaskAttachments.load(request, store)
+        step_scope = TaskAttachments.load(step, store, request_info=request)
+
+    assert (scope.request_files_not_kept, step_scope.request_files_not_kept) == (2, 2)
+    assert inventory_text(scope) == "\n".join(
+        [CONVERSATION_ATTACHMENTS_HEADING, REQUEST_FILES_NOT_KEPT_NOTE.format(count=2)]
+    )
+    assert REQUEST_FILES_NOT_KEPT_NOTE.format(count=2) in inventory_text(step_scope)
+    assert TaskAttachments.load(step, store).request_files_not_kept == 0  # without its request, a task has none
+    assert any("event=request_files_not_kept_entry_unreadable" in record.getMessage() for record in caplog.records)
+    assert REQUEST_FILES_NOT_KEPT_NOTE.format(count=1) == (
+        "The person sent 1 file(s) with this request that were not accepted, so they are not listed and cannot be "
+        "opened. If the request needs them, ask the person to send them again."
+    )
 
 
 def test_a_workers_returned_files_entry_does_not_become_its_leads_file(tmp_path: Path, layout, store) -> None:

@@ -22,7 +22,11 @@ schema of its own per test), and reads the stored records back. Covers:
 - the count of dropped files is saved with the task when it is admitted, so it
   is there before any turn runs and after a restart;
 - a request whose files are all kept is marked as knowing them, with no count;
-- a count entry a request arrives with is dropped, as only admission writes it.
+- a count entry a request arrives with is dropped, as only admission writes it;
+- the request's own prompt says how many of its files were not accepted, from
+  its first turn on (a turn that starts while the handler still awaits after
+  admission sees it too), and a later request's prompt names that turn among
+  those whose request files are not all recorded.
 """
 
 from __future__ import annotations
@@ -39,8 +43,11 @@ import pytest
 from access_control.identity import ENV_VERIFY_KEYS
 from custom_agents import task_message_runtime
 from custom_agents.conversation_attachments import (
+    CONVERSATION_ATTACHMENTS_SECTION,
     REQUEST_FILES_NOT_KEPT_EVENT,
     REQUEST_FILES_NOT_KEPT_KEY,
+    REQUEST_FILES_NOT_KEPT_NOTE,
+    UNRECORDED_TURNS_NOTE,
     TaskAttachments,
     delegated_files,
 )
@@ -54,6 +61,7 @@ from storage.config import StorageSettings, resolve_storage_settings
 from storage.postgres_connection import connect_postgres
 from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, SESSION, TEAM, _admit
+from tests.test_question_answer_files import _prompt, _sections
 from tests.test_turn_files_recording import _outside, _upload
 
 pytestmark = pytest.mark.integration
@@ -127,6 +135,8 @@ def _lead(tmp_path: Path, layout: InstanceLayout, storage: StorageSettings) -> A
     agent._conversation_store = ConversationStore(
         str(tmp_path / "tasks.db"), artifacts_dir=tmp_path / "conversation_artifacts", storage_settings=storage
     )
+    # The engine reads the conversation store it was built with.
+    agent._create_context_engine()
     return agent
 
 
@@ -166,6 +176,13 @@ def _turn(agent: Any, task_id: str = TASK) -> dict[str, Any]:
     return agent._conversation_store.get_turn_by_task_id(task_id)
 
 
+def _files_section(agent: Any, task_id: str = TASK) -> str:
+    """The prompt's file list for ``task_id``, as its turn would be built now."""
+
+    info = agent.task_manager.get_task_info(task_id)
+    return _sections(_prompt(agent, info.task, info.header, info.meta)).get(CONVERSATION_ATTACHMENTS_SECTION, "")
+
+
 @pytest.mark.asyncio
 async def test_a_request_signed_before_the_update_keeps_no_file_and_its_turn_does_not_know_them(
     tmp_path: Path, layout: InstanceLayout, storage: StorageSettings, caplog: pytest.LogCaptureFixture
@@ -185,11 +202,16 @@ async def test_a_request_signed_before_the_update_keeps_no_file_and_its_turn_doe
     assert _not_kept_counts(info.task) == [1]
     assert _not_kept_counts(_restored(tmp_path, storage, TASK)) == [1]
     assert any(f"event=request_files_not_kept task_id={TASK}" in record.getMessage() for record in caplog.records)
+    # The request's own prompt says a file was sent but not accepted.
+    assert REQUEST_FILES_NOT_KEPT_NOTE.format(count=1) in _files_section(agent)
     # A later request in the conversation finds that turn among those whose request files are not all known.
     await _admit(agent, task_id=FOLLOW_UP, text="What was in the photo?", attachments=[])
     later = TaskAttachments.load(agent.task_manager.get_task_info(FOLLOW_UP), agent._conversation_store)
     assert later.last_unrecorded_turn() == turn["turn_index"]
     assert later.find([photo.attachment_id]) == ([], [photo.attachment_id])
+    follow_up = _files_section(agent, FOLLOW_UP)
+    assert follow_up.splitlines()[-1] == UNRECORDED_TURNS_NOTE.format(turn=turn["turn_index"])
+    assert "were not accepted, so they are not listed" not in follow_up  # that line is for the request itself
 
 
 @pytest.mark.asyncio
@@ -212,6 +234,7 @@ async def test_a_record_outside_the_upload_folders_is_dropped_from_the_task_and_
     assert scope.own == (page,)
     assert delegated_files(scope, None) == [page]  # a delegation naming no ids sends only the kept file
     assert _not_kept_counts(_restored(tmp_path, storage, TASK)) == [1]
+    assert REQUEST_FILES_NOT_KEPT_NOTE.format(count=1) in _files_section(agent)
 
 
 @pytest.mark.asyncio
@@ -231,6 +254,7 @@ async def test_a_request_whose_files_are_all_kept_knows_them(
         True,
     )
     assert _not_kept_counts(info.task) == []
+    assert "not accepted" not in _files_section(agent)
 
 
 @pytest.mark.asyncio
@@ -258,3 +282,27 @@ async def test_a_count_entry_a_request_arrives_with_is_dropped(
     assert _not_kept_counts(agent.task_manager.get_task_info(TASK).task) == []
     assert _turn(agent)["attachments_recorded"] is True
     assert any("event=incoming_task_files_entries_dropped" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_starts_while_admission_still_awaits_sees_the_count(
+    tmp_path: Path, layout: InstanceLayout, storage: StorageSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handler awaits after add_task (the redispatch check, the claim); a drain pass can start the
+    task meanwhile. Its prompt must already say the request's files were not accepted, so the count is
+    part of admission rather than written afterwards."""
+
+    agent = _lead(tmp_path, layout, storage)
+    seen: list[str] = []
+    redispatch = task_message_runtime.apply_redispatch_notice
+
+    async def a_turn_starts_meanwhile(agent_: Any, task_id: str, meta: MessageMeta) -> bool:
+        seen.append(_files_section(agent_, task_id))
+        return await redispatch(agent_, task_id, meta)
+
+    monkeypatch.setattr(task_message_runtime, "apply_redispatch_notice", a_turn_starts_meanwhile)
+
+    await _admit(agent, task_id=TASK, text="Read this recipe.", attachments=[_upload(layout, "page.png"), _outside(layout)])
+
+    [section] = seen
+    assert REQUEST_FILES_NOT_KEPT_NOTE.format(count=1) in section

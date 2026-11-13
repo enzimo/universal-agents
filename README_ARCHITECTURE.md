@@ -3544,8 +3544,11 @@ Where the records live. Kept files are written in two trusted places: the
 task's own history (one files entry per accepted guidance or answer,
 `custom_agents.sent_files_runtime`) and the conversation turn the task belongs
 to (`conversation_task_links.attachments_json`, `storage.conversation_repository`
-and `storage.turn_attachments`). Admission writes a request's files with its
-turn; guidance and answers are merged into it in one write transaction that
+and `storage.turn_attachments`). A request's own files go through one
+admission rule (`conversation_attachments.admit_request_files`): the gateway
+must vouch for them and each must lie in this host's upload folders, so the
+task and its turn hold the same records. Admission writes them with its turn;
+guidance and answers are merged into it in one write transaction that
 adds each id once, so concurrent merges lose nothing and a retry adds nothing
 twice. The list is a column on the turn row rather than a table because
 departure, archive and history clean-up move or delete whole turns, so a
@@ -3627,16 +3630,21 @@ could copy them into `workspaces/agents`, which every person's work can read.
 Limits:
 
 - Turns saved before turns kept their files have no record of their
-  requests' files. There is no backfill: the gateway's records are not a
-  trusted per-turn source on the agent side, and a backfill would be a
-  migration. Whether a turn's request files are known is a column of its own
-  (`attachments_recorded`, set only when the turn is saved), so files sent to
-  such a turn later, while its request still ran (guidance, answers), are
-  recorded and listed without making its request's files look known. The
-  list says up to which turn files were not recorded (`UNRECORDED_TURNS_NOTE`),
-  and the model asks the person to send a file sent with one of those requests
-  again. The note covers only those requests' files: a recorded file left out
-  of the newest 20 still opens by id.
+  requests' files, and a turn whose request files admission did not all keep
+  lacks the dropped ones. There is no backfill: the gateway's records are not
+  a trusted per-turn source on the agent side, and a backfill would be a
+  migration. Whether all of a turn's request files are recorded is a column
+  of its own (`attachments_recorded`, set only when the turn is saved: 0 when
+  some or all are missing), so files kept, and files sent to such a turn
+  later while its request still ran (guidance, answers), are recorded and
+  listed without making the missing ones look known. The list names the
+  latest such turn (`UNRECORDED_TURNS_NOTE`), and the model asks the person
+  to send a file from one of those requests again only when it is not listed
+  there or by `get_conversation_context_slice`: a recorded file left out of
+  the newest 20 still opens by id. The request whose files were dropped is
+  told in its own prompt how many were not accepted
+  (`REQUEST_FILES_NOT_KEPT_NOTE`), from a count admission saves with the task
+  (`REQUEST_FILES_NOT_KEPT_EVENT`), so its first turn cannot miss it.
 - A file list and the file's bytes are deleted separately. The list follows
   its turn row; the bytes are deleted by upload retention
   (`attachments.retention_days`, by age) and when a person is removed
@@ -3650,9 +3658,11 @@ Limits:
   updated to this version starts with its text but without its files: the
   gateway before the update signed its context without naming the task, so
   the lead refuses them, one warning per file
-  (`event=sent_file_refused reason=context_names_no_task`). The person must
-  send those files again; operators can let queued requests start before
-  updating. Guidance and interrupt answers are signed again each time the
+  (`event=sent_file_refused reason=context_names_no_task`). Its turn is saved
+  as not recording its request's files and its prompt says how many were not
+  accepted (previous bullet), so the model asks for them when it needs them.
+  The person must send those files again; operators can let queued requests
+  start before updating. Guidance and interrupt answers are signed again each time the
   gateway sends them, and the gateway before the update sent no files with
   answers to questions, so they are not affected. On a guidance or an answer
   the same reason means a context taken from another message, and the warning

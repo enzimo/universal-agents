@@ -92,10 +92,12 @@ What a task may use (``TaskAttachments``):
   A delegated task (a worker's, or the team lead's record of an escalation)
   never reads conversation records: it uses only the files it was given.
   Turns saved before turns kept their files have no records of their
-  requests' files (files sent to them later, while they still ran, are
-  recorded and listed); the prompt's list says up to which turn
-  (``last_unrecorded_turn``), so the person is asked to send such files
-  again.
+  requests' files, and a turn whose request files admission did not all keep
+  lacks the dropped ones (files kept, and files sent to such turns later,
+  are recorded and listed); the prompt's list names the latest such turn
+  (``last_unrecorded_turn``), so the person is asked to send a missing file
+  again. The current request's own prompt says how many of its files were
+  not accepted (``TaskAttachments.request_files_not_kept``).
 
 Which files a delegation sends (``delegated_files``): the model chooses with
 ``attachment_ids`` on its delegate_task action. Left out, the new task gets
@@ -164,18 +166,27 @@ logger = logging.getLogger(__name__)
 # ``CONVERSATION_ATTACHMENTS_SECTION``.
 CONVERSATION_ATTACHMENTS_HEADING = "Conversation Attachments:"
 CONVERSATION_ATTACHMENTS_SECTION = "conversation_attachments"
-# The list's last line when earlier turns were saved before turns kept their
-# files, so a model does not read them as turns without files. Files sent to
-# such a turn later, while its request still ran (guidance, answers), are
-# recorded and listed; the files sent with its request are not
-# (``storage.turn_attachments``). Its request to send a file again covers only
-# those requests' files: a recorded file the list leaves out (past its newest
-# ``INVENTORY_LIMIT``) still opens by id.
+# The list's last line when earlier turns do not record all of their
+# requests' files (``attachments_recorded`` 0: saved before turns kept their
+# files, or some of their request files were not accepted at admission), so a
+# model does not read them as turns that received only what is listed. Such
+# turns may still list some files (kept request files, files sent to them
+# later), and those open by id like any other; ``turn`` is the latest such
+# turn, not the end of a range. The request to send a file again covers only a
+# file that is not listed here or in the slice tool, since a recorded file the
+# list leaves out (past its newest ``INVENTORY_LIMIT``) still opens by id.
 UNRECORDED_TURNS_NOTE = (
-    "Turns up to turn {turn} were saved before files were recorded: the files sent with those requests are not "
-    "listed and cannot be opened by id (files sent to them later, while they still ran, are listed and opened "
-    "like any other file). If the person refers to a file sent with one of those requests, ask them to send it "
-    "again."
+    "Some files sent with earlier requests (the latest in turn {turn}) are not recorded, because those turns were "
+    "saved before files were recorded or some of their files were not accepted. Recorded files are listed and "
+    "open by id as usual. If the person refers to a file from one of those requests that is not listed here or "
+    "by get_conversation_context_slice, ask them to send it again."
+)
+# The list's line for the current request when admission did not keep some
+# or all of the files sent with it (``REQUEST_FILES_NOT_KEPT_EVENT``): the
+# model learns they exist and asks for them only if the request needs them.
+REQUEST_FILES_NOT_KEPT_NOTE = (
+    "The person sent {count} file(s) with this request that were not accepted, so they are not listed and cannot "
+    "be opened. If the request needs them, ask the person to send them again."
 )
 # The task-history event that records the files a task accepted with a
 # guidance or an answer, and the ``details`` key holding them (full
@@ -443,6 +454,9 @@ class TaskAttachments:
     or for a plan step or recovery task its request's. ``turn_task_id`` is
     the task whose conversation turn holds the request's own files: the task
     itself, or the step's request; either way they are among ``own``.
+    ``request_files_not_kept`` is how many files sent with that request
+    admission did not keep (``admit_request_files``), read from that task's
+    own history, so the prompt can say they must be sent again.
     """
 
     task_id: str
@@ -450,6 +464,7 @@ class TaskAttachments:
     conversation_id: Optional[str] = None
     store: Any = field(default=None, repr=False, compare=False)
     turn_task_id: Optional[str] = None
+    request_files_not_kept: int = 0
 
     @classmethod
     def for_task(
@@ -493,6 +508,7 @@ class TaskAttachments:
             conversation_id=conversation_id,
             store=conversation_store if conversation_id else None,
             turn_task_id=turn_info.task.task_id,
+            request_files_not_kept=_request_files_not_kept(turn_info.task),
         )
 
     def find(self, attachment_ids: Iterable[str]) -> tuple[list[UserTaskAttachment], list[str]]:
@@ -578,13 +594,15 @@ class TaskAttachments:
         return self.inventory(limit=limit)[0]
 
     def last_unrecorded_turn(self) -> Optional[int]:
-        """The latest earlier turn of its conversation saved before turns kept their files, or None.
+        """The latest earlier turn of its conversation that does not record all of its request's files, or None.
 
-        The files sent with such a turn's request are unknown: they are not
-        listed and cannot be opened by id. Files sent to it later, while it
-        still ran, are recorded, listed and opened like any other. Asked only
-        within the conversation scope, and never about the task's own turn,
-        whose request files it holds itself.
+        Such a turn was saved before turns kept their files, or admission did
+        not keep some of its request's files: the missing ones are not listed
+        and cannot be opened by id. The files it does record (kept request
+        files, files sent to it later) are listed and opened like any other.
+        Asked only within the conversation scope, and never about the task's
+        own turn: its request's missing files are counted in
+        ``request_files_not_kept`` instead.
         """
 
         if not self.conversation_id:
@@ -631,15 +649,19 @@ def inventory_text(scope: TaskAttachments, *, exclude_ids: Iterable[str] = ()) -
     (``exclude_ids``: the files the prompt lists as the current request's).
     Built from stored records, so it does not depend on how much of the
     conversation's text the prompt keeps. Names files by id, name, type and
-    size only. Ends with ``UNRECORDED_TURNS_NOTE`` when earlier turns were
-    saved before turns kept their files, with or without files to list.
+    size only. Says how many of the current request's files were not
+    accepted (``REQUEST_FILES_NOT_KEPT_NOTE``), and ends with
+    ``UNRECORDED_TURNS_NOTE`` when earlier turns do not record all of their
+    requests' files, with or without files to list.
     """
 
     files, more = scope.inventory(exclude_ids=exclude_ids)
     unrecorded = scope.last_unrecorded_turn()
-    if not files and unrecorded is None:
+    if not files and unrecorded is None and not scope.request_files_not_kept:
         return ""
     lines = [CONVERSATION_ATTACHMENTS_HEADING, *_file_list_lines(files, more)]
+    if scope.request_files_not_kept:
+        lines.append(REQUEST_FILES_NOT_KEPT_NOTE.format(count=scope.request_files_not_kept))
     if unrecorded is not None:
         lines.append(UNRECORDED_TURNS_NOTE.format(turn=unrecorded))
     return "\n".join(lines)
@@ -702,19 +724,43 @@ def answer_files(task: Any) -> tuple[UserTaskAttachment, ...]:
     return tuple(unique.values())
 
 
-def _written_by_this_task(entry: Any, details: dict[str, Any]) -> bool:
-    """A files entry this task's runtime wrote (``task_files_details``).
+def _written_by_this_task(entry: Any, details: dict[str, Any], event: str = TASK_FILES_EVENT) -> bool:
+    """An ``event`` entry this task's runtime wrote (``task_files_details``, ``admit_request_files``).
 
     A lead's copies of its workers' entries keep their details but are
     subtask events marked with the copied entry's id; they never count, so a
-    worker cannot add files to its lead's task.
+    worker cannot add files, or a count of files not kept, to its lead's task.
     """
 
     return (
-        details.get("event") == TASK_FILES_EVENT
+        details.get("event") == event
         and getattr(entry, "entry_type", None) != TaskHistoryType.SUBTASK_EVENT
         and _BUBBLED_ENTRY_KEY not in details
     )
+
+
+def _request_files_not_kept(task: Any) -> int:
+    """How many files sent with ``task``'s request admission did not keep (its own count entries); 0 for none.
+
+    Only ``admit_request_files`` writes the count, so an unreadable one is a
+    defect worth a warning.
+    """
+
+    total = 0
+    for entry in list(task.execution_history or []):
+        details = getattr(entry, "details", None) or {}
+        if not _written_by_this_task(entry, details, REQUEST_FILES_NOT_KEPT_EVENT):
+            continue
+        count = details.get(REQUEST_FILES_NOT_KEPT_KEY)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            total += count
+        else:
+            logger.warning(
+                "A task-history count of request files not kept was unreadable and was skipped. "
+                "event=request_files_not_kept_entry_unreadable task_id=%s",
+                task.task_id,
+            )
+    return total
 
 
 def _recorded_files(task_id: str, items: Any) -> list[UserTaskAttachment]:
@@ -1175,6 +1221,7 @@ __all__ = [
     "QUESTION_ANSWER_MESSAGE_TYPE",
     "REQUEST_FILES_NOT_KEPT_EVENT",
     "REQUEST_FILES_NOT_KEPT_KEY",
+    "REQUEST_FILES_NOT_KEPT_NOTE",
     "ROOT_DELEGATED",
     "ROOT_NOT_HELD",
     "ROOT_OTHER_PERSON",

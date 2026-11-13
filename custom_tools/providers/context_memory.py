@@ -144,12 +144,15 @@ def get_conversation_turns(
     exclusive upper bound. Both accept ISO-8601 timestamps or `YYYY-MM-DD`
     dates interpreted in UTC.
 
-    Each turn lists its files in `attachments` (id, name, type and size); open
-    one with inspect_user_attachment by its attachment_id.
-    `attachments_recorded` is false on turns saved before files were
-    recorded: the files sent with them are unknown and cannot be opened, so
-    ask the person to send them again. Such a turn's `attachments` lists only
-    files sent to it later, while it still ran.
+    Each turn lists its files in `attachments` (id, name, type and size). An
+    id opens with inspect_user_attachment only for a file of this task's own
+    conversation (a task delegated to you opens only the files its delegation
+    gave it); a file seen in another conversation must be sent again here.
+    `attachments_recorded` is false on turns that do not record all of their
+    request's files (saved before files were recorded, or some were not
+    accepted): their `attachments` lists only the recorded ones (kept request
+    files, files sent later), so ask the person to send again a file from
+    such a request that is not listed.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -200,10 +203,11 @@ def _conversation_turn_summary_payload(
     # The turn's files, descriptive fields only (the store's turn rows carry no
     # storage references); a model opens one by its attachment_id.
     attachments = turn.get("attachments") or []
-    # A turn saved before turns kept their files has no count: its request's
-    # files are unknown, not absent, and its list holds only files sent to it
-    # later (storage.turn_attachments). The count stays null rather than
-    # counting those, so it never reads as "all the files it received".
+    # A turn that does not record all of its request's files (saved before
+    # turns kept their files, or some were not accepted) has no count: the
+    # missing ones are unknown, not absent, and its list holds only the
+    # recorded ones (storage.turn_attachments). The count stays null rather
+    # than counting those, so it never reads as "all the files it received".
     recorded = bool(turn.get("attachments_recorded"))
     return {
         "turn_index": turn.get("turn_index"),
@@ -465,14 +469,17 @@ def get_conversation_context_slice(
 
     `mode="summary"` returns compact per-turn summaries and identifiers,
     including each turn's files (`attachments`: id, name, type and size, at
-    most 20 per turn; `attachment_count`: how many it received). Open one with
-    inspect_user_attachment by its attachment_id.
+    most 20 per turn; `attachment_count`: how many it received). An id opens
+    with inspect_user_attachment only for a file of this task's own
+    conversation (a task delegated to you opens only the files its delegation
+    gave it); a file seen in another conversation must be sent again here.
     `mode="full"` returns the full stored turn rows, with every file of each
     turn. The limit is capped at 50.
     `attachments_recorded` is false (and `attachment_count` null) on turns
-    saved before files were recorded: the files sent with them are unknown
-    and cannot be opened, so ask the person to send them again. Such a turn's
-    `attachments` lists only files sent to it later, while it still ran.
+    that do not record all of their request's files (saved before files were
+    recorded, or some were not accepted): their `attachments` lists only the
+    recorded ones (kept request files, files sent later), so ask the person to
+    send again a file from such a request that is not listed.
     """
     agent = get_agent_ref()
     if agent is None:

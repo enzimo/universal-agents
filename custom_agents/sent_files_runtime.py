@@ -109,6 +109,7 @@ _RESULT_REFUSAL_TEXT = {
     WORK_FOR_A_PERSON_REQUIRED: "the task works for no person, so it keeps no person's files",
 }
 
+
 async def keep_sent_files(
     agent: Any,
     task_info: Any,
@@ -362,7 +363,6 @@ def _log_refused_result_files(
         )
 
 
-
 def _log_result_files_task_gone(
     agent: Any, task_id: Optional[str], subtask_info: Any, attachments: Sequence[UserTaskAttachment]
 ) -> None:
@@ -373,6 +373,7 @@ def _log_result_files_task_gone(
         subtask_info.task.task_id,
         _ids(attachments),
     )
+
 
 def _ids(attachments: Sequence[UserTaskAttachment]) -> str:
     return ",".join(attachment.attachment_id for attachment in attachments)

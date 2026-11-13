@@ -339,7 +339,6 @@ def test_a_conversation_started_after_the_upgrade_has_no_unrecorded_turns(backen
     assert all(turn["attachments_recorded"] for turn in repo.get_conversation_turns(conversation_id=CONVERSATION))
 
 
-
 def test_a_turn_whose_request_files_were_not_all_kept_is_saved_as_not_knowing_them(backend: _Backend) -> None:
     """Admission dropped one of a request's files: the turn lists the kept one and is marked 0."""
 
@@ -361,6 +360,7 @@ def test_a_turn_whose_request_files_were_not_all_kept_is_saved_as_not_knowing_th
     recorded = {turn["task_id"]: turn["attachments_recorded"] for turn in reopened.get_conversation_turns(conversation_id=CONVERSATION)}
     assert recorded == {"task_1": True, "task_2": False, "task_3": True}
     assert _listed(reopened) == [(2, "task_2", "att_late"), (2, "task_2", "att_kept"), (1, "task_1", "att_photo")]
+
 
 def test_unreadable_stored_files_are_logged_and_skipped(backend: _Backend, caplog: pytest.LogCaptureFixture) -> None:
     repo = backend.open()
