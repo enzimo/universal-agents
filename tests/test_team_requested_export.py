@@ -547,7 +547,8 @@ async def test_the_supervisor_reports_a_killed_export_and_removes_its_half_writt
         await server.close()
 
     assert status["status"] == "failed"
-    assert "The export process ended unexpectedly (exit code -9)" in status["result"]["error"]
+    # It died before collecting the passphrase, so the page says plainly that nothing was exported.
+    assert "ended (exit code -9) before it received the passphrase" in status["result"]["error"]
     assert not killed_partial.exists() and other_partial.exists() and finished.exists()
 
 

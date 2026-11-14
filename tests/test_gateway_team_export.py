@@ -228,6 +228,23 @@ _SUCCESS = {
             "Let's Begin page.",
         ),
         (
+            _outcome(
+                WATCH_FINISHED,
+                "success",
+                {
+                    **_SUCCESS, "size_bytes": 0, "sections": [],
+                    "note": "The file was written, but its size and parts could not be read afterwards.",
+                },
+            ),
+            "Exported the team to exports/alpha-20261014-101500Z.uatransfer in this instance's data folder. "
+            "The file was written, but its size and parts could not be read afterwards.\n\nNext steps:\n"
+            "1. Stop this instance. Its chat bot tokens and model sign-ins move with the file, and two running "
+            "instances must not use them at once.\n"
+            "2. Start the new version with a blank data folder.\n"
+            "3. Copy the file into the new data folder's import folder, then choose Import a team export on the "
+            "Let's Begin page.",
+        ),
+        (
             _outcome(WATCH_UNCONFIRMED),
             "Couldn't confirm whether the team export finished. Check the exports folder of this instance's data folder.",
         ),

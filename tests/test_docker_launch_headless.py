@@ -2535,7 +2535,24 @@ def test_a_repeated_problem_comes_back_as_one_counted_line_a_minute() -> None:
     problems = RepeatedProblemLog(clock=lambda: now[0])
 
     assert problems.check("a") == 0
-    assert [problems.check("a") for _ in range(3)] == [None, None, None]
+    seen = []
+    for second in (20.0, 40.0, 59.0):
+        now[0] = second
+        seen.append(problems.check("a"))
+    assert seen == [None, None, None]
     now[0] = 61.0
     assert problems.check("a") == 4
     assert problems.check("b") == 0  # a different problem logs at once
+
+
+def test_a_problem_that_stayed_away_for_a_minute_is_logged_in_full_again() -> None:
+    from team_transfer.export_requests import RepeatedProblemLog
+
+    now = [0.0]
+    problems = RepeatedProblemLog(clock=lambda: now[0])
+
+    assert problems.check("a") == 0
+    now[0] = 30.0
+    assert problems.check("a") is None
+    now[0] = 95.0  # quiet since 30 s
+    assert problems.check("a") == 0

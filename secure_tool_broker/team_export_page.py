@@ -86,6 +86,7 @@ from team_transfer.export_requests import (
     EXPORT_PASSPHRASE_MAX_CHARS,
     NEXT_STEPS,
     PROCESS_ENDED_MESSAGE,
+    PROCESS_ENDED_UNCOLLECTED_MESSAGE,
     RESULT_UNCONFIRMED,
     TEAM_EXPORT_PAGE_METHOD,
     TEAM_EXPORT_PAGE_PROVIDER,
@@ -275,11 +276,18 @@ class _Exports:
             waiting.collected,
         )
         waiting.session.state[_STATUS] = STATUS_FAILED
-        waiting.session.state[_RESULT] = {
-            "ok": False,
-            "error": PROCESS_ENDED_MESSAGE.format(exit_code=report.exit_code),
-            RESULT_UNCONFIRMED: True,
-        }
+        if waiting.collected:
+            waiting.session.state[_RESULT] = {
+                "ok": False,
+                "error": PROCESS_ENDED_MESSAGE.format(exit_code=report.exit_code),
+                RESULT_UNCONFIRMED: True,
+            }
+        else:
+            # No passphrase was handed out, so no file can exist: a plain failure.
+            waiting.session.state[_RESULT] = {
+                "ok": False,
+                "error": PROCESS_ENDED_UNCOLLECTED_MESSAGE.format(exit_code=report.exit_code),
+            }
         return True
 
     def drop_unstarted(self, session: Any, now: datetime) -> None:
@@ -616,14 +624,17 @@ def _result_panel(session: Any) -> str:
             f"<p>Run {_e(UPGRADE_COMMAND)} in the chat to try again.</p></section>"
         )
     result = TeamExportResultV1.model_validate(raw)
-    parts = "".join(f"<li>{_e(line)}</li>" for line in section_lines(result))
+    lines = section_lines(result)
     steps = "".join(f"<li>{_e(step)}</li>" for step in NEXT_STEPS)
     note = f'<p class="note">{_e(result.note)}</p>' if result.note else ""
+    # Without parts the size and contents could not be read after writing (the note says so).
+    size = f" ({_e(size_words(result.size_bytes))})" if lines else ""
+    holds = f"<p>It holds:</p><ul>{''.join(f'<li>{_e(line)}</li>' for line in lines)}</ul>" if lines else ""
     return (
         f'<section class="content-panel" id="{_FORM_ID}"><h2>The team is exported</h2>'
         f'<p class="status" role="status">Wrote <code>exports/{_e(result.file_name)}</code> in this instance\'s '
-        f"data folder ({_e(size_words(result.size_bytes))}).</p>{note}"
-        f"<p>It holds:</p><ul>{parts}</ul><h2>Next steps</h2><ol>{steps}</ol></section>"
+        f"data folder{size}.</p>{note}"
+        f"{holds}<h2>Next steps</h2><ol>{steps}</ol></section>"
     )
 
 

@@ -98,9 +98,16 @@ def team_export_result_text(outcome: BrokerSessionOutcome) -> str:
         result = TeamExportResultV1.model_validate(raw)
     except ValueError:
         return f"The team export finished, but its report could not be read. Look in {_EXPORTS_FOLDER}."
-    parts = "\n".join(f"- {line}" for line in section_lines(result))
+    lines = section_lines(result)
     steps = "\n".join(f"{number}. {step}" for number, step in enumerate(NEXT_STEPS, start=1))
     note = f" {result.note}" if result.note else ""
+    if not lines:
+        # The file was written but its size and parts could not be read (the note says so).
+        return (
+            f"Exported the team to exports/{result.file_name} in this instance's data folder.{note}"
+            f"\n\nNext steps:\n{steps}"
+        )
+    parts = "\n".join(f"- {line}" for line in lines)
     return (
         f"Exported the team to exports/{result.file_name} in this instance's data folder "
         f"({size_words(result.size_bytes)}).{note} It holds:\n{parts}\n\nNext steps:\n{steps}"

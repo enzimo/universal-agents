@@ -309,8 +309,10 @@ onboarding's server, titled **Choose what to import**, with these differences:
   `/upgrade` again. A page the broker rebuilt after a restart keeps the intro
   panel (with its **Close**) and, in place of the form, a red `.status-error`
   saying the broker restarted and to run `/upgrade` again, then **Close** at
-  the bottom. When nobody reported how a started export ended, the heading
-  says the outcome is not known and the red line says to check `exports/`.
+  the bottom. When nobody reported how an export that had its passphrase
+  ended, the heading says the outcome is not known and the red line says to
+  check `exports/`; one that ended before it got the passphrase says plainly
+  that the team was not exported.
 - Standalone broker browser-authorization pages expose long provider URLs
   through a fixed-width action. Show a disabled **Wait...** button until the
   URL arrives, then enable **Open** in the same element to open a new tab.

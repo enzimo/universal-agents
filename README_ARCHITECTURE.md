@@ -4177,7 +4177,8 @@ export-requested`; guide: `user_docs_source/team-transfer.md`).
   it once the export reported, or when it names another process than the one
   that collected the passphrase (the export process sends its own id when it
   collects). The page then says the outcome is not known and to check
-  `exports/`. The launcher
+  `exports/`, or, when the process never collected the passphrase, that
+  nothing was exported (no file can exist without it). The launcher
   marks every process it starts (`TEAM_EXPORT_REQUESTS`), so a hand-started
   gateway points to the host command instead.
 - **Only in private chats, only once per page.** `/upgrade` refuses unless

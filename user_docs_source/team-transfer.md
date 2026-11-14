@@ -98,8 +98,8 @@ started another way is told to use `team export` on the host
 
 When the export does not finish, the page and the chat say why; run
 `/upgrade` again. A half-written file is removed, even when the export process
-is killed; in that case the page says the outcome is not known, so check
-`exports/`. The page stays open for one hour. Exports run one at a time: a
+is killed; if it was killed after it received the passphrase, the page says
+the outcome is not known, so check `exports/`. The page stays open for one hour. Exports run one at a time: a
 passphrase no export has picked up after five minutes is dropped (for example
 because another export was still running), and the page says so. If the
 secure broker restarts, the page link opens a page that can no longer start or

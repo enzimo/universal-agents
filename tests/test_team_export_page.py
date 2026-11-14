@@ -459,6 +459,28 @@ async def test_the_supervisor_ends_an_export_whose_process_exited_without_report
     assert (await (await broker.get(f"{page}/status")).json())["status"] == "success"
 
 
+@pytest.mark.asyncio
+async def test_a_process_that_ended_before_collecting_says_nothing_was_exported(
+    broker: TestClient, launched_team: InstanceLayout
+) -> None:
+    from secure_tool_broker.defaults import TEAM_EXPORT_ENDED_ROUTE
+
+    page, export_id = await _submitted_export(broker, launched_team)
+    ended = {
+        "export_id": export_id, "team_id": TEST_TEAM, "owner_person_id": "usr_owner", "exit_code": 2,
+        "process_id": EXPORT_PROCESS_ID,
+    }
+
+    recorded = await broker.post(TEAM_EXPORT_ENDED_ROUTE, headers=caller_headers(CALLER_OPERATOR), json=ended)
+
+    assert (await recorded.json()) == {"status": "recorded"}
+    status = await (await broker.get(f"{page}/status")).json()
+    assert status["status"] == "failed"
+    assert "before it received the passphrase, so nothing was exported" in status["result"]["error"]
+    assert not status["result"].get("unconfirmed")
+    assert "The team was not exported" in await (await broker.get(page)).text()
+
+
 def test_the_export_routes_sit_under_the_operator_only_transfer_prefix() -> None:
     from secure_tool_broker import defaults
 
@@ -551,3 +573,19 @@ async def test_a_result_with_a_non_ascii_token_is_refused_plainly(broker: TestCl
 
     assert refused.status == 400
     assert (await (await broker.get(f"{page}/status")).json())["status"] == "exporting"
+
+
+def test_a_success_whose_size_and_parts_were_unreadable_shows_neither() -> None:
+    from types import SimpleNamespace
+
+    result = {
+        **_result("exp_aaaaaaaaaaaaaaaaaaaaaa", ok=True),
+        "size_bytes": 0,
+        "sections": [],
+        "note": "The file was written, but its size and parts could not be read afterwards.",
+    }
+    panel = team_export_page._result_panel(SimpleNamespace(state={team_export_page._RESULT: result}))
+
+    assert "could not be read afterwards" in panel
+    assert "0 bytes" not in panel and "It holds" not in panel
+    assert "Next steps" in panel

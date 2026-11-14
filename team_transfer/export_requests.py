@@ -104,6 +104,12 @@ PROCESS_ENDED_MESSAGE: Final = (
     "is not known whether the file was written: check the exports folder of this instance's data folder. Any "
     "half-written file was removed. The launcher's log has details."
 )
+# The same report for a process that ended before it collected the passphrase:
+# without the passphrase no file can have been written.
+PROCESS_ENDED_UNCOLLECTED_MESSAGE: Final = (
+    "The export process ended (exit code {exit_code}) before it received the passphrase, so nothing was "
+    "exported. The launcher's log has details."
+)
 _REQUEST_SUFFIX = ".json"
 # A request is a few hundred bytes; anything larger is not one.
 _REQUEST_MAX_BYTES = 64 * 1024
@@ -129,7 +135,8 @@ class RepeatedProblemLog:
     would otherwise log on every pass. ``check`` answers 0 for a problem seen
     for the first time (log it fully), the number of repeats since the last
     line once the interval has passed (log a short line), and None meanwhile.
-    A different problem is new and logs at once.
+    A different problem is new and logs at once, and so does a problem that
+    stayed away for a whole interval before coming back.
     """
 
     _MAX_PROBLEMS = 64
@@ -137,21 +144,22 @@ class RepeatedProblemLog:
     def __init__(self, *, interval_seconds: float = 60.0, clock: Callable[[], float] = time.monotonic) -> None:
         self._interval = interval_seconds
         self._clock = clock
-        self._seen: dict[str, tuple[float, int]] = {}
+        # problem -> (when it was last logged, repeats since then, when it was last seen)
+        self._seen: dict[str, tuple[float, int, float]] = {}
 
     def check(self, problem: str) -> int | None:
         now = self._clock()
         seen = self._seen.get(problem)
-        if seen is None:
-            if len(self._seen) >= self._MAX_PROBLEMS:
+        if seen is None or now - seen[2] >= self._interval:
+            if seen is None and len(self._seen) >= self._MAX_PROBLEMS:
                 self._seen.clear()
-            self._seen[problem] = (now, 0)
+            self._seen[problem] = (now, 0, now)
             return 0
         logged_at, repeats = seen[0], seen[1] + 1
         if now - logged_at >= self._interval:
-            self._seen[problem] = (now, 0)
+            self._seen[problem] = (now, 0, now)
             return repeats
-        self._seen[problem] = (logged_at, repeats)
+        self._seen[problem] = (logged_at, repeats, now)
         return None
 
 
@@ -400,6 +408,7 @@ __all__ = [
     "EXPORT_REQUESTS_ENV",
     "NEXT_STEPS",
     "PROCESS_ENDED_MESSAGE",
+    "PROCESS_ENDED_UNCOLLECTED_MESSAGE",
     "RepeatedProblemLog",
     "RESULT_UNCONFIRMED",
     "TEAM_EXPORT_PAGE_METHOD",
