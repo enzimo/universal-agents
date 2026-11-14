@@ -229,7 +229,8 @@ def _export_requested(args: argparse.Namespace) -> None:
     result = run_requested_export(args.config, export_id=args.export_id, owner_person_id=args.owner)
     if not result.ok:
         raise SystemExit(f"The team was not exported. {result.error}")
-    print("\n".join([f"Wrote exports/{result.file_name} ({result.size_bytes} bytes).", *section_lines(result)]))
+    note = [result.note] if result.note else []
+    print("\n".join([f"Wrote exports/{result.file_name} ({result.size_bytes} bytes).", *section_lines(result), *note]))
 
 
 def _inspect(args: argparse.Namespace) -> None:

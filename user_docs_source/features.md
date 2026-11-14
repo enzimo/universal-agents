@@ -412,7 +412,7 @@ Use `/help` for the same compact list in the transcript.
 | `/link ...` | Sign in to a tool or link its account; see [Account links](#account-links) |
 | `/accounts ...` | See whose account agents use for each service (also in **Settings → Accounts**); owners and administrators share a service's team account or keep it private, and decide whether people added from now on may use the team's model keys; see [Shared or private](permissions.md#shared-or-private) |
 | `/setup` | See what you still set up for your own work: your own model and your own accounts for the private services someone in the team uses; see [First-Time Setup](newuser/index.md#first-time-setup) |
-| `/upgrade` | Owners: export the whole team into one encrypted file to move it to a new version; see [Export from chat with /upgrade](team-transfer.md#export-from-chat-with-upgrade) |
+| `/upgrade` | Owners, in a private chat: export the whole team into one file to move it to a new version (stored sign-ins, keys and secrets encrypted; keep the file private); see [Export from chat with /upgrade](team-transfer.md#export-from-chat-with-upgrade) |
 | `/access ...` | See, give, remove, and block agents' and people's access to tools, and list requests waiting for you; see [Access commands in chat](permissions.md#access-commands-in-chat) |
 | `/user ...` | Manage users, their roles (owner, admin, member), and Web Chat access; see [Multi-User Onboarding](newuser/index.md) |
 | `/new` | Start a new session in the current channel |

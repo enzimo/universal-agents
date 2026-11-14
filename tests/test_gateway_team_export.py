@@ -40,11 +40,10 @@ from assistant_gateway.interactive_apps.website_handlers.conversation import Web
 from assistant_gateway.interactive_apps.website_support import _WEB_CHAT_ALLOWED_COMMANDS
 from assistant_gateway.runtime_ports import SystemGatewayClock
 from secure_tool_broker.service import SecureToolBrokerService
+from secure_tool_broker.defaults import TEAM_EXPORT_PASSPHRASE_ROUTE, TEAM_EXPORT_RESULT_ROUTE
 from team_transfer.export_requests import (
     EXPORT_REQUESTS_BY_SUPERVISOR,
     EXPORT_REQUESTS_ENV,
-    TEAM_EXPORT_PASSPHRASE_ROUTE,
-    TEAM_EXPORT_RESULT_ROUTE,
     take_export_request,
 )
 from runtime_settings.instance_layout import InstanceLayout
@@ -90,7 +89,7 @@ class _Watches:
 def _request(command: str = "/upgrade", session_key: str | None = "session_web") -> TeamExportCommandRequest:
     return TeamExportCommandRequest(
         command=command,
-        actor=GatewayActorContext(channel_name="website", user_id="usr_owner", chat_id="web"),
+        actor=GatewayActorContext(channel_name="website", user_id="usr_owner", chat_id="web", private_chat=True),
         session_key=session_key,
         correlation_id="web_req_1",
     )
@@ -189,7 +188,7 @@ _SUCCESS = {
         (
             _outcome(WATCH_FINISHED, "success", _SUCCESS),
             "Exported the team to exports/alpha-20261014-101500Z.uatransfer in this instance's data folder (3.2 MB). "
-            "It holds:\n- People: 3 records, 4 KB\n- Stored sign-ins and keys: 2 records, 1000 bytes (encrypted)\n\n"
+            "It holds:\n- People: 3 records, 4.0 KB\n- Stored sign-ins and keys: 2 records, 1000 bytes (encrypted)\n\n"
             "Next steps:\n"
             "1. Stop this instance. Its chat bot tokens and model sign-ins move with the file, and two running "
             "instances must not use them at once.\n"
@@ -204,12 +203,29 @@ _SUCCESS = {
         (_outcome(WATCH_FINISHED, "closed"), "The team export page was closed without exporting."),
         (
             _outcome(WATCH_EXPIRED, "created"),
-            "The team export page expired without reporting an export. If you started one, look in the exports "
-            "folder of this instance's data folder; otherwise run /upgrade again.",
+            "The team export page expired before any export reported how it went, so no file is confirmed. If you "
+            "started an export, check the exports folder of this instance's data folder; otherwise run /upgrade again.",
+        ),
+        (
+            _outcome(WATCH_FINISHED, "restarted"),
+            "The secure broker restarted, so the team export page stopped and could not report an export. If you "
+            "had started one, it may still have finished: check the exports folder of this instance's data folder. "
+            "Otherwise run /upgrade again.",
+        ),
+        (
+            _outcome(WATCH_FINISHED, "success", {**_SUCCESS, "note": "Copying it may need sudo."}),
+            "Exported the team to exports/alpha-20261014-101500Z.uatransfer in this instance's data folder (3.2 MB). "
+            "Copying it may need sudo. It holds:\n- People: 3 records, 4.0 KB\n- Stored sign-ins and keys: 2 records, "
+            "1000 bytes (encrypted)\n\nNext steps:\n"
+            "1. Stop this instance. Its chat bot tokens and model sign-ins move with the file, and two running "
+            "instances must not use them at once.\n"
+            "2. Start the new version with a blank data folder.\n"
+            "3. Copy the file into the new data folder's import folder, then choose Import a team export on the "
+            "Let's Begin page.",
         ),
         (
             _outcome(WATCH_UNCONFIRMED),
-            "Couldn't confirm whether the team export finished. Look in the exports folder of this instance's data folder.",
+            "Couldn't confirm whether the team export finished. Check the exports folder of this instance's data folder.",
         ),
     ],
 )
@@ -251,7 +267,7 @@ async def test_the_chat_hears_how_the_export_ended_end_to_end_with_the_real_brok
         action = await handler.execute(
             TeamExportCommandRequest(
                 command="/upgrade",
-                actor=GatewayActorContext(channel_name="telegram", user_id="tg_1", chat_id="4242"),
+                actor=GatewayActorContext(channel_name="telegram", user_id="tg_1", chat_id="4242", private_chat=True),
                 session_key="session_tg",
                 correlation_id="upgrade_cmd_tg",
             )
@@ -266,12 +282,14 @@ async def test_the_chat_hears_how_the_export_ended_end_to_end_with_the_real_brok
             assert request is not None
             operator = caller_headers(CALLER_OPERATOR)
             identity = {"export_id": request.export_id, "team_id": TEST_TEAM, "owner_person_id": "usr_owner"}
-            collected = await browser.post(server.make_url(TEAM_EXPORT_PASSPHRASE_ROUTE), headers=operator, json=identity)
-            assert (await collected.json()) == {"passphrase": PASSPHRASE}
+            collected = await (
+                await browser.post(server.make_url(TEAM_EXPORT_PASSPHRASE_ROUTE), headers=operator, json=identity)
+            ).json()
+            assert collected["passphrase"] == PASSPHRASE
             reported = await browser.post(
                 server.make_url(TEAM_EXPORT_RESULT_ROUTE),
                 headers=operator,
-                json={**_SUCCESS, **identity},
+                json={**_SUCCESS, **identity, "collection_token": collected["collection_token"]},
             )
             assert reported.status == 200
         for _ in range(500):
@@ -311,9 +329,39 @@ async def test_the_command_service_routes_upgrade() -> None:
     commands = _Commands()
     request = SimpleNamespace(
         channel_name="telegram", user_id="tg_1", chat_id="4242", thread_id=None, canonical_user_id="usr_owner",
-        current_session_key="session_tg", correlation_id="req_1",
+        current_session_key="session_tg", correlation_id="req_1", private_chat=True,
     )
 
     assert await _run_team_export(commands, request, "/upgrade") == "opened"  # type: ignore[arg-type]
-    assert commands.requests[0].session_key == "session_tg" and commands.requests[0].actor.canonical_user_id == "usr_owner"
-    assert await _run_team_export(None, request, "/upgrade") == "Team export is not available in this chat."  # type: ignore[arg-type]
+    [sent] = commands.requests
+    assert sent.session_key == "session_tg" and sent.actor.canonical_user_id == "usr_owner" and sent.actor.private_chat
+
+
+def test_the_command_service_always_has_the_upgrade_handler() -> None:
+    import inspect
+
+    from assistant_gateway.application.interactive_commands import GatewayCommandService
+
+    parameter = inspect.signature(GatewayCommandService).parameters["team_export_commands"]
+    assert parameter.default is inspect.Parameter.empty
+
+
+def test_sizes_read_the_same_in_file_sharing_and_in_the_export_report() -> None:
+    import assistant_gateway.file_sharing as file_sharing
+    import size_presentation
+
+    assert file_sharing.size_words is size_presentation.size_words
+    assert [size_presentation.size_words(value) for value in (0, 1023, 1024, 14_000, 3_355_443)] == [
+        "0 bytes", "1023 bytes", "1.0 KB", "13.7 KB", "3.2 MB"
+    ]
+
+
+def test_the_design_guide_keeps_the_link_card_bullet_whole() -> None:
+    from pathlib import Path
+
+    design = (Path(__file__).resolve().parents[1] / "ui" / "DESIGN.md").read_text(encoding="utf-8")
+    link_end = design.index("The card lives only in the page that ran `/link`")
+    upgrade = design.index("- `/upgrade`'s card")
+    link_start = design.rindex("\n- ", 0, link_end)
+    # The /link bullet's last lines come before the /upgrade bullet starts.
+    assert link_start < link_end < upgrade

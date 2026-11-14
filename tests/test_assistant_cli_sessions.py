@@ -56,6 +56,7 @@ from assistant_gateway.application.commands import (
     AuthenticationCommandHandler,
     IdentityCommandHandler,
     MemoryTopicCommandHandler,
+    TeamExportCommandHandler,
 )
 from assistant_gateway.application.manager_control_command_service import (
     GatewayManagerControlCommandService,
@@ -139,6 +140,7 @@ class FakeGateway:
             memory_topic_commands=MemoryTopicCommandHandler(self),
             message_submission_commands=GatewayMessageSubmissionCommandService(self),
             manager_control_commands=GatewayManagerControlCommandService(self),
+            team_export_commands=TeamExportCommandHandler(identity=self, secure_broker=secure_broker, team_id=""),
             session_commands=GatewaySessionCommandService(
                 sessions=self.session_repository,
                 requests=self.request_repository,

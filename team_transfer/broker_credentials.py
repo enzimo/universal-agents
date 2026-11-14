@@ -68,11 +68,12 @@ class BrokerEndpoint:
     token: str
 
 
+_BASE_URL_ENV = "SECURE_TOOL_BROKER_INTERNAL_BASE_URL"
+
+
 def broker_endpoint(config: Any, layout: Any) -> BrokerEndpoint:
     """The broker address and an operator token, from the instance's own settings and secrets."""
 
-    from access_control.caller_tokens import CALLER_OPERATOR, derive_caller_token
-    from env_secrets import get_env_with_file_fallback
     from internal_credentials import parse_env_file
     from secure_tool_broker.defaults import resolve_secure_tool_broker_internal_base_url
 
@@ -82,16 +83,36 @@ def broker_endpoint(config: Any, layout: Any) -> BrokerEndpoint:
     else:
         env_path = config.launch.env_file_path or layout.team_env_path
         environment = parse_env_file(env_path) if os.path.isfile(env_path) else {}
+    base_url = os.environ.get(_BASE_URL_ENV) or resolve_secure_tool_broker_internal_base_url(
+        config.security_layer.broker_internal_base_url
+    )
+    return _operator_endpoint(environment, base_url)
+
+
+def supervisor_broker_endpoint(environment: Mapping[str, str]) -> BrokerEndpoint:
+    """The operator endpoint from the environment the launcher gives the processes it starts.
+
+    That environment holds the broker root secret and the broker's address
+    (``docker/launch_headless.py``), so the supervisor reaches the broker as
+    its export processes do.
+    """
+
+    from secure_tool_broker.defaults import resolve_secure_tool_broker_internal_base_url
+
+    return _operator_endpoint(
+        environment, environment.get(_BASE_URL_ENV) or resolve_secure_tool_broker_internal_base_url(None)
+    )
+
+
+def _operator_endpoint(environment: Mapping[str, str], base_url: str) -> BrokerEndpoint:
+    from access_control.caller_tokens import CALLER_OPERATOR, derive_caller_token
+    from env_secrets import get_env_with_file_fallback
+
     root = get_env_with_file_fallback(_ROOT_TOKEN, env=environment)
     if not root:
         raise TransferError(
             f"{_ROOT_TOKEN} is not set for this instance, so the broker cannot be reached."
         )
-    base_url = os.environ.get(
-        "SECURE_TOOL_BROKER_INTERNAL_BASE_URL"
-    ) or resolve_secure_tool_broker_internal_base_url(
-        config.security_layer.broker_internal_base_url
-    )
     return BrokerEndpoint(
         base_url=str(base_url).rstrip("/"),
         token=derive_caller_token(root, CALLER_OPERATOR),
@@ -99,7 +120,11 @@ def broker_endpoint(config: Any, layout: Any) -> BrokerEndpoint:
 
 
 def call_broker(
-    endpoint: BrokerEndpoint, route: str, payload: dict[str, Any]
+    endpoint: BrokerEndpoint,
+    route: str,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float = _TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     import httpx
 
@@ -108,7 +133,7 @@ def call_broker(
             endpoint.base_url + route,
             json=payload,
             headers={"Authorization": f"Bearer {endpoint.token}"},
-            timeout=_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
     except httpx.HTTPError as exc:
         raise BrokerUnavailable(
@@ -383,4 +408,5 @@ __all__ = [
     "call_broker",
     "import_credential_bundle",
     "import_credentials",
+    "supervisor_broker_endpoint",
 ]

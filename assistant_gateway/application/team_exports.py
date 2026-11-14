@@ -11,9 +11,16 @@ exported.
 
 Who may: owners only (``access_control.people.team_export_refusal``), checked
 here with the roles the gateway knows, again by the broker when the page opens
-and on submission, and once more by the export process. Only a team started
-by the launcher can run the export (``supervisor_runs_exports``); a gateway
-started by hand points to the host command instead.
+and on submission, and once more by the export process. Only in a private
+chat: the reply holds the page's link, and anyone who sees it can open the
+page, so the channel must say the chat is private
+(``GatewayActorContext.private_chat``); a chat it cannot vouch for counts as
+not private. Only a team started by the launcher can run the export
+(``supervisor_runs_exports``); a gateway started by hand points to the host
+command instead.
+
+The chat never claims a file exists unless an export reported success: a page
+that expired, or a broker that restarted, may or may not have left one.
 """
 
 from __future__ import annotations
@@ -26,14 +33,15 @@ from assistant_gateway.application.broker_session_watch import (
     BrokerSessionOutcome,
 )
 from secure_tools.chat_commands import UPGRADE_COMMAND
+from size_presentation import size_words
 from team_transfer.export_requests import (
     EXPORT_PAGE_CLOSED,
     EXPORT_PAGE_FAILED,
     EXPORT_PAGE_FINAL_STATUSES,
+    EXPORT_PAGE_RESTARTED,
     NEXT_STEPS,
     TeamExportResultV1,
     section_lines,
-    size_words,
 )
 
 EXPORT_PAGE_DESCRIPTION: Final = (
@@ -48,6 +56,10 @@ NOT_LAUNCHED_TEXT: Final = (
     "--out <new file> instead."
 )
 UPGRADE_USAGE: Final = f"Usage: {UPGRADE_COMMAND}"
+PRIVATE_CHAT_REQUIRED_TEXT: Final = (
+    f"Send {UPGRADE_COMMAND} in a direct message with the assistant (or in Web Chat). Its reply holds a link to "
+    "the export page, and anyone who sees the link in a group could open the page."
+)
 _EXPORTS_FOLDER = "the exports folder of this instance's data folder"
 
 
@@ -61,13 +73,19 @@ def team_export_result_text(outcome: BrokerSessionOutcome) -> str:
     status = str(outcome.payload.get("status") or "")
     if outcome.ending == WATCH_EXPIRED:
         return (
-            "The team export page expired without reporting an export. If you started one, look in "
-            f"{_EXPORTS_FOLDER}; otherwise run {UPGRADE_COMMAND} again."
+            "The team export page expired before any export reported how it went, so no file is confirmed. "
+            f"If you started an export, check {_EXPORTS_FOLDER}; otherwise run {UPGRADE_COMMAND} again."
         )
     if outcome.ending != WATCH_FINISHED or status not in EXPORT_PAGE_FINAL_STATUSES:
-        return f"Couldn't confirm whether the team export finished. Look in {_EXPORTS_FOLDER}."
+        return f"Couldn't confirm whether the team export finished. Check {_EXPORTS_FOLDER}."
     if status == EXPORT_PAGE_CLOSED:
         return "The team export page was closed without exporting."
+    if status == EXPORT_PAGE_RESTARTED:
+        return (
+            "The secure broker restarted, so the team export page stopped and could not report an export. "
+            f"If you had started one, it may still have finished: check {_EXPORTS_FOLDER}. Otherwise run "
+            f"{UPGRADE_COMMAND} again."
+        )
     raw = outcome.payload.get("result")
     raw = raw if isinstance(raw, dict) else {}
     if status == EXPORT_PAGE_FAILED or not raw.get("ok"):
@@ -79,9 +97,10 @@ def team_export_result_text(outcome: BrokerSessionOutcome) -> str:
         return f"The team export finished, but its report could not be read. Look in {_EXPORTS_FOLDER}."
     parts = "\n".join(f"- {line}" for line in section_lines(result))
     steps = "\n".join(f"{number}. {step}" for number, step in enumerate(NEXT_STEPS, start=1))
+    note = f" {result.note}" if result.note else ""
     return (
         f"Exported the team to exports/{result.file_name} in this instance's data folder "
-        f"({size_words(result.size_bytes)}). It holds:\n{parts}\n\nNext steps:\n{steps}"
+        f"({size_words(result.size_bytes)}).{note} It holds:\n{parts}\n\nNext steps:\n{steps}"
     )
 
 
@@ -89,6 +108,7 @@ __all__ = [
     "EXPORT_PAGE_DESCRIPTION",
     "EXPORT_PAGE_RECEIPT",
     "NOT_LAUNCHED_TEXT",
+    "PRIVATE_CHAT_REQUIRED_TEXT",
     "UPGRADE_USAGE",
     "team_export_result_text",
     "team_export_status_is_final",

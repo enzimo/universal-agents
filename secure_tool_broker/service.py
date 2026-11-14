@@ -37,7 +37,7 @@ from secure_tool_broker.auth_pages import (
     render_markdown_text,
     render_session_countdown,
 )
-from secure_tool_broker.sign_in_pages import SIGN_IN_PAGE_SECONDS
+from secure_tool_broker.sign_in_pages import SESSION_RESTORED_AFTER_RESTART, SIGN_IN_PAGE_SECONDS
 from secure_tool_broker.x_sign_in import CALLBACK_PATH as X_CALLBACK_PATH
 from secure_tool_broker.auth_flows import (
     BrokerAuthSession,
@@ -913,7 +913,11 @@ class SecureToolBrokerService:
             owner_canonical_user_id=str(payload.get("owner_canonical_user_id") or ""),
             owner_team_id=str(payload.get("owner_team_id") or "") or None,
             owner_roles=tuple(str(role) for role in payload.get("owner_roles") or ()),
-            state={"start_payload": start_payload, "status": "created"},
+            state={
+                "start_payload": start_payload,
+                "status": "created",
+                SESSION_RESTORED_AFTER_RESTART: True,
+            },
         )
         self._auth_sessions[session_id] = session
         self._logger.info(

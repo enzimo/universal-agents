@@ -6,9 +6,18 @@ types a passphrase twice. This page keeps it in the broker's memory only and
 leaves an export request for the supervisor (``team_transfer.export_requests``;
 the request holds no secret). The supervisor's export process collects the
 passphrase once through ``TEAM_EXPORT_PASSPHRASE_ROUTE`` (operator caller
-only), writes the archive into ``exports/`` and reports through
-``TEAM_EXPORT_RESULT_ROUTE``. The page then shows the file, its parts and the
-next steps, and the gateway posts the same in the chat.
+only, ``secure_tool_broker.defaults``) with a token for that collection,
+writes the archive into ``exports/`` and reports through
+``TEAM_EXPORT_RESULT_ROUTE`` with the same token, so no other process can end
+the export. When the process exits with an error without reporting, the
+supervisor says so through ``TEAM_EXPORT_ENDED_ROUTE``. The page then shows
+the file, its parts and the next steps, and the gateway posts the same in the
+chat.
+
+What the passphrase protects, as the page says: the file's stored sign-ins,
+keys and operator secrets are encrypted with it; the rest of the team's
+records in the file can be read by anyone holding it, so the file must stay
+private.
 
 Why the broker serves it: it already serves the private pages people type
 secrets on, and the passphrase must never reach the gateway, the chat, a model
@@ -25,19 +34,26 @@ Lifetimes:
 - The page stays open for an hour (``TEAM_EXPORT_PAGE_SECONDS``) and has
   Close buttons at the top and the bottom.
 - A submitted passphrase waits at most ``PICKUP_SECONDS`` for the export
-  process; then it is dropped and the page says the launcher did not start
-  the export. Once collected, the broker keeps no copy.
-- A broker restart forgets waiting passphrases and running exports; the page
-  opens again empty and the owner runs ``/upgrade`` again.
+  process, checked when the process collects it and whenever the page or its
+  status is read; then it is dropped and the page says no export started in
+  time. Once collected, the broker keeps no copy.
+- A broker restart forgets waiting passphrases and running exports. The page
+  link still opens (it is signed), but the rebuilt page
+  (``SESSION_RESTORED_AFTER_RESTART``) never starts an export: it says the
+  broker restarted and that the owner runs ``/upgrade`` again. Remembering
+  used pages across restarts would need a store; one rule for every rebuilt
+  page needs none.
 """
 
 from __future__ import annotations
 
+import hmac
 import html
 import logging
 import os
+import secrets
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final, Mapping
 
@@ -51,30 +67,37 @@ from secure_tool_broker.auth_pages import (
     render_broker_auth_page,
     render_credential_input,
 )
+from secure_tool_broker.defaults import (
+    TEAM_EXPORT_ENDED_ROUTE,
+    TEAM_EXPORT_PASSPHRASE_ROUTE,
+    TEAM_EXPORT_RESULT_ROUTE,
+)
 from secure_tool_broker.model_key_page import NOT_ACTIVE_MESSAGE, current_person
+from secure_tool_broker.sign_in_pages import SESSION_RESTORED_AFTER_RESTART
 from secure_tools.chat_commands import UPGRADE_COMMAND
+from size_presentation import size_words
 from team_transfer.export_requests import (
     EXPORT_PAGE_CLOSED,
     EXPORT_PAGE_CREATED,
     EXPORT_PAGE_EXPORTING,
     EXPORT_PAGE_FAILED,
+    EXPORT_PAGE_RESTARTED,
     EXPORT_PAGE_SUCCESS,
     NEXT_STEPS,
+    PROCESS_ENDED_MESSAGE,
     TEAM_EXPORT_PAGE_METHOD,
     TEAM_EXPORT_PAGE_PROVIDER,
-    TEAM_EXPORT_PASSPHRASE_ROUTE,
-    TEAM_EXPORT_RESULT_ROUTE,
     TeamExportPassphraseRequestV1,
     TeamExportPassphraseV1,
+    TeamExportProcessEndedV1,
     TeamExportRequestV1,
     TeamExportResultV1,
     new_export_id,
     section_lines,
-    size_words,
     supervisor_runs_exports,
     write_export_request,
 )
-from team_transfer.titles import SECTION_TITLES
+from team_transfer.titles import section_title
 
 LOGGER = logging.getLogger(__name__)
 
@@ -86,14 +109,25 @@ STATUS_EXPORTING: Final = EXPORT_PAGE_EXPORTING
 STATUS_SUCCESS: Final = EXPORT_PAGE_SUCCESS
 STATUS_FAILED: Final = EXPORT_PAGE_FAILED
 STATUS_CLOSED: Final = EXPORT_PAGE_CLOSED
+STATUS_RESTARTED: Final = EXPORT_PAGE_RESTARTED
+# Exports run one at a time, so a request can wait behind another export.
 NOT_STARTED_MESSAGE: Final = (
-    "The launcher did not start the export within five minutes, so the passphrase was dropped. "
-    f"Check that this team runs under the launcher, then run {UPGRADE_COMMAND} again."
+    "No export process picked up the passphrase within five minutes, so it was dropped and nothing was written. "
+    "Another export may have been running, or the launcher may not be running exports for this team. "
+    f"Run {UPGRADE_COMMAND} again."
+)
+RESTARTED_MESSAGE: Final = (
+    "The secure broker restarted after this page opened, so this page can no longer start or follow an export. "
+    f"Run {UPGRADE_COMMAND} in the chat for a new page. If you started an export before the restart, it may "
+    "still have finished: look in the exports folder of this instance's data folder."
 )
 NOT_LAUNCHED_MESSAGE: Final = (
     "This team was not started by the launcher, so nothing can run the export from this page. "
     "Use assistant_cli team export on the host instead."
 )
+# What the result and ended routes answer.
+ENDED_RECORDED: Final = "recorded"
+ENDED_IGNORED: Final = "ignored"
 _EXPORT = "export"
 _CLOSE = "close"
 _FORM_ID = "export-form"
@@ -106,14 +140,24 @@ _STATUS = "status"
 
 @dataclass
 class _WaitingExport:
-    """One submitted export: its page and, until collected, its passphrase."""
+    """One submitted export: its page and, until collected, its passphrase; then its collection's token."""
 
     session: Any
     team_id: str
     owner_person_id: str
     requested_at: datetime
-    passphrase: str = ""
+    # Never in a text form of this record (logs, tracebacks).
+    passphrase: str = field(default="", repr=False)
     collected: bool = False
+    collection_token: str = field(default="", repr=False)
+
+    def names(self, export: TeamExportPassphraseRequestV1 | TeamExportResultV1 | TeamExportProcessEndedV1) -> bool:
+        return (self.team_id, self.owner_person_id) == (export.team_id, export.owner_person_id)
+
+    def overdue(self, now: datetime) -> bool:
+        """Nobody collected the passphrase within the pickup time (module docstring)."""
+
+        return not self.collected and now - self.requested_at >= timedelta(seconds=PICKUP_SECONDS)
 
 
 class _Exports:
@@ -127,36 +171,74 @@ class _Exports:
         with self._lock:
             self._by_id[export_id] = waiting
 
-    def collect(self, request: TeamExportPassphraseRequestV1) -> str:
-        """The passphrase for this export, once; the broker keeps no copy afterwards."""
+    def collect(self, request: TeamExportPassphraseRequestV1, now: datetime) -> tuple[str, str]:
+        """The passphrase for this export and its collection's token, once; the broker keeps no copy.
+
+        The pickup time is enforced here too, so a passphrase nobody read
+        the page for is never handed out late.
+        """
 
         with self._lock:
             waiting = self._by_id.get(request.export_id)
-            if waiting is None or (waiting.team_id, waiting.owner_person_id) != (
-                request.team_id,
-                request.owner_person_id,
-            ):
+            if waiting is None or not waiting.names(request):
                 raise web.HTTPNotFound(
                     text="No export with this id is waiting: the page expired, or the broker restarted."
                 )
             if waiting.collected:
                 raise web.HTTPConflict(text="This export's passphrase was already collected.")
-            passphrase, waiting.passphrase, waiting.collected = waiting.passphrase, "", True
-            return passphrase
+            if waiting.overdue(now):
+                del self._by_id[request.export_id]
+            else:
+                token = secrets.token_urlsafe(24)
+                passphrase, waiting.passphrase = waiting.passphrase, ""
+                waiting.collected, waiting.collection_token = True, token
+                return passphrase, token
+        _say_not_started(request.export_id, waiting)
+        raise web.HTTPGone(text="This export's passphrase waited longer than five minutes and was dropped.")
 
     def finish(self, result: TeamExportResultV1) -> None:
-        """Record how the export ended on its page; the export is forgotten afterwards."""
+        """Record how the export ended on its page; the export is forgotten afterwards.
+
+        A collected export ends only with its collection's token, so another
+        process's report (a duplicated request) cannot end it. A process that
+        failed before collecting may report that failure while nothing has
+        been collected.
+        """
 
         with self._lock:
             waiting = self._by_id.get(result.export_id)
-            if waiting is None or (waiting.team_id, waiting.owner_person_id) != (
-                result.team_id,
-                result.owner_person_id,
-            ):
+            if waiting is None or not waiting.names(result):
                 raise web.HTTPNotFound(text="No export with this id is open.")
+            if waiting.collected:
+                if not hmac.compare_digest(result.collection_token, waiting.collection_token):
+                    raise web.HTTPConflict(text="This result is not from the process that collected the passphrase.")
+            elif result.ok or result.collection_token:
+                raise web.HTTPConflict(text="Nothing collected this export's passphrase, so it cannot have finished.")
             del self._by_id[result.export_id]
-        waiting.session.state[_RESULT] = result.model_dump(mode="json")
+        waiting.session.state[_RESULT] = result.model_dump(mode="json", exclude={"collection_token"})
         waiting.session.state[_STATUS] = STATUS_SUCCESS if result.ok else STATUS_FAILED
+
+    def process_ended(self, report: TeamExportProcessEndedV1) -> bool:
+        """The supervisor saw the export process exit with an error; True when that ended an open export.
+
+        An export that already reported is gone from here, so its own result stands.
+        """
+
+        with self._lock:
+            waiting = self._by_id.get(report.export_id)
+            if waiting is None or not waiting.names(report):
+                return False
+            del self._by_id[report.export_id]
+        LOGGER.warning(
+            "The export process ended without reporting. event=team_export_process_ended_unreported "
+            "export_id=%s exit_code=%s collected=%s",
+            report.export_id,
+            report.exit_code,
+            waiting.collected,
+        )
+        waiting.session.state[_STATUS] = STATUS_FAILED
+        waiting.session.state[_RESULT] = {"ok": False, "error": PROCESS_ENDED_MESSAGE.format(exit_code=report.exit_code)}
+        return True
 
     def drop_unstarted(self, session: Any, now: datetime) -> None:
         """Forget a passphrase nobody collected in time, and say why on the page."""
@@ -164,22 +246,26 @@ class _Exports:
         export_id = str(session.state.get(_EXPORT_ID) or "")
         with self._lock:
             waiting = self._by_id.get(export_id)
-            if waiting is None or waiting.collected or now - waiting.requested_at < timedelta(seconds=PICKUP_SECONDS):
+            if waiting is None or not waiting.overdue(now):
                 return
             del self._by_id[export_id]
-        LOGGER.warning(
-            "No export process collected the passphrase in time; it was dropped. "
-            "event=team_export_not_started export_id=%s owner_person_id=%s",
-            export_id,
-            waiting.owner_person_id,
-        )
-        session.state[_STATUS] = STATUS_FAILED
-        session.state[_RESULT] = {"ok": False, "error": NOT_STARTED_MESSAGE}
+        _say_not_started(export_id, waiting)
 
     def discard(self, session: Any) -> None:
         export_id = str(session.state.get(_EXPORT_ID) or "")
         with self._lock:
             self._by_id.pop(export_id, None)
+
+
+def _say_not_started(export_id: str, waiting: _WaitingExport) -> None:
+    LOGGER.warning(
+        "No export process collected the passphrase in time; it was dropped. "
+        "event=team_export_not_started export_id=%s owner_person_id=%s",
+        export_id,
+        waiting.owner_person_id,
+    )
+    waiting.session.state[_STATUS] = STATUS_FAILED
+    waiting.session.state[_RESULT] = {"ok": False, "error": NOT_STARTED_MESSAGE}
 
 
 _EXPORTS = _Exports()
@@ -209,6 +295,7 @@ class TeamExportFlow:
 
     def submit(self, session: Any, form: Mapping[str, Any], logger: logging.Logger) -> None:
         session.state.pop(_FORM_ERROR, None)
+        _stop_if_restored(session)
         if str(form.get("action") or "") == _CLOSE:
             # While the export runs, the page stays: it must hear how the
             # export ended. The page offers no Close then.
@@ -218,6 +305,13 @@ class TeamExportFlow:
             _EXPORTS.discard(session)
             session.used = True
             session.state[_STATUS] = STATUS_CLOSED
+            return
+        if session.state.get(_STATUS) == STATUS_RESTARTED:
+            logger.warning(
+                "Team export refused: the page was rebuilt after a broker restart. "
+                "event=team_export_submit_refused person_id=%s reason=broker_restarted",
+                session.owner_canonical_user_id,
+            )
             return
         if session.state.get(_STATUS) != STATUS_CREATED:
             session.state[_FORM_ERROR] = f"This page already ran its export. Run {UPGRADE_COMMAND} for another one."
@@ -271,6 +365,7 @@ class TeamExportFlow:
         session.state[_STATUS] = STATUS_EXPORTING
 
     def render(self, session: Any) -> str:
+        _stop_if_restored(session)
         _EXPORTS.drop_unstarted(session, datetime.now(timezone.utc))
         status = str(session.state.get(_STATUS) or STATUS_CREATED)
         if status == STATUS_CLOSED:
@@ -278,7 +373,9 @@ class TeamExportFlow:
         if status == STATUS_EXPORTING:
             page = _intro_panel(closable=False) + _exporting_panel()
             return render_broker_auth_page(self.display_name, page, script=_WAIT_SCRIPT)
-        if status in (STATUS_SUCCESS, STATUS_FAILED):
+        if status == STATUS_RESTARTED:
+            body, script = _restarted_panel(), _BUSY_SCRIPT
+        elif status in (STATUS_SUCCESS, STATUS_FAILED):
             body, script = _result_panel(session), _BUSY_SCRIPT
         else:
             body, script = _form_panel(session), SECRET_INPUT_TOGGLE_SCRIPT + _BUSY_SCRIPT
@@ -286,6 +383,7 @@ class TeamExportFlow:
         return render_broker_auth_page(self.display_name, page, script=script)
 
     def status_payload(self, session: Any) -> dict[str, Any]:
+        _stop_if_restored(session)
         _EXPORTS.drop_unstarted(session, datetime.now(timezone.utc))
         result = session.state.get(_RESULT)
         return {
@@ -298,6 +396,18 @@ class TeamExportFlow:
 
     def cleanup(self, session: Any) -> None:
         _EXPORTS.discard(session)
+
+
+def _stop_if_restored(session: Any) -> None:
+    """A page the broker rebuilt after a restart never starts an export (module docstring)."""
+
+    if session.state.get(SESSION_RESTORED_AFTER_RESTART) and session.state.get(_STATUS) == STATUS_CREATED:
+        LOGGER.info(
+            "A team export page was rebuilt after a broker restart; it starts no export. "
+            "event=team_export_page_restarted person_id=%s",
+            session.owner_canonical_user_id,
+        )
+        session.state[_STATUS] = STATUS_RESTARTED
 
 
 def _submission_problem(session: Any, form: Mapping[str, Any]) -> str:
@@ -322,18 +432,18 @@ def _submission_problem(session: Any, form: Mapping[str, Any]) -> str:
 
 
 def add_team_export_routes(app: web.Application, *, team_id: str) -> None:
-    """The export process's two routes; only the operator caller reaches /v1/transfer/ (SecureToolBrokerService)."""
+    """The export's routes; only the operator caller reaches /v1/transfer/ (SecureToolBrokerService)."""
 
     async def passphrase_handler(request: web.Request) -> web.Response:
         body = await _model(request, TeamExportPassphraseRequestV1)
         if body.team_id != team_id:
             raise web.HTTPForbidden(text="The request names another team.")
-        passphrase = _EXPORTS.collect(body)
+        passphrase, token = _EXPORTS.collect(body, datetime.now(timezone.utc))
         LOGGER.info(
             "The export process collected its passphrase. event=team_export_passphrase_collected export_id=%s",
             body.export_id,
         )
-        return web.json_response(TeamExportPassphraseV1(passphrase=passphrase).model_dump())
+        return web.json_response(TeamExportPassphraseV1(passphrase=passphrase, collection_token=token).model_dump())
 
     async def result_handler(request: web.Request) -> web.Response:
         result = await _model(request, TeamExportResultV1)
@@ -347,10 +457,17 @@ def add_team_export_routes(app: web.Application, *, team_id: str) -> None:
             result.file_name or "-",
             result.size_bytes,
         )
-        return web.json_response({"status": "recorded"})
+        return web.json_response({"status": ENDED_RECORDED})
+
+    async def ended_handler(request: web.Request) -> web.Response:
+        report = await _model(request, TeamExportProcessEndedV1)
+        if report.team_id != team_id:
+            raise web.HTTPForbidden(text="The report names another team.")
+        return web.json_response({"status": ENDED_RECORDED if _EXPORTS.process_ended(report) else ENDED_IGNORED})
 
     app.router.add_post(TEAM_EXPORT_PASSPHRASE_ROUTE, passphrase_handler)
     app.router.add_post(TEAM_EXPORT_RESULT_ROUTE, result_handler)
+    app.router.add_post(TEAM_EXPORT_ENDED_ROUTE, ended_handler)
 
 
 async def _model(request: web.Request, model: Any) -> Any:
@@ -375,14 +492,27 @@ def _close_form() -> str:
     )
 
 
+def _section_items() -> str:
+    """What the file holds, from the sections the export writes (``team_transfer.registry``)."""
+
+    from team_transfer.registry import TRANSFER_SECTIONS
+
+    return "".join(
+        f"<li>{_e(section_title(section.name))}{' (encrypted)' if section.encrypted else ''}</li>"
+        for section in TRANSFER_SECTIONS
+    )
+
+
 def _intro_panel(*, closable: bool) -> str:
-    parts = "".join(f"<li>{_e(title)}</li>" for title in SECTION_TITLES.values())
     return (
         f'<section class="content-panel" id="{_TOP_ID}"><p class="eyebrow">Team export</p>'
         "<h1>Export the team for an upgrade</h1>"
-        "<p class=\"lede\">This writes one encrypted file with everything a new version needs to take over this "
-        "team. On the new instance you choose what to import; everything starts selected.</p>"
-        f"<p>The file holds:</p><ul>{parts}</ul>"
+        "<p class=\"lede\">This writes one file with everything a new version needs to take over this team. "
+        "On the new instance you choose what to import; everything starts selected.</p>"
+        "<p>Your passphrase encrypts the stored sign-ins, keys and secrets in the file. The rest of the team's "
+        "records in it, such as people, access, knowledge pages and schedules, can be read by anyone who has the "
+        "file, so keep the file private.</p>"
+        f"<p>The file holds:</p><ul>{_section_items()}</ul>"
         "<p>This page stays open for one hour.</p>"
         f"{_close_form() if closable else ''}</section>"
     )
@@ -401,9 +531,9 @@ def _form_panel(session: Any) -> str:
             input_id="passphrase_again", input_type="password", autocomplete="new-password", required=True
         )
         + "</div>"
-        "<p class=\"note\">At least 12 characters. Keep it somewhere safe: you need it to import the file, it is "
-        "not saved anywhere, and nobody can open the file without it. It goes to the secure broker and is never "
-        "sent to the agent.</p>"
+        "<p class=\"note\">At least 12 characters. Keep it somewhere safe: you need it to import the file, and "
+        "it is not saved anywhere. Without it nobody can read the stored sign-ins, keys and secrets in the file "
+        "or import it. It goes to the secure broker and is never sent to the agent.</p>"
         '<button type="submit">Export the team</button>'
         '<p class="status" role="status" data-export-progress hidden>Exporting. This usually takes under a '
         "minute; a large team can take a few minutes.</p></form></section>"
@@ -425,17 +555,25 @@ def _result_panel(session: Any) -> str:
         why = _e(raw.get("error") or "The export process stopped without saying why. The launcher's log has details.")
         return (
             f'<section class="content-panel" id="{_FORM_ID}"><h2>The team was not exported</h2>'
-            f'<p class="status status-error" role="alert">No file was written. {why}</p>'
+            f'<p class="status status-error" role="alert">{why}</p>'
             f"<p>Run {_e(UPGRADE_COMMAND)} in the chat to try again.</p></section>"
         )
     result = TeamExportResultV1.model_validate(raw)
     parts = "".join(f"<li>{_e(line)}</li>" for line in section_lines(result))
     steps = "".join(f"<li>{_e(step)}</li>" for step in NEXT_STEPS)
+    note = f'<p class="note">{_e(result.note)}</p>' if result.note else ""
     return (
         f'<section class="content-panel" id="{_FORM_ID}"><h2>The team is exported</h2>'
         f'<p class="status" role="status">Wrote <code>exports/{_e(result.file_name)}</code> in this instance\'s '
-        f"data folder ({_e(size_words(result.size_bytes))}).</p>"
+        f"data folder ({_e(size_words(result.size_bytes))}).</p>{note}"
         f"<p>It holds:</p><ul>{parts}</ul><h2>Next steps</h2><ol>{steps}</ol></section>"
+    )
+
+
+def _restarted_panel() -> str:
+    return (
+        f'<section class="content-panel" id="{_FORM_ID}"><h2>This page can no longer export</h2>'
+        f'<p class="status status-error" role="alert">{_e(RESTARTED_MESSAGE)}</p></section>'
     )
 
 
@@ -498,11 +636,16 @@ _WAIT_SCRIPT = """
 
 
 __all__ = [
+    "ENDED_IGNORED",
+    "ENDED_RECORDED",
+    "NOT_STARTED_MESSAGE",
     "PICKUP_SECONDS",
+    "RESTARTED_MESSAGE",
     "STATUS_CLOSED",
     "STATUS_CREATED",
     "STATUS_EXPORTING",
     "STATUS_FAILED",
+    "STATUS_RESTARTED",
     "STATUS_SUCCESS",
     "TEAM_EXPORT_PAGE_SECONDS",
     "TeamExportFlow",

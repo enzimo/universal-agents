@@ -59,14 +59,15 @@ are imported turned off; recurring schedules resume counting from import.
 An owner exports the whole team from a chat:
 
 1. **Type `/upgrade`** in a private chat with the assistant: Web Chat, or a
-   direct message in Telegram or Discord. The reply holds a link to a private
-   page, and anyone who sees the link can open the page, so don't use a group
-   chat. Only owners can export the team; administrators who are not owners
-   are refused.
+   direct message in Telegram, Discord, Signal, iMessage (Photon) or WhatsApp.
+   The reply holds a link to a private page, and anyone who sees the link can
+   open the page, so `/upgrade` in a group chat is refused and asks you to
+   send it in a direct message. Only owners can export the team;
+   administrators who are not owners are refused.
 2. **Open the page and choose a passphrase.** Type it twice, at least 12
    characters. It goes to the secure broker, is never sent to the agent and is
-   not saved anywhere. Keep it: you need it to import the file, and nobody can
-   open the file without it. The page lists what the file holds.
+   not saved anywhere. Keep it: you need it to import the file. The page lists
+   what the file holds.
 3. **Wait for the export.** The launcher writes one file into the data folder's
    `exports/` folder, for example
    `~/.universal-agents/data/exports/alpha-20261014-101500Z.uatransfer`. This
@@ -76,9 +77,18 @@ An owner exports the whole team from a chat:
    move with the file, and two running instances must not use them at once.
    Continue with [Import during onboarding](#import-during-onboarding).
 
+**What the passphrase protects.** The stored sign-ins and keys and the
+secrets from `team.env` are encrypted with the passphrase, and the whole file
+is signed with it, so any change to the file is detected. The rest of the
+team's records in the file (people, access, knowledge pages, pinned memories,
+schedules, settings and team files) are not encrypted: anyone who has the file
+can read them. Keep the file private, as you would a backup.
+
 The file can be read only by its owner (mode 0600). The container runs as
 root, so the launcher gives the file and `exports/` to whoever owns the data
-folder on the host; you can copy it without `sudo`. Old exports stay in
+folder on the host; you can copy it without `sudo`. If that fails (for
+example on some network folders), the export still succeeds and the page and
+the chat say that copying the file may need `sudo`. Old exports stay in
 `exports/` until you delete them.
 
 `/upgrade` needs the launcher (the Docker image, or `docker/launch_headless.py`),
@@ -86,10 +96,14 @@ because only the launcher holds every secret the export carries. A team
 started another way is told to use `team export` on the host
 ([Export and review](#export-and-review)).
 
-When the export does not finish, the page and the chat say why and nothing is
-written; run `/upgrade` again. The page stays open for one hour. A passphrase
-the launcher has not collected after five minutes is dropped, and the page says
-so. If the broker restarts during an export, the page opens again empty.
+When the export does not finish, the page and the chat say why; run
+`/upgrade` again. A half-written file is removed, even when the export process
+is killed. The page stays open for one hour. Exports run one at a time: a
+passphrase no export has picked up after five minutes is dropped (for example
+because another export was still running), and the page says so. If the
+secure broker restarts, the page link opens a page that can no longer start or
+follow an export; run `/upgrade` again. An export that was already running may
+still finish, so check `exports/`.
 
 ## Import during onboarding
 

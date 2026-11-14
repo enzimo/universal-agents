@@ -295,14 +295,20 @@ onboarding's server, titled **Choose what to import**, with these differences:
 - The team export page (`/upgrade`, owners; guided upgrade, 2026-10-14)
   follows the same rules: one form with the passphrase typed twice (masked,
   with the reveal control), a note that it is never saved or sent to the
-  agent, the list of what the file holds, "This page stays open for one hour."
-  and **Close** at the top and the bottom. Submitting changes the button to
-  **Exporting…** with a `role="status"` line. While the export runs the page
-  shows only that waiting line, without **Close** (the page must hear how the
-  export ended), and updates itself. The result then replaces it: the file's
-  path and size in a neutral `.status` line, the parts it holds and the
-  numbered next steps; or a red `.status-error` saying no file was written,
-  why, and to run `/upgrade` again.
+  agent, a plain line saying what the passphrase protects (the stored
+  sign-ins, keys and secrets are encrypted; the rest of the file can be read
+  by anyone who has it, so keep it private), the list of what the file holds
+  with "(encrypted)" beside the encrypted parts, "This page stays open for one
+  hour." and **Close** at the top and the bottom. Submitting changes the
+  button to **Exporting…** with a `role="status"` line. While the export runs
+  the page shows only that waiting line, without **Close** (the page must
+  hear how the export ended), and updates itself. The result then replaces
+  it: the file's path and size in a neutral `.status` line, a `.note` when
+  copying the file may need `sudo`, the parts it holds and the numbered next
+  steps; or a red `.status-error` saying why nothing was exported and to run
+  `/upgrade` again. A page the broker rebuilt after a restart shows only a
+  red `.status-error` saying the broker restarted and to run `/upgrade`
+  again, with **Close**.
 - Standalone broker browser-authorization pages expose long provider URLs
   through a fixed-width action. Show a disabled **Wait...** button until the
   URL arrives, then enable **Open** in the same element to open a new tab.
@@ -1977,16 +1983,18 @@ its history. Steps with linked requests cannot use this correction.
   reason, or "couldn't confirm" with where to check (Settings → Access → By
   Tool, or `/auth status` for sign-ins). Web Chat removes the card when that
   message arrives; until then an expired card keeps its local expired state.
-- `/upgrade`'s card (kind `broker_authentication`) works the same way: chat
-  history keeps "Team export page opened." in place of the card, and the
-  gateway's `link_result` message closes it with the file, what it holds and
-  the next steps, or why nothing was exported.
   The card lives only in the page that ran `/link`, so a refresh drops it and
   history shows the opened line and, later, the result. After a gateway
   restart no result follows for a page that was still open, and the card keeps
   its expired state with Dismiss. `/auth google team_client` and `/auth x
   team_client` cards get the same result message ("The team's Google sign-in app
   is stored; people can now sign in with it."); other `/auth` cards get none.
+- `/upgrade`'s card (kind `broker_authentication`) works the same way: chat
+  history keeps "Team export page opened." in place of the card, and the
+  gateway's `link_result` message closes it with the file, what it holds and
+  the next steps, or why nothing was exported. The chat names a file only
+  when an export reported success. `/upgrade` outside a private chat gets a
+  plain refusal asking for a direct message, and no card.
 - When a broker collection or tool setup result completes a waiting interactive
   Task, append the agent's success or failure confirmation to the originating
   Web Chat thread immediately. Quiet-hours batching applies to autonomous work,

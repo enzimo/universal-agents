@@ -31,12 +31,11 @@ from access_control.caller_tokens import CALLER_GATEWAY, CALLER_MANAGER, CALLER_
 from runtime_settings.instance_layout import InstanceLayout
 from secure_tool_broker import team_export_page
 from secure_tool_broker.auth_flows import BrokerAuthSession
+from secure_tool_broker.defaults import TEAM_EXPORT_PASSPHRASE_ROUTE, TEAM_EXPORT_RESULT_ROUTE
 from secure_tool_broker.service import SecureToolBrokerService
 from team_transfer.export_requests import (
     EXPORT_REQUESTS_BY_SUPERVISOR,
     EXPORT_REQUESTS_ENV,
-    TEAM_EXPORT_PASSPHRASE_ROUTE,
-    TEAM_EXPORT_RESULT_ROUTE,
     take_export_request,
 )
 from tests.broker_access_support import BROKER_ROOT, TEST_TEAM, caller_headers, gateway_headers, open_gate
@@ -93,12 +92,13 @@ async def _collect(client: TestClient, export_id: str, *, owner: str = "usr_owne
     )
 
 
-def _result(export_id: str, *, ok: bool = True) -> dict:
+def _result(export_id: str, *, ok: bool = True, token: str = "") -> dict:
     return {
         "export_id": export_id,
         "team_id": TEST_TEAM,
         "owner_person_id": "usr_owner",
         "ok": ok,
+        "collection_token": token,
         "file_name": "team-20261014-101500Z.uatransfer" if ok else "",
         "size_bytes": 48_213 if ok else 0,
         "sections": [{"name": "people", "records": 2, "size_bytes": 812, "encrypted": False}] if ok else [],
@@ -127,8 +127,9 @@ async def test_the_page_lists_what_moves_and_has_one_passphrase_form(broker: Tes
     page = await (await broker.get(await _page_path(broker))).text()
 
     assert "Export the team for an upgrade" in page
-    for title in ("People", "Schedules", "Knowledge pages", "Stored sign-ins and keys", "Team files and agent types"):
+    for title in ("People", "Schedules", "Knowledge pages", "Team files and agent types"):
         assert f"<li>{title}</li>" in page
+    assert "<li>Stored sign-ins and keys (encrypted)</li>" in page and "<li>Secrets from team.env (encrypted)</li>" in page
     assert page.count('type="password"') == 2 and page.count("<form") == 3  # the form and two Close buttons
     assert "This page stays open for one hour." in page
     assert "never sent to the agent" in page
@@ -174,7 +175,9 @@ async def test_the_operator_collects_the_passphrase_once_and_the_result_ends_the
     assert (await _collect(broker, request.export_id, label=CALLER_MANAGER)).status == 403
     assert (await _collect(broker, request.export_id, owner="usr_member")).status == 404
     collected = await _collect(broker, request.export_id)
-    assert collected.status == 200 and (await collected.json()) == {"passphrase": PASSPHRASE}
+    body = await collected.json()
+    assert collected.status == 200 and body["passphrase"] == PASSPHRASE and len(body["collection_token"]) >= 16
+    token = body["collection_token"]
     assert (await _collect(broker, request.export_id)).status == 409
 
     status = await (await broker.get(f"{page}/status")).json()
@@ -183,16 +186,21 @@ async def test_the_operator_collects_the_passphrase_once_and_the_result_ends_the
     await broker.post(page, data={"action": "close"})
     assert (await (await broker.get(f"{page}/status")).json())["status"] == "exporting"
 
-    finished = await broker.post(TEAM_EXPORT_RESULT_ROUTE, headers=caller_headers(CALLER_OPERATOR), json=_result(request.export_id))
+    finished = await broker.post(
+        TEAM_EXPORT_RESULT_ROUTE, headers=caller_headers(CALLER_OPERATOR), json=_result(request.export_id, token=token)
+    )
     assert finished.status == 200
 
     status = await (await broker.get(f"{page}/status")).json()
     assert status["status"] == "success" and status["result"]["file_name"] == "team-20261014-101500Z.uatransfer"
+    assert "collection_token" not in status["result"]
     shown = await (await broker.get(page)).text()
     assert "The team is exported" in shown and "exports/team-20261014-101500Z.uatransfer" in shown
     assert "People: 2 records, 812 bytes" in shown and "Stop this instance." in shown
     # The export is forgotten: a second result has nowhere to go.
-    again = await broker.post(TEAM_EXPORT_RESULT_ROUTE, headers=caller_headers(CALLER_OPERATOR), json=_result(request.export_id))
+    again = await broker.post(
+        TEAM_EXPORT_RESULT_ROUTE, headers=caller_headers(CALLER_OPERATOR), json=_result(request.export_id, token=token)
+    )
     assert again.status == 404
 
 
@@ -206,7 +214,7 @@ async def test_a_failed_export_says_so_in_red_and_how_to_try_again(broker: TestC
     await broker.post(TEAM_EXPORT_RESULT_ROUTE, headers=caller_headers(CALLER_OPERATOR), json=_result(request.export_id, ok=False))
 
     shown = await (await broker.get(page)).text()
-    assert '<p class="status status-error" role="alert">No file was written. The broker refused the request (500).' in shown
+    assert '<p class="status status-error" role="alert">The broker refused the request (500).' in shown
     assert "Run /upgrade in the chat to try again." in shown
     assert (await (await broker.get(f"{page}/status")).json())["status"] == "failed"
 
@@ -235,7 +243,8 @@ def test_a_passphrase_nobody_collects_is_dropped_after_the_pickup_time(launched_
     team_export_page._EXPORTS.drop_unstarted(session, later)
 
     assert session.state["status"] == "failed"
-    assert "did not start the export within five minutes" in session.state["result"]["error"]
+    assert "No export process picked up the passphrase within five minutes" in session.state["result"]["error"]
+    assert "Another export may have been running" in session.state["result"]["error"]
     assert flow.status_payload(session)["status"] == "failed"
 
 
@@ -296,3 +305,163 @@ async def test_close_ends_a_page_that_is_not_exporting(broker: TestClient) -> No
     assert "This page is closed." in closed and "window.close()" in closed
     assert (await broker.get(page)).status == 410
     assert (await (await broker.get(f"{page}/status")).json())["status"] == "closed"
+
+
+# -- review fixes (2026-11-14) ------------------------------------------------------
+
+
+async def _submitted_export(client: TestClient, layout: InstanceLayout) -> tuple[str, str]:
+    page = await _page_path(client)
+    await _submit(client, page)
+    request = take_export_request(layout.team_export_requests_dir)
+    assert request is not None
+    return page, request.export_id
+
+
+@pytest.mark.asyncio
+async def test_a_page_rebuilt_after_a_broker_restart_never_starts_an_export(launched_team: InstanceLayout) -> None:
+    first = TestClient(TestServer(SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate()).build_app()))
+    await first.start_server()
+    closed_page, open_page = await _page_path(first), await _page_path(first)
+    await first.post(closed_page, data={"action": "close"})
+    assert (await first.get(closed_page)).status == 410
+    await first.close()
+
+    # The broker restarts with the same root secret: the signed links open again.
+    restarted = TestClient(TestServer(SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate()).build_app()))
+    await restarted.start_server()
+    try:
+        for page in (closed_page, open_page):
+            shown = await (await restarted.post(
+                page, data={"action": "export", "passphrase": PASSPHRASE, "passphrase_again": PASSPHRASE}
+            )).text()
+            assert "The secure broker restarted after this page opened" in shown and "Run /upgrade" in shown
+            assert 'type="password"' not in shown
+            status = await (await restarted.get(f"{page}/status")).json()
+            assert status["status"] == "restarted"
+        assert take_export_request(launched_team.team_export_requests_dir) is None
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_the_page_says_exactly_what_the_passphrase_protects(broker: TestClient) -> None:
+    page = await (await broker.get(await _page_path(broker))).text()
+
+    assert "Your passphrase encrypts the stored sign-ins, keys and secrets in the file." in page
+    assert "can be read by anyone who has the file, so keep the file private" in page
+    assert "one encrypted file" not in page and "nobody can open the file without it" not in page
+
+
+@pytest.mark.asyncio
+async def test_the_file_holds_list_follows_the_sections_the_export_writes(
+    broker: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import team_transfer.registry as registry
+    from team_transfer.broker_credentials import BrokerCredentialsSection
+    from team_transfer.people import PeopleSection
+
+    monkeypatch.setattr(registry, "TRANSFER_SECTIONS", (PeopleSection(), BrokerCredentialsSection()))
+
+    page = await (await broker.get(await _page_path(broker))).text()
+
+    assert "<li>People</li><li>Stored sign-ins and keys (encrypted)</li></ul>" in page
+    assert "<li>Schedules</li>" not in page
+
+
+@pytest.mark.asyncio
+async def test_a_passphrase_is_never_handed_out_after_the_pickup_time_even_when_nobody_reads_the_page(
+    broker: TestClient, launched_team: InstanceLayout
+) -> None:
+    page, export_id = await _submitted_export(broker, launched_team)
+    for waiting in team_export_page._EXPORTS._by_id.values():
+        waiting.requested_at -= timedelta(minutes=30)
+
+    late = await _collect(broker, export_id)
+
+    assert late.status == 410
+    assert export_id not in team_export_page._EXPORTS._by_id
+    assert (await _collect(broker, export_id)).status == 404
+    status = await (await broker.get(f"{page}/status")).json()
+    assert status["status"] == "failed" and "within five minutes" in status["result"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_process_that_collected_the_passphrase_can_end_the_export(
+    broker: TestClient, launched_team: InstanceLayout
+) -> None:
+    page, export_id = await _submitted_export(broker, launched_team)
+    token = (await (await _collect(broker, export_id)).json())["collection_token"]
+    operator = caller_headers(CALLER_OPERATOR)
+
+    # A second process (a duplicated request) got 409 on collection and reports a failure.
+    other = await broker.post(TEAM_EXPORT_RESULT_ROUTE, headers=operator, json=_result(export_id, ok=False))
+    wrong = await broker.post(TEAM_EXPORT_RESULT_ROUTE, headers=operator, json=_result(export_id, ok=False, token="x" * 32))
+    assert (other.status, wrong.status) == (409, 409)
+    assert (await (await broker.get(f"{page}/status")).json())["status"] == "exporting"
+
+    real = await broker.post(TEAM_EXPORT_RESULT_ROUTE, headers=operator, json=_result(export_id, token=token))
+    assert real.status == 200
+    assert (await (await broker.get(f"{page}/status")).json())["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_a_process_that_failed_before_collecting_may_report_only_a_failure(
+    broker: TestClient, launched_team: InstanceLayout
+) -> None:
+    page, export_id = await _submitted_export(broker, launched_team)
+    operator = caller_headers(CALLER_OPERATOR)
+
+    claimed_success = await broker.post(TEAM_EXPORT_RESULT_ROUTE, headers=operator, json=_result(export_id))
+    assert claimed_success.status == 409
+    failure = await broker.post(TEAM_EXPORT_RESULT_ROUTE, headers=operator, json=_result(export_id, ok=False))
+    assert failure.status == 200
+    assert (await (await broker.get(f"{page}/status")).json())["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_the_supervisor_ends_an_export_whose_process_exited_without_reporting(
+    broker: TestClient, launched_team: InstanceLayout
+) -> None:
+    from secure_tool_broker.defaults import TEAM_EXPORT_ENDED_ROUTE
+
+    operator = caller_headers(CALLER_OPERATOR)
+    page, export_id = await _submitted_export(broker, launched_team)
+    token = (await (await _collect(broker, export_id)).json())["collection_token"]
+    ended = {"export_id": export_id, "team_id": TEST_TEAM, "owner_person_id": "usr_owner", "exit_code": -9}
+
+    # Only the operator caller reaches it.
+    assert (await broker.post(TEAM_EXPORT_ENDED_ROUTE, headers=gateway_headers(), json=ended)).status == 403
+    recorded = await broker.post(TEAM_EXPORT_ENDED_ROUTE, headers=operator, json=ended)
+
+    assert (await recorded.json()) == {"status": "recorded"}
+    status = await (await broker.get(f"{page}/status")).json()
+    assert status["status"] == "failed"
+    assert "The export process ended unexpectedly (exit code -9)" in status["result"]["error"]
+    # A result arriving afterwards has nowhere to go.
+    late = await broker.post(TEAM_EXPORT_RESULT_ROUTE, headers=operator, json=_result(export_id, token=token))
+    assert late.status == 404
+
+    # An export that already reported keeps its own result.
+    page, export_id = await _submitted_export(broker, launched_team)
+    token = (await (await _collect(broker, export_id)).json())["collection_token"]
+    await broker.post(TEAM_EXPORT_RESULT_ROUTE, headers=operator, json=_result(export_id, token=token))
+    ignored = await broker.post(TEAM_EXPORT_ENDED_ROUTE, headers=operator, json={**ended, "export_id": export_id, "exit_code": 1})
+    assert (await ignored.json()) == {"status": "ignored"}
+    assert (await (await broker.get(f"{page}/status")).json())["status"] == "success"
+
+
+def test_the_export_routes_sit_under_the_operator_only_transfer_prefix() -> None:
+    from secure_tool_broker import defaults
+
+    for route in (defaults.TEAM_EXPORT_PASSPHRASE_ROUTE, defaults.TEAM_EXPORT_RESULT_ROUTE, defaults.TEAM_EXPORT_ENDED_ROUTE):
+        assert route.startswith(defaults.TRANSFER_ROUTE_PREFIX)
+
+
+def test_a_waiting_exports_text_form_never_holds_the_passphrase() -> None:
+    waiting = team_export_page._WaitingExport(
+        session=None, team_id=TEST_TEAM, owner_person_id="usr_owner", requested_at=datetime.now(timezone.utc),
+        passphrase=PASSPHRASE,
+    )
+
+    assert PASSPHRASE not in repr(waiting)

@@ -13,17 +13,29 @@ Who does what:
    with its full environment: only the supervisor holds the broker root secret
    (for the operator token) and every operator secret the export carries.
 4. That process collects the passphrase from the broker once, through an
-   operator-only transfer route (``TEAM_EXPORT_PASSPHRASE_ROUTE``), writes the
-   archive into ``exports/`` and reports the result
-   (``TEAM_EXPORT_RESULT_ROUTE``); the page and the gateway's chat message
-   show it.
+   operator-only transfer route (``TEAM_EXPORT_PASSPHRASE_ROUTE`` in
+   ``secure_tool_broker.defaults``), with a token for that one collection,
+   writes the archive into ``exports/`` and reports the result with the same
+   token (``TEAM_EXPORT_RESULT_ROUTE``); the page and the gateway's chat
+   message show it. When the process ends with an error without reporting
+   (killed, out of memory), the supervisor reports that instead
+   (``TEAM_EXPORT_ENDED_ROUTE``); the broker ignores it for an export that
+   already reported.
 
 Why the request is a file and the passphrase is not: the supervisor has no
 listening socket and keeps one way in, request files under ``runtime/``,
 which no agent can reach. A request names an export but proves nothing by
 itself: collecting the passphrase needs the operator token, and the broker
 hands a passphrase only to the export it was typed for (export id, team and
-owner), once.
+owner), once. A request file is deleted before it is read as a request, so a
+damaged one is logged and dropped and can never stop the team.
+
+What the passphrase protects: the file's stored sign-ins and keys
+(``broker_credentials``) and operator secrets (``operator_secrets``) are
+encrypted with a key derived from it, and the whole file is signed with it so
+any change is detected. The other records (people, access, knowledge, pinned
+memories, schedules, settings, team files) are plain JSON inside the file:
+anyone holding the file can read them, so the file must stay private.
 
 ``EXPORT_REQUESTS_ENV`` is how processes know a supervisor reads these
 requests: the launcher sets it for every process it starts. A gateway started
@@ -44,14 +56,15 @@ from typing import Final, Literal, Mapping
 
 from pydantic import Field, ValidationError
 
+from size_presentation import size_words
 from team_transfer.format import (
-    CREDENTIALS_DIR,
     TransferManifestV1,
     TransferModel,
     section_files_prefix,
     section_member,
 )
 from team_transfer.private_files import write_private_json
+from team_transfer.sections import encrypted_member
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +80,12 @@ EXPORT_PAGE_EXPORTING: Final = "exporting"
 EXPORT_PAGE_SUCCESS: Final = "success"
 EXPORT_PAGE_FAILED: Final = "failed"
 EXPORT_PAGE_CLOSED: Final = "closed"
-EXPORT_PAGE_FINAL_STATUSES: Final = frozenset({EXPORT_PAGE_SUCCESS, EXPORT_PAGE_FAILED, EXPORT_PAGE_CLOSED})
-# Operator-only broker routes (secure_tool_broker.service: /v1/transfer/ is the operator's).
-TEAM_EXPORT_PASSPHRASE_ROUTE: Final = "/v1/transfer/export/passphrase"
-TEAM_EXPORT_RESULT_ROUTE: Final = "/v1/transfer/export/result"
+# The broker restarted after the page opened: it forgot any waiting passphrase
+# or running export, so the page can neither start nor follow one.
+EXPORT_PAGE_RESTARTED: Final = "restarted"
+EXPORT_PAGE_FINAL_STATUSES: Final = frozenset(
+    {EXPORT_PAGE_SUCCESS, EXPORT_PAGE_FAILED, EXPORT_PAGE_CLOSED, EXPORT_PAGE_RESTARTED}
+)
 EXPORT_FILE_SUFFIX: Final = ".uatransfer"
 EXPORT_ID_PATTERN: Final = r"^exp_[A-Za-z0-9_-]{16,64}$"
 # What to do with a finished export; the page and the chat message show the same steps.
@@ -81,9 +96,18 @@ NEXT_STEPS: Final = (
     "Copy the file into the new data folder's import folder, then choose Import a team export on the "
     "Let's Begin page.",
 )
+# What the page and the chat say when the supervisor reports an export process
+# that exited with an error before reporting (TEAM_EXPORT_ENDED_ROUTE).
+PROCESS_ENDED_MESSAGE: Final = (
+    "The export process ended unexpectedly (exit code {exit_code}) before it reported how the export went. "
+    "Any half-written file was removed. The launcher's log has details."
+)
 _REQUEST_SUFFIX = ".json"
+# A request is a few hundred bytes; anything larger is not one.
+_REQUEST_MAX_BYTES = 64 * 1024
 _FILE_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
 _ERROR_MAX_CHARS = 2000
+_TOKEN_MAX_CHARS = 128
 
 
 class TeamExportRequestV1(TransferModel):
@@ -105,7 +129,10 @@ class TeamExportPassphraseRequestV1(TransferModel):
 
 
 class TeamExportPassphraseV1(TransferModel):
+    """The passphrase, and the token this one collection's result must carry (``TeamExportResultV1``)."""
+
     passphrase: str = Field(min_length=1, max_length=1024, repr=False)
+    collection_token: str = Field(min_length=16, max_length=_TOKEN_MAX_CHARS, repr=False)
 
 
 class TeamExportSectionV1(TransferModel):
@@ -118,16 +145,35 @@ class TeamExportSectionV1(TransferModel):
 
 
 class TeamExportResultV1(TransferModel):
-    """How an export ended; never holds the passphrase or a record's contents."""
+    """How an export ended; never holds the passphrase or a record's contents.
+
+    ``collection_token`` is the token the broker gave with the passphrase.
+    The broker accepts a result for a collected export only with that token,
+    so no other process can end it. A process that failed before collecting
+    (``""``) may report only a failure, and only while nothing was collected.
+    ``note`` is a warning beside a success (the file could not be given to
+    the data folder's owner); the page and the chat show it.
+    """
 
     export_id: str = Field(pattern=EXPORT_ID_PATTERN)
     team_id: str = Field(min_length=1, max_length=120)
     owner_person_id: str = Field(min_length=1, max_length=240)
     ok: bool
+    collection_token: str = Field(default="", max_length=_TOKEN_MAX_CHARS, repr=False)
     file_name: str = Field(default="", max_length=255)
     size_bytes: int = Field(default=0, ge=0)
     sections: tuple[TeamExportSectionV1, ...] = ()
     error: str = Field(default="", max_length=_ERROR_MAX_CHARS)
+    note: str = Field(default="", max_length=_ERROR_MAX_CHARS)
+
+
+class TeamExportProcessEndedV1(TransferModel):
+    """The supervisor's report that an export process exited with an error (``TEAM_EXPORT_ENDED_ROUTE``)."""
+
+    export_id: str = Field(pattern=EXPORT_ID_PATTERN)
+    team_id: str = Field(min_length=1, max_length=120)
+    owner_person_id: str = Field(min_length=1, max_length=240)
+    exit_code: int
 
 
 def new_export_id() -> str:
@@ -139,18 +185,6 @@ def export_file_name(instance_name: str, when: datetime) -> str:
 
     stem = _FILE_NAME_UNSAFE.sub("-", instance_name).strip("-")[:80] or "team"
     return f"{stem}-{when.astimezone(timezone.utc):%Y%m%d-%H%M%S}Z{EXPORT_FILE_SUFFIX}"
-
-
-def size_words(size_bytes: int) -> str:
-    """``812 bytes``, ``14 KB``, ``3.2 MB``, ``1.4 GB``."""
-
-    value = max(0, int(size_bytes))
-    if value < 1024:
-        return f"{value} bytes"
-    for unit, scale in (("GB", 1024**3), ("MB", 1024**2)):
-        if value >= scale:
-            return f"{value / scale:.1f} {unit}"
-    return f"{round(value / 1024)} KB"
 
 
 def section_lines(result: TeamExportResultV1) -> tuple[str, ...]:
@@ -187,9 +221,11 @@ def write_export_request(requests_dir: Path, request: TeamExportRequestV1) -> Pa
 def take_export_request(requests_dir: Path) -> TeamExportRequestV1 | None:
     """The oldest waiting request, removed from the folder; None when none waits.
 
-    A request is taken once: it is deleted before the export starts, so a
-    supervisor restart never runs it twice (the owner asks again). A file
-    that is not a valid request is deleted and logged.
+    A request is taken once: it is deleted before it is read as a request,
+    so a supervisor restart never runs it twice (the owner asks again) and a
+    damaged file (not UTF-8, not JSON, wrong fields) is logged and gone
+    instead of failing on every pass. A file that cannot be deleted is never
+    run.
     """
 
     try:
@@ -203,27 +239,60 @@ def take_export_request(requests_dir: Path) -> TeamExportRequestV1 | None:
     except FileNotFoundError:
         return None
     for name in names:
-        path = requests_dir / name
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            logger.warning(
-                "An export request could not be read. event=team_export_request_unreadable file=%s error=%s",
-                path.name,
-                type(exc).__name__,
-            )
-            raw = ""
-        path.unlink(missing_ok=True)
+        raw = _take_request_file(requests_dir / name)
+        if raw is None:
+            continue
         try:
             return TeamExportRequestV1.model_validate(json.loads(raw))
-        except (ValueError, ValidationError) as exc:
+        except (ValueError, ValidationError, RecursionError) as exc:
+            # UnicodeDecodeError and JSONDecodeError are ValueErrors too.
             logger.warning(
                 "An export request was not valid and was removed. event=team_export_request_invalid "
                 "file=%s error=%s",
-                path.name,
+                name,
                 type(exc).__name__,
             )
     return None
+
+
+def _take_request_file(path: Path) -> bytes | None:
+    """The file's bytes, after deleting it; None when it could not be read or deleted.
+
+    Opened without following a link (the folder listing checked one moment
+    earlier). A file that cannot be deleted is skipped: running it would run
+    the same export again on the next pass.
+    """
+
+    raw: bytes | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            raw = handle.read(_REQUEST_MAX_BYTES + 1)
+    except OSError as exc:
+        logger.warning(
+            "An export request could not be read and was removed. event=team_export_request_unreadable "
+            "file=%s error=%s",
+            path.name,
+            type(exc).__name__,
+        )
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.error(
+            "An export request could not be removed, so it is not run. event=team_export_request_stuck "
+            "file=%s error=%s",
+            path.name,
+            type(exc).__name__,
+        )
+        return None
+    if raw is not None and len(raw) > _REQUEST_MAX_BYTES:
+        logger.warning(
+            "An export request was too large and was removed. event=team_export_request_invalid file=%s "
+            "error=too_large",
+            path.name,
+        )
+        return None
+    return raw
 
 
 def export_sections(manifest: TransferManifestV1) -> tuple[TeamExportSectionV1, ...]:
@@ -231,7 +300,7 @@ def export_sections(manifest: TransferManifestV1) -> tuple[TeamExportSectionV1, 
 
     sizes: dict[str, int] = {}
     for entry in manifest.sections:
-        paths = (section_member(entry.name), f"{CREDENTIALS_DIR}/{entry.name}.enc")
+        paths = (section_member(entry.name), encrypted_member(entry.name))
         prefix = section_files_prefix(entry.name)
         sizes[entry.name] = sum(
             member.size for member in manifest.members if member.path in paths or member.path.startswith(prefix)
@@ -258,16 +327,17 @@ __all__ = [
     "EXPORT_PAGE_EXPORTING",
     "EXPORT_PAGE_FAILED",
     "EXPORT_PAGE_FINAL_STATUSES",
+    "EXPORT_PAGE_RESTARTED",
     "EXPORT_PAGE_SUCCESS",
     "EXPORT_REQUESTS_BY_SUPERVISOR",
     "EXPORT_REQUESTS_ENV",
     "NEXT_STEPS",
+    "PROCESS_ENDED_MESSAGE",
     "TEAM_EXPORT_PAGE_METHOD",
     "TEAM_EXPORT_PAGE_PROVIDER",
-    "TEAM_EXPORT_PASSPHRASE_ROUTE",
-    "TEAM_EXPORT_RESULT_ROUTE",
     "TeamExportPassphraseRequestV1",
     "TeamExportPassphraseV1",
+    "TeamExportProcessEndedV1",
     "TeamExportRequestV1",
     "TeamExportResultV1",
     "TeamExportSectionV1",
@@ -276,7 +346,6 @@ __all__ = [
     "new_export_id",
     "section_lines",
     "short_error",
-    "size_words",
     "supervisor_runs_exports",
     "take_export_request",
     "write_export_request",

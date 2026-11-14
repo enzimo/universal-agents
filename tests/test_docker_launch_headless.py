@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from runtime_settings.instance_layout import InstanceLayout
 from assistant_gateway.config import (
     GatewayInstanceConfig,
     INSTANCE_CONFIG_SCHEMA_VERSION,
@@ -2362,9 +2363,9 @@ def test_team_exports_run_one_at_a_time_with_the_full_environment(tmp_path: Path
         processes.append(FakeProcess())
         return processes[-1]
 
-    requests_dir = tmp_path / "runtime" / "team-export" / "requests"
+    requests_dir = InstanceLayout.at(tmp_path).team_export_requests_dir
     runner = TeamExportRunner(
-        requests_dir=requests_dir,
+        layout=InstanceLayout.at(tmp_path),
         config_path=tmp_path / "instance_config.yaml",
         env={"SECURE_TOOL_BROKER_TOKEN": "root", "TELEGRAM_BOT_TOKEN": "bot"},
         python_executable="python",
@@ -2455,10 +2456,10 @@ def test_an_export_process_that_cannot_start_is_logged_and_the_supervisor_contin
     def failing_popen(command, *, cwd, env):
         raise FileNotFoundError("python")
 
-    requests_dir = tmp_path / "requests"
+    requests_dir = InstanceLayout.at(tmp_path).team_export_requests_dir
     _export_request(requests_dir, "exp_only_cccccccccccccccccc", 5)
     runner = TeamExportRunner(
-        requests_dir=requests_dir, config_path=tmp_path / "instance_config.yaml", env={}, popen=failing_popen
+        layout=InstanceLayout.at(tmp_path), config_path=tmp_path / "instance_config.yaml", env={}, popen=failing_popen
     )
 
     runner.poll()
@@ -2478,3 +2479,31 @@ def test_the_gateway_and_broker_keep_the_export_marker_and_the_instance_root(tmp
 
     assert supervisor_runs_exports(scoped) and scoped["TEAM_INSTANCE_ROOT"]
     assert EXPORT_REQUESTS_ENV in scoped
+
+
+def test_a_damaged_request_or_a_failing_export_start_never_stops_the_supervisor(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import docker.launch_headless as launch_headless
+    from docker.launch_headless import TeamExportRunner
+
+    layout = InstanceLayout.at(tmp_path)
+    layout.team_export_requests_dir.mkdir(parents=True)
+    damaged = layout.team_export_requests_dir / "00000000T000000000000Z-exp_damaged.json"
+    damaged.write_bytes(b"\xff\xfe not utf-8")
+    runner = TeamExportRunner(layout=layout, config_path=tmp_path / "instance_config.yaml", env={}, popen=lambda *a, **k: None)
+
+    runner.poll()  # the damaged file is logged and removed
+
+    assert not damaged.exists() and "event=team_export_request_invalid" in caplog.text
+
+    def missing_entrypoint(_path):
+        raise FileNotFoundError("assistant_cli.py")
+
+    monkeypatch.setattr(launch_headless, "resolve_python_entrypoint", missing_entrypoint)
+    _export_request(layout.team_export_requests_dir, "exp_only_cccccccccccccccccc", 5)
+
+    runner.poll()  # logged; the supervisor's loop goes on
+
+    assert "event=team_export_runner_failed" in caplog.text
+    runner.poll()

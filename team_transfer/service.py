@@ -102,10 +102,15 @@ def export_source(config_path: str | Path) -> ExportSource:
     )
 
 
-def require_active_owner(
+def active_owner_problem(
     config: "GatewayInstanceConfig", team_id: str, person_id: str
-) -> None:
-    """``--owner`` must be an active owner in the gateway's copy of the team's people."""
+) -> str | None:
+    """Why ``person_id`` is not an active owner in the gateway's copy of the team's people, or None.
+
+    Plain words without command-line hints: ``/upgrade``'s export shows this
+    in the chat (``team_transfer.requested_export``); ``require_active_owner``
+    adds the host command's hint.
+    """
 
     from access_control.people import PERSON_ROLE_OWNER
     from custom_messages.contracts.access_v2 import PersonStanding
@@ -119,8 +124,19 @@ def require_active_owner(
         or person.standing is not PersonStanding.ACTIVE
         or PERSON_ROLE_OWNER not in person.roles
     ):
+        return f"{person_id} is not an active owner of team {team_id}."
+    return None
+
+
+def require_active_owner(
+    config: "GatewayInstanceConfig", team_id: str, person_id: str
+) -> None:
+    """``--owner`` must be an active owner in the gateway's copy of the team's people."""
+
+    problem = active_owner_problem(config, team_id, person_id)
+    if problem:
         raise TransferError(
-            f"{person_id} is not an active owner of team {team_id}. Name an owner with --owner "
+            f"{problem} Name an owner with --owner "
             "(the gateway must have started once so its people records exist)."
         )
 
@@ -564,6 +580,7 @@ __all__ = [
     "export_team",
     "import_team",
     "plan_import",
+    "active_owner_problem",
     "require_active_owner",
     "require_finished_import",
     "require_fresh_target",

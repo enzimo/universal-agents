@@ -329,10 +329,14 @@ the old pending-question table is removed without carrying its rows forward.
 
 When a person asks how to move the team to a new version, or a release needs a
 fresh instance, point them to the team transfer ("Moving a team to a new
-version" in the user guide). An owner types `/upgrade` in a private chat (only
-owners may; you cannot run it or see the passphrase): a private page takes the
-passphrase twice and the launcher writes one encrypted file into the data
-folder's `exports/` folder, then the chat says where it is and what to do next.
+version" in the user guide). An owner types `/upgrade` in a private chat (a
+direct message or Web Chat; groups are refused, and only owners may; you
+cannot run it or see the passphrase): a private page takes the passphrase
+twice and the launcher writes one file into the data folder's `exports/`
+folder, then the chat says where it is and what to do next. The passphrase
+encrypts the stored sign-ins, keys and secrets in the file; the rest of the
+team's records in it can be read by anyone who has the file, so it must stay
+private.
 A team not started by the launcher uses `assistant_cli team export` on the host
 instead. Then stop the old instance, start the new release on an empty data
 folder, copy the export into its `import/` folder and choose **Import a team

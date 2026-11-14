@@ -14,7 +14,7 @@ _BASE_SESSION_COMMAND_LINES = (
     "/accounts [share|private <tool_id|model>] - see whose account agents use for each service; administrators share a service's team account with everyone or keep it private, and decide whether people they add may use the team's model keys",
     "/setup - see what you still set up for your own work: your own model and your own accounts for services the team keeps private",
     "/auth [status|model [me]|google team_client|x team_client|bitwarden [server <url>]|onepassword|keepass|vault] - check your sign-ins, test and save the team's model provider keys or set its sign-in apps (administrators), or sign in to a password manager",
-    "/upgrade - export the whole team into one encrypted file to move it to a new version (owners)",
+    "/upgrade - export the whole team into one file to move it to a new version (owners, private chats)",
     "/access [list|grant|revoke|block|unblock|requests] - see, give, remove and block agents' and people's access to tools, and see requests waiting for you",
     "/share <file or folder> with <person> [read|write] [--for 7d] - let another person use one of your files or folders",
     "/shares - list what you share; /unshare <share id> - stop sharing it",

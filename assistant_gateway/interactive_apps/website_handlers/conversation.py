@@ -702,6 +702,8 @@ class WebsiteConversationHandlers:
                 enable_reply_command=False,
                 enable_channel_binding_commands=False,
                 correlation_id=client_request_id,
+                # Web Chat threads belong to the signed-in person alone.
+                private_chat=True,
             )
         except PermissionError as exc:
             raise web.HTTPNotFound(text="Thread not found.") from exc

@@ -73,6 +73,9 @@ class GatewayCommandRequest:
     # The command's id in its chat (Web Chat's request id). /link tags the
     # message that says how its page ended with it (link_results).
     correlation_id: Optional[str] = None
+    # The channel vouches that only this person and the assistant are in the
+    # chat (GatewayActorContext.private_chat); unknown is not private.
+    private_chat: bool = False
 
 
 @runtime_checkable
@@ -99,10 +102,9 @@ class GatewayCommandService:
         session_commands: GatewaySessionCommands,
         message_submission_commands: GatewayMessageSubmissionCommands,
         manager_control_commands: GatewayManagerControlCommands,
-        team_export_commands: GatewayTeamExportCommands | None = None,
+        team_export_commands: GatewayTeamExportCommands,
     ) -> None:
         self._settings = settings
-        # /upgrade (owners); compositions without a broker leave it out.
         self._team_export_commands = team_export_commands
         self._authentication_commands = authentication_commands
         self._account_link_commands = account_link_commands
@@ -142,14 +144,12 @@ class GatewayCommandService:
 
 
 async def _run_team_export(
-    team_export_commands: GatewayTeamExportCommands | None,
+    team_export_commands: GatewayTeamExportCommands,
     request: GatewayCommandRequest,
     command: str,
 ) -> str | GatewayTransientAction:
     """``/upgrade``: an owner's team export (``commands.team_export``)."""
 
-    if team_export_commands is None:
-        return "Team export is not available in this chat."
     try:
         return await team_export_commands.execute(
             TeamExportCommandRequest(
@@ -160,6 +160,7 @@ async def _run_team_export(
                     chat_id=request.chat_id,
                     thread_id=request.thread_id,
                     canonical_user_id=request.canonical_user_id,
+                    private_chat=request.private_chat,
                 ),
                 session_key=request.current_session_key,
                 correlation_id=request.correlation_id,
@@ -267,7 +268,7 @@ async def _dispatch_interactive_command(
     session_commands: GatewaySessionCommands,
     message_submission_commands: GatewayMessageSubmissionCommands,
     manager_control_commands: GatewayManagerControlCommands,
-    team_export_commands: GatewayTeamExportCommands | None = None,
+    team_export_commands: GatewayTeamExportCommands,
 ) -> tuple[bool, Optional[str], str | GatewayTransientAction | None]:
     raw_text = request.raw_text
     current_session_key = request.current_session_key

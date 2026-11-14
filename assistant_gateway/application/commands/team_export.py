@@ -4,8 +4,10 @@ It opens the secure broker's export page for the owner who typed it and
 watches it (``assistant_gateway.application.team_exports``): the passphrase is
 typed on that page and never passes through the gateway, the chat or an
 agent. Only owners may run it (``access_control.people.team_export_refusal``);
-the broker and the export process check again. A gateway started without the
-launcher has nothing to run the export, so it points to the host command.
+the broker and the export process check again. Only in a private chat
+(``GatewayActorContext.private_chat``), because the reply holds the page's
+link. A gateway started without the launcher has nothing to run the export,
+so it points to the host command.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from assistant_gateway.application.team_exports import (
     EXPORT_PAGE_DESCRIPTION,
     EXPORT_PAGE_RECEIPT,
     NOT_LAUNCHED_TEXT,
+    PRIVATE_CHAT_REQUIRED_TEXT,
     UPGRADE_USAGE,
 )
 from assistant_gateway.application.transient_presentation import GatewayTransientAction
@@ -89,6 +92,14 @@ class TeamExportCommandHandler:
     async def execute(self, request: TeamExportCommandRequest) -> str | GatewayTransientAction:
         if request.command.split()[1:]:
             return UPGRADE_USAGE
+        if not request.actor.private_chat:
+            LOGGER.warning(
+                "Team export refused: not a private chat. event=gateway_team_export_refused reason=not_private_chat "
+                "channel=%s chat_id=%s",
+                request.actor.channel_name,
+                request.actor.chat_id,
+            )
+            return PRIVATE_CHAT_REQUIRED_TEXT
         person_id = resolve_actor_canonical_user_id(request.actor, self._identity)
         if not person_id:
             return "Only people registered in this team can export it."
@@ -96,7 +107,8 @@ class TeamExportCommandHandler:
         refusal = team_export_refusal(roles)
         if refusal:
             LOGGER.warning(
-                "Team export refused: not an owner. event=gateway_team_export_refused person_id=%s", person_id
+                "Team export refused: not an owner. event=gateway_team_export_refused reason=not_owner person_id=%s",
+                person_id,
             )
             return refusal
         if not self._supervised():

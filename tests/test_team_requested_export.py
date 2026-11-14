@@ -40,13 +40,13 @@ from team_transfer.export_requests import (
     export_file_name,
     export_sections,
     section_lines,
-    size_words,
     supervisor_runs_exports,
     take_export_request,
     write_export_request,
 )
 from team_transfer.people import PeopleSection
 from team_transfer.settings import SettingsSection
+from size_presentation import size_words
 from tests.broker_access_support import open_gate
 from tests.pinned_memory_support import new_instance
 from tests.test_team_transfer_broker_credentials import _use_store
@@ -188,6 +188,8 @@ async def test_a_person_who_is_no_longer_an_owner_gets_a_refusal_and_no_file(
         await server.close()
 
     assert status["status"] == "failed" and "is not an active owner" in status["result"]["error"]
+    # The chat hears plain words, not the host command's options.
+    assert "--owner" not in status["result"]["error"] and "Only an owner can export the team." in status["result"]["error"]
     assert not layout.exports_dir.exists() or not any(layout.exports_dir.iterdir())
 
 
@@ -277,7 +279,7 @@ def test_names_sizes_and_parts_read_plainly() -> None:
     assert export_file_name("///", datetime(2026, 1, 2, tzinfo=timezone.utc)) == "team-20260102-000000Z.uatransfer"
     assert [size_words(value) for value in (812, 14_000, 3_355_443, 1_503_238_554)] == [
         "812 bytes",
-        "14 KB",
+        "13.7 KB",
         "3.2 MB",
         "1.4 GB",
     ]
@@ -295,7 +297,7 @@ def test_names_sizes_and_parts_read_plainly() -> None:
     )
     assert section_lines(result) == (
         "People: 1 record, 812 bytes",
-        "Stored sign-ins and keys: 3 records, 14 KB (encrypted)",
+        "Stored sign-ins and keys: 3 records, 13.7 KB (encrypted)",
     )
 
 
@@ -380,3 +382,170 @@ def test_the_supervisors_stop_signal_becomes_a_clean_stop() -> None:
                 pass
     finally:
         signal.signal(signal.SIGTERM, previous)
+
+
+# -- review fixes (2026-11-14) ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"\xff\xfe\x00not utf-8", b"{not json", b'{"schema_version": 1, "export_id": "nope"}', b"[" * 40_000, b"x" * 70_000],
+)
+def test_a_damaged_request_is_removed_and_logged_and_never_raises(
+    tmp_path: Path, content: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    requests_dir = tmp_path / "requests"
+    requests_dir.mkdir()
+    damaged = requests_dir / "00000000T000000000000Z-exp_damaged.json"
+    damaged.write_bytes(content)
+    write_export_request(requests_dir, _request("exp_after_dddddddddddddddddd", 30))
+
+    taken = take_export_request(requests_dir)
+
+    assert taken is not None and taken.export_id == "exp_after_dddddddddddddddddd"
+    assert not damaged.exists() and list(requests_dir.iterdir()) == []
+    assert f"event=team_export_request_invalid file={damaged.name}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_error_after_collection_still_ends_the_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import sqlite3
+
+    config_path = _instance(tmp_path, monkeypatch)
+    layout = InstanceLayout.at(config_path.parent)
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(requested_export, "export_team", locked)
+    server = await _serving_broker(monkeypatch)
+    try:
+        page = await _submitted_page(server, "usr_owner")
+        request = take_export_request(layout.team_export_requests_dir)
+        assert request is not None
+        result = await asyncio.to_thread(
+            requested_export.run_requested_export, config_path, export_id=request.export_id, owner_person_id="usr_owner"
+        )
+        status = await _page_status(server, page)
+    finally:
+        await server.close()
+
+    assert not result.ok and "unexpected error (OperationalError)" in result.error
+    assert status["status"] == "failed" and status["result"]["error"] == result.error
+    assert "event=team_export_unexpected_failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_written_export_stays_a_success_when_its_owner_cannot_be_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    config_path = _instance(tmp_path, monkeypatch)
+    layout = InstanceLayout.at(config_path.parent)
+
+    def not_permitted(_paths, _root) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(requested_export, "_give_to_data_folder_owner", not_permitted)
+    server = await _serving_broker(monkeypatch)
+    try:
+        page = await _submitted_page(server, "usr_owner")
+        request = take_export_request(layout.team_export_requests_dir)
+        assert request is not None
+        result = await asyncio.to_thread(
+            requested_export.run_requested_export, config_path, export_id=request.export_id, owner_person_id="usr_owner"
+        )
+        status = await _page_status(server, page)
+    finally:
+        await server.close()
+
+    assert result.ok and result.note == requested_export.OWNER_NOT_SET_NOTE and "sudo" in result.note
+    assert (layout.exports_dir / result.file_name).is_file()
+    assert status["status"] == "success" and status["result"]["note"] == result.note
+    assert "event=team_export_owner_not_set" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_exports_folder_that_is_a_link_is_refused_and_nothing_is_written_through_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = _instance(tmp_path, monkeypatch)
+    layout = InstanceLayout.at(config_path.parent)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o755)
+    layout.exports_dir.symlink_to(elsewhere, target_is_directory=True)
+    server = await _serving_broker(monkeypatch)
+    try:
+        await _submitted_page(server, "usr_owner")
+        request = take_export_request(layout.team_export_requests_dir)
+        assert request is not None
+        result = await asyncio.to_thread(
+            requested_export.run_requested_export, config_path, export_id=request.export_id, owner_person_id="usr_owner"
+        )
+    finally:
+        await server.close()
+
+    assert not result.ok and "is not a folder (it is a link or a file)" in result.error
+    assert list(elsewhere.iterdir()) == [] and elsewhere.stat().st_mode & 0o777 == 0o755
+
+
+def test_an_export_that_cannot_read_its_settings_logs_why_and_fails_the_process(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from team_transfer.errors import TransferError
+
+    with pytest.raises(TransferError, match="The export could not start"):
+        requested_export.run_requested_export(
+            tmp_path / "missing" / "instance_config.yaml", export_id="exp_setup_eeeeeeeeeeeeeeee", owner_person_id="usr_owner"
+        )
+
+    assert "event=team_export_setup_failed export_id=exp_setup_eeeeeeeeeeeeeeee" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_supervisor_reports_a_killed_export_and_removes_its_half_written_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launcher's runner with a real broker: the export process dies without reporting."""
+
+    from docker.launch_headless import TeamExportRunner
+
+    config_path = _instance(tmp_path, monkeypatch)
+    layout = InstanceLayout.at(config_path.parent)
+    layout.exports_dir.mkdir()
+    killed_pid, other_pid = 4242, 4343
+    killed_partial = layout.exports_dir / f".alpha-20261014-101500Z.uatransfer.{killed_pid}.partial"
+    other_partial = layout.exports_dir / f".alpha-20261014-101600Z.uatransfer.{other_pid}.partial"
+    finished = layout.exports_dir / "alpha-20261013-090000Z.uatransfer"
+    for path in (killed_partial, other_partial, finished):
+        path.write_bytes(b"x")
+
+    class _Killed:
+        pid = killed_pid
+        returncode = -9
+
+        def poll(self) -> int:
+            return self.returncode
+
+    server = await _serving_broker(monkeypatch)
+    try:
+        page = await _submitted_page(server, "usr_owner")
+        runner = TeamExportRunner(
+            layout=layout,
+            config_path=config_path,
+            env={
+                "SECURE_TOOL_BROKER_TOKEN": ROOT_TOKEN,
+                "SECURE_TOOL_BROKER_INTERNAL_BASE_URL": os.environ["SECURE_TOOL_BROKER_INTERNAL_BASE_URL"],
+            },
+            popen=lambda *_args, **_kwargs: _Killed(),
+        )
+        await asyncio.to_thread(runner.poll)  # starts the export process
+        await asyncio.to_thread(runner.poll)  # sees it ended with an error
+        status = await _page_status(server, page)
+    finally:
+        await server.close()
+
+    assert status["status"] == "failed"
+    assert "The export process ended unexpectedly (exit code -9)" in status["result"]["error"]
+    assert not killed_partial.exists() and other_partial.exists() and finished.exists()
