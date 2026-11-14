@@ -83,8 +83,10 @@ from team_transfer.export_requests import (
     EXPORT_PAGE_FAILED,
     EXPORT_PAGE_RESTARTED,
     EXPORT_PAGE_SUCCESS,
+    EXPORT_PASSPHRASE_MAX_CHARS,
     NEXT_STEPS,
     PROCESS_ENDED_MESSAGE,
+    RESULT_UNCONFIRMED,
     TEAM_EXPORT_PAGE_METHOD,
     TEAM_EXPORT_PAGE_PROVIDER,
     TeamExportPassphraseRequestV1,
@@ -115,6 +117,12 @@ NOT_STARTED_MESSAGE: Final = (
     "No export process picked up the passphrase within five minutes, so it was dropped and nothing was written. "
     "Another export may have been running, or the launcher may not be running exports for this team. "
     f"Run {UPGRADE_COMMAND} again."
+)
+PASSPHRASE_TOO_LONG_MESSAGE: Final = (
+    f"Nothing was exported. Use a passphrase of at most {EXPORT_PASSPHRASE_MAX_CHARS:,} characters."
+)
+UNUSABLE_PASSPHRASE_MESSAGE: Final = (
+    f"The passphrase could not be handed to the export process, so nothing was written. Run {UPGRADE_COMMAND} again."
 )
 RESTARTED_MESSAGE: Final = (
     "The secure broker restarted after this page opened, so this page can no longer start or follow an export. "
@@ -150,6 +158,8 @@ class _WaitingExport:
     passphrase: str = field(default="", repr=False)
     collected: bool = False
     collection_token: str = field(default="", repr=False)
+    # The process that collected (TeamExportPassphraseRequestV1.process_id).
+    process_id: int = 0
 
     def names(self, export: TeamExportPassphraseRequestV1 | TeamExportResultV1 | TeamExportProcessEndedV1) -> bool:
         return (self.team_id, self.owner_person_id) == (export.team_id, export.owner_person_id)
@@ -171,11 +181,13 @@ class _Exports:
         with self._lock:
             self._by_id[export_id] = waiting
 
-    def collect(self, request: TeamExportPassphraseRequestV1, now: datetime) -> tuple[str, str]:
+    def collect(self, request: TeamExportPassphraseRequestV1, now: datetime) -> TeamExportPassphraseV1:
         """The passphrase for this export and its collection's token, once; the broker keeps no copy.
 
         The pickup time is enforced here too, so a passphrase nobody read
-        the page for is never handed out late.
+        the page for is never handed out late. The reply is built before the
+        export counts as collected, so a reply that cannot be built leaves
+        nothing half-done; its error never repeats the passphrase.
         """
 
         with self._lock:
@@ -188,11 +200,23 @@ class _Exports:
                 raise web.HTTPConflict(text="This export's passphrase was already collected.")
             if waiting.overdue(now):
                 del self._by_id[request.export_id]
+                unusable = False
             else:
-                token = secrets.token_urlsafe(24)
-                passphrase, waiting.passphrase = waiting.passphrase, ""
-                waiting.collected, waiting.collection_token = True, token
-                return passphrase, token
+                try:
+                    reply = TeamExportPassphraseV1(
+                        passphrase=waiting.passphrase, collection_token=secrets.token_urlsafe(24)
+                    )
+                except ValidationError:
+                    del self._by_id[request.export_id]
+                    unusable = True
+                else:
+                    waiting.passphrase = ""
+                    waiting.collected, waiting.collection_token = True, reply.collection_token
+                    waiting.process_id = request.process_id
+                    return reply
+        if unusable:
+            _say_unusable(request.export_id, waiting)
+            raise web.HTTPInternalServerError(text="This export's passphrase could not be handed over; it was dropped.")
         _say_not_started(request.export_id, waiting)
         raise web.HTTPGone(text="This export's passphrase waited longer than five minutes and was dropped.")
 
@@ -210,7 +234,7 @@ class _Exports:
             if waiting is None or not waiting.names(result):
                 raise web.HTTPNotFound(text="No export with this id is open.")
             if waiting.collected:
-                if not hmac.compare_digest(result.collection_token, waiting.collection_token):
+                if not hmac.compare_digest(result.collection_token.encode(), waiting.collection_token.encode()):
                     raise web.HTTPConflict(text="This result is not from the process that collected the passphrase.")
             elif result.ok or result.collection_token:
                 raise web.HTTPConflict(text="Nothing collected this export's passphrase, so it cannot have finished.")
@@ -221,14 +245,28 @@ class _Exports:
     def process_ended(self, report: TeamExportProcessEndedV1) -> bool:
         """The supervisor saw the export process exit with an error; True when that ended an open export.
 
-        An export that already reported is gone from here, so its own result stands.
+        An export that already reported is gone from here, so its own result
+        stands. A collected export ends only on a report for the process that
+        collected it, so no other process's exit can end it.
         """
 
         with self._lock:
             waiting = self._by_id.get(report.export_id)
             if waiting is None or not waiting.names(report):
                 return False
-            del self._by_id[report.export_id]
+            if waiting.collected and waiting.process_id != report.process_id:
+                mismatch = True
+            else:
+                mismatch = False
+                del self._by_id[report.export_id]
+        if mismatch:
+            LOGGER.warning(
+                "Ignored a report for another process than the one running the export. "
+                "event=team_export_process_ended_mismatch export_id=%s reported_process_id=%s",
+                report.export_id,
+                report.process_id,
+            )
+            return False
         LOGGER.warning(
             "The export process ended without reporting. event=team_export_process_ended_unreported "
             "export_id=%s exit_code=%s collected=%s",
@@ -237,7 +275,11 @@ class _Exports:
             waiting.collected,
         )
         waiting.session.state[_STATUS] = STATUS_FAILED
-        waiting.session.state[_RESULT] = {"ok": False, "error": PROCESS_ENDED_MESSAGE.format(exit_code=report.exit_code)}
+        waiting.session.state[_RESULT] = {
+            "ok": False,
+            "error": PROCESS_ENDED_MESSAGE.format(exit_code=report.exit_code),
+            RESULT_UNCONFIRMED: True,
+        }
         return True
 
     def drop_unstarted(self, session: Any, now: datetime) -> None:
@@ -255,6 +297,16 @@ class _Exports:
         export_id = str(session.state.get(_EXPORT_ID) or "")
         with self._lock:
             self._by_id.pop(export_id, None)
+
+
+def _say_unusable(export_id: str, waiting: _WaitingExport) -> None:
+    LOGGER.error(
+        "The export's passphrase could not be handed to the export process; it was dropped. "
+        "event=team_export_passphrase_unusable export_id=%s",
+        export_id,
+    )
+    waiting.session.state[_STATUS] = STATUS_FAILED
+    waiting.session.state[_RESULT] = {"ok": False, "error": UNUSABLE_PASSPHRASE_MESSAGE}
 
 
 def _say_not_started(export_id: str, waiting: _WaitingExport) -> None:
@@ -426,6 +478,8 @@ def _submission_problem(session: Any, form: Mapping[str, Any]) -> str:
         check_passphrase(passphrase)
     except TransferKeyError as exc:
         return f"Nothing was exported. {exc}"
+    if len(passphrase) > EXPORT_PASSPHRASE_MAX_CHARS:
+        return PASSPHRASE_TOO_LONG_MESSAGE
     if passphrase != str(form.get("passphrase_again") or ""):
         return "Nothing was exported. The two passphrases are different; type the same one twice."
     return ""
@@ -438,12 +492,14 @@ def add_team_export_routes(app: web.Application, *, team_id: str) -> None:
         body = await _model(request, TeamExportPassphraseRequestV1)
         if body.team_id != team_id:
             raise web.HTTPForbidden(text="The request names another team.")
-        passphrase, token = _EXPORTS.collect(body, datetime.now(timezone.utc))
+        reply = _EXPORTS.collect(body, datetime.now(timezone.utc))
         LOGGER.info(
-            "The export process collected its passphrase. event=team_export_passphrase_collected export_id=%s",
+            "The export process collected its passphrase. event=team_export_passphrase_collected export_id=%s "
+            "process_id=%s",
             body.export_id,
+            body.process_id,
         )
-        return web.json_response(TeamExportPassphraseV1(passphrase=passphrase, collection_token=token).model_dump())
+        return web.json_response(reply.model_dump())
 
     async def result_handler(request: web.Request) -> web.Response:
         result = await _model(request, TeamExportResultV1)
@@ -553,8 +609,9 @@ def _result_panel(session: Any) -> str:
     raw = raw if isinstance(raw, dict) else {}
     if not raw.get("ok"):
         why = _e(raw.get("error") or "The export process stopped without saying why. The launcher's log has details.")
+        heading = "The export's outcome is not known" if raw.get(RESULT_UNCONFIRMED) else "The team was not exported"
         return (
-            f'<section class="content-panel" id="{_FORM_ID}"><h2>The team was not exported</h2>'
+            f'<section class="content-panel" id="{_FORM_ID}"><h2>{heading}</h2>'
             f'<p class="status status-error" role="alert">{why}</p>'
             f"<p>Run {_e(UPGRADE_COMMAND)} in the chat to try again.</p></section>"
         )

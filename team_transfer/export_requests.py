@@ -50,11 +50,12 @@ import logging
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final, Literal, Mapping
+from typing import Callable, Final, Literal, Mapping
 
-from pydantic import Field, ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
 from size_presentation import size_words
 from team_transfer.format import (
@@ -99,15 +100,63 @@ NEXT_STEPS: Final = (
 # What the page and the chat say when the supervisor reports an export process
 # that exited with an error before reporting (TEAM_EXPORT_ENDED_ROUTE).
 PROCESS_ENDED_MESSAGE: Final = (
-    "The export process ended unexpectedly (exit code {exit_code}) before it reported how the export went. "
-    "Any half-written file was removed. The launcher's log has details."
+    "The export process ended unexpectedly (exit code {exit_code}) before it reported how the export went, so it "
+    "is not known whether the file was written: check the exports folder of this instance's data folder. Any "
+    "half-written file was removed. The launcher's log has details."
 )
 _REQUEST_SUFFIX = ".json"
 # A request is a few hundred bytes; anything larger is not one.
 _REQUEST_MAX_BYTES = 64 * 1024
 _FILE_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
 _ERROR_MAX_CHARS = 2000
-_TOKEN_MAX_CHARS = 128
+# Collection tokens are URL-safe base64 (secrets.token_urlsafe): ASCII only,
+# so comparing them can never fail on the characters themselves.
+_TOKEN_PATTERN = r"^[A-Za-z0-9_-]{0,128}$"
+_ISSUED_TOKEN_PATTERN = r"^[A-Za-z0-9_-]{16,128}$"
+# The longest passphrase /upgrade's page accepts; the page refuses longer ones
+# before anything is stored, so the passphrase reply always validates.
+EXPORT_PASSPHRASE_MAX_CHARS: Final = 1024
+# Set in a failed page result whose outcome nobody reported (the supervisor's
+# "process ended" report): a file may or may not exist.
+RESULT_UNCONFIRMED: Final = "unconfirmed"
+
+
+class RepeatedProblemLog:
+    """Say a repeating problem once in full, then at most once per interval with how often it came back.
+
+    The supervisor checks for export requests every second, so a problem
+    that persists (a request file it cannot delete, a missing entry point)
+    would otherwise log on every pass. ``check`` answers 0 for a problem seen
+    for the first time (log it fully), the number of repeats since the last
+    line once the interval has passed (log a short line), and None meanwhile.
+    A different problem is new and logs at once.
+    """
+
+    _MAX_PROBLEMS = 64
+
+    def __init__(self, *, interval_seconds: float = 60.0, clock: Callable[[], float] = time.monotonic) -> None:
+        self._interval = interval_seconds
+        self._clock = clock
+        self._seen: dict[str, tuple[float, int]] = {}
+
+    def check(self, problem: str) -> int | None:
+        now = self._clock()
+        seen = self._seen.get(problem)
+        if seen is None:
+            if len(self._seen) >= self._MAX_PROBLEMS:
+                self._seen.clear()
+            self._seen[problem] = (now, 0)
+            return 0
+        logged_at, repeats = seen[0], seen[1] + 1
+        if now - logged_at >= self._interval:
+            self._seen[problem] = (now, 0)
+            return repeats
+        self._seen[problem] = (logged_at, repeats)
+        return None
+
+
+# Request files the supervisor could not delete (take_export_request).
+_STUCK_FILES = RepeatedProblemLog()
 
 
 class TeamExportRequestV1(TransferModel):
@@ -121,18 +170,27 @@ class TeamExportRequestV1(TransferModel):
 
 
 class TeamExportPassphraseRequestV1(TransferModel):
-    """The export process asks the broker for the passphrase typed for its export."""
+    """The export process asks the broker for the passphrase typed for its export.
+
+    ``process_id`` is the asking process's own id: the supervisor's report
+    that an export process ended (``TeamExportProcessEndedV1``) counts only
+    for the process that collected.
+    """
 
     export_id: str = Field(pattern=EXPORT_ID_PATTERN)
     team_id: str = Field(min_length=1, max_length=120)
     owner_person_id: str = Field(min_length=1, max_length=240)
+    process_id: int = Field(ge=1)
 
 
 class TeamExportPassphraseV1(TransferModel):
     """The passphrase, and the token this one collection's result must carry (``TeamExportResultV1``)."""
 
-    passphrase: str = Field(min_length=1, max_length=1024, repr=False)
-    collection_token: str = Field(min_length=16, max_length=_TOKEN_MAX_CHARS, repr=False)
+    # A validation error never repeats the passphrase (logs, error pages).
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    passphrase: str = Field(min_length=1, max_length=EXPORT_PASSPHRASE_MAX_CHARS, repr=False)
+    collection_token: str = Field(pattern=_ISSUED_TOKEN_PATTERN, repr=False)
 
 
 class TeamExportSectionV1(TransferModel):
@@ -159,7 +217,7 @@ class TeamExportResultV1(TransferModel):
     team_id: str = Field(min_length=1, max_length=120)
     owner_person_id: str = Field(min_length=1, max_length=240)
     ok: bool
-    collection_token: str = Field(default="", max_length=_TOKEN_MAX_CHARS, repr=False)
+    collection_token: str = Field(default="", pattern=_TOKEN_PATTERN, repr=False)
     file_name: str = Field(default="", max_length=255)
     size_bytes: int = Field(default=0, ge=0)
     sections: tuple[TeamExportSectionV1, ...] = ()
@@ -168,12 +226,17 @@ class TeamExportResultV1(TransferModel):
 
 
 class TeamExportProcessEndedV1(TransferModel):
-    """The supervisor's report that an export process exited with an error (``TEAM_EXPORT_ENDED_ROUTE``)."""
+    """The supervisor's report that an export process exited with an error (``TEAM_EXPORT_ENDED_ROUTE``).
+
+    ``process_id`` is the child the supervisor started; for a collected
+    export it must be the process that collected, or the report is ignored.
+    """
 
     export_id: str = Field(pattern=EXPORT_ID_PATTERN)
     team_id: str = Field(min_length=1, max_length=120)
     owner_person_id: str = Field(min_length=1, max_length=240)
     exit_code: int
+    process_id: int = Field(ge=1)
 
 
 def new_export_id() -> str:
@@ -278,12 +341,15 @@ def _take_request_file(path: Path) -> bytes | None:
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
-        logger.error(
-            "An export request could not be removed, so it is not run. event=team_export_request_stuck "
-            "file=%s error=%s",
-            path.name,
-            type(exc).__name__,
-        )
+        repeats = _STUCK_FILES.check(path.name)
+        if repeats is not None:
+            logger.error(
+                "An export request could not be removed, so it is not run. event=team_export_request_stuck "
+                "file=%s error=%s repeats=%s",
+                path.name,
+                type(exc).__name__,
+                repeats,
+            )
         return None
     if raw is not None and len(raw) > _REQUEST_MAX_BYTES:
         logger.warning(
@@ -328,11 +394,14 @@ __all__ = [
     "EXPORT_PAGE_FAILED",
     "EXPORT_PAGE_FINAL_STATUSES",
     "EXPORT_PAGE_RESTARTED",
+    "EXPORT_PASSPHRASE_MAX_CHARS",
     "EXPORT_PAGE_SUCCESS",
     "EXPORT_REQUESTS_BY_SUPERVISOR",
     "EXPORT_REQUESTS_ENV",
     "NEXT_STEPS",
     "PROCESS_ENDED_MESSAGE",
+    "RepeatedProblemLog",
+    "RESULT_UNCONFIRMED",
     "TEAM_EXPORT_PAGE_METHOD",
     "TEAM_EXPORT_PAGE_PROVIDER",
     "TeamExportPassphraseRequestV1",

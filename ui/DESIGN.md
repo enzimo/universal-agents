@@ -306,9 +306,11 @@ onboarding's server, titled **Choose what to import**, with these differences:
   it: the file's path and size in a neutral `.status` line, a `.note` when
   copying the file may need `sudo`, the parts it holds and the numbered next
   steps; or a red `.status-error` saying why nothing was exported and to run
-  `/upgrade` again. A page the broker rebuilt after a restart shows only a
-  red `.status-error` saying the broker restarted and to run `/upgrade`
-  again, with **Close**.
+  `/upgrade` again. A page the broker rebuilt after a restart keeps the intro
+  panel (with its **Close**) and, in place of the form, a red `.status-error`
+  saying the broker restarted and to run `/upgrade` again, then **Close** at
+  the bottom. When nobody reported how a started export ended, the heading
+  says the outcome is not known and the red line says to check `exports/`.
 - Standalone broker browser-authorization pages expose long provider URLs
   through a fixed-width action. Show a disabled **Wait...** button until the
   URL arrives, then enable **Open** in the same element to open a new tab.

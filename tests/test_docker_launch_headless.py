@@ -2507,3 +2507,35 @@ def test_a_damaged_request_or_a_failing_export_start_never_stops_the_supervisor(
 
     assert "event=team_export_runner_failed" in caplog.text
     runner.poll()
+
+
+def test_a_lasting_export_runner_problem_logs_in_full_once_then_a_count_each_minute(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import docker.launch_headless as launch_headless
+    from docker.launch_headless import TeamExportRunner
+
+    def broken(_requests_dir):
+        raise RuntimeError("requests folder unreadable")
+
+    monkeypatch.setattr(launch_headless, "take_export_request", broken)
+    runner = TeamExportRunner(layout=InstanceLayout.at(tmp_path), config_path=tmp_path / "c.yaml", env={})
+
+    for _ in range(3):
+        runner.poll()
+
+    failures = [record for record in caplog.records if "event=team_export_runner_failed" in record.getMessage()]
+    assert len(failures) == 1 and failures[0].exc_info is not None
+
+
+def test_a_repeated_problem_comes_back_as_one_counted_line_a_minute() -> None:
+    from team_transfer.export_requests import RepeatedProblemLog
+
+    now = [0.0]
+    problems = RepeatedProblemLog(clock=lambda: now[0])
+
+    assert problems.check("a") == 0
+    assert [problems.check("a") for _ in range(3)] == [None, None, None]
+    now[0] = 61.0
+    assert problems.check("a") == 4
+    assert problems.check("b") == 0  # a different problem logs at once

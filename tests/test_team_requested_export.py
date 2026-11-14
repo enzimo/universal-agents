@@ -549,3 +549,55 @@ async def test_the_supervisor_reports_a_killed_export_and_removes_its_half_writt
     assert status["status"] == "failed"
     assert "The export process ended unexpectedly (exit code -9)" in status["result"]["error"]
     assert not killed_partial.exists() and other_partial.exists() and finished.exists()
+
+
+# -- second review (2026-11-14) ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_error_after_the_archive_is_written_still_reports_a_success_with_a_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    config_path = _instance(tmp_path, monkeypatch)
+    layout = InstanceLayout.at(config_path.parent)
+
+    def broken(_manifest):
+        raise RuntimeError("cannot describe")
+
+    monkeypatch.setattr(requested_export, "export_sections", broken)
+    server = await _serving_broker(monkeypatch)
+    try:
+        page = await _submitted_page(server, "usr_owner")
+        request = take_export_request(layout.team_export_requests_dir)
+        assert request is not None
+        result = await asyncio.to_thread(
+            requested_export.run_requested_export, config_path, export_id=request.export_id, owner_person_id="usr_owner"
+        )
+        status = await _page_status(server, page)
+    finally:
+        await server.close()
+
+    assert result.ok and result.note == requested_export.REPORT_INCOMPLETE_NOTE
+    assert (layout.exports_dir / result.file_name).is_file()
+    assert status["status"] == "success" and status["result"]["note"] == result.note
+    assert "event=team_export_report_incomplete" in caplog.text
+
+
+def test_a_request_file_that_cannot_be_deleted_is_logged_once_not_every_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    requests_dir = tmp_path / "requests"
+    stuck = write_export_request(requests_dir, _request("exp_stuck_ffffffffffffffffff", 40))
+    real_unlink = Path.unlink
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        if self.name == stuck.name:
+            raise PermissionError(13, "Permission denied")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    for _ in range(3):
+        assert take_export_request(requests_dir) is None
+
+    assert caplog.text.count("event=team_export_request_stuck") == 1

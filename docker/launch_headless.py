@@ -44,6 +44,7 @@ from runtime_settings.instance_layout import InstanceLayout
 from team_transfer.export_requests import (
     EXPORT_REQUESTS_BY_SUPERVISOR,
     EXPORT_REQUESTS_ENV,
+    RepeatedProblemLog,
     TeamExportRequestV1,
     take_export_request,
 )
@@ -1987,7 +1988,9 @@ class TeamExportRunner:
         env: Mapping[str, str],
         python_executable: str | None = None,
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        problems: RepeatedProblemLog | None = None,
     ) -> None:
+        self._problems = problems or RepeatedProblemLog()
         self._requests_dir = layout.team_export_requests_dir
         self._exports_dir = layout.exports_dir
         self._config_path = config_path
@@ -2001,10 +2004,21 @@ class TeamExportRunner:
 
         try:
             self._poll()
-        except Exception:
-            LOGGER.exception(
-                "Running a requested team export failed; the team keeps running. event=team_export_runner_failed"
-            )
+        except Exception as exc:
+            # The loop runs every second: a lasting problem logs in full once,
+            # then a short line with a count at most once a minute.
+            repeats = self._problems.check(f"{type(exc).__name__}: {exc}")
+            if repeats == 0:
+                LOGGER.exception(
+                    "Running a requested team export failed; the team keeps running. event=team_export_runner_failed"
+                )
+            elif repeats is not None:
+                LOGGER.error(
+                    "Running a requested team export still fails; the team keeps running. "
+                    "event=team_export_runner_failed error_type=%s repeats=%s",
+                    type(exc).__name__,
+                    repeats,
+                )
 
     def _poll(self) -> None:
         if self._running is not None:
@@ -2038,7 +2052,7 @@ class TeamExportRunner:
                 ",".join(removed),
             )
         try:
-            status = report_export_process_ended(self._env, request, code)
+            status = report_export_process_ended(self._env, request, code, process.pid)
         except Exception as exc:
             LOGGER.warning(
                 "The broker could not be told that an export process ended. event=team_export_end_unreported "

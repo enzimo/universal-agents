@@ -91,6 +91,9 @@ OWNER_NOT_SET_NOTE = (
     "The file could not be given to the data folder's owner, so it still belongs to the container's user: "
     "copying it may need administrator rights (sudo)."
 )
+REPORT_INCOMPLETE_NOTE = (
+    "The file was written, but its size and parts could not be read afterwards. The launcher's log has details."
+)
 UNEXPECTED_FAILURE = "The export stopped on an unexpected error ({kind}). The launcher's log has details."
 # The supervisor's report must not hold up its loop for long.
 _ENDED_REPORT_TIMEOUT_SECONDS = 5.0
@@ -134,7 +137,10 @@ def run_requested_export(
                 endpoint,
                 TEAM_EXPORT_PASSPHRASE_ROUTE,
                 TeamExportPassphraseRequestV1(
-                    export_id=export_id, team_id=source.team_id, owner_person_id=owner_person_id
+                    export_id=export_id,
+                    team_id=source.team_id,
+                    owner_person_id=owner_person_id,
+                    process_id=os.getpid(),
                 ).model_dump(),
             )
         )
@@ -163,7 +169,7 @@ def run_requested_export(
             export_id, source.team_id, owner_person_id, collection_token, UNEXPECTED_FAILURE.format(kind=type(exc).__name__)
         )
     else:
-        result = _published(source, report, exports_dir, export_id, owner_person_id, collection_token)
+        result = _published_or_noted(source, report, exports_dir, export_id, owner_person_id, collection_token)
     _report(endpoint, result)
     logger.info(
         "Requested team export ended. event=team_export_process_finished export_id=%s ok=%s file_name=%s",
@@ -190,6 +196,37 @@ def _setup(config_path: str | Path, export_id: str) -> tuple[ExportSource, Broke
             short_error(str(exc))[:300],
         )
         raise TransferError(f"The export could not start: {short_error(str(exc))}") from exc
+
+
+def _published_or_noted(
+    source: ExportSource,
+    report: ExportReport,
+    exports_dir: Path,
+    export_id: str,
+    owner_person_id: str,
+    collection_token: str,
+) -> TeamExportResultV1:
+    """The success result; any error while describing a published archive keeps it a success with a note."""
+
+    try:
+        return _published(source, report, exports_dir, export_id, owner_person_id, collection_token)
+    except Exception as exc:  # a stop signal or a defect after publishing must not hide the file
+        logger.exception(
+            "The export was written but its report could not be completed. event=team_export_report_incomplete "
+            "export_id=%s file_name=%s error_type=%s",
+            export_id,
+            report.path.name,
+            type(exc).__name__,
+        )
+        return TeamExportResultV1(
+            export_id=export_id,
+            team_id=source.team_id,
+            owner_person_id=owner_person_id,
+            ok=True,
+            collection_token=collection_token,
+            file_name=report.path.name,
+            note=REPORT_INCOMPLETE_NOTE,
+        )
 
 
 def _published(
@@ -315,12 +352,14 @@ def _give_to_data_folder_owner(paths: tuple[Path, ...], root: Path) -> None:
 
 
 def report_export_process_ended(
-    environment: Mapping[str, str], request: TeamExportRequestV1, exit_code: int
+    environment: Mapping[str, str], request: TeamExportRequestV1, exit_code: int, process_id: int
 ) -> str:
     """Tell the export's page that its process exited with an error; the broker's answer.
 
     The broker records it only while the export is still open (``recorded``),
-    so an export that already reported keeps its own result (``ignored``).
+    so an export that already reported keeps its own result (``ignored``),
+    and for a collected export only when ``process_id`` is the process that
+    collected.
     """
 
     reply = call_broker(
@@ -331,6 +370,7 @@ def report_export_process_ended(
             team_id=request.team_id,
             owner_person_id=request.owner_person_id,
             exit_code=exit_code,
+            process_id=process_id,
         ).model_dump(),
         timeout_seconds=_ENDED_REPORT_TIMEOUT_SECONDS,
     )
@@ -360,6 +400,7 @@ def remove_leftover_partials(exports_dir: Path, pid: int) -> tuple[str, ...]:
 
 __all__ = [
     "OWNER_NOT_SET_NOTE",
+    "REPORT_INCOMPLETE_NOTE",
     "UNEXPECTED_FAILURE",
     "ExportStopped",
     "remove_leftover_partials",

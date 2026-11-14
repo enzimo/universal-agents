@@ -84,11 +84,16 @@ async def _submit(client: TestClient, page: str, passphrase: str = PASSPHRASE, a
     return await response.text()
 
 
-async def _collect(client: TestClient, export_id: str, *, owner: str = "usr_owner", label: str = CALLER_OPERATOR):
+EXPORT_PROCESS_ID = 4321
+
+
+async def _collect(
+    client: TestClient, export_id: str, *, owner: str = "usr_owner", label: str = CALLER_OPERATOR, process_id: int = EXPORT_PROCESS_ID
+):
     return await client.post(
         TEAM_EXPORT_PASSPHRASE_ROUTE,
         headers=caller_headers(label),
-        json={"export_id": export_id, "team_id": TEST_TEAM, "owner_person_id": owner},
+        json={"export_id": export_id, "team_id": TEST_TEAM, "owner_person_id": owner, "process_id": process_id},
     )
 
 
@@ -428,7 +433,10 @@ async def test_the_supervisor_ends_an_export_whose_process_exited_without_report
     operator = caller_headers(CALLER_OPERATOR)
     page, export_id = await _submitted_export(broker, launched_team)
     token = (await (await _collect(broker, export_id)).json())["collection_token"]
-    ended = {"export_id": export_id, "team_id": TEST_TEAM, "owner_person_id": "usr_owner", "exit_code": -9}
+    ended = {
+        "export_id": export_id, "team_id": TEST_TEAM, "owner_person_id": "usr_owner", "exit_code": -9,
+        "process_id": EXPORT_PROCESS_ID,
+    }
 
     # Only the operator caller reaches it.
     assert (await broker.post(TEAM_EXPORT_ENDED_ROUTE, headers=gateway_headers(), json=ended)).status == 403
@@ -465,3 +473,81 @@ def test_a_waiting_exports_text_form_never_holds_the_passphrase() -> None:
     )
 
     assert PASSPHRASE not in repr(waiting)
+
+
+# -- second review (2026-11-14) ------------------------------------------------------
+
+LONG_PASSPHRASE = "SECRETPASS-" + "q" * 1100
+
+
+@pytest.mark.asyncio
+async def test_an_overlong_passphrase_is_refused_at_the_form(broker: TestClient, launched_team: InstanceLayout) -> None:
+    page = await _page_path(broker)
+
+    text = await _submit(broker, page, LONG_PASSPHRASE)
+
+    assert "Nothing was exported. Use a passphrase of at most 1,024 characters." in text
+    assert "SECRETPASS" not in text
+    assert take_export_request(launched_team.team_export_requests_dir) is None
+
+
+def test_a_passphrase_reply_that_fails_validation_never_repeats_the_passphrase() -> None:
+    from pydantic import ValidationError
+
+    from team_transfer.export_requests import TeamExportPassphraseV1
+
+    with pytest.raises(ValidationError) as raised:
+        TeamExportPassphraseV1(passphrase=LONG_PASSPHRASE, collection_token="t" * 32)
+
+    assert "SECRETPASS" not in str(raised.value) and "qqqq" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_passphrase_that_cannot_be_handed_over_is_dropped_without_reaching_a_log(
+    broker: TestClient, launched_team: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    page, export_id = await _submitted_export(broker, launched_team)
+    # As if an overlong passphrase had got past the form.
+    team_export_page._EXPORTS._by_id[export_id].passphrase = LONG_PASSPHRASE
+
+    collected = await _collect(broker, export_id)
+
+    assert collected.status == 500 and "SECRETPASS" not in await collected.text()
+    assert export_id not in team_export_page._EXPORTS._by_id
+    status = await (await broker.get(f"{page}/status")).json()
+    assert status["status"] == "failed" and "could not be handed to the export process" in status["result"]["error"]
+    assert "SECRETPASS" not in caplog.text and "event=team_export_passphrase_unusable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_only_the_collecting_processs_exit_ends_a_collected_export(
+    broker: TestClient, launched_team: InstanceLayout
+) -> None:
+    from secure_tool_broker.defaults import TEAM_EXPORT_ENDED_ROUTE
+
+    page, export_id = await _submitted_export(broker, launched_team)
+    await _collect(broker, export_id, process_id=4321)
+    report = {"export_id": export_id, "team_id": TEST_TEAM, "owner_person_id": "usr_owner", "exit_code": 1}
+    operator = caller_headers(CALLER_OPERATOR)
+
+    other = await broker.post(TEAM_EXPORT_ENDED_ROUTE, headers=operator, json={**report, "process_id": 9999})
+    assert (await other.json()) == {"status": "ignored"}
+    assert (await (await broker.get(f"{page}/status")).json())["status"] == "exporting"
+
+    own = await broker.post(TEAM_EXPORT_ENDED_ROUTE, headers=operator, json={**report, "process_id": 4321})
+    assert (await own.json()) == {"status": "recorded"}
+    shown = await (await broker.get(page)).text()
+    assert "The export's outcome is not known" in shown and "check the exports folder" in shown
+
+
+@pytest.mark.asyncio
+async def test_a_result_with_a_non_ascii_token_is_refused_plainly(broker: TestClient, launched_team: InstanceLayout) -> None:
+    page, export_id = await _submitted_export(broker, launched_team)
+    await _collect(broker, export_id)
+
+    refused = await broker.post(
+        TEAM_EXPORT_RESULT_ROUTE, headers=caller_headers(CALLER_OPERATOR), json=_result(export_id, ok=False, token="é" * 20)
+    )
+
+    assert refused.status == 400
+    assert (await (await broker.get(f"{page}/status")).json())["status"] == "exporting"

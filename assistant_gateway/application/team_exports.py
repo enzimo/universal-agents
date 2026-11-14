@@ -40,6 +40,7 @@ from team_transfer.export_requests import (
     EXPORT_PAGE_FINAL_STATUSES,
     EXPORT_PAGE_RESTARTED,
     NEXT_STEPS,
+    RESULT_UNCONFIRMED,
     TeamExportResultV1,
     section_lines,
 )
@@ -90,6 +91,8 @@ def team_export_result_text(outcome: BrokerSessionOutcome) -> str:
     raw = raw if isinstance(raw, dict) else {}
     if status == EXPORT_PAGE_FAILED or not raw.get("ok"):
         why = " ".join(str(raw.get("error") or "").split())
+        if raw.get(RESULT_UNCONFIRMED):
+            return f"Couldn't confirm whether the team export finished. {why}"
         return f"The team was not exported. {why + ' ' if why else ''}Run {UPGRADE_COMMAND} to try again."
     try:
         result = TeamExportResultV1.model_validate(raw)

@@ -4173,7 +4173,11 @@ export-requested`; guide: `user_docs_source/team-transfer.md`).
   parsed, and every export error in the supervisor is logged without stopping
   the team. When an export process exits with an error without reporting
   (killed), the supervisor removes its half-written file and tells the page
-  (`TEAM_EXPORT_ENDED_ROUTE`; ignored once the export reported). The launcher
+  (`TEAM_EXPORT_ENDED_ROUTE`) with the child's process id; the broker ignores
+  it once the export reported, or when it names another process than the one
+  that collected the passphrase (the export process sends its own id when it
+  collects). The page then says the outcome is not known and to check
+  `exports/`. The launcher
   marks every process it starts (`TEAM_EXPORT_REQUESTS`), so a hand-started
   gateway points to the host command instead.
 - **Only in private chats, only once per page.** `/upgrade` refuses unless

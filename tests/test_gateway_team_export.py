@@ -200,6 +200,10 @@ _SUCCESS = {
             _outcome(WATCH_FINISHED, "failed", {"ok": False, "error": "The broker refused the request (500)."}),
             "The team was not exported. The broker refused the request (500). Run /upgrade to try again.",
         ),
+        (
+            _outcome(WATCH_FINISHED, "failed", {"ok": False, "error": "Check the exports folder.", "unconfirmed": True}),
+            "Couldn't confirm whether the team export finished. Check the exports folder.",
+        ),
         (_outcome(WATCH_FINISHED, "closed"), "The team export page was closed without exporting."),
         (
             _outcome(WATCH_EXPIRED, "created"),
@@ -283,7 +287,9 @@ async def test_the_chat_hears_how_the_export_ended_end_to_end_with_the_real_brok
             operator = caller_headers(CALLER_OPERATOR)
             identity = {"export_id": request.export_id, "team_id": TEST_TEAM, "owner_person_id": "usr_owner"}
             collected = await (
-                await browser.post(server.make_url(TEAM_EXPORT_PASSPHRASE_ROUTE), headers=operator, json=identity)
+                await browser.post(
+                    server.make_url(TEAM_EXPORT_PASSPHRASE_ROUTE), headers=operator, json={**identity, "process_id": 4321}
+                )
             ).json()
             assert collected["passphrase"] == PASSPHRASE
             reported = await browser.post(

@@ -65,7 +65,7 @@ An owner exports the whole team from a chat:
    send it in a direct message. Only owners can export the team;
    administrators who are not owners are refused.
 2. **Open the page and choose a passphrase.** Type it twice, at least 12
-   characters. It goes to the secure broker, is never sent to the agent and is
+   characters and at most 1,024. It goes to the secure broker, is never sent to the agent and is
    not saved anywhere. Keep it: you need it to import the file. The page lists
    what the file holds.
 3. **Wait for the export.** The launcher writes one file into the data folder's
@@ -98,7 +98,8 @@ started another way is told to use `team export` on the host
 
 When the export does not finish, the page and the chat say why; run
 `/upgrade` again. A half-written file is removed, even when the export process
-is killed. The page stays open for one hour. Exports run one at a time: a
+is killed; in that case the page says the outcome is not known, so check
+`exports/`. The page stays open for one hour. Exports run one at a time: a
 passphrase no export has picked up after five minutes is dropped (for example
 because another export was still running), and the page says so. If the
 secure broker restarts, the page link opens a page that can no longer start or
