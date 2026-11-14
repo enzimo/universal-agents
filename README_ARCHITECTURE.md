@@ -4148,8 +4148,50 @@ tables as its control plane.
 
 Releases may change storage without migrations, so a team moves to a new
 version through a transfer file (`team_transfer`, `assistant_cli team export |
-inspect | review | import | import-credentials | finish-import`; guide:
-`user_docs_source/team-transfer.md`).
+inspect | review | import | import-credentials | finish-import |
+export-requested`; guide: `user_docs_source/team-transfer.md`).
+
+- **Owners export from chat.** `/upgrade` (owners only,
+  `access_control.people.team_export_refusal`) opens the broker's export page
+  (`secure_tool_broker.team_export_page`); the gateway never sees the
+  passphrase. The page keeps the passphrase in broker memory and writes a
+  request without any secret under `InstanceLayout.team_export_requests_dir`
+  (`team_transfer.export_requests`). The supervisor
+  (`docker/launch_headless.py`, `TeamExportRunner`) takes it and starts
+  `team export-requested` with its full environment, because only the
+  supervisor holds the broker root (for the `operator` token) and every
+  operator secret the export carries. That process collects the passphrase
+  once through an operator-only `/v1/transfer/` route
+  (`secure_tool_broker.defaults.TEAM_EXPORT_PASSPHRASE_ROUTE`) with a token
+  for that one collection, writes the archive into
+  `InstanceLayout.exports_dir` and reports the result to the page with the
+  same token, so no other process can end the export; the gateway watches the
+  page (`link_results.watch_team_export`) and posts the file, its parts and
+  the next steps in the chat. The supervisor gains no listening socket:
+  request files under `runtime/` stay its only way in, and a request proves
+  nothing without the operator token. A request file is deleted before it is
+  parsed, and every export error in the supervisor is logged without stopping
+  the team. When an export process exits with an error without reporting
+  (killed), the supervisor removes its half-written file and tells the page
+  (`TEAM_EXPORT_ENDED_ROUTE`) with the child's process id; the broker ignores
+  it once the export reported, or when it names another process than the one
+  that collected the passphrase (the export process sends its own id when it
+  collects). The page then says the outcome is not known and to check
+  `exports/`, or, when the process never collected the passphrase, that
+  nothing was exported (no file can exist without it). The launcher
+  marks every process it starts (`TEAM_EXPORT_REQUESTS`), so a hand-started
+  gateway points to the host command instead.
+- **Only in private chats, only once per page.** `/upgrade` refuses unless
+  the channel vouches that the chat is private
+  (`GatewayActorContext.private_chat`: Telegram `private` chats, Discord DMs,
+  Signal and Photon chats that are not groups, WhatsApp, Web Chat, the local
+  CLI; unknown counts as not private), because the reply holds the page link.
+  The broker keeps used pages and waiting passphrases in memory only; a page
+  it rebuilds from its signed link after a restart
+  (`sign_in_pages.SESSION_RESTORED_AFTER_RESTART`) never starts an export and
+  tells the owner to run `/upgrade` again. One rule for every rebuilt page
+  needs no store of used pages. The five-minute pickup limit is checked when
+  the passphrase is collected, not only when the page is read.
 
 - **Two pages, one review.** The operator's loopback page (`team review`,
   `team_transfer.review_web`) and onboarding's **Import a team export**
@@ -4267,7 +4309,9 @@ inspect | review | import | import-credentials | finish-import`; guide:
   private input. These checks run before the unfinished-import marker is written.
 - **Credentials stay with their owners.** A passphrase-derived key
   authenticates the manifest and encrypts secrets. Operator secrets from
-  `team.env` travel encrypted in the file. The broker's stored credentials are
+  `team.env` travel encrypted in the file. The other sections are plain,
+  signed JSON: anyone holding the file can read them, so pages and guides
+  tell people to keep the file private rather than calling it encrypted. The broker's stored credentials are
   encrypted and stored again by the broker itself, through two routes only the
   `operator` caller (`access_control.caller_tokens`) may use; the command never
   holds those values.

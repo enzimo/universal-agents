@@ -27,7 +27,10 @@ SECURE_CREDENTIAL_RESULT_MESSAGE_TYPE = "secure_credential_result"
 # The reply to a person's /link command; its form link is shown only to the
 # browser that ran the command.
 ACCOUNT_LINK_COMMAND_MESSAGE_TYPE = "command_account_link"
-# How a form or sign-in page a person opened with /link ended, posted by the
+# The reply to an owner's /upgrade; its export page link is shown only to the
+# browser that ran the command, and history keeps the card's receipt.
+TEAM_EXPORT_COMMAND_MESSAGE_TYPE = "command_upgrade"
+# How a form or sign-in page a person opened with /link (or /upgrade's export page) ended, posted by the
 # gateway in the chat where they ran /link (assistant_gateway.application.link_results).
 # In Web Chat it also removes the /link card with the same correlation id.
 LINK_RESULT_MESSAGE_TYPE = "link_result"

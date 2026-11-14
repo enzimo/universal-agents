@@ -10,7 +10,8 @@ from assistant_gateway.application.command_help import (
 )
 from assistant_gateway.application.transient_presentation import GatewayTransientAction
 from assistant_gateway.application.commands.account_link import ACCOUNT_LINK_COMMAND
-from assistant_gateway.domain.message_types import ACCOUNT_LINK_COMMAND_MESSAGE_TYPE
+from secure_tools.chat_commands import UPGRADE_COMMAND
+from assistant_gateway.domain.message_types import ACCOUNT_LINK_COMMAND_MESSAGE_TYPE, TEAM_EXPORT_COMMAND_MESSAGE_TYPE
 from assistant_gateway.application.gateway_application import (
     GatewayApplicationResponse,
     GatewaySession,
@@ -701,6 +702,8 @@ class WebsiteConversationHandlers:
                 enable_reply_command=False,
                 enable_channel_binding_commands=False,
                 correlation_id=client_request_id,
+                # Web Chat threads belong to the signed-in person alone.
+                private_chat=True,
             )
         except PermissionError as exc:
             raise web.HTTPNotFound(text="Thread not found.") from exc
@@ -807,6 +810,7 @@ class WebsiteConversationHandlers:
         if response_message_type in {
             "command_auth",
             ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
+            TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
             "command_user_sensitive",
         }:
             response_message = exchange[-1]
@@ -843,6 +847,9 @@ class WebsiteConversationHandlers:
         if tokens and tokens[0] == ACCOUNT_LINK_COMMAND:
             # The reply holds a one-time form link; keep it out of history.
             return ACCOUNT_LINK_COMMAND_MESSAGE_TYPE
+        if tokens and tokens[0] == UPGRADE_COMMAND:
+            # The reply holds the export page's link; keep it out of history.
+            return TEAM_EXPORT_COMMAND_MESSAGE_TYPE
         if (
             tokens
             and tokens[0] == "/user"

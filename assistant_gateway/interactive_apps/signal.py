@@ -536,6 +536,7 @@ class SignalInteractiveApp(BaseInteractiveApp):
                         user_id=user_id,
                         chat_id=chat_id,
                         message_id=message_id,
+                        private_chat=not is_group,
                     ),
                 )
                 if text.startswith("/") and not stored_attachments
@@ -544,6 +545,7 @@ class SignalInteractiveApp(BaseInteractiveApp):
                     user_id=user_id,
                     chat_id=chat_id,
                     message_id=message_id,
+                    private_chat=not is_group,
                 )
             )
         except TimeoutError:
@@ -799,6 +801,7 @@ class SignalInteractiveApp(BaseInteractiveApp):
         user_id: str,
         chat_id: str,
         message_id: Optional[str],
+        private_chat: bool,
     ) -> Optional[ChannelOutboundMessage]:
         command = (raw_text or "").strip()
         if not command.startswith("/"):
@@ -812,6 +815,8 @@ class SignalInteractiveApp(BaseInteractiveApp):
             thread_id=None,
             help_text=SIGNAL_HELP_TEXT,
             enable_reply_command=False,
+            # A Signal message without group info is a one-to-one chat.
+            private_chat=private_chat,
         )
         if result.handled:
             return ChannelOutboundMessage(

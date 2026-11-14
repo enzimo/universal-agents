@@ -233,7 +233,10 @@ docker run --rm -it \
 
 The default in-container instance root is `/data`. The host directory then
 contains `instance_config.yaml`, `team.env`, `control/`, `dbs/`, `state/`, and
-`workspaces/` ([Instance Folders](configuration.md#instance-folders)). An
+`workspaces/` ([Instance Folders](configuration.md#instance-folders)). Team
+exports an owner makes with `/upgrade` appear in its `exports/` folder, owned by
+whoever owns the host directory
+([Export from chat with /upgrade](team-transfer.md#export-from-chat-with-upgrade)). An
 instance created by an earlier version still has a `workspace/` folder; the
 container refuses to start until you run the move commands it prints.
 

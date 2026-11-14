@@ -126,6 +126,7 @@ class GatewayAdapterRequestHandler(AdapterHostRequestHandler):
             "enable_debug_commands",
             "enable_reply_command",
             "enable_channel_binding_commands",
+            "private_chat",
         }
         unexpected = set(message.arguments) - allowed_arguments
         if unexpected:
@@ -159,6 +160,8 @@ class GatewayAdapterRequestHandler(AdapterHostRequestHandler):
             enable_channel_binding_commands=bool(
                 message.arguments.get("enable_channel_binding_commands", True)
             ),
+            # Only an explicit true from the adapter counts (unknown is not private).
+            private_chat=message.arguments.get("private_chat") is True,
         )
         if not result.handled or result.text is None:
             return ()

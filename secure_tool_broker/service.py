@@ -37,7 +37,7 @@ from secure_tool_broker.auth_pages import (
     render_markdown_text,
     render_session_countdown,
 )
-from secure_tool_broker.sign_in_pages import SIGN_IN_PAGE_SECONDS
+from secure_tool_broker.sign_in_pages import SESSION_RESTORED_AFTER_RESTART, SIGN_IN_PAGE_SECONDS
 from secure_tool_broker.x_sign_in import CALLBACK_PATH as X_CALLBACK_PATH
 from secure_tool_broker.auth_flows import (
     BrokerAuthSession,
@@ -61,6 +61,7 @@ from secure_tool_broker.account_links import (
 )
 from custom_messages.contracts.access_v2 import AccountLinkRequestV1, PersonCredentialDeletionV1
 from secure_tool_broker.credential_transfer_api import add_transfer_routes
+from secure_tool_broker.team_export_page import add_team_export_routes
 from secure_tool_broker.defaults import (
     ONBOARDING_ACCOUNT_KEYS_ROUTE,
     PERSON_CREDENTIAL_DELETION_ROUTE,
@@ -491,6 +492,25 @@ def _require_method_authority(provider: str, method: str, person_id: str, roles:
         _require_team_administrator(provider, person_id, roles, action=f"{method}_session", method=method)
 
 
+def _require_flow_opening(flow: Any, provider: str, method: str, person_id: str, roles: tuple[str, ...]) -> None:
+    """A page whose own rule decides who may open it (``/upgrade``: owners only, ``team_export_page``)."""
+
+    opening_refusal = getattr(flow, "opening_refusal", None)
+    refusal = opening_refusal(roles) if callable(opening_refusal) else None
+    if not refusal:
+        return
+    LOGGER.warning(
+        "Broker page refused when opening. event=broker_page_opening_refused provider=%s method=%s person_id=%s",
+        provider,
+        method,
+        person_id,
+    )
+    raise web.HTTPForbidden(
+        text=json.dumps({"error": refusal, "reason_code": f"{provider}_{method}_refused"}),
+        content_type="application/json",
+    )
+
+
 def _require_team_administrator(
     provider: str, person_id: str, roles: tuple[str, ...], *, action: str, method: str = TEAM_CLIENT_METHOD
 ) -> None:
@@ -666,6 +686,7 @@ class SecureToolBrokerService:
         )
         app.router.add_post(PERSON_CREDENTIAL_DELETION_ROUTE, self._handle_delete_person_credentials)
         add_transfer_routes(app, team_id=self._access_gate.team_id)
+        add_team_export_routes(app, team_id=self._access_gate.team_id)
         app.router.add_post(ONBOARDING_ACCOUNT_KEYS_ROUTE, onboarding_keys_handler(self._access_gate))
         model_keys = team_model_key_store(self._access_gate.team_id)
         app.router.add_post(
@@ -892,7 +913,11 @@ class SecureToolBrokerService:
             owner_canonical_user_id=str(payload.get("owner_canonical_user_id") or ""),
             owner_team_id=str(payload.get("owner_team_id") or "") or None,
             owner_roles=tuple(str(role) for role in payload.get("owner_roles") or ()),
-            state={"start_payload": start_payload, "status": "created"},
+            state={
+                "start_payload": start_payload,
+                "status": "created",
+                SESSION_RESTORED_AFTER_RESTART: True,
+            },
         )
         self._auth_sessions[session_id] = session
         self._logger.info(
@@ -2213,6 +2238,7 @@ class SecureToolBrokerService:
                 status=400,
             )
         _require_method_authority(provider, method, canonical_user_id, person_roles)
+        _require_flow_opening(flow, provider, method, canonical_user_id, person_roles)
         now = datetime.now(timezone.utc)
         # A flow may keep its page open longer than a sign-in (the model key pages: 24 hours).
         expires_at = now + timedelta(seconds=getattr(flow, "page_seconds", SIGN_IN_PAGE_SECONDS))

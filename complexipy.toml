@@ -25,6 +25,7 @@ paths = [
     "internal_credentials.py",
     "old_file_cleanup.py",
     "reply_routing_trace.py",
+    "size_presentation.py",
     "strands_main.py",
     "time_presentation.py",
     "vulture_whitelist.py",

@@ -27,6 +27,8 @@ SETUP_COMMAND = "/setup"
 # The model key pages: the team's (administrators) and a person's own (``me``).
 MODEL_KEY_COMMAND = f"/auth {MODEL_KEY_AUTH_PROVIDER}"
 OWN_MODEL_COMMAND = f"{MODEL_KEY_COMMAND} me"
+# An owner exports the whole team for an upgrade (``team_transfer.export_requests``).
+UPGRADE_COMMAND = "/upgrade"
 
 
 def link_command(tool_id: str, owner: LinkOwnerKind | None = None) -> str:
@@ -50,6 +52,7 @@ __all__ = [
     "MODEL_KEY_COMMAND",
     "OWN_MODEL_COMMAND",
     "SETUP_COMMAND",
+    "UPGRADE_COMMAND",
     "accounts_command",
     "link_command",
 ]

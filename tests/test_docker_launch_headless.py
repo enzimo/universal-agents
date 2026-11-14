@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from runtime_settings.instance_layout import InstanceLayout
 from assistant_gateway.config import (
     GatewayInstanceConfig,
     INSTANCE_CONFIG_SCHEMA_VERSION,
@@ -2304,3 +2305,254 @@ def test_stream_setup_connects_to_nothing_without_jetstream(tmp_path: Path) -> N
     # A port nothing listens on: a connection attempt would retry for minutes.
     env = {"NATS_URL": "nats://127.0.0.1:9", "NATS_JETSTREAM_ENABLED": "false"}
     assert prepare_message_streams(config_path, env) == ()
+
+
+# -- /upgrade: the supervisor runs export requests ----------------------------------------
+
+
+def test_every_launched_process_knows_the_supervisor_runs_team_exports(tmp_path: Path) -> None:
+    from team_transfer.export_requests import EXPORT_REQUESTS_BY_SUPERVISOR, EXPORT_REQUESTS_ENV, supervisor_runs_exports
+
+    env_defaults = build_instance_env_defaults(_make_config(tmp_path))
+
+    assert env_defaults[EXPORT_REQUESTS_ENV] == EXPORT_REQUESTS_BY_SUPERVISOR
+    assert supervisor_runs_exports(env_defaults)
+
+
+def _export_request(requests_dir: Path, export_id: str, minute: int) -> None:
+    from datetime import datetime, timezone
+
+    from team_transfer.export_requests import TeamExportRequestV1, write_export_request
+
+    write_export_request(
+        requests_dir,
+        TeamExportRequestV1(
+            export_id=export_id,
+            team_id="team_test",
+            owner_person_id="usr_owner",
+            requested_at_utc=datetime(2026, 10, 14, 10, minute, tzinfo=timezone.utc),
+        ),
+    )
+
+
+def test_team_exports_run_one_at_a_time_with_the_full_environment(tmp_path: Path) -> None:
+    from docker.launch_headless import TeamExportRunner
+
+    started: list[tuple[list[str], dict[str, str]]] = []
+
+    class FakeProcess:
+        pid = 7
+        returncode: int | None = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    processes: list[FakeProcess] = []
+
+    def fake_popen(command, *, cwd, env):
+        started.append((list(command), dict(env)))
+        processes.append(FakeProcess())
+        return processes[-1]
+
+    requests_dir = InstanceLayout.at(tmp_path).team_export_requests_dir
+    runner = TeamExportRunner(
+        layout=InstanceLayout.at(tmp_path),
+        config_path=tmp_path / "instance_config.yaml",
+        env={"SECURE_TOOL_BROKER_TOKEN": "root", "TELEGRAM_BOT_TOKEN": "bot"},
+        python_executable="python",
+        popen=fake_popen,
+    )
+    runner.poll()
+    assert started == []
+
+    _export_request(requests_dir, "exp_second_aaaaaaaaaaaaaaaa", 20)
+    _export_request(requests_dir, "exp_first_bbbbbbbbbbbbbbbbb", 10)
+    runner.poll()
+    command, env = started[0]
+    assert command[0:2] == ["python", "-u"] and command[2].endswith("assistant_cli.py")
+    assert command[3:] == [
+        "team",
+        "export-requested",
+        "--config",
+        str(tmp_path / "instance_config.yaml"),
+        "--export-id",
+        "exp_first_bbbbbbbbbbbbbbbbb",
+        "--owner",
+        "usr_owner",
+    ]
+    # The export carries every operator secret and reaches the broker as the operator.
+    assert env == {"SECURE_TOOL_BROKER_TOKEN": "root", "TELEGRAM_BOT_TOKEN": "bot"}
+
+    runner.poll()  # still running: the next request waits
+    assert len(started) == 1
+
+    processes[0].returncode = 1  # a failed export never stops the team; the next one starts
+    runner.poll()
+    assert [command[8] for command, _env in started] == ["exp_first_bbbbbbbbbbbbbbbbb", "exp_second_aaaaaaaaaaaaaaaa"]
+
+    runner.stop()
+    assert processes[1].returncode == -15
+    assert list(requests_dir.iterdir()) == []
+
+
+def test_run_supervised_runs_team_exports_and_stops_them_on_shutdown(monkeypatch) -> None:
+    class FakeProcess:
+        pid = 1
+
+        def __init__(self, command: list[str]):
+            self.command = command
+
+        def poll(self):
+            return 0 if self.command == ["manager"] else None
+
+        def terminate(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    class Exports:
+        polls = 0
+        stops = 0
+
+        def poll(self) -> None:
+            self.polls += 1
+
+        def stop(self) -> None:
+            self.stops += 1
+
+    exports = Exports()
+    monkeypatch.setattr("docker.launch_headless.subprocess.Popen", lambda command, **_kwargs: FakeProcess(list(command)))
+    monkeypatch.setattr("docker.launch_headless.time.sleep", lambda _seconds: None)
+
+    run_supervised(
+        manager_command=["manager"],
+        gateway_command=["gateway"],
+        activity_collector_command=["activity"],
+        manager_env={},
+        gateway_env={},
+        activity_collector_env={},
+        team_exports=exports,  # type: ignore[arg-type]
+    )
+
+    assert exports.polls == 1 and exports.stops == 1
+
+
+def test_an_export_process_that_cannot_start_is_logged_and_the_supervisor_continues(tmp_path: Path, caplog) -> None:
+    from docker.launch_headless import TeamExportRunner
+
+    def failing_popen(command, *, cwd, env):
+        raise FileNotFoundError("python")
+
+    requests_dir = InstanceLayout.at(tmp_path).team_export_requests_dir
+    _export_request(requests_dir, "exp_only_cccccccccccccccccc", 5)
+    runner = TeamExportRunner(
+        layout=InstanceLayout.at(tmp_path), config_path=tmp_path / "instance_config.yaml", env={}, popen=failing_popen
+    )
+
+    runner.poll()
+    runner.poll()
+
+    assert "event=team_export_process_start_failed export_id=exp_only_cccccccccccccccccc" in caplog.text
+    assert list(requests_dir.iterdir()) == []
+    runner.stop()
+
+
+@pytest.mark.parametrize("process", ["gateway", "secure_broker"])
+def test_the_gateway_and_broker_keep_the_export_marker_and_the_instance_root(tmp_path: Path, process: str) -> None:
+    from env_secrets import environment_for
+    from team_transfer.export_requests import EXPORT_REQUESTS_ENV, supervisor_runs_exports
+
+    scoped = environment_for(process, build_instance_env_defaults(_make_config(tmp_path)))
+
+    assert supervisor_runs_exports(scoped) and scoped["TEAM_INSTANCE_ROOT"]
+    assert EXPORT_REQUESTS_ENV in scoped
+
+
+def test_a_damaged_request_or_a_failing_export_start_never_stops_the_supervisor(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import docker.launch_headless as launch_headless
+    from docker.launch_headless import TeamExportRunner
+
+    layout = InstanceLayout.at(tmp_path)
+    layout.team_export_requests_dir.mkdir(parents=True)
+    damaged = layout.team_export_requests_dir / "00000000T000000000000Z-exp_damaged.json"
+    damaged.write_bytes(b"\xff\xfe not utf-8")
+    runner = TeamExportRunner(layout=layout, config_path=tmp_path / "instance_config.yaml", env={}, popen=lambda *a, **k: None)
+
+    runner.poll()  # the damaged file is logged and removed
+
+    assert not damaged.exists() and "event=team_export_request_invalid" in caplog.text
+
+    def missing_entrypoint(_path):
+        raise FileNotFoundError("assistant_cli.py")
+
+    monkeypatch.setattr(launch_headless, "resolve_python_entrypoint", missing_entrypoint)
+    _export_request(layout.team_export_requests_dir, "exp_only_cccccccccccccccccc", 5)
+
+    runner.poll()  # logged; the supervisor's loop goes on
+
+    assert "event=team_export_runner_failed" in caplog.text
+    runner.poll()
+
+
+def test_a_lasting_export_runner_problem_logs_in_full_once_then_a_count_each_minute(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import docker.launch_headless as launch_headless
+    from docker.launch_headless import TeamExportRunner
+
+    def broken(_requests_dir):
+        raise RuntimeError("requests folder unreadable")
+
+    monkeypatch.setattr(launch_headless, "take_export_request", broken)
+    runner = TeamExportRunner(layout=InstanceLayout.at(tmp_path), config_path=tmp_path / "c.yaml", env={})
+
+    for _ in range(3):
+        runner.poll()
+
+    failures = [record for record in caplog.records if "event=team_export_runner_failed" in record.getMessage()]
+    assert len(failures) == 1 and failures[0].exc_info is not None
+
+
+def test_a_repeated_problem_comes_back_as_one_counted_line_a_minute() -> None:
+    from team_transfer.export_requests import RepeatedProblemLog
+
+    now = [0.0]
+    problems = RepeatedProblemLog(clock=lambda: now[0])
+
+    assert problems.check("a") == 0
+    seen = []
+    for second in (20.0, 40.0, 59.0):
+        now[0] = second
+        seen.append(problems.check("a"))
+    assert seen == [None, None, None]
+    now[0] = 61.0
+    assert problems.check("a") == 4
+    assert problems.check("b") == 0  # a different problem logs at once
+
+
+def test_a_problem_that_stayed_away_for_a_minute_is_logged_in_full_again() -> None:
+    from team_transfer.export_requests import RepeatedProblemLog
+
+    now = [0.0]
+    problems = RepeatedProblemLog(clock=lambda: now[0])
+
+    assert problems.check("a") == 0
+    now[0] = 30.0
+    assert problems.check("a") is None
+    now[0] = 95.0  # quiet since 30 s
+    assert problems.check("a") == 0

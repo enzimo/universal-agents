@@ -196,6 +196,7 @@ class GatewayRuntimeApplication:
         enable_channel_binding_commands: bool = True,
         query_handler: GatewayQueryHandler | None = None,
         correlation_id: str | None = None,
+        private_chat: bool = False,
     ) -> GatewayCommandResult:
         if current_session_key is None:
             active = self._session_repository.get_active_session_for_channel(
@@ -220,6 +221,7 @@ class GatewayRuntimeApplication:
                 enable_channel_binding_commands=enable_channel_binding_commands,
                 query_handler=query_handler,
                 correlation_id=correlation_id,
+                private_chat=private_chat,
             )
         )
 

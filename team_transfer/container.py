@@ -112,7 +112,7 @@ class TransferWriter:
             )
         if not target.parent.is_dir():
             raise TransferFileError(f"The folder {target.parent} does not exist.")
-        temporary = target.with_name(f".{target.name}.{os.getpid()}.partial")
+        temporary = partial_path(target, os.getpid())
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         handle = os.fdopen(fd, "wb")
         archive = zipfile.ZipFile(
@@ -206,6 +206,20 @@ class TransferWriter:
             except (OSError, ValueError):
                 pass
         self._temporary.unlink(missing_ok=True)
+
+
+PARTIAL_SUFFIX = ".partial"
+
+
+def partial_path(target: Path, pid: int) -> Path:
+    """Where process ``pid`` writes ``target`` before publishing it: hidden, beside it.
+
+    Errors and stop signals remove it (``TransferWriter.discard``); a killed
+    process leaves it, and the supervisor finds it by the process id
+    (``team_transfer.requested_export.remove_leftover_partials``).
+    """
+
+    return target.with_name(f".{target.name}.{pid}{PARTIAL_SUFFIX}")
 
 
 def _entry(name: str) -> zipfile.ZipInfo:
@@ -429,9 +443,11 @@ __all__ = [
     "MAX_MEMBERS",
     "MAX_MEMBER_BYTES",
     "MAX_TOTAL_BYTES",
+    "PARTIAL_SUFFIX",
     "TransferFileError",
     "TransferReader",
     "TransferWriter",
     "check_member_name",
     "iter_files",
+    "partial_path",
 ]

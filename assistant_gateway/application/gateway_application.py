@@ -168,8 +168,14 @@ class GatewayApplication(Protocol):
         enable_channel_binding_commands: bool = True,
         query_handler: GatewayQueryHandler | None = None,
         correlation_id: str | None = None,
+        private_chat: bool = False,
     ) -> GatewayCommandResult:
-        """Execute a normalized slash/session command for one channel route."""
+        """Execute a normalized slash/session command for one channel route.
+
+        ``private_chat``: the channel vouches that only this person and the
+        assistant are in the chat (``GatewayActorContext.private_chat``);
+        leaving it out means not private.
+        """
 
     def is_task_progress_status_request(
         self,

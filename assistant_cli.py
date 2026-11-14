@@ -318,6 +318,8 @@ async def _handle_local_session_command(
         thread_id=thread_id,
         help_text=INTERACTIVE_SESSION_HELP,
         query_handler=query_handler,
+        # The operator's own terminal on the host.
+        private_chat=True,
     )
     return result.handled, result.session_key, result.text
 

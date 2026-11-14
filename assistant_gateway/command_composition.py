@@ -16,6 +16,7 @@ from assistant_gateway.application.commands import (
     GatewayAccountSharingPort,
     IdentityCommandHandler,
     MemoryTopicCommandHandler,
+    TeamExportCommandHandler,
 )
 from assistant_gateway.application.link_results import GatewayLinkResultWatches
 from assistant_gateway.application.command_operations import (
@@ -109,6 +110,12 @@ def build_gateway_command_application(
             team_id=config.manager.team_id,
             link_results=link_results,
             model_endpoints=lambda: configured_model_endpoints(config),
+        ),
+        team_export_commands=TeamExportCommandHandler(
+            identity=operations,
+            secure_broker=broker,
+            team_id=config.manager.team_id,
+            link_results=link_results,
         ),
         account_link_commands=AccountLinkCommandHandler(
             identity=operations,

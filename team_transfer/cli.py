@@ -1,8 +1,10 @@
-"""``assistant_cli team export | inspect | review | import | import-credentials | finish-import``.
+"""``assistant_cli team export | inspect | review | import | import-credentials | finish-import | export-requested``.
 
 The passphrase is typed at a prompt, or read from a file with
 ``--passphrase-file`` (for example a Docker secret). It is never taken from
-the command line, where other processes could read it.
+the command line, where other processes could read it. ``export-requested``
+is the supervisor's export for an owner's ``/upgrade``: it collects the
+passphrase from the broker (``team_transfer.requested_export``).
 """
 
 from __future__ import annotations
@@ -148,6 +150,18 @@ def add_team_parsers(subparsers: Any) -> None:
         "--config", required=True, help="The new instance's instance_config.yaml"
     )
 
+    requested = commands.add_parser(
+        "export-requested",
+        help="Run an export an owner asked for with /upgrade (started by the supervisor)",
+        description=(
+            "The supervisor runs this for one /upgrade request. The passphrase comes from the broker's export "
+            "page, never from the command line; the archive goes into the instance's exports/ folder."
+        ),
+    )
+    requested.add_argument("--config", required=True, help="The running instance's instance_config.yaml")
+    requested.add_argument("--export-id", required=True, help="The request's export id")
+    requested.add_argument("--owner", required=True, metavar="PERSON_ID", help="The owner who asked for it")
+
 
 def _passphrase_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -177,6 +191,8 @@ def run_team_command(args: argparse.Namespace) -> None:
             _import_credentials(args)
         elif args.team_command == "finish-import":
             _finish_import(args)
+        elif args.team_command == "export-requested":
+            _export_requested(args)
         elif args.team_command == "review":
             _review(args)
         else:
@@ -203,6 +219,18 @@ def _export(args: argparse.Namespace) -> None:
         "instances. Keep the file and its passphrase private; it holds the team's configuration."
     )
     print("\n".join(lines))
+
+
+def _export_requested(args: argparse.Namespace) -> None:
+    from team_transfer.export_requests import section_lines
+    from team_transfer.requested_export import run_requested_export, stop_on_signal
+
+    stop_on_signal()
+    result = run_requested_export(args.config, export_id=args.export_id, owner_person_id=args.owner)
+    if not result.ok:
+        raise SystemExit(f"The team was not exported. {result.error}")
+    note = [result.note] if result.note else []
+    print("\n".join([f"Wrote exports/{result.file_name} ({result.size_bytes} bytes).", *section_lines(result), *note]))
 
 
 def _inspect(args: argparse.Namespace) -> None:

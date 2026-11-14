@@ -139,6 +139,22 @@ def role_change_refusal(
     return None
 
 
+TEAM_EXPORT_OWNER_REQUIRED = "Only an owner can export the team."
+
+
+def team_export_refusal(roles: Iterable[str]) -> str | None:
+    """Why this person may not export the whole team (``/upgrade``), or None when they may.
+
+    An export carries everyone's records, the team's stored sign-ins and keys
+    and every operator secret, so only an owner may make one (guided upgrade
+    plan, 2026-10-11). Administrators who are not owners may not. The export
+    process checks again with the stored record
+    (``team_transfer.service.require_active_owner``).
+    """
+
+    return None if is_owner(roles) else TEAM_EXPORT_OWNER_REQUIRED
+
+
 def status_change_refusal(*, actor_roles: Iterable[str], target_role: str | None) -> str | None:
     """Why the actor may not disable or re-enable this person, or None when they may."""
 
@@ -250,6 +266,7 @@ __all__ = [
     "PERSON_ROLE_OWNER",
     "REMOVAL_NEEDS_ADMINISTRATOR",
     "ROLES_THAT_KEEP_A_HOLDER",
+    "TEAM_EXPORT_OWNER_REQUIRED",
     "ROLE_WORDS",
     "PersonStanding",
     "account_sharing_refusal",
@@ -262,6 +279,7 @@ __all__ = [
     "removal_refusal",
     "role_change_refusal",
     "status_change_refusal",
+    "team_export_refusal",
     "team_model_keys_refusal",
     "team_work_owner",
 ]

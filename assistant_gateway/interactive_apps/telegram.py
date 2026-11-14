@@ -97,6 +97,8 @@ TELEGRAM_RICH_MESSAGE_MAX_CHARS = 32768
 TELEGRAM_SEND_RICH_MESSAGE_ENDPOINT = "sendRichMessage"
 TELEGRAM_TYPING_REPEAT_SECONDS = 4.0
 TELEGRAM_INBOUND_DEDUPE_LIMIT = 2048
+# Telegram's chat type for a one-to-one chat with the bot (chat.type).
+TELEGRAM_PRIVATE_CHAT_TYPE = "private"
 TELEGRAM_BOT_TOKEN_ENV_VAR = "TELEGRAM_BOT_TOKEN"
 # Telegram shows at most 200 characters in a button's pop-up answer.
 TELEGRAM_CALLBACK_ANSWER_MAX_CHARS = 200
@@ -953,6 +955,7 @@ class TelegramInteractiveApp(BaseInteractiveApp):
             thread_id=thread_id,
             help_text=TELEGRAM_HELP_TEXT,
             enable_reply_command=False,
+            private_chat=_is_private_chat(update),
         )
         if result.handled:
             if result.deferred:
@@ -1747,3 +1750,10 @@ class TelegramInteractiveApp(BaseInteractiveApp):
                 thread_id or "-",
                 exc_info=True,
             )
+
+
+def _is_private_chat(update: Update) -> bool:
+    """Only Telegram's own ``private`` chat type is a private chat; groups, channels and unknown are not."""
+
+    chat = getattr(update, "effective_chat", None)
+    return getattr(chat, "type", None) == TELEGRAM_PRIVATE_CHAT_TYPE

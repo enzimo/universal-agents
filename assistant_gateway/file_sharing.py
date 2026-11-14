@@ -61,6 +61,7 @@ from custom_messages.contracts.access_v2 import (
 )
 from id_generation import new_id
 from runtime_settings.instance_layout import person_folder_name
+from size_presentation import size_words
 from storage.access_repository import AccessStoreConflict, DecisionClaim, DecisionRecovery
 
 logger = logging.getLogger(__name__)
@@ -92,13 +93,6 @@ class OwnItem:
     def shown(self) -> str:
         inside = "/".join(self.parts[2:])
         return (inside + ("" if self.is_file else "/")) if inside else "your whole folder"
-
-
-def _size_words(size: int) -> str:
-    for unit, scale in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
-        if size >= scale:
-            return f"{size / scale:.1f} {unit}"
-    return f"{size} bytes"
 
 
 def _sha256(data: bytes) -> str:
@@ -274,7 +268,7 @@ class GatewayFileSharing:
         if not item.is_file:
             raise FileSharingRefused("Send one file at a time; share a folder instead.")
         if item.size > MAX_DELIVERY_BYTES:
-            raise FileSharingRefused(f"{raw} is larger than {_size_words(MAX_DELIVERY_BYTES)}.")
+            raise FileSharingRefused(f"{raw} is larger than {size_words(MAX_DELIVERY_BYTES)}.")
         target = str(destination or "").strip().strip("/")
         if target == FOLDER_ROOT_TEAM or target.startswith(f"{FOLDER_ROOT_TEAM}/"):
             return self._send_to_team(person, item, normalize_folder_id(target), move=move)
@@ -327,7 +321,7 @@ class GatewayFileSharing:
             ReviewItemV1(
                 item_id="delivery",
                 section="delivery",
-                text=f"Put {item.parts[-1]} ({_size_words(len(data))}) from {sender}'s folder into {where}.",
+                text=f"Put {item.parts[-1]} ({size_words(len(data))}) from {sender}'s folder into {where}.",
             )
         ]
         if move:
@@ -340,7 +334,7 @@ class GatewayFileSharing:
             plan_digest=digest,
             title=f"{sender} wants to put {item.parts[-1]} into your folder",
             summary=summary_line(
-                f"{sender} wants to {'move' if move else 'copy'} {item.parts[-1]} ({_size_words(len(data))}) "
+                f"{sender} wants to {'move' if move else 'copy'} {item.parts[-1]} ({size_words(len(data))}) "
                 "into your folder."
             ),
             effect=tuple(row.text for row in rows),

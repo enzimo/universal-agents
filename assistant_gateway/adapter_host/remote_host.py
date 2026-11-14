@@ -257,6 +257,7 @@ class RemoteGatewayApplication:
         enable_channel_binding_commands: bool = True,
         query_handler: GatewayQueryHandler | None = None,
         correlation_id: str | None = None,
+        private_chat: bool = False,
     ) -> GatewayCommandResult:
         # Remote adapters send their own ids; the host assigns the command's.
         del canonical_user_id, query_handler, correlation_id
@@ -283,6 +284,7 @@ class RemoteGatewayApplication:
                     "enable_debug_commands": enable_debug_commands,
                     "enable_reply_command": enable_reply_command,
                     "enable_channel_binding_commands": enable_channel_binding_commands,
+                    "private_chat": private_chat,
                 },
                 received_at_utc=datetime.now(timezone.utc),
             )
