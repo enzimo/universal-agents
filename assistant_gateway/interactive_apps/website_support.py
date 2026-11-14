@@ -12,7 +12,7 @@ from assistant_gateway.interactive_apps.host_ports import (
     InteractiveAppRuntimeContext,
 )
 from id_generation import new_id
-from secure_tools.chat_commands import ACCOUNTS_COMMAND, LINK_COMMAND, SETUP_COMMAND
+from secure_tools.chat_commands import ACCOUNTS_COMMAND, LINK_COMMAND, SETUP_COMMAND, UPGRADE_COMMAND
 from user_docs.published_sites import PublishedSiteStore
 
 """Local website host for generated single-page assistant artifacts."""
@@ -96,6 +96,7 @@ _WEB_CHAT_ALLOWED_COMMANDS = {
     "/schedules",
     "/mcp",
     "/disable",
+    UPGRADE_COMMAND,
 }
 
 _WEB_CHAT_COMMAND_NOT_AVAILABLE = (

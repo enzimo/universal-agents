@@ -41,6 +41,11 @@ from custom_agents.governance.authorized_operations import atomic_write_json
 from custom_messages.contracts.common_v1 import utc_now
 from id_generation import new_id
 from runtime_settings.instance_layout import InstanceLayout
+from team_transfer.export_requests import (
+    EXPORT_REQUESTS_BY_SUPERVISOR,
+    EXPORT_REQUESTS_ENV,
+    take_export_request,
+)
 from access_control.caller_tokens import (
     CALLER_GATEWAY,
     CALLER_MANAGER,
@@ -459,6 +464,8 @@ def build_instance_env_defaults(
     env_defaults = {
         "TEAM_INSTANCE_CONFIG": str(config.config_path),
         "TEAM_INSTANCE_ROOT": str(config.instance_root_path),
+        # This supervisor runs /upgrade's export requests (TeamExportRunner).
+        EXPORT_REQUESTS_ENV: EXPORT_REQUESTS_BY_SUPERVISOR,
         "RUNTIME_RESTART_REQUEST_DIR": str(
             config.instance_root_path / "runtime" / "restart_requests"
         ),
@@ -1949,6 +1956,84 @@ def refresh_external_skills_before_launch(
     return result
 
 
+class TeamExportRunner:
+    """Runs the exports owners ask for with ``/upgrade``, one at a time.
+
+    The broker's export page leaves a request (``team_transfer.export_requests``,
+    no secret in it); on each pass of the supervisor's loop this takes the
+    oldest one and starts ``assistant_cli team export-requested`` with the
+    supervisor's full environment, because the export carries every operator
+    secret and reaches the broker as the ``operator`` caller. The process
+    collects the passphrase from the broker itself. It is not one of the
+    runtime's processes: its exit is logged and never stops the team, and a
+    request waits while another export runs.
+    """
+
+    def __init__(
+        self,
+        *,
+        requests_dir: Path,
+        config_path: Path,
+        env: Mapping[str, str],
+        python_executable: str | None = None,
+        popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+    ) -> None:
+        self._requests_dir = requests_dir
+        self._config_path = config_path
+        self._env = dict(env)
+        self._python = python_executable or sys.executable
+        self._popen = popen
+        self._running: tuple[str, subprocess.Popen[bytes]] | None = None
+
+    def poll(self) -> None:
+        if self._running is not None:
+            export_id, process = self._running
+            code = process.poll()
+            if code is None:
+                return
+            self._running = None
+            log = LOGGER.info if code == 0 else LOGGER.warning
+            log("Team export process ended. event=team_export_process_exited export_id=%s exit_code=%s", export_id, code)
+        request = take_export_request(self._requests_dir)
+        if request is None:
+            return
+        command = [
+            self._python,
+            "-u",
+            str(resolve_python_entrypoint(REPO_ROOT / "assistant_cli.py")),
+            "team",
+            "export-requested",
+            "--config",
+            str(self._config_path),
+            "--export-id",
+            request.export_id,
+            "--owner",
+            request.owner_person_id,
+        ]
+        LOGGER.info(
+            "Starting a requested team export. event=team_export_process_started export_id=%s owner_person_id=%s",
+            request.export_id,
+            request.owner_person_id,
+        )
+        try:
+            process = self._popen(command, cwd=REPO_ROOT, env=dict(self._env))
+        except OSError as exc:
+            # The broker drops the passphrase after its pickup time and the page says so.
+            LOGGER.error(
+                "A requested team export could not start. event=team_export_process_start_failed "
+                "export_id=%s error=%s",
+                request.export_id,
+                type(exc).__name__,
+            )
+            return
+        self._running = (request.export_id, process)
+
+    def stop(self) -> None:
+        if self._running is not None:
+            terminate_process(self._running[1], "team export")
+            self._running = None
+
+
 def terminate_process(
     process: subprocess.Popen[bytes], name: str, *, timeout_seconds: float = 10.0
 ) -> None:
@@ -2212,6 +2297,7 @@ def run_supervised(
     settings_environment: SettingsEnvironment | None = None,
     agent_pass_fds: tuple[int, ...] = (),
     first_start_tasks: tuple[tuple[str, list[str], Mapping[str, str]], ...] = (),
+    team_exports: TeamExportRunner | None = None,
 ) -> int:
     """Start and watch every runtime process; restarts reuse the environments given here.
 
@@ -2230,6 +2316,7 @@ def run_supervised(
     before the manager, startup agents or gateway initialize, so their model
     and embedding keys are already stored (``build_finish_import_task``).
     Failure stops startup; the retained handover retries at the next start.
+    ``team_exports`` runs ``/upgrade``'s export requests while the team runs.
     """
     stop_requested = False
     restart_env = functools.partial(_environment_for_restart, settings_environment)
@@ -2454,6 +2541,8 @@ def run_supervised(
             if stop_requested:
                 break
             process_restart_request()
+            if team_exports is not None:
+                team_exports.poll()
             for name, process in current_processes():
                 code = process.poll()
                 if code is not None:
@@ -2470,6 +2559,8 @@ def run_supervised(
                 break
             time.sleep(1.0)
     finally:
+        if team_exports is not None:
+            team_exports.stop()
         if adapter_host is not None:
             terminate_process(adapter_host, "adapter host")
         if execution_controller is not None:
@@ -2789,6 +2880,9 @@ def main() -> int:
         settings_environment=settings_environment,
         agent_pass_fds=process_run.pass_fds(),
         first_start_tasks=(finish_import,) if finish_import else (),
+        team_exports=TeamExportRunner(
+            requests_dir=config.layout.team_export_requests_dir, config_path=config_path, env=inherited_env
+        ),
     )
 
 

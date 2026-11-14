@@ -1,9 +1,11 @@
 # Moving a team to a new version
 
 Export the old instance's setup, then import it into a fresh instance of the
-new version. The simplest way is onboarding's **Import a team export** choice:
-copy the export into the new data folder, open it in onboarding, choose what
-to bring, and the team starts
+new version. The simplest way needs no host commands: an owner types
+`/upgrade` in a chat and the launcher writes the export
+([Export from chat with /upgrade](#export-from-chat-with-upgrade)); then
+onboarding's **Import a team export** choice opens it in the new data folder,
+you choose what to bring, and the team starts
 ([Import during onboarding](#import-during-onboarding)). Host commands do the
 same and can also bring more records from the same backup later
 ([Export and review](#export-and-review)). Neither changes the signed export.
@@ -52,9 +54,48 @@ logs, queued tasks, and waiting approvals do not move. Automation jobs and manag
 services are listed for manual setup rather than imported. Missed one-time runs
 are imported turned off; recurring schedules resume counting from import.
 
+## Export from chat with /upgrade
+
+An owner exports the whole team from a chat:
+
+1. **Type `/upgrade`** in a private chat with the assistant: Web Chat, or a
+   direct message in Telegram or Discord. The reply holds a link to a private
+   page, and anyone who sees the link can open the page, so don't use a group
+   chat. Only owners can export the team; administrators who are not owners
+   are refused.
+2. **Open the page and choose a passphrase.** Type it twice, at least 12
+   characters. It goes to the secure broker, is never sent to the agent and is
+   not saved anywhere. Keep it: you need it to import the file, and nobody can
+   open the file without it. The page lists what the file holds.
+3. **Wait for the export.** The launcher writes one file into the data folder's
+   `exports/` folder, for example
+   `~/.universal-agents/data/exports/alpha-20261014-101500Z.uatransfer`. This
+   usually takes under a minute. The page and the chat then show the file's
+   name and size, what it holds and the next steps.
+4. **Stop this instance, then import.** Its chat bot tokens and model sign-ins
+   move with the file, and two running instances must not use them at once.
+   Continue with [Import during onboarding](#import-during-onboarding).
+
+The file can be read only by its owner (mode 0600). The container runs as
+root, so the launcher gives the file and `exports/` to whoever owns the data
+folder on the host; you can copy it without `sudo`. Old exports stay in
+`exports/` until you delete them.
+
+`/upgrade` needs the launcher (the Docker image, or `docker/launch_headless.py`),
+because only the launcher holds every secret the export carries. A team
+started another way is told to use `team export` on the host
+([Export and review](#export-and-review)).
+
+When the export does not finish, the page and the chat say why and nothing is
+written; run `/upgrade` again. The page stays open for one hour. A passphrase
+the launcher has not collected after five minutes is dropped, and the page says
+so. If the broker restarts during an export, the page opens again empty.
+
 ## Import during onboarding
 
-1. **Export the old team.** Run `team export` on the old instance as shown in
+1. **Export the old team.** Use `/upgrade`
+   ([Export from chat with /upgrade](#export-from-chat-with-upgrade)) or run
+   `team export` on the old instance as shown in
    [Export and review](#export-and-review), then stop the old instance.
 2. **Start the new version with an empty data folder.** Onboarding opens, as for
    a new team. Import works only on a fresh data folder and, for PostgreSQL, an

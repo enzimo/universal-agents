@@ -40,7 +40,7 @@ from typing import Any, Mapping
 from pydantic import ValidationError
 
 from access_control.people import is_administrator
-from access_control.people_directory import PeopleDirectory
+from access_control.people_directory import PeopleDirectory, PersonNow
 from access_control.person_settings import PersonSettings
 from custom_messages.contracts.model_keys_v1 import (
     MODEL_KEY_AUTH_PROVIDER,
@@ -177,6 +177,20 @@ def use_access_store(store: Any | None, team_id: str) -> None:
     use_person_settings(PersonSettings(store, team_id) if store is not None else None)
 
 
+def current_person(person_id: str) -> PersonNow | None:
+    """The person's current standing and roles from the gateway's copy of the team's people.
+
+    None without a people store (a broker started without storage) or before
+    the gateway has recorded everyone once: then only the roles signed into a
+    page when it opened are known. Other long-lived pages use it too
+    (``secure_tool_broker.team_export_page``).
+    """
+
+    if not _PEOPLE or not _PEOPLE[0].synced():
+        return None
+    return _PEOPLE[0].person(person_id)
+
+
 def _person_settings() -> PersonSettings | None:
     return _SETTINGS[0] if _SETTINGS else None
 
@@ -189,9 +203,9 @@ def _standing_refusal(session: Any, *, administrators_only: bool) -> str | None:
     all there is, and they were checked when it opened.
     """
 
-    if not _PEOPLE or not _PEOPLE[0].synced():
+    person = current_person(str(session.owner_canonical_user_id or ""))
+    if person is None:
         return ADMIN_REQUIRED_MESSAGE if administrators_only and not is_administrator(session.owner_roles) else None
-    person = _PEOPLE[0].person(str(session.owner_canonical_user_id or ""))
     if not person.active:
         return NOT_ACTIVE_MESSAGE
     if administrators_only and not is_administrator(person.roles):
@@ -1063,6 +1077,7 @@ __all__ = [
     "NOT_ACTIVE_MESSAGE",
     "ModelKeyFlow",
     "PersonalModelKeyFlow",
+    "current_person",
     "model_key_reports",
     "team_model_key_store",
     "use_access_store",

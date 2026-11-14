@@ -328,11 +328,15 @@ questions. Older requests are not inferred into the new running state, and
 the old pending-question table is removed without carrying its rows forward.
 
 When a person asks how to move the team to a new version, or a release needs a
-fresh instance, point the operator to the team transfer ("Moving a team to a new
-version" in the user guide): `assistant_cli team export` on the running old
-instance, then, simplest, start the new release on an empty data folder, copy
-the export into its `import/` folder and choose **Import a team export** on
-onboarding's Let's Begin step; stored sign-ins and keys move at the first start,
+fresh instance, point them to the team transfer ("Moving a team to a new
+version" in the user guide). An owner types `/upgrade` in a private chat (only
+owners may; you cannot run it or see the passphrase): a private page takes the
+passphrase twice and the launcher writes one encrypted file into the data
+folder's `exports/` folder, then the chat says where it is and what to do next.
+A team not started by the launcher uses `assistant_cli team export` on the host
+instead. Then stop the old instance, start the new release on an empty data
+folder, copy the export into its `import/` folder and choose **Import a team
+export** on onboarding's Let's Begin step; stored sign-ins and keys move at the first start,
 before agents or Web Chat initialize. A temporary broker or credential-store
 failure stops startup and keeps the encrypted handover for the next start;
 `team finish-import --config <instance_config.yaml>` retries it by hand. A failed

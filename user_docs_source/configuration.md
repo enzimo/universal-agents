@@ -200,11 +200,14 @@ Docker). Every other location is derived from it:
 │                                      attachment_copies/, model_failover/,
 │                                      diagnostics/, execution_artifacts/
 ├── auth/                              model sign-in tokens (OpenAI Codex, xAI)
+├── exports/                           team exports written by /upgrade
+├── import/                            team exports copied in for onboarding's Import
 ├── runtime/                           records trusted services keep:
 │                                      mcp-connections/ (installed MCP servers),
 │                                      mcp-hosting/ (hosted MCP servers),
-│                                      installed-permissions/, and
-│                                      skill-installation/ (reviewed skills)
+│                                      installed-permissions/,
+│                                      skill-installation/ (reviewed skills),
+│                                      team-import/ and team-export/ (team transfer)
 └── workspaces/                        the only area agents work in
     ├── users/<person>/                one person's private folder, with
     │                                  sites/ (published pages) and scratch/

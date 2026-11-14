@@ -292,6 +292,17 @@ onboarding's server, titled **Choose what to import**, with these differences:
   idle while it works. Long-lived pages state how long they
   stay open instead of a countdown and have a **Close** button at the top and
   the bottom that ends the page.
+- The team export page (`/upgrade`, owners; guided upgrade, 2026-10-14)
+  follows the same rules: one form with the passphrase typed twice (masked,
+  with the reveal control), a note that it is never saved or sent to the
+  agent, the list of what the file holds, "This page stays open for one hour."
+  and **Close** at the top and the bottom. Submitting changes the button to
+  **Exporting…** with a `role="status"` line. While the export runs the page
+  shows only that waiting line, without **Close** (the page must hear how the
+  export ended), and updates itself. The result then replaces it: the file's
+  path and size in a neutral `.status` line, the parts it holds and the
+  numbered next steps; or a red `.status-error` saying no file was written,
+  why, and to run `/upgrade` again.
 - Standalone broker browser-authorization pages expose long provider URLs
   through a fixed-width action. Show a disabled **Wait...** button until the
   URL arrives, then enable **Open** in the same element to open a new tab.
@@ -1966,6 +1977,10 @@ its history. Steps with linked requests cannot use this correction.
   reason, or "couldn't confirm" with where to check (Settings → Access → By
   Tool, or `/auth status` for sign-ins). Web Chat removes the card when that
   message arrives; until then an expired card keeps its local expired state.
+- `/upgrade`'s card (kind `broker_authentication`) works the same way: chat
+  history keeps "Team export page opened." in place of the card, and the
+  gateway's `link_result` message closes it with the file, what it holds and
+  the next steps, or why nothing was exported.
   The card lives only in the page that ran `/link`, so a refresh drops it and
   history shows the opened line and, later, the result. After a gateway
   restart no result follows for a page that was still open, and the card keeps

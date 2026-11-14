@@ -4148,8 +4148,27 @@ tables as its control plane.
 
 Releases may change storage without migrations, so a team moves to a new
 version through a transfer file (`team_transfer`, `assistant_cli team export |
-inspect | review | import | import-credentials | finish-import`; guide:
-`user_docs_source/team-transfer.md`).
+inspect | review | import | import-credentials | finish-import |
+export-requested`; guide: `user_docs_source/team-transfer.md`).
+
+- **Owners export from chat.** `/upgrade` (owners only,
+  `access_control.people.team_export_refusal`) opens the broker's export page
+  (`secure_tool_broker.team_export_page`); the gateway never sees the
+  passphrase. The page keeps the passphrase in broker memory and writes a
+  request without any secret under `InstanceLayout.team_export_requests_dir`
+  (`team_transfer.export_requests`). The supervisor
+  (`docker/launch_headless.py`, `TeamExportRunner`) takes it and starts
+  `team export-requested` with its full environment, because only the
+  supervisor holds the broker root (for the `operator` token) and every
+  operator secret the export carries. That process collects the passphrase
+  once through an operator-only `/v1/transfer/` route, writes the archive into
+  `InstanceLayout.exports_dir` and reports the result to the page; the gateway
+  watches the page (`link_results.watch_team_export`) and posts the file, its
+  parts and the next steps in the chat. The supervisor gains no listening
+  socket: request files under `runtime/` stay its only way in, and a request
+  proves nothing without the operator token. The launcher marks every process
+  it starts (`TEAM_EXPORT_REQUESTS`), so a hand-started gateway points to the
+  host command instead.
 
 - **Two pages, one review.** The operator's loopback page (`team review`,
   `team_transfer.review_web`) and onboarding's **Import a team export**

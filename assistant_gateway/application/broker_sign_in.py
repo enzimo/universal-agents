@@ -36,6 +36,7 @@ from custom_messages.contracts.model_keys_v1 import (
     TEAM_MODEL_KEY_METHOD,
 )
 from secure_tools.auth_methods import TEAM_CLIENT_METHOD
+from team_transfer.export_requests import TEAM_EXPORT_PAGE_METHOD, TEAM_EXPORT_PAGE_PROVIDER
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ PROVIDER_DISPLAY_NAMES = {
     "keepass": "KeePass/KeePassXC",
     "vault": "HashiCorp Vault",
     MODEL_KEY_AUTH_PROVIDER: "Model provider keys",
+    TEAM_EXPORT_PAGE_PROVIDER: "Team export",
 }
 # What the person does on the page, by provider and method ("" is the default).
 _PAGE_PURPOSE = {
@@ -62,6 +64,7 @@ _PAGE_PURPOSE = {
     ("x", TEAM_CLIENT_METHOD): "store the team's X sign-in app",
     (MODEL_KEY_AUTH_PROVIDER, TEAM_MODEL_KEY_METHOD): "test and save the team's model provider keys",
     (MODEL_KEY_AUTH_PROVIDER, PERSONAL_MODEL_KEY_METHOD): "test and save your own model provider keys",
+    (TEAM_EXPORT_PAGE_PROVIDER, TEAM_EXPORT_PAGE_METHOD): "choose a passphrase and export the team",
     ("bitwarden", ""): "complete broker-side API key login and unlock",
     ("bitwarden", "session"): "complete broker-side API key login and unlock",
 }
@@ -141,8 +144,15 @@ class GatewayBrokerSignIns:
         context: dict[str, Any],
         restart_command: str,
         options: dict[str, Any] | None = None,
+        description: str | None = None,
+        receipt: str | None = None,
     ) -> str | BrokerSignInPage:
-        """Open one sign-in page; a string says plainly why it could not open."""
+        """Open one sign-in page; a string says plainly why it could not open.
+
+        ``description`` replaces the card's sign-in wording for a page that is
+        not a sign-in (``/upgrade``'s export page); ``receipt`` is the
+        secret-free line chat history keeps instead of the card.
+        """
 
         display_name = provider_display_name(provider)
         LOGGER.info(
@@ -196,13 +206,15 @@ class GatewayBrokerSignIns:
             action=GatewayTransientAction(
                 kind=BROKER_SIGN_IN_ACTION_KIND,
                 label="Open",
-                description=(
+                description=description
+                or (
                     f"{display_name} sign-in started.\n"
                     f"Open the secure page to {page_purpose(provider, created_method)}.\n"
                     "What you enter goes directly to the secure broker and is not sent to the agent."
                 ),
                 url=login_url,
                 expires_at_utc=expires_at or None,
+                receipt=receipt,
             ),
             status_url=f"{broker_login_url.rstrip('/')}/status",
             expires_at_utc=expires_at,
