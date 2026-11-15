@@ -149,6 +149,8 @@ class _FakeGateway:
         self.identity_service = self
         self.sent_user_messages: list[dict] = []
         self.replies_to_pending: list[dict] = []
+        # The files sent with each answer, in the order of replies_to_pending.
+        self.answer_attachments: list[list] = []
         self.context_debug_controls: list[dict] = []
         self.stop_requests: list[dict] = []
         self.objective_control_calls: list[dict] = []
@@ -190,9 +192,9 @@ class _FakeGateway:
         return self.waiting_question if session_key == "pending_session" else None
 
     async def reply_to_pending_query(
-        self, *, session_key: str, task_query_id: str, response_text: str, replied_message=None,
-        attachments=(),
+        self, *, session_key: str, task_query_id: str, response_text: str, replied_message=None, attachments=None
     ):
+        self.answer_attachments.append(list(attachments or []))
         self.replies_to_pending.append(
             {
                 "session_key": session_key,
@@ -200,12 +202,11 @@ class _FakeGateway:
                 "response_text": response_text,
             }
         )
-        return SimpleNamespace(
+        return GatewayApplicationResponse(
             text=f"Pending reply: {response_text}",
             conversation_id="conv_pending",
             correlation_id="corr_pending",
             task_id="task_pending",
-            attachments=(),
         )
 
     async def send_user_message(self, text: str, **kwargs):
@@ -4348,6 +4349,49 @@ async def test_web_chat_refused_upload_saves_nothing(
     assert gateway.sent_user_messages == []
     assert gateway.replies_to_pending == []
     assert _saved_uploads(config, database) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_web_chat_sends_the_files_of_an_answer_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A send with files while a question waits answers it, files included, and keeps them on the message."""
+
+    config = _config(tmp_path)
+    _enable_web_chat(config, monkeypatch)
+    database = tmp_path / "gateway.db"
+    store = GatewayStateStore(str(database))
+    store.create_session(
+        session_key="pending_session",
+        conversation_id="conv_pending",
+        manager_agent_id="manager_1",
+        channel_name="website",
+        user_id=config.user.canonical_user_id,
+        chat_id="web-chat",
+        owner_canonical_user_id=config.user.canonical_user_id,
+    )
+    gateway = _StatefulFakeGateway(store)
+    gateway.waiting_question = "task_query_pending"
+    app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
+
+    async with TestClient(TestServer(app.build_app())) as client:
+        headers = await _signed_in(client)
+        response = await client.post(
+            "/api/web-chat/chat",
+            headers=headers,
+            data=_upload_form(session_key="pending_session", client_request_id="answer_with_file_1", message=""),
+        )
+        assert response.status == 200, await response.text()
+        transcript = await (await client.get("/api/web-chat/sessions/pending_session/messages", headers=headers)).json()
+
+    assert gateway.sent_user_messages == []
+    # Files alone answer with the same text a request with files alone gets.
+    assert [reply["response_text"] for reply in gateway.replies_to_pending] == ["User sent attachment(s)."]
+    [[notes]] = gateway.answer_attachments
+    assert (notes.filename, notes.content_type) == ("notes.txt", "text/plain")
+    [answer_message] = [message for message in transcript["messages"] if message["role"] == "user"]
+    assert [item["attachment_id"] for item in answer_message["attachments"]] == [notes.attachment_id]
+    assert _saved_uploads(config, database) == (1, 1)
 
 
 @pytest.mark.asyncio

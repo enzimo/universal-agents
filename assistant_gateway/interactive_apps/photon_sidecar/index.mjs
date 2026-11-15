@@ -61,6 +61,7 @@ import crypto from "node:crypto";
 import { once } from "node:events";
 import { isSupportedNodeVersion } from "./spectrum-runtime.mjs";
 import { configureTrustStore } from "./trust-store.mjs";
+import { normalizeSpace } from "./inbound-space.mjs";
 
 const projectId = process.env.PHOTON_PROJECT_ID;
 const projectSecret = process.env.PHOTON_PROJECT_SECRET;
@@ -321,17 +322,11 @@ async function normalizeContent(content) {
 
 async function normalizeEvent(space, message) {
   try {
-    const msgSpace = message.space || {};
     const ts = message.timestamp;
     return {
       messageId: message.id ?? null,
       platform: message.platform || space.__platform || "imessage",
-      space: {
-        id: space.id ?? msgSpace.id ?? null,
-        // iMessage spaces carry `type` ("dm"|"group") and `phone` directly.
-        type: space.type ?? msgSpace.type ?? "dm",
-        phone: space.phone ?? msgSpace.phone ?? null,
-      },
+      space: normalizeSpace(space, message.space),
       sender: { id: message.sender ? message.sender.id : null },
       content: await normalizeContent(message.content),
       timestamp:

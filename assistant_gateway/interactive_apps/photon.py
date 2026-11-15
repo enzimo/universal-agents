@@ -53,6 +53,8 @@ PHOTON_SIDECAR_DIR = Path(__file__).resolve().parent / "photon_sidecar"
 PHOTON_SIDECAR_TOKEN_HEADER = "X-Universal-Agents-Sidecar-Token"
 MAX_DEDUPED_MESSAGE_IDS = 4096
 MAX_INBOUND_BACKOFF_SECONDS = 30.0
+# The sidecar's space type for a one-to-one chat (photon_sidecar/index.mjs).
+PHOTON_DM_SPACE_TYPE = "dm"
 # The only variables the Photon sidecar takes from the gateway's (or adapter
 # host's) environment. The sidecar is a third-party Node program, so it gets
 # none of that process's secrets (task-context signing key, broker token, other
@@ -524,6 +526,8 @@ class PhotonInteractiveApp(BaseInteractiveApp):
             message_id=message_id or None,
             activity_context=activity_context,
             attachments=attachments,
+            # Only a space the sidecar names a direct chat; missing is not private.
+            private_chat=_normalized_string(space.get("type")).lower() == PHOTON_DM_SPACE_TYPE,
         )
         if handled:
             return
@@ -571,6 +575,7 @@ class PhotonInteractiveApp(BaseInteractiveApp):
         message_id: Optional[str],
         activity_context: ActivityContext,
         attachments: list[UserTaskAttachment],
+        private_chat: bool,
     ) -> bool:
         if not text.startswith("/"):
             return False
@@ -587,6 +592,7 @@ class PhotonInteractiveApp(BaseInteractiveApp):
                     user_id=user_id,
                     chat_id=chat_id,
                     message_id=message_id,
+                    private_chat=private_chat,
                 ),
             )
         except TimeoutError:
@@ -607,6 +613,7 @@ class PhotonInteractiveApp(BaseInteractiveApp):
         user_id: str,
         chat_id: str,
         message_id: Optional[str],
+        private_chat: bool,
     ) -> Optional[ChannelOutboundMessage]:
         result = await self.application.execute_interactive_command(
             raw_text=raw_text,
@@ -616,6 +623,7 @@ class PhotonInteractiveApp(BaseInteractiveApp):
             thread_id=None,
             help_text=PHOTON_HELP_TEXT,
             enable_reply_command=False,
+            private_chat=private_chat,
         )
         if not result.handled:
             return None

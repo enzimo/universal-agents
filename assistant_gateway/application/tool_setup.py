@@ -373,7 +373,12 @@ class GatewayToolSetups:
                 created_at=self._clock.now_utc().isoformat(),
             )
         )
-        # The chat request now waits on this task's pages; its sibling pages may open too.
+        # For the request's own task, the chat request now waits on its pages;
+        # its sibling pages may open too. A delegated task's page changes neither
+        # the request's status nor its task: a request with a run state keeps its
+        # own task (update_request_coordination), so the person's guidance and
+        # its files stay on the request
+        # (tests/test_guidance_files_after_setup_page.py).
         self._requests.update_coordination(
             correlation_id, status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL, active_task_id=request_content.parent_task_id
         )

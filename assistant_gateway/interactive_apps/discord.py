@@ -515,6 +515,7 @@ class DiscordInteractiveApp(BaseInteractiveApp):
                         chat_id=chat_id,
                         thread_id=thread_id,
                         message_id=str(getattr(message, "id", "")),
+                        private_chat=_is_direct_message(message),
                     ),
                 )
             except TimeoutError:
@@ -530,6 +531,7 @@ class DiscordInteractiveApp(BaseInteractiveApp):
                 chat_id=chat_id,
                 thread_id=thread_id,
                 message_id=str(getattr(message, "id", "")),
+                private_chat=_is_direct_message(message),
             )
         if handled is not None:
             await self._send_outbound(handled)
@@ -728,6 +730,7 @@ class DiscordInteractiveApp(BaseInteractiveApp):
                     chat_id=chat_id,
                     thread_id=thread_id,
                     message_id=None,
+                    private_chat=_is_direct_interaction(interaction),
                 ),
             )
         except TimeoutError:
@@ -753,6 +756,7 @@ class DiscordInteractiveApp(BaseInteractiveApp):
         chat_id: str,
         thread_id: Optional[str],
         message_id: Optional[str],
+        private_chat: bool,
     ) -> Optional[ChannelOutboundMessage]:
         command = raw_text.strip()
         if not command.startswith("/"):
@@ -766,6 +770,7 @@ class DiscordInteractiveApp(BaseInteractiveApp):
             thread_id=thread_id,
             help_text=DISCORD_HELP_TEXT,
             enable_reply_command=False,
+            private_chat=private_chat,
         )
         if result.handled:
             return ChannelOutboundMessage(
@@ -1358,3 +1363,27 @@ class DiscordInteractiveApp(BaseInteractiveApp):
                 getattr(channel, "id", "-"),
                 exc_info=True,
             )
+
+
+# Absent attributes are unknown, and unknown is not private.
+_UNKNOWN = object()
+
+
+def _is_direct_message(message: object) -> bool:
+    """A Discord DM: a message that belongs to no server (``message.guild is None``)."""
+
+    return getattr(message, "guild", _UNKNOWN) is None
+
+
+def _is_direct_interaction(interaction: object) -> bool:
+    """A slash command run in a DM with the bot: no server, and not through a user install.
+
+    An app a person installed for themselves can run commands in DMs and
+    group DMs with other people, which also have no server; those are not
+    private (``is_user_integration``).
+    """
+
+    if getattr(interaction, "guild_id", _UNKNOWN) is not None:
+        return False
+    user_install = getattr(interaction, "is_user_integration", None)
+    return callable(user_install) and not user_install()

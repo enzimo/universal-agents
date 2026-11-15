@@ -5,8 +5,8 @@
 For a first installation, use the bundled image installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/enzimo/universal-agents/v0.9.11/install.sh -o ua-install.sh
-bash ua-install.sh --image ghcr.io/enzimo/universal-agents:0.9.11
+curl -fsSL https://raw.githubusercontent.com/enzimo/universal-agents/v0.9.13/install.sh -o ua-install.sh
+bash ua-install.sh --image ghcr.io/enzimo/universal-agents:0.9.13
 ```
 
 It publishes host port `18090` to container port `18090`, keeps
@@ -137,7 +137,7 @@ Photon iMessage requires Node.js 24.5 or newer. The Dockerfiles always include
 the small Photon sidecar source tree, but they install its npm dependencies only
 when Node.js is enabled with `--nodejs` / `INSTALL_NODEJS=true`. Browser
 onboarding disables the Photon setup option when a compatible Node.js runtime
-is absent. Maintained images install the official Node.js 24.20.0 archive for
+is absent. Maintained images install the official Node.js 24.22.3 archive for
 their architecture, verify its pinned SHA-256 checksum, and use Node's native
 WebSocket implementation for Spectrum's inbound Fusor stream.
 
@@ -239,7 +239,10 @@ docker run --rm -it \
 
 The default in-container instance root is `/data`. The host directory then
 contains `instance_config.yaml`, `team.env`, `control/`, `dbs/`, `state/`, and
-`workspaces/` ([Instance Folders](configuration.md#instance-folders)). An
+`workspaces/` ([Instance Folders](configuration.md#instance-folders)). Team
+exports an owner makes with `/upgrade` appear in its `exports/` folder, owned by
+whoever owns the host directory
+([Export from chat with /upgrade](team-transfer.md#export-from-chat-with-upgrade)). An
 instance created by an earlier version still has a `workspace/` folder; the
 container refuses to start until you run the move commands it prints.
 
@@ -250,7 +253,7 @@ time; if both are running, wait for one to finish before starting another.
 
 ### NATS 2.15 upgrades
 
-The container images and native installer include NATS Server 2.15.1. NATS
+The container images and native installer include NATS Server 2.15.3. NATS
 2.15 adds a default limit of 1,000 consumers per stream. A team uses several
 consumers per agent, and object-store watchers use consumers too. Existing
 stream configuration may still report `max_consumers: -1` while the server

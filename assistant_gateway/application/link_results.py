@@ -1,10 +1,11 @@
-"""Tell a person how a page they opened with ``/link`` or ``/auth ... team_client`` ended.
+"""Tell a person how a page they opened with ``/link``, ``/auth ... team_client`` or ``/upgrade`` ended.
 
 ``/link`` opens one of the secure broker's pages for the person who typed it:
 an account link form (``http:*``, ``mcp:*``, ``cli:huggingface``, and
 ``cli:x team``) or a sign-in page (``cli:github``, ``cli:google``,
 ``cli:x``). ``/auth google team_client`` and ``/auth x team_client`` open the
-page that stores the team's sign-in app. The page finishes in the person's
+page that stores the team's sign-in app. ``/upgrade`` opens the team export
+page (``team_exports`` says what its message holds). The page finishes in the person's
 browser, so the gateway watches it with the shared broker watcher
 (``broker_session_watch``) and posts one plain message in the chat session
 where the command ran, through the gateway's normal delivery path
@@ -51,6 +52,7 @@ from assistant_gateway.application.broker_session_watch import (
 )
 from assistant_gateway.application.broker_sign_in import BrokerSignInPage
 from assistant_gateway.application.gateway_application import GatewayDeliveryEvent
+from assistant_gateway.application.team_exports import team_export_result_text, team_export_status_is_final
 from assistant_gateway.application.ports import (
     GatewayClock,
     GatewayEventOutput,
@@ -74,6 +76,7 @@ SIGN_IN_NO_ACCESS_NOTE = "Signing in gives nobody access by itself."
 # Page kinds in logs.
 _PAGE_ACCOUNT_LINK = "account_link"
 _PAGE_SIGN_IN = "sign_in"
+_PAGE_TEAM_EXPORT = "team_export"
 
 
 @dataclass(frozen=True)
@@ -130,6 +133,9 @@ class GatewayLinkResultWatches(Protocol):
         team_app: bool = False,
     ) -> None:
         """Watch one sign-in page (or, with ``team_app``, a team sign-in app page) until it ends."""
+
+    def watch_team_export(self, *, page: BrokerSignInPage, target: LinkResultTarget) -> None:
+        """Watch one ``/upgrade`` export page until its export ends or the page closes."""
 
 
 def _sentence(text: str) -> str:
@@ -304,6 +310,25 @@ class GatewayLinkResults:
                 page, restart_command, target, tool_id, TOOL_SETUP_TEAM_SIGN_IN_APP if team_app else TOOL_SETUP_SIGN_IN
             ),
             name=f"gateway_link_sign_in_result_{target.correlation_id[:24]}",
+        )
+
+    def watch_team_export(self, *, page: BrokerSignInPage, target: LinkResultTarget) -> None:
+        self._watches.start(
+            self._finish_team_export(page, target),
+            name=f"gateway_team_export_result_{target.correlation_id[:24]}",
+        )
+
+    async def _finish_team_export(self, page: BrokerSignInPage, target: LinkResultTarget) -> None:
+        outcome = await watch_broker_session(
+            read_status=lambda: self._broker.get_sign_in_status(status_url=page.status_url),
+            is_final=team_export_status_is_final,
+            deadline=watch_deadline(page.expires_at_utc),
+            clock=self._clock,
+            poll_interval_seconds=self._poll_interval_seconds,
+            on_read_failed=lambda error: self._log_read_failed(_PAGE_TEAM_EXPORT, target, error),
+        )
+        await self._post(
+            target, team_export_result_text(outcome), page=_PAGE_TEAM_EXPORT, outcome=outcome, owner="team"
         )
 
     async def _finish_account_link(

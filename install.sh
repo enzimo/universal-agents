@@ -8,7 +8,7 @@ readonly DEFAULT_WEB_PORT="18090"
 readonly DEFAULT_BROKER_PORT="18600"
 readonly DEFAULT_BIND_HOST="127.0.0.1"
 readonly DEFAULT_BRANCH="main"
-readonly DEFAULT_NATS_VERSION="v2.15.1"
+readonly DEFAULT_NATS_VERSION="v2.15.3"
 
 mode="docker"
 image="${UA_IMAGE:-$DEFAULT_IMAGE}"
@@ -289,10 +289,10 @@ install_native_nats() {
   esac
   platform="$os_name-$arch_name"
   case "$platform" in
-    darwin-amd64) archive_sha256="3cba5976a4fbd022669d3401cab4147faeb2b4c079712c882edb9ae4e52feb06" ;;
-    darwin-arm64) archive_sha256="ed0fe39222ec2e317c4d0e1a9cdc16c63ec523d94f9355d24a902a4db2655ffd" ;;
-    linux-amd64) archive_sha256="bf5edc7b1ce98e885c368cb43a886eb148dc5d0551d99f3cf6141fb5e1954c70" ;;
-    linux-arm64) archive_sha256="e2fbab4cad7d3c76e3052eb959570393c9d73ba756b70bf8e9eea61e9ae6d49c" ;;
+    darwin-amd64) archive_sha256="d274cfb9d6e26ffbb04007bfe744d46a8b4f4e5d218741f8ee89aa687c658bc1" ;;
+    darwin-arm64) archive_sha256="a7e25e32247024449e32dcb7129ff416dca3a2cd569fe3c205603ecf8fe5f810" ;;
+    linux-amd64) archive_sha256="32e18c1e78d7ef4f86e483070eef3abb2647c3d4d67e29668077c7ad81da0797" ;;
+    linux-arm64) archive_sha256="4a2088b3ec7103bf79d6484f55e80ab5d10204811d9ae6f7a33e8544d98dd45d" ;;
     *) die "No pinned NATS checksum is available for $platform" ;;
   esac
   archive="nats-server-${DEFAULT_NATS_VERSION}-${platform}.tar.gz"

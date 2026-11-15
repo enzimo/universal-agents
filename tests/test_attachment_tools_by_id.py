@@ -1,651 +1,624 @@
-"""The attachment tools open a file the person sent by its id, within what the task may use.
+"""The attachment tools open a person's uploads by id, only within the task's scope.
 
-``inspect_user_attachment`` and ``load_local_media_for_model_context`` find an
-id through ``custom_tools.attachment_uploads``: the current request's files and
-the files sent while it ran, and for the team lead's own request the files of
-its conversation's earlier turns. These tests run the tools the way the agent
-calls them (through Strands' input validation) on a real task manager and a
-real SQLite conversation store, with the person taken from a gateway-signed
-task context. tests/test_conversation_attachment_followup.py covers the
-reported case (a photo opened in the next turn, as an image block).
+``inspect_user_attachment`` and ``load_local_media_for_model_context`` with an
+``attachment_id``, through the real admission path, real SQLite task and
+conversation stores and the gateway's own upload storage, for Ann's team lead
+(signed task context). Covers:
 
-Upload retention, a history clean-up or a person's removal delete uploads
-from the gateway's process at any moment; the race tests change the stored
-file right after the real ``upload_by_id`` found it, before the tool reads it.
+- a follow-up turn inspects, copies and loads files from an earlier turn by
+  id, and no result shows where an upload is stored;
+- the media tool uses the upload's recorded type and file name, so a file
+  whose name has no suffix still loads as an image, and names each document
+  after its file and id, so two uploads with one name do not repeat a name;
+- a deleted upload gives ``upload_unavailable`` asking for the file again,
+  also when it is deleted after it was found and before it is read;
+- an upload that cannot be opened safely is not read, and the error does not
+  say where it is stored; a failed copy into the task's folder says why;
+- an upload this host cannot check (a link loop, no permission) gives
+  ``upload_unavailable`` without its location, logged with the ids;
+- a copy made before the upload is deleted is inspected and reported, and an
+  error reading the copy keeps its ``workspace_path``;
+- a workspace path that is missing or a folder is a plain error, not
+  ``remote_copy_required``, and ``remote_copy_required`` names a next step an
+  agent can take;
+- an id outside the task's scope gives ``unknown_attachment_id`` with the
+  files it may use: work for another person in Ann's conversation, Ann's
+  other conversation, and a delegated task, which opens only the files its
+  delegation gave it;
+- a record pointing outside the upload folders is refused by both tools;
+- an id from a turn saved before files were recorded says so;
+- an answer's files open by id after a restart without a conversation store;
+- the media tool takes exactly one of path and id, and checks the model and
+  the size before reading an upload.
 """
 
 from __future__ import annotations
 
-import errno
-import json
 import logging
 import os
-import shutil
+import re
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
+import pytest_asyncio
 
-import custom_tools.attachment_uploads as attachment_uploads
-import custom_tools.local_media_context_tool as media_tool_module
-import custom_tools.user_attachment_tools as inspection_tool_module
-from custom_agents.conversation_store import ConversationStore
-from custom_agents.task_manager import TaskManager
-from custom_agents.task_steering_runtime import _record_guidance_history
+from access_control import safe_open
+from access_control.identity import ENV_VERIFY_KEYS
+from assistant_gateway.inbound_attachments import (
+    InboundAttachmentStoragePolicy,
+    store_inbound_attachment_bytes_with_policy,
+)
+from custom_agents import task_message_runtime, task_steering_runtime
+from custom_agents.conversation_attachments import UPLOAD_NO_LOCAL_COPY, UnavailableUpload
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
-from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
-from custom_messages.contracts.runtime_snapshot_v3 import PlanStepTaskLink
-from custom_messages.contracts.task_v1 import Task, TaskSteering
-from custom_messages.enums import MessageMetaType, RequesterType, TaskSteeringType
+from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.task_v1 import Task
+from custom_messages.enums import MessageMetaType, TaskSteeringType
+from custom_tools import file_access, task_uploads
 from custom_tools.local_media_context_tool import load_local_media_for_model_context
-from custom_tools.runtime_context import _agent_ctx
+from custom_tools.task_uploads import (
+    RESULT_REFUSED,
+    RESULT_UNKNOWN_ATTACHMENT,
+    RESULT_UPLOAD_UNAVAILABLE,
+)
+from custom_tools import user_attachment_tools
 from custom_tools.user_attachment_tools import inspect_user_attachment
+from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_signer
-from tests.change_approval_support import use_signed_contexts
-from tests.task_work_support import set_agent_ref
+from tests.broker_access_support import context_verify_keys, forget_task_context_keys
+from tests.task_work_support import use_agent
+from tests.test_conversation_attachments import saved_before_upgrade
+from tests.test_conversation_attachments_regression import ANN, CONVERSATION, SESSION, _admit, _answer, _lead, _payload
+from tests.test_turn_files_recording import _send, _steering
 
-TEAM = "team_files_by_id"
-PERSON = "alice"
-OTHER_PERSON = "bob"
-LEAD_ID = "lead_files"
-CONVERSATION = "conv_alice"
-ROOT = "task_turn_2"
-NOTES = b"line one\nline two\n"
-PNG = b"\x89PNG\r\n\x1a\nimage-bytes"
+pytestmark = pytest.mark.integration
+
+FIRST, FOLLOW_UP = "task_first", "task_follow_up"
+BOB = "usr_bob"
+PHOTO_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(32))
+CSV_TEXT = "plant,water\nfig,weekly\n"
+PDF_BYTES = b"%PDF-1.4\nnot a real pdf\n"
+TOOLS_LOGGER = "custom_tools.task_uploads"
 
 
 @pytest.fixture(autouse=True)
-def _signed_contexts(monkeypatch: pytest.MonkeyPatch):
-    use_signed_contexts(monkeypatch)
-    _agent_ctx.set(None)
+def _verify_keys(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
+    forget_task_context_keys()
     yield
-    _agent_ctx.set(None)
+    forget_task_context_keys()
 
 
-def _meta(conversation_id: str | None, person_id: str = PERSON) -> MessageMeta:
-    # The person comes only from the gateway-signed task context.
-    signed = context_signer().issue(team_id=TEAM, person_id=person_id, person_roles=("member",))
-    return MessageMeta(
-        conversation_id=conversation_id,
-        requester_type=RequesterType.USER_REQUESTER,
-        gateway_context=GatewayContext(canonical_user_id=person_id, task_context=signed),
-    )
+@pytest.fixture(autouse=True)
+def _quiet_runtime(monkeypatch: pytest.MonkeyPatch):
+    # Each test plays the turns itself: no queue drain, and steering statuses are not published.
+    monkeypatch.setattr(task_message_runtime, "schedule_pending_work", lambda _agent: None)
+    monkeypatch.setattr(task_steering_runtime, "schedule_pending_work", lambda _agent: None)
 
+    async def no_status(*_args, **_kwargs):
+        return None
 
-class _Instance:
-    """One instance's uploads, conversation store and the team lead's task manager."""
-
-    def __init__(self, tmp_path: Path) -> None:
-        self.layout = InstanceLayout.at(tmp_path / "instance")
-        self.layout.ensure_directories()
-        self.store = ConversationStore(
-            db_path=str(self.layout.root / "conversations.db"), artifacts_dir=self.layout.conversation_artifacts_dir
-        )
-        self.manager = TaskManager(db_path=str(self.layout.root / "tasks.db"))
-        self.manager.set_owner_identity(LEAD_ID, "TeamLead", TEAM, "TeamArchitect")
-
-    def file(
-        self, attachment_id: str, filename: str, data: bytes = PNG, *, content_type: str = "image/png", kind: str = "image"
-    ) -> UserTaskAttachment:
-        path = self.layout.uploads_dir / "session_alice" / attachment_id
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        return UserTaskAttachment(
-            attachment_id=attachment_id,
-            filename=filename,
-            content_type=content_type,
-            kind=kind,  # type: ignore[arg-type]
-            size_bytes=len(data),
-            sha256="ab" * 32,
-            storage_refs=[AttachmentStorageRef(storage_type="local", path=str(path))],
-        )
-
-    def turn(
-        self, task_id: str, files: list[UserTaskAttachment], *, conversation_id: str = CONVERSATION, person: str = PERSON
-    ) -> None:
-        self.store.ensure_thread(
-            conversation_id=conversation_id,
-            team_id=TEAM,
-            owner_canonical_user_id=person,
-            owner_agent_id=LEAD_ID,
-            owner_agent_name="TeamLead",
-            requester_name=person,
-            requester_id=person,
-            root_task_id=task_id,
-        )
-        self.store.append_turn(
-            conversation_id=conversation_id,
-            task_id=task_id,
-            followup_to_task_id=None,
-            owner_agent_id=LEAD_ID,
-            requester_name=person,
-            requester_id=person,
-            correlation_id=f"corr_{task_id}",
-            problem_text=f"Request {task_id}",
-            owner_canonical_user_id=person,
-            attachments=[file.model_dump(mode="json") for file in files],
-        )
-
-    def task(
-        self,
-        task_id: str,
-        *,
-        files: list[UserTaskAttachment] | None = None,
-        conversation_id: str | None = CONVERSATION,
-        parent_task_id: str | None = None,
-    ) -> None:
-        task = Task(
-            task_id=task_id,
-            task_type=MessageMetaType.REQUEST,
-            problem_statement=f"Request {task_id}",
-            parent_task_id=parent_task_id,
-            attachments=files or [],
-        )
-        header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway", agent_signature="")
-        assert self.manager.add_task(task, header, _meta(conversation_id), owner_person_id=PERSON)
-
-    def use(self, task_id: str, *, is_team_lead: bool = True, supports_image_input: bool = True) -> None:
-        """Run the following tool calls as this instance's agent, in the turn of ``task_id``."""
-
-        set_agent_ref(
-            SimpleNamespace(
-                id=LEAD_ID,
-                team_id=TEAM,
-                is_team_lead=is_team_lead,
-                authorization_config={"enabled": False},
-                task_manager=self.manager,
-                _conversation_store=self.store,
-                instance_root=str(self.layout.root),
-                workspace_dir=str(self.layout.workspaces_dir),
-                supports_image_input=supports_image_input,
-                supports_file_input=True,
-                test_task_id=task_id,
-            )
-        )
+    monkeypatch.setattr(task_steering_runtime, "_send_steering_status_response", no_status)
 
 
 @pytest.fixture
-def instance(tmp_path: Path) -> _Instance:
-    """Turn 1 sent notes and a photo; turn 2 (``ROOT``, running) sent a list."""
-
-    instance = _Instance(tmp_path)
-    earlier = [
-        instance.file("att_notes", "notes.txt", NOTES, content_type="text/plain", kind="document"),
-        instance.file("att_photo", "photo.png"),
-    ]
-    instance.turn("task_turn_1", earlier)
-    current = [instance.file("att_list", "list.png")]
-    instance.turn(ROOT, current)
-    instance.task(ROOT, files=current)
-    return instance
+def layout(tmp_path: Path) -> InstanceLayout:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    layout.ensure_directories()
+    return layout
 
 
-async def _call(tool: Any, tool_input: dict[str, Any]) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
-    """Run a tool the way the agent does; its status, its JSON text block and its other blocks."""
+def _stored(layout: InstanceLayout, name: str, data: bytes, content_type: str) -> UserTaskAttachment:
+    """A file the gateway stored for Ann's session, with its record."""
 
-    result = None
-    async for event in tool.stream({"toolUseId": "call-1", "name": tool.tool_name, "input": tool_input}, {}):
-        result = event
-    assert result is not None
-    content = result.tool_result["content"]
-    return result.tool_result["status"], json.loads(content[0]["text"]), content[1:]
-
-
-def _ids(listed: list[dict[str, Any]]) -> list[str]:
-    return [item["attachment_id"] for item in listed]
-
-
-@pytest.mark.asyncio
-async def test_an_earlier_file_is_opened_by_id_without_showing_where_it_is_stored(instance: _Instance) -> None:
-    instance.use(ROOT)
-
-    status, inspected, _ = await _call(inspect_user_attachment, {"attachment_id": "att_notes"})
-    copied_status, copied, _ = await _call(
-        inspect_user_attachment, {"attachment_id": "att_notes", "copy_to_workspace": True}
-    )
-    image_status, image_label, image_blocks = await _call(load_local_media_for_model_context, {"attachment_id": "att_photo"})
-    document_status, document_label, document_blocks = await _call(
-        load_local_media_for_model_context, {"attachment_id": "att_notes", "purpose": "Read the notes."}
-    )
-
-    assert status == "success"
-    assert inspected["attachment"] == {
-        "attachment_id": "att_notes",
-        "filename": "notes.txt",
-        "content_type": "text/plain",
-        "kind": "document",
-        "size_bytes": len(NOTES),
-        "turn_index": 1,
-    }
-    assert [line["text"] for line in inspected["inspection"]["lines"]] == ["line one", "line two"]
-    assert "local_path" not in inspected
-    # A copy in the person's own folder, for shell or Python.
-    assert copied_status == "success"
-    assert Path(copied["workspace_path"]).read_bytes() == NOTES
-    assert copied["workspace_path"].startswith(str(instance.layout.person_dir(PERSON)))
-    assert (image_status, image_blocks) == ("success", [{"image": {"format": "png", "source": {"bytes": PNG}}}])
-    assert (image_label["attachment_id"], image_label["filename"], image_label["media_kind"]) == (
-        "att_photo",
-        "photo.png",
-        "image",
-    )
-    assert document_status == "success" and document_label["purpose"] == "Read the notes."
-    assert document_blocks == [{"document": {"format": "txt", "name": "notes", "source": {"bytes": NOTES}}}]
-    for result in (inspected, image_label, document_label):
-        assert "path" not in result and str(instance.layout.uploads_dir) not in json.dumps(result)
-
-
-@pytest.mark.asyncio
-async def test_an_id_the_task_may_not_use_is_not_found_and_lists_the_files_it_may_use(instance: _Instance) -> None:
-    # The same person's other conversation, and another person's.
-    instance.turn("task_elsewhere", [instance.file("att_elsewhere", "elsewhere.png")], conversation_id="conv_alice_2")
-    instance.turn("task_bob", [instance.file("att_bob", "bob.png")], conversation_id="conv_bob", person=OTHER_PERSON)
-    instance.use(ROOT)
-
-    for attachment_id in ("att_elsewhere", "att_bob", "../att_notes", "att_unknown"):
-        for tool in (inspect_user_attachment, load_local_media_for_model_context):
-            status, payload, blocks = await _call(tool, {"attachment_id": attachment_id})
-
-            assert (status, blocks) == ("error", [])
-            assert payload["error"].startswith("No file with this attachment_id was sent")
-            # The request's files, then the earlier ones, never another conversation's.
-            assert _ids(payload["available_attachments"]) == ["att_list", "att_photo", "att_notes"]
-            assert payload["available_attachments"][1]["turn_index"] == 1
-            assert "storage_refs" not in json.dumps(payload) and str(instance.layout.root) not in json.dumps(payload)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("signed_for", [OTHER_PERSON, None])
-async def test_a_request_not_signed_for_the_conversations_person_cannot_open_its_earlier_files(
-    instance: _Instance, signed_for: str | None
-) -> None:
-    """The person comes from the signed task context, never from the gateway context's ``canonical_user_id``."""
-
-    current = instance.file("att_new", "new.png")
-    instance.turn("task_turn_3", [current])
-    signed = context_signer().issue(team_id=TEAM, person_id=signed_for, person_roles=("member",)) if signed_for else None
-    meta = MessageMeta(
+    return store_inbound_attachment_bytes_with_policy(
+        data=data,
+        filename=name,
+        content_type=content_type,
+        policy=InboundAttachmentStoragePolicy(cache_dir=layout.uploads_dir),
+        session_key=SESSION,
         conversation_id=CONVERSATION,
-        requester_type=RequesterType.USER_REQUESTER,
-        gateway_context=GatewayContext(canonical_user_id=PERSON, task_context=signed),
-    )
-    task = Task(task_id="task_turn_3", task_type=MessageMetaType.REQUEST, problem_statement="Again.", attachments=[current])
-    header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway", agent_signature="")
-    assert instance.manager.add_task(task, header, meta, owner_person_id=signed_for)
-    instance.use("task_turn_3")
-
-    for tool in (inspect_user_attachment, load_local_media_for_model_context):
-        status, payload, blocks = await _call(tool, {"attachment_id": "att_photo"})
-
-        assert (status, blocks) == ("error", [])
-        assert payload["error"].startswith("No file with this attachment_id was sent")
-        # Only the request's own file: the conversation's earlier files are not offered.
-        assert _ids(payload["available_attachments"]) == ["att_new"]
-    status, _payload, _ = await _call(inspect_user_attachment, {"attachment_id": "att_new"})
-    assert status == "success"
+        origin="web_chat",
+    ).attachment
 
 
-@pytest.mark.asyncio
-async def test_the_files_offered_when_an_id_is_not_found_are_bounded(instance: _Instance) -> None:
-    # A newer turn of the conversation (another request) with 25 files.
-    instance.turn("task_turn_3", [instance.file(f"att_new_{index:02d}", f"new_{index}.png") for index in range(25)])
-    instance.use(ROOT)
+@pytest_asyncio.fixture
+async def earlier(tmp_path: Path, layout: InstanceLayout) -> dict[str, Any]:
+    """Turn 1 received a photo, a CSV and a PDF; turn 2 (no files) runs in a restarted lead."""
 
-    _status, payload, _ = await _call(inspect_user_attachment, {"attachment_id": "att_unknown"})
-
-    # The request's own file first, then the newest of the others.
-    assert _ids(payload["available_attachments"]) == ["att_list"] + [f"att_new_{index:02d}" for index in range(24, 5, -1)]
-
-
-@pytest.mark.asyncio
-async def test_a_removed_upload_says_it_is_no_longer_stored(instance: _Instance) -> None:
-    (instance.layout.uploads_dir / "session_alice" / "att_photo").unlink()
-    instance.use(ROOT)
-
-    for tool in (inspect_user_attachment, load_local_media_for_model_context):
-        status, payload, blocks = await _call(tool, {"attachment_id": "att_photo"})
-
-        assert (status, blocks) == ("error", [])
-        assert "no longer stored" in payload["error"] and "send it again" in payload["error"]
-        assert payload["attachment"]["attachment_id"] == "att_photo" and "storage_refs" not in payload["attachment"]
+    files = {
+        "photo": _stored(layout, "garden plant.png", PHOTO_BYTES, "image/png"),
+        "csv": _stored(layout, "watering.csv", CSV_TEXT.encode(), "text/csv"),
+        "pdf": _stored(layout, "Care Guide.pdf", PDF_BYTES, "application/pdf"),
+    }
+    first_lead = _lead(tmp_path, layout)
+    await _admit(first_lead, task_id=FIRST, text="Here are my plant files.", attachments=list(files.values()))
+    await _answer(first_lead, FIRST, "Thanks, I have them.")
+    lead = _lead(tmp_path, layout)
+    await _admit(lead, task_id=FOLLOW_UP, text="How often should I water it?", attachments=[])
+    use_agent(lead, FOLLOW_UP)
+    return {"lead": lead, "layout": layout, **files}
 
 
-# The tool calls that read or copy a file the person sent.
-_READS: dict[str, tuple[Any, dict[str, Any]]] = {
-    "image": (load_local_media_for_model_context, {"attachment_id": "att_photo"}),
-    "document": (load_local_media_for_model_context, {"attachment_id": "att_notes"}),
-    "inspection": (inspect_user_attachment, {"attachment_id": "att_notes"}),
-    "copy": (inspect_user_attachment, {"attachment_id": "att_notes", "copy_to_workspace": True}),
-}
+def _inspect(attachment_id: str, **kwargs: Any) -> dict[str, Any]:
+    return inspect_user_attachment._tool_func(attachment_id=attachment_id, **kwargs)
 
 
-def _change_after_check(monkeypatch: pytest.MonkeyPatch, change: Callable[[Path], None]) -> None:
-    """Run ``change`` on the stored file right after the real ``upload_by_id`` found it."""
-
-    found_by_id = attachment_uploads.upload_by_id
-
-    def racing(attachment_id: str) -> Any:
-        found = found_by_id(attachment_id)
-        assert not isinstance(found, dict)
-        change(found.path)
-        return found
-
-    for module in (media_tool_module, inspection_tool_module):
-        monkeypatch.setattr(module, "upload_by_id", racing)
+def _load(attachment_id: str = "", **kwargs: Any) -> dict[str, Any]:
+    return load_local_media_for_model_context._tool_func(attachment_id=attachment_id, **kwargs)
 
 
-def _replace_with_folder(path: Path) -> None:
-    path.unlink()
-    path.mkdir()
+def _texts(result: dict[str, Any]) -> str:
+    return "\n".join(block.get("text", "") for block in result["content"] if "text" in block)
 
 
-def _assert_names_no_storage(instance: _Instance, payload: dict[str, Any]) -> None:
-    shown = json.dumps(payload)
-    assert str(instance.layout.root) not in shown and "session_alice" not in shown and "storage_refs" not in shown
+def _no_storage_details(result: dict[str, Any], layout: InstanceLayout) -> None:
+    """No path into ``state/`` (which holds the upload folder) and no storage field reaches the model."""
+
+    text = _texts(result)
+    assert str(layout.state_dir) not in text and str(layout.uploads_dir) not in text
+    assert "storage_refs" not in text and "local_path" not in text
 
 
-def _files_in_person_folder(instance: _Instance) -> list[Path]:
-    """Every file in the person's folder (a copy, or a temporary one left behind)."""
+def _unknown(result: dict[str, Any], attachment_id: str) -> list[str]:
+    """The ids an ``unknown_attachment_id`` result offers instead of ``attachment_id``."""
 
-    return [path for path in instance.layout.person_dir(PERSON).rglob("*") if path.is_file()]
+    assert result["status"] == "error", result
+    payload = _payload(result)
+    assert (payload["result"], payload["attachment_id"]) == (RESULT_UNKNOWN_ATTACHMENT, attachment_id)
+    return [item["attachment_id"] for item in payload["available_attachments"]]
+
+
+# --- A follow-up turn opens earlier files ---------------------------------------------------------
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("call", sorted(_READS))
-async def test_an_upload_removed_after_it_was_found_says_it_is_no_longer_stored(
-    instance: _Instance, monkeypatch: pytest.MonkeyPatch, call: str
+async def test_a_follow_up_inspects_and_copies_an_earlier_text_file_by_id(earlier) -> None:
+    csv: UserTaskAttachment = earlier["csv"]
+
+    result = _inspect(csv.attachment_id, copy_to_workspace=True)
+
+    assert result["status"] == "success", result
+    payload = _payload(result)
+    assert payload["attachment"]["filename"] == "watering.csv"
+    assert payload["attachment"]["sha256"] == csv.sha256
+    assert [line["text"] for line in payload["inspection"]["lines"]] == ["plant,water", "fig,weekly"]
+    # The copy is in Ann's own folder, where shell and Python can process it.
+    copy = Path(payload["workspace_path"])
+    assert copy.is_relative_to(earlier["layout"].person_dir(ANN))
+    assert copy.read_text(encoding="utf-8") == CSV_TEXT
+    _no_storage_details(result, earlier["layout"])
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_loads_an_earlier_pdf_as_a_document_named_after_its_file(earlier) -> None:
+    earlier["lead"].supports_file_input = True
+
+    result = _load(earlier["pdf"].attachment_id, purpose="Read the care guide.")
+
+    assert result["status"] == "success", result
+    label, block = result["content"]
+    pdf_id = earlier["pdf"].attachment_id
+    name = "Care Guide (" + pdf_id.replace("_", "-") + ")"
+    assert block == {"document": {"format": "pdf", "name": name, "source": {"bytes": PDF_BYTES}}}
+    metadata = _payload({"content": [label]})
+    assert (metadata["attachment_id"], metadata["filename"]) == (pdf_id, "Care Guide.pdf")
+    assert metadata["content_type"] == "application/pdf"
+    _no_storage_details(result, earlier["layout"])
+
+
+@pytest.mark.asyncio
+async def test_two_uploads_with_the_same_file_name_load_as_documents_with_different_names(
+    tmp_path: Path, layout: InstanceLayout
 ) -> None:
-    _change_after_check(monkeypatch, Path.unlink)
-    instance.use(ROOT)
-    tool, tool_input = _READS[call]
+    """Bedrock refuses a request in which two document blocks share a name, compared without regard to case."""
 
-    status, payload, blocks = await _call(tool, tool_input)
+    lead = _lead(tmp_path, layout)
+    lead.supports_file_input = True
+    first = _stored(layout, "invoice.pdf", PDF_BYTES, "application/pdf")
+    corrected = _stored(layout, "Invoice (final) v2_draft #3.PDF", PDF_BYTES + b"corrected", "application/pdf")
+    await _admit(lead, task_id=FIRST, text="Compare these invoices.", attachments=[first, corrected])
+    use_agent(lead, FIRST)
 
-    assert (status, blocks) == ("error", [])
-    assert "no longer stored" in payload["error"] and "send it again" in payload["error"]
-    assert payload["attachment"]["attachment_id"] == tool_input["attachment_id"]
-    _assert_names_no_storage(instance, payload)
-    assert _files_in_person_folder(instance) == []
+    names = [_load(item.attachment_id)["content"][1]["document"]["name"] for item in (first, corrected)]
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("call", sorted(_READS))
-async def test_an_upload_that_cannot_be_read_gives_a_fixed_message_and_logs_no_path(
-    instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, call: str
-) -> None:
-    _change_after_check(monkeypatch, _replace_with_folder)  # opening it raises IsADirectoryError
-    instance.use(ROOT)
-    tool, tool_input = _READS[call]
-
-    with caplog.at_level(logging.INFO, logger="custom_tools.attachment_uploads"):
-        status, payload, blocks = await _call(tool, tool_input)
-
-    assert (status, blocks) == ("error", [])
-    assert payload["error"].startswith("This file could not be read.") and "send it again" in payload["error"]
-    assert payload["attachment"]["attachment_id"] == tool_input["attachment_id"]
-    _assert_names_no_storage(instance, payload)
-    assert _files_in_person_folder(instance) == []
-    [logged] = [record for record in caplog.records if "event=attachment_upload_unreadable" in record.getMessage()]
-    assert logged.levelno == logging.WARNING
-    assert f"task_id={ROOT} attachment_id={tool_input['attachment_id']} error_type=IsADirectoryError" in (
-        logged.getMessage()
-    )
-    assert str(instance.layout.root) not in logged.getMessage() and "session_alice" not in logged.getMessage()
-
-
-
-def _lookup_fails(monkeypatch: pytest.MonkeyPatch, path: Path, error: OSError) -> None:
-    """Looking up the stored file raises ``error``, as a permission or disk fault would; other paths are untouched."""
-
-    real_stat = os.stat
-    target = os.path.realpath(path)
-
-    def failing_stat(value: Any, *args: Any, **kwargs: Any) -> Any:
-        if os.fspath(value) == target:
-            raise error
-        return real_stat(value, *args, **kwargs)
-
-    monkeypatch.setattr(os, "stat", failing_stat)
+    # The gateway saved the second name as "Invoice _final_ v2_draft _3.PDF" (sanitize_attachment_filename).
+    assert names == [
+        "invoice (" + first.attachment_id.replace("_", "-") + ")",
+        "Invoice final v2 draft 3 (" + corrected.attachment_id.replace("_", "-") + ")",
+    ]
+    assert len({name.casefold() for name in names}) == 2
+    # Only letters, digits, single spaces, hyphens, parentheses and square brackets.
+    assert all(re.fullmatch(r"[A-Za-z0-9()\[\]-]+( [A-Za-z0-9()\[\]-]+)*", name) for name in names)
 
 
 @pytest.mark.asyncio
-# A permission fault, a disk fault, and a file where the upload's folder should
-# be (no removal leaves that, so it is a fault, not a deletion).
-@pytest.mark.parametrize("fault", [errno.EACCES, errno.EIO, errno.ENOTDIR])
-@pytest.mark.parametrize("tool", [inspect_user_attachment, load_local_media_for_model_context])
-async def test_a_stored_file_that_cannot_be_looked_up_gives_a_fixed_message_and_logs_no_path(
-    instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fault: int, tool: Any
-) -> None:
-    error = OSError(fault, os.strerror(fault))  # PermissionError, OSError, NotADirectoryError
-    _lookup_fails(monkeypatch, instance.layout.uploads_dir / "session_alice" / "att_photo", error)
-    instance.use(ROOT)
+async def test_an_upload_without_a_file_suffix_loads_by_its_recorded_type(tmp_path: Path, layout: InstanceLayout) -> None:
+    lead = _lead(tmp_path, layout)
+    # The stored file is named after the id plus the name's suffix, here none, so only the record knows its type.
+    photo = _stored(layout, "photo from phone", PHOTO_BYTES, "image/png")
+    await _admit(lead, task_id=FIRST, text="What is this?", attachments=[photo])
+    use_agent(lead, FIRST)
+
+    result = _load(photo.attachment_id)
+
+    assert result["status"] == "success", result
+    assert result["content"][1] == {"image": {"format": "png", "source": {"bytes": PHOTO_BYTES}}}
+    assert _payload(result)["content_type"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_upload_asks_for_the_file_again_from_both_tools(earlier, caplog) -> None:
+    photo: UserTaskAttachment = earlier["photo"]
+    Path(photo.local_path()).unlink()
 
     with caplog.at_level(logging.INFO):
-        status, payload, blocks = await _call(tool, {"attachment_id": "att_photo"})
+        results = [_inspect(photo.attachment_id), _load(photo.attachment_id)]
 
-    # Not "no longer stored": the file is there, so the person need not resend it yet.
-    assert (status, blocks) == ("error", [])
-    assert payload["error"].startswith("This file could not be read.") and "no longer stored" not in payload["error"]
-    assert payload["attachment"]["attachment_id"] == "att_photo"
-    _assert_names_no_storage(instance, payload)
-    [logged] = [record for record in caplog.records if "event=attachment_upload_unreadable" in record.getMessage()]
-    assert logged.levelno == logging.WARNING
-    assert f"task_id={ROOT} attachment_id=att_photo error_type={type(error).__name__} errno={fault}" in (
-        logged.getMessage()
-    )
-    assert str(instance.layout.root) not in caplog.text and "session_alice" not in caplog.text
+    for result in results:
+        assert result["status"] == "error", result
+        payload = _payload(result)
+        assert payload["result"] == RESULT_UPLOAD_UNAVAILABLE
+        assert "send it again" in payload["error"]
+        assert payload["attachment"]["attachment_id"] == photo.attachment_id
+        _no_storage_details(result, earlier["layout"])
+    assert f"event=attachment_upload_missing attachment_id={photo.attachment_id} task_id={FOLLOW_UP}" in caplog.text
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", [inspect_user_attachment, load_local_media_for_model_context])
-async def test_an_upload_whose_folder_is_gone_says_it_is_no_longer_stored(instance: _Instance, tool: Any) -> None:
-    # A clean-up or a person's removal deleted the whole session folder.
-    shutil.rmtree(instance.layout.uploads_dir / "session_alice")
-    instance.use(ROOT)
-
-    status, payload, blocks = await _call(tool, {"attachment_id": "att_photo"})
-
-    assert (status, blocks) == ("error", [])
-    assert "no longer stored" in payload["error"] and "send it again" in payload["error"]
-    _assert_names_no_storage(instance, payload)
-
-class _FailsAfterFirstRead:
-    """An upload's reader whose second read fails, as a disk error part way through a copy would."""
-
-    def __init__(self, reader: Any) -> None:
-        self._reader = reader
-        self._reads = 0
-
-    def __enter__(self) -> "_FailsAfterFirstRead":
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        self._reader.close()
-
-    def read(self, size: int = -1) -> bytes:
-        self._reads += 1
-        if self._reads > 1:
-            raise OSError(errno.EIO, os.strerror(errno.EIO), self._reader.name)
-        return self._reader.read(size)
-
-
-@pytest.mark.asyncio
-async def test_a_copy_whose_read_fails_part_way_leaves_no_partial_file(
-    instance: _Instance, monkeypatch: pytest.MonkeyPatch
+async def test_an_upload_deleted_while_it_is_opened_asks_for_the_file_again_without_its_location(
+    earlier, monkeypatch, caplog
 ) -> None:
-    upload = instance.layout.uploads_dir / "session_alice" / "att_notes"
-    opened = Path.open
+    csv: UserTaskAttachment = earlier["csv"]
+    photo: UserTaskAttachment = earlier["photo"]
+    earlier["lead"].supports_image_input = True
+    found = task_uploads.locate_upload
 
-    def failing_open(path: Path, *args: Any, **kwargs: Any) -> Any:
-        reader = opened(path, *args, **kwargs)
-        return _FailsAfterFirstRead(reader) if path == upload else reader
+    def found_then_deleted(attachment: UserTaskAttachment, *args: Any, **kwargs: Any) -> Any:
+        # Upload retention deletes the file after the tool found it and before it reads it.
+        located = found(attachment, *args, **kwargs)
+        Path(attachment.local_path()).unlink()
+        return located
 
-    monkeypatch.setattr(attachment_uploads, "COPY_CHUNK_BYTES", 4)
-    monkeypatch.setattr(Path, "open", failing_open)
-    instance.use(ROOT)
+    monkeypatch.setattr(task_uploads, "locate_upload", found_then_deleted)
 
-    status, payload, _ = await _call(inspect_user_attachment, {"attachment_id": "att_notes", "copy_to_workspace": True})
+    with caplog.at_level(logging.WARNING, logger=TOOLS_LOGGER):
+        results = {
+            "inspect": (_inspect(csv.attachment_id), csv),
+            "copy": (_inspect(earlier["pdf"].attachment_id, copy_to_workspace=True), earlier["pdf"]),
+            "load": (_load(photo.attachment_id), photo),
+        }
 
-    assert status == "error" and payload["error"].startswith("This file could not be read.")
-    _assert_names_no_storage(instance, payload)
-    assert _files_in_person_folder(instance) == []
+    for name, (result, attachment) in results.items():
+        assert result["status"] == "error", (name, result)
+        payload = _payload(result)
+        assert (payload["result"], payload["reason"]) == (RESULT_UPLOAD_UNAVAILABLE, safe_open.REASON_NOT_FOUND), name
+        assert "send it again" in payload["error"], name
+        assert payload["attachment"]["attachment_id"] == attachment.attachment_id
+        _no_storage_details(result, earlier["layout"])
+    assert f"event=attachment_read_failed attachment_id={photo.attachment_id}" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_an_upload_removed_between_the_inspection_and_the_copy_leaves_no_copy(
-    instance: _Instance, monkeypatch: pytest.MonkeyPatch
+async def test_an_upload_that_cannot_be_opened_safely_is_not_read_and_its_location_stays_hidden(earlier, caplog) -> None:
+    photo: UserTaskAttachment = earlier["photo"]
+    # A second hard link makes the file reachable from elsewhere; it is not opened.
+    os.link(photo.local_path(), Path(photo.local_path()).with_name("second_link.png"))
+    earlier["lead"].supports_image_input = True
+
+    with caplog.at_level(logging.WARNING, logger=TOOLS_LOGGER):
+        loaded = _load(photo.attachment_id)
+
+    assert loaded["status"] == "error"
+    payload = _payload(loaded)
+    assert (payload["reason"], payload["attachment"]["attachment_id"]) == (safe_open.REASON_SEVERAL_LINKS, photo.attachment_id)
+    assert all("image" not in block for block in loaded["content"])
+    _no_storage_details(loaded, earlier["layout"])
+    assert f"event=attachment_read_failed attachment_id={photo.attachment_id}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_copy_into_the_task_folder_says_why(earlier, monkeypatch) -> None:
+    def full_folder(*_args, **_kwargs):
+        raise file_access.PathPolicyError("The folder users/ann is full.", reason_code="quota")
+
+    monkeypatch.setattr(file_access, "writable", full_folder)
+
+    result = _inspect(earlier["csv"].attachment_id, copy_to_workspace=True)
+
+    assert result["status"] == "error"
+    assert _payload(result)["error"] == "The folder users/ann is full."
+    _no_storage_details(result, earlier["layout"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["link_loop", "no_permission"])
+async def test_an_upload_this_host_cannot_check_answers_upload_unavailable_without_its_location(
+    earlier, caplog, cause: str
 ) -> None:
-    """The copy is the last read: a file removed after the inspection gives an error and no copy."""
+    """SEC-2: any error while checking an upload (not only "not found") gives a fixed answer and no path."""
 
-    upload = instance.layout.uploads_dir / "session_alice" / "att_notes"
-    inspected = inspection_tool_module._inspection
-
-    def inspect_then_remove(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        result = inspected(*args, **kwargs)
+    csv: UserTaskAttachment = earlier["csv"]
+    earlier["lead"].supports_image_input = True
+    upload = Path(csv.local_path())
+    if cause == "link_loop":
         upload.unlink()
-        return result
+        upload.symlink_to(upload.with_name("loop_back"))
+        upload.with_name("loop_back").symlink_to(upload)
+    elif os.geteuid() == 0:
+        pytest.skip("root reads a folder without permissions")
+    else:
+        upload.parent.chmod(0)
 
-    monkeypatch.setattr(inspection_tool_module, "_inspection", inspect_then_remove)
-    instance.use(ROOT)
+    try:
+        with caplog.at_level(logging.WARNING, logger="custom_agents.conversation_attachments"):
+            results = [_inspect(csv.attachment_id), _inspect(csv.attachment_id, copy_to_workspace=True), _load(csv.attachment_id)]
+    finally:
+        upload.parent.chmod(0o755)
 
-    status, payload, _ = await _call(inspect_user_attachment, {"attachment_id": "att_notes", "copy_to_workspace": True})
-
-    assert status == "error" and "no longer stored" in payload["error"] and "workspace_path" not in payload
-    _assert_names_no_storage(instance, payload)
-    assert _files_in_person_folder(instance) == []
-
-
-@pytest.mark.asyncio
-async def test_an_upload_removed_after_its_copy_still_gives_the_copy_and_its_inspection(
-    instance: _Instance, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Nothing reads the upload after the copy, so a removal then does not hide a copy that was made."""
-
-    copied = inspection_tool_module.copy_upload
-
-    def copy_then_remove(upload: Any, target: Path) -> Path:
-        made = copied(upload, target)
-        upload.path.unlink()
-        return made
-
-    monkeypatch.setattr(inspection_tool_module, "copy_upload", copy_then_remove)
-    instance.use(ROOT)
-
-    status, payload, _ = await _call(inspect_user_attachment, {"attachment_id": "att_notes", "copy_to_workspace": True})
-
-    assert status == "success", payload
-    assert [line["text"] for line in payload["inspection"]["lines"]] == ["line one", "line two"]
-    assert _files_in_person_folder(instance) == [Path(payload["workspace_path"])]
-    assert Path(payload["workspace_path"]).read_bytes() == NOTES
-    assert "session_alice" not in json.dumps(payload) and "storage_refs" not in payload["attachment"]
+    for result in results:
+        assert result["status"] == "error", result
+        payload = _payload(result)
+        assert (payload["result"], payload["reason"]) == (RESULT_UPLOAD_UNAVAILABLE, "unreadable")
+        assert "send it again" in payload["error"]
+        assert payload["attachment"]["attachment_id"] == csv.attachment_id
+        assert "workspace_path" not in payload
+        _no_storage_details(result, earlier["layout"])
+    unreadable = [record.getMessage() for record in caplog.records if "event=attachment_upload_unreadable" in record.getMessage()]
+    assert len(unreadable) == 3
+    assert all(f"attachment_id={csv.attachment_id} task_id={FOLLOW_UP}" in message for message in unreadable)
+    assert not any(str(earlier["layout"].uploads_dir) in message for message in unreadable)
 
 
 @pytest.mark.asyncio
-async def test_a_file_with_no_copy_in_this_instances_uploads_needs_a_remote_copy(
-    instance: _Instance, tmp_path: Path
-) -> None:
-    """A record naming a file outside ``state/uploads`` (another machine's, or not the gateway's) is never opened."""
+async def test_a_copy_made_before_the_upload_is_deleted_is_inspected_and_reported(earlier, monkeypatch) -> None:
+    """FAIL-3: upload retention deletes the upload right after the copy; the copy's result is not lost."""
 
-    outside = tmp_path / "elsewhere" / "scan.png"
-    outside.parent.mkdir()
-    outside.write_bytes(PNG)
-    record = instance.file("att_scan", "scan.png").model_copy(
-        update={"storage_refs": [AttachmentStorageRef(storage_type="local", path=str(outside))]}
+    csv: UserTaskAttachment = earlier["csv"]
+    copy_into_task_folder = user_attachment_tools._copy_into_task_folder
+
+    def copy_then_retention(upload: Any) -> Path:
+        copied = copy_into_task_folder(upload)
+        Path(upload.attachment.local_path()).unlink()
+        return copied
+
+    monkeypatch.setattr(user_attachment_tools, "_copy_into_task_folder", copy_then_retention)
+
+    result = _inspect(csv.attachment_id, copy_to_workspace=True)
+
+    assert result["status"] == "success", result
+    payload = _payload(result)
+    assert Path(payload["workspace_path"]).read_text(encoding="utf-8") == CSV_TEXT
+    assert [line["text"] for line in payload["inspection"]["lines"]] == ["plant,water", "fig,weekly"]
+    _no_storage_details(result, earlier["layout"])
+
+
+@pytest.mark.asyncio
+async def test_an_error_reading_the_copy_keeps_its_workspace_path(earlier, monkeypatch) -> None:
+    def unreadable_copy(*_args: Any, **_kwargs: Any) -> Any:
+        raise file_access.PathPolicyError("The file uploads/notes.csv cannot be read.", reason_code="denied")
+
+    monkeypatch.setattr(file_access, "read_bytes", unreadable_copy)
+
+    result = _inspect(earlier["csv"].attachment_id, copy_to_workspace=True)
+
+    assert result["status"] == "error"
+    payload = _payload(result)
+    assert payload["error"] == "The file uploads/notes.csv cannot be read."
+    assert Path(payload["workspace_path"]).read_text(encoding="utf-8") == CSV_TEXT
+    assert "result" not in payload  # neither upload_unavailable nor a request to send the file again
+    _no_storage_details(result, earlier["layout"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["missing", "folder"])
+async def test_a_workspace_path_that_is_not_a_file_is_not_a_remote_copy(earlier, target: str) -> None:
+    """A path names a file in the task's own folders: a typo or a folder is not a person's upload on another host."""
+
+    home = current_workspace_scope().home
+    home.mkdir(parents=True, exist_ok=True)
+    named = home / "notes-typo.csv" if target == "missing" else home
+
+    for result in (inspect_user_attachment._tool_func(path=str(named)), _load(path=str(named))):
+        assert result["status"] == "error", result
+        payload = _payload(result)
+        assert payload["error"] == "Local file is unavailable."
+        assert "result" not in payload and "remote_copy_required" not in _texts(result)
+
+
+def test_a_file_this_host_has_no_copy_of_says_what_the_agent_can_do() -> None:
+    """GEN-2: remote_copy_required names a next step an agent can take, not a mirror nobody can arrange."""
+
+    record = UserTaskAttachment(
+        attachment_id="att_elsewhere",
+        filename="scan.pdf",
+        content_type="application/pdf",
+        kind="document",
+        size_bytes=3,
+        sha256="0" * 64,
+        storage_refs=[],
     )
-    instance.turn("task_turn_3", [record])
-    instance.task("task_turn_3", files=[record])
-    instance.use("task_turn_3")
+    result = task_uploads._unavailable(
+        record, UnavailableUpload(UPLOAD_NO_LOCAL_COPY, "This file has no copy stored on a host's disk.")
+    )
 
-    for tool in (inspect_user_attachment, load_local_media_for_model_context):
-        status, payload, blocks = await _call(tool, {"attachment_id": "att_scan"})
+    payload = _payload(result)
+    assert (result["status"], payload["result"]) == ("error", "remote_copy_required")
+    assert payload["next_step"] == task_uploads.REMOTE_COPY_NEXT_STEP
+    assert "team_lead_action" not in payload
 
-        assert (status, blocks) == ("remote_copy_required", [])
-        assert payload["team_lead_action"].startswith("Request a gateway-backed NATS Object Store mirror")
-        assert str(outside) not in json.dumps(payload)
-
-
-@pytest.mark.asyncio
-async def test_a_specialist_opens_its_own_tasks_files_and_never_the_conversations(instance: _Instance) -> None:
-    chosen = instance.file("att_chosen", "chosen.png")
-    instance.task("task_specialist", files=[chosen], parent_task_id=ROOT)
-    instance.use("task_specialist", is_team_lead=False)
-
-    status, _payload, blocks = await _call(load_local_media_for_model_context, {"attachment_id": "att_chosen"})
-    refused_status, refused, _ = await _call(inspect_user_attachment, {"attachment_id": "att_notes"})
-
-    assert status == "success" and blocks[0]["image"]["source"]["bytes"] == PNG
-    assert refused_status == "error" and _ids(refused["available_attachments"]) == ["att_chosen"]
+# --- Files outside the task's scope ----------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_a_guidance_file_is_opened_by_id_after_the_guidance_was_read_and_after_a_restart(
-    instance: _Instance,
+async def test_work_for_another_person_in_anns_conversation_cannot_open_its_files(earlier, caplog) -> None:
+    lead = earlier["lead"]
+    lead.task_manager.add_task(
+        Task(task_id="task_bob", task_type=MessageMetaType.REQUEST, problem_statement="Show me Ann's photo."),
+        MessageHeader(from_agent_id="gateway"),
+        MessageMeta(conversation_id=CONVERSATION),
+        owner_person_id=BOB,
+    )
+    use_agent(lead, "task_bob")
+    photo: UserTaskAttachment = earlier["photo"]
+
+    with caplog.at_level(logging.INFO):
+        results = [_inspect(photo.attachment_id), _load(photo.attachment_id)]
+
+    for result in results:
+        assert _unknown(result, photo.attachment_id) == []
+        _no_storage_details(result, earlier["layout"])
+    assert "event=conversation_files_owner_mismatch" in caplog.text
+    assert f"event=attachment_id_not_available attachment_id={photo.attachment_id} task_id=task_bob" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_anns_other_conversation_cannot_open_this_conversations_files(earlier) -> None:
+    lead = earlier["lead"]
+    await _admit(lead, task_id="task_elsewhere", text="Another topic.", attachments=[], conversation_id="conv_other")
+    use_agent(lead, "task_elsewhere")
+    photo: UserTaskAttachment = earlier["photo"]
+
+    for result in (_inspect(photo.attachment_id), _load(photo.attachment_id)):
+        assert _unknown(result, photo.attachment_id) == []
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_task_opens_only_the_files_its_delegation_gave_it(earlier) -> None:
+    lead = earlier["lead"]
+    given: UserTaskAttachment = earlier["csv"]
+    lead.task_manager.add_task(
+        Task(
+            task_id="task_worker",
+            parent_task_id=FOLLOW_UP,
+            task_type=MessageMetaType.REQUEST,
+            problem_statement="Read the watering table.",
+            attachments=[given],
+        ),
+        MessageHeader(from_agent_id="lead"),
+        MessageMeta(conversation_id=CONVERSATION),
+        owner_person_id=ANN,
+    )
+    use_agent(lead, "task_worker")
+
+    assert _inspect(given.attachment_id)["status"] == "success"
+    photo: UserTaskAttachment = earlier["photo"]
+    for result in (_inspect(photo.attachment_id), _load(photo.attachment_id)):
+        # It cannot reach the conversation's other files, and is offered only its own.
+        assert _unknown(result, photo.attachment_id) == [given.attachment_id]
+        _no_storage_details(result, earlier["layout"])
+
+
+@pytest.mark.asyncio
+async def test_a_record_pointing_outside_the_upload_folders_is_refused_by_both_tools(earlier, caplog) -> None:
+    lead, layout = earlier["lead"], earlier["layout"]
+    secret = layout.state_dir / "secret.png"
+    secret.write_bytes(PHOTO_BYTES)
+    forged = UserTaskAttachment(
+        attachment_id="att_forged",
+        filename="looks fine.png",
+        content_type="image/png",
+        kind="image",
+        size_bytes=len(PHOTO_BYTES),
+        sha256="0" * 64,
+        storage_refs=[AttachmentStorageRef(storage_type="local", path=str(secret))],
+    )
+    # A delegated task's files are not vouched for by the gateway; any agent process could send this one.
+    lead.task_manager.add_task(
+        Task(
+            task_id="task_forged",
+            parent_task_id=FOLLOW_UP,
+            task_type=MessageMetaType.REQUEST,
+            problem_statement="Look at this.",
+            attachments=[forged],
+        ),
+        MessageHeader(from_agent_id="lead"),
+        MessageMeta(conversation_id=CONVERSATION),
+        owner_person_id=ANN,
+    )
+    use_agent(lead, "task_forged")
+
+    with caplog.at_level(logging.WARNING):
+        results = [_inspect("att_forged"), _load("att_forged")]
+
+    for result in results:
+        assert result["status"] == "error", result
+        assert _payload(result)["result"] == RESULT_REFUSED
+        assert all("image" not in block for block in result["content"])
+        _no_storage_details(result, layout)
+    assert "event=attachment_outside_upload_folders attachment_id=att_forged task_id=task_forged" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_id_from_a_turn_saved_before_files_were_recorded_says_so(earlier) -> None:
+    saved_before_upgrade(earlier["lead"]._conversation_store, FIRST)
+    photo: UserTaskAttachment = earlier["photo"]
+
+    result = _inspect(photo.attachment_id)
+
+    assert _unknown(result, photo.attachment_id) == []
+    assert _payload(result)["note"].startswith("Some files sent with earlier requests (the latest in turn 1)")
+
+
+# --- An answer's files after a restart --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_answers_files_open_by_id_after_a_restart_without_a_conversation_store(
+    tmp_path: Path, layout: InstanceLayout
 ) -> None:
-    """The tools read the task's saved history, not the guidance waiting to be read."""
+    from tests.test_turn_files_recording import TASK
 
-    guidance = TaskSteering(
-        task_id=ROOT,
-        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
-        guidance_text="Use this label too.",
-        attachments=[instance.file("att_label", "label.png")],
-    )
-    assert await _record_guidance_history(SimpleNamespace(task_manager=instance.manager), ROOT, guidance)
+    lead = _lead(tmp_path, layout)
+    await _admit(lead, task_id=TASK, text="Which pan should I use?", attachments=[])
+    lead._conversation_store = None  # the task's history is the only record of the answer's files
+    pan = _stored(layout, "pan.png", PHOTO_BYTES, "image/png")
+    await _send(lead, _steering(TaskSteeringType.INTERRUPT_RESPONSE, [pan], "answer_pan", "This pan."))
 
-    for restarted in (False, True):
-        if restarted:
-            instance.manager = TaskManager(db_path=str(instance.layout.root / "tasks.db"))
-            instance.manager.set_owner_identity(LEAD_ID, "TeamLead", TEAM, "TeamArchitect")
-            assert instance.manager.restore_runtime_state()
-        instance.use(ROOT)
+    restarted = _lead(tmp_path, layout)
+    restarted._conversation_store = None
+    assert restarted.task_manager.restore_runtime_state() is not None
+    use_agent(restarted, TASK)
 
-        status, label, blocks = await _call(load_local_media_for_model_context, {"attachment_id": "att_label"})
+    inspected = _inspect(pan.attachment_id)
+    loaded = _load(pan.attachment_id)
 
-        assert status == "success" and label["attachment_id"] == "att_label" and blocks[0]["image"]["source"]["bytes"] == PNG
+    assert inspected["status"] == "success", inspected
+    assert _payload(inspected)["attachment"]["filename"] == "pan.png"
+    assert loaded["status"] == "success", loaded
+    assert loaded["content"][1] == {"image": {"format": "png", "source": {"bytes": PHOTO_BYTES}}}
 
 
-@pytest.mark.asyncio
-async def test_a_plan_step_opens_its_requests_files_and_the_earlier_ones(instance: _Instance) -> None:
-    # A step is a new top-level task with no files and a fresh conversation id.
-    instance.task("task_step", conversation_id="plan_step_conv_1")
-    instance.manager.plan_state.plan_step_task_links["task_step"] = PlanStepTaskLink(
-        root_task_id=ROOT, plan_id="plan_1", step_id="s1", step_task_id="task_step"
-    )
-    instance.use("task_step")
-
-    for attachment_id in ("att_list", "att_photo"):
-        status, label, _ = await _call(load_local_media_for_model_context, {"attachment_id": attachment_id})
-        assert status == "success" and label["attachment_id"] == attachment_id
+# --- The media tool's checks -------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_the_media_loader_takes_exactly_one_file_and_checks_the_model_by_id_too(instance: _Instance) -> None:
-    spec = load_local_media_for_model_context.tool_spec["inputSchema"]["json"]
-    assert {"path", "attachment_id"} <= set(spec["properties"]) and not set(spec.get("required", [])) & {
-        "path",
-        "attachment_id",
-    }
-    instance.use(ROOT, supports_image_input=False)
+async def test_the_media_tool_takes_exactly_one_of_path_and_attachment_id(earlier) -> None:
+    photo: UserTaskAttachment = earlier["photo"]
 
-    neither = await _call(load_local_media_for_model_context, {})
-    both = await _call(load_local_media_for_model_context, {"attachment_id": "att_list", "path": "list.png"})
-    unsupported = await _call(load_local_media_for_model_context, {"attachment_id": "att_list"})
-
-    for status, payload, _ in (neither, both):
-        assert status == "error" and payload["error"].startswith("Name exactly one file")
-    status, payload, blocks = unsupported
-    assert (status, blocks) == ("error", []) and payload["capability_field"] == "supports_image_input"
-    assert payload["attachment_id"] == "att_list" and "path" not in payload
+    for result in (_load(), _load(photo.attachment_id, path="garden plant.png")):
+        assert result["status"] == "error"
+        assert _payload(result)["error"].startswith("Give exactly one of attachment_id")
 
 
-def test_logging_is_quiet_for_a_found_file(instance: _Instance, caplog: pytest.LogCaptureFixture) -> None:
-    """Only a refused or missing file is logged (ids only)."""
+@pytest.mark.asyncio
+async def test_the_media_tool_checks_the_model_and_the_size_before_reading_an_upload(earlier, monkeypatch) -> None:
+    lead, photo = earlier["lead"], earlier["photo"]
 
-    instance.use(ROOT)
-    with caplog.at_level(logging.INFO, logger="custom_tools.attachment_uploads"):
-        found = inspect_user_attachment._tool_func(attachment_id="att_list")
-        missing = inspect_user_attachment._tool_func(attachment_id="att_bob")
+    def not_read(*_args, **_kwargs):
+        raise AssertionError("the upload was read before the checks")
 
-    assert found["status"] == "success" and missing["status"] == "error"
-    assert [record.getMessage().split("event=")[1].split()[0] for record in caplog.records] == ["attachment_id_not_found"]
+    monkeypatch.setattr("custom_agents.conversation_attachments.LocatedUpload.read_bytes", not_read)
+    lead.supports_image_input = False
+    no_images = _load(photo.attachment_id)
+    lead.supports_image_input = True
+    too_large = _load(photo.attachment_id, max_bytes=4)
+
+    assert _payload(no_images)["capability_field"] == "supports_image_input"
+    assert _payload(too_large)["error"] == "File is too large to insert into model context."
+    assert _payload(too_large)["size_bytes"] == len(PHOTO_BYTES)
+    for result in (no_images, too_large):
+        assert result["status"] == "error"
+        assert _payload(result)["attachment_id"] == photo.attachment_id
+        _no_storage_details(result, earlier["layout"])

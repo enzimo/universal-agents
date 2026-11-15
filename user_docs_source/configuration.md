@@ -219,11 +219,14 @@ Docker). Every other location is derived from it:
 │                                      attachment_copies/, model_failover/,
 │                                      diagnostics/, execution_artifacts/
 ├── auth/                              model sign-in tokens (OpenAI Codex, xAI)
+├── exports/                           team exports written by /upgrade
+├── import/                            team exports copied in for onboarding's Import
 ├── runtime/                           records trusted services keep:
 │                                      mcp-connections/ (installed MCP servers),
 │                                      mcp-hosting/ (hosted MCP servers),
-│                                      installed-permissions/, and
-│                                      skill-installation/ (reviewed skills)
+│                                      installed-permissions/,
+│                                      skill-installation/ (reviewed skills),
+│                                      team-import/ and team-export/ (team transfer)
 └── workspaces/                        the only area agents work in
     ├── users/<person>/                one person's private folder, with
     │                                  sites/ (published pages) and scratch/
@@ -379,8 +382,14 @@ accept arrives without its files. If your team runs without gateway users
 answer in a chat app are not kept and earlier files are not offered; Web Chat
 keeps them. After
 the retention period the agent says the file is no longer stored, and you send
-it again. Files sent before version 0.10 are not
-listed for later messages; send them again if you need them.
+it again. Agents cannot reach files from another chat or another person, nor
+files sent before the team's update that started keeping each message's
+files; send those again. The same holds for files sent with a request that
+was still waiting to start when the team was updated: the request runs, but
+without its files. To avoid this, update when no requests are waiting;
+otherwise ask people to send those files again. Whenever files sent with a
+request could not be accepted, the assistant is told how many, and asks for
+them again if the request needs them.
 
 A person's folder is named after their user id: generated ids such as
 `usr_3f9a1b2c4d5e` are used as they are, and other ids become a readable name

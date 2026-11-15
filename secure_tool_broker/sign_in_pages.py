@@ -15,6 +15,13 @@ from typing import Any
 # creating a Google Cloud app before signing in (owner's decision 2026-09-29).
 SIGN_IN_PAGE_SECONDS = 15 * 60
 
+# Set in a broker page session's ``state`` when the broker rebuilt the page
+# from its signed link after a restart (``SecureToolBrokerService``):
+# everything the page held only in memory is gone. A flow whose page must not
+# act on a rebuilt session checks it (``/upgrade``'s export page). Kept here,
+# not in ``auth_flows``, for the same import reason as the rest of this module.
+SESSION_RESTORED_AFTER_RESTART = "restored_after_restart"
+
 # Show the whole address as the link text only when it is short enough to read.
 AUTH_LINK_TEXT_MAX_CHARS = 100
 

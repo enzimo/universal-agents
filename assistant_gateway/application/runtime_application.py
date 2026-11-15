@@ -197,6 +197,7 @@ class GatewayRuntimeApplication:
         enable_channel_binding_commands: bool = True,
         query_handler: GatewayQueryHandler | None = None,
         correlation_id: str | None = None,
+        private_chat: bool = False,
     ) -> GatewayCommandResult:
         if current_session_key is None:
             active = self._session_repository.get_active_session_for_channel(
@@ -221,6 +222,7 @@ class GatewayRuntimeApplication:
                 enable_channel_binding_commands=enable_channel_binding_commands,
                 query_handler=query_handler,
                 correlation_id=correlation_id,
+                private_chat=private_chat,
             )
         )
 
@@ -293,7 +295,7 @@ class GatewayRuntimeApplication:
         task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
-        attachments: Sequence[UserTaskAttachment] = (),
+        attachments: list[UserTaskAttachment] | None = None,
     ) -> GatewayApplicationResponse:
         return gateway_response_view(
             await self._clarification.reply(
@@ -301,7 +303,7 @@ class GatewayRuntimeApplication:
                 task_query_id=task_query_id,
                 response_text=response_text,
                 replied_message=replied_message,
-                attachments=attachments,
+                attachments=tuple(attachments or ()),
             )
         )
 

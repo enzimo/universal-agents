@@ -17,13 +17,21 @@ UNLINKED_USER_NOTICE = (
 
 @dataclass(frozen=True)
 class GatewayActorContext:
-    """Identity and delivery coordinates supplied by a trusted adapter."""
+    """Identity and delivery coordinates supplied by a trusted adapter.
+
+    ``private_chat`` says the chat has only this person and the assistant
+    (Telegram ``chat.type == "private"``, a Discord DM, Web Chat, a Signal or
+    Photon chat that is not a group, a WhatsApp conversation, the local CLI).
+    The channel decides; a chat it cannot vouch for is not private, so
+    commands whose reply must stay private (``/upgrade``) refuse there.
+    """
 
     channel_name: str | None = None
     user_id: str | None = None
     chat_id: str | None = None
     thread_id: str | None = None
     canonical_user_id: str | None = None
+    private_chat: bool = False
 
 
 @runtime_checkable

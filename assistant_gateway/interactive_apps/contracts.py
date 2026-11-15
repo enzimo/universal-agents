@@ -69,6 +69,7 @@ class InteractiveAppApplication(Protocol):
         enable_channel_binding_commands: bool = True,
         query_handler: GatewayQueryHandler | None = None,
         correlation_id: str | None = None,
+        private_chat: bool = False,
     ) -> GatewayCommandResult: ...
 
     def resolve_session(

@@ -500,6 +500,9 @@ class WhatsAppInteractiveApp(BaseInteractiveApp):
             thread_id=None,
             help_text=WHATSAPP_HELP_TEXT,
             enable_reply_command=False,
+            # Twilio's WhatsApp messaging is one-to-one: the chat is the
+            # sender's own conversation with the assistant's number.
+            private_chat=True,
         )
         if result.handled:
             return ChannelOutboundMessage(

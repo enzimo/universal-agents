@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from typing import Optional, Protocol, runtime_checkable
 
 from assistant_gateway.application.commands import (
+    GatewayTeamExportCommands,
+    TeamExportCommandRequest,
+    is_upgrade_command,
     AccessCommandRequest,
     AccountLinkCommandRequest,
     AccountSharingCommandRequest,
@@ -70,6 +73,9 @@ class GatewayCommandRequest:
     # The command's id in its chat (Web Chat's request id). /link tags the
     # message that says how its page ended with it (link_results).
     correlation_id: Optional[str] = None
+    # The channel vouches that only this person and the assistant are in the
+    # chat (GatewayActorContext.private_chat); unknown is not private.
+    private_chat: bool = False
 
 
 @runtime_checkable
@@ -96,8 +102,10 @@ class GatewayCommandService:
         session_commands: GatewaySessionCommands,
         message_submission_commands: GatewayMessageSubmissionCommands,
         manager_control_commands: GatewayManagerControlCommands,
+        team_export_commands: GatewayTeamExportCommands,
     ) -> None:
         self._settings = settings
+        self._team_export_commands = team_export_commands
         self._authentication_commands = authentication_commands
         self._account_link_commands = account_link_commands
         self._account_sharing_commands = account_sharing_commands
@@ -121,6 +129,7 @@ class GatewayCommandService:
             session_commands=self._session_commands,
             message_submission_commands=self._message_submission_commands,
             manager_control_commands=self._manager_control_commands,
+            team_export_commands=self._team_export_commands,
         )
         return GatewayCommandResult(
             handled=handled,
@@ -132,6 +141,34 @@ class GatewayCommandService:
             ),
             transient_action=text if isinstance(text, GatewayTransientAction) else None,
         )
+
+
+async def _run_team_export(
+    team_export_commands: GatewayTeamExportCommands,
+    request: GatewayCommandRequest,
+    command: str,
+) -> str | GatewayTransientAction:
+    """``/upgrade``: an owner's team export (``commands.team_export``)."""
+
+    try:
+        return await team_export_commands.execute(
+            TeamExportCommandRequest(
+                command=command,
+                actor=GatewayActorContext(
+                    channel_name=request.channel_name,
+                    user_id=request.user_id,
+                    chat_id=request.chat_id,
+                    thread_id=request.thread_id,
+                    canonical_user_id=request.canonical_user_id,
+                    private_chat=request.private_chat,
+                ),
+                session_key=request.current_session_key,
+                correlation_id=request.correlation_id,
+            )
+        )
+    except Exception as exc:
+        LOGGER.exception("The /upgrade command failed. event=gateway_team_export_command_failed")
+        return f"The team export page could not be opened: {exc}"
 
 
 def _render_docs_link(settings: GatewayCommandSettings) -> str:
@@ -231,6 +268,7 @@ async def _dispatch_interactive_command(
     session_commands: GatewaySessionCommands,
     message_submission_commands: GatewayMessageSubmissionCommands,
     manager_control_commands: GatewayManagerControlCommands,
+    team_export_commands: GatewayTeamExportCommands,
 ) -> tuple[bool, Optional[str], str | GatewayTransientAction | None]:
     raw_text = request.raw_text
     current_session_key = request.current_session_key
@@ -315,6 +353,9 @@ async def _dispatch_interactive_command(
         except Exception as exc:
             message = f"Auth command failed: {exc}"
         return True, current_session_key, message
+
+    if is_upgrade_command(command):
+        return True, current_session_key, await _run_team_export(team_export_commands, request, command)
 
     if is_account_link_command(command):
         try:

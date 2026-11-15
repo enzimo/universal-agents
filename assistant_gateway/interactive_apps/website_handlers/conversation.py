@@ -10,7 +10,8 @@ from assistant_gateway.application.command_help import (
 )
 from assistant_gateway.application.transient_presentation import GatewayTransientAction
 from assistant_gateway.application.commands.account_link import ACCOUNT_LINK_COMMAND
-from assistant_gateway.domain.message_types import ACCOUNT_LINK_COMMAND_MESSAGE_TYPE
+from secure_tools.chat_commands import UPGRADE_COMMAND
+from assistant_gateway.domain.message_types import ACCOUNT_LINK_COMMAND_MESSAGE_TYPE, TEAM_EXPORT_COMMAND_MESSAGE_TYPE
 from assistant_gateway.application.gateway_application import (
     GatewayApplicationResponse,
     GatewaySession,
@@ -554,16 +555,14 @@ class WebsiteConversationHandlers:
             return response, tuple(
                 message for message in exchange if message is not None
             )
-        # An answer to the waiting question, with the files the person sent
-        # with it, shown in the transcript like any message with files. Its
-        # text is the file-only text when they sent only files.
+        # An answer keeps its files on the person's message, as a request does.
         acceptance = self.application.transcripts.record_local_user_message(
             owner_canonical_user_id=owner,
             session_key=session_key,
             conversation_id=conversation_id,
             client_request_id=client_request_id,
-            user_text=task_text,
-            attachments=tuple(attachments),
+            user_text=text,
+            attachments=attachments,
         )
         if acceptance is None:
             raise web.HTTPNotFound(text="Thread not found.")
@@ -583,12 +582,13 @@ class WebsiteConversationHandlers:
                 conversation_id=conversation_id,
                 exchange=exchange,
             )
-        # The answer names the question found before the send was accepted.
+        # The answer names the question found before the send was accepted,
+        # and brings the files sent with it (files alone answer with task_text).
         response = await self.application.reply_to_pending_query(
             session_key=session_key,
             task_query_id=waiting_question_id,
             response_text=task_text,
-            attachments=tuple(attachments),
+            attachments=attachments,
         )
         reply = self.application.transcripts.record_local_response(
             owner_canonical_user_id=owner,
@@ -702,6 +702,8 @@ class WebsiteConversationHandlers:
                 enable_reply_command=False,
                 enable_channel_binding_commands=False,
                 correlation_id=client_request_id,
+                # Web Chat threads belong to the signed-in person alone.
+                private_chat=True,
             )
         except PermissionError as exc:
             raise web.HTTPNotFound(text="Thread not found.") from exc
@@ -808,6 +810,7 @@ class WebsiteConversationHandlers:
         if response_message_type in {
             "command_auth",
             ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
+            TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
             "command_user_sensitive",
         }:
             response_message = exchange[-1]
@@ -844,6 +847,9 @@ class WebsiteConversationHandlers:
         if tokens and tokens[0] == ACCOUNT_LINK_COMMAND:
             # The reply holds a one-time form link; keep it out of history.
             return ACCOUNT_LINK_COMMAND_MESSAGE_TYPE
+        if tokens and tokens[0] == UPGRADE_COMMAND:
+            # The reply holds the export page's link; keep it out of history.
+            return TEAM_EXPORT_COMMAND_MESSAGE_TYPE
         if (
             tokens
             and tokens[0] == "/user"

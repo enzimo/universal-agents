@@ -1,606 +1,707 @@
-"""Which files a task may name and open by id (``custom_agents.conversation_attachments``).
+"""Which uploaded files a task may name, and where their bytes are read from.
 
-These tests use a real task manager (its plan-step and recovery links, its
-saved history and a restart from saved state) and a real SQLite conversation
-store. They cover: files received while a request ran; plan steps and recovery
-tasks resolving to the request they were made for, and subtasks never doing so;
-the earlier turns of a conversation only for the team lead and the person who
-owns it; saving files with the request's turn; delegation selection; whether a
-file is still stored; and how files are named to a model.
+Covers ``custom_agents.conversation_attachments`` with a real SQLite
+conversation store: a task's own files (its request, plus files recorded with
+accepted guidance and answers), the files of earlier turns of its own
+conversation for a top-level task that works for the conversation's person,
+nothing from the conversation for a delegated task, bounded lists without
+storage paths, the note on turns saved before files were recorded, and
+reading bytes only from this host's upload folders.
 """
 
 from __future__ import annotations
 
-import errno
 import logging
 import os
 from pathlib import Path
-from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from access_control import safe_open
+from assistant_gateway.config import GatewayInstanceConfig
 from custom_agents.conversation_attachments import (
-    MAX_SELECTED_ATTACHMENTS,
-    UPLOAD_AVAILABLE,
-    UPLOAD_DELETED,
-    UPLOAD_REMOTE,
-    UPLOAD_UNREADABLE,
+    CONVERSATION_ATTACHMENTS_HEADING,
+    INVENTORY_LIMIT,
+    REQUEST_FILES_NOT_KEPT_EVENT,
+    REQUEST_FILES_NOT_KEPT_KEY,
+    REQUEST_FILES_NOT_KEPT_NOTE,
+    TASK_FILES_EVENT,
+    TASK_FILES_KEY,
+    UPLOAD_FILE_MISSING,
+    UPLOAD_NO_LOCAL_COPY,
+    UPLOAD_NOT_ON_THIS_HOST,
+    UPLOAD_OUTSIDE_FOLDERS,
+    UNRECORDED_TURNS_NOTE,
     AttachmentSelectionError,
-    attachment_scope,
-    describe_attachment,
+    LocatedUpload,
+    TaskAttachments,
+    UnavailableUpload,
+    UploadFolders,
+    inventory_text,
+    keep_upload_files,
     locate_upload,
-    received_attachments,
-    request_files,
-    save_turn_attachments,
-    select_attachments,
-    upload_state,
+    task_files_details,
 )
 from custom_agents.conversation_store import ConversationStore
-from custom_agents.steering_history_events import (
-    GUIDANCE_ACCEPTED_EVENT,
-    GUIDANCE_STEERING_KEY,
-    HISTORY_EVENT_KEY,
-    QUERY_ANSWER_FILES_KEY,
-)
-from custom_agents.task_manager import TaskManager
-from custom_agents.task_steering_runtime import _record_guidance_history
+from custom_agents.task_manager import TaskManager, TaskResultUpdate
+from custom_agents.task_records import TaskInfo
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.runtime_snapshot_v3 import PlanStepTaskLink, RecoveryTaskLink
-from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskSteering
-from custom_messages.enums import MessageMetaType, TaskHistoryImportance, TaskHistoryType, TaskSteeringType
-from custom_messages.records.task_results import TaskResultUpdate
+from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry
+from custom_messages.enums import MessageMetaType, TaskHistoryImportance, TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
+from runtime_settings.interactive_apps import AdapterHostSettings
+from storage.sqlite_connection import connect_sqlite
+from storage.turn_attachments import TURN_ATTACHMENT_SUMMARY_FIELDS
 
-TEAM = "team_files"
-PERSON = "alice"
-OTHER_PERSON = "bob"
-CONVERSATION = "conv_alice"
-ROOT = "task_turn_2"
-
-
-def _file(layout: InstanceLayout, attachment_id: str, *, filename: str = "", stored: bool = True) -> UserTaskAttachment:
-    path = layout.uploads_dir / "session_alice" / attachment_id
-    if stored:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"data")
-    return UserTaskAttachment(
-        attachment_id=attachment_id,
-        filename=filename or f"{attachment_id}.png",
-        content_type="image/png",
-        kind="image",
-        size_bytes=4,
-        sha256="0" * 64,
-        storage_refs=[AttachmentStorageRef(storage_type="local", path=str(path))],
-    )
-
-
-class _Runtime:
-    """A team lead's task manager and conversation store, opened on one instance folder."""
-
-    def __init__(self, tmp_path: Path) -> None:
-        self.layout = InstanceLayout.at(tmp_path / "instance")
-        self.layout.ensure_directories()
-        self.store = ConversationStore(
-            db_path=str(self.layout.root / "conversations.db"), artifacts_dir=self.layout.conversation_artifacts_dir
-        )
-        self.manager = self.open_manager()
-
-    def open_manager(self) -> TaskManager:
-        manager = TaskManager(db_path=str(self.layout.root / "tasks.db"))
-        manager.set_owner_identity("lead", "TeamLead", TEAM, "TeamArchitect")
-        return manager
-
-    def restart(self) -> None:
-        self.manager = self.open_manager()
-        assert self.manager.restore_runtime_state()
-
-    def turn(self, task_id: str, files: list[UserTaskAttachment], *, conversation_id: str = CONVERSATION, owner: str = PERSON) -> None:
-        self.store.ensure_thread(
-            conversation_id=conversation_id,
-            team_id=TEAM,
-            owner_canonical_user_id=owner,
-            owner_agent_id="lead",
-            owner_agent_name="TeamLead",
-            requester_name=owner,
-            requester_id=owner,
-            root_task_id=task_id,
-        )
-        self.store.append_turn(
-            conversation_id=conversation_id,
-            task_id=task_id,
-            followup_to_task_id=None,
-            owner_agent_id="lead",
-            requester_name=owner,
-            requester_id=owner,
-            correlation_id=f"corr_{task_id}",
-            problem_text=f"Request {task_id}",
-            owner_canonical_user_id=owner,
-            attachments=[file.model_dump(mode="json") for file in files],
-        )
-
-    def task(
-        self,
-        task_id: str,
-        *,
-        files: list[UserTaskAttachment] | None = None,
-        parent_task_id: str | None = None,
-        conversation_id: str | None = None,
-    ) -> None:
-        assert self.manager.add_task(
-            Task(
-                task_id=task_id,
-                task_type=MessageMetaType.REQUEST,
-                problem_statement=f"Work {task_id}",
-                parent_task_id=parent_task_id,
-                attachments=files or [],
-            ),
-            MessageHeader(from_agent_id="gateway", response_routing_key="gateway", agent_signature=""),
-            MessageMeta(conversation_id=conversation_id),
-            owner_person_id=PERSON,
-        )
-
-    def plan_step(self, step_task_id: str, root_task_id: str = ROOT) -> None:
-        # A plan step is a new top-level task with a fresh conversation id and no files.
-        self.task(step_task_id, conversation_id=f"plan_step_conv_{step_task_id}")
-        self.manager.plan_state.plan_step_task_links[step_task_id] = PlanStepTaskLink(
-            root_task_id=root_task_id, plan_id="plan_1", step_id="s1", step_task_id=step_task_id
-        )
-
-    def recovery(self, recovery_task_id: str, original_task_id: str) -> None:
-        self.task(recovery_task_id, conversation_id=f"recov_conv_{recovery_task_id}")
-        self.manager.plan_state.recovery_links[recovery_task_id] = RecoveryTaskLink(
-            original_task_id=original_task_id,
-            original_plan_id="plan_1",
-            recovery_task_id=recovery_task_id,
-            branch_id="b",
-            failure_type="step_failed",
-            failure_summary="The step failed.",
-        )
-
-    def scope(self, task_id: str, *, is_team_lead: bool = True, person_id: str | None = PERSON):
-        request = request_files(self.manager, task_id)
-        assert request is not None
-        return attachment_scope(request, conversation_store=self.store, is_team_lead=is_team_lead, person_id=person_id)
-
-    def save(self, task_id: str, files: list[UserTaskAttachment]):
-        return save_turn_attachments(task_id, files, task_manager=self.manager, conversation_store=self.store)
+ANN, BOB = "usr_ann", "usr_bob"
+CONVERSATION, OTHER_CONVERSATION = "conv_files", "conv_other"
+CURRENT = "task_current"
+MODULE_LOGGER = "custom_agents.conversation_attachments"
 
 
 @pytest.fixture
-def runtime(tmp_path: Path) -> _Runtime:
-    """Turn 1 sent ``att_receipt``; turn 2 (``ROOT``, the request running now) sent ``att_list``."""
-
-    runtime = _Runtime(tmp_path)
-    runtime.turn("task_turn_1", [_file(runtime.layout, "att_receipt", filename="receipt.jpg")])
-    runtime.turn(ROOT, [_file(runtime.layout, "att_list")])
-    runtime.task(ROOT, files=[_file(runtime.layout, "att_list")], conversation_id=CONVERSATION)
-    return runtime
+def layout(tmp_path: Path) -> InstanceLayout:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    layout.ensure_directories()
+    layout.uploads_dir.mkdir(parents=True)
+    return layout
 
 
-def _ids(files) -> list[str]:
-    return [getattr(file, "attachment", file).attachment_id for file in files]
+@pytest.fixture
+def store(tmp_path: Path) -> ConversationStore:
+    return ConversationStore(str(tmp_path / "conversations.db"), artifacts_dir=tmp_path / "conversation_artifacts")
 
 
-@pytest.mark.asyncio
-async def test_files_received_while_a_request_ran_are_found_after_the_drain_and_a_restart(runtime: _Runtime) -> None:
-    guidance = TaskSteering(
-        task_id=ROOT,
-        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
-        guidance_text="Use this one too.",
-        attachments=[_file(runtime.layout, "att_guidance")],
-    )
-    agent = SimpleNamespace(task_manager=runtime.manager)
-    # Accepted, then applied to a model turn (the applied entry carries no files).
-    assert await _record_guidance_history(agent, ROOT, guidance)
-    assert await _record_guidance_history(agent, ROOT, guidance, applied=True)
-    runtime.manager.append_history_entry(
-        ROOT,
-        "TaskQuery response: here is the photo",
-        entry_type=TaskHistoryType.QUERY_EVENT,
-        details={"query_type": "response", QUERY_ANSWER_FILES_KEY: [_file(runtime.layout, "att_answer").model_dump(mode="json")]},
-    )
+def _upload(folder: Path, attachment_id: str, *, name: str = "", data: bytes = b"file bytes") -> UserTaskAttachment:
+    """A file the gateway stored in ``folder``, with its record."""
 
-    assert _ids(received_attachments(runtime.manager.get_task_info(ROOT).task)) == ["att_guidance", "att_answer"]
-    runtime.restart()
-    assert _ids(received_attachments(runtime.manager.get_task_info(ROOT).task)) == ["att_guidance", "att_answer"]
-    # The request's own files come first, then the received ones.
-    assert _ids(request_files(runtime.manager, ROOT).files) == ["att_list", "att_guidance", "att_answer"]
+    path = folder / "web_session" / f"{attachment_id}.bin"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return _record(attachment_id, path, name=name)
 
 
-@pytest.mark.asyncio
-async def test_files_in_a_subtasks_returned_history_never_count_as_sent_by_the_person(runtime: _Runtime) -> None:
-    """A worker's result history is copied into the request's history; its file records are not the person's."""
-
-    agent = SimpleNamespace(task_manager=runtime.manager)
-    own_guidance = TaskSteering(
-        task_id=ROOT,
-        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
-        guidance_text="Use this one too.",
-        attachments=[_file(runtime.layout, "att_guidance")],
-    )
-    assert await _record_guidance_history(agent, ROOT, own_guidance)
-    assert runtime.manager.add_subtask(
-        ROOT,
-        Task(task_id="subtask_1", task_type=MessageMetaType.REQUEST, problem_statement="Research", parent_task_id=ROOT),
-        MessageHeader(from_agent_id="lead", response_routing_key="lead", agent_signature=""),
-        MessageMeta(conversation_id="conv_subtask_1", to_agent_name="Researcher"),
-    )
-    # Another person's upload, named by entries shaped like the ones this
-    # runtime records itself.
-    other = _file(runtime.layout, "att_other_person")
-    other.storage_refs[0].path = str(runtime.layout.uploads_dir / "session_bob" / "att_other_person")
-    forwarded = TaskSteering(
-        task_id="subtask_1", steering_type=TaskSteeringType.PROACTIVE_GUIDANCE, guidance_text="x", attachments=[other]
-    )
-    returned_history = [
-        TaskHistoryEntry(
-            summary="Mid-turn proactive steering accepted: x",
-            entry_type=TaskHistoryType.TASK_EVENT,
-            importance=TaskHistoryImportance.HIGH,
-            details={HISTORY_EVENT_KEY: GUIDANCE_ACCEPTED_EVENT, GUIDANCE_STEERING_KEY: forwarded.model_dump(mode="json")},
-        ),
-        TaskHistoryEntry(
-            summary="TaskQuery response: here",
-            entry_type=TaskHistoryType.QUERY_EVENT,
-            importance=TaskHistoryImportance.HIGH,
-            details={QUERY_ANSWER_FILES_KEY: [other.model_dump(mode="json")]},
-        ),
-    ]
-
-    # As the lead does with a worker's response, then its result.
-    assert runtime.manager.update_task_result(
-        "subtask_1", TaskResultUpdate(answer="done", execution_history=returned_history)
-    )
-    runtime.manager.bubble_subtask_result(ROOT, "subtask_1")
-
-    root_task = runtime.manager.get_task_info(ROOT).task
-    # Both entries were copied with their details as the worker wrote them.
-    copied = [entry for entry in root_task.execution_history if entry.details.get("bubbled_entry_id")]
-    assert [entry.entry_type for entry in copied] == [TaskHistoryType.SUBTASK_EVENT] * 2
-    assert GUIDANCE_STEERING_KEY in copied[0].details and QUERY_ANSWER_FILES_KEY in copied[1].details
-    assert _ids(received_attachments(root_task)) == ["att_guidance"]
-    assert _ids(request_files(runtime.manager, ROOT).files) == ["att_list", "att_guidance"]
-    scope = runtime.scope(ROOT)
-    assert scope.find("att_other_person") is None and scope.find("att_guidance") is not None
-    with pytest.raises(AttachmentSelectionError):
-        select_attachments(scope, ["att_other_person"], uploads_dir=runtime.layout.uploads_dir)
-
-
-def test_an_unreadable_received_record_is_reported_and_skipped(runtime: _Runtime, caplog: pytest.LogCaptureFixture) -> None:
-    runtime.manager.append_history_entry(
-        ROOT, "TaskQuery response", entry_type=TaskHistoryType.QUERY_EVENT,
-        details={QUERY_ANSWER_FILES_KEY: [{"filename": "no id"}, _file(runtime.layout, "att_ok").model_dump(mode="json")]},
+def _record(attachment_id: str, path: Path | None, *, name: str = "") -> UserTaskAttachment:
+    refs = [AttachmentStorageRef(storage_type="local", path=str(path))] if path is not None else []
+    return UserTaskAttachment(
+        attachment_id=attachment_id,
+        filename=name or f"{attachment_id}.png",
+        content_type="image/png",
+        kind="image",
+        size_bytes=10,
+        sha256="0" * 64,
+        storage_refs=refs,
     )
 
-    with caplog.at_level(logging.WARNING):
-        assert _ids(received_attachments(runtime.manager.get_task_info(ROOT).task)) == ["att_ok"]
-    assert f"event=attachment_record_unreadable task_id={ROOT} source=answer" in caplog.text
+
+def _thread(store: ConversationStore, *, conversation_id: str = CONVERSATION, owner: str | None = ANN) -> None:
+    store.ensure_thread(
+        conversation_id=conversation_id,
+        team_id="team",
+        owner_agent_id="lead",
+        owner_agent_name="Lead",
+        requester_name=None,
+        requester_id=None,
+        root_task_id=f"root_{conversation_id}",
+        owner_canonical_user_id=owner,
+    )
 
 
-def test_plan_steps_and_recovery_tasks_use_their_requests_files_and_conversation(runtime: _Runtime) -> None:
-    runtime.plan_step("step_2")
-    runtime.recovery("recovery_1", "step_2")
-
-    for task_id in ("step_2", "recovery_1"):
-        request = request_files(runtime.manager, task_id)
-        assert (request.request_task_id, request.conversation_id) == (ROOT, CONVERSATION)
-        assert _ids(request.files) == ["att_list"]
-        scope = runtime.scope(task_id)
-        # The current request's file and the turn-1 receipt, by id.
-        assert scope.find("att_list").attachment.attachment_id == "att_list"
-        earlier = scope.find("att_receipt")
-        assert (earlier.attachment.filename, earlier.turn_index) == ("receipt.jpg", 1)
-        assert _ids(scope.files().earlier) == ["att_receipt"]
-
-
-def test_a_delegated_subtask_never_reaches_its_requesters_files(runtime: _Runtime) -> None:
-    runtime.task("subtask_1", parent_task_id=ROOT, files=[_file(runtime.layout, "att_chosen")])
-
-    request = request_files(runtime.manager, "subtask_1")
-    scope = runtime.scope("subtask_1")
-
-    assert (request.request_task_id, request.conversation_id) == ("subtask_1", None)
-    assert _ids(scope.available()) == ["att_chosen"]
-    assert scope.find("att_list") is None and scope.find("att_receipt") is None
-
-
-def test_a_link_to_a_request_no_longer_held_falls_back_to_the_tasks_own_files(runtime: _Runtime, caplog) -> None:
-    runtime.plan_step("step_orphan", root_task_id="task_gone")
-
-    with caplog.at_level(logging.WARNING):
-        request = request_files(runtime.manager, "step_orphan")
-
-    # No conversation is offered for a request that cannot be checked.
-    assert (request.request_task_id, request.conversation_id, request.files) == ("step_orphan", None, ())
-    assert "event=attachment_request_missing task_id=step_orphan missing_task_ids=task_gone" in caplog.text
-    assert request_files(runtime.manager, "task_unknown") is None
-
-
-def test_a_recovery_task_for_an_ended_step_reaches_its_request_without_a_warning(runtime: _Runtime, caplog) -> None:
-    runtime.plan_step("step_2")
-    runtime.recovery("recovery_1", "step_2")
-    # The step ends: archived and removed from the held tasks; its link stays.
-    assert runtime.manager.remove_task("step_2")
-
-    with caplog.at_level(logging.DEBUG, logger="custom_agents.conversation_attachments"):
-        for _ in range(3):  # every prompt and tool call reads it
-            request = request_files(runtime.manager, "recovery_1")
-
-    assert (request.request_task_id, request.conversation_id) == (ROOT, CONVERSATION)
-    assert _ids(request.files) == ["att_list"]
-    ours = [record for record in caplog.records if record.name == "custom_agents.conversation_attachments"]
-    assert [record.levelno for record in ours] == [logging.DEBUG] * 3
-    assert "event=attachment_request_link_ended task_id=recovery_1 ended_task_ids=step_2" in caplog.text
-    assert "attachment_request_missing" not in caplog.text
-
-
-def test_earlier_conversation_files_are_only_for_the_team_lead_working_for_their_owner(
-    runtime: _Runtime, caplog: pytest.LogCaptureFixture
+def _turn(
+    store: ConversationStore,
+    task_id: str,
+    attachments: list[UserTaskAttachment],
+    *,
+    conversation_id: str = CONVERSATION,
+    owner: str | None = ANN,
 ) -> None:
-    runtime.turn("task_bob", [_file(runtime.layout, "att_bob")], conversation_id="conv_bob", owner=OTHER_PERSON)
-
-    assert runtime.scope(ROOT).find("att_receipt") is not None
-    # A specialist (here, a worker's scheduled job run continuing its owner's
-    # conversation) gets only its own task's files.
-    assert runtime.scope(ROOT, is_team_lead=False).find("att_receipt") is None
-    assert runtime.scope(ROOT, is_team_lead=False).files().earlier == ()
-    # Another conversation's file is not found, and nothing says it exists.
-    assert runtime.scope(ROOT).find("att_bob") is None
-    with caplog.at_level(logging.INFO):
-        assert runtime.scope(ROOT, person_id=OTHER_PERSON).find("att_receipt") is None
-        assert runtime.scope(ROOT, person_id=None).find("att_receipt") is None
-    refusals = [record for record in caplog.records if "event=attachment_scope_conversation_refused" in record.message]
-    # Another person is unexpected (a warning); work for nobody is not.
-    assert [(record.levelname, record.message.rsplit("reason=", 1)[1]) for record in refusals] == [
-        ("WARNING", "resource_owner_required"),
-        ("INFO", "no_verified_person"),
-    ]
-    # The request's own files stay usable either way.
-    assert runtime.scope(ROOT, person_id=None).find("att_list") is not None
-
-
-def test_ids_that_this_runtime_never_gives_out_are_not_looked_up(runtime: _Runtime) -> None:
-    scope = runtime.scope(ROOT)
-
-    for wanted in ("", "%", "att_%", "../att_receipt", "att receipt", "x" * 129):
-        assert scope.find(wanted) is None
-
-
-def test_files_are_saved_with_the_turn_of_the_request_a_step_or_recovery_task_serves(runtime: _Runtime) -> None:
-    runtime.plan_step("step_2")
-    runtime.recovery("recovery_1", "step_2")
-
-    saved = runtime.save("step_2", [_file(runtime.layout, "att_step_answer")])
-    resent = runtime.save("step_2", [_file(runtime.layout, "att_step_answer")])
-    runtime.save("recovery_1", [_file(runtime.layout, "att_recovery_answer")])
-
-    assert _ids(UserTaskAttachment.model_validate(record) for record in saved) == ["att_list", "att_step_answer"]
-    assert resent == saved
-    turn = runtime.store.get_turn_by_task_id(ROOT)
-    assert [item["attachment_id"] for item in turn["attachments"]] == ["att_list", "att_step_answer", "att_recovery_answer"]
-    # The next step and the request itself find the step's answer file and
-    # list it with the current request, not with earlier turns.
-    runtime.plan_step("step_3")
-    for task_id in ("step_3", ROOT):
-        scope = runtime.scope(task_id)
-        assert scope.find("att_step_answer").turn_index == 2
-        files = scope.files()
-        assert _ids(files.current) == ["att_list", "att_recovery_answer", "att_step_answer"]
-        assert _ids(files.earlier) == ["att_receipt"]
-        assert _ids(scope.available()) == ["att_list", "att_recovery_answer", "att_step_answer", "att_receipt"]
-    # The next turn lists them as earlier files.
-    runtime.turn("task_turn_3", [])
-    runtime.task("task_turn_3", conversation_id=CONVERSATION)
-    assert "att_recovery_answer" in _ids(runtime.scope("task_turn_3").files().earlier)
-
-
-def test_a_prompts_files_come_from_one_listing_of_the_conversation(
-    runtime: _Runtime, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Both groups a prompt shows (current and earlier files) are read with one bounded query."""
-
-    listings: list[tuple[str, int]] = []
-    listing = runtime.store.list_conversation_attachments
-
-    def counted(conversation_id: str, *, limit: int = 20, **kwargs):
-        listings.append((conversation_id, limit))
-        return listing(conversation_id, limit=limit, **kwargs)
-
-    monkeypatch.setattr(runtime.store, "list_conversation_attachments", counted)
-    scope = runtime.scope(ROOT)
-
-    files = scope.files()
-    assert (_ids(files.current), _ids(files.earlier)) == (["att_list"], ["att_receipt"])
-    assert listings == [(CONVERSATION, 20)]
-    assert _ids(scope.available(limit=1)) == ["att_list"] and len(listings) == 2
-    # A specialist's scope has no conversation to list.
-    assert _ids(runtime.scope(ROOT, is_team_lead=False).files().current) == ["att_list"] and len(listings) == 2
-
-
-def test_a_subtasks_files_stay_in_its_history_and_a_missing_turn_is_reported(runtime: _Runtime, caplog) -> None:
-    runtime.task("subtask_1", parent_task_id=ROOT)
-    runtime.task("task_no_turn", conversation_id=CONVERSATION)
-
-    assert runtime.save("subtask_1", [_file(runtime.layout, "att_sub")]) is None
-    assert runtime.save(ROOT, []) is None
-    with caplog.at_level(logging.WARNING):
-        assert runtime.save("task_no_turn", [_file(runtime.layout, "att_lost")]) is None
-
-    assert "event=conversation_turn_missing_for_attachments task_id=task_no_turn" in caplog.text
-    assert "attachment_ids=att_lost" in caplog.text
-    assert runtime.scope(ROOT).find("att_sub") is None
-
-
-def test_a_store_error_while_saving_reaches_the_caller(runtime: _Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail(**_kwargs):
-        raise RuntimeError("database is locked")
-
-    monkeypatch.setattr(runtime.store, "merge_turn_attachments", fail)
-
-    with pytest.raises(RuntimeError, match="locked"):
-        runtime.save(ROOT, [_file(runtime.layout, "att_retry")])
-
-
-def test_a_delegation_selects_exact_files_including_earlier_ones(runtime: _Runtime) -> None:
-    scope = runtime.scope(ROOT)
-    uploads = runtime.layout.uploads_dir
-
-    assert _ids(select_attachments(scope, ["att_receipt", "att_list", "att_receipt"], uploads_dir=uploads)) == [
-        "att_receipt",
-        "att_list",
-    ]
-    assert select_attachments(scope, [], uploads_dir=uploads) == []
-
-
-def test_unknown_too_many_or_deleted_files_are_refused_with_the_files_that_can_be_passed(runtime: _Runtime) -> None:
-    runtime.turn("task_turn_0", [_file(runtime.layout, "att_gone", stored=False)])
-    scope = runtime.scope(ROOT)
-    uploads = runtime.layout.uploads_dir
-
-    with pytest.raises(AttachmentSelectionError) as unknown:
-        select_attachments(scope, [f"att_unknown{index}" for index in range(12)] + ["att_list"], uploads_dir=uploads)
-    message = str(unknown.value)
-    assert "att_unknown0" in message and "att_unknown9" in message and "and 2 more" in message
-    assert "att_unknown10" not in message
-    assert "receipt.jpg (attachment_id att_receipt" in message and "att_list" in message
-    assert str(uploads) not in message
-    assert len(unknown.value.unknown_ids) == 12
-
-    with pytest.raises(AttachmentSelectionError, match="no longer stored") as deleted:
-        select_attachments(scope, ["att_gone"], uploads_dir=uploads)
-    assert deleted.value.deleted_ids == ["att_gone"]
-
-    with pytest.raises(AttachmentSelectionError, match=f"at most {MAX_SELECTED_ATTACHMENTS}"):
-        select_attachments(scope, [f"att_{index}" for index in range(MAX_SELECTED_ATTACHMENTS + 1)], uploads_dir=uploads)
-
-
-def test_a_file_counts_as_stored_only_inside_this_instances_uploads(runtime: _Runtime, tmp_path: Path) -> None:
-    uploads = runtime.layout.uploads_dir
-    outside = tmp_path / "elsewhere" / "secret.txt"
-    outside.parent.mkdir()
-    outside.write_text("not an upload")
-    link = uploads / "session_alice" / "att_link"
-    link.parent.mkdir(parents=True, exist_ok=True)
-    os.symlink(outside, link)
-
-    def at(path: Path | None) -> UserTaskAttachment:
-        refs = [AttachmentStorageRef(storage_type="local", path=str(path))] if path else []
-        return UserTaskAttachment(attachment_id="att_x", filename="x", size_bytes=1, sha256="0", storage_refs=refs)
-
-    assert upload_state(_file(runtime.layout, "att_here"), uploads) == UPLOAD_AVAILABLE
-    assert upload_state(_file(runtime.layout, "att_removed", stored=False), uploads) == UPLOAD_DELETED
-    # Not a copy this runtime may open: elsewhere on disk, a link out of the
-    # uploads folder, the folder itself, or stored on another machine.
-    assert upload_state(at(outside), uploads) == UPLOAD_REMOTE
-    assert upload_state(at(link), uploads) == UPLOAD_REMOTE
-    assert upload_state(at(uploads), uploads) == UPLOAD_REMOTE
-    assert upload_state(at(None), uploads) == UPLOAD_REMOTE
-
-
-def test_a_file_is_named_for_a_model_without_where_it_is_stored(runtime: _Runtime) -> None:
-    earlier = runtime.scope(ROOT).find("att_receipt")
-    odd = _file(runtime.layout, "att_odd", filename="line one\nline two " + "x" * 200)
-
-    assert describe_attachment(earlier) == (
-        "receipt.jpg (attachment_id att_receipt, image, image/png, 4 bytes, sent in turn 1)"
+    store.append_turn(
+        conversation_id=conversation_id,
+        task_id=task_id,
+        followup_to_task_id=None,
+        owner_agent_id="lead",
+        requester_name=None,
+        requester_id=None,
+        correlation_id=None,
+        problem_text=f"request {task_id}",
+        owner_canonical_user_id=owner,
+        attachments=attachments,
     )
-    shown = describe_attachment(odd)
-    assert "\n" not in shown and shown.startswith("line one line two x") and "…" in shown
-    assert str(runtime.layout.root) not in shown
 
 
-def _stat_fails(monkeypatch: pytest.MonkeyPatch, path: Path, error: OSError) -> None:
-    """Looking the stored file up raises ``error``, as a permission or disk fault would; other paths are untouched."""
+def saved_before_upgrade(store: ConversationStore, *task_ids: str) -> None:
+    """Make the turns of ``task_ids`` look saved before turns kept their files.
 
-    real_stat = os.stat
-    target = os.path.realpath(path)
+    Such rows got the columns when the store was opened after the upgrade: no
+    file list, and the request-files marker at its default 0.
+    """
 
-    def failing_stat(value, *args, **kwargs):
-        if os.fspath(value) == target:
-            raise error
-        return real_stat(value, *args, **kwargs)
+    with connect_sqlite(store._db_path) as conn:
+        for task_id in task_ids:
+            conn.execute(
+                "UPDATE conversation_task_links SET attachments_json = NULL, attachments_recorded = 0 WHERE task_id = ?",
+                (task_id,),
+            )
+        conn.commit()
 
-    monkeypatch.setattr(os, "stat", failing_stat)
+
+def _task_info(
+    *,
+    attachments: list[UserTaskAttachment] = (),  # type: ignore[assignment]
+    history: list[dict[str, Any]] = (),  # type: ignore[assignment]
+    conversation_id: str | None = CONVERSATION,
+    person: str | None = ANN,
+    parent_task_id: str | None = None,
+) -> TaskInfo:
+    task = Task(
+        task_id=CURRENT,
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="current request",
+        parent_task_id=parent_task_id,
+        attachments=list(attachments),
+    )
+    info = TaskInfo(task, MessageHeader(from_agent_id="gateway"), MessageMeta(conversation_id=conversation_id), owner_person_id=person)
+    for details in history:
+        info.task.execution_history.append(TaskHistoryEntry(summary="accepted", details=details))
+    return info
 
 
-def _path(attachment: UserTaskAttachment) -> Path:
-    return Path(attachment.local_path())
+def _files(*attachments: UserTaskAttachment) -> dict[str, Any]:
+    """History details of one accepted guidance's files, as the steering runtime writes them."""
+
+    return task_files_details(list(attachments), message_id="steer_1", message_type="proactive_guidance")
+
+
+def _ids(records: list[Any]) -> list[str]:
+    return [getattr(record, "attachment", record).attachment_id for record in records]
+
+
+def test_a_top_level_task_uses_its_own_files_and_its_conversations(layout, store) -> None:
+    _thread(store)
+    photo, notes = _upload(layout.uploads_dir, "att_photo"), _upload(layout.uploads_dir, "att_notes")
+    _turn(store, "task_first", [photo])
+    _turn(store, "task_second", [notes])
+    request_file = _upload(layout.uploads_dir, "att_request")
+    guidance_file, answer_file = _upload(layout.uploads_dir, "att_guidance"), _upload(layout.uploads_dir, "att_answer")
+    info = _task_info(
+        attachments=[request_file],
+        history=[{"event": "guidance"}, _files(guidance_file), _files(answer_file, request_file)],
+    )
+
+    scope = TaskAttachments.load(info, store)
+
+    # Own files in arrival order, one per id; the conversation is in scope.
+    assert _ids(list(scope.own)) == ["att_request", "att_guidance", "att_answer"]
+    assert scope.conversation_id == CONVERSATION
+    found, unknown = scope.find([" att_photo ", "att_guidance", "att_missing", "att_photo", ""])
+    assert (_ids(found), unknown) == (["att_photo", "att_guidance"], ["att_missing"])
+    assert found[0] == photo  # the full record, for trusted code to open
+    files, more = scope.conversation_files()
+    assert [(entry.attachment.attachment_id, entry.turn_index, entry.task_id) for entry in files] == [
+        ("att_notes", 2, "task_second"),
+        ("att_photo", 1, "task_first"),
+    ]
+    assert more is False
+    # Choices: own files newest first, then the conversation's, described without storage.
+    choices = scope.choices()
+    assert [choice["attachment_id"] for choice in choices] == [
+        "att_answer", "att_guidance", "att_request", "att_notes", "att_photo",
+    ]
+    assert choices[0]["turn_index"] is None and choices[0]["task_id"] == CURRENT
+    assert set(choices[-1]) == {*TURN_ATTACHMENT_SUMMARY_FIELDS, "turn_index", "task_id"}
+    assert str(layout.root) not in repr(choices)
+
+
+def test_a_delegated_task_uses_only_the_files_it_was_given(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_first", [_upload(layout.uploads_dir, "att_photo")])
+    given = _upload(layout.uploads_dir, "att_given")
+    info = _task_info(attachments=[given], parent_task_id="task_parent")
+
+    scope = TaskAttachments.load(info, store)
+
+    assert scope.conversation_id is None
+    assert scope.find(["att_photo", "att_given"]) == ([given], ["att_photo"])
+    assert scope.conversation_files() == ([], False)
+    assert [choice["attachment_id"] for choice in scope.choices()] == ["att_given"]
 
 
 @pytest.mark.parametrize(
-    "fault, error_type, error_number",
+    ("person", "owner", "allowed"),
     [
-        (PermissionError(errno.EACCES, os.strerror(errno.EACCES)), "PermissionError", errno.EACCES),
-        (OSError(errno.EIO, os.strerror(errno.EIO)), "OSError", errno.EIO),
+        (ANN, ANN, True),
+        (None, None, True),  # work for no person, in an ownerless conversation
+        (ANN, BOB, False),  # signed for Ann, in Bob's conversation
+        (None, ANN, False),  # unsigned work in Ann's conversation
+        (ANN, None, False),  # Ann's work in a conversation that belongs to nobody
     ],
 )
-def test_a_stored_file_that_cannot_be_read_is_not_called_removed(
-    runtime: _Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fault, error_type, error_number
+def test_only_work_for_the_conversations_person_sees_its_files(
+    layout, store, caplog, person: str | None, owner: str | None, allowed: bool
 ) -> None:
-    attachment = _file(runtime.layout, "att_fault")
-    _stat_fails(monkeypatch, _path(attachment), fault)
+    _thread(store, owner=owner)
+    _turn(store, "task_first", [_upload(layout.uploads_dir, "att_photo")], owner=owner)
 
-    with caplog.at_level(logging.INFO, logger="custom_agents.conversation_attachments"):
-        location = locate_upload(attachment, runtime.layout.uploads_dir, task_id=ROOT)
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        scope = TaskAttachments.load(_task_info(person=person), store)
 
-    assert (location.state, location.path, location.size_bytes) == (UPLOAD_UNREADABLE, None, None)
-    [logged] = [record for record in caplog.records if "event=attachment_upload_unreadable" in record.getMessage()]
-    assert logged.levelno == logging.WARNING
-    assert f"task_id={ROOT} attachment_id=att_fault error_type={error_type} errno={error_number}" in logged.getMessage()
-    assert str(runtime.layout.root) not in caplog.text and "session_alice" not in caplog.text
+    assert (scope.conversation_id == CONVERSATION) is allowed
+    assert (scope.find(["att_photo"])[1] == []) is allowed
+    mismatch = [record for record in caplog.records if "event=conversation_files_owner_mismatch" in record.getMessage()]
+    assert bool(mismatch) is not allowed
+    if mismatch:
+        assert f"task_id={CURRENT}" in mismatch[0].getMessage()
 
 
-def test_a_removed_upload_or_folder_is_gone_and_a_layout_fault_is_unreadable(
-    runtime: _Runtime, caplog: pytest.LogCaptureFixture
-) -> None:
-    uploads = runtime.layout.uploads_dir
+def test_a_task_never_reaches_another_conversations_files(layout, store) -> None:
+    _thread(store)
+    _thread(store, conversation_id=OTHER_CONVERSATION)
+    _turn(store, "task_first", [_upload(layout.uploads_dir, "att_mine")])
+    _turn(store, "task_elsewhere", [_upload(layout.uploads_dir, "att_elsewhere")], conversation_id=OTHER_CONVERSATION)
 
-    def at(path: Path, attachment_id: str) -> UserTaskAttachment:
-        return UserTaskAttachment(
-            attachment_id=attachment_id, filename="x.png", size_bytes=4, sha256="0" * 64,
-            storage_refs=[AttachmentStorageRef(storage_type="local", path=str(path))],
+    scope = TaskAttachments.load(_task_info(), store)
+
+    assert scope.find(["att_mine", "att_elsewhere"])[1] == ["att_elsewhere"]
+    assert _ids(scope.conversation_files()[0]) == ["att_mine"]
+    with pytest.raises(AttachmentSelectionError) as refused:
+        scope.require(["att_elsewhere"])
+    assert "att_elsewhere" in str(refused.value) and "att_mine" in str(refused.value)
+
+
+def test_no_store_no_conversation_or_no_thread_leaves_only_the_tasks_own_files(layout, store, caplog) -> None:
+    own = _upload(layout.uploads_dir, "att_own")
+
+    assert TaskAttachments.load(_task_info(attachments=[own]), None).conversation_id is None
+    assert TaskAttachments.load(_task_info(attachments=[own], conversation_id=None), store).conversation_id is None
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        scope = TaskAttachments.load(_task_info(attachments=[own]), store)
+    assert scope.conversation_id is None and _ids(list(scope.own)) == ["att_own"]
+    assert "event=conversation_files_thread_missing" in caplog.text
+    assert TaskAttachments.load(None, store) == TaskAttachments(task_id="")
+
+
+class _CountingStore:
+    """The conversation store, recording the limits the scope asks for."""
+
+    def __init__(self, store: ConversationStore) -> None:
+        self._store = store
+        self.limits: list[int | None] = []
+
+    def get_thread(self, conversation_id: str) -> Any:
+        return self._store.get_thread(conversation_id)
+
+    def list_turn_attachments(self, conversation_id: str, **kwargs: Any) -> Any:
+        self.limits.append(kwargs.get("limit"))
+        return self._store.list_turn_attachments(conversation_id, **kwargs)
+
+
+@pytest.mark.parametrize(("turns", "more"), [(INVENTORY_LIMIT + 5, True), (INVENTORY_LIMIT + 1, False)])
+def test_the_conversation_list_is_bounded_and_skips_files_listed_elsewhere(layout, store, turns: int, more: bool) -> None:
+    _thread(store)
+    for index in range(turns):
+        _turn(store, f"task_{index:02d}", [_upload(layout.uploads_dir, f"att_{index:02d}")])
+    newest = f"att_{turns - 1:02d}"
+    counting = _CountingStore(store)
+    scope = TaskAttachments.load(_task_info(), counting)
+
+    files, has_more = scope.conversation_files(exclude_ids=[newest])
+
+    expected = [f"att_{index:02d}" for index in range(turns - 2, -1, -1)][:INVENTORY_LIMIT]
+    assert (_ids(files), has_more) == (expected, more)
+    # Asked for the limit, plus the one excluded file, plus one to tell whether there are more.
+    assert counting.limits == [INVENTORY_LIMIT + 2]
+
+
+def test_the_inventory_lists_own_files_then_earlier_ones_and_leaves_out_excluded_ones(layout, store) -> None:
+    _thread(store)
+    photo = _upload(layout.uploads_dir, "att_photo", name="garden plant.png")
+    _turn(store, "task_first", [photo])
+    request_file, guidance_file = _upload(layout.uploads_dir, "att_request"), _upload(layout.uploads_dir, "att_guidance")
+    # The current turn's row holds its own files too; they are listed once, as the task's own.
+    _turn(store, CURRENT, [request_file, guidance_file])
+    scope = TaskAttachments.load(_task_info(attachments=[request_file], history=[_files(guidance_file)]), store)
+
+    files, more = scope.inventory(exclude_ids=["att_request"])
+
+    assert ([item["attachment_id"] for item in files], more) == (["att_guidance", "att_photo"], False)
+    text = inventory_text(scope, exclude_ids=["att_request"])
+    assert text.splitlines()[0] == CONVERSATION_ATTACHMENTS_HEADING
+    assert "- `att_guidance` att_guidance.png (image/png, image, 10 bytes; sent with this task)" in text
+    assert "- `att_photo` garden plant.png (image/png, image, 10 bytes; turn 1, task task_first)" in text
+    assert "att_request" not in text and "Only the newest" not in text
+    assert str(layout.root) not in text
+
+
+def test_the_inventory_says_when_older_files_are_not_listed(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_first", [_upload(layout.uploads_dir, "att_photo")])
+    own = [_upload(layout.uploads_dir, f"att_own_{index:02d}") for index in range(INVENTORY_LIMIT)]
+    # The task's own files fill the list; the earlier photo still counts as one more.
+    scope = TaskAttachments.load(_task_info(history=[_files(*own)]), store)
+
+    files, more = scope.inventory()
+
+    assert len(files) == INVENTORY_LIMIT and more is True
+    assert "att_photo" not in [item["attachment_id"] for item in files]
+    assert f"Only the newest {INVENTORY_LIMIT} are listed" in inventory_text(scope)
+
+
+def test_no_inventory_without_files_beyond_the_current_requests(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_first", [_upload(layout.uploads_dir, "att_photo")])
+    given = _upload(layout.uploads_dir, "att_given")
+
+    # A delegated task's only files are its own request's; the prompt lists them already.
+    delegated = TaskAttachments.load(_task_info(attachments=[given], parent_task_id="task_parent"), store)
+    assert inventory_text(delegated, exclude_ids=["att_given"]) == ""
+    assert inventory_text(TaskAttachments.load(_task_info(conversation_id=None), store)) == ""
+
+
+def test_the_inventory_says_up_to_which_turn_files_were_not_recorded(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_old_1", [])
+    _turn(store, "task_old_2", [])
+    _turn(store, "task_new", [_upload(layout.uploads_dir, "att_photo")])
+    # The current task started before the upgrade too; it holds its own request's files.
+    _turn(store, CURRENT, [])
+    saved_before_upgrade(store, "task_old_1", "task_old_2", CURRENT)
+    scope = TaskAttachments.load(_task_info(), store)
+
+    assert scope.last_unrecorded_turn() == 2
+    text = inventory_text(scope)
+    assert "- `att_photo` att_photo.png (image/png, image, 10 bytes; turn 3, task task_new)" in text
+    assert text.splitlines()[-1] == UNRECORDED_TURNS_NOTE.format(turn=2)
+    assert UNRECORDED_TURNS_NOTE.format(turn=2) == (
+        "Some files sent with earlier requests (the latest in turn 2) are not recorded, because those turns were "
+        "saved before files were recorded or some of their files were not accepted. Recorded files are listed and "
+        "open by id as usual. If the person refers to a file from one of those requests that is not listed here or "
+        "by get_conversation_context_slice, ask them to send it again."
+    )
+
+
+def test_the_unrecorded_turns_note_does_not_cover_recorded_files_past_the_newest_twenty(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_old", [])
+    saved_before_upgrade(store, "task_old")
+    _turn(store, "task_turn_2", [_upload(layout.uploads_dir, "att_recorded_old")])
+    _turn(store, "task_turn_3", [_upload(layout.uploads_dir, f"att_new_{index:02d}") for index in range(INVENTORY_LIMIT)])
+    scope = TaskAttachments.load(_task_info(), store)
+
+    lines = inventory_text(scope).splitlines()
+
+    # The recorded turn-2 file is past the newest 20: left out of the list, which
+    # points to the slice, and still opened by id.
+    assert not any("att_recorded_old" in line for line in lines)
+    assert lines[-2].startswith(f"Only the newest {INVENTORY_LIMIT} are listed.")
+    assert _ids(scope.find(["att_recorded_old"])[0]) == ["att_recorded_old"]
+    # The note after it asks again only for turn 1's request files, not for every file left out.
+    assert lines[-1] == UNRECORDED_TURNS_NOTE.format(turn=1)
+    assert "a file from one of those requests that is not listed here or by get_conversation_context_slice" in lines[-1]
+    assert "a file that is not listed" not in lines[-1]
+
+
+def test_unrecorded_turns_are_noted_without_files_and_only_inside_the_conversation_scope(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_old", [])
+    saved_before_upgrade(store, "task_old")
+
+    # Nothing to list, but the person may refer to a file sent before the upgrade.
+    assert inventory_text(TaskAttachments.load(_task_info(), store)) == "\n".join(
+        [CONVERSATION_ATTACHMENTS_HEADING, UNRECORDED_TURNS_NOTE.format(turn=1)]
+    )
+    # Work for someone else and delegated work learn nothing about the conversation.
+    for outside in (_task_info(person=BOB), _task_info(parent_task_id="task_parent")):
+        scope = TaskAttachments.load(outside, store)
+        assert scope.last_unrecorded_turn() is None and inventory_text(scope) == ""
+
+
+def test_an_unknown_id_lists_at_most_twenty_choices_without_storage_paths(layout, store) -> None:
+    _thread(store)
+    for index in range(INVENTORY_LIMIT + 5):
+        _turn(store, f"task_{index:02d}", [_upload(layout.uploads_dir, f"att_{index:02d}", name=f"photo {index}.png")])
+    scope = TaskAttachments.load(_task_info(attachments=[_upload(layout.uploads_dir, "att_request")]), store)
+
+    with pytest.raises(AttachmentSelectionError) as refused:
+        scope.require(["att_request", "att_nope"])
+
+    error = refused.value
+    assert error.unknown_ids == ("att_nope",)
+    assert len(error.choices) == INVENTORY_LIMIT
+    assert error.choices[0]["attachment_id"] == "att_request"
+    assert error.choices[1]["attachment_id"] == f"att_{INVENTORY_LIMIT + 4:02d}"
+    message = str(error)
+    assert "att_nope" in message and "photo 24.png" in message and "sent with this task" in message
+    assert str(layout.root) not in message and "storage_refs" not in message
+    assert str(AttachmentSelectionError(["att_nope"], [])).endswith("This task has no files it may use.")
+
+
+def test_unreadable_task_file_entries_are_logged_and_skipped(layout, store, caplog) -> None:
+    good = _upload(layout.uploads_dir, "att_good")
+    history = [
+        {"event": TASK_FILES_EVENT, TASK_FILES_KEY: "not a list"},
+        {"event": TASK_FILES_EVENT, TASK_FILES_KEY: [{"attachment_id": "att_broken"}, good.model_dump(mode="json")]},
+    ]
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        scope = TaskAttachments.load(_task_info(history=history, conversation_id=None), store)
+
+    assert _ids(list(scope.own)) == ["att_good"]
+    unreadable = [record.getMessage() for record in caplog.records if "event=task_files_entry_unreadable" in record.getMessage()]
+    assert len(unreadable) == 2
+    assert any("attachment_id=att_broken" in message for message in unreadable)
+
+
+def test_only_files_entries_this_task_wrote_are_its_own_files(layout, store) -> None:
+    mine = _upload(layout.uploads_dir, "att_mine")
+    copied, other_event, subtask_event = (
+        _upload(layout.uploads_dir, "att_copied"),
+        _upload(layout.uploads_dir, "att_other_event"),
+        _upload(layout.uploads_dir, "att_subtask_event"),
+    )
+    info = _task_info(conversation_id=None)
+    history = info.task.execution_history
+    history.append(TaskHistoryEntry(summary="files", details=_files(mine)))
+    # A lead's copy of a worker's entry keeps its details (TaskManager._bubble_subtask_entries).
+    history.append(
+        TaskHistoryEntry(
+            summary="[Subtask child] files",
+            entry_type=TaskHistoryType.SUBTASK_EVENT,
+            details={**_files(copied), "bubbled_entry_id": "task_hist_worker"},
         )
+    )
+    history.append(TaskHistoryEntry(summary="other", details={"event": "guidance", TASK_FILES_KEY: [other_event.model_dump(mode="json")]}))
+    history.append(TaskHistoryEntry(summary="subtask", entry_type=TaskHistoryType.SUBTASK_EVENT, details=_files(subtask_event)))
 
-    stored = _file(runtime.layout, "att_here")
-    removed = _file(runtime.layout, "att_removed", stored=False)
-    # A clean-up removed the upload's whole folder.
-    in_removed_folder = at(uploads / "session_removed" / "att_in_removed", "att_in_removed")
-    # A file sits where the upload's folder should be: looking inside it raises
-    # NotADirectoryError, which no removal produces.
-    (uploads / "session_file").write_bytes(b"not a folder")
-    under_a_file = at(uploads / "session_file" / "att_under_file", "att_under_file")
-    a_folder = _file(runtime.layout, "att_folder", stored=False)
-    _path(a_folder).mkdir(parents=True)
+    scope = TaskAttachments.load(info, store)
 
-    with caplog.at_level(logging.INFO, logger="custom_agents.conversation_attachments"):
-        found = locate_upload(stored, uploads, task_id=ROOT)
-        states = [
-            locate_upload(item, uploads, task_id=ROOT).state
-            for item in (removed, in_removed_folder, under_a_file, a_folder)
-        ]
+    assert _ids(list(scope.own)) == ["att_mine"]
 
-    assert (found.state, found.path, found.size_bytes) == (UPLOAD_AVAILABLE, _path(stored).resolve(), 4)
-    assert states == [UPLOAD_DELETED, UPLOAD_DELETED, UPLOAD_UNREADABLE, UPLOAD_UNREADABLE]
-    logged = [record.getMessage() for record in caplog.records if record.levelno >= logging.INFO]
-    assert len(logged) == 2
-    assert all(record.levelno == logging.WARNING for record in caplog.records if record.levelno >= logging.INFO)
+
+def _not_kept(count: Any) -> dict[str, Any]:
+    """History details of a request's count of files not kept, as admission writes them."""
+
+    return {"event": REQUEST_FILES_NOT_KEPT_EVENT, REQUEST_FILES_NOT_KEPT_KEY: count}
+
+
+def test_the_request_and_its_steps_say_how_many_request_files_were_not_accepted(layout, store, caplog) -> None:
+    """The count comes only from the request's own entries; copies of a worker's and unreadable ones are skipped."""
+
+    _thread(store)
+    _turn(store, CURRENT, [])
+    request = _task_info(history=[_not_kept(2), {**_not_kept(5), "bubbled_entry_id": "task_hist_worker"}, _not_kept("x")])
+    request.task.execution_history.append(
+        TaskHistoryEntry(summary="[Subtask child]", entry_type=TaskHistoryType.SUBTASK_EVENT, details=_not_kept(3))
+    )
+    step = TaskInfo(
+        Task(task_id="task_step", task_type=MessageMetaType.REQUEST, problem_statement="step"),
+        MessageHeader(from_agent_id="lead"),
+        MessageMeta(conversation_id="conv_step"),
+        owner_person_id=ANN,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        scope = TaskAttachments.load(request, store)
+        step_scope = TaskAttachments.load(step, store, request_info=request)
+
+    assert (scope.request_files_not_kept, step_scope.request_files_not_kept) == (2, 2)
+    assert inventory_text(scope) == "\n".join(
+        [CONVERSATION_ATTACHMENTS_HEADING, REQUEST_FILES_NOT_KEPT_NOTE.format(count=2)]
+    )
+    assert REQUEST_FILES_NOT_KEPT_NOTE.format(count=2) in inventory_text(step_scope)
+    assert TaskAttachments.load(step, store).request_files_not_kept == 0  # without its request, a task has none
+    assert any("event=request_files_not_kept_entry_unreadable" in record.getMessage() for record in caplog.records)
+    assert REQUEST_FILES_NOT_KEPT_NOTE.format(count=1) == (
+        "The person sent 1 file(s) with this request that were not accepted, so they are not listed and cannot be "
+        "opened. If the request needs them, ask the person to send them again."
+    )
+
+
+def test_a_workers_returned_files_entry_does_not_become_its_leads_file(tmp_path: Path, layout, store) -> None:
+    """A worker's answer carries its history; the lead keeps copies of its important entries."""
+
+    manager = TaskManager(db_path=str(tmp_path / "lead.db"))
+    manager.set_owner_identity("lead_1", "lead", "team", "TeamArchitect")
+    manager.add_task(
+        Task(task_id="run_1", task_type=MessageMetaType.REQUEST, problem_statement="Ann's request."),
+        MessageHeader(from_agent_id="gateway"),
+        MessageMeta(conversation_id=CONVERSATION),
+        owner_person_id=ANN,
+    )
+    manager.add_subtask(
+        "run_1",
+        Task(task_id="child", parent_task_id="run_1", task_type=MessageMetaType.REQUEST),
+        MessageHeader(),
+        MessageMeta(),
+    )
+    # Another person's upload, in a session folder of the same upload folder.
+    bobs = _upload(layout.uploads_dir / "bob_session", "att_bobs_scan", name="passport.png")
+    returned = [TaskHistoryEntry(summary="accepted guidance", importance=TaskHistoryImportance.HIGH, details=_files(bobs))]
+    manager.update_task_result("child", TaskResultUpdate(execution_history=returned))
+
+    manager.bubble_subtask_result("run_1", "child")
+
+    lead = manager.get_task_info("run_1")
+    copies = [entry for entry in lead.task.execution_history if entry.details.get(TASK_FILES_KEY)]
+    assert len(copies) == 1  # the copy is in the lead's history ...
+    scope = TaskAttachments.load(lead, store)
+    assert scope.own == ()  # ... but is not one of its files
+    assert scope.find(["att_bobs_scan"]) == ([], ["att_bobs_scan"])
+
+
+# --- Reading bytes only from this host's upload folders ----------------------------------------
+
+
+def test_only_files_in_an_upload_folder_or_without_a_local_copy_are_kept(layout, tmp_path, caplog) -> None:
+    folders = UploadFolders.for_instance(layout.root)
+    inside = _upload(layout.uploads_dir, "att_inside")
+    no_copy = _record("att_no_copy", None)
+    outside = _record("att_outside", layout.root / "state" / "secrets.db")
+    climbing = _record("att_climbing", layout.uploads_dir / ".." / "elsewhere.png")
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        kept = keep_upload_files(
+            [inside, no_copy, outside, climbing], folders, task_id=CURRENT, conversation_id=CONVERSATION
+        )
+        without_folders = keep_upload_files([inside, no_copy], None, task_id=CURRENT, conversation_id=None)
+
+    assert _ids(kept) == ["att_inside", "att_no_copy"]
+    assert _ids(without_folders) == ["att_no_copy"]
+    refused = [record.getMessage() for record in caplog.records if "event=attachment_outside_upload_folders" in record.getMessage()]
+    assert len(refused) == 3
+    assert any(
+        f"attachment_id=att_outside task_id={CURRENT} conversation_id={CONVERSATION}" in message
+        for message in refused
+    )
+    assert all("so it was not saved" in message for message in refused)
+
+
+def test_an_upload_inside_an_upload_folder_is_located(layout) -> None:
+    folders = UploadFolders.for_instance(layout.root)
+    photo = _upload(layout.uploads_dir, "att_photo", data=b"photo bytes")
+
+    located = locate_upload(photo, folders, task_id=CURRENT, conversation_id=CONVERSATION)
+
+    assert located == LocatedUpload(
+        Path(photo.local_path()).resolve(), len(b"photo bytes"), layout.uploads_dir.resolve()
+    )
+    assert located.read_bytes(max_bytes=100) == b"photo bytes"
+    with located.reader() as reader:
+        assert reader.read() == b"photo bytes"
+
+
+def test_a_located_upload_is_read_without_following_a_link_swapped_in_later(layout) -> None:
+    folders = UploadFolders.for_instance(layout.root)
+    photo = _upload(layout.uploads_dir, "att_photo", data=b"photo bytes")
+    located = locate_upload(photo, folders, task_id=CURRENT, conversation_id=CONVERSATION)
+    assert isinstance(located, LocatedUpload)
+    secret = layout.state_dir / "secret.db"
+    secret.write_bytes(b"not an upload")
+    # After the check, the upload is replaced by a link to a file outside the folder.
+    located.path.unlink()
+    os.symlink(secret, located.path)
+
+    with pytest.raises(safe_open.UnsafePath) as refused:
+        located.read_bytes(max_bytes=100)
+    assert refused.value.reason == safe_open.REASON_LINK
+    with pytest.raises(safe_open.UnsafePath):
+        with located.reader():
+            pass
+
+
+def test_a_located_upload_that_grew_past_the_limit_is_refused(layout) -> None:
+    photo = _upload(layout.uploads_dir, "att_photo", data=b"photo bytes")
+    located = locate_upload(photo, UploadFolders.for_instance(layout.root), task_id=CURRENT, conversation_id=None)
+    assert isinstance(located, LocatedUpload)
+
+    with pytest.raises(safe_open.UnsafePath) as refused:
+        located.read_bytes(max_bytes=4)
+    assert refused.value.reason == safe_open.REASON_TOO_LARGE
+
+
+def test_a_deleted_upload_says_to_send_it_again(layout, caplog) -> None:
+    photo = _upload(layout.uploads_dir, "att_photo")
+    Path(photo.local_path()).unlink()
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = locate_upload(photo, UploadFolders.for_instance(layout.root), task_id=CURRENT, conversation_id=CONVERSATION)
+
+    assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_FILE_MISSING
+    assert "send it again" in result.message and str(layout.root) not in result.message
+    assert "event=attachment_upload_missing attachment_id=att_photo" in caplog.text
+
+
+def test_an_upload_folder_missing_on_this_host_means_another_host(tmp_path: Path, layout) -> None:
+    other_host = InstanceLayout.at(tmp_path / "worker_host")  # its state/uploads was never created
+    photo = _record("att_photo", other_host.uploads_dir / "web_session" / "att_photo.bin")
+
+    result = locate_upload(photo, UploadFolders.for_instance(other_host.root), task_id=CURRENT, conversation_id=None)
+
+    assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_NOT_ON_THIS_HOST
+
+
+def test_a_record_without_a_local_copy_is_reported(layout) -> None:
+    remote = _record("att_remote", None)
+    remote.storage_refs.append(AttachmentStorageRef(storage_type="nats_object", bucket="uploads", object_name="att_remote"))
+
+    result = locate_upload(remote, UploadFolders.for_instance(layout.root), task_id=CURRENT, conversation_id=None)
+
+    assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_NO_LOCAL_COPY
+
+
+@pytest.mark.parametrize("trick", ["outside", "dot_dot", "link"])
+def test_a_record_pointing_outside_the_upload_folders_is_refused(layout, caplog, trick: str) -> None:
+    secret = layout.state_dir / "secret.db"
+    secret.write_bytes(b"not an upload")
+    if trick == "outside":
+        path = secret
+    elif trick == "dot_dot":
+        path = layout.uploads_dir / ".." / "secret.db"
+    else:
+        path = layout.uploads_dir / "web_session" / "looks_like_an_upload.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(secret, path)
+    record = _record("att_forged", path)
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = locate_upload(record, UploadFolders.for_instance(layout.root), task_id=CURRENT, conversation_id=CONVERSATION)
+
+    assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_OUTSIDE_FOLDERS
+    assert str(secret) not in result.message
     assert (
-        f"event=attachment_upload_unreadable task_id={ROOT} attachment_id=att_under_file "
-        f"error_type=NotADirectoryError errno={errno.ENOTDIR}"
-    ) in logged[0]
-    assert "attachment_id=att_folder error_type=not_a_regular_file" in logged[1]
-    assert str(runtime.layout.root) not in caplog.text and "session_file" not in caplog.text
+        f"event=attachment_outside_upload_folders attachment_id=att_forged task_id={CURRENT} "
+        f"conversation_id={CONVERSATION}"
+    ) in caplog.text
 
 
-def test_a_delegation_passes_on_a_file_it_cannot_read_now(
-    runtime: _Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    _stat_fails(monkeypatch, runtime.layout.uploads_dir / "session_alice" / "att_list", PermissionError(errno.EACCES, "denied"))
+def test_the_adapter_hosts_upload_folder_is_trusted_from_the_saved_settings(tmp_path: Path, layout, caplog) -> None:
+    config = GatewayInstanceConfig.create(
+        instance_name="files", instance_root=str(layout.root), team_id="team", timezone="UTC"
+    )
+    config.interactive_apps.adapter_host.upload_dir = "transfers/adapter-uploads"
+    saved = config.save()
+    adapter_folder = layout.root / "transfers" / "adapter-uploads"
+    adapter_folder.mkdir(parents=True)
+    agent = type("Agent", (), {"id": "lead", "instance_root": str(layout.root), "instance_config_path": str(saved)})()
 
-    with caplog.at_level(logging.WARNING, logger="custom_agents.conversation_attachments"):
-        chosen = select_attachments(runtime.scope(ROOT), ["att_list"], uploads_dir=runtime.layout.uploads_dir)
+    folders = UploadFolders.for_agent(agent)
 
-    # The fault may clear; the specialist's tool says so if it does not.
-    assert _ids(chosen) == ["att_list"]
-    assert f"event=attachment_upload_unreadable task_id={ROOT} attachment_id=att_list" in caplog.text
+    assert folders.paths == (layout.uploads_dir.resolve(), adapter_folder.resolve())
+    photo = _upload(adapter_folder, "att_adapter")
+    assert isinstance(locate_upload(photo, folders, task_id=CURRENT, conversation_id=None), LocatedUpload)
+    Path(photo.local_path()).unlink()
+    assert locate_upload(photo, folders, task_id=CURRENT, conversation_id=None).reason == UPLOAD_FILE_MISSING
+
+    # Unreadable settings: logged, and only state/uploads is trusted.
+    agent.instance_config_path = str(tmp_path / "missing" / "instance_config.yaml")
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        assert UploadFolders.for_agent(agent).paths == (layout.uploads_dir.resolve(),)
+    assert "event=upload_folders_settings_unreadable agent_id=lead" in caplog.text
+
+
+def test_the_adapter_host_upload_folder_resolves_under_the_instance_root(tmp_path: Path) -> None:
+    settings = AdapterHostSettings(upload_dir="runtime/adapter-host-uploads")
+    assert settings.resolved_upload_dir(tmp_path) == (tmp_path / "runtime" / "adapter-host-uploads").resolve()
+    absolute = AdapterHostSettings(upload_dir=str(tmp_path / "elsewhere"))
+    assert absolute.resolved_upload_dir(tmp_path / "instance") == (tmp_path / "elsewhere").resolve()
