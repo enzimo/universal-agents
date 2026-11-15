@@ -149,15 +149,6 @@ def _turn_decision_force_prompt(
         '  `actions[].escalation.escalation_type="needs_user_input"`. Describe what\n'
         '  setup is needed without secrets, then wait for TeamArchitect\'s reply.'
     )
-    # Only the team lead chooses which of the person's files a delegated task gets.
-    delegation_files_guidance = (
-        "\n  The task gets the files the person sent with the request's own message\n"
-        "  (for a specialist's escalation, the files it came with). To pass other\n"
-        "  files the person sent (with guidance, with an answer, or earlier in the\n"
-        "  conversation), list their ids in `actions[].attachment_ids`; `[]` passes none."
-        if is_team_lead
-        else ""
-    )
     prompt = f"""
 Call the `{tool_name}` structured-output tool now.
 Do not answer in prose, Markdown, JSON text, or any other top-level text.
@@ -712,15 +703,6 @@ class ModelDelegateTaskAction(BaseModel):
         )
 
 
-class ModelWorkerDelegateTaskAction(ModelDelegateTaskAction):
-    """Slim model-facing runtime action for a specialist's delegated Task request to TeamArchitect."""
-
-    # Only TeamArchitect chooses which of the person's files a task gets: the
-    # field accepts only None and is left out of the schema (the docstring is
-    # the schema's description, so it does not name the field either).
-    attachment_ids: SkipJsonSchema[None] = None
-
-
 class ModelManagerEscalationAction(BaseModel):
     """Worker-facing shortcut for manager-mediated escalation."""
 
@@ -930,7 +912,7 @@ WORKER_EXCLUDED_ACTION_TYPES = frozenset(
 
 ModelWorkerTurnAction = Annotated[
     Union[
-        ModelWorkerDelegateTaskAction,
+        ModelDelegateTaskAction,
         ModelManagerEscalationAction,
         ModelTaskResponseAction,
         ModelTaskQueryAction,
@@ -942,7 +924,7 @@ ModelWorkerTurnAction = Annotated[
 
 
 class ModelWorkerTurnDecision(ModelAgentTurnDecision):
-    """``ModelAgentTurnDecision`` for specialists: no credential-form or signup actions, no file choice."""
+    """``ModelAgentTurnDecision`` for specialists: no credential-form or signup actions."""
 
     actions: List[ModelWorkerTurnAction] = Field(  # type: ignore[assignment]
         min_length=1,
@@ -1048,9 +1030,6 @@ class FireworksModelTurnAction(BaseModel):
         description="Optional minutes after which to look at delegated work again before all of it ends.",
     )
     manager_escalation: Optional[Dict[str, Any]] = Field(default=None, description="Optional manager escalation metadata.")
-    attachment_ids: Optional[List[str]] = Field(
-        default=None, description=f"For delegate_task only. {DELEGATION_ATTACHMENT_IDS_DESCRIPTION}"
-    )
     escalation: Optional[Dict[str, Any]] = Field(default=None, description="Manager escalation payload.")
     suppress_outbound_dispatch: Optional[bool] = Field(default=None, description="Suppress eligible timer reply delivery.")
     after_action_report: Optional[Dict[str, Any]] = Field(default=None, description="Optional follow-up report payload.")
@@ -1208,8 +1187,6 @@ class CompatibleWorkerTurnAction(CompatibleModelTurnAction):
     )
     secure_credential_collection_request: SkipJsonSchema[None] = None  # type: ignore[assignment]
     signup_automation_request: SkipJsonSchema[None] = None  # type: ignore[assignment]
-    # The same for the files a delegated task gets (ModelWorkerDelegateTaskAction).
-    attachment_ids: SkipJsonSchema[None] = None
 
 
 class CompatibleWorkerTurnDecision(CompatibleModelAgentTurnDecision):

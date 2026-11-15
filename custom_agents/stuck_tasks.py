@@ -27,13 +27,14 @@ request produces one message however many agents work on it. Conditions:
 - ``task_no_progress``: in progress on a live agent with no new history entry.
 - ``task_files_sent_before_upgrade``: unfinished work holds a file record that
   places the file outside this instance's ``state/uploads``
-  (``conversation_attachments.stored_upload_path`` finds no copy there, the
-  rule by which both file tools answer ``remote_copy_required``; it decides
-  from the record and reads no file, so a fault reading an upload is not
-  logged on every pass): a file sent with the
-  task, or one the person sent while it ran, with guidance or with an answer
-  (``conversation_attachments.received_attachments``, the files the tools offer
-  by id). Reported at once, to the person only, and closed with no message.
+  (``conversation_attachments.recorded_upload_folder`` finds no folder for it,
+  the rule by which the file tools answer ``outside_upload_folders``; it
+  decides from the record and reads no file, so a fault reading an upload is
+  not logged on every pass): a file of the task's own, the ones the file
+  tools offer by id (``conversation_attachments.TaskAttachments.own``): sent
+  with the task, or kept for it from guidance, an answer or an escalation
+  result; and the files of guidance the task accepted, which releases before
+  0.9.12 kept only in the guidance's history entry (``_guidance_files``). Reported at once, to the person only, and closed with no message.
   Without a verified person (also every chat-app request on a team with
   gateway users off) the message goes only to the request's own chat, the
   chat the files came from, and administrators get the number of files. Only
@@ -71,12 +72,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
+from pydantic import ValidationError
+
 from access_control.identity import IdentityRejected
 from custom_agents.instance_delivery_context import configured_owner_route
 from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc, retain_decisions
-from custom_agents.conversation_attachments import received_attachments, shown_name, stored_upload_path
+from custom_agents.conversation_attachments import TaskAttachments, UploadFolders, recorded_upload_folder
 from custom_agents.liveness_observation import heartbeat_checks_deferred
 from custom_agents.runtime_paths import agent_layout
+from custom_agents.task_steering_runtime import GUIDANCE_ACCEPTED_EVENT, GUIDANCE_STEERING_KEY
 from custom_agents.stuck_work import (
     ChatRoute,
     Recovery,
@@ -86,12 +90,13 @@ from custom_agents.stuck_work import (
 )
 from custom_agents.task_context_runtime import context_verifier
 from custom_messages.contracts.access_v2 import AccessRequestStatus, SchedulePermitV1, TaskContextV1
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.runtime_snapshot_v3 import (
     RuntimeSnapshotV3,
     TaskSnapshotRecord,
     decode_runtime_snapshot,
 )
-from custom_messages.enums import ProgressState
+from custom_messages.enums import ProgressState, TaskHistoryType
 from runtime_settings.stuck_tasks import StuckTaskSettings
 from storage.access_repository import AccessRepository
 from storage.stuck_work_repository import StuckSubjectKind, StuckWorkIncidentV1
@@ -117,6 +122,7 @@ EXECUTING_STATES = frozenset({ProgressState.IN_PROGRESS, ProgressState.RETRYING}
 _LABEL_LENGTH = 80
 # File names a person's notice shows; it counts the rest.
 _SHOWN_FILES = 5
+_MAX_SHOWN_NAME_CHARS = 120  # a file name as the notice shows it (_shown_name)
 
 
 def request_chat_route(
@@ -460,16 +466,19 @@ class StuckTasks:
         The work of a request's plan steps and recovery tasks, and of their
         subtasks, counts as the request's, so the person gets one notice. A
         task's files are the ones sent with it and the ones the person sent
-        while it ran, with guidance (also a worker's forwarded copy) or with an
-        answer: ``received_attachments`` reads them from the task's history as
-        the file tools do.
+        while it ran, with guidance or with an answer, or that an escalation
+        result brought: ``TaskAttachments.own`` reads them from the task's
+        record as the file tools do, and ``_guidance_files`` adds the files of
+        guidance accepted before 0.9.12. Only ``state/uploads`` counts, also while
+        an adapter host's own upload folder is configured: files the upgrade
+        step has not moved there are the ones to send again.
         """
-        uploads_dir = agent_layout(self.agent).uploads_dir
+        uploads = UploadFolders((agent_layout(self.agent).uploads_dir.resolve(),))
         files_by_request: dict[str, dict[str, str]] = {}  # request task id -> attachment id -> file name
         for task in held.values():
             try:
-                sent = [*task.record.task.attachments, *received_attachments(task.record.task)]
-                old = [attachment for attachment in sent if stored_upload_path(attachment, uploads_dir) is None]
+                sent = [*TaskAttachments.load(task.record, None).own, *_guidance_files(task.record.task)]
+                old = [attachment for attachment in sent if recorded_upload_folder(attachment, uploads) is None]
             except Exception as exc:
                 # The error's text may name a stored path, so only its type is logged.
                 logger.warning(
@@ -556,8 +565,48 @@ def _work_description(identity: TaskContextV1 | SchedulePermitV1 | None) -> tupl
     return "System work", "system work"
 
 
+def _guidance_files(task: Any) -> list[UserTaskAttachment]:
+    """The files on guidance this task accepted, from each acceptance's history entry.
+
+    Before 0.9.12 a guidance's files were kept only in the whole
+    ``TaskSteering`` its acceptance entry stores (``GUIDANCE_STEERING_KEY``);
+    0.9.12 and later also write a files entry that ``TaskAttachments.own``
+    reads, so a file can be found twice (the caller counts each id once).
+    Only entries this task's runtime wrote count: copies of a worker's
+    entries (``SUBTASK_EVENT``) keep details another process wrote.
+    Unreadable records are logged with the task id and skipped.
+    """
+
+    found: list[UserTaskAttachment] = []
+    for entry in list(getattr(task, "execution_history", None) or []):
+        details = getattr(entry, "details", None) or {}
+        if entry.entry_type != TaskHistoryType.TASK_EVENT or details.get("event") != GUIDANCE_ACCEPTED_EVENT:
+            continue
+        steering = details.get(GUIDANCE_STEERING_KEY)
+        values = steering.get("attachments") if isinstance(steering, dict) else None
+        for value in values or []:
+            try:
+                found.append(UserTaskAttachment.model_validate(value))
+            except ValidationError:
+                logger.warning(
+                    "A file record on accepted guidance was unreadable and was skipped. "
+                    "event=stuck_task_guidance_file_unreadable task_id=%s",
+                    getattr(task, "task_id", None),
+                )
+    return found
+
+
+def _shown_name(filename: str) -> str:
+    """The file name as one line of bounded length (names are the person's text)."""
+
+    single_line = " ".join(str(filename or "").split())
+    if len(single_line) > _MAX_SHOWN_NAME_CHARS:
+        return single_line[: _MAX_SHOWN_NAME_CHARS - 1] + "…"
+    return single_line or "unnamed file"
+
+
 def _shown_files(file_names: tuple[str, ...]) -> str:
-    shown = ", ".join(shown_name(name) for name in file_names[:_SHOWN_FILES])
+    shown = ", ".join(_shown_name(name) for name in file_names[:_SHOWN_FILES])
     more = len(file_names) - _SHOWN_FILES
     return f"{shown} and {more} more" if more > 0 else shown
 

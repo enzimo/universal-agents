@@ -921,6 +921,25 @@ def _adapter_host_settings(agent: Any) -> Any:
         return None
 
 
+def recorded_upload_folder(attachment: UserTaskAttachment, folders: UploadFolders) -> Optional[Path]:
+    """The folder of ``folders`` that the record's local copy lies in, or None (also without a local copy).
+
+    Decided from the record and the folders alone: the path is resolved as
+    ``locate_upload`` resolves it, but the file is never opened or checked,
+    so a caller that only needs to know where a record points (the upgrade
+    notice, ``custom_agents.stuck_tasks``) logs nothing about a file it
+    cannot read.
+    """
+
+    resolved = _resolved_local_path(attachment)
+    return folders.containing(resolved) if resolved is not None else None
+
+
+def _resolved_local_path(attachment: UserTaskAttachment) -> Optional[Path]:
+    local_path = attachment.local_path()
+    return Path(local_path).expanduser().resolve() if local_path else None
+
+
 @dataclass(frozen=True)
 class LocatedUpload:
     """An upload's bytes on this host: a regular file inside an upload folder.
@@ -980,10 +999,9 @@ def locate_upload(
     its text names where the file is stored.
     """
 
-    local_path = attachment.local_path()
-    if not local_path:
+    resolved = _resolved_local_path(attachment)
+    if resolved is None:
         return UnavailableUpload(UPLOAD_NO_LOCAL_COPY, "This file has no copy stored on a host's disk.")
-    resolved = Path(local_path).expanduser().resolve()
     folder = folders.containing(resolved)
     if folder is None:
         _log_outside(attachment, task_id, conversation_id, action="it was not opened")

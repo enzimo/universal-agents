@@ -1,11 +1,7 @@
-from pathlib import Path
-
-from assistant_gateway.config import DeliverySettings
 from custom_agents.agent_instructions import (
     ACCESS_PROMPT_RULE,
     shared_agent_base_prompt,
 )
-from custom_agents.instance_delivery_context import render_delivery_settings_context
 from custom_agents.strands_team import (
     RUNTIME_OPERATIONS_WORKFLOWS_SKILL_DIR,
     SECURE_CREDENTIAL_WORKFLOWS_SKILL_DIR,

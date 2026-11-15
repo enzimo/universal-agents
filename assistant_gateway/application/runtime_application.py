@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Sequence
 from typing import Protocol
 
 from assistant_gateway.application.clarification import GatewayClarificationApplication

@@ -10,7 +10,6 @@ from typing import Any, Dict, Optional
 from pydantic import ValidationError
 from default_values import AGENT_DEFAULTS
 
-from custom_agents.delegation_runtime import selected_attachments
 from custom_agents.delegated_work_runtime import (
     delegation_holder,
     end_unpublished_delegation,
@@ -163,12 +162,6 @@ def _validate_manager_mediated_worker_delegation(self, action: TurnAction) -> No
                            "Finish locally or report that this work needs the restarted team.")
     if getattr(self, "named_agent_type", None) == TEAM_ARCHITECT_AGENT_TYPE:
         return
-    if action.attachment_ids is not None:
-        # Specialists' schemas have no attachment_ids (ModelWorkerDelegateTaskAction);
-        # an escalation gets the specialist's own task's files.
-        raise RuntimeError(
-            "Only TeamArchitect chooses which files a delegated task gets; leave attachment_ids out."
-        )
     if (
         action.manager_escalation is not None
         and action.target_named_agent_type == TEAM_ARCHITECT_AGENT_TYPE

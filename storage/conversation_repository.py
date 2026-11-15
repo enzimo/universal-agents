@@ -123,36 +123,6 @@ def _is_memory_review_source_turn(turn: dict[str, Any]) -> bool:
     return True
 
 
-def _merged_attachments(
-    existing: list[dict[str, Any]], added: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """``existing`` then each file of ``added`` whose id is new: the first copy of a file wins, order kept."""
-
-    merged = list(existing)
-    seen = {str(item.get(_ATTACHMENT_ID_KEY) or "") for item in merged}
-    for item in added:
-        attachment_id = str(item.get(_ATTACHMENT_ID_KEY) or "")
-        if not attachment_id:
-            raise ValueError("A turn's attachment record needs an attachment_id.")
-        if attachment_id not in seen:
-            seen.add(attachment_id)
-            merged.append(dict(item))
-    return merged
-
-
-def turn_attachment_summary(record: dict[str, Any]) -> dict[str, Any]:
-    """A saved file as turn records show it: name, type and size, never its storage."""
-
-    return {field: record[field] for field in TURN_ATTACHMENT_FIELDS if field in record}
-
-
-def _like_contains(value: str) -> str:
-    """A ``LIKE ... ESCAPE '\\'`` pattern matching text that contains ``value`` literally."""
-
-    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
-
-
 def default_synopsis() -> dict[str, Any]:
     return {
         "goals": [],
@@ -659,9 +629,20 @@ class _RelationalConversationRepository:
             ensure_column(conn, "conversation_task_links", "memory_review_queued_at_utc", "TEXT", logger=self._logger)
             ensure_column(conn, "conversation_task_links", "memory_reviewed_at_utc", "TEXT", logger=self._logger)
             ensure_column(conn, "conversation_task_links", "memory_reviewed_by_agent_id", "TEXT", logger=self._logger)
-            # The files the person sent with a turn (conversation attachments, 0.10);
-            # turns saved before have none (NULL reads as an empty list).
+            # The turn's files (storage.turn_attachments); NULL or [] when none were recorded.
             ensure_column(conn, "conversation_task_links", "attachments_json", "TEXT", logger=self._logger)
+            # 1 when all of the turn's own request files are recorded, 0 when some or all
+            # are not (not kept at admission, or the row was saved before turns kept their
+            # files): append_turn writes it, nothing else changes it, and merging files
+            # sent later leaves it as it is (storage.turn_attachments). Added before the
+            # partial index below, which reads it.
+            ensure_column(
+                conn,
+                "conversation_task_links",
+                "attachments_recorded",
+                "INTEGER NOT NULL DEFAULT 0",
+                logger=self._logger,
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_artifacts (
@@ -1237,8 +1218,8 @@ class _RelationalConversationRepository:
         One write transaction reads, merges and writes the list, so concurrent
         merges into one turn each see the other's files: SQLite's write
         transaction (``BEGIN IMMEDIATE``) runs them one at a time, and in
-        PostgreSQL the turn's row stays locked (``SELECT ... FOR UPDATE``)
-        until commit. Ids already recorded are skipped, so a retried merge adds
+        PostgreSQL the store's write lock (``_write``) and the turn's row lock
+        (``SELECT ... FOR UPDATE``) hold until commit. Ids already recorded are skipped, so a retried merge adds
         nothing twice. ``attachments`` are trusted records only, as for
         ``append_turn``.
 
@@ -1251,8 +1232,7 @@ class _RelationalConversationRepository:
 
         bind = self._dialect.bind
         row_lock = " FOR UPDATE" if self._dialect == POSTGRES else ""
-        with self._connect() as conn:
-            conn.begin_write()
+        with self._write() as conn:
             row = conn.execute(
                 f"""
                 SELECT attachments_json FROM conversation_task_links
@@ -1277,7 +1257,6 @@ class _RelationalConversationRepository:
                     """,
                     (encode_turn_attachments(merged), utc_now_iso(), conversation_id, task_id),
                 )
-            conn.commit()
         return added
 
     def list_turn_attachments(

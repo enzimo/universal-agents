@@ -251,22 +251,11 @@ class DefaultContextEngine:
             if incoming_task is not None
             else ""
         )
-        # The files this task may name (custom_agents.conversation_attachments),
-        # read once: the request's other files go with the current request,
-        # earlier turns' files get their own section below.
-        scope_files = self._scope_files(request) if incoming_task is not None else None
-        # Rendered before the thread so the thread's budget leaves room for it.
-        earlier_files = render_earlier_files(scope_files) if scope_files is not None else ""
         if incoming_task is not None:
             current_request_context = render_current_request_context(
                 incoming_task,
                 request.incoming_meta,
                 continuing=bool(earlier_turn_work),
-                request_file_lines=render_request_files(
-                    scope_files, shown_ids=(attachment.attachment_id for attachment in incoming_task.attachments)
-                )
-                if scope_files is not None
-                else (),
             )
             if current_request_context:
                 sections.append(
@@ -425,19 +414,6 @@ class DefaultContextEngine:
                     pinned=True,
                     source="TaskManager.render_task_runtime_timing_markdown",
                 )
-
-        # Pinned: the files of earlier turns stay named however much of the
-        # conversation's history the prompt shows; the thread's budget above
-        # counts this section, so the thread makes room for it.
-        self._append_prompt_section(
-            sections,
-            prompt_parts,
-            name="conversation_files",
-            text=earlier_files,
-            priority=75,
-            pinned=True,
-            source="conversation_attachments.render_earlier_files",
-        )
 
         incoming_message_context = self._render_incoming_message_context(request)
         self._append_prompt_section(
