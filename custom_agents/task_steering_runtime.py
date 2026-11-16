@@ -75,6 +75,7 @@ from runtime_hosting.agent_execution import current_lane
 from custom_tools.tool_stop import ToolStop
 from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
+from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
@@ -1260,14 +1261,22 @@ async def _run_resumed_turn(
         decision_tool_name=decision_tool_name,
     )
 
-    content = await agent._execute_turn_decision_outbox(
-        decision=outcome.decision,
-        incoming_content=session.msg_content,
-        incoming_header=session.msg_header,
-        incoming_meta=session.msg_meta,
-        structured_output_details=outcome.structured_output_details,
-        start_notes=session.start_notes,
-    )
+    try:
+        content = await agent._execute_turn_decision_outbox(
+            decision=outcome.decision,
+            incoming_content=session.msg_content,
+            incoming_header=session.msg_header,
+            incoming_meta=session.msg_meta,
+            structured_output_details=outcome.structured_output_details,
+            start_notes=session.start_notes,
+        )
+    except TurnActionRecoveryScheduled:
+        await agent.turn_executor.record_unsent_answer_work(
+            msg_content=session.msg_content, msg_header=session.msg_header, msg_meta=session.msg_meta,
+            task_id=task_id, decision=outcome.decision, strands_agent=session.strands_agent,
+            decision_tool_name=decision_tool_name,
+        )
+        raise
     await agent.turn_executor.record_held_answer_work(
         msg_content=session.msg_content, msg_header=session.msg_header, msg_meta=session.msg_meta,
         task_id=task_id, decision=outcome.decision, content=content, strands_agent=session.strands_agent,

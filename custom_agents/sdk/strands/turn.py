@@ -5,6 +5,7 @@ from __future__ import annotations
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError
 from custom_agents.task_wait_limit import TaskWaitLimitReached
 from custom_agents.turn_action_refusal import TurnActionRefused
+from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 
 import asyncio
 import hashlib
@@ -2886,14 +2887,42 @@ class LLMTurnExecutor:
         fresh turn and a turn resumed after a person's decision.
         """
 
-        if decision is None or leaves_task_open(decision):
-            return  # nothing decided, or saved before the outbox ran
         if not (
             isinstance(content, Task)
             and content.task_type == MessageMetaType.REQUEST
             and content.task_id == task_id
         ):
             return
+        await self._record_unsent_answer(
+            msg_content=msg_content, msg_header=msg_header, msg_meta=msg_meta, task_id=task_id,
+            decision=decision, strands_agent=strands_agent, decision_tool_name=decision_tool_name,
+        )
+
+    async def record_unsent_answer_work(
+        self, *, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta,
+        task_id: Optional[str], decision: Any, strands_agent: Any, decision_tool_name: str = "",
+    ) -> None:
+        """Save what a turn did when the outbox stopped before its final answer went out.
+
+        The outbox raised ``TurnActionRecoveryScheduled``: it retries an
+        action or runs the task again with a recovery note, and the answer was
+        not delivered. A fault right after a workflow hold ends here too; the
+        retry holds the same answer again (``access_workflow_runtime``) and the
+        task runs again, so its next turn needs this note. When a retry later
+        delivers the answer, the task ends and no turn reads the note.
+        """
+
+        await self._record_unsent_answer(
+            msg_content=msg_content, msg_header=msg_header, msg_meta=msg_meta, task_id=task_id,
+            decision=decision, strands_agent=strands_agent, decision_tool_name=decision_tool_name,
+        )
+
+    async def _record_unsent_answer(
+        self, *, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta,
+        task_id: Optional[str], decision: Any, strands_agent: Any, decision_tool_name: str,
+    ) -> None:
+        if decision is None or leaves_task_open(decision):
+            return  # nothing decided, or saved before the outbox ran
         turn = _TurnState(msg_content=msg_content, msg_header=msg_header, msg_meta=msg_meta)
         turn.active_task_id = task_id
         turn.turn_decision_tool_name = decision_tool_name
@@ -3044,14 +3073,22 @@ class LLMTurnExecutor:
         # The outbox releases what this turn read when it records the batch;
         # a failure before that keeps it for the task's next turn.
         turn.start_notes_handed_over = True
-        turn.content = await self.effects.execute_turn_decision_outbox(
-            decision=outcome.decision,
-            incoming_content=turn.msg_content,
-            incoming_header=turn.msg_header,
-            incoming_meta=turn.msg_meta,
-            structured_output_details=outcome.structured_output_details,
-            start_notes=turn.start_notes,
-        )
+        try:
+            turn.content = await self.effects.execute_turn_decision_outbox(
+                decision=outcome.decision,
+                incoming_content=turn.msg_content,
+                incoming_header=turn.msg_header,
+                incoming_meta=turn.msg_meta,
+                structured_output_details=outcome.structured_output_details,
+                start_notes=turn.start_notes,
+            )
+        except TurnActionRecoveryScheduled:
+            await self.record_unsent_answer_work(
+                msg_content=turn.msg_content, msg_header=turn.msg_header, msg_meta=turn.msg_meta,
+                task_id=turn.active_task_id, decision=outcome.decision,
+                strands_agent=self.model(), decision_tool_name=turn.turn_decision_tool_name,
+            )
+            raise
         await self.record_held_answer_work(
             msg_content=turn.msg_content, msg_header=turn.msg_header, msg_meta=turn.msg_meta,
             task_id=turn.active_task_id, decision=outcome.decision, content=turn.content,

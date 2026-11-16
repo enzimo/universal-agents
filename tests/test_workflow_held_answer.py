@@ -55,6 +55,7 @@ from custom_messages.enums import MessageMetaType, ProgressState, RequesterType,
 from custom_tools.tool_stop import ToolStop
 from custom_agents.context_engine import ContextAssemblyRequest
 from custom_agents.task_steering_runtime import _as_provider_timeout
+from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 from custom_agents.turn_failure_runtime import task_runtime_error_message
 from custom_agents.turn_work_notes import EARLIER_TURN_WORK_HEADING, ENDED_BY_ANSWER_HELD, turn_work_notes
 from storage.access_workflow_repository import AccessWorkflowRepository
@@ -177,17 +178,11 @@ def test_a_final_answer_held_for_open_workflow_steps_queues_the_task_to_run_agai
     assert manager.get_next_task_to_process() == parent.task_id
 
 
-def test_a_final_answer_held_in_a_resumed_turn_also_queues_the_task_to_run_again(tmp_path) -> None:
-    """The turn resumed after an approval ends through the same end-of-turn handling."""
+def _resume_with_final_answer(agent, manager, parent: Task, answer: str):
+    """A turn paused for an approval resumes and gives ``answer`` (task_steering_runtime._run_resumed_turn)."""
 
-    manager = _make_task_manager(tmp_path)
-    parent = _add_active_parent_task(manager)
-    agent = _make_agent(tmp_path, task_manager=manager)
-    workflow = _open_workflow(manager, parent.task_id)
     info = manager.get_task_info(parent.task_id)
-    resumed_model = AsyncMock(
-        return_value=SimpleNamespace(stop_reason="end_turn", structured_output=_final_answer("Set up; here are the prices."))
-    )
+    resumed_model = AsyncMock(return_value=SimpleNamespace(stop_reason="end_turn", structured_output=_final_answer(answer)))
     session = task_steering_runtime.StrandsInterruptedTurnSession(
         task_id=parent.task_id,
         strands=strands_parts(SimpleNamespace(invoke_async=resumed_model)),
@@ -202,14 +197,20 @@ def test_a_final_answer_held_in_a_resumed_turn_also_queues_the_task_to_run_again
     )
     agent._interrupted_turn_sessions[parent.task_id] = session
     steering = TaskSteering(steering_type=TaskSteeringType.INTERRUPT_RESPONSE, target_task_id=parent.task_id)
+    tool_stop = ToolStop(agent_id=agent.id, task_id=parent.task_id)
+    return task_steering_runtime._run_resumed_turn(agent, session, steering, info, [{"interruptResponse": {}}], tool_stop)
 
-    result = asyncio.run(
-        task_steering_runtime._run_resumed_turn(
-            agent, session, steering, info, [{"interruptResponse": {}}], ToolStop(agent_id=agent.id, task_id=parent.task_id)
-        )
-    )
 
-    resumed_model.assert_awaited_once()
+def test_a_final_answer_held_in_a_resumed_turn_also_queues_the_task_to_run_again(tmp_path) -> None:
+    """The turn resumed after an approval ends through the same end-of-turn handling."""
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    workflow = _open_workflow(manager, parent.task_id)
+
+    result = asyncio.run(_resume_with_final_answer(agent, manager, parent, "Set up; here are the prices."))
+
     assert isinstance(result, Task) and result.task_id == parent.task_id
     _assert_held_to_run_again(manager, agent, parent.task_id, workflow.workflow_id)
     [note] = turn_work_notes(manager.get_task(parent.task_id))
@@ -708,8 +709,13 @@ def test_a_refusal_whose_plan_title_mentions_a_timeout_keeps_its_own_message() -
 # -- the turn that runs again knows what the held turn did and answered (project review F3) --
 
 
-def test_the_next_turn_sees_what_the_held_turn_did_and_answered(tmp_path) -> None:
-    """A real turn owner and the real outbox; the next turn's prompt comes from the real context engine."""
+@pytest.mark.parametrize("fault", [None, "held_back_save"], ids=["held", "held-then-a-fault"])
+def test_the_next_turn_sees_what_the_held_turn_did_and_answered(tmp_path, fault) -> None:
+    """A real turn owner and the real outbox; the next turn's prompt comes from the real context engine.
+
+    With a fault right after the hold (project review F2), the outbox raises instead of returning; the note is
+    saved there, and the outbox's retry holds the same answer again.
+    """
 
     manager = _make_task_manager(tmp_path)
     # A request with no chat conversation: the prompt check needs none.
@@ -723,8 +729,11 @@ def test_the_next_turn_sees_what_the_held_turn_did_and_answered(tmp_path) -> Non
     assert manager.get_next_task_to_process() == parent.task_id
     assert manager.update_main_task_state(parent.task_id, ProgressState.IN_PROGRESS, _now())
     bind_task(parent.task_id)
-    agent = _make_agent(tmp_path, task_manager=manager)
+    agent = _make_agent(tmp_path, task_manager=manager, turn_action_outbox=RETRY_AT_ONCE)
+    object.__setattr__(agent, "_continue_pending_work", AsyncMock())  # the test drives the retry itself
     _open_workflow(manager, parent.task_id)
+    if fault is not None:
+        _fail_once_after_the_hold(manager, parent.task_id, fault)
     info = manager.get_task_info(parent.task_id)
 
     async def answer(_prompt, **_kwargs):
@@ -754,9 +763,20 @@ def test_the_next_turn_sees_what_the_held_turn_did_and_answered(tmp_path) -> Non
     )
     executor.effects = dataclasses.replace(executor.effects, execute_turn_decision_outbox=agent._execute_turn_decision_outbox)
 
-    result = asyncio.run(executor.process_llm_interaction(parent, info.header, info.meta))
+    async def turn() -> None:
+        try:
+            result = await executor.process_llm_interaction(parent, info.header, info.meta)
+            assert fault is None and isinstance(result, Task) and result.task_id == parent.task_id  # held
+        except TurnActionRecoveryScheduled:
+            assert fault is not None
+            assert await agent._drain_due_turn_action_outbox(MAIN_LANE)  # the same answer, held again
+        finally:
+            await close_pending_work(agent)
 
-    assert isinstance(result, Task) and result.task_id == parent.task_id  # held
+    asyncio.run(turn())
+
+    assert manager.get_task_info(parent.task_id).state == ProgressState.PARTIAL
+    assert list(manager.task_state.task_queue) == [parent.task_id]
     [note] = turn_work_notes(manager.get_task(parent.task_id))
     assert note.details["ended_by"] == ENDED_BY_ANSWER_HELD and note.details["started_wait"] is False
     info = manager.get_task_info(parent.task_id)
@@ -774,3 +794,29 @@ def test_the_next_turn_sees_what_the_held_turn_did_and_answered(tmp_path) -> Non
     assert "then gave a final answer that was held back" in prompt
     assert "called `http_request` (success)" in prompt
     assert "sent final answer, held back and not sent: Here are the prices from the first registrar." in prompt
+
+
+
+def test_a_resumed_turn_whose_held_answer_meets_a_fault_still_leaves_its_note(tmp_path) -> None:
+    """The fault right after the hold (project review F2) stops the outbox before it returns, so the note is
+    saved where the outbox raised; the retry then holds the answer again and the task runs again."""
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager, turn_action_outbox=RETRY_AT_ONCE)
+    object.__setattr__(agent, "_continue_pending_work", AsyncMock())  # the retry timer is not part of this test
+    _open_workflow(manager, parent.task_id)
+    _fail_once_after_the_hold(manager, parent.task_id, "held_back_save")
+
+    async def scenario() -> None:
+        try:
+            with pytest.raises(TurnActionRecoveryScheduled):
+                await _resume_with_final_answer(agent, manager, parent, "Set up; here are the prices.")
+        finally:
+            await close_pending_work(agent)
+
+    asyncio.run(scenario())
+
+    [note] = turn_work_notes(manager.get_task(parent.task_id))
+    assert note.details["ended_by"] == ENDED_BY_ANSWER_HELD
+    assert note.details["sent"] == ["final answer, held back and not sent: Set up; here are the prices."]

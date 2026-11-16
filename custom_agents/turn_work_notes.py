@@ -22,7 +22,9 @@ What trusted code does instead:
 - A final answer the runtime holds back after the turn decided (an access
   workflow's unfinished steps, pending delegated work, a question or a
   runtime plan) also leaves the task open: the turn executor saves the note
-  once the outbox returns the held answer (``ENDED_BY_ANSWER_HELD``). Without
+  once the outbox returns the held answer (``ENDED_BY_ANSWER_HELD``), or when
+  the outbox stops before the answer went out (it retries an action, or runs
+  the task again for recovery; a fault right after a hold ends here). Without
   it the turn that runs again knew neither what was done nor what was
   answered, and could repeat outside operations (project review, 2026-11-16).
 - Every later turn of the task shows these entries under "Work already done in
