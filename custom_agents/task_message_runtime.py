@@ -1777,7 +1777,7 @@ async def _apply_task_processing_result(
         return
 
 
-async def _keep_held_answer_state(self, task_id: str) -> None:
+async def _keep_held_answer_state(self: Any, task_id: str) -> None:
     """Leave a task whose final answer was held back in the state its hold saved.
 
     A turn whose result is a request naming its own task gave a final answer

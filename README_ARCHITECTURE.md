@@ -782,7 +782,8 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    only before a real final answer) and the outbox shows that response
    dispatched or completed, or it reached the post-publish step. The outbox
    records an answer it held back (final review, pending delegated work, a
-   manager escalation) with its own status, `held_back`, so such a task is
+   manager escalation, an access workflow's unfinished steps) with its own
+   status, `held_back`, so such a task is
    handed back, and the next worker is not told the held-back answer was sent.
 3. It keeps tasks that already started and now wait on a person or subtask,
    because replies are addressed to this worker's id. They may finish until
@@ -1317,7 +1318,14 @@ A main-lane task claims the task manager's main slot
 parallel request moves to IN_PROGRESS in its own lane without taking that
 slot. Every path that runs a turn (the queue, a turn resumed after a sign-in or
 access decision, a resume with a directive) therefore ends a failed turn
-through `custom_agents.turn_failure_runtime`. As a safety net,
+through `custom_agents.turn_failure_runtime`, and so does the outbox's retry
+of an interrupted batch when an action is refused for good
+(`custom_agents.turn_action_refusal`). A turn whose final answer the runtime
+held back returns a request naming its own task; the end-of-turn handling
+(`task_message_runtime._keep_held_answer_state`) leaves the task in the state
+its hold saved (waiting for delegated work, a question or a runtime plan;
+queued to run again for an access workflow), and only a delegated subtask
+makes the task wait there. As a safety net,
 `event=execution_slot_orphaned` is logged and an IN_PROGRESS task with no turn
 running is ended: the main slot's holder when the next task is chosen and in
 the scheduler pass, and a parallel request's task whose lane nobody holds in
@@ -4387,6 +4395,20 @@ closes its step, and a new request that only that step covers is refused.
 `request_access_workflow_approvals` submits one change request per staged
 change and pauses once; `apply_change` finds each approval by its change id.
 The graph neither executes commands nor grants access.
+
+A task cannot finish while its workflow has unfinished steps
+(`custom_agents.access_workflow_runtime`). Its first final answer for each
+saved state of the steps is held back, and the task is queued at the front
+with a continuation note, so it runs again at once. A repeated answer without
+progress raises `WorkflowCompletionRefused`, a `TurnActionRefused`: the outbox
+records the action failed without model recovery (each recovery turn records a
+new batch, so the per-batch recovery limit never ended such a loop), and the
+failed-turn path fails the task and sends the person a plain statement
+followed by the agent's last reply, labelled as given before the open steps
+were finished. Notices never quote that reply; a short preview of each held
+answer stays in the task's history. Rationale: on 2026-11-14 the end-of-turn
+handling marked such a held task WAITING, which removed it from the queue, so
+it stopped for good and the person's later messages were never read.
 
 Local scheduled tasks use database claims and durable run records. A separate
 runtime loop starts needed local workers without a TeamArchitect model turn.
