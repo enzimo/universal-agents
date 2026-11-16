@@ -41,27 +41,45 @@ Read from the agent's saved work (``RuntimeSnapshotV3``):
 - ``QUEUE_PAUSE``: a person paused the task in the queue
   (``runtime_task_controls.is_explicit_queue_pause``).
 
-A new kind of wait must save a record that one of these rules (or a reason
-read from a team store by the caller) can find, or this list must learn it;
-otherwise the stuck-task check reports a task that is waiting legitimately.
-Messages still in transit (the deferred inbox, NATS) need no rule: each answers
-a wait whose record above stays saved until the message is handled.
+Read from team stores, only for a task with no reason above (``OutsideRecords``):
+
+- ``ACCESS_REQUEST``: an access, change or proposal request for the task still
+  waits in the access store.
+- ``RETRY_TIMER``: an enabled one-time schedule with runs left named
+  ``provider_overload_retry:<task id>:<marker>``: a person's "retry in 5 or 10
+  minutes" choice, or a worker's wait after a model provider refused calls.
+- ``SETUP_RUN``: a ``set_up_tools`` run for the task still waits
+  (``ToolSetupRunRepository``).
+- ``PLAN_EXECUTION``: the task is its plan's active execution with a step
+  planned or in progress (``plan_execution_active``). Plans live in the plan
+  store, and only the team lead has them. A plan step task is not excused by
+  its plan: its own wake is its queue entry, and excusing it would hide a plan
+  that cannot go on.
+
+A new kind of wait must save a record that one of these rules can find, or
+this list must learn it; otherwise the stuck-task check reports a task that is
+waiting legitimately. Messages still in transit (the deferred inbox, NATS) need
+no rule: each answers a wait whose record above stays saved until the message
+is handled.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import Any
 
 from custom_agents.agent_liveness import parse_utc
 from custom_agents.runtime_snapshot_codec import REPLAYABLE_EVENT_STATUSES
 from custom_agents.runtime_task_controls import is_explicit_queue_pause
+from custom_agents.task_manager_plans import plan_execution_active
 from custom_agents.task_steering_runtime import (
     INTERRUPT_REQUEST_EVENT,
     INTERRUPT_WAITS_ON_REQUESTER_KEY,
 )
+from custom_agents.tool_setup_runs import RUN_WAITING, ToolSetupRunV1
 from custom_messages.contracts.runtime_snapshot_v3 import (
     BATCH_WAITING_EXTERNAL_RESULT,
     RuntimeSnapshotV3,
@@ -69,6 +87,8 @@ from custom_messages.contracts.runtime_snapshot_v3 import (
 )
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
+from custom_messages.records.plans import PlanRecord
+from custom_messages.system_schedules import PROVIDER_OVERLOAD_RETRY_SCHEDULE_NAME_PREFIX
 
 # The runtime's state classes (TaskManager.is_terminal_state and
 # is_executing_state); tests keep them equal. A running state means a turn runs
@@ -102,6 +122,15 @@ class WaitReason(StrEnum):
     REQUESTER_ANSWER = "requester_answer"
     ISOLATED_RECOVERY = "isolated_recovery"
     QUEUE_PAUSE = "queue_pause"
+    ACCESS_REQUEST = "access_request"
+    RETRY_TIMER = "retry_timer"
+    SETUP_RUN = "setup_run"
+    PLAN_EXECUTION = "plan_execution"
+
+
+# Stores a per-task read can fail in (``UnreadableWaitRecord.store``).
+SETUP_RUN_STORE = "tool_setup_runs"
+PLAN_STORE = "plans"
 
 
 def last_started_at(task: Task) -> datetime | None:
@@ -266,12 +295,99 @@ def saved_wait_reason(work: SavedWork, record: TaskSnapshotRecord) -> WaitReason
     return None
 
 
+class UnreadableWaitRecord(Exception):
+    """A store row about one task could not be read, so whether it waits is unknown for now."""
+
+    def __init__(self, store: str, task_id: str) -> None:
+        super().__init__(f"The {store} record of task {task_id} could not be read.")
+        self.store = store
+        self.task_id = task_id
+
+
+@dataclass
+class OutsideRecords:
+    """Waits recorded in team stores rather than in an agent's saved work (module docstring).
+
+    The caller injects the readers, so this module does no I/O. The team-wide
+    lists (waiting access requests, schedules) are read at most once per pass,
+    and their errors propagate, as the check's other list reads do. A row about
+    one task that cannot be read raises ``UnreadableWaitRecord``: one bad row
+    must not stop the check for every other task.
+    """
+
+    waiting_access_task_ids: frozenset[str]
+    schedule_rows: Callable[[], Iterable[Mapping[str, Any]]]
+    setup_runs_for_task: Callable[[str], Iterable[ToolSetupRunV1]]
+    plan: Callable[[str, str], PlanRecord | None]
+    _retry_names: tuple[str, ...] | None = field(default=None, init=False, repr=False)
+
+    def has_retry_timer(self, task_id: str) -> bool:
+        # The colon ends the task id, so one id never matches a longer one.
+        prefix = f"{PROVIDER_OVERLOAD_RETRY_SCHEDULE_NAME_PREFIX}{task_id}:"
+        return any(name.startswith(prefix) for name in self._retry_timer_names())
+
+    def _retry_timer_names(self) -> tuple[str, ...]:
+        if self._retry_names is None:
+            names = (str(row.get("schedule_name") or "") for row in self.schedule_rows() if _will_fire(row))
+            self._retry_names = tuple(
+                name for name in names if name.startswith(PROVIDER_OVERLOAD_RETRY_SCHEDULE_NAME_PREFIX)
+            )
+        return self._retry_names
+
+    def reason(self, work: SavedWork, record: TaskSnapshotRecord, *, plan_scope: str | None) -> WaitReason | None:
+        """The first store-recorded reason ``record`` waits; ``plan_scope`` is the owner's plan scope."""
+        task_id = record.task_id
+        if task_id in self.waiting_access_task_ids:
+            return WaitReason.ACCESS_REQUEST
+        if self.has_retry_timer(task_id):
+            return WaitReason.RETRY_TIMER
+        if self._setup_run_waits(task_id):
+            return WaitReason.SETUP_RUN
+        plan_id = work.snapshot.task_to_plan_id.get(task_id)
+        if plan_id and plan_scope and plan_execution_active(self._plan(plan_id, plan_scope, task_id), task_id):
+            return WaitReason.PLAN_EXECUTION
+        return None
+
+    def _setup_run_waits(self, task_id: str) -> bool:
+        try:
+            return any(run.status == RUN_WAITING for run in self.setup_runs_for_task(task_id))
+        except Exception as exc:  # a bad row (another version, damaged JSON) or a failed read
+            raise UnreadableWaitRecord(SETUP_RUN_STORE, task_id) from exc
+
+    def _plan(self, plan_id: str, plan_scope: str, task_id: str) -> PlanRecord | None:
+        try:
+            return self.plan(plan_id, plan_scope)
+        except Exception as exc:  # a bad row (another version, damaged JSON) or a failed read
+            raise UnreadableWaitRecord(PLAN_STORE, task_id) from exc
+
+
+def _will_fire(row: Mapping[str, Any]) -> bool:
+    """An enabled schedule with runs left (the filter of ``ScheduleRepository.get_all_enabled``)."""
+    remaining = row.get("remaining_count")
+    return bool(row.get("enabled")) and (remaining is None or int(remaining) > 0)
+
+
+def wait_reason(
+    work: SavedWork, record: TaskSnapshotRecord, outside: OutsideRecords, *, plan_scope: str | None
+) -> WaitReason | None:
+    """Why ``record`` legitimately waits: saved work first, then team stores; None when nothing explains it.
+
+    Raises ``UnreadableWaitRecord`` when a store row about the task cannot be read.
+    """
+    return saved_wait_reason(work, record) or outside.reason(work, record, plan_scope=plan_scope)
+
+
 __all__ = [
     "IDLE_STATES",
+    "PLAN_STORE",
     "RUNNING_STATES",
+    "SETUP_RUN_STORE",
     "TERMINAL_STATES",
+    "OutsideRecords",
     "SavedWork",
+    "UnreadableWaitRecord",
     "WaitReason",
     "last_started_at",
     "saved_wait_reason",
+    "wait_reason",
 ]

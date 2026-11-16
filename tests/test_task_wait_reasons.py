@@ -19,13 +19,19 @@ from custom_agents.task_manager_plans import plan_execution_active
 from custom_agents.task_steering_runtime import INTERRUPT_REQUEST_EVENT, INTERRUPT_WAITS_ON_REQUESTER_KEY
 from custom_agents.task_wait_reasons import (
     IDLE_STATES,
+    PLAN_STORE,
     RUNNING_STATES,
+    SETUP_RUN_STORE,
     TERMINAL_STATES,
+    OutsideRecords,
     SavedWork,
+    UnreadableWaitRecord,
     WaitReason,
     last_started_at,
     saved_wait_reason,
+    wait_reason,
 )
+from custom_agents.tool_setup_runs import RUN_FINISHED, RUN_STOPPED, RUN_WAITING, ToolSetupRunV1
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import (
     BATCH_WAITING_EXTERNAL_RESULT,
@@ -41,6 +47,7 @@ from custom_messages.contracts.runtime_snapshot_v3 import (
 from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskQuery
 from custom_messages.enums import ExecutionPlanItemStatus, MessageMetaType, ProgressState
 from custom_messages.records.plans import PlanRecord, PlanStepRecord
+from custom_messages.system_schedules import PROVIDER_OVERLOAD_RETRY_SCHEDULE_NAME_PREFIX
 
 START = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
 W = ProgressState.WAITING
@@ -281,3 +288,132 @@ def _plan(*statuses: ExecutionPlanItemStatus, active: str | None = "root") -> Pl
 )
 def test_plan_execution_rule(plan: PlanRecord | None, running: bool) -> None:
     assert plan_execution_active(plan, "root") is running
+
+
+# -- waits recorded in team stores (OutsideRecords) ---------------------------------------
+
+
+class Readers:
+    """Fake store readers that count their calls."""
+
+    def __init__(self, *, schedules=(), runs=None, plans=None, failing=None):
+        self.calls = {"schedules": 0, "runs": 0, "plans": 0}
+        self.schedules, self.runs, self.plans, self.failing = list(schedules), runs or {}, plans or {}, failing
+
+    def records(self, waiting_access=()) -> OutsideRecords:
+        return OutsideRecords(
+            waiting_access_task_ids=frozenset(waiting_access),
+            schedule_rows=self.schedule_rows,
+            setup_runs_for_task=self.setup_runs,
+            plan=self.plan,
+        )
+
+    def schedule_rows(self):
+        self.calls["schedules"] += 1
+        if self.failing == "schedules":
+            raise RuntimeError("database is locked")
+        return self.schedules
+
+    def setup_runs(self, task_id):
+        self.calls["runs"] += 1
+        if self.failing == "runs":
+            raise ValueError("damaged row")
+        return self.runs.get(task_id, [])
+
+    def plan(self, plan_id, scope):
+        self.calls["plans"] += 1
+        if self.failing == "plans":
+            raise ValueError("damaged row")
+        assert scope == "manager:team:TeamArchitect"
+        return self.plans.get(plan_id)
+
+
+SCOPE = "manager:team:TeamArchitect"
+
+
+def schedule(name: str, *, enabled: int = 1, remaining: int | None = 1) -> dict[str, Any]:
+    return {"schedule_name": name, "enabled": enabled, "remaining_count": remaining}
+
+
+def run(status: str) -> ToolSetupRunV1:
+    return ToolSetupRunV1(
+        run_id="run-1", team_id="team", person_id="jordan", task_id="t", agent_id="lead",
+        agent_type="TeamArchitect", tool_ids=("http:registrar",), status=status,
+    )
+
+
+RETRY = PROVIDER_OVERLOAD_RETRY_SCHEDULE_NAME_PREFIX
+
+
+@pytest.mark.parametrize(
+    ("reason", "readers", "waiting_access", "sections"),
+    [
+        (WaitReason.ACCESS_REQUEST, Readers(), {"t"}, {}),
+        (WaitReason.RETRY_TIMER, Readers(schedules=[schedule(f"{RETRY}t:pause-1")]), (), {}),
+        (WaitReason.SETUP_RUN, Readers(runs={"t": [run(RUN_WAITING)]}), (), {}),
+        (
+            WaitReason.PLAN_EXECUTION,
+            Readers(plans={"plan-1": _plan(ExecutionPlanItemStatus.PLANNED, active="t")}),
+            (),
+            {"task_to_plan_id": {"t": "plan-1"}},
+        ),
+    ],
+)
+def test_each_store_recorded_wait_is_found(reason, readers, waiting_access, sections) -> None:
+    saved = work(record(), **sections)
+    assert wait_reason(saved, saved.tasks["t"], readers.records(waiting_access), plan_scope=SCOPE) is reason
+
+
+@pytest.mark.parametrize(
+    "readers",
+    [
+        pytest.param(Readers(schedules=[schedule(f"{RETRY}t2:pause-1")]), id="another task's retry timer"),
+        pytest.param(Readers(schedules=[schedule(f"{RETRY}t:pause-1", enabled=0)]), id="a turned-off timer"),
+        pytest.param(Readers(schedules=[schedule(f"{RETRY}t:pause-1", remaining=0)]), id="a timer with no runs left"),
+        pytest.param(Readers(schedules=[schedule("t:pause-1")]), id="a schedule of another kind"),
+        pytest.param(Readers(runs={"t": [run(RUN_FINISHED), run(RUN_STOPPED)]}), id="ended setup runs"),
+        pytest.param(Readers(plans={"plan-1": _plan(ExecutionPlanItemStatus.COMPLETED, active="t")}), id="a finished plan"),
+    ],
+)
+def test_store_records_that_no_longer_hold_the_task_explain_nothing(readers) -> None:
+    saved = work(record(), task_to_plan_id={"t": "plan-1"})
+    assert wait_reason(saved, saved.tasks["t"], readers.records(), plan_scope=SCOPE) is None
+
+
+def test_a_plan_step_is_not_excused_by_its_running_plan() -> None:
+    """Its own wake is its queue entry; excusing it would hide a plan that cannot go on."""
+    readers = Readers(plans={"plan-1": _plan(ExecutionPlanItemStatus.IN_PROGRESS, active="t")})
+    step_link = {"step": PlanStepTaskLink(root_task_id="t", plan_id="plan-1", step_id="s1", step_task_id="step")}
+    saved = work(record(), record("step", ProgressState.ACCEPTED), plan_step_task_links=step_link,
+                 task_to_plan_id={"t": "plan-1", "step": "plan-1"})
+    outside = readers.records()
+    assert wait_reason(saved, saved.tasks["t"], outside, plan_scope=SCOPE) is WaitReason.PLAN_EXECUTION
+    assert wait_reason(saved, saved.tasks["step"], outside, plan_scope=SCOPE) is None
+
+
+def test_stores_are_read_only_when_saved_work_explains_nothing_and_schedules_once() -> None:
+    readers = Readers()
+    outside = readers.records()
+    queued = work(record(state=ProgressState.ACCEPTED), task_queue=["t"])
+    assert wait_reason(queued, queued.tasks["t"], outside, plan_scope=SCOPE) is WaitReason.QUEUED
+    assert readers.calls == {"schedules": 0, "runs": 0, "plans": 0}
+
+    stranded = work(record("a"), record("b"))
+    for task_id in ("a", "b"):
+        assert wait_reason(stranded, stranded.tasks[task_id], outside, plan_scope=SCOPE) is None
+    assert readers.calls == {"schedules": 1, "runs": 2, "plans": 0}
+
+
+@pytest.mark.parametrize(("failing", "store"), [("runs", SETUP_RUN_STORE), ("plans", PLAN_STORE)])
+def test_an_unreadable_row_about_one_task_names_its_store(failing, store) -> None:
+    saved = work(record(), task_to_plan_id={"t": "plan-1"})
+    with pytest.raises(UnreadableWaitRecord) as raised:
+        wait_reason(saved, saved.tasks["t"], Readers(failing=failing).records(), plan_scope=SCOPE)
+    assert (raised.value.store, raised.value.task_id) == (store, "t")
+    assert isinstance(raised.value.__cause__, ValueError)
+
+
+def test_an_unreadable_team_wide_list_fails_the_whole_check() -> None:
+    saved = work(record())
+    with pytest.raises(RuntimeError):
+        wait_reason(saved, saved.tasks["t"], Readers(failing="schedules").records(), plan_scope=SCOPE)

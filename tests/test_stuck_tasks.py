@@ -19,6 +19,8 @@ from access_control.people import PERSON_ROLE_ADMIN, PERSON_ROLE_OWNER
 from custom_agents import task_context_runtime
 from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.liveness_observation import observe_liveness
+from custom_agents.durable_owner_scope import manager_durable_scope_id
+from custom_agents.runtime_task_controls import QUEUE_PAUSE_EVENT
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.stuck_tasks import (
     TASK_HANDBACK_UNCLAIMED,
@@ -57,16 +59,31 @@ from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, 
 from custom_messages.contracts.runtime_snapshot_v3 import (
     BATCH_WAITING_EXTERNAL_RESULT,
     RecoverablePauseRecord,
+    RecoveryTaskLink,
+    RuntimeMailboxEventRecord,
     RuntimeSnapshotV3,
+    TaskRuntimeLeaseRecord,
     TaskSnapshotRecord,
+    TurnActionBatchRecord,
 )
-from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry
+from custom_messages.contracts.schedule_v1 import ScheduledMessage
+from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskQuery
 from custom_messages.contracts.worker_handback_v1 import (
     HandedBackTaskV1,
     WorkerLeaseLossEvidenceV1,
     WorkerTaskHandbackV1,
 )
-from custom_messages.enums import ControlType, MessageMetaType, ProgressState, RequesterType
+from custom_messages.enums import (
+    ControlType,
+    ExecutionPlanItemStatus,
+    MessageMetaType,
+    ProgressState,
+    RequesterType,
+    ScheduleManagementClass,
+    SystemScheduleKind,
+)
+from custom_messages.records.plans import PlanRecord, PlanStepRecord
+from custom_messages.system_schedules import PROVIDER_OVERLOAD_RETRY_SCHEDULE_NAME_PREFIX
 from storage.access_repository import AccessRepository
 from storage.stuck_work_repository import StuckWorkRepository
 from storage.tool_setup_run_repository import ToolSetupRunRepository
@@ -632,6 +649,26 @@ async def test_a_workers_stranded_task_is_reported_as_its_request_naming_the_wor
 
 
 @pytest.mark.asyncio
+async def test_when_the_worker_holding_it_stops_the_person_hears_stopped_and_not_cleared(lead):
+    """Review C09: the request did not move, so its warning must not read as cleared."""
+    lead_waits_on(lead, "child-a")
+    save(lead, "worker-1", "WebResearchAgent", [record("child-a", state=ProgressState.WAITING, parent="root", route="lead")])
+    first = datetime.now(timezone.utc)
+    alive(lead, "worker-1", first)
+    await report_stuck_tasks(lead, now=first)
+    alive(lead, "worker-1", first + PAST_THRESHOLD)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    assert STRANDED_TITLE in [notice.title for notice in notices(lead)]
+
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD + timedelta(hours=1))  # no status for an hour
+    titles = [notice.title for notice in notices(lead)]
+    assert f'Your request "{REQUEST}" stopped' in titles
+    assert not [title for title in titles if "has cleared" in title]
+    assert "work_recovered" not in [envelope.msg_content.reason for envelope in chats(lead)]
+    assert TASK_WAITING_ON_NOTHING not in waiting_reasons(lead)
+
+
+@pytest.mark.asyncio
 async def test_without_a_verified_person_administrators_hear_without_the_request(lead):
     save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING, signed=False)])
     first = datetime.now(timezone.utc)
@@ -655,3 +692,199 @@ async def test_stopping_the_request_as_told_closes_the_warning_quietly(lead):
     await report_stuck_tasks(lead, now=first + PAST_THRESHOLD + timedelta(minutes=1))
     assert len(notices(lead)) == 1 and len(chats(lead)) == 1
     assert not open_incidents(lead)
+
+
+# -- every legitimate wait is left alone (review A2) ----------------------------------------
+
+
+def blocker(kind, **fields):
+    return {"human_interaction_blockers": {"root": {"kind": kind, **fields}}}
+
+
+def outside_wait(content_type):
+    """The outbox barrier after a credential form or signup automation request."""
+    held = with_history(
+        record("root", state=ProgressState.WAITING),
+        TaskHistoryEntry(summary="Waiting for the result.", details={
+            "event": "turn_action_external_wait_barrier", "batch_id": "b1", "content_type": content_type,
+        }),
+    )
+    batch = TurnActionBatchRecord(
+        batch_id="b1", source_task_id="root", status=BATCH_WAITING_EXTERNAL_RESULT, created_at=iso(datetime.now(timezone.utc))
+    )
+    return [held], {"turn_action_batches": {"b1": batch}}
+
+
+def waiting_access_request(lead):
+    AccessRepository(lead.task_manager.storage_settings).create_request(
+        AccessRequestV1(
+            request_id="req-1", team_id="team", requester_agent_id="lead", requester_agent_type="TeamArchitect",
+            person_id="jordan", subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id="TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="http:registrar"), level=AccessLevel.READ,
+            reason="Check prices", task_id="root", created_at_utc=datetime.now(timezone.utc),
+        )
+    )
+    return [record("root", state=ProgressState.WAITING)], {}
+
+
+def waiting_setup_run(lead):
+    ToolSetupRunRepository(lead.task_manager.storage_settings).create(
+        ToolSetupRunV1(
+            run_id="run-1", team_id="team", person_id="jordan", task_id="root", agent_id="lead",
+            agent_type="TeamArchitect", tool_ids=("http:registrar",),
+        )
+    )
+    return [record("root", state=ProgressState.WAITING)], {}
+
+
+def running_plan(lead):
+    lead.task_manager.plan_repository.save_plan(
+        PlanRecord(
+            plan_id="plan-1", owner_agent_id=manager_durable_scope_id(team_id="team", named_agent_type="TeamArchitect"),
+            team_id="team", root_task_id="root", active_execution_task_id="root",
+            plan_steps=[PlanStepRecord(title="Compare prices", objective="Both registrars", status=ExecutionPlanItemStatus.PLANNED)],
+        )
+    )
+    return [record("root", state=ProgressState.WAITING)], {"task_to_plan_id": {"root": "plan-1"}}
+
+
+def retry_timer(lead):
+    held = record("root", state=ProgressState.PAUSED)
+    lead._schedule_store.add(
+        ScheduledMessage(
+            schedule_id="retry-1", schedule_name=f"{PROVIDER_OVERLOAD_RETRY_SCHEDULE_NAME_PREFIX}root:pause-1",
+            management_class=ScheduleManagementClass.SYSTEM, system_schedule_kind=SystemScheduleKind.PROVIDER_OVERLOAD_RETRY,
+            payload=held.task, payload_header=held.header, payload_meta=held.meta, repeat_count=1,
+            next_fire_at=iso(datetime.now(timezone.utc) + timedelta(minutes=5)),
+        ),
+        claim_agent_id="lead", claim_named_agent_type="TeamArchitect", claim_team_id="team",
+    )
+    return [held], {}
+
+
+def saved_only(records, **sections):
+    return lambda lead: (records(), sections)
+
+
+W = ProgressState.WAITING
+LEGITIMATE_WAITS = {
+    "queued": saved_only(lambda: [record("root", state=ProgressState.ACCEPTED)], task_queue=["root"]),
+    "delegated work": lambda lead: (
+        [record("root", state=W), record("child-a", parent="root", route="lead")], {"subtask_to_parent_map": {"child-a": "root"}}
+    ),
+    "question": saved_only(
+        lambda: [record("root", state=W)],
+        task_queries={"root": [TaskQuery(query_type=MessageMetaType.REQUEST, message="Which registrar?", parent_task_id="root")]},
+    ),
+    "recoverable pause": saved_only(
+        lambda: [record("root", state=ProgressState.PAUSED)],
+        recoverable_pause_records={"p1": RecoverablePauseRecord(task_id="root", pause_id="p1", trigger="tool_call_budget")},
+    ),
+    "access request blocker": saved_only(lambda: [record("root", state=W)], **blocker("access_request", access_request_id="req-1")),
+    "setup run blocker": saved_only(lambda: [record("root", state=W)], **blocker(TOOL_SETUP_RUN_KIND, run_id="run-1")),
+    "secure credential form": lambda lead: outside_wait("SecureCredentialCollectionRequest"),
+    "signup automation": lambda lead: outside_wait("SignupAutomationRequest"),
+    "interrupt sent to the requester": lambda lead: (
+        [with_history(record("root", state=W), TaskHistoryEntry(
+            summary="Strands turn interrupted for requester input.",
+            details={"event": INTERRUPT_REQUEST_EVENT, INTERRUPT_WAITS_ON_REQUESTER_KEY: True},
+        ))],
+        {},
+    ),
+    "running action batch": saved_only(
+        lambda: [record("root", state=W)],
+        runtime_leases={"l1": TaskRuntimeLeaseRecord(lease_id="l1", root_task_id="root", source_task_id="root", owner_agent_id="lead")},
+    ),
+    "held reply": saved_only(
+        lambda: [record("root", state=W)],
+        runtime_mailbox_events={"e1": RuntimeMailboxEventRecord(
+            event_id="e1", root_task_id="root", event_type="task_response", event_class="deferrable", status="deferred",
+        )},
+    ),
+    "isolated recovery": saved_only(
+        lambda: [record("root", state=W), record("rec", state=ProgressState.ACCEPTED, signed=False, route="lead")],
+        task_queue=["rec"],
+        recovery_links={"rec": RecoveryTaskLink(
+            original_task_id="root", original_plan_id="plan-1", recovery_task_id="rec", branch_id="b",
+            failure_type="tool_error", failure_summary="A tool failed.",
+        )},
+    ),
+    "queue pause": lambda lead: (
+        [with_history(
+            record("root", state=ProgressState.PAUSED, at=PAUSED_AT),
+            TaskHistoryEntry(summary="Queue pause: later", details={"event": QUEUE_PAUSE_EVENT, "paused_at": iso(PAUSED_AT)}),
+        )],
+        {},
+    ),
+    "final review queued": saved_only(
+        lambda: [record("root", state=ProgressState.PARTIAL)], task_queue=["root"], final_review_pending_task_ids=["root"]
+    ),
+    "access request in the store": waiting_access_request,
+    "setup run in the store": waiting_setup_run,
+    "plan in the store": running_plan,
+    "retry timer in the schedule store": retry_timer,
+}
+PAUSED_AT = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("name", list(LEGITIMATE_WAITS))
+@pytest.mark.asyncio
+async def test_a_legitimate_wait_is_never_reported_as_waiting_on_nothing(lead, name):
+    records, sections = LEGITIMATE_WAITS[name](lead)
+    save(lead, "lead", "TeamArchitect", records, **sections)
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    assert TASK_WAITING_ON_NOTHING not in waiting_reasons(lead)
+    assert STRANDED_TITLE not in [notice.title for notice in notices(lead)]
+
+
+# -- a store that cannot be read (review C02) -------------------------------------------------
+
+
+def damaged(*_args, **_kwargs):
+    raise ValueError("The stored row does not match this version's model.")
+
+
+@pytest.mark.parametrize("store", ["plans", "tool_setup_runs"])
+@pytest.mark.asyncio
+async def test_an_unreadable_row_keeps_its_warning_and_the_other_notices_go_on(lead, monkeypatch, caplog, store):
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)], task_to_plan_id={"root": "plan-1"})
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    (told,) = open_incidents(lead)
+    assert told.reason == TASK_WAITING_ON_NOTHING and told.notified_at_utc is not None
+
+    if store == "plans":
+        monkeypatch.setattr(lead.task_manager.plan_repository, "get_plan", damaged)
+    else:
+        monkeypatch.setattr(ToolSetupRunRepository, "for_task", damaged)
+    save(lead, "worker-1", "WebResearchAgent", [record("other")])  # its agent never reported in
+    caplog.set_level(logging.WARNING)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD + timedelta(minutes=11))
+
+    assert f"event=stuck_task_wait_reason_unreadable task_id=root owner_agent_id=lead store={store} error_type=ValueError" in caplog.text
+    kept = next(incident for incident in open_incidents(lead) if incident.subject_id == "root")
+    assert kept == told  # neither told again nor closed
+    assert "work_recovered" not in [envelope.msg_content.reason for envelope in chats(lead)]
+    assert (lambda reasons: TASK_OWNER_GONE in reasons)({i.reason for i in open_incidents(lead) if i.subject_id == "other"})
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_team_wide_list_stops_the_pass_and_keeps_every_warning(lead, monkeypatch, caplog):
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)])
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    told = open_incidents(lead)
+
+    def locked():
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(lead._schedule_store, "all_rows", locked)
+    caplog.set_level(logging.WARNING)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD + timedelta(minutes=1))
+    assert "event=stuck_task_scan_failed" in caplog.text
+    assert open_incidents(lead) == told
+    assert [envelope.msg_content.reason for envelope in chats(lead)] == ["work_stuck"]

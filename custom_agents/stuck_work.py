@@ -23,7 +23,9 @@ How it works:
   when the work is the team's. When a finding disappears, everyone who was
   told gets a "working again" notice and message, and the incident closes.
   A source may close it with no message instead (``recovery`` returns
-  None), when the work ended and nothing will run again.
+  None), when the work ended and nothing will run again. A finding marked
+  ``undetermined`` (the source could not read what it needs this pass)
+  leaves its open incident as it is.
 - Inbox notices are stored once per notice id (``send_runtime_notice_once``),
   in both authorization modes. Chat messages are ``UserNotification``\\ s sent
   through the gateway like any proactive message; this is the one place
@@ -108,6 +110,10 @@ class StuckFinding:
     # key=value diagnostics added to the ``event=stuck_work_notified`` warning;
     # never shown to people.
     log_detail: str = ""
+    # The source could not decide this pass whether it is stuck (a record it
+    # needs could not be read): an open incident for it stays exactly as it
+    # is, neither told nor closed, and no new one opens.
+    undetermined: bool = False
 
 
 @dataclass(frozen=True)
@@ -371,6 +377,9 @@ async def report_stuck_work(
     }
     current: set[str] = set()
     for finding in findings:
+        if finding.undetermined:
+            current.add(_incident(agent, finding).incident_id)
+            continue
         try:
             incident = await runtime.run(repository.record_seen, _incident(agent, finding))
             current.add(incident.incident_id)
