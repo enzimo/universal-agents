@@ -11,8 +11,9 @@ executor (``ChangesFirstToolExecutor``), the real ``RuntimeSteeringPlugin``, a
 real ``TaskManager``, and the real guidance acceptance
 (``handle_task_steering_message``). Every call to the agent goes through
 ``invoke_with_tool_stop`` inside the task's work record, as turns do. Only the
-model is scripted. The last tests pin the Strands hook behaviour the plugin
-relies on to recognise a resumed call.
+model is scripted. The later tests pin the Strands hook behaviour the plugin
+relies on to recognise a resumed call, and test that rule
+(``custom_agents.sdk.strands.paused_tool_calls``) on its own.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from strands.types.exceptions import EventLoopException
 from strands.types.tools import ToolContext
 
 from custom_agents.sdk.strands.changes_first import ChangesFirstToolExecutor
+from custom_agents.sdk.strands.paused_tool_calls import INTERRUPT_STOP_REASON, PausedToolCalls
 from custom_agents.sdk.strands.turn_tool_stop import invoke_with_tool_stop
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_message_runtime import _apply_task_processing_result
@@ -225,6 +227,23 @@ def _assert_cancelled_with_guidance(result: tuple[str, str]) -> None:
     assert GUIDANCE in text
 
 
+def _resumed_call_log(tool_name: str, tool_use_id: str, *, waiting: int) -> str:
+    return (
+        f"event=task_steering_resumed_tool_call task_id={TASK} tool={tool_name} "
+        f"tool_use_id={tool_use_id} guidance_waiting={waiting}"
+    )
+
+
+def _resumed_call_logs(caplog) -> list[str]:
+    """The structured part of each resumed-call log line."""
+
+    return [
+        record.getMessage().split("waits for the next call. ", 1)[1]
+        for record in caplog.records
+        if "event=task_steering_resumed_tool_call" in record.getMessage()
+    ]
+
+
 PAUSES = {
     # The paused call, and the hooks placed before and after the steering plugin.
     "tool": (("wait_for_setup", {"name": "porkbun"}), (), ()),
@@ -240,7 +259,7 @@ PAUSED_CALL_RAN = {"wait_for_setup": f"wait_for_setup:porkbun:{ANSWER}", "report
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pause", sorted(PAUSES))
-async def test_a_resumed_call_keeps_its_result_and_the_next_call_brings_the_guidance(tmp_path, pause):
+async def test_a_resumed_call_keeps_its_result_and_the_next_call_brings_the_guidance(tmp_path, caplog, pause):
     paused_call, before, after = PAUSES[pause]
     runtime = _runtime_agent(tmp_path)
     model = StepsModel([[paused_call], [("report", {"label": "next"})], "Done."])
@@ -250,6 +269,7 @@ async def test_a_resumed_call_keeps_its_result_and_the_next_call_brings_the_guid
     assert paused.stop_reason == "interrupt"
     assert CALLS == []
     await _send_guidance(runtime)
+    caplog.set_level(logging.INFO, logger=LOGGER.name)
     resumed = await _call(sdk, _answers(paused))
 
     assert resumed.stop_reason == "end_turn"
@@ -257,11 +277,47 @@ async def test_a_resumed_call_keeps_its_result_and_the_next_call_brings_the_guid
     # The resumed call ran with its answer, and the model read its real result.
     assert results["step1-call0"] == PAUSED_CALL_RESULT[paused_call[0]]
     assert CALLS == [PAUSED_CALL_RAN[paused_call[0]]]
+    assert _resumed_call_logs(caplog) == [_resumed_call_log(paused_call[0], "step1-call0", waiting=1)]
     # The next new call brought the guidance instead of running.
     _assert_cancelled_with_guidance(results["step2-call0"])
     assert GUIDANCE in model.inputs[-1]
     assert GUIDANCE_APPLIED_EVENT in _history_events(runtime)
     assert TASK not in runtime._pending_proactive_task_steering
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_call_without_guidance_logs_none_waiting(tmp_path, caplog):
+    runtime = _runtime_agent(tmp_path)
+    model = StepsModel([[("wait_for_setup", {"name": "porkbun"})], [("report", {"label": "next"})], "Done."])
+    sdk = _strands_agent(runtime, model)
+
+    paused = await _call(sdk, "Check the registrars.")
+    caplog.set_level(logging.INFO, logger=LOGGER.name)
+    await _call(sdk, _answers(paused))
+
+    results = _tool_results(sdk)
+    assert results["step1-call0"] == ("success", f"setup porkbun finished: {ANSWER}")
+    assert results["step2-call0"] == ("success", "reported next")
+    assert _resumed_call_logs(caplog) == [_resumed_call_log("wait_for_setup", "step1-call0", waiting=0)]
+
+
+@pytest.mark.asyncio
+async def test_steering_turned_on_during_the_pause_still_keeps_the_resumed_result(tmp_path):
+    # The paused call started while steering was off; it must still count as
+    # resumed once steering is on again.
+    runtime = _runtime_agent(tmp_path)
+    runtime.mid_turn_steering = {"enabled": False}
+    model = StepsModel([[("wait_for_setup", {"name": "porkbun"})], [("report", {"label": "next"})], "Done."])
+    sdk = _strands_agent(runtime, model)
+
+    paused = await _call(sdk, "Check the registrars.")
+    runtime.mid_turn_steering = {"enabled": True}
+    await _send_guidance(runtime)
+    await _call(sdk, _answers(paused))
+
+    results = _tool_results(sdk)
+    assert results["step1-call0"] == ("success", f"setup porkbun finished: {ANSWER}")
+    _assert_cancelled_with_guidance(results["step2-call0"])
 
 
 @pytest.mark.asyncio
@@ -426,3 +482,65 @@ async def test_strands_ends_a_failed_call_with_an_after_invocation_event_and_no_
     with pytest.raises(EventLoopException, match="hook failed"):
         await sdk.invoke_async("Report.")
     assert recorder.events == [("before", "step1-call0"), ("end", None)]
+
+
+def _tool_use(tool_use_id: str) -> dict[str, Any]:
+    return {"toolUseId": tool_use_id, "name": "report", "input": {}}
+
+
+class _TrackerEvents:
+    """Drives a PausedToolCalls through a real HookRegistry with real Strands events."""
+
+    def __init__(self) -> None:
+        self.tracker = PausedToolCalls()
+        self.registry = HookRegistry()
+        self.tracker.register_hooks(self.registry)
+
+    def start(self, tool_use_id: str) -> bool:
+        return self.tracker.start(
+            BeforeToolCallEvent(agent=None, selected_tool=None, tool_use=_tool_use(tool_use_id), invocation_state={})
+        )
+
+    def finish(self, tool_use_id: str) -> None:
+        result = {"toolUseId": tool_use_id, "status": "success", "content": []}
+        self.registry.invoke_callbacks(
+            AfterToolCallEvent(
+                agent=None, selected_tool=None, tool_use=_tool_use(tool_use_id), invocation_state={}, result=result,
+            )
+        )
+
+    def end(self, stop_reason: str | None) -> None:
+        result = SimpleNamespace(stop_reason=stop_reason) if stop_reason else None
+        self.registry.invoke_callbacks(AfterInvocationEvent(agent=None, invocation_state={}, result=result))
+
+
+@pytest.mark.parametrize("stop_reason", [None, "end_turn"], ids=["failed", "finished"])
+def test_a_call_to_the_agent_that_does_not_pause_forgets_its_unfinished_calls(stop_reason):
+    calls = _TrackerEvents()
+    assert calls.start("call-a") is False
+    calls.end(stop_reason)
+    # A later new call that reuses the id is new.
+    assert calls.start("call-a") is False
+
+
+def test_only_the_calls_a_pause_left_unfinished_resume_until_they_finish():
+    calls = _TrackerEvents()
+    calls.start("paused")
+    calls.start("sibling")
+    calls.finish("sibling")
+    calls.end(INTERRUPT_STOP_REASON)
+
+    assert calls.start("paused") is True
+    assert calls.start("sibling") is False
+    calls.finish("paused")
+    calls.finish("sibling")
+    assert calls.start("paused") is False
+
+
+def test_a_call_that_pauses_again_still_resumes_at_the_next_resume():
+    calls = _TrackerEvents()
+    calls.start("paused")
+    calls.end(INTERRUPT_STOP_REASON)
+    assert calls.start("paused") is True
+    calls.end(INTERRUPT_STOP_REASON)
+    assert calls.start("paused") is True

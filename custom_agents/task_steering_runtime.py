@@ -63,6 +63,7 @@ from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.prompt_context_sanitization import render_replied_message_lines
 from custom_agents.provider_error_runtime import ProviderTimeoutError, is_provider_timeout_error
 from custom_agents.sent_files_runtime import keep_sent_files
+from custom_agents.sdk.strands.paused_tool_calls import PausedToolCalls
 from custom_agents.sdk.strands.turn_tool_stop import (
     TURN_CANCELLED_REASON,
     invoke_with_tool_stop,
@@ -1532,18 +1533,30 @@ async def consume_pending_proactive_guidance_message(
 
 
 class RuntimeSteeringPlugin:
-    """Apply queued proactive task guidance at Strands safe checkpoints."""
+    """Apply queued proactive task guidance at Strands safe checkpoints.
+
+    Waiting guidance cancels the next new tool call with its text, so the
+    model reads it before it goes on. A tool call resuming after its pause is
+    not new: it runs with its answer and the model gets its real result,
+    while the guidance waits for the next call, the turn decision or the
+    check before a final answer (``custom_agents.sdk.strands.paused_tool_calls``).
+    """
 
     name = "runtime_steering"
 
     def __init__(self, agent: Any) -> None:
         self.runtime_agent = agent
+        self._paused_calls = PausedToolCalls()
         _register_terminal_task_steering_cleanup(agent)
 
     def register_hooks(self, registry: HookRegistry, **_: Any) -> None:
         registry.add_callback(BeforeToolCallEvent, self.before_tool_call)
+        self._paused_calls.register_hooks(registry)
 
     async def before_tool_call(self, event: BeforeToolCallEvent) -> None:
+        # Every call is recorded whatever the settings say: steering turned on
+        # during a pause must not make the resumed call look new.
+        resumed = self._paused_calls.start(event)
         agent = self.runtime_agent
         if not mid_turn_steering_enabled(agent):
             return
@@ -1552,6 +1565,9 @@ class RuntimeSteeringPlugin:
             return
         # The task of the turn this tool call belongs to (runtime_context.task_work).
         task_id = bound_task_id()
+        if resumed:
+            _log_resumed_tool_call(agent, task_id, event)
+            return
         text = await consume_pending_proactive_guidance_message(agent, task_id)
         if not text:
             return
@@ -1560,6 +1576,28 @@ class RuntimeSteeringPlugin:
             "You MUST incorporate this guidance immediately before deciding whether to retry the tool or choose a different path.\n"
             f"{text}"
         )
+
+
+def _log_resumed_tool_call(agent: Any, task_id: Optional[str], event: BeforeToolCallEvent) -> None:
+    """Log a tool call that resumed after its pause and how much guidance waits for the next call.
+
+    The count comes from the task's list in memory, not the task store. Only
+    the process that paused can resume (its session is in memory and a
+    restart drops it), and that process keeps every guidance it accepted in
+    the list until a turn reads it. A store read here could fail the resumed
+    call, which is the result this rule keeps.
+    """
+
+    waiting = len(agent._pending_proactive_task_steering.get(task_id, ())) if task_id else 0
+    agent._logger.info(
+        "[%s] A resumed tool call keeps its result; any pending guidance waits for the next call. "
+        "event=task_steering_resumed_tool_call task_id=%s tool=%s tool_use_id=%s guidance_waiting=%s",
+        agent.id,
+        task_id or "-",
+        event.tool_use.get("name"),
+        event.tool_use.get("toolUseId"),
+        waiting,
+    )
 
 
 def _guidance_file_lines(item: TaskSteering, openable: frozenset[str]) -> list[str]:
