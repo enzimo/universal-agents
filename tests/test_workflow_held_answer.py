@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import itertools
+import json
 import logging
 from collections import deque
 from types import SimpleNamespace
@@ -31,11 +33,14 @@ from custom_agents.access_workflow_runtime import (
     WORKFLOW_CONTINUATION_NOTE,
     WorkflowCompletionRefused,
 )
+from custom_agents.pending_work_runtime import close_pending_work
 from custom_agents.structured_llm_messages import (
+    SecureCredentialCollectionAction,
     StructuredAgentTurnDecision,
     StructuredTaskPayload,
     TaskResponseAction,
 )
+from custom_messages.contracts.credentials_v1 import SecureCredentialCollectionRequest
 from custom_messages.contracts.access_workflow_v2 import (
     AccessWorkflowV2,
     WorkflowEventV2,
@@ -49,6 +54,7 @@ from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType, TaskSteeringType
 from custom_tools.tool_stop import ToolStop
 from storage.access_workflow_repository import AccessWorkflowRepository
+from runtime_hosting.agent_execution import MAIN_LANE
 from tests.task_work_support import strands_parts
 from tests.test_runtime_owner_boundaries import build_turn_owner
 from tests.test_turn_action_outbox import (
@@ -58,6 +64,9 @@ from tests.test_turn_action_outbox import (
     _make_task_manager,
     _now,
 )
+
+OWNER = "person-1"
+
 
 def _open_workflow(manager, task_id: str) -> AccessWorkflowV2:
     """A published plan whose account step is done and whose work step still runs."""
@@ -75,7 +84,7 @@ def _open_workflow(manager, task_id: str) -> AccessWorkflowV2:
         ),
     )
     record = AccessWorkflowV2(
-        owner_person_id="person-1",
+        owner_person_id=OWNER,
         team_id=manager.identity.team_id,
         requester_agent_id=manager.identity.owner_agent_id,
         requester_agent_type="TeamArchitect",
@@ -90,6 +99,11 @@ def _open_workflow(manager, task_id: str) -> AccessWorkflowV2:
     )
     event = WorkflowEventV2(workflow_id=record.workflow_id, kind="progress", code="plan_submitted")
     return AccessWorkflowRepository(manager.storage_settings).create(record, event)
+
+
+def _diagnostics(manager, workflow_id: str) -> dict:
+    service = AccessWorkflowService(AccessWorkflowRepository(manager.storage_settings))
+    return service.diagnostics(service.repository.get(workflow_id))
 
 
 def _event_codes(manager, workflow_id: str) -> list[str]:
@@ -291,14 +305,14 @@ def _queued_request(manager) -> Task:
         msg_correlation_id="corr_prices",
         conversation_id="conv_prices",
     )
-    assert manager.add_task(task, header, meta, owner_person_id=None)
+    assert manager.add_task(task, header, meta, owner_person_id=OWNER)
     return task
 
 
-def _queue_agent(tmp_path, manager, turns):
+def _queue_agent(tmp_path, manager, turns, **agent_settings):
     """An agent whose queue loop runs ``turns`` in order; each one decides through the real outbox."""
 
-    agent = _make_agent(tmp_path, task_manager=manager)
+    agent = _make_agent(tmp_path, task_manager=manager, **agent_settings)
     agent._conversation_store = None
     object.__setattr__(agent, "_refresh_self_agent_state", AsyncMock())
     object.__setattr__(agent, "_notify_context_after_turn", AsyncMock())
@@ -407,7 +421,7 @@ def test_a_second_answer_without_progress_fails_the_task_and_tells_the_person(tm
     assert message.task_type == MessageMetaType.RESPONSE and message.task_state[-1][0] == ProgressState.FAILED
     statement, _, rest = message.answer.partition("\n\n")
     assert statement.startswith('This task was stopped because its plan "Check domain prices" still has unfinished steps')
-    assert "Open Chat to go over the remaining work" in statement
+    assert "Reply here to go over the remaining work with the team lead" in statement
     assert rest == (
         f"{LAST_REPLY_LABEL}\n\n"
         "> Here are the prices from the first registrar.\n>\n> I still need the second registrar's account ID."
@@ -430,6 +444,16 @@ def test_a_second_answer_without_progress_fails_the_task_and_tells_the_person(tm
     }
     assert "first registrar" in previews["workflow_completion_deferred"]
     assert "account ID" in previews["workflow_completion_refused"]
+    # The workflow's diagnostic file says what happened, and never quotes the answers.
+    diagnostics = _diagnostics(manager, workflow.workflow_id)
+    explanations = {event["code"]: event["explanation"] for event in diagnostics["events"]}
+    assert explanations["source_task_completion_rejected"] == (
+        "The task tried to finish again without changing the unfinished steps. "
+        "It was stopped as failed, and the person was told."
+    )
+    lifecycle = {event["code"] for event in diagnostics["source_task_history"]["events"]}
+    assert {"workflow_completion_deferred", "workflow_completion_refused"} <= lifecycle
+    assert "registrar" not in json.dumps(diagnostics)
     for event in ("event=workflow_completion_refused", "event=turn_action_refused"):
         [record] = [record for record in caplog.records if event in record.getMessage()]
         assert record.levelno == logging.WARNING
@@ -459,3 +483,72 @@ async def test_a_refused_answer_ends_the_turn_as_a_reported_failure_not_a_model_
 
     assert raised.value is refusal
     assert not any("Error in LLM interaction" in record.getMessage() for record in caplog.records)
+
+
+def test_a_repeated_answer_replayed_by_the_outbox_retry_fails_the_task_and_frees_the_queue(tmp_path, caplog) -> None:
+    """The outbox's retry of a batch also runs its final answer (not only a turn does).
+
+    The continuation turn's first action (a credential form) failed to publish,
+    so the task waited RETRYING (it keeps the main slot) with the final answer
+    blocked behind it. The retry sends the form and then runs the answer; a
+    refusal there must end the task as in a turn. Re-raised, it left the task
+    RETRYING with nothing to retry, the queue stopped and nobody was told.
+    """
+
+    manager = _make_task_manager(tmp_path)
+    task = _queued_request(manager)
+    workflow = _open_workflow(manager, task.task_id)
+    publishes = itertools.count(1)
+
+    async def publish(**_kwargs):
+        number = next(publishes)
+        if number == 1:
+            raise TimeoutError("broker publish timed out")
+        return number
+
+    async def first(_agent, _content):
+        return _final_answer("Here are the prices from the first registrar.")
+
+    async def second(_agent, content):
+        form = SecureCredentialCollectionAction(
+            secure_credential_collection_request=SecureCredentialCollectionRequest(
+                parent_task_id=content.task_id,
+                service_name="Example registrar",
+                credential_key="registrar_api_key",
+                purpose="Read domain prices.",
+            )
+        )
+        return StructuredAgentTurnDecision(actions=[form, *_final_answer("Here are the prices.").actions])
+
+    started: list[str] = []
+
+    async def next_request(_agent, content):
+        started.append(content.task_id)
+        return _final_answer("Done.")
+
+    retry_at_once = {"max_auto_attempts": 3, "initial_retry_delay_seconds": 0.0, "max_retry_delay_seconds": 0.0,
+                     "retry_jitter_ratio": 0.0}
+    agent = _queue_agent(tmp_path, manager, [first, second, next_request], turn_action_outbox=retry_at_once)
+    agent.team_comms.send_message = AsyncMock(side_effect=publish)
+    object.__setattr__(agent, "_continue_pending_work", AsyncMock())  # the test drives the drain itself
+
+    async def scenario() -> None:
+        assert await agent._check_and_process_next_task()  # held
+        assert await agent._check_and_process_next_task()  # its first action waits for a retry
+        assert manager.get_task_info(task.task_id).state == ProgressState.RETRYING
+        assert await agent._drain_due_turn_action_outbox(MAIN_LANE)
+        other = Task(task_id="task_next", task_type=MessageMetaType.REQUEST, problem_statement="Next request.")
+        assert manager.add_task(other, MessageHeader(response_routing_key="user_reply"), MessageMeta(), owner_person_id=None)
+        assert await agent._check_and_process_next_task()  # the queue goes on
+        await close_pending_work(agent)
+
+    asyncio.run(scenario())
+
+    saved = manager.get_task_from_db(task.task_id, owner_agent_id=agent.id)["main_task"]
+    assert saved.task_state[-1][0] == ProgressState.FAILED
+    assert started == ["task_next"]
+    failures = [item for item in _sent_tasks(agent) if item.task_id == task.task_id]
+    assert len(failures) == 1 and failures[0].task_state[-1][0] == ProgressState.FAILED
+    assert failures[0].answer.startswith('This task was stopped because its plan "Check domain prices"')
+    assert "source_task_completion_rejected" in _event_codes(manager, workflow.workflow_id)
+    assert any("event=turn_action_refused" in record.getMessage() for record in caplog.records)

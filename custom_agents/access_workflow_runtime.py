@@ -65,8 +65,8 @@ class WorkflowCompletionRefused(TurnActionRefused):
         self.attempted_answer = attempted_answer
         super().__init__(
             f'This task was stopped because its plan "{title}" still has unfinished steps and it tried to '
-            "finish again without making progress on them. Results it already finished are kept. Open Chat "
-            "to go over the remaining work, and check uncertain results before trying again."
+            "finish again without making progress on them. Results it already finished are kept. Reply here "
+            "to go over the remaining work with the team lead, and check uncertain results before trying again."
         )
 
     @property
