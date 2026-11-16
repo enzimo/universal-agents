@@ -40,8 +40,14 @@ def resolve_secure_tool_broker_internal_base_url(
 PERSON_CREDENTIAL_DELETION_ROUTE = "/v1/people/credentials/delete"
 # Team transfer (secure_tool_broker.credential_transfer): the operator caller only.
 TRANSFER_ROUTE_PREFIX = "/v1/transfer/"
-CREDENTIAL_TRANSFER_EXPORT_ROUTE = "/v1/transfer/credentials/export"
-CREDENTIAL_TRANSFER_IMPORT_ROUTE = "/v1/transfer/credentials/import"
+CREDENTIAL_TRANSFER_EXPORT_ROUTE = f"{TRANSFER_ROUTE_PREFIX}credentials/export"
+CREDENTIAL_TRANSFER_IMPORT_ROUTE = f"{TRANSFER_ROUTE_PREFIX}credentials/import"
+# /upgrade's export (secure_tool_broker.team_export_page, team_transfer.requested_export):
+# the export process collects the owner's passphrase and reports how the export
+# ended; the supervisor reports an export process that ended without reporting.
+TEAM_EXPORT_PASSPHRASE_ROUTE = f"{TRANSFER_ROUTE_PREFIX}export/passphrase"
+TEAM_EXPORT_RESULT_ROUTE = f"{TRANSFER_ROUTE_PREFIX}export/result"
+TEAM_EXPORT_ENDED_ROUTE = f"{TRANSFER_ROUTE_PREFIX}export/ended"
 # Gateway-only route that links the keys typed during onboarding as the team's
 # accounts (secure_tool_broker.onboarding_account_keys); under /v1/account-link/,
 # which only the gateway may call.

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection, Sequence
 from pathlib import Path
-from collections.abc import Collection
 from typing import Any, Optional
 from datetime import datetime
 
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from default_values import STORAGE_DEFAULTS
 from storage.backends import STORAGE_BACKEND_SQLITE
 from storage.config import StorageSettings, resolve_storage_settings
@@ -16,6 +17,7 @@ from storage.conversation_repository import (
     create_conversation_repository,
     default_synopsis,
 )
+from storage.turn_attachments import TurnAttachment
 
 
 class ConversationStore:
@@ -151,7 +153,8 @@ class ConversationStore:
         task_status: str = "accepted",
         memory_review_status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
-        attachments: Optional[list[dict[str, Any]]] = None,
+        attachments: Sequence[UserTaskAttachment] = (),
+        request_files_known: bool = True,
     ) -> dict[str, Any]:
         return self._repository.append_turn(
             conversation_id=conversation_id,
@@ -171,32 +174,39 @@ class ConversationStore:
             memory_review_status=memory_review_status,
             owner_canonical_user_id=owner_canonical_user_id,
             attachments=attachments,
+            request_files_known=request_files_known,
         )
 
-    # The files people sent with each turn. Only trusted runtime code calls
-    # these (custom_agents.conversation_attachments); turn records themselves
-    # show files without their storage (storage.conversation_repository).
     def merge_turn_attachments(
-        self, *, conversation_id: str, task_id: str, attachments: list[dict[str, Any]]
-    ) -> Optional[list[dict[str, Any]]]:
+        self,
+        *,
+        conversation_id: str,
+        task_id: str,
+        attachments: Sequence[UserTaskAttachment],
+    ) -> Optional[int]:
         return self._repository.merge_turn_attachments(
-            conversation_id=conversation_id, task_id=task_id, attachments=attachments
+            conversation_id=conversation_id,
+            task_id=task_id,
+            attachments=attachments,
         )
 
-    def list_conversation_attachments(
+    def list_turn_attachments(
         self,
         conversation_id: str,
         *,
-        limit: int,
-        current_task_id: Optional[str] = None,
-        skip_ids: Collection[str] = (),
-    ) -> list[dict[str, Any]]:
-        return self._repository.list_conversation_attachments(
-            conversation_id, limit=limit, current_task_id=current_task_id, skip_ids=skip_ids
+        attachment_ids: Optional[Collection[str]] = None,
+        limit: Optional[int] = None,
+    ) -> list[TurnAttachment]:
+        return self._repository.list_turn_attachments(
+            conversation_id,
+            attachment_ids=attachment_ids,
+            limit=limit,
         )
 
-    def find_conversation_attachment(self, conversation_id: str, attachment_id: str) -> Optional[dict[str, Any]]:
-        return self._repository.find_conversation_attachment(conversation_id, attachment_id)
+    def last_turn_without_file_records(
+        self, conversation_id: str, *, exclude_task_id: Optional[str] = None
+    ) -> Optional[int]:
+        return self._repository.last_turn_without_file_records(conversation_id, exclude_task_id=exclude_task_id)
 
     def append_clarification(
         self,

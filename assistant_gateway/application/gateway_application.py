@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Sequence
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 
 from assistant_gateway.application.access_reviews import (
@@ -169,8 +168,14 @@ class GatewayApplication(Protocol):
         enable_channel_binding_commands: bool = True,
         query_handler: GatewayQueryHandler | None = None,
         correlation_id: str | None = None,
+        private_chat: bool = False,
     ) -> GatewayCommandResult:
-        """Execute a normalized slash/session command for one channel route."""
+        """Execute a normalized slash/session command for one channel route.
+
+        ``private_chat``: the channel vouches that only this person and the
+        assistant are in the chat (``GatewayActorContext.private_chat``);
+        leaving it out means not private.
+        """
 
     def is_task_progress_status_request(
         self,
@@ -215,14 +220,9 @@ class GatewayApplication(Protocol):
         task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
-        attachments: Sequence[UserTaskAttachment] = (),
+        attachments: list[UserTaskAttachment] | None = None,
     ) -> GatewayApplicationResponse:
-        """Answer the named question waiting in a chat, with the files the person sent with the answer.
-
-        ``attachments`` are files the gateway already checked and stored for
-        this chat. When the answer is not sent, the reply says the files were
-        not sent either.
-        """
+        """Answer the named question waiting in a chat, with the files the person sent with the answer."""
 
     async def list_scheduled_jobs(
         self,

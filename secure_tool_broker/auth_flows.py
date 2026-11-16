@@ -56,6 +56,7 @@ from secure_tool_broker.sign_in_pages import (
     sign_in_wait_script,
 )
 from secure_tool_broker.model_key_page import ModelKeyFlow, PersonalModelKeyFlow
+from secure_tool_broker.team_export_page import TeamExportFlow
 from secure_tool_broker.x_sign_in import XTeamClientFlow, XWebSignInFlow
 from secure_tools.auth_methods import TEAM_CLIENT_METHOD, X_SIGN_IN_PROVIDER, sign_in_command
 from secure_tools.providers import ToolResult
@@ -1340,6 +1341,7 @@ AUTH_FLOW_REGISTRY: dict[str, dict[str, BrokerAuthFlow]] = {
         TEAM_CLIENT_METHOD: XTeamClientFlow(),
     },
     ModelKeyFlow.provider: {ModelKeyFlow.method: ModelKeyFlow(), PersonalModelKeyFlow.method: PersonalModelKeyFlow()},
+    TeamExportFlow.provider: {TeamExportFlow.method: TeamExportFlow()},
 }
 
 

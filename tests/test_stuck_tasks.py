@@ -21,6 +21,11 @@ from access_control.people import PERSON_ROLE_ADMIN, PERSON_ROLE_OWNER
 import custom_agents.stuck_tasks as stuck_tasks_module
 from custom_agents import task_context_runtime
 from custom_agents.agent_state_store import AgentStateStore
+from custom_agents.conversation_attachments import (
+    ESCALATION_RESULT_MESSAGE_TYPE,
+    QUESTION_ANSWER_MESSAGE_TYPE,
+    task_files_details,
+)
 from custom_agents.liveness_observation import observe_liveness
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.stuck_tasks import (
@@ -522,6 +527,34 @@ async def test_a_file_sent_as_guidance_before_the_upgrade_is_named_once_in_its_r
         ("root", TASK_FILES_SENT_BEFORE_UPGRADE)
     ]
     assert not admin_notices(lead)
+
+@pytest.mark.asyncio
+async def test_files_kept_by_0_9_12_for_guidance_answers_and_escalation_results_are_named(lead):
+    """0.9.12 and 0.9.13 keep a task's later files in files entries (``task_files_details``), read as the tools do."""
+    guidance = stored_file(lead, "att_guide", "receipt.png", folder=ADAPTER_HOST_FOLDER)
+    answer = stored_file(lead, "att_answer", "invoice.pdf", folder=ADAPTER_HOST_FOLDER)
+    result = stored_file(lead, "att_result", "scan.png", folder=ADAPTER_HOST_FOLDER)
+    kept = stored_file(lead, "att_kept", "notes.txt", folder=UPLOADS_FOLDER)
+    root = record("root", state=ProgressState.WAITING)
+    root.task.execution_history = [
+        TaskHistoryEntry(
+            entry_type=TaskHistoryType.TASK_EVENT,
+            summary="Files kept",
+            details=task_files_details(files, message_id=message_id, message_type=message_type),
+        )
+        for files, message_id, message_type in (
+            ([guidance, kept], "steer-1", "guidance"),
+            ([answer], "query-1", QUESTION_ANSWER_MESSAGE_TYPE),
+            ([result], "child-a", ESCALATION_RESULT_MESSAGE_TYPE),
+        )
+    ]
+    save(lead, "lead", "TeamArchitect", [root])
+    await report_stuck_tasks(lead, now=datetime.now(timezone.utc))
+
+    (notice,) = notices(lead)
+    assert "(receipt.png, invoice.pdf, scan.png)" in notice.summary
+    assert "notes.txt" not in notice.summary and no_storage_path(notice.summary)
+
 
 @pytest.mark.asyncio
 async def test_a_subtask_still_held_after_its_request_ended_sends_no_second_notice(lead):

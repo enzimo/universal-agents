@@ -25,6 +25,7 @@ from assistant_gateway.application.transient_presentation import (
 from assistant_gateway.domain.message_types import (
     ACCESS_REVIEW_MESSAGE_TYPE,
     ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
+    TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
     LINK_RESULT_MESSAGE_TYPE,
     TOOL_SETUP_RESULT_MESSAGE_TYPE,
     SECURE_CREDENTIAL_RESULT_MESSAGE_TYPE,
@@ -131,6 +132,10 @@ _SENSITIVE_RESPONSE_TEXT = {
     "command_user_sensitive": (
         "The requested Web Chat access operation was processed. One-time material is not "
         "stored in transcript history."
+    ),
+    # Usage and refusal replies; a reply that opened the page keeps its card's receipt.
+    TEAM_EXPORT_COMMAND_MESSAGE_TYPE: (
+        "The /upgrade reply was shown when it ran and is not kept in chat history."
     ),
 }
 
@@ -712,6 +717,7 @@ class GatewayTranscriptService:
             "command",
             "command_auth",
             ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
+            TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
             LINK_RESULT_MESSAGE_TYPE,
             TOOL_SETUP_RESULT_MESSAGE_TYPE,
             SECURE_CREDENTIAL_RESULT_MESSAGE_TYPE,

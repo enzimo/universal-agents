@@ -132,14 +132,14 @@ class ChannelBridge:
             and waiting_question_id
         ):
             # The answer names the question found above, so a question shown
-            # after this message arrived is never answered by it. Files sent
-            # with it (already stored by the chat adapter) go with the answer.
+            # after this message arrived is never answered by it.
+            # The files sent with the message go with the answer.
             response = await self.application.reply_to_pending_query(
                 session_key=resolved_session_key,
                 task_query_id=waiting_question_id,
                 response_text=action.text or "",
                 replied_message=inbound.replied_message,
-                attachments=tuple(inbound_attachments),
+                attachments=inbound_attachments or None,
             )
             return [
                 self.translator.render_outbound(

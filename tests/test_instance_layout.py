@@ -65,7 +65,7 @@ def test_instance_private_paths(tmp_path):
 
 
 def test_fixed_locations_outside_the_agent_areas(tmp_path):
-    """MCP, installed-permission, team tool and sign-in locations come from the root, never a setting."""
+    """MCP, installed-permission, team tool, sign-in and export locations come from the root, never a setting."""
 
     layout = InstanceLayout.at(tmp_path)
     root = tmp_path.resolve()
@@ -78,6 +78,9 @@ def test_fixed_locations_outside_the_agent_areas(tmp_path):
         layout.auth_dir: root / "auth",
         layout.openai_codex_auth_path: root / "auth" / "openai_codex_auth.json",
         layout.xai_oauth_auth_path: root / "auth" / "xai_oauth_auth.json",
+        # /upgrade: the exports and the supervisor's requests.
+        layout.exports_dir: root / "exports",
+        layout.team_export_requests_dir: root / "runtime" / "team-export" / "requests",
     }
     for actual, wanted in expected.items():
         assert actual == wanted

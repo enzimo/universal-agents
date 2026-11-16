@@ -34,6 +34,7 @@ from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyTake
 
 from storage.backends import STORAGE_BACKEND_SQLITE
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_agents.conversation_attachments import sent_file_lines
 from custom_agents.prompt_context_sanitization import (
     extract_display_request_text,
     render_replied_message_lines,
@@ -59,8 +60,6 @@ from custom_messages.contracts.runtime_snapshot_v3 import (
     TurnActionBatchRecord,
     TurnActionOutboxRecord,
 )
-from custom_agents.conversation_attachments import render_attachment_lines
-from custom_agents.steering_history_events import QUERY_ANSWER_FILES_KEY
 from custom_agents.task_records import AfterActionReportRecordResult, ReportedWorkIdentity, TaskInfo
 from custom_agents.turn_work_notes import note_summary, render_earlier_turn_work, turn_work_notes
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -3198,15 +3197,6 @@ class TaskManager(
             self.task_state.task_to_taskquery_list[parent_task_id] = []
         self.task_state.task_to_taskquery_list[parent_task_id].append(task_query)
         summary = f"TaskQuery {task_query.query_type.value}: {task_query.message}"
-        details: Dict[str, Any] = {"query_type": task_query.query_type.value}
-        if task_query.attachments:
-            # The files the person sent with an answer (kept only on the
-            # person's answer to this task's own question,
-            # task_message_runtime), found after a restart by
-            # conversation_attachments.received_attachments.
-            details[QUERY_ANSWER_FILES_KEY] = [
-                attachment.model_dump(mode="json") for attachment in task_query.attachments
-            ]
         self.append_history_entry(
             parent_task_id,
             summary,
@@ -3219,7 +3209,7 @@ class TaskManager(
             agent_name=agent_name,
             agent_id=agent_id,
             related_task_id=task_query.task_query_id,
-            details=details,
+            details={"query_type": task_query.query_type.value},
         )
         if task_query.query_type == MessageMetaType.REQUEST:
             self._emit_activity(
@@ -3251,7 +3241,10 @@ class TaskManager(
         """Clarifications for this task, separate from its general execution history.
 
         Focused plan-step and recovery turns omit general history, but still
-        need the person's answers to questions this exact task asked.
+        need the person's answers to questions this exact task asked. Files
+        a person sent with an answer are named by id under it (the stored
+        answer holds only the files that were kept,
+        ``task_message_runtime._accept_answer_files``).
         """
         queries = self.get_task_queries(task_id) if task_query_list is None else task_query_list
         if latest_only:
@@ -3265,12 +3258,7 @@ class TaskManager(
             replied = getattr(query, "replied_message", None)
             if replied is not None:
                 lines.extend(render_replied_message_lines(replied, subject="clarification answer"))
-            files = getattr(query, "attachments", None) or []
-            if files:
-                # Named with their ids (never paths) so the model can open
-                # one in this and later turns.
-                lines.append("  Files sent with this answer (open one by its attachment_id):")
-                lines.extend(f"  {line}" for line in render_attachment_lines(files))
+            lines.extend(f"  {line}" for line in sent_file_lines(getattr(query, "attachments", None) or [], subject="answer"))
         return "\n".join(lines) + "\n"
 
     def get_task_info(self, task_id: str) -> Optional[TaskInfo]:

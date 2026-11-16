@@ -24,13 +24,59 @@ supported, because it may not read what a newer one saved.
 - **From 0.9 with a chat app the adapter host runs:** this applies only to
   chat apps set to `execution: "adapter_host"` under `interactive_apps`. Chat
   apps the gateway runs itself (`execution: "in_process"`, the default) and
-  Web Chat need nothing. For a chat app in the adapter host, first let
-  requests that use files sent through it finish. After the upgrade the team
-  can no longer open those files with its tools. The chat each such request
-  came from is told which files to send again, and the person it works for
-  also gets the notice in the Inbox. On a team with gateway users off nobody
-  is verified, so the chat gets the message and administrators get an Inbox
-  notice with the number of files.
+  Web Chat need nothing. 0.9 kept the files people sent through such a chat
+  app in the adapter host's transfer folder
+  (`interactive_apps.adapter_host.upload_dir`, by default
+  `runtime/adapter-host-uploads`); 0.10 keeps every file in `state/uploads`.
+  At its first start, before the gateway and the agents start, 0.10 moves
+  the files that conversations still list into `state/uploads`, so the team
+  can open them later in the same conversation as before. It does this once,
+  logs the result with counts (`event=adapter_host_files_upgraded`) and
+  records that it finished in `state/upgrades/adapter-host-files.json`.
+  - **Let requests that use those files finish first.** A request still
+    running during the upgrade cannot open its files afterwards. The chat it
+    came from is told which files to send again, and the person it works for
+    also gets the notice in the Inbox. On a team with gateway users off
+    nobody is verified, so the chat gets the message and administrators get
+    an Inbox notice with the number of files.
+  - **Moved files keep the date they were sent.** Upload retention counts
+    from that date, so files older than `retention_days`
+    ([Upload retention](configuration.md#upload-retention)) are deleted at
+    the gateway's first cleanup after the upgrade.
+  - **A file that is no longer there** cannot be moved. Its records are
+    removed, and when the person refers to it the team asks them to send it
+    again.
+  - **A file it refuses** (a link, contents that differ from what was
+    received, a file it cannot read) stays where it is and keeps its
+    records, but the team cannot open it. The log names it
+    (`event=adapter_host_file_not_moved`). Fix the file, delete
+    `state/upgrades/adapter-host-files.json` and restart to try again.
+  - **A file with no record of the chat that sent it** (its gateway record
+    was removed, for example by a restore on 0.9) cannot be moved, and
+    trying again does not help. Its conversation records are kept while
+    the file is there, the team cannot open it, and the person can send it
+    again. The log counts these as `no_record`.
+  - **The transfer folder is not here.** It belongs to the gateway: 0.9
+    wrote it on the gateway's machine, also when the adapter host ran
+    elsewhere. It is missing when it was not copied or mounted with the
+    instance (for example a container started without the volume that
+    held it). Nothing changes, startup goes on and an error in the log
+    says so. Copy or mount the folder where `upload_dir` points and
+    restart. If the files are really gone, run
+    `docker exec <container> python -m assistant_cli upgrade adapter-host-files --config /data/instance_config.yaml --files-gone`
+    while the team runs; their records are then removed as above.
+    The same error comes when a start after an interrupted upgrade finds
+    another folder in its place. If the log says the device number changed
+    and the folder is the same one mounted again (some file systems give it
+    a new device number at each mount), the files that start did not move
+    are not in it, and `--files-gone` finishes the upgrade safely. If the log
+    says it is probably another folder on the same disk, the earlier folder was
+    probably moved or renamed: put it back where `upload_dir` points and
+    restart, because the files that start did not move are still in it.
+  - **A folder it cannot use** (a read-only or full `state/uploads`, a
+    folder it has no permission to read): startup stops with a message
+    naming the folder. Fix it and restart; the step goes on where it
+    stopped.
 - **From 0.9 with an external NATS server:** prepare the server first. 0.10
   needs NATS Server 2.15.1 or later with two server settings
   ([Surviving a power loss](configuration.md#surviving-a-power-loss)), and more

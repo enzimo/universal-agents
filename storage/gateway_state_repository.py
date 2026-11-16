@@ -88,6 +88,7 @@ from .runtime import describe_storage_capabilities, require_repository_backend
 from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
+from .turn_attachments import relocate_steering_attachment
 
 
 def utc_now_iso() -> str:
@@ -420,6 +421,16 @@ class GatewayStateRepository(
     def get_attachment(self, attachment_id: str) -> Optional[AttachmentRecord]: ...
 
     def delete_uploads_created_before(self, cutoff: str, *, uploads_dir: str, limit: int) -> tuple[str, ...]: ...
+
+    def list_attachments_under(self, folder: str, *, after_id: str = "", limit: int) -> list[AttachmentRecord]: ...
+
+    def set_attachment_local_path(self, attachment_id: str, local_path: str) -> bool: ...
+
+    def relocate_held_guidance_attachment(
+        self, correlation_ids: Sequence[str], attachment_id: str, local_path: str
+    ) -> int: ...
+
+    def delete_attachment(self, attachment_id: str) -> bool: ...
 
     def update_attachment_nats_ref(
         self,
@@ -2622,7 +2633,15 @@ class _RelationalGatewayStateRepository:
         status: str,
         active_task_id: str,
     ) -> None:
-        """Atomically bind a gateway request to its current runtime task and state."""
+        """Atomically bind a gateway request to its current runtime task and state.
+
+        A request with a run state (running or finished) changes only for the
+        task it already names, so a delegated task's setup page or steering
+        reply never moves it: the person's guidance, its signed context and its
+        files stay on the request's own task
+        (tests/test_guidance_files_after_setup_page.py). Rows without a run
+        state (controls, guidance rows) follow the task given.
+        """
 
         normalized_task_id = str(active_task_id or "").strip()
         if not normalized_task_id:
@@ -2963,6 +2982,93 @@ class _RelationalGatewayStateRepository:
             ).fetchall()
             conn.commit()
         return tuple(str(row[0] or "") for row in rows)
+
+    def list_attachments_under(self, folder: str, *, after_id: str = "", limit: int) -> list[AttachmentRecord]:
+        """Up to ``limit`` attachment records whose file path lies under ``folder``, by id after ``after_id``.
+
+        Matched with a trailing slash and a literal prefix comparison, as in
+        ``delete_uploads_created_before``. For the upgrade step that moves
+        files out of the adapter host's transfer folder
+        (``instance_upgrades.adapter_host_files``).
+        """
+
+        bind = self._dialect.bind
+        prefix = folder.rstrip("/") + "/"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT attachment_id, session_key, conversation_id, correlation_id, filename, content_type, kind,
+                       size_bytes, sha256, local_path, nats_bucket, nats_object_name, created_at, expires_at,
+                       owner_canonical_user_id
+                FROM gateway_attachments
+                WHERE substr(local_path, 1, {bind}) = {bind} AND attachment_id > {bind}
+                ORDER BY attachment_id
+                LIMIT {bind}
+                """,
+                (len(prefix), prefix, after_id, int(limit)),
+            ).fetchall()
+        return [AttachmentRecord(**dict(row)) for row in rows]
+
+    def set_attachment_local_path(self, attachment_id: str, local_path: str) -> bool:
+        """Record where an attachment's file now is; False when there is no such record."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            updated = conn.execute(
+                f"UPDATE gateway_attachments SET local_path = {bind} WHERE attachment_id = {bind}",
+                (local_path, attachment_id),
+            ).rowcount
+            conn.commit()
+        return bool(updated)
+
+    def relocate_held_guidance_attachment(
+        self, correlation_ids: Sequence[str], attachment_id: str, local_path: str
+    ) -> int:
+        """Point ``attachment_id``'s files in these held guidance copies at ``local_path``; how many changed.
+
+        For the upgrade step that moves files out of the adapter host's
+        transfer folder (``instance_upgrades.adapter_host_files``): the
+        gateway signs held guidance again from its stored copy at each send,
+        so the rewritten path is the one the team lead receives. Each copy is
+        read again (its row locked on PostgreSQL), so a copy the gateway
+        released meanwhile is skipped and one already pointing there is left
+        alone; only the matching entries' local storage references change
+        (``storage.turn_attachments.relocate_steering_attachment``). No
+        store-wide write lock is taken: apart from this step the gateway only
+        inserts and deletes held copies, so a copy that changes between the
+        read and the write (possible on SQLite, which takes no row lock) was
+        deleted, the update changes no row, and the count leaves it out.
+        """
+
+        bind = self._dialect.bind
+        row_lock = " FOR UPDATE" if self._dialect is POSTGRES else ""
+        changed = 0
+        with self._connect() as conn:
+            for correlation_id in correlation_ids:
+                row = conn.execute(
+                    f"SELECT steering_json FROM gateway_held_guidance WHERE correlation_id = {bind}{row_lock}",
+                    (correlation_id,),
+                ).fetchone()
+                relocated = relocate_steering_attachment(row["steering_json"], attachment_id, local_path) if row else None
+                if relocated is None:
+                    continue
+                changed += conn.execute(
+                    f"UPDATE gateway_held_guidance SET steering_json = {bind} WHERE correlation_id = {bind}",
+                    (relocated, correlation_id),
+                ).rowcount
+            conn.commit()
+        return changed
+
+    def delete_attachment(self, attachment_id: str) -> bool:
+        """Delete one attachment record (its file is left alone); False when there is none."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            deleted = conn.execute(
+                f"DELETE FROM gateway_attachments WHERE attachment_id = {bind}", (attachment_id,)
+            ).rowcount
+            conn.commit()
+        return bool(deleted)
 
     def chat_text_bytes_by_owner(self) -> dict[str, int]:
         """Bytes of each person's chat text kept here, by owner: transcripts, requests and deliveries.

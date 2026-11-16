@@ -44,6 +44,10 @@ agent can reach:
 ``auth/``
     Model sign-in token stores (OpenAI Codex and xAI), written by onboarding
     and the runtime when it refreshes a token.
+``exports/``
+    Team exports an owner asked for with ``/upgrade``.
+``import/``
+    Team exports copied in for onboarding's Import.
 ``runtime/``
     Records trusted services keep while the team runs: installed MCP
     connections (``mcp-connections/``), hosted MCP server definitions and their
@@ -141,6 +145,16 @@ TEAM_IMPORT_MARKER_FILENAME = "in-progress.json"
 IMPORT_DIRNAME = "import"
 TEAM_IMPORT_REVIEW_DIRNAME = "review"
 TEAM_IMPORT_CREDENTIALS_FILENAME = "team_import_credentials.json"
+# One-time upgrade steps record here that they finished (``state/upgrades``).
+UPGRADES_DIRNAME = "upgrades"
+ADAPTER_HOST_FILES_UPGRADE_FILENAME = "adapter-host-files.json"
+ADAPTER_HOST_FILES_UPGRADE_PROGRESS_FILENAME = "adapter-host-files.started"
+ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME = "adapter-host-files.lock"
+# /upgrade: team exports the supervisor wrote, and the requests it reads
+# (team_transfer.export_requests).
+EXPORTS_DIRNAME = "exports"
+TEAM_EXPORT_DIRNAME = "team-export"
+TEAM_EXPORT_REQUESTS_DIRNAME = "requests"
 # Installed MCP connections (mcp_control.registry) and hosted MCP servers
 # (mcp_control.hosting), both under runtime/.
 MCP_CONNECTIONS_DIRNAME = "mcp-connections"
@@ -260,6 +274,17 @@ class InstanceLayout:
         folders a first import requires to be empty."""
 
         return self.root / IMPORT_DIRNAME
+
+    @property
+    def exports_dir(self) -> Path:
+        """Team exports an owner asked for with ``/upgrade``.
+
+        The supervisor's export process writes each archive here (0600, never
+        overwritten; ``team_transfer.export_requests``), and the operator
+        copies it into the new instance's ``import/``. Outside
+        ``workspaces/``, so no agent can reach it."""
+
+        return self.root / EXPORTS_DIRNAME
 
     # Areas
     @property
@@ -474,6 +499,18 @@ class InstanceLayout:
 
         return self.state_dir / TEAM_IMPORT_CREDENTIALS_FILENAME
 
+    # Team export (/upgrade)
+    @property
+    def team_export_requests_dir(self) -> Path:
+        """Export requests waiting for the supervisor (``team_transfer.export_requests``).
+
+        The broker's export page writes one when an owner submits a
+        passphrase; the request holds no secret, only which page and owner it
+        is for. The passphrase stays in the broker's memory until the
+        supervisor's export process collects it."""
+
+        return self.runtime_dir / TEAM_EXPORT_DIRNAME / TEAM_EXPORT_REQUESTS_DIRNAME
+
     # Skills
     @property
     def runtime_restart_authorization_dir(self) -> Path:
@@ -613,6 +650,42 @@ class InstanceLayout:
         task's attachment list and may copy it into the task's own folder."""
 
         return self.state_dir / "uploads"
+
+    @property
+    def adapter_host_files_upgrade_path(self) -> Path:
+        """The record that the upgrade step for adapter-host files finished.
+
+        Up to 0.9.13 a file sent through a chat app the adapter host runs
+        stayed in the adapter host's transfer folder; from 0.10 agents open
+        files only in ``uploads_dir``. The step that moves those files
+        (``instance_upgrades.adapter_host_files``) writes this file,
+        with its finish time and counts, once every file was handled, and the
+        launcher runs the step only while it is missing. Under ``state/``, so
+        no agent tool or sandboxed code can reach it."""
+
+        return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_FILENAME
+
+    @property
+    def adapter_host_files_upgrade_progress_path(self) -> Path:
+        """The record that the upgrade step for adapter-host files started changing records.
+
+        Written before the step's first change, with the transfer folder's
+        device and inode, so a later run tells that folder from an empty mount
+        point or another folder without looking at files the earlier run
+        already moved. Kept after the step finished (it says nothing then)."""
+
+        return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_PROGRESS_FILENAME
+
+    @property
+    def adapter_host_files_upgrade_lock_path(self) -> Path:
+        """The lock the upgrade step for adapter-host files holds for its whole run.
+
+        The launcher's first-start run and an operator's ``--files-gone`` run
+        (``docker exec``) can overlap; a run that finds the lock held waits
+        for the other, so two runs never move the same file. Empty; only its
+        ``flock`` matters."""
+
+        return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME
 
     @property
     def storage_levels_path(self) -> Path:

@@ -29,6 +29,16 @@ from custom_agents.task_custody import (
 from custom_agents.task_custody import check_admission as check_task_custody
 from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyFinished, TaskCustodyReleased
 from custom_agents.worker_handback_runtime import apply_redispatch_notice
+from custom_agents.conversation_attachments import (
+    QUESTION_ANSWER_MESSAGE_TYPE,
+    TASK_NOT_FOUND_REASON,
+    UploadFolder,
+    admit_request_files,
+    answer_files_check,
+    log_refused_files,
+    without_incoming_files_entries,
+)
+from custom_agents.sent_files_runtime import keep_escalation_result_files, keep_sent_files
 from custom_agents.conversation_delivery_runtime import handle_delivery_receipt
 from custom_agents.conversation_runtime import (
     ensure_task_conversation_context,
@@ -36,11 +46,6 @@ from custom_agents.conversation_runtime import (
     record_task_conversation_history,
 )
 from custom_agents.history_cleanup import followup_conversation_deleted
-from custom_agents.conversation_attachments import (
-    answer_files_refusal,
-    render_attachment_lines,
-    save_answer_files,
-)
 from custom_agents.message_routing import (
     build_outgoing_meta,
     construct_header,
@@ -770,58 +775,6 @@ async def _handle_task_query_message(
         )
 
 
-async def _with_the_persons_answer_files_only(
-    self: Any,
-    task_info: TaskInfo,
-    task_query_msg: TaskQuery,
-    incoming_msg_header: MessageHeader,
-    incoming_msg_meta: MessageMeta,
-) -> TaskQuery:
-    """The question or answer as received, or without its files when they are not the person's answer.
-
-    Kept files are saved with the task's history and its request's
-    conversation turn and offered in later turns, so they must be the person's
-    answer to this task's own question, also when the task has a parent (a
-    specialist's escalation; ``conversation_attachments.answer_files_refusal``).
-    Otherwise the text is handled as usual and the files are kept nowhere.
-    """
-
-    if not task_query_msg.attachments:
-        return task_query_msg
-    task_id = task_info.task.task_id
-    refusal = await answer_files_refusal(
-        self,
-        task_info,
-        task_query_msg,
-        incoming_msg_meta,
-        asked_by_task=self._find_original_task_query(task_id, task_query_msg.task_query_id) is not None,
-    )
-    if refusal is None:
-        return task_query_msg
-    self._logger.warning(
-        "Files sent with a question or answer were not kept: they are not the person's answer to this task's "
-        "own question. Its text is handled as usual. event=answer_files_refused task_id=%s task_query_id=%s "
-        "query_type=%s sender=%s reason=%s attachment_ids=%s",
-        task_id,
-        task_query_msg.task_query_id,
-        task_query_msg.query_type.value,
-        incoming_msg_header.from_agent_id,
-        refusal,
-        ",".join(attachment.attachment_id for attachment in task_query_msg.attachments),
-    )
-    return task_query_msg.model_copy(update={"attachments": []})
-
-
-def _clarification_line(task_query_msg: TaskQuery, actor: str) -> str:
-    """The question or answer as the conversation turn keeps it, with the answer's files named by id."""
-
-    line = f"{task_query_msg.query_type.value} from {actor}: {task_query_msg.message}"
-    if not task_query_msg.attachments:
-        return line
-    files = "\n".join(render_attachment_lines(task_query_msg.attachments))
-    return f"{line}\nFiles sent with this answer:\n{files}"
-
-
 async def _handle_task_query_for_parent(
     self,
     task_query_msg: TaskQuery,
@@ -878,6 +831,13 @@ async def _handle_task_query_for_parent(
     if not parent_task_info:
         from custom_agents.orphaned_subtasks import stop_report_for_ended_parent
 
+        # An answer for a task this agent no longer holds keeps none of its files.
+        log_refused_files(
+            task_query_msg.attachments,
+            TASK_NOT_FOUND_REASON,
+            task_id=parent_task_id,
+            conversation_id=incoming_msg_meta.conversation_id,
+        )
         # A worker still asking about work whose request ended is told to stop.
         if not await stop_report_for_ended_parent(
             self,
@@ -890,13 +850,19 @@ async def _handle_task_query_for_parent(
             )
         return
 
-    task_query_msg = await _with_the_persons_answer_files_only(
-        self, parent_task_info, task_query_msg, incoming_msg_header, incoming_msg_meta
-    )
-    # An answer's files first, with the turn of the request the asking task
-    # serves: a failed save records nothing, and the answer comes again
-    # (redelivered, or drained again from the runtime mailbox).
-    await save_answer_files(self, parent_task_id, task_query_msg.attachments)
+    # Files on the message are kept with its text, and only those the gateway
+    # sent with this answer: the stored query and everything after use the copy.
+    accepted_query = await _accept_answer_files(self, parent_task_info, task_query_msg, incoming_msg_meta)
+    if accepted_query is None:
+        self._logger.warning(
+            "A TaskQuery's task ended while its files were recorded; the message was not handled. "
+            "event=task_query_task_gone task_query_id=%s task_id=%s",
+            task_query_msg.task_query_id,
+            parent_task_id,
+        )
+        return
+    task_query_msg = accepted_query
+
     # Update task with new query information and preserve provenance.
     await self.task_manager.operations_runtime.run(
         self.task_manager.add_task_query,
@@ -917,7 +883,7 @@ async def _handle_task_query_for_parent(
         await self.task_manager.operations_runtime.run(
             self._conversation_store.append_clarification,
             task_id=parent_task_id,
-            message=_clarification_line(task_query_msg, actor),
+            message=f"{task_query_msg.query_type.value} from {actor}: {task_query_msg.message}",
         )
 
     if task_query_msg.query_type == MessageMetaType.REQUEST:
@@ -1220,6 +1186,33 @@ async def _handle_task_query_for_parent(
         )
 
 
+async def _accept_answer_files(
+    self: Any, task_info: TaskInfo, task_query: TaskQuery, msg_meta: MessageMeta
+) -> Optional[TaskQuery]:
+    """``task_query`` with only the files that were kept, after recording them; None when the task is gone.
+
+    Runs once the message's task is known, after a deferred answer comes back
+    from the runtime mailbox, and before its text is recorded, so an answer
+    keeps its files exactly when its text is kept. Only a person's answer
+    that the gateway vouches for brings files (``answer_files_check``); the
+    rest are kept by ``sent_files_runtime.keep_sent_files``.
+    """
+
+    if not task_query.attachments:
+        return task_query
+    decision = answer_files_check(task_info, task_query, msg_meta, team_id=str(getattr(self, "team_id", "") or ""))
+    kept = await keep_sent_files(
+        self,
+        task_info,
+        task_query.attachments,
+        decision,
+        message_id=task_query.task_query_id,
+        message_type=QUESTION_ANSWER_MESSAGE_TYPE,
+        subject="an answer to a question",
+    )
+    return task_query.model_copy(update={"attachments": kept}) if kept is not None else None
+
+
 async def _custody_for_new_task(
     self: Any, task_request: Task, msg_header: MessageHeader, msg_meta: MessageMeta,
     source_queue_name: Optional[str],
@@ -1366,6 +1359,8 @@ async def _handle_task_request(
             f"Invalid task request content type: {type(task_request)}. Discarding."
         )
         return
+    # Files entries are this runtime's own records (conversation_attachments).
+    task_request = without_incoming_files_entries(task_request)
 
     if (
         await self.task_manager.operations_runtime.run(
@@ -1401,36 +1396,12 @@ async def _handle_task_request(
     # may read storage (schedule run identities), so it runs in a thread.
     owner_person_id = await asyncio.to_thread(verified_meta_person_id, self, normalized_meta)
     if task_request.parent_task_id is None:
-        request_meta = normalized_meta
-
-        def join_conversation() -> Any:
-            return ensure_task_conversation_context(
-                conversation_store=self._conversation_store,
-                team_id=self.team_id,
-                owner_agent_id=self.id,
-                owner_agent_name=self.name,
-                task_request=task_request,
-                msg_header=msg_header,
-                msg_meta=request_meta,
-                owner_person_id=owner_person_id,
-                owner_named_agent_type=self.named_agent_type,
-                deleted_by_cleanup=partial(followup_conversation_deleted, self),
-            )
-
-        try:
-            # Its writes block, more so on a slow disk, so they run on the task
-            # manager's lane, not on the loop that handles the agent's messages;
-            # the lane runs one operation at a time, which keeps two requests'
-            # turns in one conversation in order as the loop did.
-            normalized_meta = await self.task_manager.operations_runtime.run(join_conversation)
-        except ValueError as exc:
-            self._logger.warning(
-                f"[{self.id}] Rejecting task {task_request.task_id}: {exc}"
-            )
-            await self._send_task_error_response(
-                task_request, msg_header, msg_meta, str(exc)
-            )
+        admitted_request = await _admit_request_turn(
+            self, task_request, msg_header, msg_meta, normalized_meta, owner_person_id
+        )
+        if admitted_request is None:
             return
+        task_request, normalized_meta = admitted_request
 
     async def admit(takeover_from: Optional[str]) -> bool:
         return await self.task_manager.operations_runtime.run(
@@ -1479,6 +1450,65 @@ async def _handle_task_request(
 
     await check_queue_pressure(self)
     schedule_pending_work(self)
+
+
+async def _admit_request_turn(
+    self: Any,
+    task_request: Task,
+    msg_header: MessageHeader,
+    msg_meta: MessageMeta,
+    normalized_meta: MessageMeta,
+    owner_person_id: Optional[str],
+) -> Optional[tuple[Task, MessageMeta]]:
+    """A top-level request with the files admission keeps, and its meta once its turn is recorded.
+
+    The files go through the one admission rule
+    (``conversation_attachments.admit_request_files``) in a thread, because
+    it verifies the signed context and resolves each record's path on the
+    file system.
+    The task then holds only the kept files, plus the record of how many
+    were dropped, which ``add_task`` saves with it; the turn records exactly
+    those files and whether all of the request's files were kept
+    (``ensure_task_conversation_context``, on the task manager's lane).
+    None when the request names someone else's conversation: it is refused
+    here with an error response.
+    """
+
+    request_files = await asyncio.to_thread(
+        admit_request_files,
+        task_request,
+        normalized_meta,
+        team_id=str(self.team_id or ""),
+        person_id=owner_person_id,
+        upload_folder=partial(UploadFolder.for_agent, self),
+    )
+
+    def join_conversation() -> Any:
+        return ensure_task_conversation_context(
+            conversation_store=self._conversation_store,
+            team_id=self.team_id,
+            owner_agent_id=self.id,
+            owner_agent_name=self.name,
+            task_request=request_files.task,
+            msg_header=msg_header,
+            msg_meta=normalized_meta,
+            owner_person_id=owner_person_id,
+            owner_named_agent_type=self.named_agent_type,
+            deleted_by_cleanup=partial(followup_conversation_deleted, self),
+            request_files=request_files,
+        )
+
+    try:
+        # Its writes block, more so on a slow disk, so they run on the task
+        # manager's lane, not on the loop that handles the agent's messages;
+        # the lane runs one operation at a time, which keeps two requests'
+        # turns in one conversation in order as the loop did.
+        meta = await self.task_manager.operations_runtime.run(join_conversation)
+    except ValueError as exc:
+        self._logger.warning(f"[{self.id}] Rejecting task {task_request.task_id}: {exc}")
+        await self._send_task_error_response(task_request, msg_header, msg_meta, str(exc))
+        return None
+    return request_files.task, meta
 
 
 async def _handle_delivery_receipt(
@@ -1856,6 +1886,9 @@ async def _handle_task_response(
             getattr(msg_header, "idempotency_key", None),
         )
         return
+    # The result of an escalation may bring the files the person sent the
+    # team lead for it; they become the waiting task's own before it resumes.
+    await keep_escalation_result_files(self, subtask_info, sub_task_response)
 
     if sub_task_response.task_state:
         next_state = sub_task_response.task_state[-1][0]

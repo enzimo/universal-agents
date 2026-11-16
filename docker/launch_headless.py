@@ -41,6 +41,14 @@ from custom_agents.governance.authorized_operations import atomic_write_json
 from custom_messages.contracts.common_v1 import utc_now
 from id_generation import new_id
 from runtime_settings.instance_layout import InstanceLayout
+from team_transfer.export_requests import (
+    EXPORT_REQUESTS_BY_SUPERVISOR,
+    EXPORT_REQUESTS_ENV,
+    RepeatedProblemLog,
+    TeamExportRequestV1,
+    take_export_request,
+)
+from team_transfer.requested_export import remove_leftover_partials, report_export_process_ended
 from access_control.caller_tokens import (
     CALLER_GATEWAY,
     CALLER_MANAGER,
@@ -477,6 +485,8 @@ def build_instance_env_defaults(
     env_defaults = {
         "TEAM_INSTANCE_CONFIG": str(config.config_path),
         "TEAM_INSTANCE_ROOT": str(config.instance_root_path),
+        # This supervisor runs /upgrade's export requests (TeamExportRunner).
+        EXPORT_REQUESTS_ENV: EXPORT_REQUESTS_BY_SUPERVISOR,
         "RUNTIME_RESTART_REQUEST_DIR": str(
             config.instance_root_path / "runtime" / "restart_requests"
         ),
@@ -1904,6 +1914,61 @@ def build_finish_import_task(
     )
 
 
+def build_adapter_host_files_task(
+    config: GatewayInstanceConfig,
+    config_path: Path,
+    env: Mapping[str, str],
+    *,
+    python_executable: str | None = None,
+) -> tuple[str, list[str], Mapping[str, str]] | None:
+    """Move files of chat apps the adapter host ran (0.9.13 and earlier) into ``state/uploads``, once.
+
+    Only while ``InstanceLayout.adapter_host_files_upgrade_path`` is missing
+    (``instance_upgrades.adapter_host_files``). It runs after the
+    credential import and before the gateway, the adapter host and the agents
+    start, so nothing else on this host writes the files or their records
+    while they move. ``env`` is the gateway's, the process that owns
+    ``state/uploads`` and the attachment records.
+    """
+
+    if config.layout.adapter_host_files_upgrade_path.is_file():
+        return None
+    return (
+        "upgrade step for adapter-host files",
+        [
+            python_executable or sys.executable,
+            "-u",
+            str(resolve_python_entrypoint(REPO_ROOT / "assistant_cli.py")),
+            "upgrade",
+            "adapter-host-files",
+            "--config",
+            str(config_path),
+        ],
+        env,
+    )
+
+
+def build_first_start_tasks(
+    config: GatewayInstanceConfig,
+    config_path: Path,
+    *,
+    broker_env: Mapping[str, str],
+    gateway_env: Mapping[str, str],
+) -> tuple[tuple[str, list[str], Mapping[str, str]], ...]:
+    """The steps ``run_supervised`` finishes before the team starts, in order, leaving out those with nothing to do.
+
+    The credential import first (it reaches the running broker as the
+    ``operator`` caller, so it gets the broker's environment), then the move
+    of adapter-host files (with the gateway's).
+    """
+
+    steps = (
+        build_finish_import_task(config, config_path, broker_env),
+        build_adapter_host_files_task(config, config_path, gateway_env),
+    )
+    return tuple(step for step in steps if step is not None)
+
+
 def build_secure_tool_broker_command(
     config_path: Path,
     *,
@@ -1991,6 +2056,161 @@ def refresh_external_skills_before_launch(
         len(result.repositories),
     )
     return result
+
+
+class TeamExportRunner:
+    """Runs the exports owners ask for with ``/upgrade``, one at a time.
+
+    The broker's export page leaves a request (``team_transfer.export_requests``,
+    no secret in it); on each pass of the supervisor's loop this takes the
+    oldest one and starts ``assistant_cli team export-requested`` with the
+    supervisor's full environment, because the export carries every operator
+    secret and reaches the broker as the ``operator`` caller. The process
+    collects the passphrase from the broker itself. It is not one of the
+    runtime's processes: its exit is logged and never stops the team, and a
+    request waits while another export runs. Any error while handling exports
+    (a damaged request, a missing entry point) is logged and the team keeps
+    running.
+
+    A process that exits with an error may not have told its page how the
+    export ended (killed, out of memory). The runner then removes that
+    process's half-written file from ``exports/`` and reports the exit to the
+    broker (``report_export_process_ended``), which ends the page only if the
+    export never reported.
+    """
+
+    def __init__(
+        self,
+        *,
+        layout: InstanceLayout,
+        config_path: Path,
+        env: Mapping[str, str],
+        python_executable: str | None = None,
+        popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        problems: RepeatedProblemLog | None = None,
+    ) -> None:
+        self._problems = problems or RepeatedProblemLog()
+        self._requests_dir = layout.team_export_requests_dir
+        self._exports_dir = layout.exports_dir
+        self._config_path = config_path
+        self._env = dict(env)
+        self._python = python_executable or sys.executable
+        self._popen = popen
+        self._running: tuple[TeamExportRequestV1, subprocess.Popen[bytes]] | None = None
+
+    def poll(self) -> None:
+        """One pass of the supervisor's loop (class docstring)."""
+
+        try:
+            self._poll()
+        except Exception as exc:
+            # The loop runs every second: a lasting problem logs in full once,
+            # then a short line with a count at most once a minute.
+            repeats = self._problems.check(f"{type(exc).__name__}: {exc}")
+            if repeats == 0:
+                LOGGER.exception(
+                    "Running a requested team export failed; the team keeps running. event=team_export_runner_failed"
+                )
+            elif repeats is not None:
+                LOGGER.error(
+                    "Running a requested team export still fails; the team keeps running. "
+                    "event=team_export_runner_failed error_type=%s repeats=%s",
+                    type(exc).__name__,
+                    repeats,
+                )
+
+    def _poll(self) -> None:
+        if self._running is not None:
+            running, process = self._running
+            code = process.poll()
+            if code is None:
+                return
+            self._running = None
+            self._ended(running, process, code)
+        waiting = take_export_request(self._requests_dir)
+        if waiting is not None:
+            self._start(waiting)
+
+    def _ended(self, request: TeamExportRequestV1, process: subprocess.Popen[bytes], code: int) -> None:
+        if code == 0:
+            LOGGER.info(
+                "Team export process ended. event=team_export_process_exited export_id=%s exit_code=0",
+                request.export_id,
+            )
+            return
+        LOGGER.warning(
+            "Team export process ended with an error. event=team_export_process_exited export_id=%s exit_code=%s",
+            request.export_id,
+            code,
+        )
+        removed = remove_leftover_partials(self._exports_dir, process.pid)
+        if removed:
+            LOGGER.warning(
+                "Removed a half-written team export. event=team_export_partial_removed export_id=%s files=%s",
+                request.export_id,
+                ",".join(removed),
+            )
+        try:
+            status = report_export_process_ended(self._env, request, code, process.pid)
+        except Exception as exc:
+            LOGGER.warning(
+                "The broker could not be told that an export process ended. event=team_export_end_unreported "
+                "export_id=%s error_type=%s",
+                request.export_id,
+                type(exc).__name__,
+            )
+            return
+        LOGGER.info(
+            "Told the broker that an export process ended. event=team_export_end_reported export_id=%s status=%s",
+            request.export_id,
+            status,
+        )
+
+    def _start(self, request: TeamExportRequestV1) -> None:
+        command = [
+            self._python,
+            "-u",
+            str(resolve_python_entrypoint(REPO_ROOT / "assistant_cli.py")),
+            "team",
+            "export-requested",
+            "--config",
+            str(self._config_path),
+            "--export-id",
+            request.export_id,
+            "--owner",
+            request.owner_person_id,
+        ]
+        LOGGER.info(
+            "Starting a requested team export. event=team_export_process_started export_id=%s owner_person_id=%s",
+            request.export_id,
+            request.owner_person_id,
+        )
+        try:
+            process = self._popen(command, cwd=REPO_ROOT, env=dict(self._env))
+        except OSError as exc:
+            # The broker drops the passphrase after its pickup time and the page says so.
+            LOGGER.error(
+                "A requested team export could not start. event=team_export_process_start_failed "
+                "export_id=%s error=%s",
+                request.export_id,
+                type(exc).__name__,
+            )
+            return
+        self._running = (request, process)
+
+    def stop(self) -> None:
+        if self._running is None:
+            return
+        request, process = self._running
+        self._running = None
+        terminate_process(process, "team export")
+        try:
+            self._ended(request, process, process.returncode if process.returncode is not None else -1)
+        except Exception:
+            LOGGER.exception(
+                "Cleaning up a stopped team export failed. event=team_export_runner_failed export_id=%s",
+                request.export_id,
+            )
 
 
 def terminate_process(
@@ -2198,7 +2418,7 @@ def _run_first_start_tasks(
     current_processes: Callable[[], tuple[tuple[str, subprocess.Popen[bytes]], ...]],
     stop_requested: Callable[[], bool],
 ) -> int | None:
-    """Complete credential restoration before any model-dependent process starts.
+    """Run the first-start steps (credential import, adapter-host files) before the team starts.
 
     None permits startup. An exit code stops it, including a requested stop.
     The broker and external services remain supervised while each step waits.
@@ -2257,6 +2477,7 @@ def run_supervised(
     agent_pass_fds: tuple[int, ...] = (),
     first_start_tasks: tuple[tuple[str, list[str], Mapping[str, str]], ...] = (),
     message_services: MessageServices | None = None,
+    team_exports: TeamExportRunner | None = None,
 ) -> int:
     """Start and watch every runtime process; restarts reuse the environments given here.
 
@@ -2273,8 +2494,10 @@ def run_supervised(
 
     The broker starts first. ``first_start_tasks`` must then finish successfully
     before the manager, startup agents or gateway initialize, so their model
-    and embedding keys are already stored (``build_finish_import_task``).
-    Failure stops startup; the retained handover retries at the next start.
+    and embedding keys are already stored (``build_finish_import_task``) and
+    files of chat apps the adapter host ran are in ``state/uploads``
+    (``build_adapter_host_files_task``). Failure stops startup; the retained
+    handover or the missing marker retries at the next start.
 
     ``message_services``, the installation authority and the team services, are already
     running and ready (``docker.message_hosts``). The supervisor watches them with the
@@ -2282,6 +2505,8 @@ def run_supervised(
     them, starts them again (the authority, then the team services, each once the one
     before is ready) and only then the others. If they cannot start again, the runtime
     stops.
+
+    ``team_exports`` runs ``/upgrade``'s export requests while the team runs.
     """
     stop_requested = False
     restart_env = functools.partial(_environment_for_restart, settings_environment)
@@ -2531,6 +2756,8 @@ def run_supervised(
             process_restart_request()
             if stop_requested:  # a restart that could not finish, or a stop during it
                 break
+            if team_exports is not None:
+                team_exports.poll()
             for name, process in current_processes():
                 code = process.poll()
                 if code is not None:
@@ -2547,6 +2774,8 @@ def run_supervised(
                 break
             time.sleep(1.0)
     finally:
+        if team_exports is not None:
+            team_exports.stop()
         if adapter_host is not None:
             terminate_process(adapter_host, "adapter host")
         if execution_controller is not None:
@@ -2923,7 +3152,9 @@ def main() -> int:
     def cleanup_managed_openshell() -> None:
         cleanup_openshell_sandbox(managed_openshell_sandbox, env=inherited_env)
 
-    finish_import = build_finish_import_task(config, config_path, inherited_env)
+    first_start_tasks = build_first_start_tasks(
+        config, config_path, broker_env=inherited_env, gateway_env=gateway_env
+    )
     # Last step before any service starts, so every check finds the streams.
     if not prepare_message_streams_before_services(
         config_path,
@@ -2971,8 +3202,9 @@ def main() -> int:
         startup_agent_envs=startup_agent_envs,
         settings_environment=settings_environment,
         agent_pass_fds=process_run.pass_fds(),
-        first_start_tasks=(finish_import,) if finish_import else (),
+        first_start_tasks=first_start_tasks,
         message_services=message_services,
+        team_exports=TeamExportRunner(layout=config.layout, config_path=config_path, env=inherited_env),
     )
 
 

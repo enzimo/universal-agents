@@ -3,9 +3,11 @@
 To move a team to another machine, or across a jump the in-place upgrade does
 not cover, export the old instance's setup and import it into a fresh instance
 of the new version. To upgrade the instance you have, install the new version
-over it instead ([Upgrading](upgrading.md)). The simplest way is onboarding's **Import a team export** choice:
-copy the export into the new data folder, open it in onboarding, choose what
-to bring, and the team starts
+over it instead ([Upgrading](upgrading.md)). The simplest way needs no host
+commands: an owner types `/upgrade` in a chat and the launcher writes the
+export ([Export from chat with /upgrade](#export-from-chat-with-upgrade)); then
+onboarding's **Import a team export** choice opens it in the new data folder,
+you choose what to bring, and the team starts
 ([Import during onboarding](#import-during-onboarding)). Host commands do the
 same and can also bring more records from the same backup later
 ([Export and review](#export-and-review)). Neither changes the signed export.
@@ -56,11 +58,68 @@ logs, queued tasks, and waiting approvals do not move. Automation jobs and manag
 services are listed for manual setup rather than imported. Missed one-time runs
 are imported turned off; recurring schedules resume counting from import.
 
+## Export from chat with /upgrade
+
+An owner exports the whole team from a chat:
+
+1. **Type `/upgrade`** in a private chat with the assistant: Web Chat, or a
+   direct message in Telegram, Discord, Signal, iMessage (Photon) or WhatsApp.
+   The reply holds a link to a private page, and anyone who sees the link can
+   open the page, so `/upgrade` in a group chat is refused and asks you to
+   send it in a direct message. Only owners can export the team;
+   administrators who are not owners are refused.
+2. **Open the page and choose a passphrase.** Type it twice, at least 12
+   characters and at most 1,024. It goes to the secure broker, is never sent to the agent and is
+   not saved anywhere. Keep it: you need it to import the file. The page lists
+   what the file holds.
+3. **Wait for the export.** The launcher writes one file into the data folder's
+   `exports/` folder, for example
+   `~/.universal-agents/data/exports/alpha-20261014-101500Z.uatransfer`. This
+   usually takes under a minute. The page and the chat then show the file's
+   name and size, what it holds and the next steps. When the team uses an
+   external NATS server, they also show the `NATS:` line under **Before you
+   start the new instance**: what to set on the new instance before it starts
+   ([An external NATS server](#an-external-nats-server)).
+4. **Stop this instance, then import.** Its chat bot tokens and model sign-ins
+   move with the file, and two running instances must not use them at once.
+   Continue with [Import during onboarding](#import-during-onboarding).
+
+**What the passphrase protects.** The stored sign-ins and keys and the
+secrets from `team.env` are encrypted with the passphrase, and the whole file
+is signed with it, so any change to the file is detected. The rest of the
+team's records in the file (people, access, knowledge pages, pinned memories,
+schedules, settings and team files) are not encrypted: anyone who has the file
+can read them. Keep the file private, as you would a backup.
+
+The file can be read only by its owner (mode 0600). The container runs as
+root, so the launcher gives the file and `exports/` to whoever owns the data
+folder on the host; you can copy it without `sudo`. If that fails (for
+example on some network folders), the export still succeeds and the page and
+the chat say that copying the file may need `sudo`. Old exports stay in
+`exports/` until you delete them.
+
+`/upgrade` needs the launcher (the Docker image, or `docker/launch_headless.py`),
+because only the launcher holds every secret the export carries. A team
+started another way is told to use `team export` on the host
+([Export and review](#export-and-review)).
+
+When the export does not finish, the page and the chat say why; run
+`/upgrade` again. A half-written file is removed, even when the export process
+is killed; if it was killed after it received the passphrase, the page says
+the outcome is not known, so check `exports/`. The page stays open for one hour. Exports run one at a time: a
+passphrase no export has picked up after five minutes is dropped (for example
+because another export was still running), and the page says so. If the
+secure broker restarts, the page link opens a page that can no longer start or
+follow an export; run `/upgrade` again. An export that was already running may
+still finish, so check `exports/`.
+
 ## Import during onboarding
 
-1. **Export the old team.** Run `team export` on the old instance as shown in
+1. **Export the old team.** Use `/upgrade`
+   ([Export from chat with /upgrade](#export-from-chat-with-upgrade)) or run
+   `team export` on the old instance as shown in
    [Export and review](#export-and-review), then stop the old instance.
-2. **Start the new version with an empty data folder.** Onboarding opens, as for
+2. **Start the new instance with a blank data folder.** Onboarding opens, as for
    a new team. Import works only on a fresh data folder and, for PostgreSQL, an
    empty database named by `POSTGRES_DSN` in the container's environment.
 3. **Copy the export into the new data folder's `import/` folder**, for example
@@ -240,7 +299,8 @@ The export decides from the old instance's own settings: `instance_config.yaml`
 and its `team.env`, or its environment when it takes secrets from there. It
 moves the user and password only when those settings name an external server.
 It prints at most two lines about this, each starting with `NATS:` and naming
-variables, never their values:
+variables, never their values (`/upgrade` shows them on its page and in the
+chat, and the launcher's log has them):
 
 - Whenever those settings name an external server: the login that moved
   (`NATS_USER`, `NATS_PASSWORD`, or none) and what to set on the new instance
@@ -252,7 +312,10 @@ variables, never their values:
   local or external otherwise, or, with an external server, when they set
   another address, user or password. An address there that the export cannot
   read, such as a mistyped `NATS_URL`, is named the same way; the export did
-  not use it.
+  not use it. `/upgrade` runs the export in the instance's own environment,
+  so there this line means the running instance does use those variables,
+  for example a `NATS_URL` its compose file sets that differs from
+  `team.env`.
 
 If the instance really runs with the variables that line names (for example
 from its container's environment in a compose file), put them in its

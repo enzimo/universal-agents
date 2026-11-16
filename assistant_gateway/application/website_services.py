@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hmac
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
@@ -800,7 +800,7 @@ class WebsiteTranscriptApplication:
         conversation_id: str | None,
         client_request_id: str,
         user_text: str,
-        attachments: tuple[UserTaskAttachment, ...] = (),
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> tuple[WebTranscriptMessageV1, bool] | None:
         session = self._visible_session(session_key, owner_canonical_user_id)
         if session is None:
@@ -810,7 +810,7 @@ class WebsiteTranscriptApplication:
             route=self._route(owner_canonical_user_id, client_request_id),
             conversation_id=conversation_id or session.conversation_id,
             text=user_text,
-            attachments=attachments,
+            attachments=tuple(attachments),
         )
         if acceptance is None:
             return None

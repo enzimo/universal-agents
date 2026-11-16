@@ -191,6 +191,7 @@ async def test_dispatcher_delegates_session_commands_with_typed_actor_context() 
         memory_topic_commands=object(),  # type: ignore[arg-type]
         message_submission_commands=object(),  # type: ignore[arg-type]
         manager_control_commands=object(),  # type: ignore[arg-type]
+        team_export_commands=object(),  # type: ignore[arg-type]
         session_commands=session_commands,  # type: ignore[arg-type]
     )
 
@@ -246,6 +247,7 @@ async def test_dispatcher_delegates_link_command_with_typed_actor_context() -> N
         memory_topic_commands=object(),  # type: ignore[arg-type]
         message_submission_commands=object(),  # type: ignore[arg-type]
         manager_control_commands=object(),  # type: ignore[arg-type]
+        team_export_commands=object(),  # type: ignore[arg-type]
         session_commands=object(),  # type: ignore[arg-type]
     )
 
@@ -286,6 +288,7 @@ async def test_dispatcher_delegates_accounts_command_with_typed_actor_context() 
         memory_topic_commands=object(),  # type: ignore[arg-type]
         message_submission_commands=object(),  # type: ignore[arg-type]
         manager_control_commands=object(),  # type: ignore[arg-type]
+        team_export_commands=object(),  # type: ignore[arg-type]
         session_commands=object(),  # type: ignore[arg-type]
     )
 

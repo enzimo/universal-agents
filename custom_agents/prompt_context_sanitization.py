@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 from custom_messages.contracts.replied_message_v1 import RepliedMessage
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -10,6 +10,10 @@ from custom_messages.contracts.task_v1 import Task, TaskQuery
 
 
 _SECTION_HEADER_RE = re.compile(r"^\[([^\]\n]+)\]\s*$", re.MULTILINE)
+
+# The most files "Current Request Attachments" lists; the context engine's
+# list of earlier files leaves out exactly those it shows.
+CURRENT_REQUEST_ATTACHMENT_LIMIT = 20
 
 
 def parse_bracketed_prompt_sections(text: str | None) -> dict[str, str]:
@@ -42,18 +46,8 @@ CONTINUING_REQUEST_LABEL = (
 
 
 def render_current_request_context(
-    task: Task,
-    meta: Optional[MessageMeta],
-    *,
-    continuing: bool = False,
-    request_file_lines: Sequence[str] = (),
+    task: Task, meta: Optional[MessageMeta], *, continuing: bool = False
 ) -> str:
-    """The current request as the prompt's final section.
-
-    ``request_file_lines`` names the request's other files, the ones its
-    message does not carry (``conversation_attachments.render_request_files``).
-    """
-
     sections = parse_bracketed_prompt_sections(task.problem_statement)
     request_text = extract_display_request_text(task.problem_statement) or "(no request text provided)"
     lines = []
@@ -89,10 +83,9 @@ def render_current_request_context(
     lines.extend([CONTINUING_REQUEST_LABEL if continuing else "Current Request:", request_text])
     lines.extend(_replied_message_block(getattr(task, "replied_message", None)))
     attachment_lines = _render_attachment_summary(getattr(task, "attachments", None))
-    for block in (attachment_lines, list(request_file_lines)):
-        if block:
-            lines.append("")
-            lines.extend(block)
+    if attachment_lines:
+        lines.append("")
+        lines.extend(attachment_lines)
     return "\n".join(lines).strip()
 
 
@@ -281,18 +274,17 @@ def render_incoming_message_summary(
 
 
 def _render_attachment_summary(attachments: Any) -> list[str]:
-    """The current message's files by name and id, never where they are stored.
+    """The current request's files by name, id, type and size.
 
-    Models open a file by ``attachment_id`` (``custom_tools.attachment_uploads``);
-    a storage path would only invite a path the tools refuse, and its folder
-    name carries chat identifiers.
+    Never where they are stored: models open uploads by ``attachment_id``
+    only (``custom_agents.conversation_attachments``).
     """
 
     values = list(attachments or [])
     if not values:
         return []
     lines = ["Current Request Attachments:"]
-    for attachment in values[:20]:
+    for attachment in values[:CURRENT_REQUEST_ATTACHMENT_LIMIT]:
         lines.append(
             f"- {getattr(attachment, 'filename', 'attachment')} "
             f"(id={getattr(attachment, 'attachment_id', '')}, "
@@ -301,8 +293,10 @@ def _render_attachment_summary(attachments: Any) -> list[str]:
             f"size={getattr(attachment, 'size_bytes', 0)} bytes, "
             f"sha256={getattr(attachment, 'sha256', '')})"
         )
-    if len(values) > 20:
-        lines.append(f"- {len(values) - 20} additional attachment(s) omitted from prompt summary.")
+    if len(values) > CURRENT_REQUEST_ATTACHMENT_LIMIT:
+        lines.append(
+            f"- {len(values) - CURRENT_REQUEST_ATTACHMENT_LIMIT} additional attachment(s) omitted from prompt summary."
+        )
     lines.append(
         "Supported images may be included as direct model image input when the active model allows it; "
         "use inspect_user_attachment for metadata, text extraction, unsupported media, or fallback inspection. "

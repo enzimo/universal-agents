@@ -1,857 +1,1307 @@
-"""The files a person sent in a conversation, and which of them a task may use.
+"""Which uploaded files a task may name, and where their bytes may be read from.
 
-The gateway stores every upload under ``state/uploads`` and sends its record
-(a ``UserTaskAttachment``) with the message: a new request (``Task.attachments``),
-guidance while a request runs (``TaskSteering.attachments``) or an answer to a
-question. Trusted runtime code saves those records with the request's turn
-(``save_turn_attachments``, ``storage.conversation_repository``) and in the
-task's history, so a later step, a follow-up or a restarted runtime can name
-and open them by id. Nothing here takes a record or a path from a model: models
-name files only by ``attachment_id``, and ids are looked up only within the
-scope this module computes.
+A person's files reach the team through the gateway, which stores the bytes
+in this host's upload folder (``state/uploads``) and puts a ``UserTaskAttachment`` record on the
+task's messages: the request's own files on ``Task.attachments``, files sent
+while it runs on its guidance and interrupt answers (``TaskSteering``), and
+files sent with an answer to one of its questions (``TaskQuery``). Trusted
+runtime code keeps those records in two places: the task's own history (one
+``TASK_FILES_EVENT`` entry per accepted guidance or answer with files, written
+by ``custom_agents.sent_files_runtime``) and the conversation turn the task
+belongs to (``attachments_json`` in ``storage.conversation_repository``,
+written by ``custom_agents.conversation_runtime``). This module is the one
+place that decides which of them a task may use; the attachment tools, the
+prompt's file list and delegation all ask it.
 
-Which files a task may use (``request_files`` then ``attachment_scope``):
+Which files are kept at all, before anything is saved:
 
-- The request the task serves: itself, or for a plan step or an isolated
-  recovery task the request it was made for, followed only through the task
-  manager's own plan-step and recovery links (never delegation links).
-- Always: that request's files, the files the person sent while it ran
-  (guidance and answers, from the durable task history) and the task's own.
-- The files saved with the request's conversation turn (also those another of
-  its plan steps received) and the files of earlier turns only for the team
-  lead, only for a top-level request, and only when the person the work is
-  verified to be for may read that conversation (``access_control.ownership``).
-  Specialists, including a worker's scheduled job run that continues its
-  owner's conversation, get only their own task's files and the files the team
-  lead chose for them.
+- A top-level task keeps the files on its request, guidance and answers only
+  when the gateway vouches that it sent exactly those files with that
+  message for this task, in this conversation, for this person: the
+  message's own signed context names all three and has the id derived from
+  the message's key and its file records
+  (``access_control.ownership.sent_files_access``, checked by
+  ``admit_request_files`` at admission, ``steering_files_check`` for guidance
+  and interrupt answers and ``answer_files_check`` for answers to
+  questions). Other agent processes also send tasks and steering
+  messages, every worker of a request holds a copy of its signed context,
+  and every agent process receives each guidance's context; the rule's
+  docstring explains why none of them can vouch for other files.
+  Refused files are dropped from the message itself and logged one by one.
+- A delegated task keeps no files from guidance, and questions an agent
+  asks bring none; a delegated task's files are the ones its delegation
+  named (``Task.attachments``). The lead sends guidance on to its workers
+  without files. One delegated task can ask the person: the team lead's
+  record of a worker's escalation (``manager_escalation``), whose question
+  the lead shows in the person's chat. The answer's files are kept on the
+  escalation under the same gateway rule, and also on the request it runs
+  for when the lead holds that request for the same person
+  (``sent_files_runtime.keep_sent_files``). An escalation from work the
+  lead never held (a worker's scheduled job or maintenance run) keeps them
+  on itself only, and is the request of the work the lead does for it
+  (``linked_request``); one linked to a request here that cannot take them
+  (another person's) keeps none, and no other delegated task keeps any. The
+  lead's result for the escalation carries them, and only them
+  (``answer_files``), to the worker, which keeps the ones in the upload
+  folder as its task's own (``ESCALATION_RESULT_MESSAGE_TYPE``), and on its
+  conversation turn when that task is its own request (a job run), but only
+  when that task works for a person
+  (``access_control.ownership.escalation_result_files_access``): the lead
+  answers a maintenance run's escalation for the schedule's administrator,
+  and work for no person keeps none of that person's files.
+- Files history entries are written only by this runtime, so any a task
+  message arrives with are dropped (``without_incoming_files_entries``).
+- Records that point outside this host's upload folder are dropped too
+  (``keep_upload_files``), before anything is saved.
+- A top-level request goes through one admission rule for both checks
+  (``admit_request_files``), so the task's own files and its conversation
+  turn hold the same records. When any of its files is dropped, its turn is
+  saved as not knowing all of its request's files (``attachments_recorded``
+  0, ``storage.turn_attachments``) and its history records how many were
+  dropped (``REQUEST_FILES_NOT_KEPT_EVENT``), saved with the task when it is
+  admitted.
 
-An id the scope does not hold is "not found", with no hint that it exists in
-another conversation.
+So every source ``TaskAttachments`` reads was written only after these checks.
 
-Prompts name the same files (``DefaultContextEngine``, ``AttachmentScope.files``):
-the request's files its message does not carry go with the current request
-(``render_request_files``), and the team lead's prompt lists the newest 20
-files of earlier turns in a section of its own (``render_earlier_files``),
-whatever part of the conversation's history the prompt shows. Images are not
-attached again; the model opens a file by id when it needs it.
+What a task may use (``TaskAttachments``):
 
-Who may add files (``sent_files_refusal``): files that arrive while a
-top-level task runs, with guidance or with an answer to a question, are kept
-only when the message is verified to come from the person the task works for.
-Any process on the team's NATS can address a message to the team lead, and
-these files are saved with the person's conversation and offered for later
-turns and delegation, so a message without that person's signed context
-keeps its text and loses its files. Files with a question's answer are kept
-only on the answer to a question the task itself asked, signed for the person
-the task works for (``answer_files_refusal``): only the gateway sends them.
-That holds for a task with a parent too, such as a specialist's escalation the
-team lead asks the person about; its answer's files are saved with the turn of
-the request the work serves (``answer_turn_task_id``).
+- its own files: ``Task.attachments`` plus the files of every guidance and
+  answer it accepted (and, for a worker, of its escalations' results), read
+  from its durable history, so they survive the
+  guidance being read and a restart. Only entries this task's runtime wrote
+  count: a lead's history also holds copies of its workers' important entries
+  (``TaskManager.bubble_subtask_result`` keeps their details), and a worker
+  must not add files to its lead's task that way. A plan step's or isolated
+  recovery task's own files include its request's own files (below);
+- for a top-level task only, the files earlier turns of its own conversation
+  received, while it works for the conversation's person
+  (``access_control.ownership.conversation_files_access``, with the person
+  recorded at admission from the signed task context). A plan step or an
+  isolated recovery task is a task of its own, with a conversation id of its
+  own and no turn, working on its request: it uses its request's own files
+  and its request's conversation the same way (``step_request``), so its
+  prompt lists and its tools open the request's files and earlier turns'
+  files, even when the request's turn was saved before turns kept their
+  files. The request is found only through the task manager's plan-step and
+  recovery links (``linked_request``), must be a top-level task held here
+  or the team lead's escalation from a worker's own run, and must work for
+  the step's person (``access_control.ownership.request_files_access``);
+  otherwise the step uses only its own files (logged).
+  A step of such an escalation uses the escalation's own files (the run's
+  files it was sent with, and its answers' files), never a conversation.
+  A delegated task (a worker's, or the team lead's record of an escalation)
+  never reads conversation records: it uses only the files it was given.
+  Turns saved before turns kept their files have no records of their
+  requests' files, and a turn whose request files admission did not all keep
+  lacks the dropped ones (files kept, and files sent to such turns later,
+  are recorded and listed); the prompt's list names the latest such turn
+  (``last_unrecorded_turn``), so the person is asked to send a missing file
+  again. The current request's own prompt says how many of its files were
+  not accepted (``TaskAttachments.request_files_not_kept``).
+
+Which files a delegation sends (``delegated_files``): the model chooses with
+``attachment_ids`` on its delegate_task action. Left out, the new task gets
+the delegating task's own files (above: a plan step's include its request's
+files, as a delegation from the request itself sends them); an empty list
+sends none; ids send
+exactly those files, from what the delegating task may use, and an id that
+is not one fails the delegation with the list of ids it may use. A worker can
+therefore pass on only files it was given.
+
+Models name files by ``attachment_id`` only. Records hold where the bytes are
+stored, so they leave this module only as descriptive summaries
+(``storage.turn_attachments.TURN_ATTACHMENT_SUMMARY_FIELDS``), never with
+storage references or paths.
+
+Where bytes are read from (``UploadFolder``, ``locate_upload``): only from
+inside this host's upload folder, ``state/uploads``. A record's path is not trusted by itself (a delegated task's
+files are not vouched for by the gateway): it is resolved, following any
+links in it, and a record whose resolved path lies anywhere else is refused
+and logged. The bytes are then read from that folder one component of the
+resolved path at a time without following links (``LocatedUpload.read_bytes``),
+so a link put in the file's place after the check is refused. A file that
+cannot be checked for any other reason (no permission, a link loop, an I/O
+error) is unreadable here (``UPLOAD_UNREADABLE``): the error is logged with
+the ids, and the model gets a fixed text, never the error's, which names
+where the file is stored. The attachment tools open
+files by id through ``custom_tools.task_uploads``, and a turn reads the images
+on its own message for the model's direct image input the same way
+(``custom_agents.sdk.strands.turn``), skipping any it cannot read.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import re
 import stat
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, Optional
+from typing import Any, BinaryIO, Optional
 
 from pydantic import ValidationError
 
-from access_control.ownership import PRIVATE_READ, RESOURCE_CONVERSATION, private_access
-from custom_agents.access_runtime import verified_meta_person_id
-from custom_agents.steering_history_events import (
-    GUIDANCE_ACCEPTED_EVENT,
-    GUIDANCE_STEERING_KEY,
-    HISTORY_EVENT_KEY,
-    QUERY_ANSWER_FILES_KEY,
+from access_control import safe_open
+from access_control.identity import IdentityRejected
+from access_control.ownership import (
+    CONTEXT_NAMES_NO_TASK,
+    OwnershipDecision,
+    answer_context_id,
+    conversation_files_access,
+    request_context_id,
+    request_files_access,
+    sent_files_access,
+    steering_context_id,
 )
+from custom_agents.task_context_runtime import context_verifier
+from custom_messages.contracts.access_v2 import TaskContextV1
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
-from custom_messages.enums import MessageMetaType, TaskHistoryType
-from storage.conversation_repository import (
-    ATTACHMENT_TASK_ID_KEY,
-    ATTACHMENT_TURN_INDEX_KEY,
-    CONVERSATION_ATTACHMENT_LIST_LIMIT,
-    turn_attachment_summary,
-)
+from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskQuery, TaskSteering
+from custom_messages.enums import MessageMetaType, TaskHistoryImportance, TaskHistoryType
+from runtime_settings.instance_layout import InstanceLayout
+from storage.turn_attachments import INVENTORY_LIMIT, TurnAttachment, attachment_summary
 
 logger = logging.getLogger(__name__)
 
-# Ids the gateway makes (``att_<hex>`` and adapter object ids). Anything else
-# is not an id this runtime gave out, so it is never looked up.
-_ATTACHMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
-# A plan step's recovery task is linked to the step, the step to its request.
-_MAX_REQUEST_LINKS = 8
-# A delegation names at most this many files; an error names at most this many
-# unknown ids and lists at most CONVERSATION_ATTACHMENT_LIST_LIMIT files.
-MAX_SELECTED_ATTACHMENTS = 20
-_MAX_REPORTED_IDS = 10
-_MAX_SHOWN_NAME_CHARS = 120
-_NO_VERIFIED_PERSON = "no_verified_person"
-# The message is verified for someone other than the person the task works for.
-SENDER_OTHER_PERSON = "other_person"
-SENDER_NOT_VERIFIED = _NO_VERIFIED_PERSON
-# Why files on a question's answer are not kept (``answer_files_refusal``).
-ANSWER_NOT_A_RESPONSE = "not_an_answer"
-ANSWER_TO_NO_QUESTION = "no_question"
-
-UploadState = Literal["available", "deleted", "remote", "unreadable"]
-UPLOAD_AVAILABLE: UploadState = "available"
-UPLOAD_DELETED: UploadState = "deleted"
-UPLOAD_REMOTE: UploadState = "remote"
-UPLOAD_UNREADABLE: UploadState = "unreadable"
-# The errors that mean a stored upload is gone: its retention ended, or a
-# clean-up or its person's removal deleted it, with or without its folder.
-# A removal never leaves a file where a folder should be, so NotADirectoryError
-# is a layout fault under state/uploads: like any other error reading the
-# upload, it is reported as unreadable, not as a deletion.
-UPLOAD_GONE_ERRORS: tuple[type[OSError], ...] = (FileNotFoundError,)
-
-
-def attachment_records(values: Iterable[Any]) -> list[dict[str, Any]]:
-    """Validated records (``UserTaskAttachment`` JSON dumps) for saving, each id once, order kept."""
-
-    records: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for value in values:
-        attachment = UserTaskAttachment.model_validate(value)
-        if attachment.attachment_id not in seen:
-            seen.add(attachment.attachment_id)
-            records.append(attachment.model_dump(mode="json"))
-    return records
-
-
-def _validated(values: Iterable[Any], *, task_id: str, source: str) -> list[UserTaskAttachment]:
-    """Records saved by trusted code; one that no longer validates is reported and skipped."""
-
-    attachments: list[UserTaskAttachment] = []
-    for value in values:
-        try:
-            attachments.append(UserTaskAttachment.model_validate(value))
-        except ValidationError:
-            logger.warning(
-                "A saved file record could not be read; it is skipped. "
-                "event=attachment_record_unreadable task_id=%s source=%s",
-                task_id,
-                source,
-            )
-    return attachments
-
-
-def received_attachments(task: Any) -> list[UserTaskAttachment]:
-    """Files the person sent while this task ran, from its durable history.
-
-    Accepted guidance keeps its whole ``TaskSteering`` and an answer to a
-    question keeps its files (``custom_agents.steering_history_events``), so
-    the files are found after the guidance is drained and after a restart.
-
-    Only the two kinds of entry this runtime records for the task itself are
-    read: a guidance acceptance (``TASK_EVENT``) and an answer to a question
-    (``QUERY_EVENT``). Entries copied from a subtask's result
-    (``SUBTASK_EVENT``, ``TaskManager.bubble_subtask_result``) keep the
-    details the worker that ran the subtask wrote, possibly in another
-    process, so their files never count as sent by the person.
-    """
-
-    task_id = str(getattr(task, "task_id", "") or "")
-    found: list[UserTaskAttachment] = []
-    for entry in list(getattr(task, "execution_history", None) or []):
-        entry_type = getattr(entry, "entry_type", None)
-        details = getattr(entry, "details", None) or {}
-        if entry_type == TaskHistoryType.TASK_EVENT and details.get(HISTORY_EVENT_KEY) == GUIDANCE_ACCEPTED_EVENT:
-            steering = details.get(GUIDANCE_STEERING_KEY) or {}
-            values = steering.get("attachments") if isinstance(steering, dict) else None
-            found.extend(_validated(values or [], task_id=task_id, source="guidance"))
-        elif entry_type == TaskHistoryType.QUERY_EVENT and details.get(QUERY_ANSWER_FILES_KEY):
-            found.extend(_validated(details[QUERY_ANSWER_FILES_KEY], task_id=task_id, source="answer"))
-    return found
-
-
-async def _sender_refusal(agent: Any, person_id: Optional[str], msg_meta: Any) -> Optional[str]:
-    """Why a message is not verified to come for ``person_id``; None when it is.
-
-    The message's signed task context or schedule run identity
-    (``access_runtime.verified_meta_person_id``) must name the person.
-    ``SENDER_NOT_VERIFIED`` when nothing valid names a person (also for work
-    for nobody), ``SENDER_OTHER_PERSON`` for someone else.
-    """
-
-    # Reading a schedule run identity may touch storage, so off the event loop.
-    sender = await asyncio.to_thread(verified_meta_person_id, agent, msg_meta)
-    if not sender:
-        return SENDER_NOT_VERIFIED
-    if sender != person_id:
-        return SENDER_OTHER_PERSON
-    return None
-
-
-async def sent_files_refusal(agent: Any, task_info: Any, msg_meta: Any) -> Optional[str]:
-    """Why files guidance carries for this task are not kept as its person's; None when they are.
-
-    For a top-level task (a request, a plan step, a recovery task, a job
-    run), whose files are saved with its conversation turn, the message must
-    be verified to work for the person the task works for
-    (``TaskInfo.owner_person_id``, recorded at admission; plan steps and
-    recovery tasks keep their request's). The gateway signs every guidance
-    message it sends for a person.
-
-    A delegated subtask is not checked: guidance files for it never reach a
-    conversation (``save_turn_attachments`` saves only a top-level request's),
-    and the copies of guidance the team lead passes on to its workers carry no
-    signed context.
-    """
-
-    if getattr(task_info.task, "parent_task_id", None) is not None:
-        return None
-    return await _sender_refusal(agent, task_info.owner_person_id, msg_meta)
-
-
-async def answer_files_refusal(
-    agent: Any, task_info: Any, query: Any, msg_meta: Any, *, asked_by_task: bool
-) -> Optional[str]:
-    """Why files on a ``TaskQuery`` are not kept as the person's answer; None when they are.
-
-    Files come only with the person's answer (``RESPONSE``) to a question
-    the task itself asked (its ``REQUEST`` is in the task's question list:
-    ``asked_by_task``), signed for the person the task works for
-    (``TaskInfo.owner_person_id``). That holds for a task with a parent as
-    well: a specialist's escalation (the specialists' way to ask the person,
-    ``agent_instructions``) is a task the team lead holds with the specialist's
-    task as its parent, its question goes to the person's chat
-    (``message_routing.requester_bound_primary_route``), and the delegated
-    task carries its request's signed context, so it works for that person.
-    Only the gateway sends such answers: models cannot set files on a question
-    or an answer (``ModelTaskQueryPayload``). So files on a question, on an
-    answer to no question asked, or on an answer not signed for the task's
-    person are not the person's.
-    """
-
-    if query.query_type != MessageMetaType.RESPONSE:
-        return ANSWER_NOT_A_RESPONSE
-    if not asked_by_task:
-        return ANSWER_TO_NO_QUESTION
-    return await _sender_refusal(agent, task_info.owner_person_id, msg_meta)
-
-
-def _request_chain(task_manager: Any, task_id: str) -> list[str]:
-    """``task_id`` then each task it was made for, up to the request it serves.
-
-    Follows only the task manager's own plan-step (step to its request) and
-    isolated-recovery (recovery task to the task it recovers) links, so a
-    delegated subtask never reaches its requester's files this way.
-    """
-
-    chain = [task_id]
-    for _ in range(_MAX_REQUEST_LINKS):
-        current = chain[-1]
-        step_link = task_manager.get_plan_step_task_link(current)
-        recovery_link = None if step_link is not None else task_manager.get_recovery_link(current)
-        linked = (
-            getattr(step_link, "root_task_id", None)
-            if step_link is not None
-            else getattr(recovery_link, "original_task_id", None)
-        )
-        if not linked or linked in chain:
-            return chain
-        chain.append(str(linked))
-    logger.warning(
-        "A task's plan-step and recovery links did not end; its own request is taken as the last one reached. "
-        "event=attachment_request_links_too_long task_id=%s last_task_id=%s",
-        task_id,
-        chain[-1],
-    )
-    return chain
-
-
-@dataclass(frozen=True)
-class RequestFiles:
-    """The request a task serves and the files it holds, read from the task manager.
-
-    Plain data, so it can be read in the task manager's operation lane.
-    ``conversation_id`` is the request's own conversation, set only for a
-    top-level request (only those are turns of a conversation).
-    ``message_files`` are the files of the request's own message, the ones a
-    task delegated from it gets when the delegation names none
-    (``delegation_runtime._give_subtask_files``).
-    """
-
-    task_id: str
-    request_task_id: str
-    conversation_id: Optional[str]
-    files: tuple[UserTaskAttachment, ...]
-    message_files: tuple[UserTaskAttachment, ...] = ()
-
-
-def request_files(task_manager: Any, task_id: str) -> Optional[RequestFiles]:
-    """The files a task may use without its conversation, and its request; None for an unknown task.
-
-    The request's message files come first, then the files received while
-    each task of the chain ran, each id once.
-    """
-
-    if task_manager.get_task_info(task_id) is None:
-        return None
-    chain = _request_chain(task_manager, task_id)
-    infos = [(chain_id, task_manager.get_task_info(chain_id)) for chain_id in chain]
-    known = [(chain_id, info) for chain_id, info in infos if info is not None]
-    missing = ",".join(chain_id for chain_id, info in infos if info is None)
-    if infos[-1][1] is None:
-        # The request itself ended (or its link is wrong) while this task runs.
-        logger.warning(
-            "A task's request is no longer held; only the files of the tasks still held are used. "
-            "event=attachment_request_missing task_id=%s missing_task_ids=%s",
-            task_id,
-            missing,
-        )
-    elif missing:
-        # A plan step that ended while its recovery task runs: normal, and read
-        # on every prompt and tool call, so not a warning.
-        logger.debug(
-            "A plan step or recovery task between a task and its request has ended; the request's files "
-            "are used. event=attachment_request_link_ended task_id=%s ended_task_ids=%s",
-            task_id,
-            missing,
-        )
-    request_id, request_info = known[-1]
-    files: dict[str, UserTaskAttachment] = {}
-    for _chain_id, info in reversed(known):
-        for attachment in [*list(info.task.attachments or []), *received_attachments(info.task)]:
-            files.setdefault(attachment.attachment_id, attachment)
-    top_level = request_id == chain[-1] and getattr(request_info.task, "parent_task_id", None) is None
-    conversation_id = getattr(request_info.meta, "conversation_id", None) if top_level else None
-    return RequestFiles(
-        task_id=task_id,
-        request_task_id=request_id,
-        conversation_id=str(conversation_id) if conversation_id else None,
-        files=tuple(files.values()),
-        message_files=tuple(request_info.task.attachments or ()),
-    )
-
-
-@dataclass(frozen=True)
-class SentFile:
-    """A file the person sent, and the conversation turn it came with when that is known."""
-
-    attachment: UserTaskAttachment
-    turn_index: Optional[int] = None
-
-
-def _sent_file(record: dict[str, Any], *, conversation_id: str) -> Optional[SentFile]:
-    attachments = _validated([record], task_id=str(record.get("task_id") or ""), source=conversation_id)
-    if not attachments:
-        return None
-    turn_index = record.get(ATTACHMENT_TURN_INDEX_KEY)
-    return SentFile(attachments[0], turn_index=int(turn_index) if turn_index is not None else None)
-
-
-@dataclass(frozen=True)
-class ScopeFiles:
-    """The files a task may name: the current request's, then earlier turns' (``AttachmentScope.files``)."""
-
-    current: tuple[SentFile, ...]
-    earlier: tuple[SentFile, ...]
-
-    def available(self, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT) -> list[SentFile]:
-        """Current files first, then earlier ones, at most ``limit``."""
-
-        return [*self.current, *self.earlier][: max(0, limit)]
-
-
-@dataclass(frozen=True)
-class AttachmentScope:
-    """The files one task may name and open by id.
-
-    ``conversation_id`` is set only when the earlier turns of the request's
-    conversation may be read (module docstring); ``store`` is then the
-    conversation store that holds them.
-    """
-
-    request: RequestFiles
-    conversation_id: Optional[str] = None
-    store: Any = field(default=None, repr=False, compare=False)
-
-    def find(self, attachment_id: str) -> Optional[SentFile]:
-        """The file with this id, or None when the id is not one this task may use."""
-
-        wanted = str(attachment_id or "").strip()
-        if not _ATTACHMENT_ID_PATTERN.fullmatch(wanted):
-            return None
-        for attachment in self.request.files:
-            if attachment.attachment_id == wanted:
-                return SentFile(attachment)
-        if self.conversation_id is None:
-            return None
-        record = self.store.find_conversation_attachment(self.conversation_id, wanted)
-        return _sent_file(record, conversation_id=self.conversation_id) if record else None
-
-    def files(self) -> ScopeFiles:
-        """The files this task may name, grouped for its prompt, read with one bounded listing.
-
-        ``current``: the request's own files (``request.files``), then the
-        files saved with its turn that another of its plan steps or recovery
-        tasks received. ``earlier``: the newest ``CONVERSATION_ATTACHMENT_LIST_LIMIT``
-        files of the other turns, newest first, however many files the request
-        itself holds. Read with one query, so call this once per prompt.
-        """
-
-        own = tuple(SentFile(attachment) for attachment in self.request.files)
-        if self.conversation_id is None:
-            return ScopeFiles(current=own, earlier=())
-        this_turn: list[SentFile] = []
-        earlier: list[SentFile] = []
-        listed = self.store.list_conversation_attachments(
-            self.conversation_id,
-            limit=CONVERSATION_ATTACHMENT_LIST_LIMIT,
-            current_task_id=self.request.request_task_id,
-            skip_ids={attachment.attachment_id for attachment in self.request.files},
-        )
-        for record in listed:
-            sent = _sent_file(record, conversation_id=self.conversation_id)
-            if sent is None:
-                continue
-            same_turn = str(record.get(ATTACHMENT_TASK_ID_KEY) or "") == self.request.request_task_id
-            (this_turn if same_turn else earlier).append(sent)
-        return ScopeFiles(current=(*own, *this_turn), earlier=tuple(earlier))
-
-    def available(self, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT) -> list[SentFile]:
-        """The files to offer when an id is not found: the current request's, then earlier ones."""
-
-        return self.files().available(limit)
-
-
-def attachment_scope(
-    request: RequestFiles,
-    *,
-    conversation_store: Any,
-    is_team_lead: bool,
-    person_id: Optional[str],
-) -> AttachmentScope:
-    """What a task may open: its request's files, plus its conversation's for the team lead's own person.
-
-    ``person_id`` is the person the task is verified to work for (its signed
-    context or schedule run identity), never a field from a message body.
-    """
-
-    conversation_id = request.conversation_id
-    if not conversation_id or not is_team_lead or conversation_store is None:
-        return AttachmentScope(request)
-    refusal = _conversation_refusal(conversation_store, conversation_id, person_id)
-    if refusal is not None:
-        # Work for nobody (system work) never reads a person's conversation;
-        # anything else is unexpected for a request's own conversation.
-        logger.log(
-            logging.INFO if refusal == _NO_VERIFIED_PERSON else logging.WARNING,
-            "A task's earlier conversation files were not offered: its person could not be shown to own the "
-            "conversation. event=attachment_scope_conversation_refused task_id=%s request_task_id=%s "
-            "conversation_id=%s reason=%s",
-            request.task_id,
-            request.request_task_id,
-            conversation_id,
-            refusal,
-        )
-        return AttachmentScope(request)
-    return AttachmentScope(request, conversation_id=conversation_id, store=conversation_store)
-
-
-def task_attachment_scope(
-    task_manager: Any,
-    task_id: str,
-    *,
-    conversation_store: Any,
-    is_team_lead: bool,
-    person_id: Optional[str],
-) -> Optional[AttachmentScope]:
-    """``attachment_scope`` of a task this agent holds; None for a task it does not hold.
-
-    Reads the task manager, so call it in the task-manager lane.
-    """
-
-    request = request_files(task_manager, task_id)
-    if request is None:
-        return None
-    return attachment_scope(
-        request, conversation_store=conversation_store, is_team_lead=is_team_lead, person_id=person_id
-    )
-
-
-def _conversation_refusal(conversation_store: Any, conversation_id: str, person_id: Optional[str]) -> Optional[str]:
-    """Why the person may not read this conversation (None when they may), decided by ``access_control.ownership``."""
-
-    if not person_id:
-        return _NO_VERIFIED_PERSON
-    thread = conversation_store.get_thread(conversation_id)
-    if not thread:
-        return "no_thread"
-    decision = private_access(
-        person_id=person_id,
-        owner_id=thread.get("owner_canonical_user_id"),
-        resource_type=RESOURCE_CONVERSATION,
-        resource_id=conversation_id,
-        action=PRIVATE_READ,
-        team_id=thread.get("team_id"),
-    )
-    return None if decision.allowed else decision.reason
-
-
-@dataclass(frozen=True)
-class UploadLocation:
-    """Whether this runtime holds a file, with its real path and size when it does (``locate_upload``)."""
-
-    state: UploadState
-    path: Optional[Path] = None
-    size_bytes: Optional[int] = None
-
-
-def stored_upload_path(attachment: UserTaskAttachment, uploads_dir: Path) -> Optional[str]:
-    """The real path of the file's copy in this instance's ``state/uploads``; None when it has none there.
-
-    Decides from the record alone and never reads the file, so a check that
-    only needs to know whether a record is this runtime's (the upgrade notice,
-    ``custom_agents.stuck_tasks``) logs nothing about a file it cannot read.
-    A local copy counts only inside ``state/uploads`` (``InstanceLayout.uploads_dir``),
-    compared as real paths. A path anywhere else is not a copy this runtime may
-    open: the file was stored on another machine, or the record is not one the
-    gateway made.
-    """
-
-    path = attachment.local_path()
-    if not path:
-        return None
-    root = os.path.realpath(uploads_dir)
-    resolved = os.path.realpath(path)
-    if os.path.commonpath([root, resolved]) != root or resolved == root:
-        logger.debug(
-            "A file's stored copy is outside this runtime's uploads folder. "
-            "event=attachment_outside_uploads attachment_id=%s",
-            attachment.attachment_id,
-        )
-        return None
-    return resolved
-
-
-def log_unreadable_upload(task_id: Optional[str], attachment_id: str, error_type: str, error_number: Optional[int]) -> None:
-    """Report an upload that is there but cannot be read. The error's text names the storage path, so it is never logged."""
-
-    logger.warning(
-        "A file the person sent could not be read. event=attachment_upload_unreadable task_id=%s "
-        "attachment_id=%s error_type=%s errno=%s",
-        task_id,
-        attachment_id,
-        error_type,
-        error_number,
-    )
-
-
-def locate_upload(attachment: UserTaskAttachment, uploads_dir: Path, *, task_id: Optional[str] = None) -> UploadLocation:
-    """Where this runtime holds the file: ``available`` (real path and size), ``deleted``, ``unreadable`` or ``remote``.
-
-    ``remote``: no copy in ``state/uploads`` (``stored_upload_path``). Otherwise
-    one look-up of the file decides: gone (``UPLOAD_GONE_ERRORS``: the file or
-    its folder is missing) means the upload was removed (its retention ended,
-    a clean-up, or its person was removed); any other error, or something there
-    that is not a regular file, is ``unreadable`` (a permission, disk or layout
-    fault) and is logged for
-    ``task_id``. Agents cannot write in ``state/uploads``, so the real path
-    checked here is the file that is opened, and the size comes from the same
-    look-up, so no error between the check and the size can carry the path out.
-    """
-
-    resolved = stored_upload_path(attachment, uploads_dir)
-    if resolved is None:
-        return UploadLocation(UPLOAD_REMOTE)
-    try:
-        found = os.stat(resolved)
-    except UPLOAD_GONE_ERRORS:
-        return UploadLocation(UPLOAD_DELETED)
-    except OSError as exc:
-        log_unreadable_upload(task_id, attachment.attachment_id, type(exc).__name__, exc.errno)
-        return UploadLocation(UPLOAD_UNREADABLE)
-    if not stat.S_ISREG(found.st_mode):
-        log_unreadable_upload(task_id, attachment.attachment_id, "not_a_regular_file", None)
-        return UploadLocation(UPLOAD_UNREADABLE)
-    return UploadLocation(UPLOAD_AVAILABLE, Path(resolved), found.st_size)
-
-
-def upload_state(attachment: UserTaskAttachment, uploads_dir: Path, *, task_id: Optional[str] = None) -> UploadState:
-    """Whether this runtime holds the file (``locate_upload``): ``available``, ``deleted``, ``unreadable`` or ``remote``."""
-
-    return locate_upload(attachment, uploads_dir, task_id=task_id).state
-
-
-def attachment_summary(sent: SentFile | UserTaskAttachment) -> dict[str, Any]:
-    """A file as tool results show it: id, name, type, kind, size and its turn when known; never its storage."""
-
-    file = sent if isinstance(sent, SentFile) else SentFile(sent)
-    summary = turn_attachment_summary(file.attachment.model_dump(mode="json"))
-    if file.turn_index is not None:
-        summary[ATTACHMENT_TURN_INDEX_KEY] = file.turn_index
-    return summary
-
-
-def shown_name(filename: str) -> str:
-    """The file name as one line of bounded length (names are the person's text)."""
-
-    single_line = " ".join(str(filename or "").split())
-    if len(single_line) > _MAX_SHOWN_NAME_CHARS:
-        return single_line[: _MAX_SHOWN_NAME_CHARS - 1] + "…"
-    return single_line or "unnamed file"
-
-
-def _shown_size(size_bytes: int) -> str:
-    size = max(0, int(size_bytes or 0))
-    if size < 1024:
-        return f"{size} bytes"
-    if size < 1024 * 1024:
-        return f"{size / 1024:.1f} KB"
-    return f"{size / (1024 * 1024):.1f} MB"
-
-
-def describe_attachment(sent: SentFile | UserTaskAttachment) -> str:
-    """One line naming a file for a model: name, id, kind, type, size and its turn when known. Never its path."""
-
-    file = sent if isinstance(sent, SentFile) else SentFile(sent)
-    attachment = file.attachment
-    turn = f", sent in turn {file.turn_index}" if file.turn_index is not None else ""
-    return (
-        f"{shown_name(attachment.filename)} (attachment_id {attachment.attachment_id}, {attachment.kind}, "
-        f"{attachment.content_type}, {_shown_size(attachment.size_bytes)}{turn})"
-    )
-
-
-def render_attachment_lines(files: Iterable[SentFile | UserTaskAttachment]) -> list[str]:
-    """``- <description>`` for each file, in order."""
-
-    return [f"- {describe_attachment(file)}" for file in files]
-
-
-# How a prompt names the files of a request and of its conversation's earlier
-# turns (``render_request_files``, ``render_earlier_files``).
-REQUEST_FILES_HEADING = "Other Files For This Request"
-EARLIER_FILES_HEADING = "Earlier Files In This Conversation"
-_OPEN_BY_ID = (
-    "Open one by attachment_id with inspect_user_attachment, or with load_local_media_for_model_context when "
-    "you need to see an image or document yourself."
+# The prompt section listing earlier files (``inventory_text``); its name in
+# context accounting and in ``overflow_recovery.degrade_sections`` is
+# ``CONVERSATION_ATTACHMENTS_SECTION``.
+CONVERSATION_ATTACHMENTS_HEADING = "Conversation Attachments:"
+CONVERSATION_ATTACHMENTS_SECTION = "conversation_attachments"
+# The list's last line when earlier turns do not record all of their
+# requests' files (``attachments_recorded`` 0: saved before turns kept their
+# files, or some of their request files were not accepted at admission), so a
+# model does not read them as turns that received only what is listed. Such
+# turns may still list some files (kept request files, files sent to them
+# later), and those open by id like any other; ``turn`` is the latest such
+# turn, not the end of a range. The request to send a file again covers only a
+# file that is not listed here or in the slice tool, since a recorded file the
+# list leaves out (past its newest ``INVENTORY_LIMIT``) still opens by id.
+UNRECORDED_TURNS_NOTE = (
+    "Some files sent with earlier requests (the latest in turn {turn}) are not recorded, because those turns were "
+    "saved before files were recorded or some of their files were not accepted. Recorded files are listed and "
+    "open by id as usual. If the person refers to a file from one of those requests that is not listed here or "
+    "by get_conversation_context_slice, ask them to send it again."
+)
+# The list's line for the current request when admission did not keep some
+# or all of the files sent with it (``REQUEST_FILES_NOT_KEPT_EVENT``): the
+# model learns they exist and asks for them only if the request needs them.
+REQUEST_FILES_NOT_KEPT_NOTE = (
+    "The person sent {count} file(s) with this request that were not accepted, so they are not listed and cannot "
+    "be opened. If the request needs them, ask the person to send them again."
+)
+# The task-history event that records the files a task accepted with a
+# guidance or an answer, and the ``details`` key holding them (full
+# ``UserTaskAttachment`` dumps). Written only by ``task_files_details``.
+TASK_FILES_EVENT = "task_files_accepted"
+TASK_FILES_KEY = "task_files"
+# The task-history event recording how many of a top-level request's own
+# files were not kept at admission (``admit_request_files``), and the
+# ``details`` key holding that count. Written only there, into the admitted
+# task before ``add_task`` saves it, so the request's prompt can say they
+# must be sent again.
+REQUEST_FILES_NOT_KEPT_EVENT = "request_files_not_kept"
+REQUEST_FILES_NOT_KEPT_KEY = "not_kept_count"
+# The task-history events only this runtime writes; a message arriving with
+# any of them has them dropped (``without_incoming_files_entries``).
+_RUNTIME_FILE_EVENTS = frozenset({TASK_FILES_EVENT, REQUEST_FILES_NOT_KEPT_EVENT})
+# The ``message_type`` of a files entry for a person's answer to a question
+# (``TaskQuery``); guidance and interrupt answers use their steering type.
+QUESTION_ANSWER_MESSAGE_TYPE = "question_answer"
+# The ``message_type`` of a worker's files entry for the files the team lead's
+# result for its escalation brought (``sent_files_runtime.keep_escalation_result_files``).
+ESCALATION_RESULT_MESSAGE_TYPE = "escalation_result"
+# Why a message's files are not kept, beside the reasons of ``sent_files_access``
+# (``log_refused_files``): the task is delegated work that keeps none from it,
+# the message is a question rather than a person's answer, or its task is not
+# held here.
+DELEGATED_TASK_REASON = "delegated_task"
+NOT_AN_ANSWER_REASON = "not_an_answer"
+TASK_NOT_FOUND_REASON = "task_not_found"
+# Why the task a step or delegated task runs for may not share its files
+# (``RequestLink.reason``): it is not held here, it is itself delegated work,
+# or it works for another person.
+ROOT_NOT_HELD = "not_held"
+ROOT_DELEGATED = "delegated"
+ROOT_OTHER_PERSON = "other_person"
+# What ``log_refused_files`` says for those reasons; any other reason is the
+# gateway's rule (``sent_files_access``) refusing the files.
+_REFUSAL_TEXT = {
+    DELEGATED_TASK_REASON: "the task it was sent to is delegated work that keeps no files from this message",
+    NOT_AN_ANSWER_REASON: "only a person's answer to a question brings files",
+    TASK_NOT_FOUND_REASON: "the task it was sent to is not held here",
+}
+_NOT_VOUCHED_TEXT = "the gateway does not vouch that it sent it for this task"
+# What ``log_refused_files`` says for a new request whose signed context names
+# no task (``CONTEXT_NAMES_NO_TASK``): the gateway before the update that
+# started keeping each message's files signed a request's context without one,
+# so this is a request still queued for the lead across that update. Only a
+# request gets this text. Guidance and interrupt answers are signed again each
+# time the gateway sends them, and that gateway sent no files with answers to
+# questions, so on those messages the reason means a context taken from another
+# message, such as the gateway's status check, and gets ``_NOT_VOUCHED_TEXT``.
+_QUEUED_REQUEST_TEXT = (
+    "its signed context names no task, as a request's context the gateway signed before the update that started "
+    "keeping each message's files does; the person must send the file again"
+)
+# Set by ``TaskManager`` on the copies of a worker's entries in its lead's history.
+_BUBBLED_ENTRY_KEY = "bubbled_entry_id"
+
+# Why an upload cannot be read here (``locate_upload``).
+UPLOAD_NO_LOCAL_COPY = "no_local_copy"
+UPLOAD_NOT_ON_THIS_HOST = "not_on_this_host"
+UPLOAD_FILE_MISSING = "file_missing"
+# The plural stays: 0.9.12 shipped this reason code and its log event
+# (``event=attachment_outside_upload_folders``); since 0.10 there is one folder.
+UPLOAD_OUTSIDE_FOLDERS = "outside_upload_folders"
+UPLOAD_UNREADABLE = "unreadable"
+# What the model is told about an upload whose file was deleted, whether before
+# it was found (``locate_upload``) or while it was being read
+# (``custom_tools.task_uploads.read_failed``).
+UPLOAD_GONE_MESSAGE = (
+    "This file is no longer stored: uploads are deleted after the team's upload retention period "
+    "or when their person leaves the team. Ask the person to send it again."
+)
+# What the model is told about an upload this host has but cannot read
+# (``UPLOAD_UNREADABLE``): a fixed text, since the error's own names the path.
+UPLOAD_UNREADABLE_MESSAGE = (
+    "This file is stored on this host but could not be read; the error was logged for the team's operators. "
+    "If the request needs it, ask the person to send it again."
 )
 
 
-def render_request_files(files: ScopeFiles, *, shown_ids: Iterable[str]) -> list[str]:
-    """Prompt lines for the request's files that its message does not show; [] when there are none.
+def task_files_details(
+    attachments: Sequence[UserTaskAttachment], *, message_id: str, message_type: str
+) -> dict[str, Any]:
+    """History ``details`` that make ``attachments`` part of the task's own files.
 
-    These are files the person sent with the request a plan step or recovery
-    task serves, or while the request ran: with guidance, with an answer to
-    a question, or while another of its plan steps ran. The message's own
-    files are listed with the message (``Current Request Attachments``).
+    For the files of one accepted guidance, interrupt answer or question
+    answer (``message_id``: its steering id or the question's
+    ``task_query_id``), after ``keep_upload_files`` checked them. The records
+    are full, because ``TaskAttachments`` reads where the bytes are from them;
+    views that show history to models reduce them with
+    ``storage.turn_attachments.summarize_file_records``.
     """
 
-    shown = set(shown_ids)
-    rest = [file for file in files.current if file.attachment.attachment_id not in shown]
-    if not rest:
-        return []
-    return [
-        f"{REQUEST_FILES_HEADING} (sent with the request, with guidance or with an answer to a question; "
-        f"{_OPEN_BY_ID}):",
-        *render_attachment_lines(rest),
-    ]
+    return {
+        "event": TASK_FILES_EVENT,
+        "message_id": message_id,
+        "message_type": message_type,
+        TASK_FILES_KEY: [attachment.model_dump(mode="json") for attachment in attachments],
+    }
 
 
-def render_earlier_files(files: ScopeFiles) -> str:
-    """The prompt section naming the files of the conversation's earlier turns; "" when there are none.
-
-    At most ``CONVERSATION_ATTACHMENT_LIST_LIMIT`` files, newest first, each
-    with its turn (``AttachmentScope.files``). It does not depend on how much
-    of the conversation's history the prompt shows, and it names files only:
-    images are not attached to the prompt again.
-    """
-
-    if not files.earlier:
-        return ""
-    return "\n".join(
-        [
-            f"{EARLIER_FILES_HEADING} (newest first, at most {CONVERSATION_ATTACHMENT_LIST_LIMIT}; "
-            f"they are not attached again. {_OPEN_BY_ID}):",
-            *render_attachment_lines(files.earlier),
-        ]
+def _file_basics(summary: dict[str, Any]) -> str:
+    return (
+        f"`{summary.get('attachment_id')}` {summary.get('filename')} "
+        f"({summary.get('content_type')}, {summary.get('kind')}, {summary.get('size_bytes')} bytes"
     )
+
+
+def describe_file(summary: dict[str, Any]) -> str:
+    """One line naming a file for a model: id, name, type and size, and the turn it came with."""
+
+    turn_index = summary.get("turn_index")
+    if turn_index is None:
+        return _file_basics(summary) + "; sent with this task)"
+    return _file_basics(summary) + f"; turn {turn_index}, task {summary.get('task_id')})"
+
+
+def sent_file_lines(attachments: Sequence[UserTaskAttachment], *, subject: str) -> list[str]:
+    """Lines naming the files sent with a guidance or an answer (``subject``), for the model.
+
+    Used for guidance and interrupt answers (``task_steering_runtime``) and
+    for answers to questions (``TaskManager.render_task_query_history_markdown``).
+
+    Empty without files. Names each file by id, name, type and size only.
+    """
+
+    if not attachments:
+        return []
+    lines = [
+        f"Files sent with this {subject} (open one by its attachment_id with "
+        "inspect_user_attachment or load_local_media_for_model_context):"
+    ]
+    lines.extend(f"- {_file_basics(attachment_summary(attachment))})" for attachment in attachments)
+    return lines
 
 
 class AttachmentSelectionError(ValueError):
-    """A delegation named files the task may not use, or too many; the message says which and what it may use."""
+    """Attachment ids a task named that are not files it may use.
 
-    def __init__(self, message: str, *, unknown_ids: list[str], deleted_ids: list[str]) -> None:
-        super().__init__(message)
-        self.unknown_ids = unknown_ids
-        self.deleted_ids = deleted_ids
-
-
-def _named_ids(ids: list[str]) -> str:
-    shown = ", ".join(ids[:_MAX_REPORTED_IDS])
-    more = len(ids) - _MAX_REPORTED_IDS
-    return f"{shown} and {more} more" if more > 0 else shown
-
-
-def select_attachments(scope: AttachmentScope, attachment_ids: list[str], *, uploads_dir: Path) -> list[UserTaskAttachment]:
-    """The exact files a delegation names, each once, in the order named; ``[]`` selects none.
-
-    Raises ``AttachmentSelectionError`` when it names more than
-    ``MAX_SELECTED_ATTACHMENTS`` files, an id this task may not use, or a file
-    whose upload is gone; the message lists the files it may use. A file that
-    is there but cannot be read now is passed on: the fault may clear, it is
-    logged, and the specialist's tool says so when it opens the file.
+    The message names the unknown ids and lists, newest first, the files the
+    task may use (at most ``INVENTORY_LIMIT``), without storage paths.
     """
 
-    wanted = list(dict.fromkeys(str(value or "").strip() for value in attachment_ids))
-    if len(wanted) > MAX_SELECTED_ATTACHMENTS:
-        raise AttachmentSelectionError(
-            f"A delegation can pass at most {MAX_SELECTED_ATTACHMENTS} files; {len(wanted)} were named.",
-            unknown_ids=[],
-            deleted_ids=[],
-        )
-    selected: list[UserTaskAttachment] = []
-    unknown: list[str] = []
-    deleted: list[str] = []
-    for attachment_id in wanted:
-        found = scope.find(attachment_id)
-        if found is None:
-            unknown.append(attachment_id)
-        elif upload_state(found.attachment, uploads_dir, task_id=scope.request.task_id) == UPLOAD_DELETED:
-            deleted.append(attachment_id)
-        else:
-            selected.append(found.attachment)
-    if not unknown and not deleted:
-        return selected
-    problems = []
-    if unknown:
-        problems.append(
-            f"No file with attachment_id {_named_ids(unknown)} was sent with this request or earlier in its conversation."
-        )
-    if deleted:
-        problems.append(f"The file with attachment_id {_named_ids(deleted)} is no longer stored.")
-    available = scope.available()
-    listing = (
-        "Files you can pass:\n" + "\n".join(render_attachment_lines(available))
-        if available
-        else "No files can be passed for this request."
-    )
-    raise AttachmentSelectionError(" ".join(problems) + "\n" + listing, unknown_ids=unknown, deleted_ids=deleted)
+    def __init__(self, unknown_ids: Sequence[str], choices: Sequence[dict[str, Any]]) -> None:
+        self.unknown_ids = tuple(unknown_ids)
+        self.choices = tuple(choices)
+        super().__init__(self._message())
+
+    def _message(self) -> str:
+        head = "These attachment ids are not files this task may use: " + ", ".join(self.unknown_ids) + "."
+        if not self.choices:
+            return head + " This task has no files it may use."
+        lines = [head, f"Files it may use (newest first, at most {INVENTORY_LIMIT}):"]
+        lines.extend(f"- {describe_file(choice)}" for choice in self.choices)
+        return "\n".join(lines)
 
 
-def save_turn_attachments(
-    task_id: str,
-    attachments: Iterable[Any],
-    *,
-    task_manager: Any,
-    conversation_store: Any,
-) -> Optional[list[dict[str, Any]]]:
-    """Save files the person sent while ``task_id`` ran with the turn of the request it serves.
+def team_lead_escalation(task_info: Any, *, is_team_lead: bool) -> bool:
+    """Whether ``task_info`` is the team lead's record of a worker's escalation.
 
-    A plan step's or a recovery task's files go to the turn of the request
-    it was made for, so later steps and follow-ups find them. Only top-level
-    requests are turns of a conversation; a subtask's files stay in its own
-    history. The merge adds each id once, so a resent message adds nothing.
-    Returns the turn's saved records, or None when nothing was saved. Store
-    errors propagate, so the caller records nothing and the message is sent
-    again.
+    ``is_team_lead`` is the holding agent's role; the escalation is marked
+    by ``manager_escalation`` in its admitted meta, set by the worker's
+    runtime when it escalated (``turn_action_outbox_runtime``). The same
+    test as ``task_context_runtime.sign_system_escalation``: only the team
+    lead accepts escalations, and people's answers reach only the team lead.
     """
 
-    records = attachment_records(attachments)
-    if not records or conversation_store is None:
-        return None
-    request = request_files(task_manager, task_id)
-    if request is None or request.conversation_id is None:
-        return None
-    merged: Optional[list[dict[str, Any]]] = conversation_store.merge_turn_attachments(
-        conversation_id=request.conversation_id,
-        task_id=request.request_task_id,
-        attachments=records,
+    return bool(is_team_lead) and getattr(task_info.meta, "manager_escalation", None) is not None
+
+
+@dataclass(frozen=True)
+class RequestLink:
+    """The request a plan step, recovery task or delegated task runs for, as this agent holds it.
+
+    Found by ``linked_request`` only through the task manager's plan-step,
+    recovery and delegation links (``TaskManager.resolve_root_task_id``),
+    never from a message or a model. ``root_task_id`` is the task it runs for
+    (None when the task is its own request, or its parent is not held here);
+    ``info`` is that task when it may share the task's files: a request
+    working for the same person (``access_control.ownership.request_files_access``
+    on the persons recorded at admission from verified identity). Otherwise
+    ``reason`` says why not: ``ROOT_NOT_HELD``, ``ROOT_DELEGATED`` or
+    ``ROOT_OTHER_PERSON``.
+    """
+
+    root_task_id: Optional[str] = None
+    info: Optional[Any] = None
+    reason: Optional[str] = None
+
+    @property
+    def linked(self) -> bool:
+        """Whether the task runs for another task this agent holds, whether or not it may share its files."""
+
+        return self.root_task_id is not None
+
+
+def linked_request(task_manager: Any, task_info: Any, *, is_team_lead: bool) -> RequestLink:
+    """The request the task in ``task_info`` runs for, through the task manager's links (``RequestLink``).
+
+    The links end at a top-level task, or at a task whose parent this agent
+    does not hold: work another agent delegated here. Such a task is the
+    request only when it is the team lead's escalation from work the lead
+    never held (``team_lead_escalation``; ``is_team_lead`` is the holding
+    agent's role), such as a worker's scheduled job run that asked for a
+    specialist: the work the lead does for it (plan steps, isolated recovery,
+    delegated work and its escalations) runs for it as work for a person's
+    request runs for that request. Any other delegated task is
+    ``ROOT_DELEGATED``. Both kinds of request must work for the task's
+    person (``access_control.ownership.request_files_access``). Reading
+    (``step_request``) and keeping a person's files (``sent_files_runtime``)
+    use this one rule.
+
+    Calls the task manager directly: run it on the task manager's operation
+    lane from async code.
+    """
+
+    task_id = task_info.task.task_id
+    root_id = task_manager.resolve_root_task_id(task_id)
+    if not root_id or root_id == task_id:
+        return RequestLink()
+    root_info = task_manager.get_task_info(root_id)
+    if root_info is None:
+        return RequestLink(root_id, reason=ROOT_NOT_HELD)
+    if root_info.task.parent_task_id is not None and not team_lead_escalation(root_info, is_team_lead=is_team_lead):
+        return RequestLink(root_id, reason=ROOT_DELEGATED)
+    decision = request_files_access(
+        person_id=task_info.owner_person_id, request_person_id=root_info.owner_person_id, request_task_id=root_id
     )
-    if merged is None:
+    if not decision.allowed:
+        return RequestLink(root_id, reason=ROOT_OTHER_PERSON)
+    return RequestLink(root_id, info=root_info)
+
+
+def step_request(task_manager: Any, task_info: Any, *, is_team_lead: bool) -> Optional[Any]:
+    """The request a plan step or isolated recovery task runs for, when it may use that request's files.
+
+    A step or recovery task is a task of its own, with a conversation id of
+    its own and no conversation turn; it works on its request, so it may use
+    the request's own files and, for a top-level request, the files of the
+    request's conversation (``TaskAttachments.load``). The request may be
+    the team lead's escalation from a worker's own run (``linked_request``);
+    as delegated work it reads no conversation, so the step then uses the
+    escalation's own files and its own. A delegated task never has a step
+    request: it uses only the files it was given. None for a task that is
+    its own request; a link to a task that may not share its files
+    (``RequestLink.reason``) is logged and gives None.
+    """
+
+    if task_info is None or task_manager is None or task_info.task.parent_task_id is not None:
+        return None
+    link = linked_request(task_manager, task_info, is_team_lead=is_team_lead)
+    if link.linked and link.info is None:
         logger.warning(
-            "Files the person sent were not saved with a conversation turn: the request has no turn. "
-            "event=conversation_turn_missing_for_attachments task_id=%s request_task_id=%s conversation_id=%s "
-            "attachment_ids=%s",
-            task_id,
-            request.request_task_id,
-            request.conversation_id,
-            ",".join(record["attachment_id"] for record in records),
+            "A step's request may not share its files with it, so the step uses only its own. "
+            "event=step_request_files_not_usable task_id=%s root_task_id=%s reason=%s",
+            task_info.task.task_id,
+            link.root_task_id,
+            link.reason,
         )
-    return merged
+    return link.info
 
 
-def answer_turn_task_id(task_manager: Any, task_id: str) -> str:
-    """The task whose request's conversation turn keeps the files of an answer given on ``task_id``.
+@dataclass(frozen=True)
+class TaskAttachments:
+    """The files one task may name: its own, and for a top-level task its conversation's.
 
-    The person answers the team lead's question in the chat of the request
-    the asking task serves, so the files go with that request's turn and a
-    later turn can open them. The request is reached through this task
-    manager's own links (``TaskManager.resolve_root_task_id``: plan-step,
-    recovery and parent links between tasks it holds), for example a
-    specialist's escalation, then the task the team lead delegated to that
-    specialist, then the person's request. The escalation names its parent
-    itself, so the request is used only when it works for the same person as
-    the asking task, whom the answer was verified for
-    (``answer_files_refusal``). Otherwise, and when the asking task serves no
-    request this agent holds (a specialist's own scheduled run), the files
-    stay with the asking task's history only. Read in the task-manager lane.
+    Build it with ``for_task`` (or ``load`` when the request is known).
+    ``own`` are the task's own files; a plan step's or recovery task's
+    include its request's own files, because it works on that request (what
+    a delegation that leaves ``attachment_ids`` out sends,
+    ``delegated_files``). ``conversation_id`` is set only when the task may
+    use that conversation's files (module docstring): its own conversation,
+    or for a plan step or recovery task its request's. ``turn_task_id`` is
+    the task whose conversation turn holds the request's own files: the task
+    itself, or the step's request; either way they are among ``own``.
+    ``request_files_not_kept`` is how many files sent with that request
+    admission did not keep (``admit_request_files``), read from that task's
+    own history, so the prompt can say they must be sent again.
     """
 
-    request_id = task_manager.resolve_root_task_id(task_id) or task_id
-    if request_id == task_id:
-        return task_id
-    asking = task_manager.get_task_info(task_id)
-    request = task_manager.get_task_info(request_id)
-    if asking is None or request is None:
-        # A request no longer held is reported where the files are saved
-        # (``request_files``, event=attachment_request_missing).
-        return task_id
-    if request.owner_person_id == asking.owner_person_id:
-        return request_id
-    logger.warning(
-        "An answer's files are kept with the task that asked, not with its request's turn: the request does not "
-        "work for the same person. event=answer_files_request_other_person task_id=%s request_task_id=%s",
-        task_id,
-        request_id,
-    )
-    return task_id
+    task_id: str
+    own: tuple[UserTaskAttachment, ...] = ()
+    conversation_id: Optional[str] = None
+    store: Any = field(default=None, repr=False, compare=False)
+    turn_task_id: Optional[str] = None
+    request_files_not_kept: int = 0
+
+    @classmethod
+    def for_task(
+        cls, task_manager: Any, task_info: Any, conversation_store: Any, *, is_team_lead: bool
+    ) -> "TaskAttachments":
+        """The scope of the task in ``task_info``, a plan step's through its request (``step_request``).
+
+        ``is_team_lead`` is the holding agent's role (``linked_request``).
+        Calls the task manager directly, as the prompt and the tools read
+        task records; async code finds the request on the operation lane
+        and calls ``load``.
+        """
+
+        request_info = step_request(task_manager, task_info, is_team_lead=is_team_lead)
+        return cls.load(task_info, conversation_store, request_info=request_info)
+
+    @classmethod
+    def load(cls, task_info: Any, conversation_store: Any, *, request_info: Any = None) -> "TaskAttachments":
+        """The scope of the task in ``task_info`` (None gives an empty scope).
+
+        ``request_info`` is the request a plan step or recovery task runs for
+        (``step_request``): the step's own files then include the request's
+        own files (first, as they came first; each id once), which holds even
+        when the request's turn was saved before turns kept their files, and
+        the step uses the request's conversation under the same person check
+        (none when the request is the team lead's escalation, which is
+        delegated work).
+        """
+
+        task = getattr(task_info, "task", None)
+        if task is None:
+            return cls(task_id="")
+        turn_info = request_info if request_info is not None else task_info
+        conversation_id = _conversation_in_scope(turn_info, conversation_store)
+        own = _own_files(task)
+        if request_info is not None:
+            own = _unique((*_own_files(request_info.task), *own))
+        return cls(
+            task_id=task.task_id,
+            own=own,
+            conversation_id=conversation_id,
+            store=conversation_store if conversation_id else None,
+            turn_task_id=turn_info.task.task_id,
+            request_files_not_kept=_request_files_not_kept(turn_info.task),
+        )
+
+    def find(self, attachment_ids: Iterable[str]) -> tuple[list[UserTaskAttachment], list[str]]:
+        """The records for ``attachment_ids`` in request order, and the ids that are not in scope.
+
+        Ids are stripped and deduplicated; the task's own files are checked
+        first, then its conversation's.
+        """
+
+        wanted = list(dict.fromkeys(str(item or "").strip() for item in attachment_ids))
+        wanted = [item for item in wanted if item]
+        own = {attachment.attachment_id: attachment for attachment in self.own}
+        remaining = [item for item in wanted if item not in own]
+        earlier: dict[str, UserTaskAttachment] = {}
+        if remaining and self.conversation_id:
+            listed = self.store.list_turn_attachments(self.conversation_id, attachment_ids=remaining)
+            earlier = {entry.attachment.attachment_id: entry.attachment for entry in listed}
+        found: list[UserTaskAttachment] = []
+        unknown: list[str] = []
+        for item in wanted:
+            record = own.get(item) or earlier.get(item)
+            if record is None:
+                unknown.append(item)
+            else:
+                found.append(record)
+        return found, unknown
+
+    def require(self, attachment_ids: Iterable[str]) -> list[UserTaskAttachment]:
+        """The records for ``attachment_ids``; ``AttachmentSelectionError`` when any is not in scope."""
+
+        found, unknown = self.find(attachment_ids)
+        if unknown:
+            raise AttachmentSelectionError(unknown, self.choices())
+        return found
+
+    def conversation_files(
+        self, *, limit: int = INVENTORY_LIMIT, exclude_ids: Iterable[str] = ()
+    ) -> tuple[list[TurnAttachment], bool]:
+        """Up to ``limit`` of the conversation's files, newest first, and whether there are more.
+
+        ``exclude_ids`` are left out (files listed elsewhere, such as the
+        current request's). The store is asked for at most ``limit`` plus the
+        excluded count plus one files, never the whole conversation. With
+        ``limit`` 0 it only says whether there are any.
+        """
+
+        if not self.conversation_id:
+            return [], False
+        limit = max(limit, 0)
+        excluded = set(exclude_ids)
+        listed = self.store.list_turn_attachments(self.conversation_id, limit=limit + len(excluded) + 1)
+        kept = [entry for entry in listed if entry.attachment.attachment_id not in excluded]
+        return kept[:limit], len(kept) > limit
+
+    def inventory(
+        self, *, limit: int = INVENTORY_LIMIT, exclude_ids: Iterable[str] = ()
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Descriptive summaries of the files the task may use, newest first, and whether there are more.
+
+        Its own files come first (they arrived with the current request, so
+        they are the newest), then the files earlier turns of its conversation
+        received. ``exclude_ids`` are left out, such as the files the prompt
+        already lists as the current request's. Summaries never carry storage
+        references (``storage.turn_attachments.TURN_ATTACHMENT_SUMMARY_FIELDS``).
+        """
+
+        excluded = set(exclude_ids)
+        own = [
+            {**attachment_summary(attachment), "turn_index": None, "task_id": self.task_id}
+            for attachment in reversed(self.own)
+            if attachment.attachment_id not in excluded
+        ]
+        listed = own[:limit]
+        earlier, more_earlier = self.conversation_files(
+            limit=limit - len(listed),
+            exclude_ids=[*excluded, *(attachment.attachment_id for attachment in self.own)],
+        )
+        return listed + [entry.summary() for entry in earlier], len(own) > limit or more_earlier
+
+    def choices(self, limit: int = INVENTORY_LIMIT) -> list[dict[str, Any]]:
+        """Descriptive summaries of the files the task may use, newest first: its own, then its conversation's."""
+
+        return self.inventory(limit=limit)[0]
+
+    def last_unrecorded_turn(self) -> Optional[int]:
+        """The latest earlier turn of its conversation that does not record all of its request's files, or None.
+
+        Such a turn was saved before turns kept their files, or admission did
+        not keep some of its request's files: the missing ones are not listed
+        and cannot be opened by id. The files it does record (kept request
+        files, files sent to it later) are listed and opened like any other.
+        Asked only within the conversation scope, and never about the task's
+        own turn: its request's missing files are counted in
+        ``request_files_not_kept`` instead.
+        """
+
+        if not self.conversation_id:
+            return None
+        latest: Optional[int] = self.store.last_turn_without_file_records(
+            self.conversation_id, exclude_task_id=self.turn_task_id or self.task_id
+        )
+        return latest
 
 
-async def _save_in_lane(agent: Any, attachments: Iterable[Any], turn_task_id: Callable[[Any], str]) -> None:
-    files = list(attachments)
+def delegated_files(scope: TaskAttachments, attachment_ids: Optional[Sequence[str]]) -> list[UserTaskAttachment]:
+    """The files a task delegated from the task of ``scope`` gets (copies of trusted records).
+
+    ``attachment_ids`` comes from the model's delegation (``DelegateTaskAction``):
+
+    - None (left out): the delegating task's own files (``scope.own``:
+      ``Task.attachments`` and the files of the guidance, answers and
+      escalation results it accepted; for a plan step or recovery task,
+      its request's own files first), deduplicated in arrival order.
+    - An empty list: none.
+    - Ids: exactly those files, in the order named, each once, from the files
+      the task may use (its own, then its or its request's conversation's).
+      Any id that is not one raises ``AttachmentSelectionError``, which lists
+      the files it may use without storage paths.
+
+    A model only names ids; the records, and where the bytes are, come from
+    this runtime's own records. A delegated task's scope has no conversation,
+    so a worker can pass on only files it was given.
+    """
+
+    if attachment_ids is None:
+        chosen: Sequence[UserTaskAttachment] = scope.own
+    elif not attachment_ids:
+        chosen = []
+    else:
+        chosen = scope.require(attachment_ids)
+    return [attachment.model_copy(deep=True) for attachment in chosen]
+
+
+def inventory_text(scope: TaskAttachments, *, exclude_ids: Iterable[str] = ()) -> str:
+    """The prompt's list of earlier files the task may use, or "" when it has nothing to say.
+
+    At most ``INVENTORY_LIMIT`` files, newest first, from ``scope.inventory``
+    (``exclude_ids``: the files the prompt lists as the current request's).
+    Built from stored records, so it does not depend on how much of the
+    conversation's text the prompt keeps. Names files by id, name, type and
+    size only. Says how many of the current request's files were not
+    accepted (``REQUEST_FILES_NOT_KEPT_NOTE``), and ends with
+    ``UNRECORDED_TURNS_NOTE`` when earlier turns do not record all of their
+    requests' files, with or without files to list.
+    """
+
+    files, more = scope.inventory(exclude_ids=exclude_ids)
+    unrecorded = scope.last_unrecorded_turn()
+    if not files and unrecorded is None and not scope.request_files_not_kept:
+        return ""
+    lines = [CONVERSATION_ATTACHMENTS_HEADING, *_file_list_lines(files, more)]
+    if scope.request_files_not_kept:
+        lines.append(REQUEST_FILES_NOT_KEPT_NOTE.format(count=scope.request_files_not_kept))
+    if unrecorded is not None:
+        lines.append(UNRECORDED_TURNS_NOTE.format(turn=unrecorded))
+    return "\n".join(lines)
+
+
+def _file_list_lines(files: Sequence[dict[str, Any]], more: bool) -> list[str]:
+    """The list's lines for ``files`` (none without files), and a note when more exist."""
+
     if not files:
-        return
-    task_manager = agent.task_manager
-    conversation_store = getattr(agent, "_conversation_store", None)
+        return []
+    lines = [
+        "Files sent earlier in this conversation or while this request ran, newest first. Open one by its "
+        "attachment_id with inspect_user_attachment, or load_local_media_for_model_context to see an image or "
+        "document.",
+    ]
+    lines.extend(f"- {describe_file(item)}" for item in files)
+    if more:
+        lines.append(
+            f"Only the newest {INVENTORY_LIMIT} are listed. get_conversation_context_slice shows the files of "
+            "each earlier turn."
+        )
+    return lines
 
-    def save() -> Any:
-        return save_turn_attachments(
-            turn_task_id(task_manager), files, task_manager=task_manager, conversation_store=conversation_store
+
+def _own_files(task: Any) -> tuple[UserTaskAttachment, ...]:
+    """``Task.attachments`` then the files recorded with accepted guidance and answers, one per id."""
+
+    collected = [item for item in list(task.attachments or []) if isinstance(item, UserTaskAttachment)]
+    for entry in list(task.execution_history or []):
+        details = getattr(entry, "details", None) or {}
+        if _written_by_this_task(entry, details):
+            collected.extend(_recorded_files(task.task_id, details.get(TASK_FILES_KEY)))
+    return _unique(collected)
+
+
+def _unique(attachments: Iterable[UserTaskAttachment]) -> tuple[UserTaskAttachment, ...]:
+    """``attachments`` with each id once, where it first appears."""
+
+    unique: dict[str, UserTaskAttachment] = {}
+    for attachment in attachments:
+        unique.setdefault(attachment.attachment_id, attachment)
+    return tuple(unique.values())
+
+
+def kept_message_files(task: Any, message_id: str) -> tuple[UserTaskAttachment, ...]:
+    """The files this task's own files entries record for one message (``message_id``), one per id.
+
+    For a guidance or an interrupt answer the id is its ``steering_id``,
+    which the gateway keeps across resends, so a resend can tell that an
+    earlier delivery already kept its files
+    (``custom_agents.task_steering_runtime``).
+    """
+
+    unique: dict[str, UserTaskAttachment] = {}
+    for entry in list(task.execution_history or []):
+        details = getattr(entry, "details", None) or {}
+        if _written_by_this_task(entry, details) and details.get("message_id") == message_id:
+            for attachment in _recorded_files(task.task_id, details.get(TASK_FILES_KEY)):
+                unique.setdefault(attachment.attachment_id, attachment)
+    return tuple(unique.values())
+
+
+def answer_files(task: Any) -> tuple[UserTaskAttachment, ...]:
+    """The files people's answers to the task's questions brought, as kept for it, one per id, in arrival order.
+
+    Read from the files entries this task's runtime wrote for answers
+    (``QUESTION_ANSWER_MESSAGE_TYPE``); never its request's files or a
+    guidance's. A delegated task's result carries exactly these to the agent
+    that delegated it (``sent_files_runtime.result_with_answer_files``).
+    """
+
+    unique: dict[str, UserTaskAttachment] = {}
+    for entry in list(task.execution_history or []):
+        details = getattr(entry, "details", None) or {}
+        if _written_by_this_task(entry, details) and details.get("message_type") == QUESTION_ANSWER_MESSAGE_TYPE:
+            for attachment in _recorded_files(task.task_id, details.get(TASK_FILES_KEY)):
+                unique.setdefault(attachment.attachment_id, attachment)
+    return tuple(unique.values())
+
+
+def _written_by_this_task(entry: Any, details: dict[str, Any], event: str = TASK_FILES_EVENT) -> bool:
+    """An ``event`` entry this task's runtime wrote (``task_files_details``, ``admit_request_files``).
+
+    A lead's copies of its workers' entries keep their details but are
+    subtask events marked with the copied entry's id; they never count, so a
+    worker cannot add files, or a count of files not kept, to its lead's task.
+    """
+
+    return (
+        details.get("event") == event
+        and getattr(entry, "entry_type", None) != TaskHistoryType.SUBTASK_EVENT
+        and _BUBBLED_ENTRY_KEY not in details
+    )
+
+
+def _request_files_not_kept(task: Any) -> int:
+    """How many files sent with ``task``'s request admission did not keep (its own count entries); 0 for none.
+
+    Only ``admit_request_files`` writes the count, so an unreadable one is a
+    defect worth a warning.
+    """
+
+    total = 0
+    for entry in list(task.execution_history or []):
+        details = getattr(entry, "details", None) or {}
+        if not _written_by_this_task(entry, details, REQUEST_FILES_NOT_KEPT_EVENT):
+            continue
+        count = details.get(REQUEST_FILES_NOT_KEPT_KEY)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            total += count
+        else:
+            logger.warning(
+                "A task-history count of request files not kept was unreadable and was skipped. "
+                "event=request_files_not_kept_entry_unreadable task_id=%s",
+                task.task_id,
+            )
+    return total
+
+
+def _recorded_files(task_id: str, items: Any) -> list[UserTaskAttachment]:
+    """The records in one files entry's ``TASK_FILES_KEY`` value; unreadable ones are logged and skipped.
+
+    Only ``task_files_details`` writes them, so an unreadable value is a
+    defect worth a warning.
+    """
+
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        logger.warning(
+            "A task-history file entry was unreadable and was skipped. "
+            "event=task_files_entry_unreadable task_id=%s reason=not_a_list",
+            task_id,
+        )
+        return []
+    records: list[UserTaskAttachment] = []
+    for item in items:
+        try:
+            records.append(UserTaskAttachment.model_validate(item))
+        except ValidationError:
+            logger.warning(
+                "A task-history file record was unreadable and was skipped. "
+                "event=task_files_entry_unreadable task_id=%s attachment_id=%s",
+                task_id,
+                item.get("attachment_id") if isinstance(item, dict) else None,
+            )
+    return records
+
+
+def _conversation_in_scope(task_info: Any, conversation_store: Any) -> Optional[str]:
+    """The task's conversation when it may use that conversation's files, else None."""
+
+    task = task_info.task
+    if task.parent_task_id is not None or conversation_store is None:
+        return None
+    conversation_id = str(getattr(getattr(task_info, "meta", None), "conversation_id", "") or "").strip()
+    if not conversation_id:
+        return None
+    thread = conversation_store.get_thread(conversation_id)
+    if not thread:
+        logger.warning(
+            "A task's conversation has no record, so its earlier files are not offered. "
+            "event=conversation_files_thread_missing conversation_id=%s task_id=%s",
+            conversation_id,
+            task.task_id,
+        )
+        return None
+    owner = thread.get("owner_canonical_user_id")
+    person = getattr(task_info, "owner_person_id", None)
+    decision = conversation_files_access(person_id=person, owner_id=owner, conversation_id=conversation_id)
+    if not decision.allowed:
+        logger.warning(
+            "A task works for someone other than its conversation's person, so the conversation's "
+            "files are not offered. event=conversation_files_owner_mismatch conversation_id=%s task_id=%s "
+            "conversation_owner=%s task_person=%s",
+            conversation_id,
+            task.task_id,
+            owner or "-",
+            person or "-",
+        )
+        return None
+    return conversation_id
+
+
+@dataclass(frozen=True)
+class UploadFolder:
+    """This host's upload folder, ``state/uploads``: the only place a file is read from by id.
+
+    ``path`` is ``InstanceLayout.uploads_dir``, resolved. The gateway stores
+    every file a person sends there, also the files of chat apps an adapter
+    host runs (``assistant_gateway.inbound_attachments``). Up to 0.9.13 such
+    files stayed in the adapter host's transfer folder; the upgrade step
+    (``instance_upgrades.adapter_host_files``) moves them here, and
+    nothing here reads that folder. Records that still point into it (held
+    work from before the upgrade) are refused (``UPLOAD_OUTSIDE_FOLDERS``) and
+    the person is asked to send the file again (``custom_agents.stuck_tasks``).
+    """
+
+    path: Path
+
+    @classmethod
+    def for_instance(cls, instance_root: str | Path) -> "UploadFolder":
+        """The upload folder of the instance at ``instance_root``."""
+
+        return cls(InstanceLayout.at(instance_root).uploads_dir.resolve())
+
+    @classmethod
+    def for_agent(cls, agent: Any) -> "UploadFolder":
+        """The upload folder of the instance ``agent`` runs in.
+
+        ``agent`` is a running agent or a turn's ``TurnRuntimeSettings``: both
+        carry the ``instance_root``, ``instance_config_path`` and
+        ``workspace_dir`` that ``infer_instance_root`` reads.
+        """
+
+        from custom_agents.runtime_paths import infer_instance_root
+
+        return cls.for_instance(infer_instance_root(agent))
+
+    def contains(self, path: Path) -> bool:
+        """Whether the resolved ``path`` lies inside this folder."""
+
+        return self.path in path.parents
+
+
+def points_into_upload_folder(attachment: UserTaskAttachment, upload_folder: UploadFolder) -> bool:
+    """Whether the record's local copy lies in ``upload_folder`` (False without a local copy).
+
+    Decided from the record and the folder alone: the path is resolved as
+    ``locate_upload`` resolves it, but the file is never opened or checked,
+    so a caller that only needs to know where a record points (the upgrade
+    notice, ``custom_agents.stuck_tasks``) logs nothing about a file it
+    cannot read.
+    """
+
+    resolved = _resolved_local_path(attachment)
+    return resolved is not None and upload_folder.contains(resolved)
+
+
+def _resolved_local_path(attachment: UserTaskAttachment) -> Optional[Path]:
+    local_path = attachment.local_path()
+    return Path(local_path).expanduser().resolve() if local_path else None
+
+
+@dataclass(frozen=True)
+class LocatedUpload:
+    """An upload's bytes on this host: a regular file inside an upload folder.
+
+    ``path`` is resolved and lies below ``folder``. Read it with
+    ``read_bytes`` or ``reader``, which open it from ``folder`` one component
+    at a time without following links (``access_control.safe_open``), so a
+    link swapped in after ``locate_upload`` checked the path is refused, not
+    followed.
+    """
+
+    path: Path
+    size_bytes: int
+    folder: Path
+
+    def _parts(self) -> tuple[str, ...]:
+        return self.path.relative_to(self.folder).parts
+
+    def read_bytes(self, *, max_bytes: int) -> bytes:
+        """The file's bytes; ``safe_open.UnsafePath`` when it is larger than ``max_bytes`` or unsafe to open."""
+
+        return safe_open.read_bytes(self.folder, self._parts(), max_bytes=max_bytes)
+
+    @contextmanager
+    def reader(self) -> Iterator[BinaryIO]:
+        """A binary reader of the file (``safe_open.UnsafePath`` when it is unsafe to open)."""
+
+        with safe_open.opened_file(self.folder, self._parts()) as (descriptor, _status):
+            with os.fdopen(os.dup(descriptor), "rb") as opened:
+                yield opened
+
+
+@dataclass(frozen=True)
+class UnavailableUpload:
+    """Why an upload cannot be read here (``UPLOAD_*``), with a plain explanation for the model."""
+
+    reason: str
+    message: str
+
+
+def locate_upload(
+    attachment: UserTaskAttachment,
+    upload_folder: UploadFolder,
+    *,
+    task_id: str,
+    conversation_id: Optional[str],
+) -> LocatedUpload | UnavailableUpload:
+    """Where to read ``attachment``'s bytes on this host, or why they cannot be read.
+
+    The record's local path is resolved (links followed) and must lie inside
+    ``upload_folder``; anything else is refused and logged with the ids.
+    Inside the folder, when it exists here, a missing file was deleted (upload
+    retention, or its person left the team); when the folder is not here, the
+    file is on another host. Any other error while checking the file (no
+    permission, a link loop, an I/O error, or a file where the session
+    folder should be, ``NotADirectoryError``, which no clean-up produces)
+    makes it unreadable here: logged
+    with the ids and the error number, and never shown to the model, because
+    its text names where the file is stored.
+    """
+
+    resolved = _resolved_local_path(attachment)
+    if resolved is None:
+        return UnavailableUpload(UPLOAD_NO_LOCAL_COPY, "This file has no copy stored on a host's disk.")
+    if not upload_folder.contains(resolved):
+        _log_outside(attachment, task_id, conversation_id, action="it was not opened")
+        return UnavailableUpload(
+            UPLOAD_OUTSIDE_FOLDERS,
+            "This file's record does not point into this host's upload folder, so it cannot be opened.",
+        )
+    folder = upload_folder.path
+    try:
+        entry = resolved.stat()
+    except FileNotFoundError:  # only a removal: anything else is a fault, logged below
+        entry = None
+    except OSError as exc:
+        logger.warning(
+            "An upload's file could not be checked, so it is not opened. "
+            "event=attachment_upload_unreadable attachment_id=%s task_id=%s conversation_id=%s error_type=%s errno=%s",
+            attachment.attachment_id,
+            task_id,
+            conversation_id or "-",
+            type(exc).__name__,
+            exc.errno,
+        )
+        return UnavailableUpload(UPLOAD_UNREADABLE, UPLOAD_UNREADABLE_MESSAGE)
+    if entry is not None and stat.S_ISREG(entry.st_mode):
+        return LocatedUpload(resolved, entry.st_size, folder)
+    if folder.is_dir():
+        logger.info(
+            "An upload's file is gone from this host's upload folder. "
+            "event=attachment_upload_missing attachment_id=%s task_id=%s conversation_id=%s",
+            attachment.attachment_id,
+            task_id,
+            conversation_id or "-",
+        )
+        return UnavailableUpload(UPLOAD_FILE_MISSING, UPLOAD_GONE_MESSAGE)
+    return UnavailableUpload(UPLOAD_NOT_ON_THIS_HOST, "This file is stored on another host, not where this agent runs.")
+
+
+@dataclass(frozen=True)
+class AdmittedRequestFiles:
+    """A top-level request as admitted (``admit_request_files``), and how many of its files it did not keep.
+
+    ``task`` holds only the files it keeps. When ``not_kept`` is above 0 its
+    history also holds one ``REQUEST_FILES_NOT_KEPT_EVENT`` entry with that
+    count, which ``TaskManager.add_task`` saves with the task in its first
+    write. Its conversation turn records exactly ``task.attachments`` and is
+    marked as not knowing all of its request's files when any were dropped
+    (``conversation_runtime.ensure_task_conversation_context``).
+    """
+
+    task: Task
+    not_kept: int = 0
+
+
+def admit_request_files(
+    task: Task,
+    meta: Any,
+    *,
+    team_id: str,
+    person_id: Optional[str],
+    upload_folder: Callable[[], UploadFolder],
+) -> AdmittedRequestFiles:
+    """The one admission rule for a top-level request's files (module docstring).
+
+    ``meta`` is the request's message meta; ``person_id`` is whom the task
+    verifiably works for. The files stay only when the gateway vouches for
+    them (``sent_files_access``) and each lies in this host's upload folder
+    (``keep_upload_files``; ``upload_folder`` finds it, only when files are left
+    to check). Each dropped file is logged with why. The task's own files and
+    its turn then hold the same records. Blocking (it verifies the signed
+    context and resolves each record's path on the file system): run it in a
+    thread from async code.
+    """
+
+    sent = list(task.attachments or [])
+    if not sent:
+        return AdmittedRequestFiles(task)
+    conversation_id = _text(getattr(meta, "conversation_id", None))
+    vouched = _vouched_request_files(task, meta, team_id=team_id, person_id=person_id, conversation_id=conversation_id)
+    kept = keep_upload_files(vouched, upload_folder() if vouched else None, task_id=task.task_id, conversation_id=conversation_id)
+    not_kept = len(sent) - len(kept)
+    if not not_kept:
+        return AdmittedRequestFiles(task)
+    logger.info(
+        "Files sent with a request were not kept; the request is admitted without them. "
+        "event=request_files_not_kept task_id=%s conversation_id=%s count=%d",
+        task.task_id,
+        conversation_id or "-",
+        not_kept,
+    )
+    entry = TaskHistoryEntry(
+        summary=(
+            f"{not_kept} file(s) sent with this request were not accepted; if the request needs them, the person "
+            "must send them again."
+        ),
+        importance=TaskHistoryImportance.HIGH,
+        details={"event": REQUEST_FILES_NOT_KEPT_EVENT, REQUEST_FILES_NOT_KEPT_KEY: not_kept},
+    )
+    history = [*list(task.execution_history or []), entry]
+    return AdmittedRequestFiles(task.model_copy(update={"attachments": kept, "execution_history": history}), not_kept)
+
+
+def _vouched_request_files(
+    task: Task, meta: Any, *, team_id: str, person_id: Optional[str], conversation_id: Optional[str]
+) -> list[UserTaskAttachment]:
+    """The request's files when the gateway vouches it sent them for this request; none (logged) otherwise."""
+
+    decision = sent_files_access(
+        sender=_verified_sender(meta, team_id),
+        task_id=task.task_id,
+        conversation_id=conversation_id,
+        person_id=person_id,
+        message_context_id=request_context_id(task),
+    )
+    if decision.allowed:
+        return list(task.attachments)
+    log_refused_files(
+        task.attachments, decision.reason, task_id=task.task_id, conversation_id=conversation_id, request=True
+    )
+    return []
+
+
+def steering_files_check(task_info: Any, steering: TaskSteering, meta: Any, *, team_id: str) -> OwnershipDecision:
+    """Whether the files on ``steering`` (a guidance or an answer, with message meta ``meta``) may become the task's.
+
+    A delegated task keeps none (module docstring). For a top-level task the
+    message must carry a context the gateway signed for this message and
+    these files; ``steering`` is the message as it arrived.
+    """
+
+    if task_info.task.parent_task_id is not None:
+        return OwnershipDecision(False, DELEGATED_TASK_REASON)
+    return _sent_to_task_check(task_info, meta, team_id, steering_context_id(steering))
+
+
+def answer_files_check(task_info: Any, answer: TaskQuery, meta: Any, *, team_id: str) -> OwnershipDecision:
+    """Whether the files on ``answer`` (a ``TaskQuery`` with message meta ``meta``) may become the task's.
+
+    Only a person's answer to a question (a RESPONSE, which the gateway
+    sends) brings files; a question an agent asks keeps none. The message
+    must carry a context the gateway signed for this answer and these files,
+    naming the task the question was asked in (``answer`` is the message as
+    it arrived). That task may be delegated: the team lead's record of a
+    worker's escalation, whose question it asked the person. Which delegated
+    tasks keep them is decided by ``sent_files_runtime.keep_sent_files``
+    (module docstring).
+    """
+
+    if answer.query_type != MessageMetaType.RESPONSE:
+        return OwnershipDecision(False, NOT_AN_ANSWER_REASON)
+    return _sent_to_task_check(task_info, meta, team_id, answer_context_id(answer))
+
+
+def _sent_to_task_check(task_info: Any, meta: Any, team_id: str, message_context_id: str) -> OwnershipDecision:
+    task = task_info.task
+    return sent_files_access(
+        sender=_verified_sender(meta, team_id),
+        task_id=task.task_id,
+        conversation_id=_text(getattr(task_info.meta, "conversation_id", None)),
+        person_id=getattr(task_info, "owner_person_id", None),
+        message_context_id=message_context_id,
+    )
+
+
+def log_refused_files(
+    attachments: Iterable[UserTaskAttachment],
+    reason: str,
+    *,
+    task_id: str,
+    conversation_id: Optional[str],
+    request: bool = False,
+) -> None:
+    """One warning per file a message brought that is not kept, saying why (``_REFUSAL_TEXT``).
+
+    ``request`` is set for a new request's files (``admit_request_files``),
+    the only message whose context names no task because the gateway signed
+    it before the update (``_QUEUED_REQUEST_TEXT``).
+    """
+
+    if request and reason == CONTEXT_NAMES_NO_TASK:
+        explanation = _QUEUED_REQUEST_TEXT
+    else:
+        explanation = _REFUSAL_TEXT.get(reason, _NOT_VOUCHED_TEXT)
+    for attachment in attachments:
+        logger.warning(
+            "A file on a message was not kept: %s. "
+            "event=sent_file_refused reason=%s attachment_id=%s task_id=%s conversation_id=%s",
+            explanation,
+            reason,
+            attachment.attachment_id,
+            task_id,
+            conversation_id or "-",
         )
 
-    await task_manager.operations_runtime.run(save)
 
+def without_incoming_files_entries(task: Task) -> Task:
+    """``task`` without the files entries its message arrived with (module docstring).
 
-async def save_sent_files(agent: Any, task_id: str, attachments: Iterable[Any]) -> None:
-    """Save files the person sent with guidance for ``task_id``, in the agent's task-manager lane.
-
-    Runs before the message is recorded or answered: a store error raises,
-    so nothing is recorded and the message comes again (the gateway resends
-    held guidance). The merge adds each file once, so the next attempt saves
-    only what is missing. One lane operation reads the task's request links
-    and writes the turn, in order with the request's own admission.
+    Only this runtime writes them (``_RUNTIME_FILE_EVENTS``: files entries,
+    and the count of a request's files not kept at admission); requests and
+    delegated tasks arrive with none, so any found are dropped and logged.
     """
 
-    await _save_in_lane(agent, attachments, lambda _task_manager: task_id)
+    history = list(task.execution_history or [])
+    kept = [
+        entry
+        for entry in history
+        if (getattr(entry, "details", None) or {}).get("event") not in _RUNTIME_FILE_EVENTS
+    ]
+    if len(kept) == len(history):
+        return task
+    logger.warning(
+        "A task arrived with files entries in its history; they were dropped. "
+        "event=incoming_task_files_entries_dropped task_id=%s count=%d",
+        task.task_id,
+        len(history) - len(kept),
+    )
+    return task.model_copy(update={"execution_history": kept})
 
 
-async def save_answer_files(agent: Any, task_id: str, attachments: Iterable[Any]) -> None:
-    """Save the files of the person's answer to a question asked on ``task_id`` (``answer_turn_task_id``).
+def _verified_sender(meta: Any, team_id: str) -> Optional[TaskContextV1]:
+    """The message's own signed context, verified with this process's keys; None when missing or invalid."""
 
-    Like ``save_sent_files``: before the answer is recorded, so a store error
-    leaves nothing recorded and the answer is redelivered or drained again
-    from the runtime mailbox.
+    signed = getattr(getattr(meta, "gateway_context", None), "task_context", None)
+    if signed is None:
+        return None
+    try:
+        return context_verifier().verify(signed, team_id=team_id or None)
+    except (IdentityRejected, ValueError) as exc:
+        logger.info("A message's signed context was not accepted. event=sent_files_context_rejected error=%s", exc)
+        return None
+
+
+def _text(value: Any) -> Optional[str]:
+    return str(value or "").strip() or None
+
+
+def keep_upload_files(
+    attachments: Iterable[UserTaskAttachment],
+    upload_folder: Optional[UploadFolder],
+    *,
+    task_id: str,
+    conversation_id: Optional[str],
+) -> list[UserTaskAttachment]:
+    """The records trusted code may save for a task: those it could later read by id.
+
+    A record with no local copy is kept (it opens as ``no_local_copy``). A
+    record whose local path resolves outside ``upload_folder`` (None: no folder is
+    trusted) is dropped and logged with the ids, so it is never saved in the
+    task's history or its conversation (module docstring). The file need not
+    exist: a deleted upload is reported when it is opened.
     """
 
-    await _save_in_lane(agent, attachments, lambda task_manager: answer_turn_task_id(task_manager, task_id))
+    kept: list[UserTaskAttachment] = []
+    for attachment in attachments:
+        local_path = attachment.local_path()
+        if local_path and (upload_folder is None or not upload_folder.contains(Path(local_path).expanduser().resolve())):
+            _log_outside(attachment, task_id, conversation_id, action="it was not saved")
+            continue
+        kept.append(attachment)
+    return kept
+
+
+def _log_outside(
+    attachment: UserTaskAttachment, task_id: str, conversation_id: Optional[str], *, action: str
+) -> None:
+    logger.warning(
+        "A file record points outside this host's upload folder (state/uploads), so %s. "
+        "event=attachment_outside_upload_folders attachment_id=%s task_id=%s conversation_id=%s",
+        action,
+        attachment.attachment_id,
+        task_id,
+        conversation_id or "-",
+    )
+
+
+__all__ = [
+    "CONVERSATION_ATTACHMENTS_HEADING",
+    "CONVERSATION_ATTACHMENTS_SECTION",
+    "DELEGATED_TASK_REASON",
+    "ESCALATION_RESULT_MESSAGE_TYPE",
+    "INVENTORY_LIMIT",
+    "NOT_AN_ANSWER_REASON",
+    "QUESTION_ANSWER_MESSAGE_TYPE",
+    "REQUEST_FILES_NOT_KEPT_EVENT",
+    "REQUEST_FILES_NOT_KEPT_KEY",
+    "REQUEST_FILES_NOT_KEPT_NOTE",
+    "ROOT_DELEGATED",
+    "ROOT_NOT_HELD",
+    "ROOT_OTHER_PERSON",
+    "TASK_FILES_EVENT",
+    "TASK_FILES_KEY",
+    "TASK_NOT_FOUND_REASON",
+    "UPLOAD_FILE_MISSING",
+    "UPLOAD_GONE_MESSAGE",
+    "UPLOAD_NOT_ON_THIS_HOST",
+    "UPLOAD_NO_LOCAL_COPY",
+    "UPLOAD_OUTSIDE_FOLDERS",
+    "UPLOAD_UNREADABLE",
+    "UPLOAD_UNREADABLE_MESSAGE",
+    "AdmittedRequestFiles",
+    "AttachmentSelectionError",
+    "LocatedUpload",
+    "RequestLink",
+    "TaskAttachments",
+    "UnavailableUpload",
+    "UploadFolder",
+    "admit_request_files",
+    "answer_files",
+    "answer_files_check",
+    "delegated_files",
+    "describe_file",
+    "inventory_text",
+    "keep_upload_files",
+    "kept_message_files",
+    "linked_request",
+    "locate_upload",
+    "log_refused_files",
+    "sent_file_lines",
+    "steering_files_check",
+    "step_request",
+    "task_files_details",
+    "team_lead_escalation",
+    "without_incoming_files_entries",
+]

@@ -1,0 +1,184 @@
+{
+ "message_class": "Task",
+ "task_id": "task_held",
+ "parent_task_id": null,
+ "task_state": [],
+ "task_type": "request",
+ "problem_statement": "Compare the receipts",
+ "errors": null,
+ "task_plan": null,
+ "execution_digest": null,
+ "execution_history": [
+  {
+   "entry_id": "task_hist_286566c3486f",
+   "message_class": "TaskHistoryEntry",
+   "timestamp": "2026-11-16T03:31:41.481540+00:00",
+   "source": "system",
+   "entry_type": "task_event",
+   "importance": "high",
+   "summary": "1 file(s) sent with this request were not accepted; if the request needs them, the person must send them again.",
+   "agent_name": null,
+   "agent_id": null,
+   "related_task_id": null,
+   "objective_id": null,
+   "plan_id": null,
+   "plan_step_id": null,
+   "tracks_to_plan": null,
+   "details": {
+    "event": "request_files_not_kept",
+    "not_kept_count": 1
+   }
+  },
+  {
+   "entry_id": "task_hist_5f70093f9a90",
+   "message_class": "TaskHistoryEntry",
+   "timestamp": "2026-11-16T03:31:41.481578+00:00",
+   "source": "system",
+   "entry_type": "task_event",
+   "importance": "normal",
+   "summary": "Files sent with guidance accepted: guidance.png",
+   "agent_name": null,
+   "agent_id": null,
+   "related_task_id": null,
+   "objective_id": null,
+   "plan_id": null,
+   "plan_step_id": null,
+   "tracks_to_plan": null,
+   "details": {
+    "event": "task_files_accepted",
+    "message_id": "steer_1",
+    "message_type": "guidance",
+    "task_files": [
+     {
+      "attachment_id": "att_guidance",
+      "filename": "guidance.png",
+      "content_type": "image/png",
+      "kind": "image",
+      "size_bytes": 12,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "created_at": "2026-11-12T09:00:00+00:00",
+      "origin": "web_chat",
+      "storage_refs": [
+       {
+        "storage_type": "local",
+        "path": "/instance/state/uploads/web_session/att_guidance.png",
+        "bucket": null,
+        "object_name": null
+       }
+      ],
+      "caption": "caption of guidance.png"
+     }
+    ]
+   }
+  },
+  {
+   "entry_id": "task_hist_9bef3c5ac038",
+   "message_class": "TaskHistoryEntry",
+   "timestamp": "2026-11-16T03:31:41.481588+00:00",
+   "source": "system",
+   "entry_type": "task_event",
+   "importance": "normal",
+   "summary": "Files sent with an answer accepted: answer.png",
+   "agent_name": null,
+   "agent_id": null,
+   "related_task_id": null,
+   "objective_id": null,
+   "plan_id": null,
+   "plan_step_id": null,
+   "tracks_to_plan": null,
+   "details": {
+    "event": "task_files_accepted",
+    "message_id": "query_1",
+    "message_type": "question_answer",
+    "task_files": [
+     {
+      "attachment_id": "att_answer",
+      "filename": "answer.png",
+      "content_type": "image/png",
+      "kind": "image",
+      "size_bytes": 12,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "created_at": "2026-11-12T09:00:00+00:00",
+      "origin": "web_chat",
+      "storage_refs": [
+       {
+        "storage_type": "local",
+        "path": "/instance/state/uploads/web_session/att_answer.png",
+        "bucket": null,
+        "object_name": null
+       }
+      ],
+      "caption": "caption of answer.png"
+     }
+    ]
+   }
+  },
+  {
+   "entry_id": "task_hist_333ef6928db2",
+   "message_class": "TaskHistoryEntry",
+   "timestamp": "2026-11-16T03:31:41.481593+00:00",
+   "source": "system",
+   "entry_type": "task_event",
+   "importance": "normal",
+   "summary": "Files from an escalation result accepted: result.png",
+   "agent_name": null,
+   "agent_id": null,
+   "related_task_id": null,
+   "objective_id": null,
+   "plan_id": null,
+   "plan_step_id": null,
+   "tracks_to_plan": null,
+   "details": {
+    "event": "task_files_accepted",
+    "message_id": "task_sub",
+    "message_type": "escalation_result",
+    "task_files": [
+     {
+      "attachment_id": "att_result",
+      "filename": "result.png",
+      "content_type": "image/png",
+      "kind": "image",
+      "size_bytes": 12,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "created_at": "2026-11-12T09:00:00+00:00",
+      "origin": "web_chat",
+      "storage_refs": [
+       {
+        "storage_type": "local",
+        "path": "/instance/state/uploads/web_session/att_result.png",
+        "bucket": null,
+        "object_name": null
+       }
+      ],
+      "caption": "caption of result.png"
+     }
+    ]
+   }
+  }
+ ],
+ "attachments": [
+  {
+   "attachment_id": "att_receipt",
+   "filename": "receipt.png",
+   "content_type": "image/png",
+   "kind": "image",
+   "size_bytes": 12,
+   "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+   "created_at": "2026-11-12T09:00:00+00:00",
+   "origin": "web_chat",
+   "storage_refs": [
+    {
+     "storage_type": "local",
+     "path": "/instance/state/uploads/web_session/att_receipt.png",
+     "bucket": null,
+     "object_name": null
+    }
+   ],
+   "caption": "caption of receipt.png"
+  }
+ ],
+ "replied_message": null,
+ "thoughts_info": null,
+ "answer": null,
+ "failure": null
+}

@@ -83,7 +83,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
-          node-version: "24.20.0"
+          node-version: "24.22.3"
           package-manager-cache: false
 
       - name: Create disposable Python environment

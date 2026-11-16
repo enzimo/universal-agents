@@ -191,9 +191,11 @@ def _nats_notices(
     lines = []
     if unused := _unused_command_nats(source, config, environment, instance_generates, values):
         lines.append(
-            f"NATS: run with this command's environment over team.env, the instance would use {', '.join(unused)}, "
-            f"which this export did not use. The export decided from instance_config.yaml and team.env that the NATS "
-            f"server is {side}. {_SEE_THE_GUIDE}"
+            # Under /upgrade the export runs in the instance's own environment, so this line then says the
+            # running instance uses settings the export did not; under `team export` it is the operator's shell.
+            f"NATS: with the environment this export ran in (the instance's own, under /upgrade) laid over team.env, "
+            f"the instance would use {', '.join(unused)}, which this export did not use. The export decided from "
+            f"instance_config.yaml and team.env that the NATS server is {side}. {_SEE_THE_GUIDE}"
         )
     if not instance_generates:
         needed = [f"{LOCAL_NATS_ENABLED_ENV}=false", *(name for name in NATS_DECISION_ENV_NAMES if environment.get(name))]

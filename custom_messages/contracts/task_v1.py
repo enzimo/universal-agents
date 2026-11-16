@@ -405,7 +405,7 @@ class TaskQuery(BaseModel):
     )
     attachments: List[UserTaskAttachment] = Field(
         default_factory=list,
-        description="Files the person sent with this answer, as the gateway stored them. Set only by the gateway on a person's answer; binary bytes are stored outside the message.",
+        description="Files the person sent with this answer (only on a RESPONSE the gateway sends). Binary bytes are stored outside the message. The team lead keeps them only when the answer's own signed context vouches for exactly these files (access_control.ownership.answer_context_id).",
     )
     parent_task_id: Optional[str] = Field(
         default=None, description="Id of the task that this query pertains to"

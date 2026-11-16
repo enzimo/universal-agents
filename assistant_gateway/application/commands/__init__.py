@@ -69,9 +69,19 @@ from assistant_gateway.application.commands.session import (
     SessionCommandResult,
     is_session_command,
 )
+from assistant_gateway.application.commands.team_export import (
+    GatewayTeamExportCommands,
+    TeamExportCommandHandler,
+    TeamExportCommandRequest,
+    is_upgrade_command,
+)
 
 __all__ = [
     "ACCESS_HELP_TEXT",
+    "GatewayTeamExportCommands",
+    "TeamExportCommandHandler",
+    "TeamExportCommandRequest",
+    "is_upgrade_command",
     "ACCOUNT_LINK_COMMAND_USAGE",
     "AccessBlockInput",
     "AccessCommandHandler",
