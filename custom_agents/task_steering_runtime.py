@@ -139,6 +139,12 @@ GUIDANCE_APPLIED_EVENT = "task_steering_proactive_guidance_applied"
 # above, they tell a resend of a message that was used from one that was lost
 # (``_message_was_taken``).
 INTERRUPT_RESUMED_EVENT = "task_steering_interrupt_resumed"
+# History event of a turn that paused on an interrupt. Its details say whether
+# the turn waits for its requester's answer (an interrupt sent to the chat);
+# access and setup-run interrupts wait here for people's decisions through
+# their blocker instead (``custom_agents.task_wait_reasons``).
+INTERRUPT_REQUEST_EVENT = "task_steering_interrupt_request"
+INTERRUPT_WAITS_ON_REQUESTER_KEY = "waits_on_requester"
 INTERRUPT_RESPONSE_RECOVERY_EVENT = "task_steering_interrupt_response_recovery"
 _ANSWER_TAKEN_EVENTS = frozenset({INTERRUPT_RESUMED_EVENT, INTERRUPT_RESPONSE_RECOVERY_EVENT})
 
@@ -1479,9 +1485,10 @@ async def send_interrupt_request_for_result(
         entry_type=TaskHistoryType.QUERY_EVENT,
         importance=TaskHistoryImportance.HIGH,
         details={
-            "event": "task_steering_interrupt_request",
+            "event": INTERRUPT_REQUEST_EVENT,
             "steering_id": steering.steering_id,
             "interrupt_ids": [record.interrupt_id for record in interrupt_records],
+            INTERRUPT_WAITS_ON_REQUESTER_KEY: bool(upstream_interrupts),
         },
     )
     await agent.task_manager.operations_runtime.run(

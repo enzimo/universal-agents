@@ -694,7 +694,8 @@ Stuck tasks are reported the same way (`custom_agents.stuck_tasks`). The team
 lead reads every agent's saved work in its team (read-only) and reports one
 incident per request and condition: the agent holding the work stopped reporting
 in, a handed-back task nobody picked up, an access decision or a question to the
-person still waiting (reminders after a day), or no progress while in progress.
+person still waiting (reminders after a day), no progress while in progress, or
+a task waiting on nothing (`task_waiting_on_nothing`).
 Thresholds live in `agent.schedule_maintenance.stuck_tasks`. The person comes
 from the root task's signed context (read, never used to authorize); without one
 only administrators are told, and their notices never quote the request. The
@@ -711,6 +712,29 @@ reports that the condition ended, without claiming new task progress.
 The same pass also frees a work slot held by a task whose turn is gone
 (`turn_failure_runtime.release_orphaned_slot_when_idle`), which previously
 waited for new work to arrive.
+
+A task waiting on nothing is not running (waiting, paused or ready), is not in
+its agent's queue, and has no reason to wait. Every legitimate reason is listed
+in one place, `custom_agents.task_wait_reasons`, each read from the record the
+runtime saves for it: from the agent's saved work (queue, delegated work, a
+question, a recoverable pause, a person's decision on an access request or a
+`set_up_tools` run, an outside result such as a credential form, an interrupt
+sent to the requester, a running action batch or held reply, an isolated
+recovery, a queue pause), and from team stores, read only when saved work
+explains nothing (a waiting access request, a running plan, a waiting setup run,
+a provider retry timer). A new kind of wait must save a record one of these
+rules can find. No saved record says when the last reason ended, and accepted
+guidance adds history to such a task without moving it, so the wait counts from
+the first pass that sees it: the stuck-work engine takes a per-finding wait
+(`StuckFinding.notice_after`, here `no_progress_after_seconds`), and a pass that
+no longer sees it closes the untold incident. Its person is told to stop it and
+ask again; administrators hear only when no person is verified. A store row
+about one task that cannot be read leaves that task's incident as it is
+(`StuckFinding.undetermined`, `event=stuck_task_wait_reason_unreadable`) so the
+other conditions go on. The check was added after a request sat waiting for
+about 16 hours (2026-11-14) with no condition noticing: its saved workflow had
+queued it to continue, and its turn's result then set it waiting, which removed
+the queue entry.
 
 Four repairs keep work from getting stuck in the first place:
 

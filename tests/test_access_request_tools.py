@@ -31,7 +31,11 @@ from custom_agents.task_human_interaction_blockers import (
     get_human_interaction_blocker,
 )
 from custom_agents.task_manager import TaskManager
-from custom_agents.task_steering_runtime import send_interrupt_request_for_result
+from custom_agents.task_steering_runtime import (
+    INTERRUPT_REQUEST_EVENT,
+    INTERRUPT_WAITS_ON_REQUESTER_KEY,
+    send_interrupt_request_for_result,
+)
 from custom_messages.contracts.access_v2 import (
     AccessRequestResolvedV1,
     AccessRequestStatus,
@@ -336,6 +340,12 @@ async def test_an_access_interrupt_waits_here_and_a_decision_resumes_the_task(st
     blocker = get_human_interaction_blocker(manager, task_id)
     assert blocker["kind"] == ACCESS_REQUEST_BLOCKER and blocker["access_request_id"] == request_id
     assert manager.get_task_info(task_id).state == ProgressState.WAITING
+    # It waits through its blocker, not on the requester (custom_agents.task_wait_reasons).
+    (paused,) = [
+        entry.details for entry in manager.get_task_info(task_id).task.execution_history
+        if entry.details.get("event") == INTERRUPT_REQUEST_EVENT
+    ]
+    assert paused[INTERRUPT_WAITS_ON_REQUESTER_KEY] is False
 
     # A live turn is answered through its interrupt.
     requests = access_runtime.runtime_requests(worker)

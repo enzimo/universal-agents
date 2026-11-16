@@ -25,6 +25,16 @@ request produces one message however many agents work on it. Conditions:
 - ``task_waiting_for_answer``: the task asked the person a question (a
   recoverable pause) that is still unanswered.
 - ``task_no_progress``: in progress on a live agent with no new history entry.
+- ``task_waiting_on_nothing``: a live agent's task that is not running (waiting,
+  paused or ready), not in its queue, and has no reason to wait in its saved
+  work (``custom_agents.task_wait_reasons`` lists every reason). Nothing will
+  continue it: it was left waiting by mistake. No saved record says when the
+  last reason ended, so the wait counts from the first pass that sees it, and
+  the person is told only after it has been seen on every pass for
+  ``no_progress_after_seconds``; a pass that no longer sees it closes the untold
+  incident. Accepted guidance adds history to such a task without moving it, so
+  the last history entry cannot start the wait. The person is told to stop it
+  and ask again, because a message to it would only be taken as guidance.
 
 Who is told: the person in the root task's signed context (read with
 ``check_expiry=False``, which reads facts and authorizes nothing, because a
@@ -43,6 +53,7 @@ from typing import Any, Iterable
 from access_control.identity import IdentityRejected
 from custom_agents.instance_delivery_context import configured_owner_route
 from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc, retain_decisions
+from custom_agents.durable_owner_scope import manager_durable_scope_id
 from custom_agents.liveness_observation import heartbeat_checks_deferred
 from custom_agents.stuck_work import (
     ChatRoute,
@@ -52,6 +63,14 @@ from custom_agents.stuck_work import (
     report_stuck_work,
 )
 from custom_agents.task_context_runtime import context_verifier
+from custom_agents.task_wait_reasons import (
+    PENDING_PAUSE,
+    TERMINAL_STATES,
+    OutsideRecords,
+    SavedWork,
+    UnreadableWaitRecord,
+    wait_reason,
+)
 from custom_messages.contracts.access_v2 import AccessRequestStatus, SchedulePermitV1, TaskContextV1
 from custom_messages.contracts.runtime_snapshot_v3 import (
     RuntimeSnapshotV3,
@@ -62,6 +81,7 @@ from custom_messages.enums import ProgressState
 from runtime_settings.stuck_tasks import StuckTaskSettings
 from storage.access_repository import AccessRepository
 from storage.stuck_work_repository import StuckSubjectKind, StuckWorkIncidentV1
+from storage.tool_setup_run_repository import ToolSetupRunRepository
 from storage.worker_handback_repository import WorkerHandbackRepository
 from time_presentation import format_user_timestamp
 
@@ -73,12 +93,8 @@ TASK_HANDBACK_UNCLAIMED = "task_handback_unclaimed"
 TASK_WAITING_FOR_ACCESS = "task_waiting_for_access_decision"
 TASK_WAITING_FOR_ANSWER = "task_waiting_for_answer"
 TASK_NO_PROGRESS = "task_no_progress"
-# A recoverable pause still waiting for the person (RecoverablePauseRecord.status).
-PAUSE_PENDING = "pending"
+TASK_WAITING_ON_NOTHING = "task_waiting_on_nothing"
 
-TERMINAL_STATES = frozenset(
-    {ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED}
-)
 EXECUTING_STATES = frozenset({ProgressState.IN_PROGRESS, ProgressState.RETRYING})
 _LABEL_LENGTH = 80
 
@@ -138,6 +154,12 @@ def last_activity(record: TaskSnapshotRecord) -> datetime | None:
     return max(known) if known else None
 
 
+def last_moved(record: TaskSnapshotRecord) -> datetime | None:
+    """When the task last changed state; history such as accepted guidance does not move it."""
+    states = record.task.task_state or []
+    return _utc(states[-1][1]) if states else None
+
+
 class StuckTasks:
     """The task source for ``report_stuck_work``."""
 
@@ -147,6 +169,9 @@ class StuckTasks:
         self.agent = agent
         self.settings = settings
         self.team_id = str(agent.team_id)
+        # (request id, reason) of this pass's findings; ``recovery`` runs after
+        # ``findings`` in the same pass and reads them.
+        self._found: frozenset[tuple[str, str]] = frozenset()
 
     # -- reading saved work ---------------------------------------------------
 
@@ -256,12 +281,17 @@ class StuckTasks:
         since: datetime,
         agent_ids: set[str],
         agent_type: str | None,
+        notice_after: timedelta | None = None,
+        shown_since: datetime | None = None,
+        log_detail: str = "",
+        undetermined: bool = False,
     ) -> StuckFinding:
+        """One finding for a request; ``shown_since`` is the time the texts name, when not ``since``."""
         identity = self.identity_of(meta)
         person = identity.person_id if identity is not None else None
         subject, description = _work_description(identity)
-        label, when = self.label(root_task), self._when(meta, since)
-        text, admin_text, tell_admins = _texts(reason, when, agent_type, description)
+        label, when = self.label(root_task), self._when(meta, shown_since or since)
+        text, admin_text, tell_admins = _texts(reason, when, agent_type, description, root_task.task_id)
         return StuckFinding(
             subject_kind=TASK_SUBJECT,
             subject_id=root_task.task_id,
@@ -273,6 +303,9 @@ class StuckTasks:
             message=StuckMessage(title=f'Your request "{label}" {_TITLES[reason]}', text=text),
             chat_route=self.chat_route(header, meta, person, agent_ids),
             administrator_message=StuckMessage(title=f"{subject} {_TITLES[reason]}", text=admin_text),
+            notice_after=notice_after,
+            log_detail=log_detail,
+            undetermined=undetermined,
         )
 
     def findings(self, now: datetime) -> list[StuckFinding]:
@@ -281,22 +314,30 @@ class StuckTasks:
         agent_ids = {owner.owner_agent_id for owner in owners} | {str(self.agent.id)}
         found: dict[tuple[str, str], StuckFinding] = {}
 
-        def add(task: HeldTask, reason: str, since: datetime) -> None:
+        def add(task: HeldTask, reason: str, since: datetime, **extra: Any) -> None:
             root = self.root(held, task)
             key = (root.record.task_id, reason)
-            if key not in found:
+            known = found.get(key)
+            # A decided finding for the request replaces an undetermined one.
+            if known is None or (known.undetermined and not extra.get("undetermined", False)):
                 found[key] = self._finding(
                     root.record.task, root.record.header, root.record.meta,
                     reason=reason, since=since, agent_ids=agent_ids,
-                    agent_type=task.owner_named_agent_type,
+                    agent_type=task.owner_named_agent_type, **extra,
                 )
 
         live_owners = self._owners_gone(owners, held, now, add)
         self._handbacks(now, held, agent_ids, found)
-        self._waiting_for_access(now, held, add)
+        waiting_requests = AccessRepository(self.agent.task_manager.storage_settings).list_requests(
+            self.team_id, status=AccessRequestStatus.WAITING
+        )
+        self._waiting_for_access(now, held, add, waiting_requests)
+        outside = self._outside_records(waiting_requests)
         for owner in owners:
             if owner.owner_agent_id in live_owners:
                 self._live_owner_waits(owner, held, now, add)
+                self._waiting_on_nothing(owner, now, add, outside)
+        self._found = frozenset(found)
         return list(found.values())
 
     def _owners_gone(self, owners: list[OwnerWork], held: dict[str, HeldTask], now: datetime, add: Any) -> set[str]:
@@ -320,18 +361,82 @@ class StuckTasks:
         no_progress = timedelta(seconds=self.settings.no_progress_after_seconds)
         for pause in owner.snapshot.recoverable_pause_records.values():
             created = _utc(pause.created_at)
-            if pause.status == PAUSE_PENDING and created and now - created >= waiting and pause.task_id in held:
+            if pause.status == PENDING_PAUSE and created and now - created >= waiting and pause.task_id in held:
                 add(held[pause.task_id], TASK_WAITING_FOR_ANSWER, created)
         for record in owner.snapshot.tasks:
             last = last_activity(record)
             if record.state in EXECUTING_STATES and last and now - last >= no_progress:
                 add(held[record.task_id], TASK_NO_PROGRESS, last)
 
-    def _waiting_for_access(self, now: datetime, held: dict[str, HeldTask], add: Any) -> None:
-        threshold = timedelta(seconds=self.settings.waiting_on_person_after_seconds)
-        requests = AccessRepository(self.agent.task_manager.storage_settings).list_requests(
-            self.team_id, status=AccessRequestStatus.WAITING
+    def _outside_records(self, waiting_requests: list[Any]) -> OutsideRecords:
+        """The team stores that record waits outside saved work (``task_wait_reasons.OutsideRecords``)."""
+        setup_runs = ToolSetupRunRepository(self.agent.task_manager.storage_settings)
+        plans = self.agent.task_manager.plan_repository
+        return OutsideRecords(
+            waiting_access_task_ids=frozenset(request.task_id for request in waiting_requests if request.task_id),
+            # all_rows raises on a storage error: an unreadable store must not look empty.
+            schedule_rows=self.agent._schedule_store.all_rows,
+            setup_runs_for_task=lambda task_id: setup_runs.for_task(team_id=self.team_id, task_id=task_id),
+            plan=lambda plan_id, scope: plans.get_plan(plan_id, owner_agent_id=scope),
         )
+
+    def _waiting_on_nothing(self, owner: OwnerWork, now: datetime, add: Any, outside: OutsideRecords) -> None:
+        """Idle tasks a live owner runs that nothing will continue (module docstring).
+
+        ``since`` is now, so the incident's first sight starts the wait, which
+        ``notice_after`` then requires to last. The finding names the request
+        by the owner's own root walk (a plan step's plan root, a recovery
+        task's original) and the agent type of the owner that runs the task.
+        """
+        threshold = timedelta(seconds=self.settings.no_progress_after_seconds)
+        work = SavedWork.from_snapshot(owner.snapshot)
+        plan_scope = manager_durable_scope_id(
+            team_id=self.team_id, named_agent_type=owner.owner_named_agent_type, fallback_agent_id=owner.owner_agent_id
+        )
+        for record in work.idle_tasks():
+            stranded = self._stranded(owner, work, record, outside, plan_scope)
+            if stranded is False:
+                continue
+            request = work.tasks.get(work.root_of(record.task_id), record)
+            moved = last_moved(record)
+            add(
+                HeldTask(owner.owner_agent_id, owner.owner_named_agent_type, request),
+                TASK_WAITING_ON_NOTHING,
+                now,
+                notice_after=threshold,
+                shown_since=moved,
+                log_detail=(
+                    f"task_id={record.task_id} owner_agent_id={owner.owner_agent_id} "
+                    f"owner_agent_type={owner.owner_named_agent_type or '-'} state={record.state.value} "
+                    f"last_moved={moved.isoformat() if moved else '-'}"
+                ),
+                undetermined=stranded is None,
+            )
+
+    @staticmethod
+    def _stranded(
+        owner: OwnerWork, work: SavedWork, record: TaskSnapshotRecord, outside: OutsideRecords, plan_scope: str | None
+    ) -> bool | None:
+        """True when nothing explains the wait, False when something does, None when a record could not be read."""
+        try:
+            return wait_reason(work, record, outside, plan_scope=plan_scope) is None
+        except UnreadableWaitRecord as unreadable:
+            logger.warning(
+                "Could not read whether a task waits on something; its stuck-task warning stays as it is "
+                "for this pass. event=stuck_task_wait_reason_unreadable task_id=%s owner_agent_id=%s "
+                "store=%s error_type=%s",
+                record.task_id,
+                owner.owner_agent_id,
+                unreadable.store,
+                type(unreadable.__cause__).__name__,
+            )
+            return None
+
+    def _waiting_for_access(
+        self, now: datetime, held: dict[str, HeldTask], add: Any, requests: list[Any]
+    ) -> None:
+        """Access requests still waiting (read once per pass and shared with ``task_waiting_on_nothing``)."""
+        threshold = timedelta(seconds=self.settings.waiting_on_person_after_seconds)
         for request in requests:
             created = _utc(request.created_at_utc)
             if request.task_id in held and created and now - created >= threshold:
@@ -362,10 +467,18 @@ class StuckTasks:
 
     # -- recovery -----------------------------------------------------------------
 
-    def recovery(self, incident: StuckWorkIncidentV1) -> Recovery:
+    def recovery(self, incident: StuckWorkIncidentV1) -> Recovery | None:
         owners = self.owners()
         held = self.held_tasks(owners)
         task = held.get(incident.subject_id)
+        if incident.reason == TASK_WAITING_ON_NOTHING and (
+            task is None or (incident.subject_id, TASK_OWNER_GONE) in self._found
+        ):
+            # Nothing moved, so nothing has cleared. Either the person stopped
+            # it, as the notice told them to, and the stop already replied; or
+            # the agent holding it stopped, so it is no longer checked here and
+            # this pass's "stopped" notice speaks for the request.
+            return None
         if task is None:
             # No saved owner remains. Do not infer a successful result from
             # disappearing custody; the task's history owns its final outcome.
@@ -396,6 +509,7 @@ _TITLES = {
     TASK_WAITING_FOR_ACCESS: "is waiting for an access decision",
     TASK_WAITING_FOR_ANSWER: "is waiting for your answer",
     TASK_NO_PROGRESS: "has made no progress",
+    TASK_WAITING_ON_NOTHING: "will not continue on its own",
 }
 
 
@@ -410,7 +524,7 @@ def _work_description(identity: TaskContextV1 | SchedulePermitV1 | None) -> tupl
     return "System work", "system work"
 
 
-def _texts(reason: str, when: str, agent_type: str | None, work: str) -> tuple[str, str, bool]:
+def _texts(reason: str, when: str, agent_type: str | None, work: str, task_id: str) -> tuple[str, str, bool]:
     """(person text, administrator text, whether administrators are told)."""
     kind = agent_type or "agent"
     if reason == TASK_OWNER_GONE:
@@ -436,6 +550,15 @@ def _texts(reason: str, when: str, agent_type: str | None, work: str) -> tuple[s
             "in the Inbox (Settings > Inbox). It continues as soon as it is decided.",
             f"A task has been waiting since {when} for an access decision in the Inbox.",
             True,
+        )
+    if reason == TASK_WAITING_ON_NOTHING:
+        return (
+            f"It has not moved since {when}, and it is not waiting for anything that could still "
+            "continue it (an answer, an approval, a setup step or another agent's work). Stop it "
+            f"with /stop task {task_id} or in Settings > Tasks, then send your request again.",
+            f"A task held by {kind} has not moved since {when} and is not waiting for anything that "
+            f"could continue it, so it will not continue on its own. Check the runtime log for task {task_id}.",
+            False,
         )
     if reason == TASK_WAITING_FOR_ANSWER:
         return (

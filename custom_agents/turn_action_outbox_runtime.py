@@ -68,7 +68,7 @@ from custom_messages.contracts.envelope_v1 import (
     MessageEnvelope,
 )
 from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, MessageHeader, MessageMeta
-from custom_messages.contracts.runtime_snapshot_v3 import TURN_ACTION_HELD_BACK
+from custom_messages.contracts.runtime_snapshot_v3 import BATCH_WAITING_EXTERNAL_RESULT, TURN_ACTION_HELD_BACK
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task, TaskQuery
 from custom_messages.enums import (
@@ -2348,7 +2348,7 @@ async def _execute_turn_decision_outbox(
                         "content_type": type(result_content).__name__,
                     },
                 )
-                batch_final_status = "waiting_external_result"
+                batch_final_status = BATCH_WAITING_EXTERNAL_RESULT
                 break
         await self.task_manager.operations_runtime.run(
             self.task_manager.mark_turn_action_batch_status,
