@@ -53,6 +53,14 @@ pins what one process can show of the second and third reasons: a file
 merged into the turn between the scan and the rewrite stays (the fresh read),
 and a record deleted meanwhile is skipped. The row lock itself is argued, not
 tested: pinning it needs concurrent writers on a real PostgreSQL server.
+Held guidance copies are rewritten the same way, from a fresh read in one
+write transaction, and one the gateway released meanwhile is skipped. One race
+there is accepted: the gateway's retry may read a held copy, the step rewrite
+it, and the gateway sign and send the old path; the team lead then drops that
+file as outside ``state/uploads`` (logged) and the gateway releases the copy
+on acceptance, so that guidance arrives without the file and the person can
+send it again. Only this operator's run can meet it: the first start runs
+before the gateway.
 
 What it does, per attachment id:
 
@@ -64,19 +72,20 @@ What it does, per attachment id:
    inside the transfer folder, the file is opened without following links
    (``access_control.safe_open``), is a regular file with one link, and its
    sha256 is the gateway record's. Records are not trusted by themselves:
-   agent processes write conversation turns. A conversation entry is moved
-   with the file only when it names the same path and sha256 as the gateway
-   record;
+   agent processes write conversation turns. A conversation entry or a held
+   guidance copy is moved with the file only when it names the same path and
+   sha256 as the gateway record;
 3. moves it to ``state/uploads/<session>/<id><suffix>``, the layout new
    uploads get (``inbound_attachments.store_inbound_attachment_bytes_with_policy``),
    by ``rename`` (which keeps the modification time), or, when the transfer
    folder is on another file system, by a copy that keeps the modification
    time, is checked against the record's sha256 and is renamed into place,
    the source removed only after both records changed;
-4. rewrites the conversation entries first and the gateway record second.
-   A run that stops part way is finished by the next one: a destination that
-   already holds the file (same sha256) counts as ``already_moved`` without
-   needing the transfer folder, and both records are rewritten again.
+4. rewrites the conversation entries first, the gateway's held guidance
+   copies next and the gateway record last. A run that stops part way is
+   finished by the next one: a destination that already holds the file (same
+   sha256) counts as ``already_moved`` without needing the transfer folder,
+   and every record is rewritten again.
 
 Whether the transfer folder is here is decided only from the folder itself,
 never from a file an earlier run already moved to its destination: it is here
@@ -101,9 +110,11 @@ time): a folder mounted again that still holds a waiting file is here by its
 files and the record is rewritten; one that holds none waits until
 ``--files-gone``, which is safe then, because every file it held was moved and
 its records point at the destination. The log calls ``--files-gone`` safe only
-when the device number changed: the same device with another inode is another
-folder on the same disk (the earlier one moved or renamed and an empty one made
-at its path), so the log says to put the earlier folder back. Device and inode
+when the device number changed: the same device with another inode is most
+likely another folder on the same disk (the earlier one moved or renamed and an
+empty one made at its path), so the log says to put the earlier folder back if
+so. It stays tentative because a file system that makes up inode numbers at
+mount time can give the same folder mounted again its old device number. Device and inode
 rather than a token file in the folder: the transfer folder belongs to the
 adapter host and may be read-only, and an identity that does not match at the
 start only ever leads to waiting; one found by the re-check before the drops
@@ -171,12 +182,17 @@ which of three cases it is.
    or naming another path or sha256 than the gateway record is never moved:
    it is dropped when its file is proven absent and kept otherwise.
 
-Held task records and messages still queued are not rewritten: the
-message-bound context id hashes every field of each file record, path
-included (``access_control.ownership``), so a rewritten record would no
-longer match what the gateway signed. The file tools refuse those records as
-outside ``state/uploads``, and the team lead's stuck-task check tells the
-person which files to send again (``custom_agents.stuck_tasks``,
+Guidance the gateway still holds (``gateway_held_guidance``) is rewritten
+with its moved file: the gateway signs it again from that copy at each send,
+so the team lead receives the new path. A held copy whose file did not move
+is left as it is and named in the not-moved warning (``held_guidance_ids``);
+it arrives without the file, which the team lead logs, and the stuck-task
+check does not see it. Held task records and messages still queued are not
+rewritten: the message-bound context id hashes every field of each file
+record, path included (``access_control.ownership``), so a rewritten record
+would no longer match what the gateway signed. The file tools refuse those
+records as outside ``state/uploads``, and the team lead's stuck-task check
+tells the person which files to send again (``custom_agents.stuck_tasks``,
 ``task_files_sent_before_upgrade``).
 
 It lives in ``instance_upgrades``, not ``assistant_gateway``, because it
@@ -199,10 +215,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from pydantic import ValidationError
+
 from access_control import safe_open
 from assistant_gateway.domain.delivery import AttachmentRecord
 from assistant_gateway.inbound_attachments import safe_attachment_session_dir_name, sanitize_attachment_filename
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
+from custom_messages.contracts.task_v1 import TaskSteering
 from storage.conversation_repository import ConversationRepository, create_conversation_repository
 from storage.gateway_state_repository import GatewayStateRepository, create_gateway_state_repository
 
@@ -246,6 +265,12 @@ _NO_RETRY_REASONS = {
         "from them, and the person can send it again"
     ),
 }
+
+# Added to the not-moved warning when held guidance names the file (its copies are never changed).
+_HELD_GUIDANCE_NOTE = (
+    " Guidance the gateway holds names it too: that guidance is sent without the file, and the person can send "
+    "it again."
+)
 
 # The operator's command that declares the waiting files gone (rule 3), named in messages.
 FILES_GONE_COMMAND = "assistant_cli upgrade adapter-host-files --config <instance_config.yaml> --files-gone"
@@ -326,13 +351,23 @@ class _Entry:
         return (self.conversation_id, self.task_id)
 
 
+@dataclass(frozen=True)
+class _HeldEntry:
+    """One held guidance copy's record of a file in the transfer folder (``gateway_held_guidance``)."""
+
+    correlation_id: str
+    attachment: UserTaskAttachment
+    path: Path
+
+
 @dataclass
 class _Item:
-    """One attachment id with a file in the transfer folder: its gateway record and conversation entries."""
+    """One attachment id with a file in the transfer folder: its gateway record, conversation entries and held guidance."""
 
     attachment_id: str
     record: Optional[AttachmentRecord] = None
     entries: list[_Entry] = field(default_factory=list)
+    held: list[_HeldEntry] = field(default_factory=list)
 
 
 class _Unmovable(Exception):
@@ -362,6 +397,8 @@ class _NotMoved:
     kept_entries: list[_Entry]
     drop_record: bool
     kept_record: bool
+    # Held guidance naming the file: never changed or dropped, only named in the warning.
+    held: list[_HeldEntry] = field(default_factory=list)
 
 
 class FolderProblem(Exception):
@@ -505,7 +542,14 @@ class _Step:
     # -- finding ---------------------------------------------------------------
 
     def find(self) -> list[_Item]:
-        """Every attachment id with a gateway record or a conversation entry in the transfer folder."""
+        """Every attachment id with a gateway record or a conversation entry in the transfer folder.
+
+        Held guidance naming such a file is added to its id. An id only held
+        guidance names (no gateway record, no conversation entry) is no item:
+        it would never move, so it neither waits nor moves, and is logged
+        (``event=adapter_host_files_held_only``); that guidance arrives
+        without the file, which the team lead logs.
+        """
 
         items: dict[str, _Item] = {}
         after_id = ""
@@ -519,7 +563,44 @@ class _Step:
             after_id = records[-1].attachment_id
         for entry in self._entries():
             items.setdefault(entry.attachment.attachment_id, _Item(entry.attachment.attachment_id)).entries.append(entry)
+        for held in self._held_entries():
+            item = items.get(held.attachment.attachment_id)
+            if item is not None:
+                item.held.append(held)
+                continue
+            logger.warning(
+                "Guidance the gateway holds names a file of a chat app the adapter host ran that no other record "
+                "names, so it cannot be moved; the guidance is sent without it and the person can send it again. "
+                "event=adapter_host_files_held_only attachment_id=%s correlation_id=%s file=%s",
+                held.attachment.attachment_id,
+                held.correlation_id,
+                held.path,
+            )
         return [items[key] for key in sorted(items)]
+
+    def _held_entries(self) -> Iterator[_HeldEntry]:
+        """Files in the transfer folder that guidance the gateway still holds names.
+
+        Read whole: the table holds only guidance its running request has not
+        confirmed yet. A copy that does not decode is one the gateway cannot
+        send either; it is logged (``event=adapter_host_files_held_guidance_unreadable``)
+        and left alone.
+        """
+
+        for held in self._gateway.list_held_guidance():
+            try:
+                attachments = TaskSteering.model_validate_json(held.steering_json).attachments
+            except ValidationError:
+                logger.warning(
+                    "A held guidance copy could not be read, so its files are not moved with it. "
+                    "event=adapter_host_files_held_guidance_unreadable correlation_id=%s",
+                    held.correlation_id,
+                )
+                continue
+            for attachment in attachments:
+                path = self._in_transfer(attachment.local_path())
+                if path is not None:
+                    yield _HeldEntry(held.correlation_id, attachment, path)
 
     def _entries(self) -> Iterator[_Entry]:
         after: Optional[tuple[str, str]] = None
@@ -744,7 +825,7 @@ class _Step:
             record = item.record
             if record is None:
                 unmovable = _Unmovable(OUTCOME_NO_RECORD, REASON_NO_GATEWAY_RECORD, self._transfer)
-                self._keep_or_drop(item, unmovable, item.entries, record_path=None, absent_source=None)
+                self._keep_or_drop(item, unmovable, item.entries, item.held, record_path=None, absent_source=None)
                 return
             names: Optional[tuple[Path, tuple[str, str]]] = None
             try:
@@ -757,6 +838,7 @@ class _Step:
                     item,
                     unmovable,
                     item.entries,
+                    item.held,
                     record_path=source_path,
                     absent_source=absent,
                     destination=names[1] if names is not None else None,
@@ -767,18 +849,26 @@ class _Step:
                 entry for entry in item.entries if entry.path == source and entry.attachment.sha256 == record.sha256
             ]
             others = [entry for entry in item.entries if entry not in moved_with]
+            held_with = [held for held in item.held if held.path == source and held.attachment.sha256 == record.sha256]
+            held_others = [held for held in item.held if held not in held_with]
             new_path = str(self._uploads.joinpath(*destination))
+            # Turns, then held guidance, then the gateway record: the gateway record still naming the
+            # transfer folder is what makes the next run finish a run stopped between them.
             if moved_with:
                 self._conversations.relocate_turn_attachment(
                     sorted({entry.turn for entry in moved_with}), item.attachment_id, local_path=new_path
                 )
+            if held_with:
+                self._gateway.relocate_held_guidance_attachment(
+                    sorted({held.correlation_id for held in held_with}), item.attachment_id, new_path
+                )
             self._gateway.set_attachment_local_path(item.attachment_id, new_path)
             if remove_source:
                 self._remove_source(source, item.attachment_id)
-            if others:
-                # Entries naming another path or sha256 never follow the file (agent processes write turns).
+            if others or held_others:
+                # Records naming another path or sha256 never follow the file (agent processes write turns).
                 mismatch = _Unmovable(OUTCOME_REFUSED, REASON_RECORD_MISMATCH, self._transfer)
-                self._keep_or_drop(item, mismatch, others, record_path=None, absent_source=None, counted=False)
+                self._keep_or_drop(item, mismatch, others, held_others, record_path=None, absent_source=None, counted=False)
             setattr(self.counts, outcome, getattr(self.counts, outcome) + 1)
 
     def _names(self, item: _Item, record: AttachmentRecord) -> tuple[Path, tuple[str, str]]:
@@ -1050,6 +1140,7 @@ class _Step:
         item: _Item,
         unmovable: _Unmovable,
         entries: list[_Entry],
+        held: list[_HeldEntry],
         *,
         record_path: Optional[Path],
         absent_source: Optional[Path],
@@ -1066,7 +1157,9 @@ class _Step:
         cannot be told: an earlier run may have renamed it there and stopped
         before rewriting its records, so its records stay and a later run
         counts it ``already_moved``. Everything is decided before anything is
-        dropped.
+        dropped. ``held`` guidance copies are never dropped: the gateway
+        releases them when the team lead accepts the guidance, which then
+        arrives without the file (the lead logs it), so they are only named.
         """
 
         at_destination = destination is not None and self._maybe_at_destination(destination)
@@ -1083,7 +1176,7 @@ class _Step:
         has_record = counted and item.record is not None
         drop_record = has_record and absent(record_path)
         self._not_moved.append(
-            _NotMoved(item, unmovable, drop_entries, kept_entries, drop_record, has_record and not drop_record)
+            _NotMoved(item, unmovable, drop_entries, kept_entries, drop_record, has_record and not drop_record, held)
         )
         if counted:
             setattr(self.counts, unmovable.outcome, getattr(self.counts, unmovable.outcome) + 1)
@@ -1122,9 +1215,15 @@ class _Step:
         kept = bool(not_moved.kept_entries) or not_moved.kept_record
         records = RECORDS_PARTLY_DROPPED if dropped and kept else RECORDS_DROPPED if dropped else RECORDS_KEPT
         entries = not_moved.drop_entries + not_moved.kept_entries
-        file = unmovable.file or (entries[0].path if entries else None)
-        if not kept:
+        held = sorted({entry.correlation_id for entry in not_moved.held})
+        file = unmovable.file or (entries[0].path if entries else not_moved.held[0].path if not_moved.held else None)
+        if dropped and not kept:
             advice = "its records were dropped, so the person must send it again"
+        elif not kept:  # only held guidance names it with another path or sha256 than the gateway's record
+            advice = (
+                "held guidance names it with another path or sha256 than the gateway's record, so that guidance "
+                "cannot follow the moved file and trying again does not help"
+            )
         elif unmovable.reason in _NO_RETRY_REASONS:
             advice = _NO_RETRY_REASONS[unmovable.reason]
         else:
@@ -1133,13 +1232,15 @@ class _Step:
                 f"{self._marker} and restart to try it again"
             )
         logger.warning(
-            "A file of a chat app the adapter host ran was not moved into state/uploads; %s%s. "
-            "event=adapter_host_file_not_moved attachment_id=%s conversation_ids=%s folder=%s file=%s records=%s "
-            "reason=%s",
+            "A file of a chat app the adapter host ran was not moved into state/uploads; %s%s.%s "
+            "event=adapter_host_file_not_moved attachment_id=%s conversation_ids=%s held_guidance_ids=%s folder=%s "
+            "file=%s records=%s reason=%s",
             advice,
             f" ({unmovable.detail})" if unmovable.detail else "",
+            _HELD_GUIDANCE_NOTE if held else "",
             item.attachment_id,
             ",".join(sorted({entry.conversation_id for entry in entries})) or "-",
+            ",".join(held) or "-",
             unmovable.folder or self._transfer,
             file or "-",
             records,

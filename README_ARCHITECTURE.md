@@ -4644,7 +4644,12 @@ the desktop app never offers an older version.
   with no gateway record (no chat session for its folder) or naming another
   path or sha256 is never moved; it is dropped only when its file is proven
   absent. One line, `event=adapter_host_files_upgraded` with the counts,
-  reports the result, at warning level when a file was not moved. Held
+  reports the result, at warning level when a file was not moved. Guidance
+  the gateway still holds (`gateway_held_guidance`) is rewritten with its
+  moved file, between the turns and the gateway record and under the same
+  path-and-sha256 rule, because the gateway signs it again from that copy at
+  each send; a held copy whose file did not move is left as it is and named
+  in the not-moved warning (`held_guidance_ids`). Held
   task records and messages still queued are not rewritten: the message-bound
   context id hashes each file record's path (`access_control.ownership`), and
   task records change only through custody. The module goes with the other
@@ -4665,8 +4670,11 @@ the desktop app never offers an older version.
   kept from guidance, answers and escalation results, the files the tools
   offer by id) and the files on guidance accepted by releases before 0.9.12,
   which kept them only in the guidance's history entry. So guidance sent
-  through such a chat app before the upgrade, or held by the gateway and sent
-  again after it, is reported too. A copy of guidance passed on to a working
+  through such a chat app before the upgrade is reported too. Guidance the
+  gateway held across the upgrade is not: the upgrade step points it at
+  the moved file, and one whose file did not move arrives without it
+  (the team lead logs `attachment_outside_upload_folders` and the step's
+  warning names it), which this check cannot see. A copy of guidance passed on to a working
   specialist carries no files (the team lead keeps them), so it adds none.
   The files of a request's subtasks, plan steps and recovery tasks (found
   through the plan-step and recovery links in the team lead's saved work) go

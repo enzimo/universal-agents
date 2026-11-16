@@ -61,18 +61,20 @@ import pytest
 
 import instance_upgrades.adapter_host_files as upgrade_module
 from instance_upgrades.adapter_host_files import upgrade_adapter_host_files
+from assistant_gateway.domain.request_state import HeldGuidanceRecord
 from custom_agents.conversation_attachments import (
     UNRECORDED_TURNS_NOTE,
     LocatedUpload,
     TaskAttachments,
     UploadFolder,
     inventory_text,
+    keep_upload_files,
     locate_upload,
 )
 from custom_agents.conversation_store import ConversationStore
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
-from custom_messages.contracts.task_v1 import Task
-from custom_messages.enums import MessageMetaType
+from custom_messages.contracts.task_v1 import Task, TaskSteering
+from custom_messages.enums import MessageMetaType, TaskSteeringType
 from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.interactive_apps import AdapterHostSettings
 from storage.config import StorageSettings, resolve_storage_settings
@@ -544,6 +546,110 @@ def test_a_transfer_folder_set_to_state_uploads_moves_and_drops_nothing(instance
     assert inside.read_bytes() == b"already where agents open it"
     assert instance.gateway().get_attachment("att_inside").local_path == str(inside)
     assert _untouched(instance) == before
+
+
+# --- Guidance the gateway holds ------------------------------------------------------------------
+
+
+def _hold(instance: _Instance, correlation_id: str, *files: UserTaskAttachment, raw: str | None = None) -> str:
+    """Guidance the gateway held across the upgrade, naming ``files``; its stored copy is returned."""
+
+    steering = TaskSteering(
+        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
+        guidance_text=f"Use this file too ({correlation_id}).",
+        attachments=list(files),
+    )
+    stored = raw if raw is not None else steering.model_dump_json()
+    instance.gateway().hold_guidance(
+        HeldGuidanceRecord(
+            correlation_id=correlation_id,
+            target_correlation_id="corr_running",
+            session_key="telegram:chat:7",
+            conversation_id=CONVERSATION,
+            steering_json=stored,
+            created_at="2026-11-01T00:00:00+00:00",
+        )
+    )
+    return stored
+
+
+def _held_copy(instance: _Instance, correlation_id: str) -> str:
+    return instance.gateway().get_held_guidance(correlation_id).steering_json
+
+
+def _turn_record(instance: _Instance, attachment_id: str) -> UserTaskAttachment:
+    """The 0.9.13 record a turn keeps, with the transfer folder path and the gateway's sha256."""
+
+    return next(
+        entry.attachment
+        for entry in instance.conversations().list_turn_attachments(CONVERSATION)
+        if entry.attachment.attachment_id == attachment_id
+    )
+
+
+def test_held_guidance_follows_its_moved_file_and_the_lead_keeps_it_when_sent_again(instance: _Instance, caplog) -> None:
+    """F2 (DATA-1): the gateway signs held guidance again from its copy, so the copy must name the moved file.
+
+    Only a copy naming the gateway record's path and sha256 follows it; the others stay exactly as stored and are
+    named in a warning. Guidance naming a file no other record names makes nothing wait.
+    """
+
+    photo, lost = _turn_record(instance, "att_photo"), _turn_record(instance, "att_lost")
+    _hold(instance, "guide_photo", photo)
+    untouched = {
+        "guide_lost": _hold(instance, "guide_lost", lost),
+        "guide_other_sha": _hold(
+            instance, "guide_other_sha", photo.model_copy(update={"sha256": hashlib.sha256(b"else").hexdigest()})
+        ),
+        "guide_held_only": _hold(
+            instance,
+            "guide_held_only",
+            _record("att_stray", str(_write(instance.transfer / "adapter_upload_stray", b"stray")), "0" * 64),
+        ),
+        "guide_unreadable": _hold(instance, "guide_unreadable", raw="{not json"),
+    }
+    before = TaskSteering.model_validate_json(_held_copy(instance, "guide_photo"))
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.finished and result.counts.moved == 1, "guidance naming a file nothing else names waits for nothing"
+    after = TaskSteering.model_validate_json(_held_copy(instance, "guide_photo"))
+    (moved,) = after.attachments
+    assert moved.local_path() == str(instance.photo_destination)
+    assert after.model_dump(exclude={"attachments"}) == before.model_dump(exclude={"attachments"})
+    assert moved.model_dump(exclude={"storage_refs"}) == photo.model_dump(exclude={"storage_refs"})
+    # What the team lead does with the files of guidance it receives (sent_files_runtime._kept_upload_files).
+    folder = UploadFolder.for_instance(instance.root)
+    assert keep_upload_files(after.attachments, folder, task_id="task_2", conversation_id=CONVERSATION) == [moved]
+    located = locate_upload(moved, folder, task_id="task_2", conversation_id=CONVERSATION)
+    assert isinstance(located, LocatedUpload) and located.read_bytes(max_bytes=100) == CONTENT["att_photo"]
+    assert {key: _held_copy(instance, key) for key in untouched} == untouched, "the others stay exactly as stored"
+    not_moved = _events(caplog, "adapter_host_file_not_moved")
+    (lost_warning,) = [message for message in not_moved if "attachment_id=att_lost" in message]
+    assert "held_guidance_ids=guide_lost " in lost_warning and "sent without the file" in lost_warning
+    (mismatch,) = [message for message in not_moved if "reason=record_mismatch" in message]
+    assert "attachment_id=att_photo" in mismatch and "held_guidance_ids=guide_other_sha " in mismatch
+    assert mismatch.endswith("records=kept reason=record_mismatch") and "restart" not in mismatch
+    (held_only,) = _events(caplog, "adapter_host_files_held_only")
+    assert "attachment_id=att_stray correlation_id=guide_held_only" in held_only
+    (unreadable,) = _events(caplog, "adapter_host_files_held_guidance_unreadable")
+    assert unreadable.endswith("correlation_id=guide_unreadable")
+
+
+def test_a_held_copy_released_or_already_moved_is_left_alone(instance: _Instance) -> None:
+    """The gateway may release a copy while an operator's run works beside it; a second rewrite changes nothing."""
+
+    photo = _turn_record(instance, "att_photo")
+    _hold(instance, "guide_photo", photo)
+    gateway = instance.gateway()
+    destination = str(instance.photo_destination)
+
+    assert gateway.relocate_held_guidance_attachment(["released", "guide_photo"], "att_photo", destination) == 1
+    once = _held_copy(instance, "guide_photo")
+    assert gateway.relocate_held_guidance_attachment(["guide_photo"], "att_photo", destination) == 0
+    assert gateway.relocate_held_guidance_attachment(["guide_photo"], "att_other", "/elsewhere") == 0
+    assert _held_copy(instance, "guide_photo") == once
 
 
 # --- Runs that overlap ---------------------------------------------------------------------------
@@ -1295,8 +1401,9 @@ class _Stop(RuntimeError):
     pass
 
 
-@pytest.mark.parametrize("stop_at", ["before_conversations", "before_gateway"])
+@pytest.mark.parametrize("stop_at", ["before_conversations", "before_held_guidance", "before_gateway"])
 def test_a_run_stopped_part_way_is_finished_by_the_next_run(instance: _Instance, monkeypatch, stop_at) -> None:
+    _hold(instance, "guide_photo", _turn_record(instance, "att_photo"))
     if stop_at == "before_conversations":
         original = _RelationalConversationRepository.relocate_turn_attachment
 
@@ -1307,9 +1414,9 @@ def test_a_run_stopped_part_way_is_finished_by_the_next_run(instance: _Instance,
 
         monkeypatch.setattr(_RelationalConversationRepository, "relocate_turn_attachment", stop)
     else:
-        monkeypatch.setattr(
-            _RelationalGatewayStateRepository, "set_attachment_local_path", lambda *_args: (_ for _ in ()).throw(_Stop())
-        )
+        # F2: held guidance is rewritten before the gateway record, which is what makes the next run find the file.
+        method = "relocate_held_guidance_attachment" if stop_at == "before_held_guidance" else "set_attachment_local_path"
+        monkeypatch.setattr(_RelationalGatewayStateRepository, method, lambda *_args: (_ for _ in ()).throw(_Stop()))
 
     with pytest.raises(_Stop):
         instance.run()
@@ -1325,6 +1432,8 @@ def test_a_run_stopped_part_way_is_finished_by_the_next_run(instance: _Instance,
     assert instance.turn_paths("task_2")["att_photo"] == str(instance.photo_destination)
     assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
     assert instance.photo_destination.read_bytes() == CONTENT["att_photo"]
+    (held,) = TaskSteering.model_validate_json(_held_copy(instance, "guide_photo")).attachments
+    assert held.local_path() == str(instance.photo_destination)
 
 
 # --- The progress record: a run stopped part way, then another folder or none ----------------------------

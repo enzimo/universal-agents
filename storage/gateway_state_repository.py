@@ -88,6 +88,7 @@ from .runtime import describe_storage_capabilities, require_repository_backend
 from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
+from .turn_attachments import relocate_steering_attachment
 
 
 def utc_now_iso() -> str:
@@ -424,6 +425,10 @@ class GatewayStateRepository(
     def list_attachments_under(self, folder: str, *, after_id: str = "", limit: int) -> list[AttachmentRecord]: ...
 
     def set_attachment_local_path(self, attachment_id: str, local_path: str) -> bool: ...
+
+    def relocate_held_guidance_attachment(
+        self, correlation_ids: Sequence[str], attachment_id: str, local_path: str
+    ) -> int: ...
 
     def delete_attachment(self, attachment_id: str) -> bool: ...
 
@@ -3015,6 +3020,44 @@ class _RelationalGatewayStateRepository:
             ).rowcount
             conn.commit()
         return bool(updated)
+
+    def relocate_held_guidance_attachment(
+        self, correlation_ids: Sequence[str], attachment_id: str, local_path: str
+    ) -> int:
+        """Point ``attachment_id``'s files in these held guidance copies at ``local_path``; how many changed.
+
+        For the upgrade step that moves files out of the adapter host's
+        transfer folder (``instance_upgrades.adapter_host_files``): the
+        gateway signs held guidance again from its stored copy at each send,
+        so the rewritten path is the one the team lead receives. Each copy is
+        read again in one transaction (its row locked on PostgreSQL), so a
+        copy the gateway released meanwhile is skipped and one already
+        pointing there is left alone; only the matching entries' local storage
+        references change (``storage.turn_attachments.relocate_steering_attachment``).
+        No store-wide write lock is taken: apart from this step the gateway
+        only inserts and deletes held copies, so a copy that changes between
+        the read and the write was deleted, and the update then changes no row.
+        """
+
+        bind = self._dialect.bind
+        row_lock = " FOR UPDATE" if self._dialect is POSTGRES else ""
+        changed = 0
+        with self._connect() as conn:
+            for correlation_id in correlation_ids:
+                row = conn.execute(
+                    f"SELECT steering_json FROM gateway_held_guidance WHERE correlation_id = {bind}{row_lock}",
+                    (correlation_id,),
+                ).fetchone()
+                relocated = relocate_steering_attachment(row["steering_json"], attachment_id, local_path) if row else None
+                if relocated is None:
+                    continue
+                conn.execute(
+                    f"UPDATE gateway_held_guidance SET steering_json = {bind} WHERE correlation_id = {bind}",
+                    (relocated, correlation_id),
+                )
+                changed += 1
+            conn.commit()
+        return changed
 
     def delete_attachment(self, attachment_id: str) -> bool:
         """Delete one attachment record (its file is left alone); False when there is none."""

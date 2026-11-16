@@ -60,6 +60,8 @@ TURN_ATTACHMENT_SUMMARY_FIELDS = (
 # Every dumped file record (``UserTaskAttachment``) has this field and no other
 # message contract does. It says where the bytes are, so it marks a file record.
 _STORAGE_REFS_FIELD = "storage_refs"
+# ``TaskSteering.attachments``: the files a held guidance copy carries.
+_STEERING_ATTACHMENTS_FIELD = "attachments"
 
 
 def _summary_fields(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -215,6 +217,31 @@ def relocate_turn_attachment(raw: Any, attachment_id: str, local_path: str | Non
         return json.dumps([item for item in items if not _has_id(item, attachment_id)])
     changed = [_point_at(item, local_path) for item in items if _has_id(item, attachment_id)]
     return json.dumps(items) if any(changed) else None
+
+
+def relocate_steering_attachment(raw: Any, attachment_id: str, local_path: str) -> str | None:
+    """A held guidance's stored ``TaskSteering`` with ``attachment_id``'s entries moved to ``local_path``.
+
+    For the same upgrade step, on the gateway's held guidance copies
+    (``gateway_held_guidance.steering_json``), which the gateway signs again
+    at each send, so a rewritten path is the one it signs. Like
+    ``relocate_turn_attachment`` it edits the stored JSON: only the matching
+    entries' local storage references change, every other field is kept as
+    stored, and the result is written in the compact form the gateway's
+    ``model_dump_json`` writes. Returns None when nothing changes (no entry
+    has that id, they already point there, or the value is not a steering
+    object with a list of files).
+    """
+
+    try:
+        steering = json.loads(raw) if isinstance(raw, (str, bytes)) else None
+    except json.JSONDecodeError:
+        return None
+    items = steering.get(_STEERING_ATTACHMENTS_FIELD) if isinstance(steering, dict) else None
+    if not isinstance(items, list):
+        return None
+    changed = [_point_at(item, local_path) for item in items if _has_id(item, attachment_id)]
+    return json.dumps(steering, ensure_ascii=False, separators=(",", ":")) if any(changed) else None
 
 
 def _stored_list(raw: Any) -> list[Any] | None:
