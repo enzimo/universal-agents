@@ -404,6 +404,14 @@ def test_stores_are_read_only_when_saved_work_explains_nothing_and_schedules_onc
     assert readers.calls == {"schedules": 1, "runs": 2, "plans": 0}
 
 
+def test_a_running_plan_never_makes_the_pass_read_every_schedule() -> None:
+    """Review C10: a plan's root task waits here on every pass while its steps run."""
+    readers = Readers(plans={"plan-1": _plan(ExecutionPlanItemStatus.IN_PROGRESS, active="t")})
+    saved = work(record(), task_to_plan_id={"t": "plan-1"})
+    assert wait_reason(saved, saved.tasks["t"], readers.records(), plan_scope=SCOPE) is WaitReason.PLAN_EXECUTION
+    assert readers.calls == {"schedules": 0, "runs": 0, "plans": 1}
+
+
 @pytest.mark.parametrize(("failing", "store"), [("runs", SETUP_RUN_STORE), ("plans", PLAN_STORE)])
 def test_an_unreadable_row_about_one_task_names_its_store(failing, store) -> None:
     saved = work(record(), task_to_plan_id={"t": "plan-1"})

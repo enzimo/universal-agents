@@ -614,7 +614,7 @@ agent:
       enabled: true                             # Tell people about stuck tasks.
       owner_gone_after_seconds: 600             # The agent holding the task stopped reporting in and nobody took it over. An agent without a worker start record that reports no process, or whose process can't be checked, counts as stopped after this long, and another agent may then take its work over.
       waiting_on_person_after_seconds: 86400    # Waiting this long on an access decision or the person's answer (a reminder; such waits may last two days).
-      no_progress_after_seconds: 7200           # In progress with no new history entry this long.
+      no_progress_after_seconds: 7200           # In progress with no new history entry this long, or not running with nothing left that could continue it.
       handback_unclaimed_after_seconds: 1800    # Handed back by a worker that lost its lease, sent out again, and not picked up.
     internal_improvement_review_interval_seconds: 21600  # Manager-owned InternalImprovement review cadence (6 hours); each worker startup ensures one shared team schedule. Set <= 0 to disable installation and the stale-schedule check.
 

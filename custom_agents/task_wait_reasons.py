@@ -45,16 +45,16 @@ Read from team stores, only for a task with no reason above (``OutsideRecords``)
 
 - ``ACCESS_REQUEST``: an access, change or proposal request for the task still
   waits in the access store.
-- ``RETRY_TIMER``: an enabled one-time schedule with runs left named
-  ``provider_overload_retry:<task id>:<marker>``: a person's "retry in 5 or 10
-  minutes" choice, or a worker's wait after a model provider refused calls.
-- ``SETUP_RUN``: a ``set_up_tools`` run for the task still waits
-  (``ToolSetupRunRepository``).
 - ``PLAN_EXECUTION``: the task is its plan's active execution with a step
   planned or in progress (``plan_execution_active``). Plans live in the plan
   store, and only the team lead has them. A plan step task is not excused by
   its plan: its own wake is its queue entry, and excusing it would hide a plan
   that cannot go on.
+- ``SETUP_RUN``: a ``set_up_tools`` run for the task still waits
+  (``ToolSetupRunRepository``).
+- ``RETRY_TIMER``: an enabled one-time schedule with runs left named
+  ``provider_overload_retry:<task id>:<marker>``: a person's "retry in 5 or 10
+  minutes" choice, or a worker's wait after a model provider refused calls.
 
 A new kind of wait must save a record that one of these rules can find, or
 this list must learn it; otherwise the stuck-task check reports a task that is
@@ -335,17 +335,22 @@ class OutsideRecords:
         return self._retry_names
 
     def reason(self, work: SavedWork, record: TaskSnapshotRecord, *, plan_scope: str | None) -> WaitReason | None:
-        """The first store-recorded reason ``record`` waits; ``plan_scope`` is the owner's plan scope."""
+        """The first store-recorded reason ``record`` waits; ``plan_scope`` is the owner's plan scope.
+
+        Cheapest first: one-row reads per task, and the whole schedule list
+        last, so a plan's root task, which waits here on every pass while its
+        steps run, never makes the pass read every schedule.
+        """
         task_id = record.task_id
         if task_id in self.waiting_access_task_ids:
             return WaitReason.ACCESS_REQUEST
-        if self.has_retry_timer(task_id):
-            return WaitReason.RETRY_TIMER
-        if self._setup_run_waits(task_id):
-            return WaitReason.SETUP_RUN
         plan_id = work.snapshot.task_to_plan_id.get(task_id)
         if plan_id and plan_scope and plan_execution_active(self._plan(plan_id, plan_scope, task_id), task_id):
             return WaitReason.PLAN_EXECUTION
+        if self._setup_run_waits(task_id):
+            return WaitReason.SETUP_RUN
+        if self.has_retry_timer(task_id):
+            return WaitReason.RETRY_TIMER
         return None
 
     def _setup_run_waits(self, task_id: str) -> bool:

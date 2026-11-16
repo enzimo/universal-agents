@@ -356,6 +356,41 @@ def _incident(agent: Any, finding: StuckFinding) -> StuckWorkIncidentV1:
     )
 
 
+async def _record_finding(
+    agent: Any,
+    repository: StuckWorkRepository,
+    finding: StuckFinding,
+    current: set[str],
+    *,
+    notice_after: timedelta,
+    now: datetime,
+) -> None:
+    """Keep the finding's incident open and tell people once it has lasted its wait.
+
+    The incident joins ``current`` before anyone is told, so a failed notice
+    leaves it open (and its first sight unchanged) for the next pass to retry.
+    """
+    if finding.undetermined:
+        current.add(_incident(agent, finding).incident_id)
+        return
+    runtime = agent.task_manager.operations_runtime
+    incident = await runtime.run(repository.record_seen, _incident(agent, finding))
+    current.add(incident.incident_id)
+    wait = notice_after if finding.notice_after is None else finding.notice_after
+    if incident.notified_at_utc is not None or now - incident.first_seen_at_utc < wait:
+        return
+    # Tell with the current reason, then remember that it was told.
+    incident = incident.model_copy(
+        update={
+            "reason": finding.reason,
+            "person_id": finding.person_id,
+            "tell_administrators": finding.tell_administrators,
+        }
+    )
+    await _tell_stuck(agent, finding, incident)
+    await runtime.run(repository.mark_notified, incident, now)
+
+
 async def report_stuck_work(
     agent: Any,
     source: StuckWorkSource,
@@ -377,25 +412,8 @@ async def report_stuck_work(
     }
     current: set[str] = set()
     for finding in findings:
-        if finding.undetermined:
-            current.add(_incident(agent, finding).incident_id)
-            continue
         try:
-            incident = await runtime.run(repository.record_seen, _incident(agent, finding))
-            current.add(incident.incident_id)
-            wait = notice_after if finding.notice_after is None else finding.notice_after
-            if incident.notified_at_utc is not None or now - incident.first_seen_at_utc < wait:
-                continue
-            # Tell with the current reason, then remember that it was told.
-            incident = incident.model_copy(
-                update={
-                    "reason": finding.reason,
-                    "person_id": finding.person_id,
-                    "tell_administrators": finding.tell_administrators,
-                }
-            )
-            await _tell_stuck(agent, finding, incident)
-            await runtime.run(repository.mark_notified, incident, now)
+            await _record_finding(agent, repository, finding, current, notice_after=notice_after, now=now)
         except Exception:
             agent._logger.exception(
                 "Could not report stuck work; retrying on the next pass. "

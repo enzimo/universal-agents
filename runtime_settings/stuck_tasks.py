@@ -23,7 +23,11 @@ class StuckTaskSettings(BaseModel):
     # Waiting on an access decision or on the person's answer to a question.
     # Such waits may last two days, so this is a reminder, not a failure.
     waiting_on_person_after_seconds: float = Field(default=86400, ge=600)
-    # In progress with no new history entry (a tool or service that never answers).
+    # A task that is not moving: in progress with no new history entry (a tool
+    # or service that never answers), or not running with nothing that could
+    # continue it (task_waiting_on_nothing), seen on every pass this long. One
+    # threshold: both mean the task has stopped moving, and both are far longer
+    # than the moments a task waits between steps.
     no_progress_after_seconds: float = Field(default=7200, ge=600)
     # Handed back by a worker that lost its lease and sent out again, but no agent picked it up.
     handback_unclaimed_after_seconds: float = Field(default=1800, ge=60)
