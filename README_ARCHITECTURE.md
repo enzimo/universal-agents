@@ -2787,10 +2787,13 @@ person which command to run or asking whether to start:
    (`link_results`), the Mark Done button, or start-up recovery ends it. After
    a gateway restart, pages still waiting are reported as unwatched (and
    offered again); page addresses are never stored.
-   A page that opens after the chat reply closed (every page of a run but the
-   first) is listed for Web Chat and the workflow page by
-   `credential_handoff.ToolSetupHandoffs`. Its card stays until that page's
-   own `ToolSetupRecord` ends (`GatewayToolSetups.page_status`), its expiry
+   A page that opens after the chat reply closed (usually every page of a run
+   but the first) is listed for Web Chat and the workflow page by
+   `credential_handoff.ToolSetupHandoffs`. A page shown in the live reply is
+   not listed again: its address goes only into that first no-store response,
+   so after a refresh only its history line remains. A listed card stays
+   until that page's own `ToolSetupRecord` ends
+   (`GatewayToolSetups.page_status`), its expiry
    passes, or the task ends (the chat request has a terminal status or a
    finished run state). Each removal is logged once
    (`event=gateway_credential_handoff_card_closed` with a `reason`; a missing

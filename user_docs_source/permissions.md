@@ -1537,11 +1537,16 @@ run too, so an agent restart during the wait resumes the task once the pages
 end. Refreshing chat can recover a live page while the gateway is running; a
 restart does not recover an already-issued page.
 
-Each page's card, in chat and on the workflow page, stays until that page
-itself ends (finished, closed, expired) or the task ends, however the task's
-other pages end. Chat history keeps one line per page and never a page's
-address: for example "X sign-in page opened."; for a step done outside
-Universal Agents, the step's title, instructions and link.
+Each page's card stays until that page itself ends (finished, closed,
+expired) or the task ends, however the task's other pages end. Pages that
+open after the chat's first reply (usually every page but the first) also
+show on the workflow page and come back after a refresh. A page shown in the
+chat's first reply keeps its card in that chat until the page ends, but a
+refresh removes the card and the workflow page does not list it; a step done
+outside Universal Agents can still be marked done on the workflow page. Chat
+history keeps one line per page and never a page's address: for example "X
+sign-in page opened."; for a step done outside Universal Agents, the step's
+title, instructions and link.
 
 ## Complete workflow reviews
 
