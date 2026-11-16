@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
@@ -16,9 +17,11 @@ from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
 from assistant_gateway.application.ports import GatewaySecureBrokerRefusal
 from assistant_gateway.application.tool_setup import PageEnding
+from assistant_gateway.interactive_apps.website_handlers.workflows import WebsiteWorkflowHandlers
 from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.task_v1 import TaskSteering, TaskSteeringInterruptRecord
+from custom_messages.contracts.tool_setup_spec_v1 import ExternalSetupStepV1
 from custom_messages.enums import TaskSteeringType
 from custom_messages.contracts.routing_v1 import (
     MessageHeader,
@@ -215,15 +218,12 @@ async def test_duplicate_delivery_does_not_create_another_broker_session(handoff
         owner_canonical_user_id=gateway.config.user.canonical_user_id
     )
     assert len(actions) == 1
+    # Another page's result changes the shared chat request's status; this page
+    # still waits, so its card stays (a card follows its own page).
     gateway.state_store.update_request_status(
         "correlation_binding", "waiting_for_credential_result"
     )
-    assert (
-        gateway.application.transcripts.list_credential_actions(
-            owner_canonical_user_id=gateway.config.user.canonical_user_id
-        )
-        == ()
-    )
+    assert _listed(gateway) == [envelope.msg_content.setup_request_id]
 
 
 @pytest.mark.asyncio
@@ -425,3 +425,279 @@ async def test_the_setup_workflow_notice_shows_in_web_chat_with_its_link(handoff
     )
     [shown] = [message for message in history.messages if message.message_type == "user_notification"]
     assert link in shown.content
+
+
+# Each page's card stays until that page ends --------------------------------------------
+#
+# Incident (2026-11-14, summarised): set_up_tools opened two outside steps for one
+# task, one through the live reply and one through the handoff. Marking the first
+# done removed the second's card from Web Chat and the workflow page, because each
+# page's result changes the chat request the pages share, and the card list
+# followed that request's status instead of the card's own page.
+
+CHAT_REQUEST = "correlation_binding"
+# The workflow page lists the cards of its own conversation and chat request.
+WORKFLOW = {"source_session_key": "session_binding", "source_correlation_id": CHAT_REQUEST}
+
+
+class _Steps:
+    """Catalog steps done outside Universal Agents for two tools, and the task's workflow page."""
+
+    TOOLS = {
+        ("http:registrar_one", "create_key"): ("Registrar One", "https://registrar-one.example.com/account/api"),
+        ("http:registrar_two", "create_token"): ("Registrar Two", "https://registrar-two.example.com/profile/tokens"),
+    }
+
+    def external_step(self, tool_id: str, step_id: str):
+        found = self.TOOLS.get((tool_id, step_id))
+        if found is None:
+            return None
+        name, url = found
+        return name, ExternalSetupStepV1(
+            step_id=step_id,
+            title=f"Create a {name} API key",
+            instructions=f"Sign in to {name}, open the API page and create a key that can read your account.",
+            url=url,
+        )
+
+    def workflow_url(self, task_id: str):
+        return "/workflows/access_flow_registrars" if task_id == "task_binding" else None
+
+
+def _page(
+    envelope: MessageEnvelope,
+    setup_request_id: str,
+    *,
+    tool_id: str,
+    kind: str = "account_link",
+    owner: str = "person",
+    step_id: str | None = None,
+) -> MessageEnvelope:
+    page = envelope.model_copy(deep=True)
+    page.msg_content = ToolSetupRequestV1(
+        setup_request_id=setup_request_id,
+        parent_task_id="task_binding",
+        tool_id=tool_id,
+        kind=kind,
+        owner=owner,
+        step_id=step_id,
+        reason=f"Set up {tool_id} so I can compare the two accounts.",
+    )
+    return page
+
+
+def _outside_step(envelope: MessageEnvelope, setup_request_id: str, tool_id: str) -> MessageEnvelope:
+    step_id = "create_key" if tool_id == "http:registrar_one" else "create_token"
+    return _page(envelope, setup_request_id, tool_id=tool_id, kind="external_step", step_id=step_id)
+
+
+async def _open_through_the_live_reply(gateway: UserGateway, page: MessageEnvelope):
+    """The page arrives while the chat waits for the task's reply (what a Web Chat send waits on)."""
+
+    async with gateway._manager_client.response_channel(CHAT_REQUEST):
+        await gateway._manager_client.handle_response(page)
+        response = await gateway._response_coordinator.await_terminal_response(
+            correlation_id=CHAT_REQUEST, session_key="session_binding", query_handler=None
+        )
+    assert response.transient_action is not None, response.text
+    return response
+
+
+def _listed(gateway: UserGateway) -> list[str]:
+    """The pages whose cards Web Chat lists (its live events read)."""
+
+    owner = gateway.config.user.canonical_user_id
+    return [
+        item.request_id
+        for item in gateway.application.transcripts.list_credential_actions(owner_canonical_user_id=owner)
+    ]
+
+
+def _on_workflow_page(gateway: UserGateway) -> list[str]:
+    """The pages whose cards the workflow page lists (the filter its read uses)."""
+
+    handlers = WebsiteWorkflowHandlers(application=gateway.application, operations=None)
+    return [action["request_id"] for action in handlers._credential_actions(gateway.config.user.canonical_user_id, WORKFLOW)]
+
+
+async def _end(gateway: UserGateway, setup_request_id: str, ending: str) -> None:
+    """End one page: Mark Done for an outside step, otherwise how its page watcher would end it."""
+
+    setups = gateway._credential_workflow.tool_setups
+    if ending == "marked_done":
+        assert await setups.external_step_done(setup_request_id, person_id=gateway.config.user.canonical_user_id)
+        return
+    assert await setups._finish(
+        setup_request_id, PageEnding(ending, f"The page ended: {ending}."), attempt=1, source="task_request"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sibling_kind", ["external_step", "account_link"])
+@pytest.mark.parametrize("first_ending", ["marked_done", "completed", "declined", "expired"])
+async def test_one_page_ending_leaves_the_other_pages_card_until_its_own_page_ends(handoff, first_ending, sibling_kind):
+    gateway, envelope, _create, transport = handoff
+    gateway._credential_workflow.tool_setups.guide = _Steps()
+    first_id, sibling_id = "tool_setup_req_first", "tool_setup_req_sibling"
+    if first_ending == "marked_done":
+        first = _outside_step(envelope, first_id, "http:registrar_one")
+    else:
+        first = _page(envelope, first_id, tool_id="http:registrar_one")
+    await _open_through_the_live_reply(gateway, first)
+    if sibling_kind == "external_step":
+        sibling = _outside_step(envelope, sibling_id, "http:registrar_two")
+    else:
+        sibling = _page(envelope, sibling_id, tool_id="http:registrar_two")
+    assert await gateway._credential_handoffs.try_present(sibling) is True
+    assert _listed(gateway) == [sibling_id] == _on_workflow_page(gateway)
+
+    await _end(gateway, first_id, first_ending)
+
+    result = transport.durable[-1][0].msg_content
+    expected_status = "completed" if first_ending == "marked_done" else first_ending
+    assert (result.setup_request_id, result.status) == (first_id, expected_status)
+    assert gateway.state_store.get_request(CHAT_REQUEST).status == "waiting_for_credential_result"
+    expected = [sibling_id]
+    if first_ending == "expired":
+        # The run offers an expired page again; the new page opens beside the sibling.
+        again = _page(envelope, "tool_setup_req_first_again", tool_id="http:registrar_one")
+        assert await gateway._credential_handoffs.try_present(again) is True
+        expected.append("tool_setup_req_first_again")
+    assert _listed(gateway) == expected
+    assert _on_workflow_page(gateway) == expected
+
+    await _end(gateway, sibling_id, "marked_done" if sibling_kind == "external_step" else "completed")
+
+    assert _listed(gateway) == expected[1:]
+    assert _on_workflow_page(gateway) == expected[1:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "declined", "unavailable", "expired"])
+async def test_a_card_closes_when_its_own_page_ends(handoff, caplog, status):
+    gateway, envelope, _create, _transport = handoff
+    caplog.set_level(logging.INFO)
+    page_id = envelope.msg_content.setup_request_id
+    await gateway.inbound_messages.handle(envelope)
+    assert _listed(gateway) == [page_id]
+
+    await _end(gateway, page_id, status)
+
+    assert _listed(gateway) == []
+    assert (
+        f"event=gateway_credential_handoff_card_closed request_id={page_id} correlation_id={CHAT_REQUEST} "
+        f"session_key=session_binding reason=page_ended page_status={status}"
+    ) in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_page_offered_again_replaces_the_expired_pages_card(handoff):
+    gateway, envelope, _create, _transport = handoff
+    await gateway.inbound_messages.handle(envelope)
+    await _end(gateway, envelope.msg_content.setup_request_id, "expired")
+
+    again = _page(envelope, "account_link_request_again", tool_id="cli:huggingface")
+    assert await gateway._credential_handoffs.try_present(again) is True
+
+    assert _listed(gateway) == ["account_link_request_again"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "delivered", "finished_run"])
+async def test_cards_close_when_their_task_ends_while_the_page_still_waits(handoff, caplog, ending):
+    gateway, envelope, _create, _transport = handoff
+    caplog.set_level(logging.INFO)
+    page_id = envelope.msg_content.setup_request_id
+    if ending == "finished_run":
+        # A thread's request records that it ended in its run state; a refused
+        # final reply finishes it and leaves its status as it was.
+        gateway.state_store.record_request(
+            correlation_id=CHAT_REQUEST,
+            session_key="session_binding",
+            request_kind="interactive",
+            request_text="bind a credential",
+            conversation_id="conversation_binding",
+            followup_to_task_id=None,
+            status="waiting_for_permission",
+            owner_canonical_user_id=gateway.config.user.canonical_user_id,
+            active_task_id="task_binding",
+            run_state="running",
+        )
+    await gateway.inbound_messages.handle(envelope)
+    assert _listed(gateway) == [page_id]
+
+    if ending == "finished_run":
+        assert gateway._request_service.finish(CHAT_REQUEST)
+        assert gateway.state_store.get_request(CHAT_REQUEST).status == "waiting_for_credential"
+    else:
+        gateway.state_store.update_request_status(CHAT_REQUEST, ending)
+
+    assert _listed(gateway) == []
+    assert gateway.state_store.tool_setup_repository.get_tool_setup(page_id).status == "waiting"
+    assert f"request_id={page_id} correlation_id={CHAT_REQUEST} session_key=session_binding reason=task_ended" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "reason"), [("request_id", "page_record_missing"), ("correlation_id", "request_missing")]
+)
+async def test_a_card_whose_records_are_missing_is_closed_with_a_warning(handoff, caplog, field, reason):
+    gateway, envelope, _create, _transport = handoff
+    page_id = envelope.msg_content.setup_request_id
+    await gateway.inbound_messages.handle(envelope)
+    pending = gateway._credential_handoffs._pending
+    pending["account_link_request_orphan"] = replace(pending[page_id], **{field: "unknown_id"})
+
+    assert _listed(gateway) == [page_id]
+
+    [warning] = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING and "event=gateway_credential_handoff_card_closed" in record.getMessage()
+    ]
+    assert f"reason={reason}" in warning
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "tool_id", "owner"),
+    [
+        ("sign_in", "cli:x", "person"),
+        ("team_sign_in_app", "cli:x", "team"),
+        ("account_link", "http:registrar_one", "person"),
+        ("external_step", "http:registrar_one", "person"),
+    ],
+)
+async def test_a_cards_lifetime_follows_whether_it_holds_a_bearer_link(handoff, monkeypatch, kind, tool_id, owner):
+    """A card with a page's bearer link stays in memory at most 31 minutes; an outside step's keeps its own expiry."""
+
+    gateway, envelope, create, _transport = handoff
+    gateway._credential_workflow.tool_setups.guide = _Steps()
+    # The broker reports pages that stay open for two hours.
+    two_hours = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    create.return_value = {**create.return_value, "expires_at": two_hours}
+    monkeypatch.setattr(
+        gateway._secure_broker,
+        "create_auth_session",
+        AsyncMock(
+            return_value={
+                "status": "created",
+                "login_url": "http://127.0.0.1:8766/auth/x/v1.signed_session",
+                "expires_at": two_hours,
+            }
+        ),
+    )
+    if kind == "external_step":
+        page = _outside_step(envelope, "tool_setup_req_kind", tool_id)
+    else:
+        page = _page(envelope, "tool_setup_req_kind", tool_id=tool_id, kind=kind, owner=owner)
+    opened_at = datetime.now(timezone.utc)
+
+    assert await gateway._credential_handoffs.try_present(page) is True
+
+    [card] = gateway._credential_handoffs._pending.values()
+    if kind == "external_step":
+        assert card.expires_at == datetime.fromisoformat(card.action.expires_at_utc)
+        assert card.expires_at > opened_at + timedelta(hours=47)
+    else:
+        assert opened_at + timedelta(minutes=30) < card.expires_at <= datetime.now(timezone.utc) + timedelta(minutes=31)

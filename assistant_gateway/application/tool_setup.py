@@ -407,6 +407,16 @@ class GatewayToolSetups:
             return False
         return bool(self._setups.list_tool_setups(status=SETUP_STATUS_WAITING, parent_task_id=request.parent_task_id))
 
+    def page_status(self, setup_request_id: str) -> str | None:
+        """The page's status: ``waiting`` until it ends, then how it ended; None when no page has that id.
+
+        A page's chat card follows this, not the chat request its task's pages
+        share (``credential_handoff.ToolSetupHandoffs``).
+        """
+
+        record = self._setups.get_tool_setup(setup_request_id)
+        return record.status if record is not None else None
+
     def _external_page(self, request: ToolSetupRequestV1, roles: tuple[str, ...]) -> _OpenedPage:
         """A step outside Universal Agents, in the catalog's words; the person marks it done."""
 

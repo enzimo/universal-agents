@@ -21,16 +21,36 @@ from assistant_gateway.application.request_service import (
     GatewayRequestService,
     TERMINAL_REQUEST_STATUSES,
 )
+from assistant_gateway.application.tool_setup import SETUP_STATUS_WAITING
 from assistant_gateway.application.transcript_service import GatewayTranscriptService
 from assistant_gateway.application.transient_presentation import PendingCredentialAction
 from assistant_gateway.ports.repositories import SessionRepository
 from assistant_gateway.domain.sessions import SessionRecord
-from assistant_gateway.domain.request_state import RequestRecord
-from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1
+from assistant_gateway.domain.request_state import RUN_STATE_FINISHED, RequestRecord
+from custom_messages.contracts.credentials_v1 import TOOL_SETUP_EXTERNAL_STEP, ToolSetupRequestV1
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 
 
 CREDENTIAL_HANDOFF_SOURCE_KIND = "credential_handoff"
+
+# Why a card left the list (event=gateway_credential_handoff_card_closed reason=...).
+CARD_CLOSED_EXPIRED = "expired"
+CARD_CLOSED_TASK_ENDED = "task_ended"
+CARD_CLOSED_PAGE_ENDED = "page_ended"
+# Anomalies: a card is stored only after its chat request and page record exist.
+CARD_CLOSED_REQUEST_MISSING = "request_missing"
+CARD_CLOSED_PAGE_RECORD_MISSING = "page_record_missing"
+_ANOMALOUS_CLOSINGS = frozenset({CARD_CLOSED_REQUEST_MISSING, CARD_CLOSED_PAGE_RECORD_MISSING})
+
+# How long a card may keep a setup page's bearer link (sign-in, account link or
+# team sign-in app page) in gateway memory, whatever expiry the broker
+# reported. Every kind is bounded by default, so a page kind added later is
+# too. Only an outside step is exempt: its card links to the catalog's approved
+# https address (ExternalSetupStepV1 refuses sign-in details and key-like
+# values) or the workflow page, which needs the owner's session, so it keeps
+# its own expiry (tool_setup.EXTERNAL_STEP_ACTION_HOURS) and leaves when the
+# person marks the step done or the task ends.
+BEARER_CARD_MAX_LIFETIME = timedelta(minutes=31)
 
 
 class ToolSetupHandoffs:
@@ -66,13 +86,54 @@ class ToolSetupHandoffs:
     def _prune(self) -> None:
         now = datetime.now(timezone.utc)
         for key, item in tuple(self._pending.items()):
-            record = self._requests.get(item.correlation_id)
-            if (
-                item.expires_at <= now
-                or record is None
-                or record.status != REQUEST_STATUS_WAITING_FOR_CREDENTIAL
-            ):
-                self._pending.pop(key, None)
+            closing = self._closing(item, now)
+            # Listings also run in worker threads: only the call that removes
+            # the card reports it.
+            if closing is not None and self._pending.pop(key, None) is not None:
+                self._log_closed(item, *closing)
+
+    def _closing(
+        self, item: PendingCredentialAction, now: datetime
+    ) -> tuple[str, str | None] | None:
+        """Why the card leaves the list, with its page's status; None while its page still waits.
+
+        set_up_tools opens a task's pages together, and they share one chat
+        request whose status every page's result changes. So a card follows its
+        own page record, and the chat request matters only once it has ended
+        (a terminal status, or a finished run state for a thread's request).
+        Before, finishing one page removed every other open page's card
+        (incident 2026-11-14).
+        """
+
+        if item.expires_at <= now:
+            return CARD_CLOSED_EXPIRED, None
+        record = self._requests.get(item.correlation_id)
+        if record is None:
+            return CARD_CLOSED_REQUEST_MISSING, None
+        if record.status in TERMINAL_REQUEST_STATUSES or record.run_state == RUN_STATE_FINISHED:
+            return CARD_CLOSED_TASK_ENDED, None
+        page_status = self._workflow.tool_setups.page_status(item.request_id)
+        if page_status is None:
+            return CARD_CLOSED_PAGE_RECORD_MISSING, None
+        if page_status != SETUP_STATUS_WAITING:
+            return CARD_CLOSED_PAGE_ENDED, page_status
+        return None
+
+    def _log_closed(self, item: PendingCredentialAction, reason: str, page_status: str | None) -> None:
+        anomaly = reason in _ANOMALOUS_CLOSINGS
+        self._logger.log(
+            logging.WARNING if anomaly else logging.INFO,
+            "%s event=gateway_credential_handoff_card_closed request_id=%s correlation_id=%s "
+            "session_key=%s reason=%s page_status=%s",
+            "Stopped showing a setup page's card because its chat request or page record is missing."
+            if anomaly
+            else "Stopped showing a setup page's card.",
+            item.request_id,
+            item.correlation_id,
+            item.session_key,
+            reason,
+            page_status or "-",
+        )
 
     async def try_present(self, envelope: MessageEnvelope) -> bool:
         content = envelope.msg_content
@@ -158,16 +219,13 @@ class ToolSetupHandoffs:
         )
         action = response.transient_action
         if action is not None:
-            expires_at = datetime.fromisoformat(action.expires_at_utc or "")
             self._pending[content.setup_request_id] = PendingCredentialAction(
                 owner=session.owner_canonical_user_id,
                 session_key=session.session_key,
                 correlation_id=correlation_id,
                 request_id=content.setup_request_id,
                 anchor=anchor,
-                expires_at=min(
-                    expires_at, datetime.now(timezone.utc) + timedelta(minutes=31)
-                ),
+                expires_at=_card_expiry(content.kind, action.expires_at_utc or ""),
                 action=action,
             )
             self._logger.info(
@@ -257,3 +315,12 @@ class ToolSetupHandoffs:
         ):
             return None
         return session
+
+
+def _card_expiry(kind: str, expires_at_utc: str) -> datetime:
+    """When a card leaves the list: its action's expiry, bounded for bearer links (BEARER_CARD_MAX_LIFETIME)."""
+
+    expires_at = datetime.fromisoformat(expires_at_utc)
+    if kind == TOOL_SETUP_EXTERNAL_STEP:
+        return expires_at
+    return min(expires_at, datetime.now(timezone.utc) + BEARER_CARD_MAX_LIFETIME)
