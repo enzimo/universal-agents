@@ -38,7 +38,20 @@ Two other ways end a wait: the person finishing the same setup on their own
 ``person_finished``), and a gateway restart, after which nobody watches the
 page any more (``recover_unwatched`` reports the page as unwatched, and
 TeamLead checks the setup again before asking). Finishing a record is a
-conditional update, so the task gets exactly one result.
+conditional update, so the task gets exactly one result. Both the person's own
+``/link`` and Mark Done send a ``person_action`` result; their words differ.
+
+When a page ends, its card closes with one line in the person's chat
+(``_post_closing``). The code that ended the page writes that line
+(``PageEnding.closing``, or else the task's ``message``). The line names the
+page by kind (``_what``) and the tool by the name its page showed: the sign-in
+name ("GitHub") for sign-ins and the team's sign-in app, and the catalog's
+display name for account links and outside steps. For example: "The GitHub
+sign-in is done (account exampleuser).", "You finished the account link for
+Portainer yourself, so this page is no longer needed.", or, after Mark Done,
+"You marked the Gitea setup step 'Create a Gitea token' done." Rationale (an
+incident on 2026-11-14): the line used to be rebuilt from the result's source,
+so Mark Done read as an account link with the raw tool id.
 
 Nothing here grants access: signing in or linking an account only makes a
 credential available; grants decide who may use the tool.

@@ -14,7 +14,9 @@ requests. This page shows, for the person the workflow belongs to:
 - setup steps done outside Universal Agents (``external_step``, such as
   creating a token on a service's site) with **Mark done**: only the person
   the workflow belongs to marks their own waiting step, through the gateway's
-  setup service, which tells the waiting task (``mark_setup_done``);
+  setup service, which tells the waiting task and closes the step's chat card
+  with the step's stored title (``mark_setup_done``; the title comes from the
+  stored step, never from the browser);
 - **Review Ready Requests**: the waiting requests the person can decide, with
   the Inbox's own choices (Approve or Deny for a staged change; Approve,
   Approve read only, Approve for this task only or Deny for access). Each

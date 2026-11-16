@@ -2786,7 +2786,15 @@ person which command to run or asking whether to start:
    page's watcher, the person's own `/link` or `/auth ... team_client`
    (`link_results`), the Mark Done button, or start-up recovery ends it. After
    a gateway restart, pages still waiting are reported as unwatched (and
-   offered again); page addresses are never stored.
+   offered again); page addresses are never stored. The way that ends a page
+   writes the one chat line that closes its card (`PageEnding.closing`, else
+   the task's message). The line names the page by kind and the tool by the
+   name its page showed: the sign-in name for sign-ins, the catalog's display
+   name for account links and outside steps. Mark Done uses the step title
+   stored on the workflow page, never words from the browser. Rationale (an
+   incident on 2026-11-14): the gateway rebuilt the line from the result's
+   source alone, which covers both the person's own `/link` and Mark Done,
+   so Mark Done read as an account link with the raw tool id.
 
 5. Last known states instead of model re-checks (owner's decision 2026-09-28).
    Trusted code keeps one `ToolSetupStateV1` per team, person and account tool

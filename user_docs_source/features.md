@@ -667,7 +667,8 @@ the Inbox), **Sign in to GitHub** ("Waiting for the person to finish the
 page", then "Signed in as exampleuser"), and **Do the requested work** after both.
 The steps update by themselves. A step you do outside Universal Agents, such
 as creating a token, shows its instructions in chat and a **Mark Done** button
-on the workflow page. When only one thing is missing there is no workflow;
+on the workflow page; after you press it, chat says which step you marked
+done. When only one thing is missing there is no workflow;
 the page just opens. See
 [Complete workflow reviews](permissions.md#complete-workflow-reviews).
 
