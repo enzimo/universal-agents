@@ -415,8 +415,11 @@ async def _defer_terminal_task_response_for_pending_parent_work(
             task_id=incoming_content.task_id, team_id=self.team_id,
             attempted_answer=outgoing_content.answer or "",
         ):
+            # A held answer, not a wait: the hold queued the task to run again at
+            # once (task_message_runtime._keep_held_answer_state keeps that state).
             return Task(task_id=incoming_content.task_id, task_type=MessageMetaType.REQUEST,
-                        problem_statement="Continue the saved workflow after its outstanding work or reviews finish.")
+                        problem_statement="Final answer held back: the task runs again at once with the "
+                        "workflow continuation note.")
         return None
 
     now_ts = datetime.now(timezone.utc).isoformat()
