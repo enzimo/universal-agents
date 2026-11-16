@@ -4519,7 +4519,9 @@ the desktop app never offers an older version.
   (`execution: "in_process"`, the default) and Web Chat already stored their
   files in `state/uploads`. So the launcher runs one upgrade step,
   `assistant_cli upgrade adapter-host-files`
-  (`assistant_gateway.adapter_host_files_upgrade`), as a first-start step
+  (`instance_upgrades.adapter_host_files`, outside `assistant_gateway`
+  because it changes the team's conversation store, which the gateway runtime
+  never imports), as a first-start step
   after the credential import and before the gateway, the adapter host and
   the agents start (`docker.launch_headless.build_first_start_tasks`), while
   `InstanceLayout.adapter_host_files_upgrade_path`

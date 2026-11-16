@@ -1365,7 +1365,7 @@ class _RelationalConversationRepository:
 
         Ordered by conversation and task id; ``after`` is the last pair of the
         previous batch. For the upgrade step that moves files out of the
-        adapter host's transfer folder (``assistant_gateway.adapter_host_files_upgrade``),
+        adapter host's transfer folder (``instance_upgrades.adapter_host_files``),
         which reads every turn once. The records are complete, storage
         references included: trusted callers only.
         """

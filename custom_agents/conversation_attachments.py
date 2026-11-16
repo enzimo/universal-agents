@@ -866,7 +866,7 @@ class UploadFolder:
     every file a person sends there, also the files of chat apps an adapter
     host runs (``assistant_gateway.inbound_attachments``). Up to 0.9.13 such
     files stayed in the adapter host's transfer folder; the upgrade step
-    (``assistant_gateway.adapter_host_files_upgrade``) moves them here, and
+    (``instance_upgrades.adapter_host_files``) moves them here, and
     nothing here reads that folder. Records that still point into it (held
     work from before the upgrade) are refused (``UPLOAD_OUTSIDE_FOLDERS``) and
     the person is asked to send the file again (``custom_agents.stuck_tasks``).

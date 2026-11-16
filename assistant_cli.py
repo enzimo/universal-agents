@@ -2625,14 +2625,14 @@ def _resolve_instance_config_path(config_path: str | None) -> str:
 
 
 def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
-    """``upgrade adapter-host-files`` (``assistant_gateway.adapter_host_files_upgrade``).
+    """``upgrade adapter-host-files`` (``instance_upgrades.adapter_host_files``).
 
     Exits 0 when the step finished or is waiting for a missing transfer
     folder (startup goes on and the next start tries again), and non-zero on
     an unexpected error, which stops startup until a restart finishes it.
     """
 
-    from assistant_gateway.adapter_host_files_upgrade import upgrade_adapter_host_files
+    from instance_upgrades.adapter_host_files import upgrade_adapter_host_files
 
     config = GatewayInstanceConfig.load_for_process(args.config)
     result = upgrade_adapter_host_files(config, files_gone=args.files_gone)

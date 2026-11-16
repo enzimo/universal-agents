@@ -2984,7 +2984,7 @@ class _RelationalGatewayStateRepository:
         Matched with a trailing slash and a literal prefix comparison, as in
         ``delete_uploads_created_before``. For the upgrade step that moves
         files out of the adapter host's transfer folder
-        (``assistant_gateway.adapter_host_files_upgrade``).
+        (``instance_upgrades.adapter_host_files``).
         """
 
         bind = self._dialect.bind

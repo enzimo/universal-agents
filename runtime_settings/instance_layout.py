@@ -656,7 +656,7 @@ class InstanceLayout:
         Up to 0.9.13 a file sent through a chat app the adapter host runs
         stayed in the adapter host's transfer folder; from 0.10 agents open
         files only in ``uploads_dir``. The step that moves those files
-        (``assistant_gateway.adapter_host_files_upgrade``) writes this file,
+        (``instance_upgrades.adapter_host_files``) writes this file,
         with its finish time and counts, once every file was handled, and the
         launcher runs the step only while it is missing. Under ``state/``, so
         no agent tool or sandboxed code can reach it."""

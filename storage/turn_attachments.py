@@ -200,7 +200,7 @@ def relocate_turn_attachment(raw: Any, attachment_id: str, local_path: str | Non
     """One turn's column with ``attachment_id``'s entries moved to ``local_path``, or removed when it is None.
 
     For the upgrade step that moves files out of the adapter host's transfer
-    folder (``assistant_gateway.adapter_host_files_upgrade``). It edits the
+    folder (``instance_upgrades.adapter_host_files``). It edits the
     stored JSON, not decoded records, so every other entry, an unreadable one
     included, is kept exactly as stored: only the matching entries' local
     storage references change. Returns None when nothing changes (no entry

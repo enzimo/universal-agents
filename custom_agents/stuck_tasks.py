@@ -47,7 +47,7 @@ Files sent before the upgrade. Up to 0.9 the adapter host recorded the files of
 chat apps it runs (``execution: "adapter_host"``) in its own transfer folder,
 and the file tools opened them there. From 0.10 the gateway stores every file
 in ``state/uploads`` and the tools open nothing else. At the first start the
-upgrade step (``assistant_gateway.adapter_host_files_upgrade``) moves those
+upgrade step (``instance_upgrades.adapter_host_files``) moves those
 files there and rewrites the gateway's records and the conversation turns,
 but not held task records: the gateway signed each message's files with
 their paths. So a request still running or queued at the upgrade cannot

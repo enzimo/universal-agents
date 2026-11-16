@@ -4,7 +4,7 @@ Up to 0.9.13 such a file stayed in the adapter host's transfer folder, and its
 path was saved in the gateway's attachment record and in the conversation
 turns that received it. From 0.10 agents open files only in ``state/uploads``
 (``custom_agents.conversation_attachments.UploadFolder``), so the step
-(``assistant_gateway.adapter_host_files_upgrade``) moves them and rewrites
+(``instance_upgrades.adapter_host_files``) moves them and rewrites
 both records, once, before the team starts. The starting state is written by
 v0.9.13's own code (``tests/fixtures/upgrade/0.9.13-adapter-host-files.sql``):
 
@@ -44,8 +44,8 @@ from uuid import uuid4
 
 import pytest
 
-import assistant_gateway.adapter_host_files_upgrade as upgrade_module
-from assistant_gateway.adapter_host_files_upgrade import upgrade_adapter_host_files
+import instance_upgrades.adapter_host_files as upgrade_module
+from instance_upgrades.adapter_host_files import upgrade_adapter_host_files
 from custom_agents.conversation_attachments import (
     UNRECORDED_TURNS_NOTE,
     LocatedUpload,

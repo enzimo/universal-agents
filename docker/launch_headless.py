@@ -1924,7 +1924,7 @@ def build_adapter_host_files_task(
     """Move files of chat apps the adapter host ran (0.9.13 and earlier) into ``state/uploads``, once.
 
     Only while ``InstanceLayout.adapter_host_files_upgrade_path`` is missing
-    (``assistant_gateway.adapter_host_files_upgrade``). It runs after the
+    (``instance_upgrades.adapter_host_files``). It runs after the
     credential import and before the gateway, the adapter host and the agents
     start, so nothing else on this host writes the files or their records
     while they move. ``env`` is the gateway's, the process that owns

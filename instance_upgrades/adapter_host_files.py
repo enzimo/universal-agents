@@ -70,7 +70,9 @@ goes on either way, and the next start tries again. An unexpected error (a
 database error, a full disk) raises, so the launcher stops startup, and a
 restart finishes the work.
 
-This module goes with the other 0.9 upgrade steps when 0.11 ships.
+It lives in ``instance_upgrades``, not ``assistant_gateway``, because it
+changes the team's conversation store, which the gateway runtime never
+imports. It goes with the other 0.9 upgrade steps when 0.11 ships.
 """
 
 from __future__ import annotations
