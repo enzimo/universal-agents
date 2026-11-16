@@ -821,20 +821,29 @@ class GatewayToolSetups:
         safely(record, what="setup_finished", tool_id=tool_id, kind=kind, person_id=person_id)
 
     async def recover_unwatched(self) -> int:
-        """After a gateway start: report every page still marked waiting as unwatched."""
+        """After a gateway start: report every page still marked waiting as unwatched.
+
+        Each record is reported on its own: a record that cannot be reported
+        (a kind this version does not know, or a failed send) is logged and
+        stays waiting, and the records after it are still reported.
+        """
 
         recovered = 0
         for record in self._setups.list_tool_setups(status=SETUP_STATUS_WAITING):
             if record.kind == TOOL_SETUP_EXTERNAL_STEP:
                 continue  # nothing watches it; the person still marks it done
-            ending = PageEnding(
-                TOOL_SETUP_UNAVAILABLE,
-                f"The gateway restarted while the page for {self._page_what(record)} was open, "
-                "so nobody could see how it ended.",
-                reason_code=REASON_PAGE_NOT_WATCHED,
-            )
-            if await self._finish(record.setup_request_id, ending, attempt=None, source=TOOL_SETUP_SOURCE_TASK):
-                recovered += 1
+            try:
+                if await self._report_unwatched(record):
+                    recovered += 1
+            except Exception:  # noqa: BLE001 - one bad record must not keep every later page waiting
+                self._logger.exception(
+                    "Could not report a setup page nobody watched after the gateway started; it stays waiting. "
+                    "event=gateway_tool_setup_recovery_failed setup_request_id=%s task_id=%s tool_id=%s kind=%s",
+                    record.setup_request_id,
+                    record.parent_task_id,
+                    record.tool_id,
+                    record.kind,
+                )
         if recovered:
             self._logger.warning(
                 "Reported setup pages nobody watched after the gateway started. "
@@ -842,6 +851,17 @@ class GatewayToolSetups:
                 recovered,
             )
         return recovered
+
+    async def _report_unwatched(self, record: ToolSetupRecord) -> bool:
+        """Tell the record's task that nobody saw how its page ended; False when another path finished it."""
+
+        ending = PageEnding(
+            TOOL_SETUP_UNAVAILABLE,
+            f"The gateway restarted while the page for {self._page_what(record)} was open, "
+            "so nobody could see how it ended.",
+            reason_code=REASON_PAGE_NOT_WATCHED,
+        )
+        return await self._finish(record.setup_request_id, ending, attempt=None, source=TOOL_SETUP_SOURCE_TASK)
 
     async def _finish(
         self,

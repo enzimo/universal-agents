@@ -673,13 +673,20 @@ async def test_a_closed_form_posts_one_closing_message(chat_setup_gateway) -> No
     assert closing.text == "The form for the account link for Portainer was closed without linking anything."
 
 
-def _waiting_record(gateway: UserGateway, tool_id: str, kind: str, owner: str, setup_request_id: str = "tool_setup_req_old") -> None:
+def _waiting_record(
+    gateway: UserGateway,
+    tool_id: str,
+    kind: str,
+    owner: str,
+    setup_request_id: str = "tool_setup_req_old",
+    created_at: str = "2026-09-28T08:00:00+00:00",
+) -> None:
     _setups(gateway).record_tool_setup(
         ToolSetupRecord(
             setup_request_id=setup_request_id, parent_task_id=TASK, person_id=gateway.config.user.canonical_user_id,
             tool_id=tool_id, kind=kind, owner_kind=owner, session_key=SESSION,
             correlation_id=CHAT_REQUEST, conversation_id="conversation_link", status="waiting",
-            created_at="2026-09-28T08:00:00+00:00",
+            created_at=created_at,
         )
     )
 
@@ -707,6 +714,30 @@ async def test_a_page_nobody_watches_after_a_restart_is_closed_with_its_name(
     [result] = await _results(transport)
     line = f"The gateway restarted while the page for {what} was open, so nobody could see how it ended."
     assert (closing.correlation_id, closing.text, result.message) == ("tool_setup_req_old", line, line)
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_cannot_be_reported_is_logged_and_the_later_ones_still_are(chat_setup_gateway, caplog) -> None:
+    """A stored kind this version does not know (a rollback, a hand edit) must not keep every later page waiting."""
+
+    gateway, _broker, transport, events = chat_setup_gateway
+    _waiting_record(
+        gateway, "cli:github", "password_reset", "person",
+        setup_request_id="tool_setup_req_bad", created_at="2026-09-28T07:00:00+00:00",
+    )
+    _waiting_record(gateway, "cli:github", "sign_in", "person")
+
+    with caplog.at_level("WARNING"):
+        assert await gateway._credential_workflow.tool_setups.recover_unwatched() == 1
+
+    [closing] = _closings(events)
+    [result] = await _results(transport)
+    assert (closing.correlation_id, result.setup_request_id) == ("tool_setup_req_old", "tool_setup_req_old")
+    [failure] = [
+        record for record in caplog.records if "event=gateway_tool_setup_recovery_failed" in record.getMessage()
+    ]
+    assert "setup_request_id=tool_setup_req_bad" in failure.getMessage() and failure.exc_info is not None
+    assert _setups(gateway).get_tool_setup("tool_setup_req_bad").status == "waiting"
 
 
 @pytest.mark.asyncio
