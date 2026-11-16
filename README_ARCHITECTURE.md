@@ -4564,14 +4564,18 @@ the desktop app never offers an older version.
   written: an error (`event=adapter_host_files_folder_missing`) says to mount
   it and restart, or, if the files are gone, to run the command with
   `--files-gone`; startup goes on and the next start tries again. A folder
-  the step cannot use (permission denied, an I/O error, a read-only or full
-  `state/uploads`, a copy that reads back differently) stops startup with
-  `event=adapter_host_files_folder_unusable` and a message naming the folder,
-  as does any other unexpected error (a database error); a restart after the
-  fix finishes the work. Only a file missing from a folder that opens counts
-  as missing; an error that comes from one record's names and would recur at
-  every start (`ENAMETOOLONG`, `EINVAL`) refuses that file, so one bad record
-  cannot stop startup for good. Held
+  or file the step cannot use (permission denied, an I/O error while reading
+  or writing, a read-only or full `state/uploads`, a copy that reads back
+  differently) stops startup with `event=adapter_host_files_folder_unusable`
+  and a message naming the folder and, when one file was being worked on,
+  that file and its attachment id, so the operator can fix or move away that
+  one file; any other unexpected error (a database error) stops it too, and
+  a restart after the fix finishes the work. Only a file missing from a
+  folder that opens counts as missing; an error that comes from one record's
+  names and would recur at every start (`ENAMETOOLONG`, `EINVAL`) refuses
+  that file, so one bad record cannot stop startup for good, and such a name
+  does not count as a file found in the folder. A source that is not a
+  regular file (a pipe) is opened without waiting and refused. Held
   task records and messages still queued are not rewritten: the message-bound
   context id hashes each file record's path (`access_control.ownership`), and
   task records change only through custody. The module goes with the other

@@ -74,13 +74,17 @@ restart, or, if the files are really gone, to run the command with
 ``--files-gone``, which handles every file it cannot find as missing. Startup
 goes on either way, and the next start tries again.
 
-A folder it cannot use (permission denied, an I/O error, a read-only or full
-``state/uploads``, a folder that vanished during the run) raises
-``FolderProblem``, naming the folder; the launcher stops startup, and a
-restart after the operator fixes it finishes the work. So does any other
-unexpected error (a database error). An error that comes from one record's
-names and would recur at every start (``ENAMETOOLONG``, ``EINVAL``) refuses
-that file instead, so one bad record cannot block startup.
+A folder or file it cannot use (permission denied, an I/O error while
+reading or writing, a read-only or full ``state/uploads``, a folder that
+vanished during the run) raises ``FolderProblem``, naming the folder and,
+when one file was being worked on, that file and its attachment id, so the
+operator knows what to fix or move away; the launcher stops startup, and a
+restart after the fix finishes the work. So does any other unexpected error
+(a database error). An error that comes from one record's names and would
+recur at every start (``ENAMETOOLONG``, ``EINVAL``) refuses that file
+instead, so one bad record cannot block startup; such a name is also no
+sign that the folder holds the files. A source that is not a regular file
+(a pipe) is opened without waiting for a writer and refused.
 
 It lives in ``instance_upgrades``, not ``assistant_gateway``, because it
 changes the team's conversation store, which the gateway runtime never
@@ -95,6 +99,7 @@ import json
 import logging
 import os
 import stat
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -134,6 +139,10 @@ TRANSFER_FILE_PREFIX = "adapter_upload_"
 # Errors that come from one record's names and recur at every start: that file is
 # refused, so one bad record cannot stop startup for good.
 _RECORD_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.EINVAL})
+
+# The source is opened like ``safe_open`` opens files: no link followed, and a planted pipe
+# does not wait for a writer before ``fstat`` refuses it (reads of a regular file are unchanged).
+_SOURCE_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 
 _BATCH = 500
 _CHUNK = 1024 * 1024
@@ -201,15 +210,42 @@ class _Unmovable(Exception):
 
 
 class FolderProblem(Exception):
-    """A folder the step needs cannot be used; nothing more changes, and a restart after the fix finishes the work."""
+    """A folder the step needs cannot be used; nothing more changes, and a restart after the fix finishes the work.
 
-    def __init__(self, folder: Path, reason: str, detail: str) -> None:
-        super().__init__(
-            f"The upgrade step for adapter-host files cannot use the folder {folder} ({detail}). Fix the folder "
-            "(mount it, its permissions, free space) and restart; nothing was lost."
-        )
+    ``file`` is the file being read or written when the error came, and
+    ``attachment_id`` its attachment (set by the caller that knows it), so a
+    problem with one file names that file: the folder itself may be fine.
+    """
+
+    def __init__(self, folder: Path, reason: str, detail: str, *, file: Optional[Path] = None) -> None:
+        super().__init__(detail)
         self.folder = folder
         self.reason = reason
+        self.detail = detail
+        self.file = file
+        self.attachment_id: Optional[str] = None
+
+    def __str__(self) -> str:
+        at = f", working on {self.file}" if self.file is not None else ""
+        if self.attachment_id is not None:
+            at += f" for attachment {self.attachment_id}"
+        return (
+            f"The upgrade step for adapter-host files cannot use the folder {self.folder} ({self.detail}{at}). "
+            "Fix the folder or that file (mount it, its permissions, free space; a file that cannot be read can be "
+            "moved away, and the person then sends it again) and restart; nothing was lost."
+        )
+
+
+@contextmanager
+def _naming(attachment_id: str) -> Iterator[None]:
+    """Add ``attachment_id`` to a ``FolderProblem`` raised while working on its file."""
+
+    try:
+        yield
+    except FolderProblem as problem:
+        if problem.attachment_id is None:
+            problem.attachment_id = attachment_id
+        raise
 
 
 def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> UpgradeResult:
@@ -247,7 +283,12 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
         step.forget_unmovable()
     except FolderProblem as problem:
         logger.error(
-            "%s event=adapter_host_files_folder_unusable folder=%s reason=%s", problem, problem.folder, problem.reason
+            "%s event=adapter_host_files_folder_unusable folder=%s file=%s attachment_id=%s reason=%s",
+            problem,
+            problem.folder,
+            problem.file or "-",
+            problem.attachment_id or "-",
+            problem.reason,
         )
         raise
     _write_marker(marker, step.counts)
@@ -349,7 +390,9 @@ class _Step:
         destination (an earlier run moved it and stopped). When none is, the
         folder is not here or is not the one 0.9.13 wrote (an empty mount
         point, a folder the 0.10 adapter host created), so the caller changes
-        nothing. A folder that answers with another error raises ``FolderProblem``.
+        nothing. A file name the file system refuses (``name_refused``) says
+        nothing about the folder, so it does not count. A folder that answers
+        with another error raises ``FolderProblem``.
         """
 
         waiting = 0
@@ -361,11 +404,12 @@ class _Step:
                 continue
             waiting += 1
             if not found:
-                # The destination is looked at only for an id that can be a file name (one handle() moves).
-                moved = _plain_name(item.attachment_id) and (
-                    _look(self._uploads, self._destination(record), absent_is_missing=True) is None
-                )
-                found = moved or _look(self._transfer, (source.name,), absent_is_missing=True) != OUTCOME_MISSING
+                with _naming(item.attachment_id):
+                    # The destination is looked at only for an id that can be a file name (one handle() moves).
+                    moved = _plain_name(item.attachment_id) and (
+                        _look(self._uploads, self._destination(record), absent_is_missing=True) is None
+                    )
+                    found = moved or _entry_there(_look(self._transfer, (source.name,), absent_is_missing=True))
         return waiting, found
 
     # -- handling one file -------------------------------------------------------
@@ -381,7 +425,8 @@ class _Step:
             if source is None:
                 raise _Unmovable(OUTCOME_REFUSED, REASON_OUTSIDE_FOLDER)
             destination = self._destination(record)
-            outcome, remove_source = self._place(source, destination, record.sha256)
+            with _naming(item.attachment_id):
+                outcome, remove_source = self._place(source, destination, record.sha256)
         except _Unmovable as unmovable:
             self._unmovable.append((item, unmovable))  # forgotten once every file that can move has moved
             return
@@ -466,13 +511,13 @@ def _plain_name(attachment_id: str) -> bool:
     )
 
 
-def _judge_os(exc: OSError, folder: Path) -> _Unmovable:
-    """What an error opening, renaming or writing a file in ``folder`` means for that file.
+def _judge_os(exc: OSError, folder: Path, file: Optional[Path] = None) -> _Unmovable:
+    """What an error opening, reading, renaming or writing ``file`` in ``folder`` means for that file.
 
     The file is missing (``ENOENT``) or refused (a link, or a name error that
-    recurs at every start); anything else is a problem with the folder
-    (permission denied, I/O error, read-only or full disk) and raises
-    ``FolderProblem``.
+    recurs at every start); anything else is a problem with the folder or the
+    file (permission denied, I/O error, read-only or full disk) and raises
+    ``FolderProblem`` naming both.
     """
 
     if exc.errno == errno.ENOENT:
@@ -481,10 +526,12 @@ def _judge_os(exc: OSError, folder: Path) -> _Unmovable:
         return _Unmovable(OUTCOME_REFUSED, safe_open.REASON_LINK)
     if exc.errno in _RECORD_ERRNOS:
         return _Unmovable(OUTCOME_REFUSED, REASON_NAME_REFUSED)
-    raise FolderProblem(folder, safe_open.REASON_OPEN_FAILED, exc.strerror or str(exc)) from exc
+    raise FolderProblem(folder, safe_open.REASON_OPEN_FAILED, exc.strerror or str(exc), file=file) from exc
 
 
-def _judge(exc: safe_open.UnsafePath, folder: Path, *, absent_is_missing: bool) -> _Unmovable:
+def _judge(
+    exc: safe_open.UnsafePath, folder: Path, *, absent_is_missing: bool, file: Optional[Path] = None
+) -> _Unmovable:
     """``_judge_os`` for a ``safe_open`` refusal under ``folder``.
 
     A folder that is not there is missing files only when ``absent_is_missing``
@@ -499,22 +546,32 @@ def _judge(exc: safe_open.UnsafePath, folder: Path, *, absent_is_missing: bool) 
         if absent_is_missing and isinstance(cause, FileNotFoundError):
             return _Unmovable(OUTCOME_MISSING, REASON_MISSING)
         detail = cause.strerror if isinstance(cause, OSError) and cause.strerror else str(exc)
-        raise FolderProblem(folder, exc.reason, detail) from exc
+        raise FolderProblem(folder, exc.reason, detail, file=file) from exc
     if exc.reason == safe_open.REASON_OPEN_FAILED and isinstance(cause, OSError):
-        return _judge_os(cause, folder)
+        return _judge_os(cause, folder, file)
     return _Unmovable(OUTCOME_REFUSED, exc.reason)
 
 
-def _look(root: Path, parts: tuple[str, ...], *, absent_is_missing: bool) -> Optional[str]:
-    """None when ``root/parts`` is there (a link is not followed), else the outcome its absence or refusal means."""
+def _look(root: Path, parts: tuple[str, ...], *, absent_is_missing: bool) -> Optional[_Unmovable]:
+    """None when ``root/parts`` is there (a link is not followed), else what its absence or refusal means."""
 
+    file = root.joinpath(*parts)
     try:
         status = safe_open.entry_status(root, parts)
     except safe_open.UnsafePath as exc:
-        return _judge(exc, root, absent_is_missing=absent_is_missing).outcome
+        return _judge(exc, root, absent_is_missing=absent_is_missing, file=file)
     except OSError as exc:
-        return _judge_os(exc, root).outcome
-    return None if status is not None else OUTCOME_MISSING
+        return _judge_os(exc, root, file)
+    return None if status is not None else _Unmovable(OUTCOME_MISSING, REASON_MISSING)
+
+
+def _entry_there(look: Optional[_Unmovable]) -> bool:
+    """Whether a ``_look`` saw an entry: there, or refused for what it is (a link, not a regular file).
+
+    A name the file system refused was never looked up, so it is no sign of the file.
+    """
+
+    return look is None or (look.outcome != OUTCOME_MISSING and look.reason != REASON_NAME_REFUSED)
 
 
 def _file_digest(root: Path, parts: tuple[str, ...]) -> Optional[str]:
@@ -522,14 +579,19 @@ def _file_digest(root: Path, parts: tuple[str, ...]) -> Optional[str]:
 
     ``root`` is ``state/uploads``, which may not exist yet. A file that is
     there but cannot be read safely (a link, not a regular file, several hard
-    links) raises ``_Unmovable``; a folder problem raises ``FolderProblem``.
+    links) raises ``_Unmovable``; a folder problem or a read error raises
+    ``FolderProblem`` naming the file.
     """
 
+    file = root.joinpath(*parts)
     try:
         with safe_open.opened_file(root, parts) as (descriptor, _info):
-            return _digest(descriptor)
+            try:
+                return _digest(descriptor)
+            except OSError as exc:
+                raise _judge_os(exc, root, file) from exc
     except safe_open.UnsafePath as exc:
-        unmovable = _judge(exc, root, absent_is_missing=True)
+        unmovable = _judge(exc, root, absent_is_missing=True, file=file)
         if unmovable.outcome == OUTCOME_MISSING:
             return None
         raise unmovable from exc
@@ -538,23 +600,32 @@ def _file_digest(root: Path, parts: tuple[str, ...]) -> Optional[str]:
 def _same_file_left(root: Path, parts: tuple[str, ...], sha256: str) -> bool:
     """Whether ``root/parts`` is still a safe copy of the file (sha256 ``sha256``), to be removed.
 
-    Removing it only tidies the transfer folder, so a folder problem here is
-    logged and the copy is left.
+    Removing it only tidies the transfer folder, so a folder problem or a
+    read error here is logged and the copy is left.
     """
 
+    file = root.joinpath(*parts)
     try:
         with safe_open.opened_file(root, parts) as (descriptor, _info):
             return _digest(descriptor) == sha256
     except safe_open.UnsafePath as exc:
         try:
-            _judge(exc, root, absent_is_missing=True)
+            _judge(exc, root, absent_is_missing=True, file=file)
         except FolderProblem as problem:
-            logger.warning(
-                "A moved file's original in the adapter host's transfer folder could not be checked, so it is "
-                "left there. event=adapter_host_file_source_left reason=%s",
-                problem.reason,
-            )
+            _log_source_left(file, problem.reason)
         return False
+    except OSError:  # a read error in _digest
+        _log_source_left(file, safe_open.REASON_OPEN_FAILED)
+        return False
+
+
+def _log_source_left(file: Path, reason: str) -> None:
+    logger.warning(
+        "A moved file's original in the adapter host's transfer folder could not be checked, so it is left there. "
+        "event=adapter_host_file_source_left file=%s reason=%s",
+        file,
+        reason,
+    )
 
 
 def _digest(descriptor: int) -> str:
@@ -579,7 +650,8 @@ def _move(
 
     Both folders are opened without following links (the destination's
     session folder is created), the source is opened with ``O_NOFOLLOW`` and
-    must be a regular file with one link and the record's sha256. Only the
+    ``O_NONBLOCK`` (a pipe does not wait for a writer; ``fstat`` refuses it)
+    and must be a regular file with one link and the record's sha256. Only the
     gateway writes either folder and it is not running, so nothing changes
     the file between the check and the rename. The transfer folder was found
     before the run, so its absence now is a folder problem, unless
@@ -590,41 +662,55 @@ def _move(
         uploads.mkdir(parents=True, exist_ok=True)  # an instance whose gateway stored no file yet
     except OSError as exc:
         raise FolderProblem(uploads, safe_open.REASON_OPEN_FAILED, exc.strerror or str(exc)) from exc
+    source_file = transfer.joinpath(*source_parts)
+    destination_file = uploads.joinpath(*destination)
     try:
         source_dir = safe_open.open_directory(transfer, source_parts[:-1])
     except safe_open.UnsafePath as exc:
-        raise _judge(exc, transfer, absent_is_missing=files_gone) from exc
+        raise _judge(exc, transfer, absent_is_missing=files_gone, file=source_file) from exc
     try:
         name = source_parts[-1]
         try:
-            descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=source_dir)
+            descriptor = os.open(name, _SOURCE_FLAGS, dir_fd=source_dir)
         except OSError as exc:
-            raise _judge_os(exc, transfer) from exc
+            raise _judge_os(exc, transfer, source_file) from exc
         try:
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode):
-                raise _Unmovable(OUTCOME_REFUSED, safe_open.REASON_NOT_REGULAR_FILE)
-            if info.st_nlink != 1:
-                raise _Unmovable(OUTCOME_REFUSED, safe_open.REASON_SEVERAL_LINKS)
-            if _digest(descriptor) != sha256:
+            try:
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode):
+                    raise _Unmovable(OUTCOME_REFUSED, safe_open.REASON_NOT_REGULAR_FILE)
+                if info.st_nlink != 1:
+                    raise _Unmovable(OUTCOME_REFUSED, safe_open.REASON_SEVERAL_LINKS)
+                digest = _digest(descriptor)
+            except OSError as exc:
+                raise _judge_os(exc, transfer, source_file) from exc
+            if digest != sha256:
                 raise _Unmovable(OUTCOME_REFUSED, REASON_SHA256_MISMATCH)
             try:
                 destination_dir = safe_open.open_directory(uploads, destination[:-1], create=True)
             except safe_open.UnsafePath as exc:
-                raise _judge(exc, uploads, absent_is_missing=False) from exc
+                raise _judge(exc, uploads, absent_is_missing=False, file=destination_file) from exc
             try:
                 try:
                     os.rename(name, destination[-1], src_dir_fd=source_dir, dst_dir_fd=destination_dir)
                 except OSError as exc:
                     if exc.errno != errno.EXDEV:
-                        raise _judge_os(exc, uploads) from exc
+                        raise _judge_os(exc, uploads, destination_file) from exc
                     try:
                         _copy_into_place(descriptor, info, destination_dir, destination[-1], sha256, uploads)
+                    except FolderProblem as problem:
+                        problem.file = destination_file
+                        raise
                     except OSError as copy_error:
-                        raise _judge_os(copy_error, uploads) from copy_error
+                        raise _judge_os(copy_error, uploads, destination_file) from copy_error
                     return True
-                os.fsync(destination_dir)
-                os.fsync(source_dir)
+                try:
+                    os.fsync(destination_dir)
+                    os.fsync(source_dir)
+                except OSError as exc:
+                    # The rename happened: never an _Unmovable, which would drop the moved file's records.
+                    detail = exc.strerror or str(exc)
+                    raise FolderProblem(uploads, safe_open.REASON_OPEN_FAILED, detail, file=destination_file) from exc
                 return False
             finally:
                 os.close(destination_dir)

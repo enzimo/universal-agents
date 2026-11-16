@@ -19,10 +19,12 @@ at it, it opens by id and is listed for the model), files it cannot move
 recorded), records it refuses (a link, another checksum, an id that is not a
 file name, a destination already taken, a conversation entry naming another
 path, a file that is not what 0.9.13 wrote, a name the file system refuses),
-the folder missing or holding none of the files (nothing changes;
-``--files-gone`` then finishes), a folder it cannot use (startup stops and
-nothing changes), a run stopped part way (the next run finishes), a move
-across file systems (short writes, a copy that reads back differently),
+the folder missing or holding none of the files (nothing changes, also
+when one record names a file too long for the file system; ``--files-gone``
+then finishes), a folder or one file it cannot use or read (startup stops,
+the error names the file, and nothing changes), a pipe in place of a file
+(refused without waiting), a run stopped part way (the next run finishes), a
+move across file systems (short writes, a copy that reads back differently),
 upload retention and a person's removal finding the moved file, the launcher
 step and the operator command. A held request still naming the old path gets
 the stuck-task notice: ``tests/test_stuck_tasks.py`` (``ADAPTER_HOST_FOLDER``).
@@ -541,6 +543,126 @@ def test_a_name_the_file_system_refuses_is_refused_not_retried_forever(instance:
     assert instance.gateway().get_attachment(long_id) is None
     assert instance.photo_source.read_bytes() == CONTENT["att_photo"]
     assert any(message.endswith("reason=name_refused") for message in _events(caplog, "adapter_host_file_not_moved"))
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permissions do not stop root")
+def test_a_file_it_cannot_read_stops_startup_naming_that_file(instance: _Instance, caplog) -> None:
+    """The folder is fine and only the photo is unreadable: the message names the photo, not just its folder."""
+
+    os.chmod(instance.photo_source, 0)
+    try:
+        before = _untouched(instance)
+        with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
+            with pytest.raises(upgrade_module.FolderProblem) as raised:
+                instance.run()
+        assert _untouched(instance) == before
+    finally:
+        os.chmod(instance.photo_source, 0o640)
+
+    problem = raised.value
+    assert problem.file == instance.photo_source and problem.attachment_id == "att_photo"
+    assert str(instance.photo_source) in str(problem) and "att_photo" in str(problem)
+    (error,) = _events(caplog, "adapter_host_files_folder_unusable")
+    assert f"file={instance.photo_source}" in error and "attachment_id=att_photo" in error
+    assert not instance.layout.adapter_host_files_upgrade_path.exists()
+    assert instance.run().counts.moved == 1, "a restart after the fix finishes the work"
+
+
+def _photo_already_at_destination(instance: _Instance) -> Path:
+    _write(instance.photo_destination, CONTENT["att_photo"])
+    return instance.photo_destination
+
+
+@pytest.mark.parametrize(
+    "where", ["source", "destination"], ids=["source", "destination"]
+)
+def test_a_read_error_stops_startup_naming_the_file_and_keeps_every_record(
+    instance: _Instance, monkeypatch, caplog, where
+) -> None:
+    """An I/O error (a bad sector) while reading a file is a ``FolderProblem`` naming it, not a bare ``OSError``."""
+
+    if where == "destination":
+        file, folder = _photo_already_at_destination(instance), instance.layout.uploads_dir.resolve()
+    else:
+        file, folder = instance.photo_source, instance.transfer
+    before = _untouched(instance)
+
+    def failing_pread(*_args):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(upgrade_module.os, "pread", failing_pread)
+    with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
+        with pytest.raises(upgrade_module.FolderProblem) as raised:
+            instance.run()
+    monkeypatch.undo()
+
+    problem = raised.value
+    assert (problem.folder, problem.file, problem.attachment_id) == (folder, file, "att_photo")
+    assert "Input/output error" in str(problem) and str(file) in str(problem)
+    (error,) = _events(caplog, "adapter_host_files_folder_unusable")
+    assert f"file={file}" in error and "attachment_id=att_photo" in error
+    assert _untouched(instance) == before and not instance.layout.adapter_host_files_upgrade_path.exists()
+    counts = instance.run().counts
+    assert counts.moved + counts.already_moved == 1, "a restart after the fix finishes the work"
+
+
+def test_a_pipe_in_place_of_a_file_is_refused_without_waiting(instance: _Instance, caplog) -> None:
+    """A pipe with no writer would block a plain open; the step opens without waiting and refuses it."""
+
+    import signal
+
+    instance.photo_source.unlink()
+    os.mkfifo(instance.photo_source, 0o600)
+
+    def stuck(*_args):
+        raise AssertionError("the step waited for a writer on the pipe")
+
+    previous = signal.signal(signal.SIGALRM, stuck)
+    signal.alarm(5)
+    try:
+        with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+            result = instance.run()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+    assert result.finished and result.counts.moved == 0 and result.counts.refused == 1
+    assert instance.gateway().get_attachment("att_photo") is None
+    assert instance.photo_source.is_fifo(), "the pipe is left where it is"
+    assert any(
+        "attachment_id=att_photo" in message and message.endswith("reason=not_regular_file")
+        for message in _events(caplog, "adapter_host_file_not_moved")
+    )
+
+
+def test_a_name_too_long_for_the_file_system_is_no_sign_the_folder_holds_the_files(instance: _Instance, caplog) -> None:
+    """One record whose stored file name the file system refuses cannot make an empty mount point look found."""
+
+    _empty_mount_point(instance)
+    long_path = instance.transfer / ("adapter_upload_" + "x" * 300)
+    instance.gateway().upsert_attachment(
+        attachment_id="att_long",
+        session_key="telegram:chat:7",
+        conversation_id=CONVERSATION,
+        correlation_id=None,
+        filename="long.png",
+        content_type="image/png",
+        kind="image",
+        size_bytes=1,
+        sha256=hashlib.sha256(b"x").hexdigest(),
+        local_path=str(long_path),
+        owner_canonical_user_id=PERSON,
+    )
+    before = _untouched(instance)
+
+    with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert not result.finished and result.folder_missing and result.waiting == 3
+    assert _untouched(instance) == before
+    assert instance.gateway().get_attachment("att_long") is not None
+    assert not instance.layout.adapter_host_files_upgrade_path.exists()
+    assert _events(caplog, "adapter_host_files_folder_missing")
 
 
 def test_only_files_0_9_13_wrote_are_moved(instance: _Instance) -> None:
