@@ -195,6 +195,8 @@ async def test_access_resume_clears_old_blocker_before_final_review(
         turn_executor=SimpleNamespace(
             _apply_agent_result_transformer=lambda _, result: result,
             prepare_turn_decision=AsyncMock(),
+            # Saves a note when the outbox held the turn's answer back.
+            record_held_answer_work=AsyncMock(),
             decode_result=lambda **_: SimpleNamespace(
                 decision=None, structured_output_details=None
             ),
@@ -220,6 +222,7 @@ async def test_access_resume_clears_old_blocker_before_final_review(
         strands_agent=sdk,
         decision_tool_name="",
     )
+    agent.turn_executor.record_held_answer_work.assert_awaited_once()
     assert manager.get_task_info(task.task_id).state == ProgressState.PARTIAL
     assert manager.get_next_task_to_process() == task.task_id
     manager.update_main_task_state(task.task_id, ProgressState.IN_PROGRESS, now)

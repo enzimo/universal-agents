@@ -148,10 +148,13 @@ grant nothing.
    long as no request is linked to it.
 
 A step is reported complete only after its requests were approved and its
-changes applied. A task cannot finish while its plan has unfinished steps: it
-gets one turn to finish or report them, and a repeated attempt without
-progress fails with an explicit error. An uncertain external result is
-checked before any retry.
+changes applied. A task cannot finish while its plan has unfinished steps. Its
+first answer for each saved state of the plan is held back, and the task runs
+again at once to finish or report the steps; a message you send meanwhile is
+read on that turn. If it answers again without progress on the steps, the
+task is stopped as failed: you get a message that says so, followed by the
+agent's last reply, labelled as given before the open steps were finished. An
+uncertain external result is checked before any retry.
 
 With authorization off there are no requests: the agent can still publish and
 follow a plan, and applies each change after you agree in the conversation.
@@ -170,6 +173,11 @@ setup.
 
 ## Changes in this release
 
+- A task whose answer was held back for unfinished plan steps now runs again
+  at once. Before, it could stop for good without telling you, and messages
+  you sent to it were accepted but never read. A repeated answer without
+  progress now stops the task with a message, instead of running it again
+  and again.
 - Steps name kinds of change and tools with a level instead of action ids.
   Workflows saved by earlier releases are not shown and cannot be continued;
   the agent publishes a new plan.
