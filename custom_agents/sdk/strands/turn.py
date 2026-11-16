@@ -121,6 +121,7 @@ from custom_messages.enums import (
 )
 from reply_routing_trace import is_reply_routing_trace_enabled
 from custom_agents.turn_work_notes import (
+    ENDED_BY_ANSWER_HELD,
     ENDED_BY_OPEN,
     ENDED_BY_TOOL_LIMIT,
     ENDED_BY_WAIT,
@@ -2870,16 +2871,53 @@ class LLMTurnExecutor:
         await self._stop_at_wait_limit(turn, decision)
         await self._record_turn_work(turn, decision=decision, strands_agent=strands_agent)
 
+    async def record_held_answer_work(
+        self, *, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta,
+        task_id: Optional[str], decision: Any, content: Any, strands_agent: Any, decision_tool_name: str = "",
+    ) -> None:
+        """Save what a turn did when the outbox held its final answer back (``turn_work_notes``).
+
+        ``prepare_turn_decision`` saves no note for a decision that finishes
+        the task. A hold (an access workflow's unfinished steps, pending
+        delegated work, a question or a runtime plan) leaves the task open
+        after all and returns a request naming the turn's own task, and the
+        turn that runs the task again needs what this one did and answered.
+        Both paths that run a turn's decision call this after the outbox: a
+        fresh turn and a turn resumed after a person's decision.
+        """
+
+        if decision is None or leaves_task_open(decision):
+            return  # nothing decided, or saved before the outbox ran
+        if not (
+            isinstance(content, Task)
+            and content.task_type == MessageMetaType.REQUEST
+            and content.task_id == task_id
+        ):
+            return
+        turn = _TurnState(msg_content=msg_content, msg_header=msg_header, msg_meta=msg_meta)
+        turn.active_task_id = task_id
+        turn.turn_decision_tool_name = decision_tool_name
+        await self._record_turn_work(
+            turn, decision=decision, ended_by=ENDED_BY_ANSWER_HELD, strands_agent=strands_agent, answer_held=True
+        )
+
     async def _record_turn_work(
-        self, turn: _TurnState, *, decision: Any, ended_by: Optional[str] = None, strands_agent: Any = None
+        self,
+        turn: _TurnState,
+        *,
+        decision: Any,
+        ended_by: Optional[str] = None,
+        strands_agent: Any = None,
+        answer_held: bool = False,
     ) -> None:
         """Save what this turn did when it leaves its task open (``turn_work_notes``).
 
         Only a task request's own turn: answering a question about another
         task, or a protocol message, has no later turn that continues it. A
-        decision that finishes the task saves nothing, and neither does a turn
-        that called no tools and sent nothing (for example a check-back wake
-        that only keeps waiting).
+        decision that finishes the task saves nothing, unless the outbox held
+        its answer back (``answer_held``, ``record_held_answer_work``), and
+        neither does a turn that called no tools and sent nothing (for example
+        a check-back wake that only keeps waiting).
         """
 
         content = turn.msg_content
@@ -2890,7 +2928,7 @@ class LLMTurnExecutor:
             and content.task_type == MessageMetaType.REQUEST
         ):
             return
-        if decision is not None and not leaves_task_open(decision):
+        if decision is not None and not answer_held and not leaves_task_open(decision):
             return
         started_wait = decision is not None and decision_starts_wait(decision)
         model = self.model() if strands_agent is None else strands_agent
@@ -3013,6 +3051,11 @@ class LLMTurnExecutor:
             incoming_meta=turn.msg_meta,
             structured_output_details=outcome.structured_output_details,
             start_notes=turn.start_notes,
+        )
+        await self.record_held_answer_work(
+            msg_content=turn.msg_content, msg_header=turn.msg_header, msg_meta=turn.msg_meta,
+            task_id=turn.active_task_id, decision=outcome.decision, content=turn.content,
+            strands_agent=self.model(), decision_tool_name=turn.turn_decision_tool_name,
         )
         await self._write_context_debug_post_turn(
             request=turn.context_request,

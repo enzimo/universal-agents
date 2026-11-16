@@ -1376,7 +1376,10 @@ task knows only the task's saved history. When a turn ends with its task still
 open (it delegated, escalated, asked a question, sent a credential form, or
 paused at its tool-call budget), trusted code saves what the turn did before
 anything is sent: the tools it called with short input previews and their
-results, and what it sent (`custom_agents/turn_work_notes.py`). Every later
+results, and what it sent (`custom_agents/turn_work_notes.py`). A final answer
+the runtime holds back after the turn decided (for example for an access
+workflow's unfinished steps) leaves the task open too; its note, with the held
+answer, is saved once the outbox returns. Every later
 turn of the task shows this as "Work already done in this task", says the
 task is continuing and labels its request accordingly. Rationale: without it a
 resumed turn saw only the original request and did the work again; a scheduled

@@ -53,9 +53,14 @@ from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskAnswer, TaskQuery, TaskSteering
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType, TaskSteeringType
 from custom_tools.tool_stop import ToolStop
+from custom_agents.context_engine import ContextAssemblyRequest
+from custom_agents.task_steering_runtime import _as_provider_timeout
+from custom_agents.turn_failure_runtime import task_runtime_error_message
+from custom_agents.turn_work_notes import EARLIER_TURN_WORK_HEADING, ENDED_BY_ANSWER_HELD, turn_work_notes
 from storage.access_workflow_repository import AccessWorkflowRepository
 from runtime_hosting.agent_execution import MAIN_LANE
-from tests.task_work_support import strands_parts
+from tests.task_work_support import bind_task, strands_parts
+from tests.test_context_engine import _engine
 from tests.test_runtime_owner_boundaries import build_turn_owner
 from tests.test_turn_action_outbox import (
     _add_active_parent_task,
@@ -167,7 +172,7 @@ def test_a_final_answer_held_for_open_workflow_steps_queues_the_task_to_run_agai
     asyncio.run(task_message_runtime._apply_task_processing_result(agent, parent.task_id, info, result))
 
     _assert_held_to_run_again(manager, agent, parent.task_id, workflow.workflow_id)
-    held = [record for record in caplog.records if "event=task_answer_held" in record.getMessage()]
+    held = [record for record in caplog.records if "event=turn_output_held" in record.getMessage()]
     assert len(held) == 1 and "state=partial" in held[0].getMessage()
     assert manager.get_next_task_to_process() == parent.task_id
 
@@ -207,6 +212,9 @@ def test_a_final_answer_held_in_a_resumed_turn_also_queues_the_task_to_run_again
     resumed_model.assert_awaited_once()
     assert isinstance(result, Task) and result.task_id == parent.task_id
     _assert_held_to_run_again(manager, agent, parent.task_id, workflow.workflow_id)
+    [note] = turn_work_notes(manager.get_task(parent.task_id))
+    assert note.details["ended_by"] == ENDED_BY_ANSWER_HELD
+    assert note.details["sent"] == ["final answer, held back and not sent: Set up; here are the prices."]
     assert parent.task_id not in agent._interrupted_turn_sessions
     assert manager.get_next_task_to_process() == parent.task_id
 
@@ -223,7 +231,7 @@ def test_a_held_answer_whose_hold_saved_no_state_is_reported(tmp_path, caplog) -
     asyncio.run(task_message_runtime._apply_task_processing_result(agent, parent.task_id, info, held))
 
     assert manager.get_task_info(parent.task_id).state == ProgressState.IN_PROGRESS
-    warnings = [record for record in caplog.records if "event=held_answer_state_not_saved" in record.getMessage()]
+    warnings = [record for record in caplog.records if "event=held_output_state_not_saved" in record.getMessage()]
     assert len(warnings) == 1
     assert warnings[0].levelno == logging.WARNING
     assert f"task_id={parent.task_id}" in warnings[0].getMessage() and "state=in_progress" in warnings[0].getMessage()
@@ -272,7 +280,8 @@ def _history_marks(manager, task_id: str) -> list[str]:
     ],
 )
 def test_holds_for_other_work_and_delegation_still_leave_the_task_waiting(tmp_path, setup, actions, hold) -> None:
-    """Each hold below saves WAITING itself; a plain delegation's parent waits through the end-of-turn handling."""
+    """Each hold below saves WAITING itself; a plain delegation's parent waits too (the batch's state step
+    sets it before the end-of-turn handling, whose own write has its own test)."""
     manager = _make_task_manager(tmp_path)
     parent = _add_active_parent_task(manager)
     agent = _make_agent(tmp_path, task_manager=manager)
@@ -660,3 +669,108 @@ def test_a_held_answer_run_again_after_a_failure_is_held_again_and_a_real_repeat
     assert message.answer.endswith(f"{LAST_REPLY_LABEL}\n\n> Here are the prices again.")
     replayed = [record for record in caplog.records if "event=workflow_completion_hold_replayed" in record.getMessage()]
     assert len(replayed) == 1 and replayed[0].levelno == logging.WARNING
+
+
+# -- the end-of-turn WAITING write for a delegated subtask (project review F6) --
+
+
+def test_a_delegated_subtask_result_makes_its_parent_wait_at_the_end_of_the_turn(tmp_path) -> None:
+    """The end-of-turn handling's own write, without the batch's state step that usually sets it first."""
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    assert manager.update_main_task_state(parent.task_id, ProgressState.PARTIAL, _now())
+    info = manager.get_task_info(parent.task_id)
+    child = Task(task_id="task_child", parent_task_id=parent.task_id, task_type=MessageMetaType.REQUEST)
+
+    asyncio.run(task_message_runtime._apply_task_processing_result(agent, parent.task_id, info, child))
+
+    assert manager.get_task_info(parent.task_id).state == ProgressState.WAITING
+    assert parent.task_id not in manager.task_state.task_queue
+
+
+# -- a resumed turn's refusal is not read as a model timeout (project review F4) --
+
+
+def test_a_refusal_whose_plan_title_mentions_a_timeout_keeps_its_own_message() -> None:
+    refusal = WorkflowCompletionRefused(
+        workflow_id="access_flow_1", task_id="task_backup", title="Rerun the backup job that timed out",
+        attempted_answer="Done.",
+    )
+
+    assert _as_provider_timeout(refusal) is refusal
+    assert task_runtime_error_message(refusal).startswith(
+        'This task was stopped because its plan "Rerun the backup job that timed out"'
+    )
+
+
+# -- the turn that runs again knows what the held turn did and answered (project review F3) --
+
+
+def test_the_next_turn_sees_what_the_held_turn_did_and_answered(tmp_path) -> None:
+    """A real turn owner and the real outbox; the next turn's prompt comes from the real context engine."""
+
+    manager = _make_task_manager(tmp_path)
+    # A request with no chat conversation: the prompt check needs none.
+    parent = Task(task_id="task_prices", task_type=MessageMetaType.REQUEST, problem_statement="Check domain prices.")
+    assert manager.add_task(
+        parent,
+        MessageHeader(from_agent_id="user_agent", response_routing_key="user_reply"),
+        MessageMeta(requester_type=RequesterType.USER_REQUESTER, is_response_requested=True),
+        owner_person_id=OWNER,
+    )
+    assert manager.get_next_task_to_process() == parent.task_id
+    assert manager.update_main_task_state(parent.task_id, ProgressState.IN_PROGRESS, _now())
+    bind_task(parent.task_id)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    _open_workflow(manager, parent.task_id)
+    info = manager.get_task_info(parent.task_id)
+
+    async def answer(_prompt, **_kwargs):
+        return SimpleNamespace(structured_output=_final_answer("Here are the prices from the first registrar."))
+
+    # The turn looked the prices up before it answered.
+    model = SimpleNamespace(
+        invoke_async=answer,
+        messages=[
+            {"role": "assistant", "content": [
+                {"toolUse": {"toolUseId": "t1", "name": "http_request", "input": {"url": "https://registrar.example.com/prices"}}},
+            ]},
+            {"role": "user", "content": [{"toolResult": {"toolUseId": "t1", "status": "success", "content": [{"text": "ok"}]}}]},
+        ],
+    )
+    executor, _ = build_turn_owner(
+        invoke=answer, guidance=deque(["", ""]), committed=[], cleared=[], model=model,
+        task_operations={
+            "read_runtime_resume_directive": manager.read_runtime_resume_directive,
+            "read_partial_tool_call_limit": manager.read_partial_tool_call_limit,
+            "release_turn_start_notes": manager.release_turn_start_notes,
+            "get_task_info": manager.get_task_info,
+            "count_recoverable_pauses": manager.count_recoverable_pauses,
+            "record_turn_work": manager.record_turn_work,
+            "count_started_waits": manager.count_started_waits,
+        },
+    )
+    executor.effects = dataclasses.replace(executor.effects, execute_turn_decision_outbox=agent._execute_turn_decision_outbox)
+
+    result = asyncio.run(executor.process_llm_interaction(parent, info.header, info.meta))
+
+    assert isinstance(result, Task) and result.task_id == parent.task_id  # held
+    [note] = turn_work_notes(manager.get_task(parent.task_id))
+    assert note.details["ended_by"] == ENDED_BY_ANSWER_HELD and note.details["started_wait"] is False
+    info = manager.get_task_info(parent.task_id)
+    prompt = _engine(task_manager=manager, context_window_tokens=200000).assemble(
+        ContextAssemblyRequest(
+            incoming_content=info.task,
+            incoming_header=info.header,
+            incoming_meta=info.meta,
+            identity_meta=info.meta,
+            execution_task_id=parent.task_id,
+            incoming_message_json=info.task.model_dump_json(),
+        )
+    ).prompt
+    assert EARLIER_TURN_WORK_HEADING in prompt
+    assert "then gave a final answer that was held back" in prompt
+    assert "called `http_request` (success)" in prompt
+    assert "sent final answer, held back and not sent: Here are the prices from the first registrar." in prompt

@@ -1778,11 +1778,12 @@ async def _apply_task_processing_result(
 
 
 async def _keep_held_answer_state(self: Any, task_id: str) -> None:
-    """Leave a task whose final answer was held back in the state its hold saved.
+    """Leave a task whose turn output was held back in the state its hold saved.
 
-    A turn whose result is a request naming its own task gave a final answer
-    that the runtime held back instead of sending. Every hold saves the state
-    the task needs before it returns that request:
+    A turn whose result is a request naming its own task had its output held
+    back instead of sent: a final answer, or a delegation or question the
+    plan-activation guard suppressed. Every hold saves the state the task
+    needs before it returns that request:
 
     - delegated work or a TaskQuery still pending, a runtime plan running, or a
       delegation suppressed after plan activation: WAITING, until that work
@@ -1808,15 +1809,15 @@ async def _keep_held_answer_state(self: Any, task_id: str) -> None:
     state = info.state if info is not None else None
     if state is not None and self.task_manager.is_executing_state(state):
         self._logger.warning(
-            "A task's final answer was held back, but its hold saved no state for it. "
-            "event=held_answer_state_not_saved task_id=%s state=%s",
+            "The turn's output was held back, but its hold saved no state for the task. "
+            "event=held_output_state_not_saved task_id=%s state=%s",
             task_id,
             state.value,
         )
         return
     self._logger.info(
-        "A task's final answer was held back; it keeps the state its hold saved. "
-        "event=task_answer_held task_id=%s state=%s",
+        "The turn's output was held back; the task keeps the state its hold saved. "
+        "event=turn_output_held task_id=%s state=%s",
         task_id,
         state.value if state is not None else "missing",
     )

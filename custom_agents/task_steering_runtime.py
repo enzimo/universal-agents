@@ -73,6 +73,7 @@ from custom_agents.execution_lanes import is_parallel_lane
 from custom_tools.runtime_context import TaskWork, bound_task_id, current_task_work, task_work
 from runtime_hosting.agent_execution import current_lane
 from custom_tools.tool_stop import ToolStop
+from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
 from custom_agents.task_human_interaction_blockers import (
@@ -1197,9 +1198,14 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
 
 
 def _as_provider_timeout(error: Exception) -> Exception:
-    """A resumed turn skips the turn runtime's recovery, so name a timeout the same way."""
+    """A resumed turn skips the turn runtime's recovery, so name a timeout the same way.
 
-    if isinstance(error, ProviderTimeoutError) or not is_provider_timeout_error(error):
+    A refused action is already classified and keeps its own message, even
+    when its text happens to contain timeout words (a plan titled "Rerun the
+    backup job that timed out" read as a model timeout).
+    """
+
+    if isinstance(error, (ProviderTimeoutError, TurnActionRefused)) or not is_provider_timeout_error(error):
         return error
     timeout = ProviderTimeoutError()
     timeout.__cause__ = error
@@ -1247,10 +1253,11 @@ async def _run_resumed_turn(
         msg_meta=session.msg_meta,
     )
 
+    decision_tool_name = getattr(session.invoke_kwargs.get("structured_output_model"), "__name__", "")
     await agent.turn_executor.prepare_turn_decision(
         msg_content=session.msg_content, msg_header=session.msg_header, msg_meta=session.msg_meta,
         task_id=task_id, decision=outcome.decision, strands_agent=session.strands_agent,
-        decision_tool_name=getattr(session.invoke_kwargs.get("structured_output_model"), "__name__", ""),
+        decision_tool_name=decision_tool_name,
     )
 
     content = await agent._execute_turn_decision_outbox(
@@ -1260,6 +1267,11 @@ async def _run_resumed_turn(
         incoming_meta=session.msg_meta,
         structured_output_details=outcome.structured_output_details,
         start_notes=session.start_notes,
+    )
+    await agent.turn_executor.record_held_answer_work(
+        msg_content=session.msg_content, msg_header=session.msg_header, msg_meta=session.msg_meta,
+        task_id=task_id, decision=outcome.decision, content=content, strands_agent=session.strands_agent,
+        decision_tool_name=decision_tool_name,
     )
     await agent._apply_task_processing_result(task_id, task_info, content)
     agent._interrupted_turn_sessions.pop(task_id, None)
