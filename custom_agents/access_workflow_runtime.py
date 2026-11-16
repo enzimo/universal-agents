@@ -28,6 +28,8 @@ from storage.access_workflow_repository import AccessWorkflowRepository
 
 logger = logging.getLogger(__name__)
 CLOSED_STATE_VALUES = frozenset(state.value for state in CLOSED_STEP_STATES)
+# How the note a held task's next turn reads begins (``_continue``).
+WORKFLOW_CONTINUATION_NOTE = "Continue the published access workflow in this same task."
 
 
 def _service(manager: Any) -> AccessWorkflowService:
@@ -41,7 +43,7 @@ def _continue(manager: Any, record: Any, evidence: list[dict[str, Any]]) -> None
     # (``access_request_runtime`` does the same when a request is decided).
     manager.append_runtime_resume_directive(
         record.source_task_id,
-        "Continue the published access workflow in this same task. Keep finished results. Read "
+        f"{WORKFLOW_CONTINUATION_NOTE} Keep finished results. Read "
         "get_access_workflow, check each request's current status, then do only what is allowed now and "
         "report each step. An approval is not completion: apply approved changes with apply_change and check "
         "the work. Never ask again for anything the person denied. If work cannot continue, report the step "
@@ -139,4 +141,4 @@ def defer_workflow_completion(manager: Any, *, task_id: str, team_id: str) -> bo
     return False
 
 
-__all__ = ["defer_workflow_completion"]
+__all__ = ["WORKFLOW_CONTINUATION_NOTE", "defer_workflow_completion"]

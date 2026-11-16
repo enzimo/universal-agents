@@ -20,7 +20,11 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from custom_agents import task_message_runtime, task_steering_runtime
+from custom_agents.access_workflows import AccessWorkflowService
+from custom_agents.access_workflow_runtime import WORKFLOW_CONTINUATION_NOTE
 from custom_agents.structured_llm_messages import (
     StructuredAgentTurnDecision,
     StructuredTaskPayload,
@@ -30,18 +34,23 @@ from custom_messages.contracts.access_workflow_v2 import (
     AccessWorkflowV2,
     WorkflowEventV2,
     WorkflowPhase,
+    WorkflowProgressV2,
     WorkflowStepState,
     WorkflowStepV2,
 )
-from custom_messages.contracts.task_v1 import Task, TaskSteering
-from custom_messages.enums import MessageMetaType, ProgressState, TaskSteeringType
+from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
+from custom_messages.enums import MessageMetaType, ProgressState, RequesterType, TaskSteeringType
 from custom_tools.tool_stop import ToolStop
 from storage.access_workflow_repository import AccessWorkflowRepository
 from tests.task_work_support import strands_parts
-from tests.test_turn_action_outbox import _add_active_parent_task, _make_agent, _make_task_manager, _now
-
-CONTINUATION_NOTE = "Continue the published access workflow in this same task."
-
+from tests.test_turn_action_outbox import (
+    _add_active_parent_task,
+    _delegation,
+    _make_agent,
+    _make_task_manager,
+    _now,
+)
 
 def _open_workflow(manager, task_id: str) -> AccessWorkflowV2:
     """A published plan whose account step is done and whose work step still runs."""
@@ -97,7 +106,7 @@ def _assert_held_to_run_again(manager, agent, task_id: str, workflow_id: str) ->
     assert info.state == ProgressState.PARTIAL
     assert list(manager.task_state.task_queue) == [task_id]
     note = manager.read_runtime_resume_directive(task_id) or ""
-    assert CONTINUATION_NOTE in note and workflow_id in note
+    assert WORKFLOW_CONTINUATION_NOTE in note and workflow_id in note
     agent.team_comms.send_message.assert_not_awaited()
     assert _records(manager)[-1].status == "held_back"
     assert "source_task_reconciliation_requested" in _event_codes(manager, workflow_id)
@@ -185,3 +194,176 @@ def test_a_held_answer_whose_hold_saved_no_state_is_reported(tmp_path, caplog) -
     assert len(warnings) == 1
     assert warnings[0].levelno == logging.WARNING
     assert f"task_id={parent.task_id}" in warnings[0].getMessage() and "state=in_progress" in warnings[0].getMessage()
+
+
+# -- the other holds keep their waits (A2) --
+
+
+def _with_pending_query(manager, task_id: str) -> None:
+    manager.add_task_query(
+        task_id, TaskQuery(query_type=MessageMetaType.REQUEST, parent_task_id=task_id, message="Which registrar?")
+    )
+
+
+def _with_active_plan(manager, task_id: str) -> None:
+    plan = manager.activate_plan_execution(
+        task_id,
+        steps=[{"title": "Check the prices", "objective": "Look up the domain prices."}],
+        final_review=False,
+        agent_name="manager",
+        agent_id=manager.identity.owner_agent_id,
+    )
+    assert plan is not None and manager.is_plan_execution_root_active(task_id)
+
+
+def _history_marks(manager, task_id: str) -> list[str]:
+    """The events, plan actions and reasons the task's history records, in order."""
+
+    marks = []
+    for entry in manager.get_task_info(task_id).task.execution_history:
+        details = entry.details or {}
+        mark = details.get("event") or details.get("action") or details.get("reason")
+        if mark:
+            marks.append(str(mark))
+    return marks
+
+
+@pytest.mark.parametrize(
+    ("setup", "actions", "hold"),
+    [
+        pytest.param(None, ["delegate", "answer"], "terminal_task_response_deferred", id="answer-with-pending-delegated-work"),
+        pytest.param(_with_pending_query, ["answer"], "terminal_task_response_deferred", id="answer-with-unanswered-task-query"),
+        pytest.param(_with_active_plan, ["answer"], "defer_root_response_for_plan_execution", id="answer-during-plan-execution"),
+        pytest.param(_with_active_plan, ["delegate"], "suppress_post_activation_plan_bypass", id="delegation-after-plan-activation"),
+        pytest.param(None, ["delegate"], None, id="plain-delegation"),
+    ],
+)
+def test_holds_for_other_work_and_delegation_still_leave_the_task_waiting(tmp_path, setup, actions, hold) -> None:
+    """Each hold below saves WAITING itself; a plain delegation's parent waits through the end-of-turn handling."""
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    if setup is not None:
+        setup(manager, parent.task_id)
+    built = {"delegate": lambda: _delegation("Look up the domain prices."), "answer": lambda: _final_answer("Done.").actions[0]}
+    info = manager.get_task_info(parent.task_id)
+
+    result = asyncio.run(
+        agent._execute_turn_decision_outbox(
+            decision=StructuredAgentTurnDecision(actions=[built[name]() for name in actions]),
+            incoming_content=parent,
+            incoming_header=info.header,
+            incoming_meta=info.meta,
+        )
+    )
+    asyncio.run(task_message_runtime._apply_task_processing_result(agent, parent.task_id, info, result))
+
+    assert isinstance(result, Task) and result.task_type == MessageMetaType.REQUEST
+    # A held answer names its own task; a delegation names its child.
+    assert (result.task_id == parent.task_id) is (hold is not None)
+    if hold is not None:
+        assert hold in _history_marks(manager, parent.task_id)
+    assert manager.get_task_info(parent.task_id).state == ProgressState.WAITING
+    assert parent.task_id not in manager.task_state.task_queue
+    sent = [call.kwargs["message"].msg_content for call in agent.team_comms.send_message.await_args_list]
+    assert not any(isinstance(item, Task) and item.task_type == MessageMetaType.RESPONSE for item in sent)
+
+
+# -- the queue runs the held task again (intent) --
+
+
+def _queued_request(manager) -> Task:
+    """A person's request, queued and not started yet."""
+
+    task = Task(task_id="task_prices", task_type=MessageMetaType.REQUEST, problem_statement="Check domain prices.")
+    header = MessageHeader(from_agent_id="user_agent", response_routing_key="user_reply")
+    meta = MessageMeta(
+        from_agent_name="user",
+        requester_type=RequesterType.USER_REQUESTER,
+        is_response_requested=True,
+        msg_correlation_id="corr_prices",
+        conversation_id="conv_prices",
+    )
+    assert manager.add_task(task, header, meta, owner_person_id=None)
+    return task
+
+
+def _queue_agent(tmp_path, manager, turns):
+    """An agent whose queue loop runs ``turns`` in order; each one decides through the real outbox."""
+
+    agent = _make_agent(tmp_path, task_manager=manager)
+    agent._conversation_store = None
+    object.__setattr__(agent, "_refresh_self_agent_state", AsyncMock())
+    object.__setattr__(agent, "_notify_context_after_turn", AsyncMock())
+    pending = list(turns)
+
+    async def process_llm_interaction(*, msg_content, msg_header, msg_meta):
+        decision = await pending.pop(0)(agent, msg_content)
+        return await agent._execute_turn_decision_outbox(
+            decision=decision, incoming_content=msg_content, incoming_header=msg_header, incoming_meta=msg_meta
+        )
+
+    object.__setattr__(agent, "process_llm_interaction", process_llm_interaction)
+    return agent
+
+
+def _sent_tasks(agent) -> list[Task]:
+    return [
+        call.kwargs["message"].msg_content
+        for call in agent.team_comms.send_message.await_args_list
+        if isinstance(call.kwargs["message"].msg_content, Task)
+    ]
+
+
+def test_the_queue_runs_the_held_task_again_with_its_note_and_the_guidance_sent_meanwhile(tmp_path) -> None:
+    manager = _make_task_manager(tmp_path)
+    task = _queued_request(manager)
+    workflow = _open_workflow(manager, task.task_id)
+    second_turn: dict[str, str] = {}
+
+    async def first(_agent, _content):
+        return _final_answer("Here are the prices from the first registrar.")
+
+    async def second(agent, content):
+        # What every turn start reads (custom_agents.sdk.strands.turn): the note and the queued guidance.
+        second_turn["task_id"] = content.task_id
+        second_turn["note"] = manager.read_runtime_resume_directive(content.task_id) or ""
+        second_turn["guidance"] = await task_steering_runtime.consume_pending_proactive_guidance_message(
+            agent, content.task_id
+        )
+        service = AccessWorkflowService(AccessWorkflowRepository(manager.storage_settings))
+        service.progress(
+            service.repository.get(workflow.workflow_id),
+            WorkflowProgressV2(step_id="do_the_work", state=WorkflowStepState.COMPLETE, summary="Reported the prices."),
+        )
+        return _final_answer("Here are the prices from both registrars.")
+
+    agent = _queue_agent(tmp_path, manager, [first, second])
+
+    async def scenario() -> None:
+        assert await agent._check_and_process_next_task()
+        _assert_held_to_run_again(manager, agent, task.task_id, workflow.workflow_id)
+        await task_steering_runtime.handle_task_steering_message(
+            agent,
+            TaskSteering(
+                steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
+                target_task_id=task.task_id,
+                guidance_text="Also check the price of the .test domain.",
+                idempotency_key="guidance_prices",
+            ),
+            MessageHeader(from_agent_id="gateway"),
+            MessageMeta(msg_correlation_id="corr_prices", conversation_id="conv_prices"),
+        )
+        assert await agent._check_and_process_next_task()  # the same task, at once
+        assert not await agent._check_and_process_next_task()
+
+    asyncio.run(scenario())
+
+    assert second_turn["task_id"] == task.task_id
+    assert WORKFLOW_CONTINUATION_NOTE in second_turn["note"] and workflow.workflow_id in second_turn["note"]
+    assert "Also check the price of the .test domain." in second_turn["guidance"]
+    answers = [item for item in _sent_tasks(agent) if item.task_type == MessageMetaType.RESPONSE]
+    assert [item.answer for item in answers] == ["Here are the prices from both registrars."]
+    assert manager.get_task_info(task.task_id) is None  # finished and archived
+    saved = manager.get_task_from_db(task.task_id, owner_agent_id=agent.id)
+    assert saved["main_task"].task_state[-1][0] == ProgressState.COMPLETED

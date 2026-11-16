@@ -1792,8 +1792,8 @@ async def _keep_held_answer_state(self, task_id: str) -> None:
       the batch's state projection makes it PARTIAL.
 
     Only a delegated subtask (a request with another task id) makes the task
-    wait here. Why: until 2026-11-14 this handling also wrote WAITING for a
-    held answer, which removed the queue entry of a task its workflow hold had
+    wait here. Why: this handling used to write WAITING for a held answer too.
+    On 2026-11-14 that removed the queue entry of a task its workflow hold had
     queued, so nothing ever ran it again and the person's later messages were
     accepted but never read.
 
