@@ -30,8 +30,10 @@ checked by injecting an error at each file and folder operation in turn
 (``test_one_error_rule_holds_at_every_operation``), a run stopped part way
 (the next run finishes), a move across file systems (short writes, a folder
 sync that fails or is not offered after the copy is in place), upload
-retention and a person's removal finding the moved file, the launcher step
-and the operator command. A held request still naming the old path gets
+retention and a person's removal finding the moved file, records read past
+one batch, a transfer folder set to ``state/uploads``, a run that waits for
+another's lock (and a state folder without locks), the launcher step and the
+operator command. A held request still naming the old path gets
 the stuck-task notice: ``tests/test_stuck_tasks.py`` (``ADAPTER_HOST_FOLDER``).
 Runs on SQLite and, with ``LIVE_TEST_POSTGRES_DSN``, on PostgreSQL.
 """
@@ -39,6 +41,7 @@ Runs on SQLite and, with ``LIVE_TEST_POSTGRES_DSN``, on PostgreSQL.
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import logging
@@ -46,6 +49,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -331,6 +335,8 @@ def test_a_file_proven_absent_leaves_its_turns_and_the_model_is_told_to_ask_for_
     _assert_not_opened(instance, orphan)
     records = sorted(message.rsplit("records=", 1)[1] for message in _events(caplog, "adapter_host_file_not_moved"))
     assert records == ["dropped reason=missing", "kept reason=no_gateway_record"]
+    (no_record,) = [message for message in _events(caplog, "adapter_host_file_not_moved") if "att_orphan" in message]
+    assert "trying again does not help" in no_record and "restart" not in no_record, "F6: no retry advice"
     assert all(f"conversation_ids={CONVERSATION}" in message for message in _events(caplog, "adapter_host_file_not_moved"))
 
 
@@ -457,16 +463,24 @@ def test_a_file_it_refuses_keeps_its_records_and_is_not_opened(instance: _Instan
     assert after == before, "nothing in state/uploads was written or replaced"
 
 
-@pytest.mark.parametrize("other_there", [True, False], ids=["other_file_here", "other_file_absent"])
-def test_a_conversation_entry_naming_another_path_does_not_follow_the_moved_file(instance: _Instance, caplog, other_there) -> None:
+@pytest.mark.parametrize(
+    "named", ["other_file_here", "other_file_absent", "same_path_other_sha256"]
+)
+def test_a_conversation_entry_naming_another_path_does_not_follow_the_moved_file(instance: _Instance, caplog, named) -> None:
     """Agent processes write conversation turns, so an entry is moved only when it names the gateway's file.
 
-    It is dropped only when the file it names is proven absent (rule 3).
+    The same path with another sha256 is not the gateway's file either (EVI-2, U5). It is dropped only when the
+    file it names is proven absent (rule 3); the moved photo's path is, once it moved.
     """
 
+    other_there = named == "other_file_here"
     if other_there:
         _write(instance.transfer / "adapter_upload_other", b"some other upload")
     record = instance.gateway().get_attachment("att_photo")
+    if named == "same_path_other_sha256":
+        entry = _record("att_photo", str(instance.photo_source), hashlib.sha256(b"something else").hexdigest())
+    else:
+        entry = _record("att_photo", str(instance.transfer / "adapter_upload_other"), record.sha256)
     conversations = instance.conversations()
     conversations.append_turn(
         conversation_id=CONVERSATION,
@@ -478,7 +492,7 @@ def test_a_conversation_entry_naming_another_path_does_not_follow_the_moved_file
         correlation_id=None,
         problem_text="Look again",
         owner_canonical_user_id=PERSON,
-        attachments=[_record("att_photo", str(instance.transfer / "adapter_upload_other"), record.sha256)],
+        attachments=[entry],
     )
 
     with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
@@ -492,7 +506,120 @@ def test_a_conversation_entry_naming_another_path_does_not_follow_the_moved_file
         assert "att_photo" not in instance.turn_paths("task_3") and instance.recorded("task_3") == 0
     assert instance.turn_paths("task_1")["att_photo"] == str(instance.photo_destination)
     records = "kept" if other_there else "dropped"
-    assert any(message.endswith(f"records={records} reason=record_mismatch") for message in _events(caplog, "adapter_host_file_not_moved"))
+    (warning,) = [message for message in _events(caplog, "adapter_host_file_not_moved") if "reason=record_mismatch" in message]
+    assert warning.endswith(f"records={records} reason=record_mismatch")
+    if other_there:
+        assert "trying again does not help" in warning and "restart" not in warning, "F6: no retry advice"
+
+
+def test_records_past_one_batch_are_all_read(instance: _Instance, monkeypatch) -> None:
+    """EVI-2 (U1, U2): with a batch of one, both the gateway records and the turns must be read past the first."""
+
+    monkeypatch.setattr(upgrade_module, "_BATCH", 1)
+
+    result = instance.run()
+
+    assert result.finished
+    assert (result.counts.moved, result.counts.missing, result.counts.no_record) == (1, 1, 1)
+    assert instance.turn_paths("task_1")["att_photo"] == str(instance.photo_destination), "the first turn"
+    assert instance.turn_paths("task_2")["att_photo"] == str(instance.photo_destination), "a turn past the first batch"
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+    assert instance.gateway().get_attachment("att_lost") is None, "a gateway record past the first batch"
+
+
+def test_a_transfer_folder_set_to_state_uploads_moves_and_drops_nothing(instance: _Instance) -> None:
+    """EVI-2 (U7): a file already inside state/uploads is where agents open it, even named as 0.9.13 named them."""
+
+    uploads = instance.layout.uploads_dir.resolve()
+    inside = uploads / "adapter_upload_inside"
+    _write(inside, b"already where agents open it")
+    _record_named(instance, "att_inside", str(inside))
+    config = instance.config()
+    config.interactive_apps = SimpleNamespace(adapter_host=AdapterHostSettings(upload_dir=str(uploads)))
+    before = _untouched(instance)
+
+    result = upgrade_adapter_host_files(config)
+
+    assert result.finished and result.waiting == 0 and result.counts == upgrade_module.UpgradeCounts()
+    assert inside.read_bytes() == b"already where agents open it"
+    assert instance.gateway().get_attachment("att_inside").local_path == str(inside)
+    assert _untouched(instance) == before
+
+
+# --- Runs that overlap ---------------------------------------------------------------------------
+
+
+def _hold_the_lock(instance: _Instance) -> int:
+    """Another run holds the step's lock: a descriptor of its own with the lock taken."""
+
+    path = instance.layout.adapter_host_files_upgrade_lock_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return descriptor
+
+
+class _Seen(logging.Handler):
+    """Sets ``event`` when a log line names ``name``."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(logging.WARNING)
+        self.name_seen = name
+        self.event = threading.Event()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if f"event={self.name_seen}" in record.getMessage():
+            self.event.set()
+
+
+@pytest.mark.parametrize("other_run", ["finished_the_step", "stopped"])
+def test_a_run_that_finds_the_lock_held_waits_for_the_other(instance: _Instance, other_run) -> None:
+    """F13 (CONC-4): runs never overlap, so they never move the same file or share a temporary copy.
+
+    A run that waited reads the marker again: when the other run finished, it does nothing; when the other
+    stopped, it does the work.
+    """
+
+    held = _hold_the_lock(instance)
+    seen = _Seen("adapter_host_files_waiting_for_other_run")
+    module_logger = logging.getLogger(MODULE_LOGGER)
+    module_logger.addHandler(seen)
+    results: list[upgrade_module.UpgradeResult] = []
+    waiting = threading.Thread(target=lambda: results.append(instance.run()), daemon=True)
+    try:
+        waiting.start()
+        assert seen.event.wait(30), "the second run says it waits"
+        waiting.join(0.5)
+        assert waiting.is_alive() and not results, "it waits while the lock is held"
+        assert instance.files()["att_photo"] == str(instance.photo_source), "and has changed nothing"
+        if other_run == "finished_the_step":
+            instance.layout.adapter_host_files_upgrade_path.write_text("{}\n")
+    finally:
+        os.close(held)
+        module_logger.removeHandler(seen)
+    waiting.join(30)
+
+    (result,) = results
+    if other_run == "finished_the_step":
+        assert result.already_done and instance.files()["att_photo"] == str(instance.photo_source)
+    else:
+        assert result.finished and not result.already_done and result.counts.moved == 1
+        assert instance.files()["att_photo"] == str(instance.photo_destination)
+
+
+def test_a_state_folder_without_file_locks_warns_and_goes_on(instance: _Instance, monkeypatch, caplog) -> None:
+    """F13: ENOLCK (a network state folder) must neither stop every start nor pass silently."""
+
+    def no_locks(_descriptor, _mode):
+        raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+
+    monkeypatch.setattr(upgrade_module.fcntl, "flock", no_locks)
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.finished and result.counts.moved == 1
+    (warning,) = _events(caplog, "adapter_host_files_lock_unsupported")
+    assert "do not run it twice at once" in warning
 
 
 # --- The transfer folder is not here -------------------------------------------------------------
@@ -853,6 +980,7 @@ _SESSION = _is(lambda instance: instance.photo_destination.parent)
 _DESTINATION = _is(lambda instance: instance.photo_destination)
 _MARKER = _is(lambda instance: instance.layout.adapter_host_files_upgrade_path)
 _PROGRESS = _is(lambda instance: instance.layout.adapter_host_files_upgrade_progress_path)
+_LOCK = _is(lambda instance: instance.layout.adapter_host_files_upgrade_lock_path)
 _FD_FUNCTIONS = {"pread", "write", "fsync", "fstat", "fchmod"}
 
 
@@ -936,6 +1064,7 @@ _FAULTS = {
     "fstat_transfer_identity": _Fault("fstat", _TRANSFER, errno.EIO, "folder", "transfer"),
     "read_progress_record": _Fault("open", _PROGRESS, errno.EIO, "folder", "state"),
     "write_progress_record": _Fault("replace", _PROGRESS, errno.EROFS, "folder", "state"),
+    "open_lock_read_only": _Fault("open", _LOCK, errno.EROFS, "folder", "state"),
     "stat_in_unsearchable_folder": _Fault("stat", _ORPHAN, errno.EACCES, "folder", "transfer"),
     "open_file_in_unsearchable_folder": _Fault(
         "open", _PHOTO, errno.EACCES, "folder", "transfer", also=(("stat", _PHOTO, errno.EACCES),)
@@ -1667,7 +1796,8 @@ def test_the_operator_command_runs_the_step_on_a_saved_instance(tmp_path: Path) 
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "Moved 1 file(s) into state/uploads; 2 could not be moved" in completed.stdout
+    assert "Moved 1 file(s) into state/uploads; 1 could not be moved" in completed.stdout
+    assert "1 file(s) have no gateway record" in completed.stdout and "trying again does not help" in completed.stdout
     assert "event=adapter_host_files_upgraded moved=1" in completed.stderr
     assert (config.layout.uploads_dir / "telegram_chat_7" / "att_photo.png").read_bytes() == CONTENT["att_photo"]
     assert config.layout.adapter_host_files_upgrade_path.is_file()

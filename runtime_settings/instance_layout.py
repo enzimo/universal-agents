@@ -149,6 +149,7 @@ TEAM_IMPORT_CREDENTIALS_FILENAME = "team_import_credentials.json"
 UPGRADES_DIRNAME = "upgrades"
 ADAPTER_HOST_FILES_UPGRADE_FILENAME = "adapter-host-files.json"
 ADAPTER_HOST_FILES_UPGRADE_PROGRESS_FILENAME = "adapter-host-files.started"
+ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME = "adapter-host-files.lock"
 # /upgrade: team exports the supervisor wrote, and the requests it reads
 # (team_transfer.export_requests).
 EXPORTS_DIRNAME = "exports"
@@ -674,6 +675,17 @@ class InstanceLayout:
         already moved. Kept after the step finished (it says nothing then)."""
 
         return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_PROGRESS_FILENAME
+
+    @property
+    def adapter_host_files_upgrade_lock_path(self) -> Path:
+        """The lock the upgrade step for adapter-host files holds for its whole run.
+
+        The launcher's first-start run and an operator's ``--files-gone`` run
+        (``docker exec``) can overlap; a run that finds the lock held waits
+        for the other, so two runs never move the same file. Empty; only its
+        ``flock`` matters."""
+
+        return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME
 
     @property
     def storage_levels_path(self) -> Path:

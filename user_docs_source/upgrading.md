@@ -51,6 +51,11 @@ supported, because it may not read what a newer one saved.
     records, but the team cannot open it. The log names it
     (`event=adapter_host_file_not_moved`). Fix the file, delete
     `state/upgrades/adapter-host-files.json` and restart to try again.
+  - **A file with no record of the chat that sent it** (its gateway record
+    was removed, for example by a restore on 0.9) cannot be moved, and
+    trying again does not help. Its conversation records are kept while
+    the file is there, the team cannot open it, and the person can send it
+    again. The log counts these as `no_record`.
   - **The transfer folder is not on this machine** (the adapter host ran
     elsewhere, or its folder is not mounted): nothing changes, startup goes
     on and an error in the log says so. Mount the folder where `upload_dir`

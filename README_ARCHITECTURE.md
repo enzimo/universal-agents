@@ -4535,7 +4535,14 @@ the desktop app never offers an older version.
   path), so the step selects nothing the team creates; turns are rewritten
   from a fresh read under the row locks `merge_turn_attachments` takes, so a
   file an agent merges into the same turn meanwhile stays; and a turn or
-  gateway record the team deletes meanwhile is skipped. A file that moves
+  gateway record the team deletes meanwhile is skipped. A test pins the fresh
+  read and the skipped record; the PostgreSQL row lock is argued, not tested,
+  because that needs concurrent writers on a real server. Every run holds
+  the step's lock (`state/upgrades/adapter-host-files.lock`) from before it
+  reads anything, and a run that finds it held waits, so the launcher's run
+  and an operator's run never move the same file or share a temporary copy;
+  on a file system without locks the step warns
+  (`event=adapter_host_files_lock_unsupported`) and goes on. A file that moves
   while the gateway deletes its record is left without a record, and upload
   retention removes it by its age. It finds the gateway records and conversation entries (decoded from
   the stored JSON) that name a file as 0.9.13 wrote it,

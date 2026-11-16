@@ -2655,8 +2655,14 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
         counts = result.counts
         print(
             f"Moved {counts.moved + counts.already_moved} file(s) into state/uploads; "
-            f"{counts.not_moved} could not be moved; the log says which, and whether their records were kept."
+            f"{counts.missing + counts.refused} could not be moved; the log says which, and whether their "
+            "records were kept."
         )
+        if counts.no_record:
+            print(
+                f"{counts.no_record} file(s) have no gateway record saying which chat sent them, so they cannot be "
+                "moved and trying again does not help; the person can send them again."
+            )
 
 
 def _ensure_instance_config_ready(config_path: str | None) -> str:

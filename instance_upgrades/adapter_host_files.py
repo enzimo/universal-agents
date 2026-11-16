@@ -21,7 +21,11 @@ start, while ``InstanceLayout.adapter_host_files_upgrade_path`` is missing. So
 no other process on this host writes ``state/uploads``, the transfer folder or
 the two tables; remote workers may share a PostgreSQL conversation store, so
 conversation turns change under row locks
-(``ConversationRepository.relocate_turn_attachment``).
+(``ConversationRepository.relocate_turn_attachment``). Every run holds the
+step's lock (``InstanceLayout.adapter_host_files_upgrade_lock_path``) from
+before it reads anything to its end, and one that finds it held waits, so
+the launcher's run and an operator's run never move the same file or share a
+temporary copy (``_step_lock``).
 
 The operator's ``--files-gone`` run (``docker exec``, as
 ``user_docs_source/upgrading.md`` shows) runs beside the running team. That
@@ -45,7 +49,10 @@ A file that turns up and moves during such a run while the gateway deletes
 its record stays in ``state/uploads`` without a record, and upload retention
 removes it by its age (the move keeps the time it was sent).
 ``test_a_files_gone_run_beside_the_running_team_keeps_what_the_team_writes``
-pins the second and third reasons.
+pins what one process can show of the second and third reasons: a file
+merged into the turn between the scan and the rewrite stays (the fresh read),
+and a record deleted meanwhile is skipped. The row lock itself is argued, not
+tested: pinning it needs concurrent writers on a real PostgreSQL server.
 
 What it does, per attachment id:
 
@@ -180,6 +187,7 @@ imports. It goes with the other 0.9 upgrade steps when 0.11 ships.
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import logging
@@ -226,6 +234,19 @@ RECORDS_DROPPED = "dropped"
 RECORDS_KEPT = "kept"
 RECORDS_PARTLY_DROPPED = "partly_dropped"
 
+# Kept records that no retry can move (F6): what their warning says instead of "fix the file and restart".
+_NO_RETRY_REASONS = {
+    REASON_NO_GATEWAY_RECORD: (
+        "no gateway record says which chat sent it, so it cannot be moved and trying again does not help; its "
+        "conversation records were kept, the team cannot open it, and the person can send it again"
+    ),
+    REASON_RECORD_MISMATCH: (
+        "these conversation records name another path or sha256 than the gateway's record, so they cannot "
+        "follow the moved file and trying again does not help; they were kept, the team cannot open the file "
+        "from them, and the person can send it again"
+    ),
+}
+
 # The operator's command that declares the waiting files gone (rule 3), named in messages.
 FILES_GONE_COMMAND = "assistant_cli upgrade adapter-host-files --config <instance_config.yaml> --files-gone"
 # Why a transfer folder that opened is not the one the run decided on (C06).
@@ -241,6 +262,8 @@ _NAME_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.EINVAL})
 _DESTINATION_FOLDER_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EDQUOT})
 # Answers of a file system that offers no fsync (some FUSE, 9p and shared-folder mounts): not a failure.
 _SYNC_UNSUPPORTED_ERRNOS = frozenset({errno.EINVAL, errno.EOPNOTSUPP})
+# Answers of a file system that offers no file locks (some network state folders): the step goes on, warned.
+_LOCK_UNSUPPORTED_ERRNOS = frozenset({errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP})
 # Permission errors, for which an open is told apart from a folder that cannot be searched.
 _PERMISSION_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
 
@@ -397,31 +420,31 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
     if marker.is_file():
         return UpgradeResult(finished=True, counts=UpgradeCounts(), already_done=True)
     transfer = config.interactive_apps.adapter_host.resolved_upload_dir(config.instance_root_path)
-    uploads = Path(layout.uploads_dir).resolve()
-    gateway = create_gateway_state_repository(config.state_storage_settings, logger=logger)
-    conversations = create_conversation_repository(
-        config.manager_storage_settings, artifacts_dir=layout.conversation_artifacts_dir, logger=logger
-    )
-    step = _Step(
-        transfer=transfer,
-        uploads=uploads,
-        gateway=gateway,
-        conversations=conversations,
-        marker=marker,
-        progress=Path(layout.adapter_host_files_upgrade_progress_path),
-        files_gone=files_gone,
-    )
     try:
-        items = step.find()
-        waiting, here = step.survey(items)
-        if waiting and not here and not files_gone:
-            step.report_waiting(waiting)
-            return UpgradeResult(finished=False, counts=UpgradeCounts(), waiting=waiting)
-        step.start()
-        for item in items:
-            step.handle(item)
-        step.forget_unmovable()
-        _write_state_file(marker, {"finished_at_utc": _now(), **asdict(step.counts)})
+        with _step_lock(Path(layout.adapter_host_files_upgrade_lock_path)):
+            if marker.is_file():  # the run this one waited for finished the step
+                return UpgradeResult(finished=True, counts=UpgradeCounts(), already_done=True)
+            step = _Step(
+                transfer=transfer,
+                uploads=Path(layout.uploads_dir).resolve(),
+                gateway=create_gateway_state_repository(config.state_storage_settings, logger=logger),
+                conversations=create_conversation_repository(
+                    config.manager_storage_settings, artifacts_dir=layout.conversation_artifacts_dir, logger=logger
+                ),
+                marker=marker,
+                progress=Path(layout.adapter_host_files_upgrade_progress_path),
+                files_gone=files_gone,
+            )
+            items = step.find()
+            waiting, here = step.survey(items)
+            if waiting and not here and not files_gone:
+                step.report_waiting(waiting)
+                return UpgradeResult(finished=False, counts=UpgradeCounts(), waiting=waiting)
+            step.start()
+            for item in items:
+                step.handle(item)
+            step.forget_unmovable()
+            _write_state_file(marker, {"finished_at_utc": _now(), **asdict(step.counts)})
     except FolderProblem as problem:
         problem.files_gone_helps = problem.not_there and problem.folder == transfer
         logger.error(
@@ -895,7 +918,10 @@ class _Step:
         back and must carry the record's sha256 before it is renamed into place.
         Any error before that removes the temporary file, so the original and
         its records stay. The temporary name is fixed-length, so a name that
-        fits does not fail only because of the copy.
+        fits does not fail only because of the copy, and fixed per
+        destination, so the next run removes a copy a stopped run left; two
+        runs never share it because the step's lock (``_step_lock``) keeps
+        runs from overlapping (CONC-4).
         """
 
         name = destination_file.name
@@ -1094,13 +1120,15 @@ class _Step:
         records = RECORDS_PARTLY_DROPPED if dropped and kept else RECORDS_DROPPED if dropped else RECORDS_KEPT
         entries = not_moved.drop_entries + not_moved.kept_entries
         file = unmovable.file or (entries[0].path if entries else None)
-        if kept:
+        if not kept:
+            advice = "its records were dropped, so the person must send it again"
+        elif unmovable.reason in _NO_RETRY_REASONS:
+            advice = _NO_RETRY_REASONS[unmovable.reason]
+        else:
             advice = (
                 f"its records were kept, so it cannot be opened until it is moved: fix the file, delete "
                 f"{self._marker} and restart to try it again"
             )
-        else:
-            advice = "its records were dropped, so the person must send it again"
         logger.warning(
             "A file of a chat app the adapter host ran was not moved into state/uploads; %s%s. "
             "event=adapter_host_file_not_moved attachment_id=%s conversation_ids=%s folder=%s file=%s records=%s "
@@ -1306,6 +1334,62 @@ def _identity_text(identity: Optional[tuple[int, int]]) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+@contextmanager
+def _step_lock(path: Path) -> Iterator[None]:
+    """Hold the step's lock (``flock`` on ``path``) for the whole run, so two runs never overlap (F13).
+
+    The launcher's first-start run and an operator's ``--files-gone`` run
+    (``docker exec``) can meet. A run that finds the lock held logs
+    ``event=adapter_host_files_waiting_for_other_run`` and waits rather than
+    refusing: the other run is about to finish, and refusing would stop
+    startup or fail the operator's command. Closing the descriptor releases
+    it, also when the process dies. Opening or creating the lock file is a
+    folder error on ``state/upgrades`` (rule 2). A file system without locks
+    (ENOLCK, EOPNOTSUPP on some network state folders) is logged
+    (``event=adapter_host_files_lock_unsupported``) and the step goes on
+    without the lock, as an unsupported sync does: overlapping runs need an
+    operator's command beside the first start, while stopping would block
+    every start on that disk with no way out.
+    """
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise FolderProblem(path.parent, safe_open.REASON_OPEN_FAILED, _detail(exc), file=path) from exc
+    try:
+        _take_lock(descriptor, path)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _take_lock(descriptor: int, path: Path) -> None:
+    for mode in (fcntl.LOCK_EX | fcntl.LOCK_NB, fcntl.LOCK_EX):
+        try:
+            fcntl.flock(descriptor, mode)
+            return
+        except BlockingIOError:
+            logger.warning(
+                "Another run of the upgrade step for adapter-host files is working; this one waits for it to "
+                "finish. event=adapter_host_files_waiting_for_other_run lock=%s",
+                path,
+            )
+        except OSError as exc:
+            if exc.errno in _LOCK_UNSUPPORTED_ERRNOS:
+                logger.warning(
+                    "The file system of state/upgrades offers no file locks, so the upgrade step for adapter-host "
+                    "files runs without one: do not run it twice at once. event=adapter_host_files_lock_unsupported "
+                    "lock=%s reason=%s",
+                    path,
+                    _detail(exc),
+                )
+                return
+            raise FolderProblem(path.parent, safe_open.REASON_OPEN_FAILED, _detail(exc), file=path) from exc
+    # Only a waiting flock that answered "would block" gets here; never run without the lock silently.
+    raise FolderProblem(path.parent, safe_open.REASON_OPEN_FAILED, "the lock could not be taken", file=path)
 
 
 def _write_state_file(path: Path, body: dict[str, Any]) -> None:
