@@ -24,19 +24,27 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 import pytest_asyncio
 
 from assistant_gateway import gateway as gateway_module
+from assistant_gateway.application.broker_session_watch import (
+    WATCH_EXPIRED,
+    WATCH_FINISHED,
+    WATCH_UNCONFIRMED,
+    BrokerSessionOutcome,
+)
 from assistant_gateway.application.interactive_commands import GatewayCommandRequest
+from assistant_gateway.application.tool_setup import _what, account_link_page_ending, sign_in_page_ending
 from assistant_gateway.domain.message_types import (
     TOOL_SETUP_MESSAGE_TYPE,
     TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE,
 )
 from assistant_gateway.domain.request_state import ToolSetupRecord
 from assistant_gateway.gateway import UserGateway
-from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1, ToolSetupResultV1
+from custom_messages.contracts.credentials_v1 import ToolSetupKind, ToolSetupRequestV1, ToolSetupResultV1
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from tests.test_gateway_account_links import (  # noqa: F401 - pytest fixtures
@@ -355,6 +363,7 @@ async def test_the_persons_own_link_ends_the_tasks_wait_once(setup_gateway) -> N
     owner = gateway.config.user.canonical_user_id
     _waiting_task(gateway, owner=owner)
     gateway._credential_workflow.link_results._poll_interval_seconds = 0.01
+    gateway._credential_workflow.tool_setups.guide = _Guide()
     await _request_setup(gateway)
 
     # The person runs /link themselves in the same chat and finishes that form.
@@ -376,7 +385,7 @@ async def test_the_persons_own_link_ends_the_tasks_wait_once(setup_gateway) -> N
     assert (result.status, result.source, result.setup_request_id) == ("completed", "person_action", "tool_setup_req_test")
     state = _known(gateway, owner, "http:portainer")
     assert (state.state.value, state.how, state.source) == ("ready", "own_link", "person_action")
-    assert result.message == "The person finished the account link for http:portainer on their own."
+    assert result.message == "The person finished the account link for Portainer on their own."
     # The task's own form expires later; the task already has its one result.
     broker.refuse("link_session_1", error="expired", reason_code="account_link_session_expired")
     await _settle(gateway)
@@ -527,8 +536,14 @@ class _Guide:
             url="https://gitea.example.com/user/settings/applications",
         )
 
+    def display_name(self, tool_id: str):
+        return {"http:gitea": "Gitea", "http:portainer": "Portainer"}.get(tool_id)
+
     def workflow_url(self, task_id: str):
         return "/workflows/access_flow_gitea" if task_id == TASK else None
+
+
+STEP = "Create a Gitea token"
 
 
 async def _request_external_step(gateway: UserGateway, step_id: str = "create_token"):
@@ -562,13 +577,13 @@ async def test_an_external_step_shows_the_catalogs_words_and_ends_when_marked_do
     assert (record.kind, record.status) == ("external_step", "waiting")
     setups = gateway._credential_workflow.tool_setups
     assert await setups.recover_unwatched() == 0, "a restart does not end it: the person still marks it done"
-    assert await setups.external_step_done("tool_setup_req_step", person_id="someone-else") is False
+    assert await setups.external_step_done("tool_setup_req_step", person_id="someone-else", step_title=STEP) is False
 
-    assert await setups.external_step_done("tool_setup_req_step", person_id=owner) is True
+    assert await setups.external_step_done("tool_setup_req_step", person_id=owner, step_title=STEP) is True
 
     [result] = await _results(transport)
     assert (result.status, result.kind, result.source) == ("completed", "external_step", "person_action")
-    assert await setups.external_step_done("tool_setup_req_step", person_id=owner) is False, "once"
+    assert await setups.external_step_done("tool_setup_req_step", person_id=owner, step_title=STEP) is False, "once"
 
 
 @pytest.mark.asyncio
@@ -658,29 +673,200 @@ async def test_a_closed_form_posts_one_closing_message(chat_setup_gateway) -> No
     assert closing.text == "The form for the account link for Portainer was closed without linking anything."
 
 
-@pytest.mark.asyncio
-async def test_a_page_nobody_watches_after_a_restart_is_closed_too(chat_setup_gateway) -> None:
-    gateway, _broker, transport, events = chat_setup_gateway
+def _waiting_record(
+    gateway: UserGateway,
+    tool_id: str,
+    kind: str,
+    owner: str,
+    setup_request_id: str = "tool_setup_req_old",
+    created_at: str = "2026-09-28T08:00:00+00:00",
+) -> None:
     _setups(gateway).record_tool_setup(
         ToolSetupRecord(
-            setup_request_id="tool_setup_req_old", parent_task_id=TASK, person_id=gateway.config.user.canonical_user_id,
-            tool_id="cli:github", kind="sign_in", owner_kind="person", session_key=SESSION,
+            setup_request_id=setup_request_id, parent_task_id=TASK, person_id=gateway.config.user.canonical_user_id,
+            tool_id=tool_id, kind=kind, owner_kind=owner, session_key=SESSION,
+            correlation_id=CHAT_REQUEST, conversation_id="conversation_link", status="waiting",
+            created_at=created_at,
+        )
+    )
+
+
+# Each broker page kind: the tool, its kind and owner, and the page in words (sign-in names, catalog names).
+PAGE_KINDS = [
+    ("cli:github", "sign_in", "person", "the GitHub sign-in"),
+    ("cli:google", "team_sign_in_app", "team", "the team's Google sign-in app"),
+    ("http:portainer", "account_link", "person", "the account link for Portainer"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool_id", "kind", "owner", "what"), PAGE_KINDS)
+async def test_a_page_nobody_watches_after_a_restart_is_closed_with_its_name(
+    chat_setup_gateway, tool_id, kind, owner, what
+) -> None:
+    gateway, _broker, transport, events = chat_setup_gateway
+    gateway._credential_workflow.tool_setups.guide = _Guide()
+    _waiting_record(gateway, tool_id, kind, owner)
+
+    assert await gateway._credential_workflow.tool_setups.recover_unwatched() == 1
+
+    [closing] = _closings(events)
+    [result] = await _results(transport)
+    line = f"The gateway restarted while the page for {what} was open, so nobody could see how it ended."
+    assert (closing.correlation_id, closing.text, result.message) == ("tool_setup_req_old", line, line)
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_cannot_be_reported_is_logged_and_the_later_ones_still_are(chat_setup_gateway, caplog) -> None:
+    """A stored kind this version does not know (a rollback, a hand edit) must not keep every later page waiting."""
+
+    gateway, _broker, transport, events = chat_setup_gateway
+    _waiting_record(
+        gateway, "cli:github", "password_reset", "person",
+        setup_request_id="tool_setup_req_bad", created_at="2026-09-28T07:00:00+00:00",
+    )
+    _waiting_record(gateway, "cli:github", "sign_in", "person")
+
+    with caplog.at_level("WARNING"):
+        assert await gateway._credential_workflow.tool_setups.recover_unwatched() == 1
+
+    [closing] = _closings(events)
+    [result] = await _results(transport)
+    assert (closing.correlation_id, result.setup_request_id) == ("tool_setup_req_old", "tool_setup_req_old")
+    [failure] = [
+        record for record in caplog.records if "event=gateway_tool_setup_recovery_failed" in record.getMessage()
+    ]
+    assert "setup_request_id=tool_setup_req_bad" in failure.getMessage() and failure.exc_info is not None
+    assert "status=waiting" in failure.getMessage(), "it failed before it was claimed, so the next start tries again"
+    assert _setups(gateway).get_tool_setup("tool_setup_req_bad").status == "waiting"
+
+
+@pytest.mark.asyncio
+async def test_a_record_whose_result_cannot_be_sent_is_logged_as_finished_not_waiting(chat_setup_gateway, caplog) -> None:
+    """The record is claimed before its result is sent; the log line says so instead of 'still waiting'."""
+
+    gateway, _broker, _transport, _events = chat_setup_gateway
+    _setups(gateway).record_tool_setup(
+        ToolSetupRecord(
+            setup_request_id="tool_setup_req_no_chat", parent_task_id=TASK, person_id=gateway.config.user.canonical_user_id,
+            tool_id="cli:github", kind="sign_in", owner_kind="person", session_key="session_gone",
             correlation_id=CHAT_REQUEST, conversation_id="conversation_link", status="waiting",
             created_at="2026-09-28T08:00:00+00:00",
         )
     )
 
-    assert await gateway._credential_workflow.tool_setups.recover_unwatched() == 1
+    with caplog.at_level("WARNING"):
+        assert await gateway._credential_workflow.tool_setups.recover_unwatched() == 0
+
+    [failure] = [
+        record for record in caplog.records if "event=gateway_tool_setup_recovery_failed" in record.getMessage()
+    ]
+    assert "setup_request_id=tool_setup_req_no_chat" in failure.getMessage()
+    assert "status=unavailable" in failure.getMessage(), "claimed before the send failed: its task was not told"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool_id", "kind", "owner", "what"), PAGE_KINDS)
+async def test_finishing_the_setup_with_link_or_auth_names_the_page(chat_setup_gateway, tool_id, kind, owner, what) -> None:
+    gateway, _broker, transport, events = chat_setup_gateway
+    gateway._credential_workflow.tool_setups.guide = _Guide()
+    _waiting_record(gateway, tool_id, kind, owner)
+    label = None if kind == "account_link" else "exampleuser"
+
+    told = await gateway._credential_workflow.tool_setups.person_finished(
+        person_id=gateway.config.user.canonical_user_id, tool_id=tool_id, kind=kind,
+        owner=owner if kind == "account_link" else None, account_label=label,
+    )
+
+    assert told == 1
+    [closing] = _closings(events)
+    [result] = await _results(transport)
+    assert closing.text == f"You finished {what} yourself, so this page is no longer needed."
+    assert result.message == f"The person finished {what} on their own" + (" (account exampleuser)." if label else ".")
+
+
+@pytest.mark.asyncio
+async def test_marking_an_outside_step_done_names_the_step_not_an_account_link(chat_setup_gateway) -> None:
+    """The 2026-11-14 incident: Mark Done read 'You finished the account link for <tool id> yourself ...'."""
+
+    gateway, _broker, transport, events = chat_setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    setups = gateway._credential_workflow.tool_setups
+    setups.guide = _Guide()
+    await _request_external_step(gateway)
+
+    assert await setups.external_step_done("tool_setup_req_step", person_id=owner, step_title=STEP) is True
+    assert await setups.external_step_done("tool_setup_req_step", person_id=owner, step_title=STEP) is False
 
     [closing] = _closings(events)
-    assert closing.correlation_id == "tool_setup_req_old"
-    assert "gateway restarted" in closing.text
+    [result] = await _results(transport)
+    assert closing.correlation_id == "tool_setup_req_step"
+    assert closing.text == "You marked the Gitea setup step 'Create a Gitea token' done."
+    assert "account link" not in closing.text
+    assert (result.source, result.message) == (
+        "person_action",
+        "The person marked the Gitea setup step 'Create a Gitea token' done.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_form_names_the_page_that_did_not_finish(chat_setup_gateway) -> None:
+    gateway, broker, transport, events = chat_setup_gateway
+    await _request_setup(gateway)
+
+    broker.refuse(
+        "link_session_1",
+        error="That credential is not one of this tool's credentials",
+        reason_code="account_link_credential_mismatch",
+    )
+    await _results(transport)
+    await _settle(gateway)
+
+    [closing] = _closings(events)
+    assert closing.text == (
+        "The account link for Portainer did not finish. That credential is not one of this tool's credentials."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_tool_the_catalog_lacks_is_named_by_its_id_and_logged(chat_setup_gateway, caplog) -> None:
+    gateway, _broker, _transport, events = chat_setup_gateway
+    gateway._credential_workflow.tool_setups.guide = _Guide()
+    _waiting_record(gateway, "http:removed_tool", "account_link", "person")
+
+    with caplog.at_level("WARNING"):
+        await gateway._credential_workflow.tool_setups.recover_unwatched()
+
+    [closing] = _closings(events)
+    assert closing.text.startswith("The gateway restarted while the page for the account link for http:removed_tool was")
+    assert any(
+        "event=gateway_tool_setup_name_unknown" in record.getMessage() and "http:removed_tool" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_step_marked_done_without_its_stored_title_names_the_tool_and_is_logged(chat_setup_gateway, caplog) -> None:
+    gateway, _broker, _transport, events = chat_setup_gateway
+    setups = gateway._credential_workflow.tool_setups
+    setups.guide = _Guide()
+    _waiting_record(gateway, "http:gitea", "external_step", "person", setup_request_id="tool_setup_req_step")
+
+    with caplog.at_level("WARNING"):
+        assert await setups.external_step_done(
+            "tool_setup_req_step", person_id=gateway.config.user.canonical_user_id, step_title="  "
+        )
+
+    [closing] = _closings(events)
+    assert closing.text == "You marked the Gitea setup step done."
+    assert any("event=gateway_tool_setup_step_title_missing" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_the_persons_own_link_closes_the_task_card_without_repeating_the_link_result(chat_setup_gateway) -> None:
     gateway, broker, transport, events = chat_setup_gateway
     owner = gateway.config.user.canonical_user_id
+    gateway._credential_workflow.tool_setups.guide = _Guide()
     await _request_setup(gateway)
 
     await gateway.command_application.execute(
@@ -697,7 +883,7 @@ async def test_the_persons_own_link_closes_the_task_card_without_repeating_the_l
     [closing] = _closings(events)
     link_results = [event for event in events if event.message_type == "link_result"]
     assert closing.correlation_id == "tool_setup_req_test"
-    assert closing.text == "You finished the account link for http:portainer yourself, so this page is no longer needed."
+    assert closing.text == "You finished the account link for Portainer yourself, so this page is no longer needed."
     assert all(closing.text != event.text for event in link_results)
 
 
@@ -737,3 +923,139 @@ async def test_web_chat_records_the_closing_line_under_the_pages_own_id(chat_set
     )
     [line] = [message for message in page.messages if message.message_type == "tool_setup_result"]
     assert (line.correlation_id, line.role) == ("tool_setup_req_web", "system")
+
+
+# The words for each page and each way it ends (the 2026-11-14 Mark Done line) ------------
+
+
+def test_every_setup_kind_in_the_contract_has_its_own_words() -> None:
+    """A kind added to the contract fails here until ``_what`` names it, never borrowing another kind's words."""
+
+    phrases = {kind: _what(kind, "Gitea", "Create a Gitea token") for kind in get_args(ToolSetupKind)}
+
+    assert phrases == {
+        "sign_in": "the Gitea sign-in",
+        "account_link": "the account link for Gitea",
+        "team_sign_in_app": "the team's Gitea sign-in app",
+        "external_step": "the Gitea setup step 'Create a Gitea token'",
+    }
+    assert _what("external_step", "Gitea") == "the Gitea setup step", "a step whose title is not known"
+    with pytest.raises(ValueError):
+        _what("password_reset", "Gitea")
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (
+            BrokerSessionOutcome(WATCH_EXPIRED),
+            ("expired", "The page for the GitHub sign-in expired before it was finished.", None),
+        ),
+        (
+            BrokerSessionOutcome(WATCH_UNCONFIRMED),
+            ("unavailable", "Nobody could confirm whether the GitHub sign-in finished.", "tool_setup_page_unconfirmed"),
+        ),
+        (
+            BrokerSessionOutcome(WATCH_FINISHED, {"status": "pending"}),
+            ("unavailable", "Nobody could confirm whether the GitHub sign-in finished.", "tool_setup_page_unconfirmed"),
+        ),
+        (
+            BrokerSessionOutcome(
+                WATCH_FINISHED,
+                {"status": "error", "message": "The sign-in was cancelled", "failure_reason": "sign_in_cancelled"},
+            ),
+            ("unavailable", "The GitHub sign-in did not finish. The sign-in was cancelled.", "sign_in_cancelled"),
+        ),
+        (
+            BrokerSessionOutcome(WATCH_FINISHED, {"status": "error"}),
+            ("unavailable", "The GitHub sign-in did not finish.", "tool_setup_sign_in_failed"),
+        ),
+        (
+            BrokerSessionOutcome(WATCH_FINISHED, {"status": "success", "username": "exampleuser"}),
+            ("completed", "The GitHub sign-in is done (account exampleuser).", None),
+        ),
+        (BrokerSessionOutcome(WATCH_FINISHED, {"status": "success"}), ("completed", "The GitHub sign-in is done.", None)),
+    ],
+)
+def test_each_way_a_sign_in_page_ends_names_the_page(outcome, expected) -> None:
+    ending = sign_in_page_ending(outcome, what="the GitHub sign-in")
+
+    assert (ending.status, ending.message, ending.reason_code) == expected
+    assert ending.closing == "", "the chat shows the same line the task hears"
+
+
+def _link_result(**result) -> BrokerSessionOutcome:
+    return BrokerSessionOutcome(WATCH_FINISHED, {"result": result})
+
+
+_CREATED = {"status": "account_link_created", "link_id": "account_link_1", "owner_kind": "person"}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (
+            BrokerSessionOutcome(WATCH_EXPIRED),
+            ("expired", "The form for the account link for Portainer expired before it was used.", None),
+        ),
+        (
+            BrokerSessionOutcome(WATCH_UNCONFIRMED),
+            (
+                "unavailable",
+                "Nobody could confirm whether the account link for Portainer finished.",
+                "tool_setup_page_unconfirmed",
+            ),
+        ),
+        (
+            _link_result(**_CREATED, tool_id="http:portainer"),
+            ("completed", "The account link for Portainer is done.", None),
+        ),
+        (
+            _link_result(**_CREATED, tool_id="http:other"),
+            (
+                "unavailable",
+                "Nobody could confirm whether the account link for Portainer finished.",
+                "tool_setup_link_mismatch",
+            ),
+        ),
+        (
+            _link_result(**{**_CREATED, "owner_kind": "team"}, tool_id="http:portainer"),
+            (
+                "unavailable",
+                "Nobody could confirm whether the account link for Portainer finished.",
+                "tool_setup_link_mismatch",
+            ),
+        ),
+        (
+            _link_result(status="account_link_declined"),
+            ("declined", "The form for the account link for Portainer was closed without linking anything.", None),
+        ),
+        (
+            _link_result(status="account_link_unavailable", reason_code="account_link_session_expired"),
+            ("expired", "The form for the account link for Portainer expired before it was used.", None),
+        ),
+        (
+            _link_result(
+                status="account_link_unavailable",
+                reason_code="account_link_credential_mismatch",
+                error="That credential is not one of this tool's credentials",
+            ),
+            (
+                "unavailable",
+                "The account link for Portainer did not finish. That credential is not one of this tool's credentials.",
+                "account_link_credential_mismatch",
+            ),
+        ),
+        (
+            _link_result(status="account_link_unavailable"),
+            ("unavailable", "The account link for Portainer did not finish.", "tool_setup_page_refused"),
+        ),
+    ],
+)
+def test_each_way_an_account_link_form_ends_names_the_page(outcome, expected) -> None:
+    ending = account_link_page_ending(
+        outcome, what="the account link for Portainer", tool_id="http:portainer", owner="person"
+    )
+
+    assert (ending.status, ending.message, ending.reason_code) == expected
+    assert ending.closing == "", "the chat shows the same line the task hears"

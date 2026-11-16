@@ -1564,8 +1564,8 @@ or closed without finishing (the step is blocked, like a denied request).
 Finishing the setup yourself with `/link` while the task waits counts the same.
 A step you do outside Universal Agents (for example, creating a token on the
 service's website) shows its instructions and a **Mark Done** button; only
-you, the person the workflow belongs to, can mark it done, and the waiting
-task continues. A setup page that matched no single step is listed with the
+you, the person the workflow belongs to, can mark it done. Chat then names
+the step you marked done, and the waiting task continues. A setup page that matched no single step is listed with the
 other requests not on a step.
 
 **Review Ready Requests** shows the plan's waiting requests as the same review

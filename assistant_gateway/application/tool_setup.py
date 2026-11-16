@@ -38,7 +38,20 @@ Two other ways end a wait: the person finishing the same setup on their own
 ``person_finished``), and a gateway restart, after which nobody watches the
 page any more (``recover_unwatched`` reports the page as unwatched, and
 TeamLead checks the setup again before asking). Finishing a record is a
-conditional update, so the task gets exactly one result.
+conditional update, so the task gets exactly one result. Both the person's own
+``/link`` and Mark Done send a ``person_action`` result; their words differ.
+
+When a page ends, its card closes with one line in the person's chat
+(``_post_closing``). The code that ended the page writes that line
+(``PageEnding.closing``, or else the task's ``message``). The line names the
+page by kind (``_what``) and the tool by the name its page showed: the sign-in
+name ("GitHub") for sign-ins and the team's sign-in app, and the catalog's
+display name for account links and outside steps. For example: "The GitHub
+sign-in is done (account exampleuser).", "You finished the account link for
+Portainer yourself, so this page is no longer needed.", or, after Mark Done,
+"You marked the Gitea setup step 'Create a Gitea token' done." Rationale (an
+incident on 2026-11-14): the line used to be rebuilt from the result's source,
+so Mark Done read as an account link with the raw tool id.
 
 Nothing here grants access: signing in or linking an account only makes a
 credential available; grants decide who may use the tool.
@@ -153,6 +166,8 @@ _SIGN_IN_FINAL = frozenset({SIGN_IN_STATUS_SUCCESS, SIGN_IN_STATUS_ERROR})
 _BROKER_NOTE = "What you enter goes straight to the secure broker, never to the agent."
 
 TeamRolesResolver = Callable[[str], tuple[str, ...]]
+# Kinds whose page names the tool by its sign-in name ("Sign in to GitHub"), not the catalog's ("GitHub (gh)").
+_SIGN_IN_KINDS = frozenset({TOOL_SETUP_SIGN_IN, TOOL_SETUP_TEAM_SIGN_IN_APP})
 # How long an external step's chat action stays live (it has no broker page):
 # a non-time-sensitive wait, like approvals.
 EXTERNAL_STEP_ACTION_HOURS = 48
@@ -164,6 +179,8 @@ class SetupGuide(Protocol):
 
     def external_step(self, tool_id: str, step_id: str) -> tuple[str, ExternalSetupStepV1] | None: ...
 
+    def display_name(self, tool_id: str) -> str | None: ...
+
     def workflow_url(self, task_id: str) -> str | None: ...
 
 
@@ -172,14 +189,50 @@ def _sentence(text: str) -> str:
     return words if not words or words.endswith((".", "!", "?")) else f"{words}."
 
 
-def _what(kind: str, tool_words: str) -> str:
-    """The setup in plain words: "the GitHub sign-in", "the account link for Portainer"."""
+def _what(kind: str, tool_name: str, step_title: str = "") -> str:
+    """The setup page in plain words; the one place each kind's phrase is written.
+
+    "the GitHub sign-in", "the team's Google sign-in app", "the account link
+    for Portainer", "the Gitea setup step 'Create a Gitea token'" ("the Gitea
+    setup step" when the step's title is not known). Records hold only kinds
+    the ``ToolSetupKind`` contract accepted, so any other kind is a
+    programming error, never a reason to borrow another kind's words.
+    """
 
     if kind == TOOL_SETUP_SIGN_IN:
-        return f"the {tool_words} sign-in"
+        return f"the {tool_name} sign-in"
     if kind == TOOL_SETUP_TEAM_SIGN_IN_APP:
-        return f"the team's {tool_words} sign-in app"
-    return f"the account link for {tool_words}"
+        return f"the team's {tool_name} sign-in app"
+    if kind == TOOL_SETUP_ACCOUNT_LINK:
+        return f"the account link for {tool_name}"
+    if kind == TOOL_SETUP_EXTERNAL_STEP:
+        return f"the {tool_name} setup step '{step_title}'" if step_title else f"the {tool_name} setup step"
+    raise ValueError(f"Unknown tool setup kind {kind!r}.")
+
+
+# Lines several page endings share; ``what`` is always a ``_what`` phrase.
+
+
+def _capitalized(text: str) -> str:
+    """``text`` with its first letter in upper case, for a sentence that starts with it."""
+
+    return f"{text[0].upper()}{text[1:]}" if text else text
+
+
+def _is_done(what: str, account_label: str | None = None) -> str:
+    return f"{_capitalized(what)} is done" + (f" (account {account_label})." if account_label else ".")
+
+
+def _did_not_finish(what: str, why: str) -> str:
+    return f"{_capitalized(what)} did not finish. {why}".strip()
+
+
+def _unconfirmed(what: str) -> str:
+    return f"Nobody could confirm whether {what} finished."
+
+
+def _form_expired(what: str) -> str:
+    return f"The form for {what} expired before it was used."
 
 
 @dataclass(frozen=True)
@@ -193,7 +246,12 @@ class SetupRefused(Exception):
 
 @dataclass(frozen=True)
 class PageEnding:
-    """How a page ended, as the task hears it."""
+    """How a page ended: ``message`` is what the task hears.
+
+    ``closing`` is the line the person's chat shows when it differs from
+    ``message`` (empty means the same line). The code that ends a page writes
+    both, so the line always names what actually ended (``_post_closing``).
+    """
 
     status: str
     message: str
@@ -201,6 +259,7 @@ class PageEnding:
     account_label: str | None = None
     link_id: str | None = None
     needs_administrator: bool = False
+    closing: str = field(default="", kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -224,21 +283,16 @@ def sign_in_page_ending(outcome: BrokerSessionOutcome, *, what: str) -> PageEndi
         return PageEnding(TOOL_SETUP_EXPIRED, f"The page for {what} expired before it was finished.")
     status = str(outcome.payload.get("status") or "")
     if outcome.ending != WATCH_FINISHED or status not in _SIGN_IN_FINAL:
-        return PageEnding(
-            TOOL_SETUP_UNAVAILABLE,
-            f"Nobody could confirm whether {what} finished.",
-            reason_code=REASON_PAGE_UNCONFIRMED,
-        )
+        return PageEnding(TOOL_SETUP_UNAVAILABLE, _unconfirmed(what), reason_code=REASON_PAGE_UNCONFIRMED)
     if status == SIGN_IN_STATUS_ERROR:
         why = _sentence(str(outcome.payload.get("message") or ""))[:300]
         return PageEnding(
             TOOL_SETUP_UNAVAILABLE,
-            f"{what[0].upper()}{what[1:]} did not finish. {why}".strip(),
+            _did_not_finish(what, why),
             reason_code=str(outcome.payload.get("failure_reason") or REASON_SIGN_IN_FAILED),
         )
     label = " ".join(str(outcome.payload.get("username") or "").split())[:200] or None
-    done = f"{what[0].upper()}{what[1:]} is done" + (f" (account {label})." if label else ".")
-    return PageEnding(TOOL_SETUP_COMPLETED, done, account_label=label)
+    return PageEnding(TOOL_SETUP_COMPLETED, _is_done(what, label), account_label=label)
 
 
 def account_link_page_ending(
@@ -247,29 +301,26 @@ def account_link_page_ending(
     """An account link form's ending; a created link for another tool or owner is never reported as linked."""
 
     if outcome.ending == WATCH_EXPIRED:
-        return PageEnding(TOOL_SETUP_EXPIRED, f"The form for {what} expired before it was used.")
+        return PageEnding(TOOL_SETUP_EXPIRED, _form_expired(what))
     if outcome.ending != WATCH_FINISHED:
-        return PageEnding(
-            TOOL_SETUP_UNAVAILABLE, f"Nobody could confirm whether {what} finished.", REASON_PAGE_UNCONFIRMED
-        )
+        return PageEnding(TOOL_SETUP_UNAVAILABLE, _unconfirmed(what), reason_code=REASON_PAGE_UNCONFIRMED)
     result = outcome.payload.get("result")
     result = result if isinstance(result, dict) else {}
     status = str(result.get("status") or outcome.payload.get("status") or "")
     if status == ACCOUNT_LINK_STATUS_CREATED:
         link_id = str(result.get("link_id") or "") or None
         if link_id and result.get("tool_id") == tool_id and result.get("owner_kind") == owner:
-            return PageEnding(TOOL_SETUP_COMPLETED, f"{what[0].upper()}{what[1:]} is done.", link_id=link_id)
-        return PageEnding(
-            TOOL_SETUP_UNAVAILABLE, f"Nobody could confirm whether {what} finished.", REASON_LINK_MISMATCH
-        )
+            return PageEnding(TOOL_SETUP_COMPLETED, _is_done(what), link_id=link_id)
+        return PageEnding(TOOL_SETUP_UNAVAILABLE, _unconfirmed(what), reason_code=REASON_LINK_MISMATCH)
     if status == ACCOUNT_LINK_STATUS_DECLINED:
         return PageEnding(TOOL_SETUP_DECLINED, f"The form for {what} was closed without linking anything.")
     if result.get("reason_code") == REASON_SESSION_EXPIRED:
-        return PageEnding(TOOL_SETUP_EXPIRED, f"The form for {what} expired before it was used.")
+        return PageEnding(TOOL_SETUP_EXPIRED, _form_expired(what))
+    # The broker refused the form (its plain reason follows); name the page like every other ending.
     why = _sentence(str(result.get("error") or ""))[:300]
     return PageEnding(
         TOOL_SETUP_UNAVAILABLE,
-        f"Nothing was linked. {why}".strip(),
+        _did_not_finish(what, why),
         reason_code=str(result.get("reason_code") or REASON_PAGE_REFUSED),
     )
 
@@ -444,8 +495,16 @@ class GatewayToolSetups:
             instructions=f"{_sentence(step.instructions)}{where}{check}{done}",
         )
 
-    async def external_step_done(self, setup_request_id: str, *, person_id: str) -> bool:
-        """The person marked an external step done (the workflow page); False when it is not theirs or not waiting."""
+    async def external_step_done(self, setup_request_id: str, *, person_id: str, step_title: str) -> bool:
+        """The person marked an external step done (the workflow page); False when it is not theirs or not waiting.
+
+        ``step_title`` is the step's title the workflow page stores, which
+        trusted code wrote from the catalog when the page opened (never words
+        from the browser); it is the row the person clicked. Marking a step
+        done is a ``person_action`` result like the person's own ``/link``,
+        with its own words: "You marked the Gitea setup step 'Create a Gitea
+        token' done."
+        """
 
         record = self._setups.get_tool_setup(setup_request_id)
         if (
@@ -455,8 +514,47 @@ class GatewayToolSetups:
             or record.status != SETUP_STATUS_WAITING
         ):
             return False
-        ending = PageEnding(TOOL_SETUP_COMPLETED, "The setup step was marked done.")
+        title = " ".join(step_title.split())
+        if not title:
+            self._logger.warning(
+                "An outside setup step was marked done without its stored title; its line names only the tool. "
+                "event=gateway_tool_setup_step_title_missing setup_request_id=%s tool_id=%s",
+                setup_request_id,
+                record.tool_id,
+            )
+        what = self._page_what(record, title)
+        ending = PageEnding(TOOL_SETUP_COMPLETED, f"The person marked {what} done.", closing=f"You marked {what} done.")
         return await self._finish(setup_request_id, ending, attempt=1, source=TOOL_SETUP_SOURCE_PERSON)
+
+    def _page_what(self, record: ToolSetupRecord, step_title: str = "") -> str:
+        """The record's page in plain words, with the tool named as its page named it."""
+
+        return _what(record.kind, self._tool_name(record), step_title)
+
+    def _tool_name(self, record: ToolSetupRecord) -> str:
+        """The tool's name as the page showed it; the raw tool id, logged, when no name is known.
+
+        Sign-in pages use the sign-in name (``tool_sign_in``); account link
+        forms and outside steps use the catalog's display name, which the
+        broker named the form with and ``_external_page`` showed. The raw id
+        stands in only when the tool has left the catalog since the page opened.
+        """
+
+        if record.kind in _SIGN_IN_KINDS:
+            sign_in = tool_sign_in(record.tool_id)
+            name = sign_in.display_name if sign_in else None
+        else:
+            name = self.guide.display_name(record.tool_id) if self.guide else None
+        if name:
+            return name
+        self._logger.warning(
+            "A setup page's tool has no display name; its line names the tool id. "
+            "event=gateway_tool_setup_name_unknown setup_request_id=%s tool_id=%s kind=%s",
+            record.setup_request_id,
+            record.tool_id,
+            record.kind,
+        )
+        return record.tool_id
 
     def _next_attempt(self, request: ToolSetupRequestV1) -> int:
         """This page's number among the task's pages of its kind for the tool; refuses past the limit."""
@@ -682,11 +780,13 @@ class GatewayToolSetups:
         for record in self._setups.list_tool_setups(status=SETUP_STATUS_WAITING, person_id=person_id, tool_id=tool_id):
             if record.kind != kind or (owner is not None and record.owner_kind != owner):
                 continue
-            what = _what(kind, tool_id)
+            what = self._page_what(record)
             ending = PageEnding(
                 TOOL_SETUP_COMPLETED,
                 f"The person finished {what} on their own" + (f" (account {account_label})." if account_label else "."),
                 account_label=account_label,
+                # The /link or /auth result already told the person how it went.
+                closing=f"You finished {what} yourself, so this page is no longer needed.",
             )
             if await self._finish(record.setup_request_id, ending, attempt=None, source=TOOL_SETUP_SOURCE_PERSON):
                 finished += 1
@@ -721,19 +821,35 @@ class GatewayToolSetups:
         safely(record, what="setup_finished", tool_id=tool_id, kind=kind, person_id=person_id)
 
     async def recover_unwatched(self) -> int:
-        """After a gateway start: report every page still marked waiting as unwatched."""
+        """After a gateway start: report every page still marked waiting as unwatched.
+
+        Each record is reported on its own, so a record that cannot be
+        reported never stops the records after it. Its failure is logged with
+        the record's stored status: ``waiting`` when it failed before it was
+        claimed (a kind this version does not know), so the next start tries
+        again; a finished status when it failed after the claim (the result
+        could not be sent), so its task was not told.
+        """
 
         recovered = 0
         for record in self._setups.list_tool_setups(status=SETUP_STATUS_WAITING):
             if record.kind == TOOL_SETUP_EXTERNAL_STEP:
                 continue  # nothing watches it; the person still marks it done
-            ending = PageEnding(
-                TOOL_SETUP_UNAVAILABLE,
-                "The gateway restarted while the setup page was open, so nobody could see how it ended.",
-                reason_code=REASON_PAGE_NOT_WATCHED,
-            )
-            if await self._finish(record.setup_request_id, ending, attempt=None, source=TOOL_SETUP_SOURCE_TASK):
-                recovered += 1
+            try:
+                if await self._report_unwatched(record):
+                    recovered += 1
+            except Exception:  # noqa: BLE001 - one bad record must not keep every later page waiting
+                self._logger.exception(
+                    "Could not report a setup page nobody watched after the gateway started "
+                    "(status waiting: the next start tries again; a finished status: its task was not told). "
+                    "event=gateway_tool_setup_recovery_failed setup_request_id=%s task_id=%s tool_id=%s kind=%s "
+                    "status=%s",
+                    record.setup_request_id,
+                    record.parent_task_id,
+                    record.tool_id,
+                    record.kind,
+                    self._stored_status(record.setup_request_id),
+                )
         if recovered:
             self._logger.warning(
                 "Reported setup pages nobody watched after the gateway started. "
@@ -741,6 +857,26 @@ class GatewayToolSetups:
                 recovered,
             )
         return recovered
+
+    def _stored_status(self, setup_request_id: str) -> str:
+        """A record's stored status for a failure log line; never raises, so the first failure stays visible."""
+
+        try:
+            record = self._setups.get_tool_setup(setup_request_id)
+        except Exception:  # noqa: BLE001 - the failure being logged matters more than this read
+            return "unreadable"
+        return record.status if record is not None else "missing"
+
+    async def _report_unwatched(self, record: ToolSetupRecord) -> bool:
+        """Tell the record's task that nobody saw how its page ended; False when another path finished it."""
+
+        ending = PageEnding(
+            TOOL_SETUP_UNAVAILABLE,
+            f"The gateway restarted while the page for {self._page_what(record)} was open, "
+            "so nobody could see how it ended.",
+            reason_code=REASON_PAGE_NOT_WATCHED,
+        )
+        return await self._finish(record.setup_request_id, ending, attempt=None, source=TOOL_SETUP_SOURCE_TASK)
 
     async def _finish(
         self,
@@ -792,9 +928,11 @@ class GatewayToolSetups:
 
         Every way a page ends passes here once (its watcher, the person's own
         ``/link`` or ``/auth``, Mark Done, restart recovery), because only the
-        call that claimed the waiting record posts. When the person finished it
-        with ``/link``, the /link result already said how that went, so this
-        line only says the page is no longer needed.
+        call that claimed the waiting record posts. The line is the ending's
+        own (``closing``, else ``message``), written where the page ended:
+        ``source`` alone cannot say what ended, because the person ends a page
+        both with ``/link`` and with Mark Done (the 2026-11-14 incident, where
+        Mark Done read as an account link with the raw tool id).
         """
 
         if self._event_output is None:
@@ -802,10 +940,7 @@ class GatewayToolSetups:
         session = self._sessions.get_session(record.session_key)
         if session is None:
             return
-        if source == TOOL_SETUP_SOURCE_PERSON:
-            text = f"You finished {_what(record.kind, record.tool_id)} yourself, so this page is no longer needed."
-        else:
-            text = ending.message
+        text = ending.closing or ending.message
         try:
             await self._event_output.emit(
                 GatewayDeliveryEvent(

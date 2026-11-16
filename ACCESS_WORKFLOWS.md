@@ -80,9 +80,10 @@ changes by itself:
 
 A step you do outside Universal Agents, such as creating a token on the
 service's website, shows its instructions in chat and on its step, with a
-**Mark Done** button on the workflow page. Only you can mark it done; the
-waiting task then continues (the account link that stores the token opens
-next). These steps come from the tool's catalog setup data, in the exact
+**Mark Done** button on the workflow page. Only you can mark it done; chat
+then says which step you finished, such as "You marked the Gitea setup step
+'Create a Gitea token' done.", and the waiting task continues (the account
+link that stores the token opens next). These steps come from the tool's catalog setup data, in the exact
 words an administrator approved, never from the agent.
 
 Setting the tool up yourself with `/link <tool>` while the task waits marks
