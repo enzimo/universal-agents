@@ -38,6 +38,11 @@ the request finishes before accepting it.
 Messages reach the request in the order they were saved; newer guidance waits
 while an earlier message is still unconfirmed.
 
+If the request is waiting for a setup page or for an approval when your message
+arrives, the team lead first gets the outcome of that wait and then reads your
+message. A change approved in the Inbox in the meantime still goes ahead. To
+stop it, decline it in the Inbox or stop the request.
+
 Use **New Chat** or `/new` to start separate work. Once a request finishes,
 your next message in its chat starts another request.
 

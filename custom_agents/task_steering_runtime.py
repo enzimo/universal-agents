@@ -1,5 +1,18 @@
 """Mid-turn steering helpers for UniversalAgent.
 
+Accepted guidance reaches the model at the start of its turn or, mid-turn, at
+the next safe point. ``RuntimeSteeringPlugin`` cancels the next new tool call
+(the structured-output turn decision included) with the guidance text, and a
+final answer is held back while guidance is unread
+(``task_message_runtime._apply_task_processing_result``). A tool call resuming
+after its pause (``set_up_tools``, ``request_access``, ``apply_change``, any
+local Strands interrupt) is not a new call: it runs with its answer and the
+model gets its real result, while the guidance waits for the next safe point
+(``custom_agents.sdk.strands.paused_tool_calls`` tells such a call apart).
+Cancelling it threw away the answer the task waited for. So a change approved
+in the Inbox while guidance waits is applied before the model reads it; people
+stop such a change by declining it or stopping the request.
+
 Files sent with a guidance or an answer (``TaskSteering.attachments``) are
 accepted before the message is acknowledged (``_accept_sent_files``, which
 records them with ``custom_agents.sent_files_runtime``), and
@@ -1540,6 +1553,8 @@ class RuntimeSteeringPlugin:
     not new: it runs with its answer and the model gets its real result,
     while the guidance waits for the next call, the turn decision or the
     check before a final answer (``custom_agents.sdk.strands.paused_tool_calls``).
+    A resumed ``apply_change`` therefore applies the approved plan before the
+    model reads guidance sent during the wait (module docstring).
     """
 
     name = "runtime_steering"

@@ -3040,6 +3040,24 @@ question to a person uses the preserved gateway reply route. Steering that
 names a task applies only to that task. Accepted guidance and duplicate keys
 are saved with its history, and guidance survives a restart until the model
 turn records its decision.
+The model reads accepted guidance at the start of its turn and, mid-turn, at
+the next safe point: the next new tool call, the turn decision included
+(Strands delivers it as a tool call), is cancelled with the guidance text
+(`task_steering_runtime.RuntimeSteeringPlugin`); guidance that arrives after a
+model call makes the turn call the model again; and a final answer is held back
+while guidance is unread, and the task runs again with it
+(`_apply_task_processing_result`). A tool call that resumes after its pause (`set_up_tools` waiting for setup pages,
+`request_access` or `apply_change` waiting for a decision, any local Strands
+interrupt) is not a new call: it runs with its answer, and the guidance waits
+for the next call, the turn decision or the check before the final answer.
+Why: cancelling the resumed call threw away the answer the task had waited
+for, and the model then repeated setup that was already done. Strands gives
+no sign in the event that a call resumes, so
+`custom_agents.sdk.strands.paused_tool_calls` recognises one with public hooks
+only: its tool use id started in a call to the agent that paused and has not
+finished since. One consequence: a change approved in the Inbox while guidance
+waits is applied before the model reads that guidance. To stop such a change,
+decline it in the Inbox or stop the request.
 An explicitly addressed receiver answers `STALE` for a missing task. The gateway
 holds guidance for that request until the lead admits its task, and retries
 with the same idempotency key. Guidance never becomes another root request.

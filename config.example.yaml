@@ -331,7 +331,7 @@ agent:
     proactive_guidance_ttl_seconds: 1800.0      # Suggested expiry for proactive guidance.
     interrupt_response_timeout_seconds: 86400.0 # Suggested expiry for interrupt responses.
     allow_restart_fallback: true                # Record durable recovery guidance if the live Strands session is gone.
-    apply_proactive_guidance_before_tools: true # Cancel a pending tool call when fresh guidance arrives.
+    apply_proactive_guidance_before_tools: true # Cancel the next new tool call when fresh guidance arrives (never one resuming after its pause).
     apply_proactive_guidance_after_model: true  # Retry a model call when guidance arrives at a safe checkpoint.
 
   # Active Strands transcript management before model calls.
