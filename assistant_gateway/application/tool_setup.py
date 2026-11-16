@@ -24,13 +24,16 @@ module:
 
 Setup pages come from ``set_up_tools`` runs (``custom_agents.tool_setup_run_runtime``),
 several at once for one task: a sibling page of a task that already waits on a
-page opens too (``credential_handoff``). The run itself tells the person about
-its workflow page in one chat message before the pages open
-(``tool_setup_run_runtime``): a card here shows only its own reason, and
-channels without cards show only its text. An ``external_step`` is a step the
-person does outside Universal Agents; the gateway shows the catalog's words
-for it (``SetupGuide``, never words from the request), opens no broker page,
-and waits until the person marks it done on the workflow page
+page opens too (``credential_handoff``), and each page's card stays until that
+page ends, whatever happens to the others (``page_status``). The run itself
+tells the person about its workflow page in one chat message before the pages
+open (``tool_setup_run_runtime``): a card here shows only its own reason, and
+channels without cards show only its text. Chat history keeps each page's
+receipt, never its address or the task's reason. An ``external_step`` is a
+step the person does outside Universal Agents; the gateway shows the
+catalog's words for it (``SetupGuide``, never words from the request), keeps
+its title, instructions and link in chat history, opens no broker page, and
+waits until the person marks it done on the workflow page
 (``external_step_done``); it does not expire.
 
 Two other ways end a wait: the person finishing the same setup on their own

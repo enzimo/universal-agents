@@ -1,12 +1,23 @@
 """Show tool setup pages that arrive after the chat response has closed.
 
 An agent task can ask for a setup page (sign-in, account link, team sign-in
-app) after a permission approval ended the Web Chat HTTP response, or from
+app, outside step) after a permission approval ended the Web Chat HTTP
+response, after an earlier page of the same ``set_up_tools`` run, or from
 delegated work that never had one. The gateway then opens the page for the
-Web Chat session owner (``tool_setup.GatewayToolSetups``) and keeps only a
-safe notice in the transcript. Bearer page links stay in gateway memory and
-are read through the authenticated Website facet, never through delivery
-replay.
+Web Chat session owner (``tool_setup.GatewayToolSetups``) and keeps the
+page's own secret-free line in the transcript (its receipt, such as "Account
+link form opened for Portainer (your account)."; an outside step's line also
+keeps its catalog title, instructions and link). Bearer page links stay in
+gateway memory and are read through the authenticated Website facet (Web
+Chat's live events and the workflow page), never through delivery replay.
+
+A page's card stays listed until that page itself ends (its
+``ToolSetupRecord`` is no longer waiting), its expiry passes, or its task
+ends (the chat request has a terminal status or a finished run state). The
+pages of one task share a chat request whose status each page's result
+changes, so that status never decides a card on its own (incident
+2026-11-14: finishing one page removed the other open pages' cards). A card
+with a bearer link stays in memory at most ``BEARER_CARD_MAX_LIFETIME``.
 """
 
 from __future__ import annotations
@@ -54,7 +65,11 @@ BEARER_CARD_MAX_LIFETIME = timedelta(minutes=31)
 
 
 class ToolSetupHandoffs:
-    """Bounded, process-local handoffs; request state prevents restart reminting."""
+    """Bounded, process-local cards, one per page (module docstring).
+
+    Request state and the page's transcript receipt prevent reminting a form
+    after a restart or a redelivery.
+    """
 
     def __init__(
         self,

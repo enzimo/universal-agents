@@ -2787,6 +2787,27 @@ person which command to run or asking whether to start:
    (`link_results`), the Mark Done button, or start-up recovery ends it. After
    a gateway restart, pages still waiting are reported as unwatched (and
    offered again); page addresses are never stored.
+   A page that opens after the chat reply closed (every page of a run but the
+   first) is listed for Web Chat and the workflow page by
+   `credential_handoff.ToolSetupHandoffs`. Its card stays until that page's
+   own `ToolSetupRecord` ends (`GatewayToolSetups.page_status`), its expiry
+   passes, or the task ends (the chat request has a terminal status or a
+   finished run state). Each removal is logged once
+   (`event=gateway_credential_handoff_card_closed` with a `reason`; a missing
+   request or page record is a warning). A card holding a sign-in or account
+   link page's bearer link stays in memory at most 31 minutes
+   (`BEARER_CARD_MAX_LIFETIME`); an outside step's card holds none and keeps
+   its 48-hour expiry. Chat history keeps each page's own secret-free receipt
+   on both paths (`GatewayTranscriptService.history_text`: a reply's
+   `transcript_text`, otherwise the fixed safe text for reply types that can
+   carry a page address); an outside step's line also keeps its catalog
+   title, instructions and link and the workflow page link, never the task's
+   own reason. Rationale (incident 2026-11-14): a task's pages share one chat
+   request, and every page's result sets it to
+   `waiting_for_credential_result`; the card list followed that status, so
+   finishing one page removed the other open pages' cards, and the handoff's
+   history line was the generic "A setup page is ready" text, so a reload lost
+   which page was open.
 
 5. Last known states instead of model re-checks (owner's decision 2026-09-28).
    Trusted code keeps one `ToolSetupStateV1` per team, person and account tool

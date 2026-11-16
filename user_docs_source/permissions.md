@@ -1537,6 +1537,12 @@ run too, so an agent restart during the wait resumes the task once the pages
 end. Refreshing chat can recover a live page while the gateway is running; a
 restart does not recover an already-issued page.
 
+Each page's card, in chat and on the workflow page, stays until that page
+itself ends (finished, closed, expired) or the task ends, however the task's
+other pages end. Chat history keeps one line per page and never a page's
+address: for example "X sign-in page opened."; for a step done outside
+Universal Agents, the step's title, instructions and link.
+
 ## Complete workflow reviews
 
 When a goal needs two or more things set up or approved, the team lead shows it

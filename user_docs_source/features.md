@@ -575,10 +575,12 @@ When an agent asks you to store or delete a credential, Web Chat shows a
 dismissible **Open secure credential form** action with a live expiry countdown.
 A setup page an agent asks for (see
 [When an agent needs a tool set up](#when-an-agent-needs-a-tool-set-up)) shows
-its own **Open** action the same way.
-The action is available only in the browser response that starts the workflow;
-it stays at its original position in the chat timeline and disappears as soon
-as the form ends: the chat then shows one line saying how it ended, such as
+its own **Open** action the same way; the pages that open after the first one
+come back after a refresh until each ends.
+A credential form's action is available only in the browser response that
+starts the workflow; it stays at its original position in the chat timeline
+and disappears as soon as the form ends: the chat then shows one line saying
+how it ended, such as
 "The secure form for `bifrost_virtual_key` is done: the credential was
 stored.", while the agent goes on with its task.
 If the gateway loses the form's status, it closes the card and says it cannot
@@ -649,6 +651,12 @@ same way.
 - If you close a page without finishing, or deny the access request, the
   setup stops, TeamLead tells you what cannot be done, and it does not ask
   again in this request.
+- Each page's card stays until that page ends, however the other pages end:
+  marking one step done never removes another step's card. Chat history keeps
+  one line per page, such as "Account link form opened for Portainer (your
+  account)."; for a step outside Universal Agents it keeps the step's title,
+  instructions and link, so a refresh never loses them. Page addresses for
+  sign-ins and account links are never saved.
 - If the missing step is an administrator's, such as the team's Google or X
   sign-in app or access you do not have, and you are not an administrator,
   nothing opens: TeamLead explains which step is missing and who can do it,
