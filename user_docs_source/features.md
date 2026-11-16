@@ -454,7 +454,7 @@ A request can stop with nothing left that could continue it: no question to
 you, no approval or setup step, no work by another agent and no retry is still
 open, and it is not waiting its turn. Messages you send to it are taken as
 guidance and do not start it again, so the notice asks you to stop it with
-`/stop task <task_id>` or in **Settings > Tasks** and send the request again.
+`/stop task <task_id>` or in **Settings → Tasks** and send the request again.
 You are told only after the team lead has seen it like this on every check for
 two hours, so the short moments a request waits between its steps are never
 reported. If you stop it as told, you get no further notice about it.

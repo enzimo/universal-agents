@@ -696,7 +696,22 @@ incident per request and condition: the agent holding the work stopped reporting
 in, a handed-back task nobody picked up, an access decision or a question to the
 person still waiting (reminders after a day), no progress while in progress, or
 a task waiting on nothing (`task_waiting_on_nothing`).
-Thresholds live in `agent.schedule_maintenance.stuck_tasks`.
+Thresholds live in `agent.schedule_maintenance.stuck_tasks`. The person comes
+from the root task's signed context (read, never used to authorize); without one
+only administrators are told, and their notices never quote the request. The
+task monitor also observes its own scheduler cadence
+(`custom_agents.liveness_observation`). After a pause longer than the normal
+60-second scheduler wait plus one 20-second heartbeat interval, it gives
+workers 60 active seconds to refresh their heartbeats. During that window,
+heartbeat-only takeover waits and task incidents remain unchanged; launch
+records, process evidence and explicit exits still decide. Host sleep cannot
+make a live startup agent look dead in any case: it is judged by its process,
+not its heartbeat (see below). Signed
+work for no person is labelled as system work or maintenance. A cleared warning
+reports that the condition ended, without claiming new task progress.
+The same pass also frees a work slot held by a task whose turn is gone
+(`turn_failure_runtime.release_orphaned_slot_when_idle`), which previously
+waited for new work to arrive.
 
 A task waiting on nothing is not running (waiting, paused or ready), is not in
 its agent's queue, and has no reason to wait. Every legitimate reason is listed
@@ -719,22 +734,7 @@ about one task that cannot be read leaves that task's incident as it is
 other conditions go on. The check was added after a request sat waiting for
 about 16 hours (2026-11-14) with no condition noticing: its saved workflow had
 queued it to continue, and its turn's result then set it waiting, which removed
-the queue entry. The person comes
-from the root task's signed context (read, never used to authorize); without one
-only administrators are told, and their notices never quote the request. The
-task monitor also observes its own scheduler cadence
-(`custom_agents.liveness_observation`). After a pause longer than the normal
-60-second scheduler wait plus one 20-second heartbeat interval, it gives
-workers 60 active seconds to refresh their heartbeats. During that window,
-heartbeat-only takeover waits and task incidents remain unchanged; launch
-records, process evidence and explicit exits still decide. Host sleep cannot
-make a live startup agent look dead in any case: it is judged by its process,
-not its heartbeat (see below). Signed
-work for no person is labelled as system work or maintenance. A cleared warning
-reports that the condition ended, without claiming new task progress.
-The same pass also frees a work slot held by a task whose turn is gone
-(`turn_failure_runtime.release_orphaned_slot_when_idle`), which previously
-waited for new work to arrive.
+the queue entry.
 
 Four repairs keep work from getting stuck in the first place:
 
