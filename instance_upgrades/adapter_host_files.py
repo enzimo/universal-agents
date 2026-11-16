@@ -25,9 +25,10 @@ conversation turns change under row locks
 
 What it does, per attachment id:
 
-1. finds the files: gateway records whose path lies under the transfer folder,
-   and conversation entries whose path does (the conversation pass decodes the
-   stored JSON, because a SQL substring match on JSON text is not reliable);
+1. finds the files: gateway records and conversation entries naming a file
+   0.9.13 wrote, ``<transfer folder>/adapter_upload_<id>`` (the conversation
+   pass decodes the stored JSON, because a SQL substring match on JSON text
+   is not reliable);
 2. checks each: the id is a plain file name (it becomes one), the path lies
    inside the transfer folder, the file is opened without following links
    (``access_control.safe_open``), is a regular file with one link, and its
@@ -39,20 +40,22 @@ What it does, per attachment id:
    uploads get (``inbound_attachments.store_inbound_attachment_bytes_with_policy``),
    by ``rename`` (which keeps the modification time), or, when the transfer
    folder is on another file system, by a copy that keeps the modification
-   time and is renamed into place, the source removed only after both records
-   changed;
+   time, is checked against the record's sha256 and is renamed into place,
+   the source removed only after both records changed;
 4. rewrites the conversation entries first and the gateway record second.
    A run that stops part way is finished by the next one: a destination that
    already holds the file (same sha256) counts as ``already_moved`` and both
    records are rewritten again.
 
-Files it cannot move (missing, refused by a check, or listed only in a
-conversation entry with no gateway record, so with no chat session for its
-folder): their entries are removed from the turns, which are marked as not
-recording all of their request's files (``attachments_recorded`` 0, the
-marker 0.9.12 shipped), so the model asks the person to send the file again;
-their gateway record, if any, is deleted, because it points at no file it
-could open. The file itself is left where it is.
+Files it cannot move (missing from a folder that opens, refused by a check,
+or listed only in a conversation entry with no gateway record, so with no
+chat session for its folder): their entries are removed from the turns, which
+are marked as not recording all of their request's files
+(``attachments_recorded`` 0, the marker 0.9.12 shipped), so the model asks the
+person to send the file again; their gateway record, if any, is deleted,
+because it points at no file it could open. The file itself is left where it
+is. This happens only after every file that can move has moved, so a run that
+stops on a folder problem has dropped no record.
 
 Held task records and messages still queued are not rewritten: the
 message-bound context id hashes every field of each file record, path
@@ -62,13 +65,22 @@ outside ``state/uploads``, and the team lead's stuck-task check tells the
 person which files to send again (``custom_agents.stuck_tasks``,
 ``task_files_sent_before_upgrade``).
 
-When the transfer folder is missing while records point into it (not
-mounted), nothing changes and no marker is written: one error says to mount
-it and restart, or, if the files are really gone, to run the command with
+Whether the files are here is decided from what the step finds, not from the
+folder alone: when gateway records wait for files and none of them is in the
+transfer folder or already at its destination (the folder is not there, or a
+mount point or a folder the 0.10 adapter host created is empty), nothing
+changes and no marker is written: one error says to mount the folder and
+restart, or, if the files are really gone, to run the command with
 ``--files-gone``, which handles every file it cannot find as missing. Startup
-goes on either way, and the next start tries again. An unexpected error (a
-database error, a full disk) raises, so the launcher stops startup, and a
-restart finishes the work.
+goes on either way, and the next start tries again.
+
+A folder it cannot use (permission denied, an I/O error, a read-only or full
+``state/uploads``, a folder that vanished during the run) raises
+``FolderProblem``, naming the folder; the launcher stops startup, and a
+restart after the operator fixes it finishes the work. So does any other
+unexpected error (a database error). An error that comes from one record's
+names and would recur at every start (``ENAMETOOLONG``, ``EINVAL``) refuses
+that file instead, so one bad record cannot block startup.
 
 It lives in ``instance_upgrades``, not ``assistant_gateway``, because it
 changes the team's conversation store, which the gateway runtime never
@@ -105,6 +117,8 @@ REASON_OUTSIDE_FOLDER = "outside_transfer_folder"
 REASON_SHA256_MISMATCH = "sha256_mismatch"
 REASON_DESTINATION_TAKEN = "destination_taken"
 REASON_RECORD_MISMATCH = "record_mismatch"
+REASON_NAME_REFUSED = "name_refused"  # the file system refused the name (ENAMETOOLONG, EINVAL)
+REASON_COPY_MISMATCH = "copy_mismatch"  # a FolderProblem: the cross-disk copy read back differently
 
 # Outcomes per attachment id.
 OUTCOME_MOVED = "moved"
@@ -112,6 +126,14 @@ OUTCOME_ALREADY_MOVED = "already_moved"
 OUTCOME_MISSING = "missing"
 OUTCOME_REFUSED = "refused"
 OUTCOME_NO_RECORD = "no_record"
+
+# What 0.9.13's adapter host named each file it kept, directly in its transfer folder
+# (``new_id("adapter_upload")`` in ``assistant_gateway.adapter_host.service``).
+TRANSFER_FILE_PREFIX = "adapter_upload_"
+
+# Errors that come from one record's names and recur at every start: that file is
+# refused, so one bad record cannot stop startup for good.
+_RECORD_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.EINVAL})
 
 _BATCH = 500
 _CHUNK = 1024 * 1024
@@ -136,7 +158,7 @@ class UpgradeCounts:
 
 @dataclass(frozen=True)
 class UpgradeResult:
-    """``finished`` once the marker is written; ``folder_missing`` when records wait for a missing folder."""
+    """``finished`` once the marker is written; ``folder_missing`` when records wait for a folder that holds none of their files."""
 
     finished: bool
     counts: UpgradeCounts
@@ -178,6 +200,18 @@ class _Unmovable(Exception):
         self.reason = reason
 
 
+class FolderProblem(Exception):
+    """A folder the step needs cannot be used; nothing more changes, and a restart after the fix finishes the work."""
+
+    def __init__(self, folder: Path, reason: str, detail: str) -> None:
+        super().__init__(
+            f"The upgrade step for adapter-host files cannot use the folder {folder} ({detail}). Fix the folder "
+            "(mount it, its permissions, free space) and restart; nothing was lost."
+        )
+        self.folder = folder
+        self.reason = reason
+
+
 def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> UpgradeResult:
     """Run the step for the instance of ``config`` (a ``GatewayInstanceConfig``); see the module docstring."""
 
@@ -191,21 +225,31 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
     conversations = create_conversation_repository(
         config.manager_storage_settings, artifacts_dir=layout.conversation_artifacts_dir, logger=logger
     )
-    step = _Step(transfer=transfer, uploads=uploads, gateway=gateway, conversations=conversations)
-    items = step.find()
-    if items and not transfer.is_dir() and not files_gone:
+    step = _Step(
+        transfer=transfer, uploads=uploads, gateway=gateway, conversations=conversations, files_gone=files_gone
+    )
+    try:
+        items = step.find()
+        waiting, found = step.survey(items)
+        if waiting and not found and not files_gone:
+            logger.error(
+                "Files sent through chat apps the adapter host ran are recorded in its transfer folder, but the "
+                "folder is not here or holds none of them, so they were not moved into state/uploads and nothing "
+                "was changed. Mount the folder (interactive_apps.adapter_host.upload_dir) and restart; if the files "
+                "are really gone, run 'assistant_cli upgrade adapter-host-files --config <instance_config.yaml> "
+                "--files-gone'. event=adapter_host_files_folder_missing folder=%s waiting=%s",
+                transfer,
+                waiting,
+            )
+            return UpgradeResult(finished=False, counts=UpgradeCounts(), waiting=waiting)
+        for item in items:
+            step.handle(item)
+        step.forget_unmovable()
+    except FolderProblem as problem:
         logger.error(
-            "Files sent through chat apps the adapter host ran are recorded in its transfer folder, but the folder "
-            "is not here, so they were not moved into state/uploads and nothing was changed. Mount the folder "
-            "(interactive_apps.adapter_host.upload_dir) and restart; if the files are really gone, run "
-            "'assistant_cli upgrade adapter-host-files --config <instance_config.yaml> --files-gone'. "
-            "event=adapter_host_files_folder_missing folder=%s waiting=%s",
-            transfer,
-            len(items),
+            "%s event=adapter_host_files_folder_unusable folder=%s reason=%s", problem, problem.folder, problem.reason
         )
-        return UpgradeResult(finished=False, counts=UpgradeCounts(), waiting=len(items))
-    for item in items:
-        step.handle(item)
+        raise
     _write_marker(marker, step.counts)
     counts = step.counts
     logger.log(
@@ -232,13 +276,17 @@ class _Step:
         uploads: Path,
         gateway: GatewayStateRepository,
         conversations: ConversationRepository,
+        files_gone: bool = False,
     ) -> None:
         self._transfer = transfer
         self._uploads = uploads
         self._gateway = gateway
         self._conversations = conversations
+        # With --files-gone a transfer folder that is not there means every file in it is missing.
+        self._files_gone = files_gone
         self.counts = UpgradeCounts()
         self._unrecorded_turns: set[tuple[str, str]] = set()
+        self._unmovable: list[tuple[_Item, _Unmovable]] = []
 
     # -- finding ---------------------------------------------------------------
 
@@ -275,19 +323,50 @@ class _Step:
     def _in_transfer(self, raw: Optional[str]) -> Optional[Path]:
         """``raw`` normalized when it names a file still waiting in the transfer folder, else None.
 
-        Normalized without following links: the file is opened later from the
-        folder one component at a time, which refuses any link on the way. A
-        path already inside ``state/uploads`` is not waiting, also when an
-        operator set the transfer folder to, around or inside it: those files
-        are where agents open them, so nothing moves or removes them.
+        Only what 0.9.13 wrote waits: ``adapter_upload_<id>`` directly in the
+        folder, so an operator who pointed the folder at a folder holding
+        other files (the instance root, ``workspaces``) has none of those
+        moved or dropped. Normalized without following links: the file is
+        opened later from the folder, which refuses a link. A path already
+        inside ``state/uploads`` is not waiting, also when an operator set the
+        transfer folder to, around or inside it: those files are where agents
+        open them, so nothing moves or removes them.
         """
 
         if not raw or not os.path.isabs(raw):
             return None
         path = Path(os.path.normpath(raw))
-        if self._transfer not in path.parents or self._uploads == path or self._uploads in path.parents:
+        if path.parent != self._transfer or not path.name.startswith(TRANSFER_FILE_PREFIX):
+            return None
+        if self._uploads == path or self._uploads in path.parents:
             return None
         return path
+
+    def survey(self, items: list[_Item]) -> tuple[int, bool]:
+        """How many files gateway records wait for, and whether one of those is here.
+
+        A file is here when it is in the transfer folder or already at its
+        destination (an earlier run moved it and stopped). When none is, the
+        folder is not here or is not the one 0.9.13 wrote (an empty mount
+        point, a folder the 0.10 adapter host created), so the caller changes
+        nothing. A folder that answers with another error raises ``FolderProblem``.
+        """
+
+        waiting = 0
+        found = False
+        for item in items:
+            record = item.record
+            source = self._in_transfer(record.local_path) if record is not None else None
+            if record is None or source is None:
+                continue
+            waiting += 1
+            if not found:
+                # The destination is looked at only for an id that can be a file name (one handle() moves).
+                moved = _plain_name(item.attachment_id) and (
+                    _look(self._uploads, self._destination(record), absent_is_missing=True) is None
+                )
+                found = moved or _look(self._transfer, (source.name,), absent_is_missing=True) != OUTCOME_MISSING
+        return waiting, found
 
     # -- handling one file -------------------------------------------------------
 
@@ -304,7 +383,7 @@ class _Step:
             destination = self._destination(record)
             outcome, remove_source = self._place(source, destination, record.sha256)
         except _Unmovable as unmovable:
-            self._forget(item, unmovable)
+            self._unmovable.append((item, unmovable))  # forgotten once every file that can move has moved
             return
         moved_with = [entry for entry in item.entries if entry.path == source and entry.attachment.sha256 == record.sha256]
         others = [entry for entry in item.entries if entry not in moved_with]
@@ -335,9 +414,17 @@ class _Step:
             return OUTCOME_ALREADY_MOVED, _same_file_left(self._transfer, source_parts, sha256)
         if at_destination is not None:
             raise _Unmovable(OUTCOME_REFUSED, REASON_DESTINATION_TAKEN)
-        return OUTCOME_MOVED, _move(self._transfer, source_parts, self._uploads, destination, sha256)
+        moved = _move(self._transfer, source_parts, self._uploads, destination, sha256, files_gone=self._files_gone)
+        return OUTCOME_MOVED, moved
 
     # -- files it cannot move ----------------------------------------------------
+
+    def forget_unmovable(self) -> None:
+        """Drop the records of every file that could not move, after the moves (see the module docstring)."""
+
+        for item, unmovable in self._unmovable:
+            self._forget(item, unmovable)
+        self._unmovable.clear()
 
     def _forget(self, item: _Item, unmovable: _Unmovable) -> None:
         setattr(self.counts, unmovable.outcome, getattr(self.counts, unmovable.outcome) + 1)
@@ -379,28 +466,94 @@ def _plain_name(attachment_id: str) -> bool:
     )
 
 
+def _judge_os(exc: OSError, folder: Path) -> _Unmovable:
+    """What an error opening, renaming or writing a file in ``folder`` means for that file.
+
+    The file is missing (``ENOENT``) or refused (a link, or a name error that
+    recurs at every start); anything else is a problem with the folder
+    (permission denied, I/O error, read-only or full disk) and raises
+    ``FolderProblem``.
+    """
+
+    if exc.errno == errno.ENOENT:
+        return _Unmovable(OUTCOME_MISSING, REASON_MISSING)
+    if exc.errno == errno.ELOOP:
+        return _Unmovable(OUTCOME_REFUSED, safe_open.REASON_LINK)
+    if exc.errno in _RECORD_ERRNOS:
+        return _Unmovable(OUTCOME_REFUSED, REASON_NAME_REFUSED)
+    raise FolderProblem(folder, safe_open.REASON_OPEN_FAILED, exc.strerror or str(exc)) from exc
+
+
+def _judge(exc: safe_open.UnsafePath, folder: Path, *, absent_is_missing: bool) -> _Unmovable:
+    """``_judge_os`` for a ``safe_open`` refusal under ``folder``.
+
+    A folder that is not there is missing files only when ``absent_is_missing``
+    (no file stored there yet, or ``--files-gone``); otherwise it, like a
+    folder that cannot be opened for another reason, raises ``FolderProblem``.
+    """
+
+    cause = exc.__cause__
+    if exc.reason == safe_open.REASON_NOT_FOUND:
+        return _Unmovable(OUTCOME_MISSING, REASON_MISSING)
+    if exc.reason == safe_open.REASON_ROOT_UNAVAILABLE:
+        if absent_is_missing and isinstance(cause, FileNotFoundError):
+            return _Unmovable(OUTCOME_MISSING, REASON_MISSING)
+        detail = cause.strerror if isinstance(cause, OSError) and cause.strerror else str(exc)
+        raise FolderProblem(folder, exc.reason, detail) from exc
+    if exc.reason == safe_open.REASON_OPEN_FAILED and isinstance(cause, OSError):
+        return _judge_os(cause, folder)
+    return _Unmovable(OUTCOME_REFUSED, exc.reason)
+
+
+def _look(root: Path, parts: tuple[str, ...], *, absent_is_missing: bool) -> Optional[str]:
+    """None when ``root/parts`` is there (a link is not followed), else the outcome its absence or refusal means."""
+
+    try:
+        status = safe_open.entry_status(root, parts)
+    except safe_open.UnsafePath as exc:
+        return _judge(exc, root, absent_is_missing=absent_is_missing).outcome
+    except OSError as exc:
+        return _judge_os(exc, root).outcome
+    return None if status is not None else OUTCOME_MISSING
+
+
 def _file_digest(root: Path, parts: tuple[str, ...]) -> Optional[str]:
     """The sha256 of the regular file ``root/parts`` (opened without following links); None when it is missing.
 
-    A file that is there but cannot be read safely (a link, not a regular
-    file, several hard links) raises ``_Unmovable``.
+    ``root`` is ``state/uploads``, which may not exist yet. A file that is
+    there but cannot be read safely (a link, not a regular file, several hard
+    links) raises ``_Unmovable``; a folder problem raises ``FolderProblem``.
     """
 
     try:
         with safe_open.opened_file(root, parts) as (descriptor, _info):
             return _digest(descriptor)
     except safe_open.UnsafePath as exc:
-        if exc.reason in {safe_open.REASON_NOT_FOUND, safe_open.REASON_ROOT_UNAVAILABLE}:
+        unmovable = _judge(exc, root, absent_is_missing=True)
+        if unmovable.outcome == OUTCOME_MISSING:
             return None
-        raise _Unmovable(OUTCOME_REFUSED, exc.reason) from exc
+        raise unmovable from exc
 
 
 def _same_file_left(root: Path, parts: tuple[str, ...], sha256: str) -> bool:
-    """Whether ``root/parts`` is still a safe copy of the file (sha256 ``sha256``), to be removed."""
+    """Whether ``root/parts`` is still a safe copy of the file (sha256 ``sha256``), to be removed.
+
+    Removing it only tidies the transfer folder, so a folder problem here is
+    logged and the copy is left.
+    """
 
     try:
-        return _file_digest(root, parts) == sha256
-    except _Unmovable:
+        with safe_open.opened_file(root, parts) as (descriptor, _info):
+            return _digest(descriptor) == sha256
+    except safe_open.UnsafePath as exc:
+        try:
+            _judge(exc, root, absent_is_missing=True)
+        except FolderProblem as problem:
+            logger.warning(
+                "A moved file's original in the adapter host's transfer folder could not be checked, so it is "
+                "left there. event=adapter_host_file_source_left reason=%s",
+                problem.reason,
+            )
         return False
 
 
@@ -414,7 +567,13 @@ def _digest(descriptor: int) -> str:
 
 
 def _move(
-    transfer: Path, source_parts: tuple[str, ...], uploads: Path, destination: tuple[str, str], sha256: str
+    transfer: Path,
+    source_parts: tuple[str, ...],
+    uploads: Path,
+    destination: tuple[str, str],
+    sha256: str,
+    *,
+    files_gone: bool,
 ) -> bool:
     """Move the checked file into ``uploads``; True when it was copied and its source is to be removed later.
 
@@ -422,25 +581,25 @@ def _move(
     session folder is created), the source is opened with ``O_NOFOLLOW`` and
     must be a regular file with one link and the record's sha256. Only the
     gateway writes either folder and it is not running, so nothing changes
-    the file between the check and the rename.
+    the file between the check and the rename. The transfer folder was found
+    before the run, so its absence now is a folder problem, unless
+    ``files_gone``.
     """
 
-    uploads.mkdir(parents=True, exist_ok=True)  # an instance whose gateway stored no file yet
+    try:
+        uploads.mkdir(parents=True, exist_ok=True)  # an instance whose gateway stored no file yet
+    except OSError as exc:
+        raise FolderProblem(uploads, safe_open.REASON_OPEN_FAILED, exc.strerror or str(exc)) from exc
     try:
         source_dir = safe_open.open_directory(transfer, source_parts[:-1])
     except safe_open.UnsafePath as exc:
-        if exc.reason in {safe_open.REASON_NOT_FOUND, safe_open.REASON_ROOT_UNAVAILABLE}:
-            raise _Unmovable(OUTCOME_MISSING, REASON_MISSING) from exc
-        raise _Unmovable(OUTCOME_REFUSED, exc.reason) from exc
+        raise _judge(exc, transfer, absent_is_missing=files_gone) from exc
     try:
         name = source_parts[-1]
         try:
             descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=source_dir)
-        except FileNotFoundError as exc:
-            raise _Unmovable(OUTCOME_MISSING, REASON_MISSING) from exc
         except OSError as exc:
-            reason = safe_open.REASON_LINK if exc.errno == errno.ELOOP else safe_open.REASON_OPEN_FAILED
-            raise _Unmovable(OUTCOME_REFUSED, reason) from exc
+            raise _judge_os(exc, transfer) from exc
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
@@ -452,14 +611,17 @@ def _move(
             try:
                 destination_dir = safe_open.open_directory(uploads, destination[:-1], create=True)
             except safe_open.UnsafePath as exc:
-                raise _Unmovable(OUTCOME_REFUSED, exc.reason) from exc
+                raise _judge(exc, uploads, absent_is_missing=False) from exc
             try:
                 try:
                     os.rename(name, destination[-1], src_dir_fd=source_dir, dst_dir_fd=destination_dir)
                 except OSError as exc:
                     if exc.errno != errno.EXDEV:
-                        raise
-                    _copy_into_place(descriptor, info, destination_dir, destination[-1])
+                        raise _judge_os(exc, uploads) from exc
+                    try:
+                        _copy_into_place(descriptor, info, destination_dir, destination[-1], sha256, uploads)
+                    except OSError as copy_error:
+                        raise _judge_os(copy_error, uploads) from copy_error
                     return True
                 os.fsync(destination_dir)
                 os.fsync(source_dir)
@@ -472,22 +634,37 @@ def _move(
         os.close(source_dir)
 
 
-def _copy_into_place(descriptor: int, info: os.stat_result, directory: int, name: str) -> None:
-    """Copy across file systems: a temporary file in ``directory``, flushed, its mode and times kept, renamed to ``name``."""
+def _copy_into_place(
+    descriptor: int, info: os.stat_result, directory: int, name: str, sha256: str, folder: Path
+) -> None:
+    """Copy across file systems: a temporary file in ``directory``, flushed, its mode and times kept, renamed to ``name``.
 
-    temporary = f".{name}.moving"
+    The transfer folder may be a network or FUSE mount, where a write can be
+    short, so each chunk is written until all of it is, and the copy is read
+    back and must carry the record's sha256 before it is renamed into place;
+    otherwise it is removed and ``FolderProblem`` raised, so the original
+    stays and a restart tries again. The temporary name is fixed-length, so a
+    name that fits does not fail only because of the copy.
+    """
+
+    temporary = f".moving-{hashlib.sha256(name.encode()).hexdigest()[:16]}"
     try:
         os.unlink(temporary, dir_fd=directory)  # left by a run that stopped while copying
     except FileNotFoundError:
         pass
     target = os.open(
-        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600, dir_fd=directory
+        temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600, dir_fd=directory
     )
     try:
         offset = 0
         while chunk := os.pread(descriptor, _CHUNK, offset):
-            os.write(target, chunk)
+            pending = memoryview(chunk)
+            while pending:
+                pending = pending[os.write(target, pending) :]
             offset += len(chunk)
+        os.fsync(target)
+        if _digest(target) != sha256:
+            raise FolderProblem(folder, REASON_COPY_MISMATCH, "the copy did not match the file it was made from")
         os.fchmod(target, stat.S_IMODE(info.st_mode))
         os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
         os.fsync(target)
@@ -524,4 +701,4 @@ def _write_marker(marker: Path, counts: UpgradeCounts) -> None:
     os.replace(temporary, marker)
 
 
-__all__ = ["UpgradeCounts", "UpgradeResult", "upgrade_adapter_host_files"]
+__all__ = ["FolderProblem", "UpgradeCounts", "UpgradeResult", "upgrade_adapter_host_files"]

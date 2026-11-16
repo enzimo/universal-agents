@@ -2627,19 +2627,27 @@ def _resolve_instance_config_path(config_path: str | None) -> str:
 def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
     """``upgrade adapter-host-files`` (``instance_upgrades.adapter_host_files``).
 
-    Exits 0 when the step finished or is waiting for a missing transfer
-    folder (startup goes on and the next start tries again), and non-zero on
-    an unexpected error, which stops startup until a restart finishes it.
+    Exits 0 when the step finished or is waiting for a transfer folder that
+    is not here or holds none of the files (startup goes on and the next start
+    tries again), and non-zero when a folder cannot be used (``FolderProblem``,
+    with a message naming it) or on another unexpected error, which stops
+    startup until a restart finishes it.
     """
 
-    from instance_upgrades.adapter_host_files import upgrade_adapter_host_files
+    from instance_upgrades.adapter_host_files import FolderProblem, upgrade_adapter_host_files
 
     config = GatewayInstanceConfig.load_for_process(args.config)
-    result = upgrade_adapter_host_files(config, files_gone=args.files_gone)
+    try:
+        result = upgrade_adapter_host_files(config, files_gone=args.files_gone)
+    except FolderProblem as problem:
+        raise SystemExit(str(problem)) from problem
     if result.already_done:
         print("The adapter-host files were already moved into state/uploads.")
     elif result.folder_missing:
-        print(f"{result.waiting} file(s) wait for the adapter host's transfer folder, which is not here. See the log.")
+        print(
+            f"{result.waiting} file(s) wait for the adapter host's transfer folder, which is not here or holds "
+            "none of them. See the log."
+        )
     else:
         counts = result.counts
         print(

@@ -4527,9 +4527,10 @@ the desktop app never offers an older version.
   `InstanceLayout.adapter_host_files_upgrade_path`
   (`state/upgrades/adapter-host-files.json`, the finish time and the counts)
   is missing. Nothing else on the host writes the files or their records
-  then. It finds the gateway records under the transfer folder (a literal
-  prefix match) and the conversation entries that point into it (decoded from
-  the stored JSON). Records are not trusted by themselves, because agent
+  then. It finds the gateway records and conversation entries (decoded from
+  the stored JSON) that name a file as 0.9.13 wrote it,
+  `adapter_upload_<id>` directly in the transfer folder, so a folder an
+  operator pointed at other files has none of those moved or dropped. Records are not trusted by themselves, because agent
   processes write conversation turns: the attachment id must be a plain file
   name, the file is opened from the folder without following links, must be
   a regular file with one link and carry the gateway record's sha256, and a
@@ -4538,8 +4539,10 @@ the desktop app never offers an older version.
   where new uploads go, by `rename`, which keeps its modification time, so
   upload retention counts from when it was sent and files older than
   `retention_days` go at the gateway's first cleanup; across file systems it
-  is copied with its mode and times and renamed into place, and the original
-  is removed only after both records changed. The conversation entries are
+  is copied with its mode and times (each write repeated until all of it is
+  written, because the folder may be a network mount), read back and checked
+  against the record's sha256, renamed into place, and the original is
+  removed only after both records changed. The conversation entries are
   rewritten first (one transaction, with the row locks
   `merge_turn_attachments` takes, because remote workers may share a
   PostgreSQL store), then the gateway record, so a run that stops part way is
@@ -4549,15 +4552,26 @@ the desktop app never offers an older version.
   removed from its turns, which are marked as not recording all of their
   request's files (`attachments_recorded` 0, the marker 0.9.12 shipped), so
   the model asks the person to send it again; its gateway record is deleted
-  and the file is left where it is. One line,
+  and the file is left where it is. Those records are dropped only after
+  every file that can move has moved, so a run that stops leaves them. One line,
   `event=adapter_host_files_upgraded` with the counts, reports the result, at
-  warning level when a file could not be moved, with one warning per file. If
-  records point into the transfer folder and the folder is not there (not
-  mounted), nothing changes and no marker is written: an error
-  (`event=adapter_host_files_folder_missing`) says to mount it and restart,
-  or, if the files are gone, to run the command with `--files-gone`; startup
-  goes on and the next start tries again. An unexpected error (a database
-  error, a full disk) stops startup, and a restart finishes the work. Held
+  warning level when a file could not be moved, with one warning per file.
+  Whether the files are here is decided from what the step finds, not from
+  the folder alone: if gateway records wait for files and none of them is in
+  the transfer folder or already at its destination (the folder is not
+  there, an unmounted disk left an empty mount point, or the 0.10 adapter
+  host created the folder for a new upload), nothing changes and no marker is
+  written: an error (`event=adapter_host_files_folder_missing`) says to mount
+  it and restart, or, if the files are gone, to run the command with
+  `--files-gone`; startup goes on and the next start tries again. A folder
+  the step cannot use (permission denied, an I/O error, a read-only or full
+  `state/uploads`, a copy that reads back differently) stops startup with
+  `event=adapter_host_files_folder_unusable` and a message naming the folder,
+  as does any other unexpected error (a database error); a restart after the
+  fix finishes the work. Only a file missing from a folder that opens counts
+  as missing; an error that comes from one record's names and would recur at
+  every start (`ENAMETOOLONG`, `EINVAL`) refuses that file, so one bad record
+  cannot stop startup for good. Held
   task records and messages still queued are not rewritten: the message-bound
   context id hashes each file record's path (`access_control.ownership`), and
   task records change only through custody. The module goes with the other
