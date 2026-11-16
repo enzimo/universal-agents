@@ -7,7 +7,7 @@ only after the handler decided to take the message. They are kept only when
 the gateway vouches that it sent them with this message for this task
 (``steering_files_check``: the message's own signed context names the task,
 its conversation and its person, and its id is bound to this message's key
-and these files); a delegated task keeps none. Records outside this host's upload folders are
+and these files); a delegated task keeps none. Records outside this host's upload folder are
 dropped too. The rest are added to the task's conversation turn and recorded
 in its history, and the model sees them by name and id with the guidance or
 answer text. They then stay usable by id after the guidance is read and after

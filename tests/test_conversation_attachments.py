@@ -6,7 +6,7 @@ accepted guidance and answers), the files of earlier turns of its own
 conversation for a top-level task that works for the conversation's person,
 nothing from the conversation for a delegated task, bounded lists without
 storage paths, the note on turns saved before files were recorded, and
-reading bytes only from this host's upload folders.
+reading bytes only from this host's upload folder.
 """
 
 from __future__ import annotations
@@ -37,11 +37,11 @@ from custom_agents.conversation_attachments import (
     LocatedUpload,
     TaskAttachments,
     UnavailableUpload,
-    UploadFolders,
+    UploadFolder,
     inventory_text,
     keep_upload_files,
     locate_upload,
-    recorded_upload_folder,
+    points_into_upload_folder,
     task_files_details,
 )
 from custom_agents.conversation_store import ConversationStore
@@ -551,11 +551,11 @@ def test_a_workers_returned_files_entry_does_not_become_its_leads_file(tmp_path:
     assert scope.find(["att_bobs_scan"]) == ([], ["att_bobs_scan"])
 
 
-# --- Reading bytes only from this host's upload folders ----------------------------------------
+# --- Reading bytes only from this host's upload folder -----------------------------------------
 
 
-def test_only_files_in_an_upload_folder_or_without_a_local_copy_are_kept(layout, tmp_path, caplog) -> None:
-    folders = UploadFolders.for_instance(layout.root)
+def test_only_files_in_the_upload_folder_or_without_a_local_copy_are_kept(layout, tmp_path, caplog) -> None:
+    upload_folder = UploadFolder.for_instance(layout.root)
     inside = _upload(layout.uploads_dir, "att_inside")
     no_copy = _record("att_no_copy", None)
     outside = _record("att_outside", layout.root / "state" / "secrets.db")
@@ -563,12 +563,12 @@ def test_only_files_in_an_upload_folder_or_without_a_local_copy_are_kept(layout,
 
     with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
         kept = keep_upload_files(
-            [inside, no_copy, outside, climbing], folders, task_id=CURRENT, conversation_id=CONVERSATION
+            [inside, no_copy, outside, climbing], upload_folder, task_id=CURRENT, conversation_id=CONVERSATION
         )
-        without_folders = keep_upload_files([inside, no_copy], None, task_id=CURRENT, conversation_id=None)
+        without_folder = keep_upload_files([inside, no_copy], None, task_id=CURRENT, conversation_id=None)
 
     assert _ids(kept) == ["att_inside", "att_no_copy"]
-    assert _ids(without_folders) == ["att_no_copy"]
+    assert _ids(without_folder) == ["att_no_copy"]
     refused = [record.getMessage() for record in caplog.records if "event=attachment_outside_upload_folders" in record.getMessage()]
     assert len(refused) == 3
     assert any(
@@ -578,11 +578,11 @@ def test_only_files_in_an_upload_folder_or_without_a_local_copy_are_kept(layout,
     assert all("so it was not saved" in message for message in refused)
 
 
-def test_an_upload_inside_an_upload_folder_is_located(layout) -> None:
-    folders = UploadFolders.for_instance(layout.root)
+def test_an_upload_inside_the_upload_folder_is_located(layout) -> None:
+    upload_folder = UploadFolder.for_instance(layout.root)
     photo = _upload(layout.uploads_dir, "att_photo", data=b"photo bytes")
 
-    located = locate_upload(photo, folders, task_id=CURRENT, conversation_id=CONVERSATION)
+    located = locate_upload(photo, upload_folder, task_id=CURRENT, conversation_id=CONVERSATION)
 
     assert located == LocatedUpload(
         Path(photo.local_path()).resolve(), len(b"photo bytes"), layout.uploads_dir.resolve()
@@ -593,9 +593,9 @@ def test_an_upload_inside_an_upload_folder_is_located(layout) -> None:
 
 
 def test_a_located_upload_is_read_without_following_a_link_swapped_in_later(layout) -> None:
-    folders = UploadFolders.for_instance(layout.root)
+    upload_folder = UploadFolder.for_instance(layout.root)
     photo = _upload(layout.uploads_dir, "att_photo", data=b"photo bytes")
-    located = locate_upload(photo, folders, task_id=CURRENT, conversation_id=CONVERSATION)
+    located = locate_upload(photo, upload_folder, task_id=CURRENT, conversation_id=CONVERSATION)
     assert isinstance(located, LocatedUpload)
     secret = layout.state_dir / "secret.db"
     secret.write_bytes(b"not an upload")
@@ -613,7 +613,7 @@ def test_a_located_upload_is_read_without_following_a_link_swapped_in_later(layo
 
 def test_a_located_upload_that_grew_past_the_limit_is_refused(layout) -> None:
     photo = _upload(layout.uploads_dir, "att_photo", data=b"photo bytes")
-    located = locate_upload(photo, UploadFolders.for_instance(layout.root), task_id=CURRENT, conversation_id=None)
+    located = locate_upload(photo, UploadFolder.for_instance(layout.root), task_id=CURRENT, conversation_id=None)
     assert isinstance(located, LocatedUpload)
 
     with pytest.raises(safe_open.UnsafePath) as refused:
@@ -626,7 +626,7 @@ def test_a_deleted_upload_says_to_send_it_again(layout, caplog) -> None:
     Path(photo.local_path()).unlink()
 
     with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
-        result = locate_upload(photo, UploadFolders.for_instance(layout.root), task_id=CURRENT, conversation_id=CONVERSATION)
+        result = locate_upload(photo, UploadFolder.for_instance(layout.root), task_id=CURRENT, conversation_id=CONVERSATION)
 
     assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_FILE_MISSING
     assert "send it again" in result.message and str(layout.root) not in result.message
@@ -637,7 +637,7 @@ def test_an_upload_folder_missing_on_this_host_means_another_host(tmp_path: Path
     other_host = InstanceLayout.at(tmp_path / "worker_host")  # its state/uploads was never created
     photo = _record("att_photo", other_host.uploads_dir / "web_session" / "att_photo.bin")
 
-    result = locate_upload(photo, UploadFolders.for_instance(other_host.root), task_id=CURRENT, conversation_id=None)
+    result = locate_upload(photo, UploadFolder.for_instance(other_host.root), task_id=CURRENT, conversation_id=None)
 
     assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_NOT_ON_THIS_HOST
 
@@ -646,7 +646,7 @@ def test_a_record_without_a_local_copy_is_reported(layout) -> None:
     remote = _record("att_remote", None)
     remote.storage_refs.append(AttachmentStorageRef(storage_type="nats_object", bucket="uploads", object_name="att_remote"))
 
-    result = locate_upload(remote, UploadFolders.for_instance(layout.root), task_id=CURRENT, conversation_id=None)
+    result = locate_upload(remote, UploadFolder.for_instance(layout.root), task_id=CURRENT, conversation_id=None)
 
     assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_NO_LOCAL_COPY
 
@@ -666,7 +666,7 @@ def test_a_record_pointing_outside_the_upload_folders_is_refused(layout, caplog,
     record = _record("att_forged", path)
 
     with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
-        result = locate_upload(record, UploadFolders.for_instance(layout.root), task_id=CURRENT, conversation_id=CONVERSATION)
+        result = locate_upload(record, UploadFolder.for_instance(layout.root), task_id=CURRENT, conversation_id=CONVERSATION)
 
     assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_OUTSIDE_FOLDERS
     assert str(secret) not in result.message
@@ -688,14 +688,14 @@ def test_only_state_uploads_is_trusted_even_with_an_adapter_host_transfer_folder
     adapter_folder.mkdir(parents=True)
     agent = type("Agent", (), {"id": "lead", "instance_root": str(layout.root), "instance_config_path": str(saved)})()
 
-    folders = UploadFolders.for_agent(agent)
+    upload_folder = UploadFolder.for_agent(agent)
 
-    assert folders.paths == (layout.uploads_dir.resolve(),)
+    assert upload_folder.path == layout.uploads_dir.resolve()
     photo = _upload(adapter_folder, "att_adapter")
     with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
-        result = locate_upload(photo, folders, task_id=CURRENT, conversation_id=None)
+        result = locate_upload(photo, upload_folder, task_id=CURRENT, conversation_id=None)
     assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_OUTSIDE_FOLDERS
-    assert recorded_upload_folder(photo, folders) is None
+    assert not points_into_upload_folder(photo, upload_folder)
     assert "event=attachment_outside_upload_folders attachment_id=att_adapter" in caplog.text
 
 

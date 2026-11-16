@@ -3861,7 +3861,7 @@ task's own history (one files entry per accepted guidance or answer,
 to (`conversation_task_links.attachments_json`, `storage.conversation_repository`
 and `storage.turn_attachments`). A request's own files go through one
 admission rule (`conversation_attachments.admit_request_files`): the gateway
-must vouch for them and each must lie in this host's upload folders, so the
+must vouch for them and each must lie in this host's upload folder (`state/uploads`), so the
 task and its turn hold the same records. Admission writes them with its turn;
 guidance and answers are merged into it in one write transaction that
 adds each id once, so concurrent merges lose nothing and a retry adds nothing
@@ -3918,7 +3918,7 @@ same way. A file that cannot be opened says why: `unknown_attachment_id`
 host cannot read it: any error checking it other than "not found", such as
 no permission or a link loop, is logged with the ids and answered with a
 fixed text), `remote_copy_required` (stored on another host) or `refused` (a
-record that points outside the upload folders). No result includes a storage
+record that points outside the upload folder). No result includes a storage
 path, and a turn's direct image input skips an image it cannot read instead of
 failing. `copy_to_workspace` inspects the copy it made, so a deletion right
 after the copy cannot hide it. A `path` that is missing or a folder is a
@@ -3944,7 +3944,7 @@ that request for the same person. An escalation from a worker's scheduled run,
 which the lead never held, keeps them itself and is the request of the work
 the lead does for it. The lead's result for the escalation carries exactly
 those answer files (`answer_files`) back to the worker, which keeps the ones
-inside its upload folders as its task's own, and on the run's conversation
+inside its upload folder as its task's own, and on the run's conversation
 turn for a scheduled run. An escalation linked to another person's request
 keeps none. Whether work for a request shares its files is decided by
 `access_control.ownership.request_files_access` (same person only). A worker
@@ -4521,7 +4521,7 @@ the desktop app never offers an older version.
   lead's stuck-task check (`custom_agents.stuck_tasks`, condition
   `task_files_sent_before_upgrade`): on each pass it reads every agent's saved
   work, finds file records outside `state/uploads` (decided from the record
-  alone by `conversation_attachments.recorded_upload_folder`; for such a record
+  alone by `conversation_attachments.points_into_upload_folder`; for such a record
   the file tools answer `refused` with reason `outside_upload_folders`) and
   tells the person in the request's signed context, once and at once, in the
   Inbox and the request's chat, which files to send again. It reads each

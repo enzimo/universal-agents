@@ -788,7 +788,7 @@ class AdapterHostSettings(BaseModel):
         An adapter host's upload lands here first
         (``assistant_gateway.adapter_host.composition``); the gateway then stores
         it in ``state/uploads``, the only folder agents open files from
-        (``custom_agents.conversation_attachments.UploadFolders``).
+        (``custom_agents.conversation_attachments.UploadFolder``).
         """
 
         path = Path(self.upload_dir).expanduser()

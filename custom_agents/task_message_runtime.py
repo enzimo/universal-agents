@@ -32,7 +32,7 @@ from custom_agents.worker_handback_runtime import apply_redispatch_notice
 from custom_agents.conversation_attachments import (
     QUESTION_ANSWER_MESSAGE_TYPE,
     TASK_NOT_FOUND_REASON,
-    UploadFolders,
+    UploadFolder,
     admit_request_files,
     answer_files_check,
     log_refused_files,
@@ -1480,7 +1480,7 @@ async def _admit_request_turn(
         normalized_meta,
         team_id=str(self.team_id or ""),
         person_id=owner_person_id,
-        folders=partial(UploadFolders.for_agent, self),
+        upload_folder=partial(UploadFolder.for_agent, self),
     )
 
     def join_conversation() -> Any:

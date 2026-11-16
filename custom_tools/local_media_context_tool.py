@@ -1,7 +1,7 @@
 """Tools for inserting local media files into the Strands model context.
 
 A file comes from one of two places: an upload the task may use, named by
-``attachment_id`` and read from this host's upload folders
+``attachment_id`` and read from this host's upload folder
 (``custom_tools.task_uploads``), or a file in the task's folders, named by
 ``path`` and read through the agent file library (``custom_tools.file_access``).
 Results for an upload name it by id and file name, never by where it is stored.

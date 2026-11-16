@@ -38,7 +38,7 @@ from assistant_gateway.inbound_attachments import InboundAttachmentStoragePolicy
 from assistant_gateway.interactive_apps.host_ports import LocalInteractiveAppAttachmentStore
 from assistant_gateway.translation import ChannelInboundMessage
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
-from custom_agents.conversation_attachments import LocatedUpload, UploadFolders, locate_upload
+from custom_agents.conversation_attachments import LocatedUpload, UploadFolder, locate_upload
 from tests.test_gateway_adapter_host_phase4 import ADAPTER_ID, NOW, PLUGIN_ID, _peer, _registration, _service
 from tests.test_gateway_question_queue import TELEGRAM_ID, _Chat, _two_requests_ask
 
@@ -144,8 +144,8 @@ async def test_a_hosted_chats_file_is_saved_in_the_gateways_uploads_and_sent_wit
     assert (file.filename, file.content_type, file.kind, file.origin) == ("receipt.png", "image/png", "image", "telegram")
     assert file.attachment_id.startswith("att_") and file.attachment_id != sent.attachment_id
     # The file tools open it by id from state/uploads, the one upload folder.
-    folders = UploadFolders.for_instance(hosted.chat.config.layout.root)
-    located = locate_upload(file, folders, task_id=first.task_query_id, conversation_id=None)
+    upload_folder = UploadFolder.for_instance(hosted.chat.config.layout.root)
+    located = locate_upload(file, upload_folder, task_id=first.task_query_id, conversation_id=None)
     assert isinstance(located, LocatedUpload) and located.read_bytes(max_bytes=len(PHOTO)) == PHOTO
     # The gateway knows it as its own upload (retention, clean-up and departure use this record).
     record = hosted.chat.store.get_attachment(file.attachment_id)

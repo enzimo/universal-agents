@@ -3,8 +3,8 @@
 A top-level request goes through one admission rule
 (``conversation_attachments.admit_request_files``): its files stay only when
 the gateway vouches it sent them for this request and each lies in this
-host's upload folders. Before this change the two checks ran apart: a record
-outside the upload folders stayed among the task's own files (listed, sent
+host's upload folder. Before this change the two checks ran apart: a record
+outside the upload folder stayed among the task's own files (listed, sent
 with a delegation that names no ids, refused when opened) while its turn
 dropped it, and a turn whose request files were dropped was saved as "request
 files known, none", so nothing told the model to ask for them again (review
@@ -17,7 +17,7 @@ schema of its own per test), and reads the stored records back. Covers:
 
 - a request the gateway signed before the update (its context names no task)
   keeps no file, and its turn is saved as not knowing its request's files;
-- of a request's two files, one outside the upload folders is dropped from
+- of a request's two files, one outside the upload folder is dropped from
   the task, its turn, its own files and a default delegation alike;
 - the count of dropped files is saved with the task when it is admitted, so it
   is there before any turn runs and after a restart;

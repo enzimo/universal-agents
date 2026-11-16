@@ -34,7 +34,7 @@ and on the run's: the specialist and the run both get it.
 The other tests cover the refusals: an escalation whose request, or whose
 run's escalation, works for someone else, a run's escalation held by an
 agent that is not the team lead, a result that is not for an escalation,
-records outside the upload folders, and which results carry files at all.
+records outside the upload folder, and which results carry files at all.
 
 A worker's own question (a ``TaskQuery`` to the lead) never reaches the
 person: the lead's turn on it must answer it (``_validate_task_turn_llm_output``),

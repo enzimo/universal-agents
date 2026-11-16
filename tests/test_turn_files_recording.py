@@ -11,7 +11,7 @@ working for Ann (signed task context). Covers:
   history before the message is acknowledged, named by id in the text the
   model reads, and stay the task's own files after the guidance is read and
   after a restart;
-- records pointing outside this host's upload folders are never saved;
+- records pointing outside this host's upload folder are never saved;
 - a store error leaves the message unacknowledged, and the resend records
   each file once;
 - only files the gateway sent with that message for this task are kept: a
@@ -60,7 +60,7 @@ from custom_agents import sent_files_runtime, task_message_runtime, task_steerin
 from custom_agents.conversation_attachments import (
     TASK_FILES_EVENT,
     TaskAttachments,
-    UploadFolders,
+    UploadFolder,
     admit_request_files,
     task_files_details,
 )
@@ -152,7 +152,7 @@ def _upload(
 
 
 def _outside(layout: InstanceLayout) -> UserTaskAttachment:
-    """A record naming a file outside the upload folders, as a faulty sender could."""
+    """A record naming a file outside the upload folder, as a faulty sender could."""
 
     return UserTaskAttachment(
         attachment_id=OUTSIDE,
@@ -285,7 +285,7 @@ async def test_guidance_files_are_kept_before_it_is_acknowledged_and_survive_rea
     assert entry.details["message_id"] == steering.steering_id
     assert [item["attachment_id"] for item in entry.details["task_files"]] == [page_two.attachment_id]
     assert _own(lead.task_manager, lead._conversation_store) == [first_page, page_two.attachment_id]
-    # The record outside the upload folders is dropped everywhere, with a warning.
+    # The record outside the upload folder is dropped everywhere, with a warning.
     assert lead._pending_proactive_task_steering[TASK][0].attachments == [page_two]
     assert _messages(caplog, "attachment_outside_upload_folders")
     assert _messages(caplog, "conversation_turn_attachments_merged")
@@ -692,13 +692,13 @@ def test_a_copy_of_the_request_with_other_files_keeps_none(
     admitted = lead.task_manager.get_task_info(TASK)
     copy = admitted.task.model_copy(update={"attachments": [bobs]})
 
-    def folders() -> UploadFolders:
-        return UploadFolders.for_agent(lead)
+    def upload_folder() -> UploadFolder:
+        return UploadFolder.for_agent(lead)
 
     with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
-        kept = admit_request_files(copy, _copied_task_context(lead), team_id=TEAM, person_id=ANN, folders=folders)
+        kept = admit_request_files(copy, _copied_task_context(lead), team_id=TEAM, person_id=ANN, upload_folder=upload_folder)
         unchanged = admit_request_files(
-            admitted.task, _copied_task_context(lead), team_id=TEAM, person_id=ANN, folders=folders
+            admitted.task, _copied_task_context(lead), team_id=TEAM, person_id=ANN, upload_folder=upload_folder
         )
 
     assert (kept.task.attachments, kept.not_kept) == ([], 1)

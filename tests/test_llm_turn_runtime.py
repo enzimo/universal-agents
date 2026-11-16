@@ -302,12 +302,12 @@ async def test_a_turn_reads_its_images_and_their_settings_once_off_the_event_loo
 
     from collections import deque
 
-    from custom_agents.conversation_attachments import UploadFolders
+    from custom_agents.conversation_attachments import UploadFolder
     from tests.test_runtime_owner_boundaries import build_turn_owner
 
     image = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
     loads: list[bool] = []
-    for_agent = UploadFolders.for_agent.__func__
+    for_agent = UploadFolder.for_agent.__func__
 
     def recorded(cls, agent):
         try:
@@ -317,7 +317,7 @@ async def test_a_turn_reads_its_images_and_their_settings_once_off_the_event_loo
             loads.append(False)
         return for_agent(cls, agent)
 
-    monkeypatch.setattr(UploadFolders, "for_agent", classmethod(recorded))
+    monkeypatch.setattr(UploadFolder, "for_agent", classmethod(recorded))
     prompts: list[Any] = []
 
     async def invoke(prompt, **_kwargs):
@@ -361,12 +361,12 @@ async def test_after_an_inline_failover_each_attempt_sends_images_only_if_its_mo
     from collections import deque
     from dataclasses import replace
 
-    from custom_agents.conversation_attachments import UploadFolders
+    from custom_agents.conversation_attachments import UploadFolder
     from tests.test_runtime_owner_boundaries import build_turn_owner
 
     image = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
     loads: list[bool] = []
-    for_agent = UploadFolders.for_agent.__func__
+    for_agent = UploadFolder.for_agent.__func__
 
     def recorded(cls, agent):
         try:
@@ -376,7 +376,7 @@ async def test_after_an_inline_failover_each_attempt_sends_images_only_if_its_mo
             loads.append(False)
         return for_agent(cls, agent)
 
-    monkeypatch.setattr(UploadFolders, "for_agent", classmethod(recorded))
+    monkeypatch.setattr(UploadFolder, "for_agent", classmethod(recorded))
     prompts: list[Any] = []
 
     async def invoke(prompt, **_kwargs):

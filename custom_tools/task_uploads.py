@@ -12,9 +12,9 @@ tool call runs for may use, and where on this host their bytes are:
   that works for its conversation's person, the files earlier turns of that
   conversation received (``TaskAttachments``). A delegated task (a worker's)
   uses only the files its delegation named;
-- bytes are read only from below this host's upload folders: the record's
-  path is resolved (links in it followed) and must lie inside one, and the
-  file is then opened from that folder without following links
+- bytes are read only from below this host's upload folder (``state/uploads``):
+  the record's path is resolved (links in it followed) and must lie inside it,
+  and the file is then opened from that folder without following links
   (``locate_upload``, ``LocatedUpload``).
 
 A file the task may not use, or whose bytes cannot be read here, comes back as
@@ -46,7 +46,7 @@ from custom_agents.conversation_attachments import (
     LocatedUpload,
     TaskAttachments,
     UnavailableUpload,
-    UploadFolders,
+    UploadFolder,
     locate_upload,
 )
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
@@ -152,7 +152,7 @@ def open_task_upload(attachment_id: str) -> TaskUpload | dict[str, Any]:
         return _not_in_scope(scope, wanted)
     attachment = found[0]
     located = locate_upload(
-        attachment, UploadFolders.for_agent(agent), task_id=scope.task_id, conversation_id=scope.conversation_id
+        attachment, UploadFolder.for_agent(agent), task_id=scope.task_id, conversation_id=scope.conversation_id
     )
     if isinstance(located, UnavailableUpload):
         return _unavailable(attachment, located)

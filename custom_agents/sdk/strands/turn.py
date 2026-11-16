@@ -106,7 +106,7 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_agents.conversation_attachments import (
     UnavailableUpload,
-    UploadFolders,
+    UploadFolder,
     locate_upload,
 )
 from custom_messages.enums import ObjectiveWorkSessionStatus
@@ -431,7 +431,7 @@ def _attachment_local_path(attachment: Any) -> Path | None:
 
 def _direct_image_input(
     attachment: UserTaskAttachment,
-    folders: UploadFolders,
+    upload_folder: UploadFolder,
     *,
     task_id: str,
     conversation_id: Optional[str],
@@ -440,7 +440,7 @@ def _direct_image_input(
 
     The bytes are read the way the attachment tools read uploads
     (``custom_agents.conversation_attachments``): only from inside this host's
-    upload folders, where the record's resolved path must lie, then opened
+    upload folder, where the record's resolved path must lie, then opened
     from that folder without following links. A delegated task's records are
     not vouched for by the gateway, so a record pointing anywhere else is
     skipped (``locate_upload`` logs ``event=attachment_outside_upload_folders``),
@@ -451,7 +451,7 @@ def _direct_image_input(
     filename = attachment.filename or attachment_id or "image"
     content_type = _attachment_content_type(attachment)
     noted: dict[str, Any] = {"attachment_id": attachment_id, "filename": filename}
-    located = locate_upload(attachment, folders, task_id=task_id, conversation_id=conversation_id)
+    located = locate_upload(attachment, upload_folder, task_id=task_id, conversation_id=conversation_id)
     if isinstance(located, UnavailableUpload):
         return [], {**noted, "status": "skipped", "reason": located.reason}
     image_format = _attachment_image_format(attachment, located.path)
@@ -1038,14 +1038,14 @@ class LLMTurnExecutor:
         images = self._direct_images(msg_content)
         if not images:
             return [], []
-        # The turn's settings carry the instance root UploadFolders reads.
-        folders = UploadFolders.for_agent(self.settings)
+        # The turn's settings carry the instance root UploadFolder reads.
+        upload_folder = UploadFolder.for_agent(self.settings)
         task_id = str(getattr(msg_content, "task_id", "") or "")
         blocks: list[ContentBlock] = []
         diagnostics: list[dict[str, Any]] = []
         for attachment in images:
             image_blocks, diagnostic = _direct_image_input(
-                attachment, folders, task_id=task_id, conversation_id=conversation_id
+                attachment, upload_folder, task_id=task_id, conversation_id=conversation_id
             )
             blocks.extend(image_blocks)
             diagnostics.append(diagnostic)

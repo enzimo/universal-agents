@@ -25,7 +25,7 @@ conversation stores and the gateway's own upload storage, for Ann's team lead
   files it may use: work for another person in Ann's conversation, Ann's
   other conversation, and a delegated task, which opens only the files its
   delegation gave it;
-- a record pointing outside the upload folders is refused by both tools;
+- a record pointing outside the upload folder is refused by both tools;
 - an id from a turn saved before files were recorded says so;
 - an answer's files open by id after a restart without a conversation store;
 - the media tool takes exactly one of path and id, and checks the model and

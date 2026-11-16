@@ -2,7 +2,7 @@
 
 Uploads are named by ``attachment_id``: the runtime decides which files the
 task may use (its own and, for a top-level task, its conversation's earlier
-files) and reads them only from this host's upload folders
+files) and reads them only from this host's upload folder
 (``custom_tools.task_uploads``); results by id never show where they are
 stored. A file named by path is checked and read once through the agent file
 library (``custom_tools.file_access``), and the inspection works on those

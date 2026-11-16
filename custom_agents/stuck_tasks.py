@@ -27,7 +27,7 @@ request produces one message however many agents work on it. Conditions:
 - ``task_no_progress``: in progress on a live agent with no new history entry.
 - ``task_files_sent_before_upgrade``: unfinished work holds a file record that
   places the file outside this instance's ``state/uploads``
-  (``conversation_attachments.recorded_upload_folder`` finds no folder for it,
+  (``conversation_attachments.points_into_upload_folder`` says no,
   the rule by which the file tools answer ``outside_upload_folders``; it
   decides from the record and reads no file, so a fault reading an upload is
   not logged on every pass): a file of the task's own, the ones the file
@@ -77,7 +77,7 @@ from pydantic import ValidationError
 from access_control.identity import IdentityRejected
 from custom_agents.instance_delivery_context import configured_owner_route
 from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc, retain_decisions
-from custom_agents.conversation_attachments import TaskAttachments, UploadFolders, recorded_upload_folder
+from custom_agents.conversation_attachments import TaskAttachments, UploadFolder, points_into_upload_folder
 from custom_agents.liveness_observation import heartbeat_checks_deferred
 from custom_agents.task_steering_runtime import GUIDANCE_ACCEPTED_EVENT, GUIDANCE_STEERING_KEY
 from custom_agents.stuck_work import (
@@ -469,15 +469,15 @@ class StuckTasks:
         result brought: ``TaskAttachments.own`` reads them from the task's
         record as the file tools do, and ``_guidance_files`` adds the files of
         guidance accepted before 0.9.12. A file whose record points outside
-        ``state/uploads`` (``UploadFolders``, the folder the file tools open)
+        ``state/uploads`` (``UploadFolder``, the folder the file tools open)
         is one to send again.
         """
-        uploads = UploadFolders.for_agent(self.agent)
+        uploads = UploadFolder.for_agent(self.agent)
         files_by_request: dict[str, dict[str, str]] = {}  # request task id -> attachment id -> file name
         for task in held.values():
             try:
                 sent = [*TaskAttachments.load(task.record, None).own, *_guidance_files(task.record.task)]
-                old = [attachment for attachment in sent if recorded_upload_folder(attachment, uploads) is None]
+                old = [attachment for attachment in sent if not points_into_upload_folder(attachment, uploads)]
             except Exception as exc:
                 # The error's text may name a stored path, so only its type is logged.
                 logger.warning(

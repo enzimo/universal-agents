@@ -62,7 +62,7 @@ bound to the answer and its files.
 
 The lead's result for the escalation then carries the files of those
 answers, and only those (``result_with_answer_files``); the model never
-chooses them. The worker keeps the ones inside this host's upload folders as
+chooses them. The worker keeps the ones inside this host's upload folder as
 its escalating task's own, and on that task's conversation turn when it is
 its own request (a job run) (``keep_escalation_result_files``): it trusts
 the result as it trusts its task's ``Task.attachments``, because it comes
@@ -87,7 +87,7 @@ from custom_agents.conversation_attachments import (
     DELEGATED_TASK_REASON,
     ESCALATION_RESULT_MESSAGE_TYPE,
     RequestLink,
-    UploadFolders,
+    UploadFolder,
     answer_files,
     keep_upload_files,
     linked_request,
@@ -125,7 +125,7 @@ async def keep_sent_files(
 
     ``decision`` says whether the gateway vouches for ``attachments``; when it
     does not, every file is dropped and logged. Records outside this host's
-    upload folders are dropped too (each logged). The rest are written to
+    upload folder are dropped too (each logged). The rest are written to
     the task's history as one files entry (``message_id`` and
     ``message_type`` name the message; ``subject`` names it in the entry's
     text, such as "a guidance"); when that entry is not written because the
@@ -192,14 +192,14 @@ async def keep_sent_files(
 async def _kept_upload_files(
     agent: Any, attachments: Sequence[UserTaskAttachment], *, task_id: str, conversation_id: Optional[str]
 ) -> list[UserTaskAttachment]:
-    """``attachments`` without the records outside this host's upload folders (``keep_upload_files``, logged).
+    """``attachments`` without the records outside this host's upload folder (``keep_upload_files``, logged).
 
     Runs in a thread: each record's path is resolved on the file system.
     """
 
     def check() -> list[UserTaskAttachment]:
-        folders = UploadFolders.for_agent(agent)
-        return keep_upload_files(attachments, folders, task_id=task_id, conversation_id=conversation_id)
+        upload_folder = UploadFolder.for_agent(agent)
+        return keep_upload_files(attachments, upload_folder, task_id=task_id, conversation_id=conversation_id)
 
     return await asyncio.to_thread(check)
 

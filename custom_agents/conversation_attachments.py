@@ -1,7 +1,7 @@
 """Which uploaded files a task may name, and where their bytes may be read from.
 
 A person's files reach the team through the gateway, which stores the bytes
-in this host's upload folders and puts a ``UserTaskAttachment`` record on the
+in this host's upload folder (``state/uploads``) and puts a ``UserTaskAttachment`` record on the
 task's messages: the request's own files on ``Task.attachments``, files sent
 while it runs on its guidance and interrupt answers (``TaskSteering``), and
 files sent with an answer to one of its questions (``TaskQuery``). Trusted
@@ -43,7 +43,7 @@ Which files are kept at all, before anything is saved:
   (another person's) keeps none, and no other delegated task keeps any. The
   lead's result for the escalation carries them, and only them
   (``answer_files``), to the worker, which keeps the ones in the upload
-  folders as its task's own (``ESCALATION_RESULT_MESSAGE_TYPE``), and on its
+  folder as its task's own (``ESCALATION_RESULT_MESSAGE_TYPE``), and on its
   conversation turn when that task is its own request (a job run), but only
   when that task works for a person
   (``access_control.ownership.escalation_result_files_access``): the lead
@@ -51,7 +51,7 @@ Which files are kept at all, before anything is saved:
   and work for no person keeps none of that person's files.
 - Files history entries are written only by this runtime, so any a task
   message arrives with are dropped (``without_incoming_files_entries``).
-- Records that point outside this host's upload folders are dropped too
+- Records that point outside this host's upload folder are dropped too
   (``keep_upload_files``), before anything is saved.
 - A top-level request goes through one admission rule for both checks
   (``admit_request_files``), so the task's own files and its conversation
@@ -113,7 +113,7 @@ stored, so they leave this module only as descriptive summaries
 (``storage.turn_attachments.TURN_ATTACHMENT_SUMMARY_FIELDS``), never with
 storage references or paths.
 
-Where bytes are read from (``UploadFolders``, ``locate_upload``): only from
+Where bytes are read from (``UploadFolder``, ``locate_upload``): only from
 inside this host's upload folder, ``state/uploads``. A record's path is not trusted by itself (a delegated task's
 files are not vouched for by the gateway): it is resolved, following any
 links in it, and a record whose resolved path lies anywhere else is refused
@@ -252,6 +252,8 @@ _BUBBLED_ENTRY_KEY = "bubbled_entry_id"
 UPLOAD_NO_LOCAL_COPY = "no_local_copy"
 UPLOAD_NOT_ON_THIS_HOST = "not_on_this_host"
 UPLOAD_FILE_MISSING = "file_missing"
+# The plural stays: 0.9.12 shipped this reason code and its log event
+# (``event=attachment_outside_upload_folders``); since 0.10 there is one folder.
 UPLOAD_OUTSIDE_FOLDERS = "outside_upload_folders"
 UPLOAD_UNREADABLE = "unreadable"
 # What the model is told about an upload whose file was deleted, whether before
@@ -857,28 +859,29 @@ def _conversation_in_scope(task_info: Any, conversation_store: Any) -> Optional[
 
 
 @dataclass(frozen=True)
-class UploadFolders:
-    """This host's upload folders: the only places a file is read from by id.
+class UploadFolder:
+    """This host's upload folder, ``state/uploads``: the only place a file is read from by id.
 
-    One folder, ``state/uploads`` (``InstanceLayout.uploads_dir``), resolved.
-    The gateway stores every file a person sends there, also the files of chat
-    apps an adapter host runs (``assistant_gateway.inbound_attachments``). Up
-    to 0.9.13 such files stayed in the adapter host's transfer folder; nothing
-    here reads that folder. Records that still point into it are refused
-    (``UPLOAD_OUTSIDE_FOLDERS``) and the person is asked to send the file
-    again (``custom_agents.stuck_tasks``).
+    ``path`` is ``InstanceLayout.uploads_dir``, resolved. The gateway stores
+    every file a person sends there, also the files of chat apps an adapter
+    host runs (``assistant_gateway.inbound_attachments``). Up to 0.9.13 such
+    files stayed in the adapter host's transfer folder; the upgrade step
+    (``assistant_gateway.adapter_host_files_upgrade``) moves them here, and
+    nothing here reads that folder. Records that still point into it (held
+    work from before the upgrade) are refused (``UPLOAD_OUTSIDE_FOLDERS``) and
+    the person is asked to send the file again (``custom_agents.stuck_tasks``).
     """
 
-    paths: tuple[Path, ...]
+    path: Path
 
     @classmethod
-    def for_instance(cls, instance_root: str | Path) -> "UploadFolders":
+    def for_instance(cls, instance_root: str | Path) -> "UploadFolder":
         """The upload folder of the instance at ``instance_root``."""
 
-        return cls((InstanceLayout.at(instance_root).uploads_dir.resolve(),))
+        return cls(InstanceLayout.at(instance_root).uploads_dir.resolve())
 
     @classmethod
-    def for_agent(cls, agent: Any) -> "UploadFolders":
+    def for_agent(cls, agent: Any) -> "UploadFolder":
         """The upload folder of the instance ``agent`` runs in.
 
         ``agent`` is a running agent or a turn's ``TurnRuntimeSettings``: both
@@ -890,16 +893,16 @@ class UploadFolders:
 
         return cls.for_instance(infer_instance_root(agent))
 
-    def containing(self, path: Path) -> Optional[Path]:
-        """The folder that holds the resolved ``path``, or None."""
+    def contains(self, path: Path) -> bool:
+        """Whether the resolved ``path`` lies inside this folder."""
 
-        return next((folder for folder in self.paths if folder in path.parents), None)
+        return self.path in path.parents
 
 
-def recorded_upload_folder(attachment: UserTaskAttachment, folders: UploadFolders) -> Optional[Path]:
-    """The folder of ``folders`` that the record's local copy lies in, or None (also without a local copy).
+def points_into_upload_folder(attachment: UserTaskAttachment, upload_folder: UploadFolder) -> bool:
+    """Whether the record's local copy lies in ``upload_folder`` (False without a local copy).
 
-    Decided from the record and the folders alone: the path is resolved as
+    Decided from the record and the folder alone: the path is resolved as
     ``locate_upload`` resolves it, but the file is never opened or checked,
     so a caller that only needs to know where a record points (the upgrade
     notice, ``custom_agents.stuck_tasks``) logs nothing about a file it
@@ -907,7 +910,7 @@ def recorded_upload_folder(attachment: UserTaskAttachment, folders: UploadFolder
     """
 
     resolved = _resolved_local_path(attachment)
-    return folders.containing(resolved) if resolved is not None else None
+    return resolved is not None and upload_folder.contains(resolved)
 
 
 def _resolved_local_path(attachment: UserTaskAttachment) -> Optional[Path]:
@@ -957,7 +960,7 @@ class UnavailableUpload:
 
 def locate_upload(
     attachment: UserTaskAttachment,
-    folders: UploadFolders,
+    upload_folder: UploadFolder,
     *,
     task_id: str,
     conversation_id: Optional[str],
@@ -965,8 +968,8 @@ def locate_upload(
     """Where to read ``attachment``'s bytes on this host, or why they cannot be read.
 
     The record's local path is resolved (links followed) and must lie inside
-    one of ``folders``; anything else is refused and logged with the ids.
-    Inside a folder that exists here, a missing file was deleted (upload
+    ``upload_folder``; anything else is refused and logged with the ids.
+    Inside the folder, when it exists here, a missing file was deleted (upload
     retention, or its person left the team); when the folder is not here, the
     file is on another host. Any other error while checking the file (no
     permission, a link loop, an I/O error) makes it unreadable here: logged
@@ -977,13 +980,13 @@ def locate_upload(
     resolved = _resolved_local_path(attachment)
     if resolved is None:
         return UnavailableUpload(UPLOAD_NO_LOCAL_COPY, "This file has no copy stored on a host's disk.")
-    folder = folders.containing(resolved)
-    if folder is None:
+    if not upload_folder.contains(resolved):
         _log_outside(attachment, task_id, conversation_id, action="it was not opened")
         return UnavailableUpload(
             UPLOAD_OUTSIDE_FOLDERS,
-            "This file's record does not point into this host's upload folders, so it cannot be opened.",
+            "This file's record does not point into this host's upload folder, so it cannot be opened.",
         )
+    folder = upload_folder.path
     try:
         entry = resolved.stat()
     except (FileNotFoundError, NotADirectoryError):
@@ -1035,14 +1038,14 @@ def admit_request_files(
     *,
     team_id: str,
     person_id: Optional[str],
-    folders: Callable[[], UploadFolders],
+    upload_folder: Callable[[], UploadFolder],
 ) -> AdmittedRequestFiles:
     """The one admission rule for a top-level request's files (module docstring).
 
     ``meta`` is the request's message meta; ``person_id`` is whom the task
     verifiably works for. The files stay only when the gateway vouches for
-    them (``sent_files_access``) and each lies in this host's upload folders
-    (``keep_upload_files``; ``folders`` reads them, only when files are left
+    them (``sent_files_access``) and each lies in this host's upload folder
+    (``keep_upload_files``; ``upload_folder`` finds it, only when files are left
     to check). Each dropped file is logged with why. The task's own files and
     its turn then hold the same records. Blocking (it verifies the signed
     context and reads settings): run it in a thread from async code.
@@ -1053,7 +1056,7 @@ def admit_request_files(
         return AdmittedRequestFiles(task)
     conversation_id = _text(getattr(meta, "conversation_id", None))
     vouched = _vouched_request_files(task, meta, team_id=team_id, person_id=person_id, conversation_id=conversation_id)
-    kept = keep_upload_files(vouched, folders() if vouched else None, task_id=task.task_id, conversation_id=conversation_id)
+    kept = keep_upload_files(vouched, upload_folder() if vouched else None, task_id=task.task_id, conversation_id=conversation_id)
     not_kept = len(sent) - len(kept)
     if not not_kept:
         return AdmittedRequestFiles(task)
@@ -1213,7 +1216,7 @@ def _text(value: Any) -> Optional[str]:
 
 def keep_upload_files(
     attachments: Iterable[UserTaskAttachment],
-    folders: Optional[UploadFolders],
+    upload_folder: Optional[UploadFolder],
     *,
     task_id: str,
     conversation_id: Optional[str],
@@ -1221,7 +1224,7 @@ def keep_upload_files(
     """The records trusted code may save for a task: those it could later read by id.
 
     A record with no local copy is kept (it opens as ``no_local_copy``). A
-    record whose local path resolves outside ``folders`` (None: no folder is
+    record whose local path resolves outside ``upload_folder`` (None: no folder is
     trusted) is dropped and logged with the ids, so it is never saved in the
     task's history or its conversation (module docstring). The file need not
     exist: a deleted upload is reported when it is opened.
@@ -1230,7 +1233,7 @@ def keep_upload_files(
     kept: list[UserTaskAttachment] = []
     for attachment in attachments:
         local_path = attachment.local_path()
-        if local_path and (folders is None or folders.containing(Path(local_path).expanduser().resolve()) is None):
+        if local_path and (upload_folder is None or not upload_folder.contains(Path(local_path).expanduser().resolve())):
             _log_outside(attachment, task_id, conversation_id, action="it was not saved")
             continue
         kept.append(attachment)
@@ -1241,7 +1244,7 @@ def _log_outside(
     attachment: UserTaskAttachment, task_id: str, conversation_id: Optional[str], *, action: str
 ) -> None:
     logger.warning(
-        "A file record points outside this host's upload folders, so %s. "
+        "A file record points outside this host's upload folder (state/uploads), so %s. "
         "event=attachment_outside_upload_folders attachment_id=%s task_id=%s conversation_id=%s",
         action,
         attachment.attachment_id,
@@ -1280,7 +1283,7 @@ __all__ = [
     "RequestLink",
     "TaskAttachments",
     "UnavailableUpload",
-    "UploadFolders",
+    "UploadFolder",
     "admit_request_files",
     "answer_files",
     "answer_files_check",
