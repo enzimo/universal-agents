@@ -50,8 +50,8 @@ from custom_tools.runtime_context import task_work
 from custom_tools.tool_stop import ToolStop
 
 LOGGER = logging.getLogger(__name__)
-TASK = "task_registrars"
-GUIDANCE = "Check the second registrar first."
+TASK = "task_two_services"
+GUIDANCE = "Check the second service first."
 CANCELLED_PREFIX = "Tool call cancelled because new requester steering arrived"
 ANSWER = "approved"
 CALLS: list[str] = []
@@ -144,7 +144,7 @@ def _runtime_agent(tmp_path) -> SimpleNamespace:
     manager = TaskManager(db_path=str(tmp_path / "tasks.db"))
     manager.set_owner_identity("lead", "Lead", "team", "TeamArchitect")
     manager.add_task(
-        Task(task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="Check two registrars."),
+        Task(task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="Check two services."),
         MessageHeader(), MessageMeta(), owner_person_id=None,
     )
     manager.update_main_task_state(TASK, ProgressState.IN_PROGRESS, _now())
@@ -246,15 +246,15 @@ def _resumed_call_logs(caplog) -> list[str]:
 
 PAUSES = {
     # The paused call, and the hooks placed before and after the steering plugin.
-    "tool": (("wait_for_setup", {"name": "porkbun"}), (), ()),
+    "tool": (("wait_for_setup", {"name": "service-a"}), (), ()),
     "hook-before-plugin": (("report", {"label": "needs-approval"}), (ApprovalHook(),), ()),
     "hook-after-plugin": (("report", {"label": "needs-approval"}), (), (ApprovalHook(),)),
 }
 PAUSED_CALL_RESULT = {
-    "wait_for_setup": ("success", f"setup porkbun finished: {ANSWER}"),
+    "wait_for_setup": ("success", f"setup service-a finished: {ANSWER}"),
     "report": ("success", "reported needs-approval"),
 }
-PAUSED_CALL_RAN = {"wait_for_setup": f"wait_for_setup:porkbun:{ANSWER}", "report": "report:needs-approval"}
+PAUSED_CALL_RAN = {"wait_for_setup": f"wait_for_setup:service-a:{ANSWER}", "report": "report:needs-approval"}
 
 
 @pytest.mark.asyncio
@@ -265,7 +265,7 @@ async def test_a_resumed_call_keeps_its_result_and_the_next_call_brings_the_guid
     model = StepsModel([[paused_call], [("report", {"label": "next"})], "Done."])
     sdk = _strands_agent(runtime, model, before=before, after=after)
 
-    paused = await _call(sdk, "Check the registrars.")
+    paused = await _call(sdk, "Check the services.")
     assert paused.stop_reason == "interrupt"
     assert CALLS == []
     await _send_guidance(runtime)
@@ -288,15 +288,15 @@ async def test_a_resumed_call_keeps_its_result_and_the_next_call_brings_the_guid
 @pytest.mark.asyncio
 async def test_a_resumed_call_without_guidance_logs_none_waiting(tmp_path, caplog):
     runtime = _runtime_agent(tmp_path)
-    model = StepsModel([[("wait_for_setup", {"name": "porkbun"})], [("report", {"label": "next"})], "Done."])
+    model = StepsModel([[("wait_for_setup", {"name": "service-a"})], [("report", {"label": "next"})], "Done."])
     sdk = _strands_agent(runtime, model)
 
-    paused = await _call(sdk, "Check the registrars.")
+    paused = await _call(sdk, "Check the services.")
     caplog.set_level(logging.INFO, logger=LOGGER.name)
     await _call(sdk, _answers(paused))
 
     results = _tool_results(sdk)
-    assert results["step1-call0"] == ("success", f"setup porkbun finished: {ANSWER}")
+    assert results["step1-call0"] == ("success", f"setup service-a finished: {ANSWER}")
     assert results["step2-call0"] == ("success", "reported next")
     assert _resumed_call_logs(caplog) == [_resumed_call_log("wait_for_setup", "step1-call0", waiting=0)]
 
@@ -307,16 +307,16 @@ async def test_steering_turned_on_during_the_pause_still_keeps_the_resumed_resul
     # resumed once steering is on again.
     runtime = _runtime_agent(tmp_path)
     runtime.mid_turn_steering = {"enabled": False}
-    model = StepsModel([[("wait_for_setup", {"name": "porkbun"})], [("report", {"label": "next"})], "Done."])
+    model = StepsModel([[("wait_for_setup", {"name": "service-a"})], [("report", {"label": "next"})], "Done."])
     sdk = _strands_agent(runtime, model)
 
-    paused = await _call(sdk, "Check the registrars.")
+    paused = await _call(sdk, "Check the services.")
     runtime.mid_turn_steering = {"enabled": True}
     await _send_guidance(runtime)
     await _call(sdk, _answers(paused))
 
     results = _tool_results(sdk)
-    assert results["step1-call0"] == ("success", f"setup porkbun finished: {ANSWER}")
+    assert results["step1-call0"] == ("success", f"setup service-a finished: {ANSWER}")
     _assert_cancelled_with_guidance(results["step2-call0"])
 
 
@@ -324,15 +324,15 @@ async def test_steering_turned_on_during_the_pause_still_keeps_the_resumed_resul
 async def test_guidance_reaches_the_turn_decision_after_a_resumed_call(tmp_path):
     runtime = _runtime_agent(tmp_path)
     decision = ("TurnDecision", {"done": True})
-    model = StepsModel([[("wait_for_setup", {"name": "porkbun"})], [decision], [decision]])
+    model = StepsModel([[("wait_for_setup", {"name": "service-a"})], [decision], [decision]])
     sdk = _strands_agent(runtime, model)
 
-    paused = await _call(sdk, "Check the registrars.", structured_output_model=TurnDecision)
+    paused = await _call(sdk, "Check the services.", structured_output_model=TurnDecision)
     await _send_guidance(runtime)
     resumed = await _call(sdk, _answers(paused), structured_output_model=TurnDecision)
 
     results = _tool_results(sdk)
-    assert results["step1-call0"] == ("success", f"setup porkbun finished: {ANSWER}")
+    assert results["step1-call0"] == ("success", f"setup service-a finished: {ANSWER}")
     # The first decision brought the guidance; the model decided again after reading it.
     _assert_cancelled_with_guidance(results["step2-call0"])
     assert GUIDANCE in model.inputs[-1]
@@ -342,19 +342,19 @@ async def test_guidance_reaches_the_turn_decision_after_a_resumed_call(tmp_path)
 @pytest.mark.asyncio
 async def test_guidance_left_after_a_resumed_turn_defers_its_final_answer(tmp_path):
     runtime = _runtime_agent(tmp_path)
-    model = StepsModel([[("wait_for_setup", {"name": "porkbun"})], "Both registrars are ready."])
+    model = StepsModel([[("wait_for_setup", {"name": "service-a"})], "Both services are ready."])
     sdk = _strands_agent(runtime, model)
 
-    paused = await _call(sdk, "Check the registrars.")
+    paused = await _call(sdk, "Check the services.")
     await _send_guidance(runtime)
     resumed = await _call(sdk, _answers(paused))
 
     assert resumed.stop_reason == "end_turn"
-    assert _tool_results(sdk)["step1-call0"] == ("success", f"setup porkbun finished: {ANSWER}")
+    assert _tool_results(sdk)["step1-call0"] == ("success", f"setup service-a finished: {ANSWER}")
     # No later call read the guidance, so the existing check before a final
     # answer is committed finds it and runs the task again with it.
     manager = runtime.task_manager
-    answer = Task(task_id=TASK, task_type=MessageMetaType.RESPONSE, answer="Both registrars are ready.")
+    answer = Task(task_id=TASK, task_type=MessageMetaType.RESPONSE, answer="Both services are ready.")
     await _apply_task_processing_result(runtime, TASK, manager.get_task_info(TASK), answer)
     assert "task_steering_terminal_commit_deferred" in _history_events(runtime)
     assert GUIDANCE in (manager.read_runtime_resume_directive(TASK) or "")
@@ -365,11 +365,11 @@ async def test_guidance_left_after_a_resumed_turn_defers_its_final_answer(tmp_pa
 @pytest.mark.asyncio
 async def test_two_paused_calls_in_one_step_both_keep_their_results(tmp_path):
     runtime = _runtime_agent(tmp_path)
-    step = [("wait_for_setup", {"name": "porkbun"}), ("wait_for_setup", {"name": "cloudflare"}), ("report", {"label": "sibling"})]
+    step = [("wait_for_setup", {"name": "service-a"}), ("wait_for_setup", {"name": "service-b"}), ("report", {"label": "sibling"})]
     model = StepsModel([step, [("report", {"label": "next"})], "Done."])
     sdk = _strands_agent(runtime, model)
 
-    paused = await _call(sdk, "Check the registrars.")
+    paused = await _call(sdk, "Check the services.")
     assert paused.stop_reason == "interrupt" and len(paused.interrupts) == 2
     # The executor ran the sibling beside the two calls that paused.
     assert CALLS == ["report:sibling"]
@@ -377,12 +377,12 @@ async def test_two_paused_calls_in_one_step_both_keep_their_results(tmp_path):
     await _call(sdk, _answers(paused))
 
     results = _tool_results(sdk)
-    assert results["step1-call0"] == ("success", f"setup porkbun finished: {ANSWER}")
-    assert results["step1-call1"] == ("success", f"setup cloudflare finished: {ANSWER}")
+    assert results["step1-call0"] == ("success", f"setup service-a finished: {ANSWER}")
+    assert results["step1-call1"] == ("success", f"setup service-b finished: {ANSWER}")
     assert results["step1-call2"] == ("success", "reported sibling")
     # The finished sibling did not run again; the next new call brought the guidance.
     assert sorted(CALLS) == sorted(
-        ["report:sibling", f"wait_for_setup:porkbun:{ANSWER}", f"wait_for_setup:cloudflare:{ANSWER}"]
+        ["report:sibling", f"wait_for_setup:service-a:{ANSWER}", f"wait_for_setup:service-b:{ANSWER}"]
     )
     _assert_cancelled_with_guidance(results["step2-call0"])
 
@@ -394,7 +394,7 @@ async def test_a_new_call_with_pending_guidance_is_still_cancelled(tmp_path):
     sdk = _strands_agent(runtime, model)
     await _send_guidance(runtime, while_waiting=False)
 
-    result = await _call(sdk, "Check the registrars.")
+    result = await _call(sdk, "Check the services.")
 
     assert result.stop_reason == "end_turn"
     _assert_cancelled_with_guidance(_tool_results(sdk)["step1-call0"])
@@ -408,18 +408,18 @@ async def test_a_call_that_never_ran_before_the_pause_is_cancelled_after_the_res
     # Strands' sequential executor stops a step at its first pause, so the
     # step's later call first runs after the resume: it is a new call.
     runtime = _runtime_agent(tmp_path)
-    model = StepsModel([[("wait_for_setup", {"name": "porkbun"}), ("report", {"label": "after"})], "Done."])
+    model = StepsModel([[("wait_for_setup", {"name": "service-a"}), ("report", {"label": "after"})], "Done."])
     sdk = _strands_agent(runtime, model, executor=SequentialToolExecutor())
 
-    paused = await _call(sdk, "Check the registrars.")
+    paused = await _call(sdk, "Check the services.")
     assert CALLS == []
     await _send_guidance(runtime)
     await _call(sdk, _answers(paused))
 
     results = _tool_results(sdk)
-    assert results["step1-call0"] == ("success", f"setup porkbun finished: {ANSWER}")
+    assert results["step1-call0"] == ("success", f"setup service-a finished: {ANSWER}")
     _assert_cancelled_with_guidance(results["step1-call1"])
-    assert CALLS == [f"wait_for_setup:porkbun:{ANSWER}"]
+    assert CALLS == [f"wait_for_setup:service-a:{ANSWER}"]
 
 
 class HookRecorder:
@@ -447,7 +447,7 @@ async def test_strands_runs_a_paused_call_again_without_an_after_event_for_the_p
 
     recorder = HookRecorder()
     if pause == "tool":
-        paused_call, hooks = ("wait_for_setup", {"name": "porkbun"}), [recorder]
+        paused_call, hooks = ("wait_for_setup", {"name": "service-a"}), [recorder]
     else:
         paused_call, hooks = ("report", {"label": "needs-approval"}), [ApprovalHook(), recorder]
     sdk = Agent(
@@ -455,7 +455,7 @@ async def test_strands_runs_a_paused_call_again_without_an_after_event_for_the_p
         callback_handler=None, tool_executor=ChangesFirstToolExecutor(lambda _name, _arguments: None),
     )
 
-    paused = await sdk.invoke_async("Check the registrars.")
+    paused = await sdk.invoke_async("Check the services.")
     assert recorder.events == [("before", "step1-call0"), ("end", "interrupt")]
     await sdk.invoke_async(_answers(paused))
     assert recorder.events[2:] == [("before", "step1-call0"), ("after", "step1-call0"), ("end", "end_turn")]
