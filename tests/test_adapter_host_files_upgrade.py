@@ -23,7 +23,8 @@ not what 0.9.13 wrote, a name the file system refuses, a NUL byte in a stored
 name, a file it cannot read, a pipe in place of a file, refused without
 waiting, a copy that reads back differently), the folder missing or holding
 none of the files (nothing changes, also when one record names a file too
-long or with a NUL byte; ``--files-gone`` then finishes), a folder it cannot
+long or with a NUL byte; ``--files-gone`` then finishes, also beside a
+running team that writes the same turns and records), a folder it cannot
 use (startup stops naming the folder and nothing changes), one error rule
 checked by injecting an error at each file and folder operation in turn
 (``test_one_error_rule_holds_at_every_operation``), a run stopped part way
@@ -517,6 +518,45 @@ def test_with_the_folder_missing_nothing_changes_until_the_files_are_declared_go
     assert instance.layout.adapter_host_files_upgrade_path.is_file()
 
 
+def test_a_files_gone_run_beside_the_running_team_keeps_what_the_team_writes(instance: _Instance, monkeypatch) -> None:
+    """The operator runs ``--files-gone`` with ``docker exec`` while the team runs (C20).
+
+    Between the step's scan and its rewrites, an agent merges a file sent after
+    the upgrade into a turn the step changes, and the gateway's history
+    clean-up deletes a record the step is about to drop. The merged file stays
+    (turns are rewritten from a fresh read under row locks, not from the scan)
+    and the deleted record is skipped.
+    """
+
+    instance.transfer.rename(instance.root / "unmounted")
+    assert instance.run().folder_missing
+    new_path = str(instance.layout.uploads_dir.resolve() / "telegram_chat_7" / "att_new.png")
+    new_file = _record("att_new", new_path, hashlib.sha256(b"sent after the upgrade").hexdigest())
+    real = _RelationalConversationRepository.relocate_turn_attachment
+    team_wrote: list[str] = []
+
+    def beside_the_team(self, turns, attachment_id, *, local_path):
+        if not team_wrote:
+            team_wrote.append(attachment_id)
+            assert instance.repository().merge_turn_attachments(
+                conversation_id=CONVERSATION, task_id="task_1", attachments=[new_file]
+            ) == 1
+            assert instance.gateway().delete_attachment("att_lost")
+        return real(self, turns, attachment_id, local_path=local_path)
+
+    monkeypatch.setattr(_RelationalConversationRepository, "relocate_turn_attachment", beside_the_team)
+    result = instance.run(files_gone=True)
+    monkeypatch.undo()
+
+    assert team_wrote, "the team wrote between the scan and the rewrites"
+    assert result.finished and (result.counts.missing, result.counts.no_record) == (2, 1)
+    assert result.counts.gateway_rows_removed == 1, "att_photo's record; att_lost's was already gone"
+    assert instance.turn_paths("task_1") == {"att_new": new_path}
+    assert instance.recorded("task_1") == 0
+    assert instance.gateway().get_attachment("att_photo") is None
+    assert instance.layout.adapter_host_files_upgrade_path.is_file()
+
+
 def _untouched(instance: _Instance) -> tuple[Any, ...]:
     """What a run that changes nothing leaves as it found it: the records, the turns' markers and the files."""
 
@@ -878,6 +918,16 @@ _FAULTS = {
     "open_destination_io_after_earlier_rename": _Fault(
         "open", _DESTINATION, errno.EIO, "refused", "unreadable", setup=_photo_renamed_before_records
     ),
+    # Nor can it be told whether anything is at the destination: the records are kept, startup goes on (C21).
+    "open_and_stat_destination_io_after_earlier_rename": _Fault(
+        "open",
+        _DESTINATION,
+        errno.EIO,
+        "refused",
+        "unreadable",
+        also=(("stat", _DESTINATION, errno.EIO),),
+        setup=_photo_renamed_before_records,
+    ),
     "path_construction": _Fault("path", _PHOTO, ValueError("no file name"), "refused", "unsafe_name"),
     # Rule 2: a folder.
     "open_transfer_folder": _Fault("open", _TRANSFER, errno.EACCES, "folder", "transfer"),
@@ -953,6 +1003,7 @@ def test_one_error_rule_holds_at_every_operation(instance: _Instance, monkeypatc
             result = instance.run()
     monkeypatch.undo()
     assert fault.function in fired, "the error was injected"
+    assert all(function in fired for function, _target, _error in fault.also), "every extra error was injected"
     marker = instance.layout.adapter_host_files_upgrade_path
 
     if fault.expect == "refused":

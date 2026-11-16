@@ -55,8 +55,8 @@ supported, because it may not read what a newer one saved.
     elsewhere, or its folder is not mounted): nothing changes, startup goes
     on and an error in the log says so. Mount the folder where `upload_dir`
     points and restart. If the files are really gone, run
-    `docker exec <container> python -m assistant_cli upgrade adapter-host-files --config /data/instance_config.yaml --files-gone`;
-    their records are then removed as above.
+    `docker exec <container> python -m assistant_cli upgrade adapter-host-files --config /data/instance_config.yaml --files-gone`
+    while the team runs; their records are then removed as above.
   - **A folder it cannot use** (a read-only or full `state/uploads`, a
     folder it has no permission to read): startup stops with a message
     naming the folder. Fix it and restart; the step goes on where it

@@ -4527,7 +4527,17 @@ the desktop app never offers an older version.
   `InstanceLayout.adapter_host_files_upgrade_path`
   (`state/upgrades/adapter-host-files.json`, the finish time and the counts)
   is missing. Nothing else on the host writes the files or their records
-  then. It finds the gateway records and conversation entries (decoded from
+  then. The operator's `--files-gone` run (`docker exec`, while the team
+  runs) is safe beside the team for reasons a later change must keep: no
+  gateway attachment record or conversation entry 0.10 writes names the
+  transfer folder (the 0.10 adapter host's transfer copies have new ids that
+  only its own upload records name; the gateway records the `state/uploads`
+  path), so the step selects nothing the team creates; turns are rewritten
+  from a fresh read under the row locks `merge_turn_attachments` takes, so a
+  file an agent merges into the same turn meanwhile stays; and a turn or
+  gateway record the team deletes meanwhile is skipped. A file that moves
+  while the gateway deletes its record is left without a record, and upload
+  retention removes it by its age. It finds the gateway records and conversation entries (decoded from
   the stored JSON) that name a file as 0.9.13 wrote it,
   `adapter_upload_<id>` directly in the transfer folder, so a folder an
   operator pointed at other files has none of those moved or dropped. Records are not trusted by themselves, because agent

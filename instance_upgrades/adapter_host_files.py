@@ -23,6 +23,30 @@ the two tables; remote workers may share a PostgreSQL conversation store, so
 conversation turns change under row locks
 (``ConversationRepository.relocate_turn_attachment``).
 
+The operator's ``--files-gone`` run (``docker exec``, as
+``user_docs_source/upgrading.md`` shows) runs beside the running team. That
+is safe for three reasons, which a later change to the step must keep:
+
+- no gateway attachment record or conversation entry 0.10 writes names the
+  transfer folder (the 0.10 adapter host's transfer copies have new upload ids
+  and only its own upload records name them; the gateway saves each into
+  ``state/uploads`` and records that path), so the step selects no row or
+  file the running team creates;
+- conversation turns are rewritten from a fresh read in one write
+  transaction under the row locks ``merge_turn_attachments`` takes, never
+  from what the step read earlier, so a file an agent merges into the same
+  turn meanwhile stays;
+- a turn or gateway record the team deletes meanwhile (history clean-up, a
+  person's removal) is skipped: ``relocate_turn_attachment`` passes over a
+  missing turn, and ``set_attachment_local_path`` and ``delete_attachment``
+  return False for a missing record.
+
+A file that turns up and moves during such a run while the gateway deletes
+its record stays in ``state/uploads`` without a record, and upload retention
+removes it by its age (the move keeps the time it was sent).
+``test_a_files_gone_run_beside_the_running_team_keeps_what_the_team_writes``
+pins the second and third reasons.
+
 What it does, per attachment id:
 
 1. finds the files: gateway records and conversation entries naming a file
