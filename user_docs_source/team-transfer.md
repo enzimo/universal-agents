@@ -76,7 +76,10 @@ An owner exports the whole team from a chat:
    `exports/` folder, for example
    `~/.universal-agents/data/exports/alpha-20261014-101500Z.uatransfer`. This
    usually takes under a minute. The page and the chat then show the file's
-   name and size, what it holds and the next steps.
+   name and size, what it holds and the next steps. When the team uses an
+   external NATS server, they also show the `NATS:` line under **Before you
+   start the new instance**: what to set on the new instance before it starts
+   ([An external NATS server](#an-external-nats-server)).
 4. **Stop this instance, then import.** Its chat bot tokens and model sign-ins
    move with the file, and two running instances must not use them at once.
    Continue with [Import during onboarding](#import-during-onboarding).
@@ -296,7 +299,8 @@ The export decides from the old instance's own settings: `instance_config.yaml`
 and its `team.env`, or its environment when it takes secrets from there. It
 moves the user and password only when those settings name an external server.
 It prints at most two lines about this, each starting with `NATS:` and naming
-variables, never their values:
+variables, never their values (`/upgrade` shows them on its page and in the
+chat, and the launcher's log has them):
 
 - Whenever those settings name an external server: the login that moved
   (`NATS_USER`, `NATS_PASSWORD`, or none) and what to set on the new instance

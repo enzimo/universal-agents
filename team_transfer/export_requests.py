@@ -53,7 +53,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Final, Literal, Mapping
+from typing import Annotated, Callable, Final, Literal, Mapping
 
 from pydantic import ConfigDict, Field, ValidationError
 
@@ -93,10 +93,15 @@ EXPORT_ID_PATTERN: Final = r"^exp_[A-Za-z0-9_-]{16,64}$"
 NEXT_STEPS: Final = (
     "Stop this instance. Its chat bot tokens and model sign-ins move with the file, and two running "
     "instances must not use them at once.",
-    "Start the new version with a blank data folder.",
+    "Start the new instance with a blank data folder.",
     "Copy the file into the new data folder's import folder, then choose Import a team export on the "
     "Let's Begin page.",
 )
+# The heading the page and the chat put over the export's notices (TeamExportResultV1.notices).
+NOTICES_HEADING: Final = "Before you start the new instance"
+# At most this many notices travel with a result; the export makes at most two today
+# (the NATS lines, team_transfer.operator_secrets._nats_notices).
+EXPORT_NOTICES_MAX: Final = 10
 # What the page and the chat say when the supervisor reports an export process
 # that exited with an error before reporting (TEAM_EXPORT_ENDED_ROUTE).
 PROCESS_ENDED_MESSAGE: Final = (
@@ -115,6 +120,7 @@ _REQUEST_SUFFIX = ".json"
 _REQUEST_MAX_BYTES = 64 * 1024
 _FILE_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
 _ERROR_MAX_CHARS = 2000
+_Notice = Annotated[str, Field(min_length=1, max_length=_ERROR_MAX_CHARS)]
 # Collection tokens are URL-safe base64 (secrets.token_urlsafe): ASCII only,
 # so comparing them can never fail on the characters themselves.
 _TOKEN_PATTERN = r"^[A-Za-z0-9_-]{0,128}$"
@@ -218,7 +224,12 @@ class TeamExportResultV1(TransferModel):
     so no other process can end it. A process that failed before collecting
     (``""``) may report only a failure, and only while nothing was collected.
     ``note`` is a warning beside a success (the file could not be given to
-    the data folder's owner); the page and the chat show it.
+    the data folder's owner); the page and the chat show it. ``notices`` are
+    the export's lines for whoever starts the new instance, the same lines
+    ``team export`` prints (``ExportReport.notices``): for an external NATS
+    server, what the new instance needs before it starts. They name
+    variables, never values; the page and the chat show them under
+    ``NOTICES_HEADING``, before the next steps.
     """
 
     export_id: str = Field(pattern=EXPORT_ID_PATTERN)
@@ -231,6 +242,7 @@ class TeamExportResultV1(TransferModel):
     sections: tuple[TeamExportSectionV1, ...] = ()
     error: str = Field(default="", max_length=_ERROR_MAX_CHARS)
     note: str = Field(default="", max_length=_ERROR_MAX_CHARS)
+    notices: tuple[_Notice, ...] = Field(default=(), max_length=EXPORT_NOTICES_MAX)
 
 
 class TeamExportProcessEndedV1(TransferModel):
@@ -404,9 +416,11 @@ __all__ = [
     "EXPORT_PAGE_RESTARTED",
     "EXPORT_PASSPHRASE_MAX_CHARS",
     "EXPORT_PAGE_SUCCESS",
+    "EXPORT_NOTICES_MAX",
     "EXPORT_REQUESTS_BY_SUPERVISOR",
     "EXPORT_REQUESTS_ENV",
     "NEXT_STEPS",
+    "NOTICES_HEADING",
     "PROCESS_ENDED_MESSAGE",
     "PROCESS_ENDED_UNCOLLECTED_MESSAGE",
     "RepeatedProblemLog",

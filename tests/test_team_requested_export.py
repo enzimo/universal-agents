@@ -7,8 +7,11 @@ submitted as the browser does; the export process
 the operator, writes the archive into ``exports/`` and reports the result,
 which the page and its status route show. Also covered: a person who is no
 longer an owner when the export runs gets a refusal on the page and no file;
-the file is given to the data folder's owner when the export runs as root; and
-the request and result helpers (``team_transfer.export_requests``).
+the file is given to the data folder's owner when the export runs as root; an
+instance on an external NATS server gets the export's ``NATS:`` line on the
+result, the page, the chat message and in the log (also when the archive's
+parts could not be read afterwards), and notices past the result's bound stay
+in the log; and the request and result helpers (``team_transfer.export_requests``).
 """
 
 from __future__ import annotations
@@ -618,3 +621,103 @@ def test_a_request_file_that_cannot_be_deleted_is_logged_once_not_every_pass(
         assert take_export_request(requests_dir) is None
 
     assert caplog.text.count("event=team_export_request_stuck") == 1
+
+
+# --- The export's notices (an external NATS server) -----------------------------------------------
+
+EXTERNAL_NATS = "nats://nats.example.invalid:4222"
+NATS_PASSWORD_VALUE = "external-nats-password-value"
+
+
+def _export_with_external_nats(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The running team of ``_instance``, sending its messages through an external NATS server with a login."""
+
+    from assistant_gateway.instance_secrets import NATS_CREDENTIAL_ENV_NAMES, NATS_DECISION_ENV_NAMES
+    import team_transfer.registry as registry
+    from team_transfer.operator_secrets import OperatorSecretsSection
+
+    config_path = _instance(tmp_path, monkeypatch)
+    # The shell running the tests may set any of these (tests/test_team_transfer_operator_secrets.py).
+    for name in (*NATS_DECISION_ENV_NAMES, *NATS_CREDENTIAL_ENV_NAMES, "TEAM_LOCAL_NATS_ENABLED"):
+        for form in (name, f"{name}_FILE"):
+            monkeypatch.delenv(form, raising=False)
+    team_env = config_path.parent / "team.env"
+    team_env.write_text(
+        team_env.read_text() + f"NATS_URL={EXTERNAL_NATS}\nNATS_USER=nats-user\nNATS_PASSWORD={NATS_PASSWORD_VALUE}\n"
+    )
+    monkeypatch.setattr(registry, "TRANSFER_SECTIONS", (*registry.TRANSFER_SECTIONS, OperatorSecretsSection()))
+    return config_path
+
+
+def _cannot_describe(_manifest):
+    raise RuntimeError("cannot describe")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report_incomplete", [False, True], ids=["described", "report_incomplete"])
+async def test_upgrade_tells_the_owner_what_an_external_nats_server_needs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, report_incomplete: bool
+) -> None:
+    """F3 (GEN-1): the NATS lines ``team export`` prints reach /upgrade's result, page and chat message, and the log.
+
+    Without them an owner moving a team on an external NATS server starts the new instance with its own
+    server, cutting off remote workers. A result whose parts could not be read afterwards keeps them too.
+    """
+
+    from assistant_gateway.application.broker_session_watch import WATCH_FINISHED, BrokerSessionOutcome
+    from assistant_gateway.application.team_exports import team_export_result_text
+    from secure_tool_broker import team_export_page
+    from team_transfer.export_requests import NOTICES_HEADING
+
+    config_path = _export_with_external_nats(tmp_path, monkeypatch)
+    layout = InstanceLayout.at(config_path.parent)
+    if report_incomplete:
+        monkeypatch.setattr(requested_export, "export_sections", _cannot_describe)
+    server = await _serving_broker(monkeypatch)
+    try:
+        page = await _submitted_page(server, "usr_owner")
+        request = take_export_request(layout.team_export_requests_dir)
+        assert request is not None
+        with caplog.at_level("INFO", logger=requested_export.__name__):
+            result = await asyncio.to_thread(
+                requested_export.run_requested_export, config_path, export_id=request.export_id, owner_person_id="usr_owner"
+            )
+        status = await _page_status(server, page)
+        async with aiohttp.ClientSession() as client:
+            shown = await (await client.get(server.make_url(page))).text()
+    finally:
+        await server.close()
+
+    assert result.ok and (result.note == requested_export.REPORT_INCOMPLETE_NOTE) is report_incomplete
+    (notice,) = result.notices
+    assert notice.startswith("NATS: the server is external. Login carried: NATS_USER, NATS_PASSWORD.")
+    assert "do not travel: TEAM_LOCAL_NATS_ENABLED=false, NATS_URL." in notice
+    assert EXTERNAL_NATS not in notice and NATS_PASSWORD_VALUE not in notice, "names only, never values"
+    assert status["status"] == "success" and status["result"]["notices"] == [notice]
+    assert f"<h2>{NOTICES_HEADING}</h2><ul><li>{team_export_page._e(notice)}</li></ul><h2>Next steps</h2>" in shown
+    chat = team_export_result_text(BrokerSessionOutcome(WATCH_FINISHED, status))
+    assert f"\n\n{NOTICES_HEADING}:\n- {notice}\n\nNext steps:\n1. " in chat
+    (logged,) = [record.getMessage() for record in caplog.records if "event=team_export_notice " in record.getMessage()]
+    assert logged.endswith(f"export_id={request.export_id} notice={notice}")
+
+
+def test_notices_past_the_results_bound_stay_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    """A published archive's result must always validate, so notices beyond the bound are logged, not dropped silently."""
+
+    from team_transfer.export_requests import EXPORT_NOTICES_MAX
+
+    many = [f"Notice {number}." for number in range(EXPORT_NOTICES_MAX + 2)]
+
+    with caplog.at_level("INFO", logger=requested_export.__name__):
+        kept = requested_export._result_notices([*many, "", "  "], "exp_aaaaaaaaaaaaaaaaaaaaaa")
+
+    assert kept == tuple(many[:EXPORT_NOTICES_MAX])
+    TeamExportResultV1(
+        export_id="exp_aaaaaaaaaaaaaaaaaaaaaa", team_id=TEAM, owner_person_id="usr_owner", ok=True, notices=kept
+    )
+    assert caplog.text.count("event=team_export_notice ") == EXPORT_NOTICES_MAX + 2
+    assert f"event=team_export_notices_cut export_id=exp_aaaaaaaaaaaaaaaaaaaaaa shown={EXPORT_NOTICES_MAX} " in caplog.text
+    with pytest.raises(ValueError):
+        TeamExportResultV1(
+            export_id="exp_aaaaaaaaaaaaaaaaaaaaaa", team_id=TEAM, owner_person_id="usr_owner", ok=True, notices=tuple(many)
+        )

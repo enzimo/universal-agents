@@ -304,8 +304,10 @@ onboarding's server, titled **Choose what to import**, with these differences:
   the page shows only that waiting line, without **Close** (the page must
   hear how the export ended), and updates itself. The result then replaces
   it: the file's path and size in a neutral `.status` line, a `.note` when
-  copying the file may need `sudo`, the parts it holds and the numbered next
-  steps; or a red `.status-error` saying why nothing was exported and to run
+  copying the file may need `sudo`, the parts it holds, the export's notices
+  (an external NATS server's `NATS:` lines) as a list under a **Before you
+  start the new instance** heading, and the numbered next steps; or a red
+  `.status-error` saying why nothing was exported and to run
   `/upgrade` again. A page the broker rebuilt after a restart keeps the intro
   panel (with its **Close**) and, in place of the form, a red `.status-error`
   saying the broker restarted and to run `/upgrade` again, then **Close** at

@@ -1,4 +1,9 @@
-"""The ``/upgrade`` chat command: an owner exports the whole team for an upgrade.
+"""The ``/upgrade`` chat command: an owner exports the whole team to move it to a fresh instance.
+
+The file moves the team to a fresh instance or another machine; history,
+learned memory and workspace files stay behind. A new version on the same
+machine installs over the instance instead (user guide, "Upgrading"), so
+``/help`` and the page say so.
 
 It opens the secure broker's export page for the owner who typed it and
 watches it (``assistant_gateway.application.team_exports``): the passphrase is

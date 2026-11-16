@@ -85,6 +85,7 @@ from team_transfer.export_requests import (
     EXPORT_PAGE_SUCCESS,
     EXPORT_PASSPHRASE_MAX_CHARS,
     NEXT_STEPS,
+    NOTICES_HEADING,
     PROCESS_ENDED_MESSAGE,
     PROCESS_ENDED_UNCOLLECTED_MESSAGE,
     RESULT_UNCONFIRMED,
@@ -570,9 +571,12 @@ def _section_items() -> str:
 def _intro_panel(*, closable: bool) -> str:
     return (
         f'<section class="content-panel" id="{_TOP_ID}"><p class="eyebrow">Team export</p>'
-        "<h1>Export the team for an upgrade</h1>"
-        "<p class=\"lede\">This writes one file with everything a new version needs to take over this team. "
-        "On the new instance you choose what to import; everything starts selected.</p>"
+        "<h1>Export the team to move it</h1>"
+        "<p class=\"lede\">This writes one file that moves this team to a fresh instance, on this machine or "
+        "another. On the new instance you choose what to import; everything starts selected.</p>"
+        "<p>Conversation and task history, learned memory and workspace files stay behind. To upgrade this "
+        "instance to a new version, install the new version over it instead (Upgrading, in the user guide): "
+        "everything stays.</p>"
         "<p>Your passphrase encrypts the stored sign-ins, keys and secrets in the file. The rest of the team's "
         "records in it, such as people, access, knowledge pages and schedules, can be read by anyone who has the "
         "file, so keep the file private.</p>"
@@ -630,11 +634,16 @@ def _result_panel(session: Any) -> str:
     # Without parts the size and contents could not be read after writing (the note says so).
     size = f" ({_e(size_words(result.size_bytes))})" if lines else ""
     holds = f"<p>It holds:</p><ul>{''.join(f'<li>{_e(line)}</li>' for line in lines)}</ul>" if lines else ""
+    notices = (
+        f"<h2>{_e(NOTICES_HEADING)}</h2><ul>{''.join(f'<li>{_e(notice)}</li>' for notice in result.notices)}</ul>"
+        if result.notices
+        else ""
+    )
     return (
         f'<section class="content-panel" id="{_FORM_ID}"><h2>The team is exported</h2>'
         f'<p class="status" role="status">Wrote <code>exports/{_e(result.file_name)}</code> in this instance\'s '
         f"data folder{size}.</p>{note}"
-        f"{holds}<h2>Next steps</h2><ol>{steps}</ol></section>"
+        f"{holds}{notices}<h2>Next steps</h2><ol>{steps}</ol></section>"
     )
 
 

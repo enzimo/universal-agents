@@ -234,7 +234,8 @@ def _export_requested(args: argparse.Namespace) -> None:
     if not result.ok:
         raise SystemExit(f"The team was not exported. {result.error}")
     note = [result.note] if result.note else []
-    print("\n".join([f"Wrote exports/{result.file_name} ({result.size_bytes} bytes).", *section_lines(result), *note]))
+    wrote = f"Wrote exports/{result.file_name} ({result.size_bytes} bytes)."
+    print("\n".join([wrote, *section_lines(result), *note, *result.notices]))
 
 
 def _inspect(args: argparse.Namespace) -> None:

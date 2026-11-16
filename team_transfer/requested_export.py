@@ -12,7 +12,9 @@ It runs the same engine as ``team export``:
 3. write the archive into ``exports/`` (0600, never overwritten), then give
    it and the folder to whoever owns the data folder;
 4. report the result to the page with that token; the gateway posts it in
-   the chat.
+   the chat. The result carries the export's notices (for an external NATS
+   server, what the new instance needs before it starts), each also logged,
+   so ``/upgrade`` tells the owner what ``team export`` prints.
 
 What the passphrase protects: the archive's stored sign-ins and keys and its
 operator secrets are encrypted with it, and the whole archive is signed with
@@ -51,7 +53,7 @@ import stat
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from access_control.people import TEAM_EXPORT_OWNER_REQUIRED
 from secure_tool_broker.defaults import (
@@ -71,6 +73,7 @@ from team_transfer.crypto import TransferKeyError
 from team_transfer.errors import TransferError
 from team_transfer.export_requests import (
     EXPORT_FILE_SUFFIX,
+    EXPORT_NOTICES_MAX,
     TeamExportPassphraseRequestV1,
     TeamExportPassphraseV1,
     TeamExportProcessEndedV1,
@@ -208,8 +211,9 @@ def _published_or_noted(
 ) -> TeamExportResultV1:
     """The success result; any error while describing a published archive keeps it a success with a note."""
 
+    notices = _result_notices(report.notices, export_id)
     try:
-        return _published(source, report, exports_dir, export_id, owner_person_id, collection_token)
+        return _published(source, report, exports_dir, export_id, owner_person_id, collection_token, notices)
     except Exception as exc:  # a stop signal or a defect after publishing must not hide the file
         logger.exception(
             "The export was written but its report could not be completed. event=team_export_report_incomplete "
@@ -226,7 +230,30 @@ def _published_or_noted(
             collection_token=collection_token,
             file_name=report.path.name,
             note=REPORT_INCOMPLETE_NOTE,
+            notices=notices,
         )
+
+
+def _result_notices(notices: Sequence[str], export_id: str) -> tuple[str, ...]:
+    """The export's notices for the result, each logged (names only, by ``_nats_notices``' rule).
+
+    Bounded like ``TeamExportResultV1.notices`` so a published archive's
+    result always validates; any beyond the bound stay in the log only, with
+    a warning saying so.
+    """
+
+    kept = tuple(notice for notice in (short_error(notice) for notice in notices) if notice)
+    for notice in kept:
+        logger.info("Team export notice. event=team_export_notice export_id=%s notice=%s", export_id, notice)
+    if len(kept) > EXPORT_NOTICES_MAX:
+        logger.warning(
+            "The export made more notices than its result holds; the rest are only in this log. "
+            "event=team_export_notices_cut export_id=%s shown=%s total=%s",
+            export_id,
+            EXPORT_NOTICES_MAX,
+            len(kept),
+        )
+    return kept[:EXPORT_NOTICES_MAX]
 
 
 def _published(
@@ -236,6 +263,7 @@ def _published(
     export_id: str,
     owner_person_id: str,
     collection_token: str,
+    notices: tuple[str, ...],
 ) -> TeamExportResultV1:
     """The success result for a published archive; nothing after publishing undoes it (module docstring)."""
 
@@ -261,6 +289,7 @@ def _published(
         size_bytes=_file_size(report.path, export_id),
         sections=export_sections(report.manifest),
         note=note,
+        notices=notices,
     )
 
 

@@ -131,7 +131,7 @@ async def test_only_owners_open_the_export_page(broker: TestClient, roles: list[
 async def test_the_page_lists_what_moves_and_has_one_passphrase_form(broker: TestClient) -> None:
     page = await (await broker.get(await _page_path(broker))).text()
 
-    assert "Export the team for an upgrade" in page
+    assert "Export the team to move it" in page
     for title in ("People", "Schedules", "Knowledge pages", "Team files and agent types"):
         assert f"<li>{title}</li>" in page
     assert "<li>Stored sign-ins and keys (encrypted)</li>" in page and "<li>Secrets from team.env (encrypted)</li>" in page

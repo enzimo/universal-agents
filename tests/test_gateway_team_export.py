@@ -192,7 +192,7 @@ _SUCCESS = {
             "Next steps:\n"
             "1. Stop this instance. Its chat bot tokens and model sign-ins move with the file, and two running "
             "instances must not use them at once.\n"
-            "2. Start the new version with a blank data folder.\n"
+            "2. Start the new instance with a blank data folder.\n"
             "3. Copy the file into the new data folder's import folder, then choose Import a team export on the "
             "Let's Begin page.",
         ),
@@ -223,7 +223,7 @@ _SUCCESS = {
             "1000 bytes (encrypted)\n\nNext steps:\n"
             "1. Stop this instance. Its chat bot tokens and model sign-ins move with the file, and two running "
             "instances must not use them at once.\n"
-            "2. Start the new version with a blank data folder.\n"
+            "2. Start the new instance with a blank data folder.\n"
             "3. Copy the file into the new data folder's import folder, then choose Import a team export on the "
             "Let's Begin page.",
         ),
@@ -240,7 +240,7 @@ _SUCCESS = {
             "The file was written, but its size and parts could not be read afterwards.\n\nNext steps:\n"
             "1. Stop this instance. Its chat bot tokens and model sign-ins move with the file, and two running "
             "instances must not use them at once.\n"
-            "2. Start the new version with a blank data folder.\n"
+            "2. Start the new instance with a blank data folder.\n"
             "3. Copy the file into the new data folder's import folder, then choose Import a team export on the "
             "Let's Begin page.",
         ),

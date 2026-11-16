@@ -6,8 +6,9 @@ that page to the broker only; the supervisor's export process writes the
 archive (``team_transfer.export_requests``). The gateway watches the page with
 the shared broker watcher and posts one message in the chat where
 ``/upgrade`` ran (``link_results.GatewayLinkResults.watch_team_export``): the
-file's name and size, what it holds and the next steps, or why nothing was
-exported.
+file's name and size, what it holds, the export's notices (for an external
+NATS server, what the new instance needs before it starts) and the next
+steps, or why nothing was exported.
 
 Who may: owners only (``access_control.people.team_export_refusal``), checked
 here with the roles the gateway knows, again by the broker when the page opens
@@ -40,6 +41,7 @@ from team_transfer.export_requests import (
     EXPORT_PAGE_FINAL_STATUSES,
     EXPORT_PAGE_RESTARTED,
     NEXT_STEPS,
+    NOTICES_HEADING,
     RESULT_UNCONFIRMED,
     TeamExportResultV1,
     section_lines,
@@ -101,16 +103,19 @@ def team_export_result_text(outcome: BrokerSessionOutcome) -> str:
     lines = section_lines(result)
     steps = "\n".join(f"{number}. {step}" for number, step in enumerate(NEXT_STEPS, start=1))
     note = f" {result.note}" if result.note else ""
+    # The export's notices (an external NATS server's needs) come before the steps they affect.
+    notices = "".join(f"\n- {notice}" for notice in result.notices)
+    before_start = f"\n\n{NOTICES_HEADING}:{notices}" if notices else ""
     if not lines:
         # The file was written but its size and parts could not be read (the note says so).
         return (
             f"Exported the team to exports/{result.file_name} in this instance's data folder.{note}"
-            f"\n\nNext steps:\n{steps}"
+            f"{before_start}\n\nNext steps:\n{steps}"
         )
     parts = "\n".join(f"- {line}" for line in lines)
     return (
         f"Exported the team to exports/{result.file_name} in this instance's data folder "
-        f"({size_words(result.size_bytes)}).{note} It holds:\n{parts}\n\nNext steps:\n{steps}"
+        f"({size_words(result.size_bytes)}).{note} It holds:\n{parts}{before_start}\n\nNext steps:\n{steps}"
     )
 
 
