@@ -1698,6 +1698,9 @@ async def _apply_task_processing_result(
                 )
                 await self._complete_task_and_schedule_aar_review(task_id, now_ts)
         elif task_result.task_type == MessageMetaType.REQUEST:
+            if task_result.task_id == task_id:
+                await _keep_held_answer_state(self, task_id)
+                return
             self._logger.info(
                 "Task %s generated a sub-Task REQUEST: %s", task_id, task_result.task_id
             )
@@ -1772,6 +1775,51 @@ async def _apply_task_processing_result(
         # send_interrupt_request_for_result persisted WAITING before publication.
         # A fast delegated decision may already have resumed this task.
         return
+
+
+async def _keep_held_answer_state(self, task_id: str) -> None:
+    """Leave a task whose final answer was held back in the state its hold saved.
+
+    A turn whose result is a request naming its own task gave a final answer
+    that the runtime held back instead of sending. Every hold saves the state
+    the task needs before it returns that request:
+
+    - delegated work or a TaskQuery still pending, a runtime plan running, or a
+      delegation suppressed after plan activation: WAITING, until that work
+      or answer wakes the task;
+    - an open access workflow with unfinished steps: queued at the front to
+      run again at once with a continuation note (``access_workflow_runtime``);
+      the batch's state projection makes it PARTIAL.
+
+    Only a delegated subtask (a request with another task id) makes the task
+    wait here. Why: until 2026-11-14 this handling also wrote WAITING for a
+    held answer, which removed the queue entry of a task its workflow hold had
+    queued, so nothing ever ran it again and the person's later messages were
+    accepted but never read.
+
+    A task still in an executing state means a hold returned without saving
+    one: nothing would release its slot except the orphaned-slot safety net,
+    which hides the cause, so that is logged as a warning.
+    """
+
+    info = await self.task_manager.operations_runtime.run(
+        self.task_manager.get_task_info, task_id
+    )
+    state = info.state if info is not None else None
+    if state is not None and self.task_manager.is_executing_state(state):
+        self._logger.warning(
+            "A task's final answer was held back, but its hold saved no state for it. "
+            "event=held_answer_state_not_saved task_id=%s state=%s",
+            task_id,
+            state.value,
+        )
+        return
+    self._logger.info(
+        "A task's final answer was held back; it keeps the state its hold saved. "
+        "event=task_answer_held task_id=%s state=%s",
+        task_id,
+        state.value if state is not None else "missing",
+    )
 
 
 async def _handle_task_response(
