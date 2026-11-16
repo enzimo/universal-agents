@@ -149,7 +149,10 @@ class GatewayAccessWorkflowPage:
         if link is None or link.kind != "external_step" or link.status != "waiting":
             raise WorkflowPageRefused("This step is not waiting to be marked done. Refresh the page.")
         setups = self.access_inbox.tool_setups
-        if setups is None or not await setups.external_step_done(setup_request_id, person_id=owner_id):
+        # The title is the stored one on the row the person clicked, never from the browser.
+        if setups is None or not await setups.external_step_done(
+            setup_request_id, person_id=owner_id, step_title=link.step_title
+        ):
             raise WorkflowPageRefused("This step was already marked done or no longer waits. Refresh the page.")
         logger.info(
             "A person marked a setup step done. event=workflow_setup_marked_done workflow_id=%s setup_request_id=%s",

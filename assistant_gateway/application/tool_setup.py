@@ -153,6 +153,8 @@ _SIGN_IN_FINAL = frozenset({SIGN_IN_STATUS_SUCCESS, SIGN_IN_STATUS_ERROR})
 _BROKER_NOTE = "What you enter goes straight to the secure broker, never to the agent."
 
 TeamRolesResolver = Callable[[str], tuple[str, ...]]
+# Kinds whose page names the tool by its sign-in name ("Sign in to GitHub"), not the catalog's ("GitHub (gh)").
+_SIGN_IN_KINDS = frozenset({TOOL_SETUP_SIGN_IN, TOOL_SETUP_TEAM_SIGN_IN_APP})
 # How long an external step's chat action stays live (it has no broker page):
 # a non-time-sensitive wait, like approvals.
 EXTERNAL_STEP_ACTION_HOURS = 48
@@ -163,6 +165,8 @@ class SetupGuide(Protocol):
     """Trusted words and links for setup pages (``assistant_gateway.tool_setup_guide``)."""
 
     def external_step(self, tool_id: str, step_id: str) -> tuple[str, ExternalSetupStepV1] | None: ...
+
+    def display_name(self, tool_id: str) -> str | None: ...
 
     def workflow_url(self, task_id: str) -> str | None: ...
 
@@ -229,7 +233,12 @@ class SetupRefused(Exception):
 
 @dataclass(frozen=True)
 class PageEnding:
-    """How a page ended, as the task hears it."""
+    """How a page ended: ``message`` is what the task hears.
+
+    ``closing`` is the line the person's chat shows when it differs from
+    ``message`` (empty means the same line). The code that ends a page writes
+    both, so the line always names what actually ended (``_post_closing``).
+    """
 
     status: str
     message: str
@@ -237,6 +246,7 @@ class PageEnding:
     account_label: str | None = None
     link_id: str | None = None
     needs_administrator: bool = False
+    closing: str = field(default="", kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -472,8 +482,16 @@ class GatewayToolSetups:
             instructions=f"{_sentence(step.instructions)}{where}{check}{done}",
         )
 
-    async def external_step_done(self, setup_request_id: str, *, person_id: str) -> bool:
-        """The person marked an external step done (the workflow page); False when it is not theirs or not waiting."""
+    async def external_step_done(self, setup_request_id: str, *, person_id: str, step_title: str) -> bool:
+        """The person marked an external step done (the workflow page); False when it is not theirs or not waiting.
+
+        ``step_title`` is the step's title the workflow page stores, which
+        trusted code wrote from the catalog when the page opened (never words
+        from the browser); it is the row the person clicked. Marking a step
+        done is a ``person_action`` result like the person's own ``/link``,
+        with its own words: "You marked the Gitea setup step 'Create a Gitea
+        token' done."
+        """
 
         record = self._setups.get_tool_setup(setup_request_id)
         if (
@@ -483,8 +501,47 @@ class GatewayToolSetups:
             or record.status != SETUP_STATUS_WAITING
         ):
             return False
-        ending = PageEnding(TOOL_SETUP_COMPLETED, "The setup step was marked done.")
+        title = " ".join(step_title.split())
+        if not title:
+            self._logger.warning(
+                "An outside setup step was marked done without its stored title; its line names only the tool. "
+                "event=gateway_tool_setup_step_title_missing setup_request_id=%s tool_id=%s",
+                setup_request_id,
+                record.tool_id,
+            )
+        what = self._page_what(record, title)
+        ending = PageEnding(TOOL_SETUP_COMPLETED, f"The person marked {what} done.", closing=f"You marked {what} done.")
         return await self._finish(setup_request_id, ending, attempt=1, source=TOOL_SETUP_SOURCE_PERSON)
+
+    def _page_what(self, record: ToolSetupRecord, step_title: str = "") -> str:
+        """The record's page in plain words, with the tool named as its page named it."""
+
+        return _what(record.kind, self._tool_name(record), step_title)
+
+    def _tool_name(self, record: ToolSetupRecord) -> str:
+        """The tool's name as the page showed it; the raw tool id, logged, when no name is known.
+
+        Sign-in pages use the sign-in name (``tool_sign_in``); account link
+        forms and outside steps use the catalog's display name, which the
+        broker named the form with and ``_external_page`` showed. The raw id
+        stands in only when the tool has left the catalog since the page opened.
+        """
+
+        if record.kind in _SIGN_IN_KINDS:
+            sign_in = tool_sign_in(record.tool_id)
+            name = sign_in.display_name if sign_in else None
+        else:
+            name = self.guide.display_name(record.tool_id) if self.guide else None
+        if name:
+            return name
+        self._logger.warning(
+            "A setup page's tool has no display name; its line names the tool id. "
+            "event=gateway_tool_setup_name_unknown setup_request_id=%s tool_id=%s kind=%s",
+            record.setup_request_id,
+            record.tool_id,
+            record.kind,
+        )
+        return record.tool_id
 
     def _next_attempt(self, request: ToolSetupRequestV1) -> int:
         """This page's number among the task's pages of its kind for the tool; refuses past the limit."""
@@ -710,11 +767,13 @@ class GatewayToolSetups:
         for record in self._setups.list_tool_setups(status=SETUP_STATUS_WAITING, person_id=person_id, tool_id=tool_id):
             if record.kind != kind or (owner is not None and record.owner_kind != owner):
                 continue
-            what = _what(kind, tool_id)
+            what = self._page_what(record)
             ending = PageEnding(
                 TOOL_SETUP_COMPLETED,
                 f"The person finished {what} on their own" + (f" (account {account_label})." if account_label else "."),
                 account_label=account_label,
+                # The /link or /auth result already told the person how it went.
+                closing=f"You finished {what} yourself, so this page is no longer needed.",
             )
             if await self._finish(record.setup_request_id, ending, attempt=None, source=TOOL_SETUP_SOURCE_PERSON):
                 finished += 1
@@ -757,7 +816,8 @@ class GatewayToolSetups:
                 continue  # nothing watches it; the person still marks it done
             ending = PageEnding(
                 TOOL_SETUP_UNAVAILABLE,
-                "The gateway restarted while the setup page was open, so nobody could see how it ended.",
+                f"The gateway restarted while the page for {self._page_what(record)} was open, "
+                "so nobody could see how it ended.",
                 reason_code=REASON_PAGE_NOT_WATCHED,
             )
             if await self._finish(record.setup_request_id, ending, attempt=None, source=TOOL_SETUP_SOURCE_TASK):
@@ -820,9 +880,11 @@ class GatewayToolSetups:
 
         Every way a page ends passes here once (its watcher, the person's own
         ``/link`` or ``/auth``, Mark Done, restart recovery), because only the
-        call that claimed the waiting record posts. When the person finished it
-        with ``/link``, the /link result already said how that went, so this
-        line only says the page is no longer needed.
+        call that claimed the waiting record posts. The line is the ending's
+        own (``closing``, else ``message``), written where the page ended:
+        ``source`` alone cannot say what ended, because the person ends a page
+        both with ``/link`` and with Mark Done (the 2026-11-14 incident, where
+        Mark Done read as an account link with the raw tool id).
         """
 
         if self._event_output is None:
@@ -830,10 +892,7 @@ class GatewayToolSetups:
         session = self._sessions.get_session(record.session_key)
         if session is None:
             return
-        if source == TOOL_SETUP_SOURCE_PERSON:
-            text = f"You finished {_what(record.kind, record.tool_id)} yourself, so this page is no longer needed."
-        else:
-            text = ending.message
+        text = ending.closing or ending.message
         try:
             await self._event_output.emit(
                 GatewayDeliveryEvent(

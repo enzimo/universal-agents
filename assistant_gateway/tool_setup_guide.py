@@ -42,6 +42,12 @@ class GatewaySetupGuide:
         step = tool.setup.step(step_id) if tool is not None and tool.setup else None
         return (tool.display_name, step) if step is not None else None
 
+    def display_name(self, tool_id: str) -> str | None:
+        """The tool's display name in the catalog (the name its account link form showed), or None."""
+
+        tool = self._catalogs.current().tools.get(tool_id)
+        return tool.display_name if tool is not None else None
+
     def workflow_url(self, task_id: str) -> str | None:
         """The workflow page of the task's access workflow, if it has one (logged on failure)."""
 

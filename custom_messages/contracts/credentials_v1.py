@@ -245,9 +245,11 @@ TOOL_SETUP_COMPLETED: ToolSetupResultStatus = "completed"
 TOOL_SETUP_DECLINED: ToolSetupResultStatus = "declined"
 TOOL_SETUP_EXPIRED: ToolSetupResultStatus = "expired"
 TOOL_SETUP_UNAVAILABLE: ToolSetupResultStatus = "unavailable"
-# Where the result came from: the page the task asked for, or a page the
-# person opened themselves (``/link``, ``/auth ... team_client``) while the
-# task waited.
+# Where the result came from: the page the task asked for, or the person
+# (``person_action``), who either finished the same setup on their own
+# (``/link``, ``/auth ... team_client``) while the task waited or marked a
+# step they did outside Universal Agents done on the workflow page (kind
+# ``external_step``). Words for a result follow its kind, not its source alone.
 ToolSetupSource = Literal["task_request", "person_action"]
 TOOL_SETUP_SOURCE_TASK: ToolSetupSource = "task_request"
 TOOL_SETUP_SOURCE_PERSON: ToolSetupSource = "person_action"
