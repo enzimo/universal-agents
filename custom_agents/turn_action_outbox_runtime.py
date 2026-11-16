@@ -20,7 +20,7 @@ from custom_agents.delegated_work_runtime import (
 from custom_agents.pending_work_runtime import wake_pending_work_after
 from custom_agents.schedule_installation import create_schedule_from_turn_action
 from custom_agents.task_runtime_state import TurnStartNotes
-from custom_agents.task_records import TaskInfo
+from custom_agents.task_records import TaskInfo, task_answer_text
 from custom_agents.worker_result_reports import is_worker_result_report, prepare_worker_result_report
 from custom_agents.conversation_delivery_states import (
     DELIVERY_STATE_NOTIFICATION_QUEUED,
@@ -51,6 +51,7 @@ from custom_agents.structured_llm_messages import (
     TurnAction,
 )
 from custom_agents.task_runtime_coordinator import RuntimeBatchInterrupted
+from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_agents.sent_files_runtime import result_with_answer_files
 from custom_agents.tool_call_limits import (
     compact_debug_preview as _compact_debug_preview,
@@ -67,7 +68,7 @@ from custom_messages.contracts.envelope_v1 import (
     MessageEnvelope,
 )
 from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, MessageHeader, MessageMeta
-from custom_messages.contracts.runtime_snapshot_v3 import TURN_ACTION_HELD_BACK
+from custom_messages.contracts.runtime_snapshot_v3 import BATCH_WAITING_EXTERNAL_RESULT, TURN_ACTION_HELD_BACK
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task, TaskQuery
 from custom_messages.enums import (
@@ -412,9 +413,13 @@ async def _defer_terminal_task_response_for_pending_parent_work(
         if await self.task_manager.operations_runtime.run(
             partial(defer_workflow_completion, self.task_manager),
             task_id=incoming_content.task_id, team_id=self.team_id,
+            attempted_answer=task_answer_text(outgoing_content.answer), action_id=record_id,
         ):
+            # A held answer, not a wait: the hold queued the task to run again at
+            # once (task_message_runtime._keep_held_answer_state keeps that state).
             return Task(task_id=incoming_content.task_id, task_type=MessageMetaType.REQUEST,
-                        problem_statement="Continue the saved workflow after its outstanding work or reviews finish.")
+                        problem_statement="Final answer held back: the task runs again at once with the "
+                        "workflow continuation note.")
         return None
 
     now_ts = datetime.now(timezone.utc).isoformat()
@@ -909,9 +914,12 @@ async def _schedule_turn_action_recovery(
         reason=f"Action {action_id} failed before later actions ran.",
     )
 
+    # Another attempt would meet the same refusal (custom_agents.turn_action_refusal).
+    refused = isinstance(exc, TurnActionRefused)
     automatic_retry_phases = {"persist", "publish", "post_publish_finalize"}
     if (
-        record.recoverability == "automatic_retry"
+        not refused
+        and record.recoverability == "automatic_retry"
         and record.phase in automatic_retry_phases
         and record.attempt_count < max_auto_attempts
     ):
@@ -962,6 +970,18 @@ async def _schedule_turn_action_recovery(
 
     def failed(status: str) -> Optional[str]:
         return None if publish_confirmed else status
+
+    if refused:
+        await _record_terminal_action_failure(
+            self,
+            record=record,
+            status=failed("failed_terminal"),
+            exc=exc,
+            failure_report=failure_report,
+            timestamp=now_ts,
+            summary=f"Runtime action {action_id} was refused for good; the task cannot recover it with another turn.",
+        )
+        raise exc
 
     inline_limit = self._turn_action_outbox_int(
         "max_inline_recovery_attempts_per_batch", 2
@@ -1118,33 +1138,59 @@ async def _schedule_turn_action_recovery(
                 f"Runtime action {action_id} started isolated recovery after {type(exc).__name__}: {exc}"
             ) from exc
 
+    await _record_terminal_action_failure(
+        self,
+        record=record,
+        status=failed("failed_terminal"),
+        exc=exc,
+        failure_report=failure_report,
+        timestamp=now_ts,
+        summary=f"Runtime action {action_id} exhausted recovery attempts and failed terminally.",
+    )
+    raise exc
+
+
+async def _record_terminal_action_failure(
+    self: Any,
+    *,
+    record: Any,
+    status: Optional[str],
+    exc: Exception,
+    failure_report: Dict[str, Any],
+    timestamp: str,
+    summary: str,
+) -> None:
+    """Record an action the outbox stops trying: failed for good, its batch failed, the task's history told.
+
+    ``status`` is None for a delegation a worker already holds: it stays
+    dispatched (``_end_unpublished_delegation``).
+    """
     await self.task_manager.operations_runtime.run(
         self.task_manager.mark_turn_action_record,
-        action_id,
-        status=failed("failed_terminal"),
+        record.action_id,
+        status=status,
         recoverability="terminal",
         last_error=str(exc),
         failure_report=failure_report,
     )
     await self.task_manager.operations_runtime.run(
         self.task_manager.mark_turn_action_batch_status,
-        batch_id,
+        record.batch_id,
         "failed",
         current_action_index=record.action_index,
     )
     await self.task_manager.operations_runtime.run(
         self.task_manager.append_history_entry,
-        source_task_id,
-        f"Runtime action {action_id} exhausted recovery attempts and failed terminally.",
+        record.source_task_id,
+        summary,
         entry_type=TaskHistoryType.ERROR_EVENT,
         importance=TaskHistoryImportance.CRITICAL,
-        timestamp=now_ts,
+        timestamp=timestamp,
         agent_name=self.name,
         agent_id=self.id,
         tracks_to_plan=True,
         details=failure_report,
     )
-    raise exc
 
 
 def _is_waiting_delegation(content: Any, meta: MessageMeta) -> bool:
@@ -2302,7 +2348,7 @@ async def _execute_turn_decision_outbox(
                         "content_type": type(result_content).__name__,
                     },
                 )
-                batch_final_status = "waiting_external_result"
+                batch_final_status = BATCH_WAITING_EXTERNAL_RESULT
                 break
         await self.task_manager.operations_runtime.run(
             self.task_manager.mark_turn_action_batch_status,

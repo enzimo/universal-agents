@@ -1,5 +1,26 @@
 """Mid-turn steering helpers for UniversalAgent.
 
+Accepted guidance reaches the model at the start of its turn or, mid-turn, at
+its next new tool call: ``RuntimeSteeringPlugin`` cancels that call with the
+guidance text. After each call to the agent that did not pause, the turn
+checks again before carrying out its decision: a fresh turn in
+``custom_agents.sdk.strands.turn``, a resumed one in
+``_call_until_guidance_read``. The decision is not always a tool call
+(providers that enforce structured output themselves answer Strands' forced
+decision as JSON text), so this check is what keeps a final answer from going
+out before the guidance is read. Guidance that arrives after it is found when
+the task's result is applied
+(``task_message_runtime._apply_task_processing_result``), after the decision's
+actions were carried out, and the task runs again with it. A tool call
+resuming after its pause (``set_up_tools``, ``request_access``,
+``apply_change``, any local Strands interrupt) is not a new call: it runs with
+its answer and the model gets its real result, while the guidance waits for
+the next new call or the check after the call
+(``custom_agents.sdk.strands.paused_tool_calls`` tells such a call apart).
+Cancelling it threw away the answer the task waited for. So a change approved
+in the Inbox while guidance waits is applied before the model reads it; people
+stop such a change by declining it or stopping the request.
+
 Files sent with a guidance or an answer (``TaskSteering.attachments``) are
 accepted before the message is acknowledged (``_accept_sent_files``, which
 records them with ``custom_agents.sent_files_runtime``), and
@@ -63,6 +84,8 @@ from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.prompt_context_sanitization import render_replied_message_lines
 from custom_agents.provider_error_runtime import ProviderTimeoutError, is_provider_timeout_error
 from custom_agents.sent_files_runtime import keep_sent_files
+from custom_agents.sdk.strands.paused_tool_calls import INTERRUPT_STOP_REASON, PausedToolCalls
+from custom_agents.sdk.strands.turn import late_guidance_instruction
 from custom_agents.sdk.strands.turn_tool_stop import (
     TURN_CANCELLED_REASON,
     invoke_with_tool_stop,
@@ -73,7 +96,9 @@ from custom_agents.execution_lanes import is_parallel_lane
 from custom_tools.runtime_context import TaskWork, bound_task_id, current_task_work, task_work
 from runtime_hosting.agent_execution import current_lane
 from custom_tools.tool_stop import ToolStop
+from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
+from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
@@ -114,6 +139,12 @@ GUIDANCE_APPLIED_EVENT = "task_steering_proactive_guidance_applied"
 # above, they tell a resend of a message that was used from one that was lost
 # (``_message_was_taken``).
 INTERRUPT_RESUMED_EVENT = "task_steering_interrupt_resumed"
+# History event of a turn that paused on an interrupt. Its details say whether
+# the turn waits for its requester's answer (an interrupt sent to the chat);
+# access and setup-run interrupts wait here for people's decisions through
+# their blocker instead (``custom_agents.task_wait_reasons``).
+INTERRUPT_REQUEST_EVENT = "task_steering_interrupt_request"
+INTERRUPT_WAITS_ON_REQUESTER_KEY = "waits_on_requester"
 INTERRUPT_RESPONSE_RECOVERY_EVENT = "task_steering_interrupt_response_recovery"
 _ANSWER_TAKEN_EVENTS = frozenset({INTERRUPT_RESUMED_EVENT, INTERRUPT_RESPONSE_RECOVERY_EVENT})
 
@@ -1197,13 +1228,57 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
 
 
 def _as_provider_timeout(error: Exception) -> Exception:
-    """A resumed turn skips the turn runtime's recovery, so name a timeout the same way."""
+    """A resumed turn skips the turn runtime's recovery, so name a timeout the same way.
 
-    if isinstance(error, ProviderTimeoutError) or not is_provider_timeout_error(error):
+    A refused action is already classified and keeps its own message, even
+    when its text happens to contain timeout words (a plan titled "Rerun the
+    backup job that timed out" read as a model timeout).
+    """
+
+    if isinstance(error, (ProviderTimeoutError, TurnActionRefused)) or not is_provider_timeout_error(error):
         return error
     timeout = ProviderTimeoutError()
     timeout.__cause__ = error
     return timeout
+
+
+async def _call_until_guidance_read(
+    agent: Any, session: StrandsInterruptedTurnSession, prompt: Any, tool_stop: ToolStop
+) -> Any:
+    """Call the paused turn's Strands agent, and again while guidance is unread after a call that did not pause.
+
+    A fresh turn has the same check after its model call (``sdk.strands.turn``).
+    A resumed turn needs it too: its turn decision can arrive without a tool
+    call for ``RuntimeSteeringPlugin`` to cancel, because providers that
+    enforce structured output themselves (Anthropic, Bedrock) answer Strands'
+    forced decision as JSON text. Without the check the decision, a final
+    answer included, was carried out before the guidance was read. The next
+    call keeps the conversation, which holds the resumed tool call's result,
+    and sends the guidance as its prompt. A call that pauses goes back to the
+    caller, which asks for what it waits on.
+    """
+
+    while True:
+        result = await invoke_with_tool_stop(
+            session.strands_agent,
+            prompt,
+            tool_stop=tool_stop,
+            invoke_kwargs=session.invoke_kwargs,
+            callback_handler=session.callback_handler,
+            logger=agent._logger,
+        )
+        if getattr(result, "stop_reason", None) == INTERRUPT_STOP_REASON:
+            return result
+        guidance = await consume_pending_proactive_guidance_message(agent, session.task_id)
+        if not guidance:
+            return result
+        agent._logger.info(
+            "[%s] Calling the resumed turn's model again because guidance arrived before its decision was "
+            "carried out. event=task_steering_resumed_turn_guidance_rerun task_id=%s",
+            agent.id,
+            session.task_id,
+        )
+        prompt = late_guidance_instruction(guidance)
 
 
 async def _run_resumed_turn(
@@ -1217,14 +1292,7 @@ async def _run_resumed_turn(
     """Answer the SDK interrupt, then apply the turn's decision to the task."""
 
     task_id = session.task_id
-    result = await invoke_with_tool_stop(
-        session.strands_agent,
-        response_blocks,
-        tool_stop=tool_stop,
-        invoke_kwargs=session.invoke_kwargs,
-        callback_handler=session.callback_handler,
-        logger=agent._logger,
-    )
+    result = await _call_until_guidance_read(agent, session, response_blocks, tool_stop)
     result = agent.turn_executor._apply_agent_result_transformer(
         session.msg_content, result
     )
@@ -1247,19 +1315,33 @@ async def _run_resumed_turn(
         msg_meta=session.msg_meta,
     )
 
+    decision_tool_name = getattr(session.invoke_kwargs.get("structured_output_model"), "__name__", "")
     await agent.turn_executor.prepare_turn_decision(
         msg_content=session.msg_content, msg_header=session.msg_header, msg_meta=session.msg_meta,
         task_id=task_id, decision=outcome.decision, strands_agent=session.strands_agent,
-        decision_tool_name=getattr(session.invoke_kwargs.get("structured_output_model"), "__name__", ""),
+        decision_tool_name=decision_tool_name,
     )
 
-    content = await agent._execute_turn_decision_outbox(
-        decision=outcome.decision,
-        incoming_content=session.msg_content,
-        incoming_header=session.msg_header,
-        incoming_meta=session.msg_meta,
-        structured_output_details=outcome.structured_output_details,
-        start_notes=session.start_notes,
+    try:
+        content = await agent._execute_turn_decision_outbox(
+            decision=outcome.decision,
+            incoming_content=session.msg_content,
+            incoming_header=session.msg_header,
+            incoming_meta=session.msg_meta,
+            structured_output_details=outcome.structured_output_details,
+            start_notes=session.start_notes,
+        )
+    except TurnActionRecoveryScheduled:
+        await agent.turn_executor.record_unsent_answer_work(
+            msg_content=session.msg_content, msg_header=session.msg_header, msg_meta=session.msg_meta,
+            task_id=task_id, decision=outcome.decision, strands_agent=session.strands_agent,
+            decision_tool_name=decision_tool_name,
+        )
+        raise
+    await agent.turn_executor.record_held_answer_work(
+        msg_content=session.msg_content, msg_header=session.msg_header, msg_meta=session.msg_meta,
+        task_id=task_id, decision=outcome.decision, content=content, strands_agent=session.strands_agent,
+        decision_tool_name=decision_tool_name,
     )
     await agent._apply_task_processing_result(task_id, task_info, content)
     agent._interrupted_turn_sessions.pop(task_id, None)
@@ -1403,9 +1485,10 @@ async def send_interrupt_request_for_result(
         entry_type=TaskHistoryType.QUERY_EVENT,
         importance=TaskHistoryImportance.HIGH,
         details={
-            "event": "task_steering_interrupt_request",
+            "event": INTERRUPT_REQUEST_EVENT,
             "steering_id": steering.steering_id,
             "interrupt_ids": [record.interrupt_id for record in interrupt_records],
+            INTERRUPT_WAITS_ON_REQUESTER_KEY: bool(upstream_interrupts),
         },
     )
     await agent.task_manager.operations_runtime.run(
@@ -1532,18 +1615,32 @@ async def consume_pending_proactive_guidance_message(
 
 
 class RuntimeSteeringPlugin:
-    """Apply queued proactive task guidance at Strands safe checkpoints."""
+    """Apply queued proactive task guidance at Strands safe checkpoints.
+
+    Waiting guidance cancels the next new tool call with its text, so the
+    model reads it before it goes on. A tool call resuming after its pause is
+    not new: it runs with its answer and the model gets its real result,
+    while the guidance waits for the next new call or the turn's check after
+    the call (``custom_agents.sdk.strands.paused_tool_calls``).
+    A resumed ``apply_change`` therefore applies the approved plan before the
+    model reads guidance sent during the wait (module docstring).
+    """
 
     name = "runtime_steering"
 
     def __init__(self, agent: Any) -> None:
         self.runtime_agent = agent
+        self._paused_calls = PausedToolCalls()
         _register_terminal_task_steering_cleanup(agent)
 
     def register_hooks(self, registry: HookRegistry, **_: Any) -> None:
         registry.add_callback(BeforeToolCallEvent, self.before_tool_call)
+        self._paused_calls.register_hooks(registry)
 
     async def before_tool_call(self, event: BeforeToolCallEvent) -> None:
+        # Every call is recorded whatever the settings say: steering turned on
+        # during a pause must not make the resumed call look new.
+        resumed = self._paused_calls.start(event)
         agent = self.runtime_agent
         if not mid_turn_steering_enabled(agent):
             return
@@ -1552,6 +1649,9 @@ class RuntimeSteeringPlugin:
             return
         # The task of the turn this tool call belongs to (runtime_context.task_work).
         task_id = bound_task_id()
+        if resumed:
+            _log_resumed_tool_call(agent, task_id, event)
+            return
         text = await consume_pending_proactive_guidance_message(agent, task_id)
         if not text:
             return
@@ -1560,6 +1660,28 @@ class RuntimeSteeringPlugin:
             "You MUST incorporate this guidance immediately before deciding whether to retry the tool or choose a different path.\n"
             f"{text}"
         )
+
+
+def _log_resumed_tool_call(agent: Any, task_id: Optional[str], event: BeforeToolCallEvent) -> None:
+    """Log a tool call that resumed after its pause and how much guidance waits for the next call.
+
+    The count comes from the task's list in memory, not the task store. Only
+    the process that paused can resume (its session is in memory and a
+    restart drops it), and that process keeps every guidance it accepted in
+    the list until a turn reads it. A store read here could fail the resumed
+    call, which is the result this rule keeps.
+    """
+
+    waiting = len(agent._pending_proactive_task_steering.get(task_id, ())) if task_id else 0
+    agent._logger.info(
+        "[%s] A resumed tool call keeps its result; any pending guidance waits for the next call. "
+        "event=task_steering_resumed_tool_call task_id=%s tool=%s tool_use_id=%s guidance_waiting=%s",
+        agent.id,
+        task_id or "-",
+        event.tool_use.get("name"),
+        event.tool_use.get("toolUseId"),
+        waiting,
+    )
 
 
 def _guidance_file_lines(item: TaskSteering, openable: frozenset[str]) -> list[str]:

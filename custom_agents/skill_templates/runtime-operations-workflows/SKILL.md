@@ -147,8 +147,10 @@ still needs it, they send it again; do not resend it for them.
 The runtime itself watches for stuck work and tells the person (Inbox and chat):
 an agent that stopped while holding a request (a replacement of its type is
 started and takes the work over), a handed-back task nobody picked up, long waits
-on an access decision or on the person's answer, and work with no progress for
-hours. Work a request handed to other agents stops when the request ends. When
+on an access decision or on the person's answer, work with no progress for
+hours, and a request waiting with nothing left that could continue it. A message
+to such a request is only taken as guidance and does not start it again.
+Work a request handed to other agents stops when the request ends. When
 a person asks about such a notice, look at the task's history and current state
 (`list_task_queue`), explain it in plain words, and if they want it stopped,
 give them `/stop task <task_id>`; do not resend or recreate the request.

@@ -109,6 +109,8 @@ async def test_real_interrupt_resume_checks_waits_and_saves_work_before_dispatch
         id="worker_1", turn_executor=executor, task_manager=manager, _logger=executor.logger,
         _execute_turn_decision_outbox=outbox, _apply_task_processing_result=AsyncMock(),
         _interrupted_turn_sessions={"run_1": session}, _strands_agent=sdk,
+        # A resumed turn checks for unread guidance after its call (task_steering_runtime).
+        _pending_proactive_task_steering={},
     )
     steering = TaskSteering(steering_type=TaskSteeringType.INTERRUPT_RESPONSE, target_task_id="run_1")
     response = [{"interruptResponse": {"interruptId": paused.interrupts[0].id, "response": "approved"}}]

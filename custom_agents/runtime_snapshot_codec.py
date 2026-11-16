@@ -211,8 +211,14 @@ def _outbox_with_batch(_key: object, value: object, state: WorkflowRuntimeState)
     return value if getattr(value, "batch_id", None) in state.execution_state.turn_action_batches else None
 
 
+# Mailbox event statuses recovery restores: deferred and processing events are
+# still to be handled; received ones record an event handled when it arrived
+# and are kept with the tree.
+REPLAYABLE_EVENT_STATUSES = frozenset({"received", "deferred", "processing"})
+
+
 def _replayable_event(_key: object, value: object, _state: WorkflowRuntimeState) -> object | None:
-    return value if getattr(value, "status", None) in {"received", "deferred", "processing"} else None
+    return value if getattr(value, "status", None) in REPLAYABLE_EVENT_STATUSES else None
 
 
 _RESTORE_POLICY: dict[str, RestorePolicy] = {

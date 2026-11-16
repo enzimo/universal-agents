@@ -346,6 +346,9 @@ async def test_a_proposed_web_tool_with_setup_data_works_with_no_code_change(tmp
     assert (token_step.kind, token_step.step_id) == ("external_step", "create_token"), "the link waits for the token"
 
     await gateway_result(lead, token_step, "completed", source="person_action")  # marked done on the workflow page
+    events = workflow_service_for(lead).repository.events(run.workflow_id)
+    [marked] = [event for event in events if event.code == "setup_completed" and event.step_id == "gitea_create_token"]
+    assert marked.message == "A setup page ended: completed (the person marked it done)."
     token, link = sent_pages(lead)
     assert link.kind == "account_link"
     await gateway_result(lead, link, "completed")

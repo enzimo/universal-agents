@@ -253,6 +253,8 @@ from custom_agents import delegation_runtime
 from custom_agents import subtask_watchdog_runtime
 from custom_agents import turn_action_outbox_runtime
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+from custom_agents.turn_action_refusal import TurnActionRefused
+from custom_agents.turn_failure_runtime import fail_task_after_turn_error
 from custom_agents.task_wait_limit import MAX_WAITS_PER_TASK
 from custom_agents.task_steering_runtime import (
     StrandsInterruptedTurnSession,
@@ -280,6 +282,7 @@ from custom_agents.structured_llm_messages import (
     TurnAction,
 )
 from custom_agents.task_manager import TaskInfo, TaskManager
+from custom_agents.task_records import task_answer_text
 from custom_messages.contracts.activity_v1 import TaskActivityEvent
 from custom_messages.contracts.control_v1 import (
     AgentCreationRequest,
@@ -394,14 +397,6 @@ def _optional_int_from_env(name: str) -> Optional[int]:
     return int(raw_value)
 
 
-def _task_answer_text(answer: Union[TaskAnswer, str, None]) -> str:
-    if isinstance(answer, TaskAnswer):
-        return str(answer.answer or "")
-    if answer is None:
-        return ""
-    return str(answer)
-
-
 def _has_unbalanced_markdown_delimiter(text: str) -> bool:
     if len(MARKDOWN_FENCE_PATTERN.findall(text)) % 2:
         return True
@@ -426,7 +421,7 @@ def _has_unbalanced_markdown_delimiter(text: str) -> bool:
 def _terminal_answer_quality_error(
     answer: Union[TaskAnswer, str, None],
 ) -> Optional[str]:
-    text = _task_answer_text(answer)
+    text = task_answer_text(answer)
     stripped = text.strip()
     if not stripped:
         return "answer is empty"
@@ -2351,7 +2346,7 @@ class UniversalAgent(BaseModel):
                     )
                     if quality_error:
                         answer_preview = _compact_debug_preview(
-                            _task_answer_text(outgoing_content.answer),
+                            task_answer_text(outgoing_content.answer),
                             max_chars=240,
                         )
                         self._logger.warning(
@@ -4551,6 +4546,20 @@ class UniversalAgent(BaseModel):
                     batch_id=batch.batch_id,
                     status="interrupted",
                 )
+            return True
+        except TurnActionRefused as refused:
+            # A refused action (a repeated final answer, custom_agents.turn_action_refusal)
+            # ends its task here as in a turn: re-raised, it left the task RETRYING
+            # with the main slot held, and nobody was told.
+            if lease is not None:
+                await self.task_manager.operations_runtime.run(
+                    coordinator.complete_batch,
+                    lease_id=lease.lease_id,
+                    root_task_id=root_task_id,
+                    batch_id=batch.batch_id,
+                    status="failed",
+                )
+            await fail_task_after_turn_error(self, due_record.source_task_id, source_info, refused)
             return True
         except Exception:
             if lease is not None:

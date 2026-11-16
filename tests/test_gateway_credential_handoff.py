@@ -450,6 +450,9 @@ class _Steps:
         ("http:registrar_two", "create_token"): ("Registrar Two", "https://registrar-two.example.com/profile/tokens"),
     }
 
+    def display_name(self, tool_id: str):
+        return next((name for (tool, _step), (name, _url) in self.TOOLS.items() if tool == tool_id), None)
+
     def external_step(self, tool_id: str, step_id: str):
         found = self.TOOLS.get((tool_id, step_id))
         if found is None:
@@ -527,7 +530,7 @@ async def _end(gateway: UserGateway, setup_request_id: str, ending: str) -> None
 
     setups = gateway._credential_workflow.tool_setups
     if ending == "marked_done":
-        assert await setups.external_step_done(setup_request_id, person_id=gateway.config.user.canonical_user_id)
+        assert await setups.external_step_done(setup_request_id, person_id=gateway.config.user.canonical_user_id, step_title="Create a key")
         return
     assert await setups._finish(
         setup_request_id, PageEnding(ending, f"The page ended: {ending}."), attempt=1, source="task_request"

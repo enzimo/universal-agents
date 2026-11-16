@@ -14,7 +14,9 @@ requests. This page shows, for the person the workflow belongs to:
 - setup steps done outside Universal Agents (``external_step``, such as
   creating a token on a service's site) with **Mark done**: only the person
   the workflow belongs to marks their own waiting step, through the gateway's
-  setup service, which tells the waiting task (``mark_setup_done``);
+  setup service, which tells the waiting task and closes the step's chat card
+  with the step's stored title (``mark_setup_done``; the title comes from the
+  stored step, never from the browser);
 - **Review Ready Requests**: the waiting requests the person can decide, with
   the Inbox's own choices (Approve or Deny for a staged change; Approve,
   Approve read only, Approve for this task only or Deny for access). Each
@@ -149,7 +151,10 @@ class GatewayAccessWorkflowPage:
         if link is None or link.kind != "external_step" or link.status != "waiting":
             raise WorkflowPageRefused("This step is not waiting to be marked done. Refresh the page.")
         setups = self.access_inbox.tool_setups
-        if setups is None or not await setups.external_step_done(setup_request_id, person_id=owner_id):
+        # The title is the stored one on the row the person clicked, never from the browser.
+        if setups is None or not await setups.external_step_done(
+            setup_request_id, person_id=owner_id, step_title=link.step_title
+        ):
             raise WorkflowPageRefused("This step was already marked done or no longer waits. Refresh the page.")
         logger.info(
             "A person marked a setup step done. event=workflow_setup_marked_done workflow_id=%s setup_request_id=%s",
