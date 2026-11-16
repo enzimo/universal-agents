@@ -4557,16 +4557,35 @@ the desktop app never offers an older version.
   `merge_turn_attachments` takes, because remote workers may share a
   PostgreSQL store), then the gateway record, so a run that stops part way is
   finished by the next one (a destination already holding the file counts as
-  `already_moved`). Whether the files are here is decided from what the step
-  finds, not from the folder alone: if records wait for files and none of
-  them is in the transfer folder or already at its destination (the folder
-  is not there, an unmounted disk left an empty mount point, or the 0.10
-  adapter host created the folder for a new upload), nothing changes and no
-  marker is written: an error (`event=adapter_host_files_folder_missing`)
-  says to mount it and restart, or, if the files are gone, to run the command
-  with `--files-gone`; startup goes on and the next start tries again. A
-  stored name that cannot be looked up (a NUL byte, too long a name) is no
-  sign either way. One error rule holds for every file and path operation of
+  `already_moved`, without needing the transfer folder). Whether the transfer
+  folder is here is decided only from the folder itself, never from a file an
+  earlier run already moved: it is here when it opens and holds one of the
+  waiting files, or when its device and inode are the ones the progress
+  record names (`InstanceLayout.adapter_host_files_upgrade_progress_path`,
+  `state/upgrades/adapter-host-files.started`). A run that will change
+  anything writes that record first, once the folder opened, so a run that
+  stopped after moving every file still in the folder is finished by the next
+  one, and an empty mount point or another folder is never taken for the
+  folder an earlier run started on (counting a moved file as proof let an
+  empty mount point drop the records of files that still existed). If the
+  folder is not here (not there, an unmounted disk left an empty mount point,
+  the 0.10 adapter host created the folder for a new upload, or another
+  folder holds none of the files), nothing changes and no marker is written:
+  an error (`event=adapter_host_files_folder_missing`, with the recorded and
+  current identity) says to mount it and restart, or, if the files are gone,
+  to run the command with `--files-gone`; startup goes on and the next start
+  tries again. A `--files-gone` run whose folder is not there writes no record
+  and needs none. Device numbers are not stable on every file system (NFS,
+  CIFS, FUSE, 9p, drvfs and overlay assign them at mount time): a folder
+  mounted again that still holds a waiting file is here by its files and the
+  record is rewritten; one that holds none waits until `--files-gone`, which
+  is safe then because every file it held already moved. Device and inode
+  rather than a token file: the folder belongs to the adapter host and may be
+  read-only, and a mismatch only ever leads to waiting. Before any record is
+  dropped the folder is opened again and must have the same identity, because
+  every look opens it by path and a folder unmounted meanwhile would look
+  empty. A stored name that cannot be looked up (a NUL byte, too long a name)
+  is no sign either way. One error rule holds for every file and path operation of
   the step (opening, reading, writing, syncing, renaming, removing and
   looking up a file or folder, and building its path; each catches `OSError`
   and `ValueError`), because finding rare errors one at a time kept turning
@@ -4583,19 +4602,22 @@ the desktop app never offers an older version.
   records again (moved files are no longer found there, so nothing moves
   twice); (2) an error that concerns a folder (not there, no permission to
   read or search it, a read-only or full `state/uploads` or a transfer folder
-  the move cannot remove names from, a folder sync that fails) changes
-  nothing further, keeps every record not yet finished and writes no marker:
-  a folder that holds none of the files waits as above, any other stops
-  startup with `event=adapter_host_files_folder_unusable` and a message
-  naming the folder and, when one file was being worked on, that file and its
-  attachment id, and a restart after the fix finishes the work (so does any
+  the move cannot remove names from, a folder sync that fails, a progress
+  record or marker that cannot be read or written) changes nothing further,
+  keeps every record not yet finished and writes no marker: a transfer folder
+  that is not here waits as above, any other stops startup with
+  `event=adapter_host_files_folder_unusable` and a message naming the folder
+  and, when one file was being worked on, that file and its attachment id
+  (and `--files-gone` only when the transfer folder vanished during the run,
+  the one cause that option changes), and a restart after the fix finishes
+  the work (so does any
   other unexpected error, such as a database error); a sync the file system
   does not offer (`EINVAL`, `EOPNOTSUPP`, as some FUSE, 9p and shared-folder
   mounts answer) is logged once per folder
   (`event=adapter_host_files_sync_unsupported`) and is no failure; (3) a
   record is dropped only when its file moved and both records were
-  rewritten, when the file is proven absent from a transfer folder that
-  opened, or with `--files-gone`. A dropped file's entries are removed from
+  rewritten, when the file is proven absent from a transfer folder that is
+  here, or with `--files-gone`. A dropped file's entries are removed from
   its turns, which are marked as not recording all of their request's files
   (`attachments_recorded` 0, the marker 0.9.12 shipped), so the model asks
   the person to send it again, and its gateway record is deleted. Records are

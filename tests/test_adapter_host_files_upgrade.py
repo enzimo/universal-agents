@@ -43,6 +43,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -509,7 +510,7 @@ def test_with_the_folder_missing_nothing_changes_until_the_files_are_declared_go
     assert (instance.files(), instance.recorded("task_1"), instance.gateway().get_attachment("att_photo")) == before
     assert not instance.layout.adapter_host_files_upgrade_path.exists()
     (error,) = _events(caplog, "adapter_host_files_folder_missing")
-    assert "--files-gone" in error and error.endswith(f"folder={instance.transfer} waiting=3")
+    assert "--files-gone" in error and error.endswith(f"folder={instance.transfer} waiting=3 recorded=- current=-")
 
     gone = instance.run(files_gone=True)
 
@@ -851,6 +852,7 @@ _TRANSFER = _is(lambda instance: instance.transfer)
 _SESSION = _is(lambda instance: instance.photo_destination.parent)
 _DESTINATION = _is(lambda instance: instance.photo_destination)
 _MARKER = _is(lambda instance: instance.layout.adapter_host_files_upgrade_path)
+_PROGRESS = _is(lambda instance: instance.layout.adapter_host_files_upgrade_progress_path)
 _FD_FUNCTIONS = {"pread", "write", "fsync", "fstat", "fchmod"}
 
 
@@ -929,8 +931,11 @@ _FAULTS = {
         setup=_photo_renamed_before_records,
     ),
     "path_construction": _Fault("path", _PHOTO, ValueError("no file name"), "refused", "unsafe_name"),
-    # Rule 2: a folder.
+    # Rule 2: a folder. The first open of the transfer folder is the one that reads its identity.
     "open_transfer_folder": _Fault("open", _TRANSFER, errno.EACCES, "folder", "transfer"),
+    "fstat_transfer_identity": _Fault("fstat", _TRANSFER, errno.EIO, "folder", "transfer"),
+    "read_progress_record": _Fault("open", _PROGRESS, errno.EIO, "folder", "state"),
+    "write_progress_record": _Fault("replace", _PROGRESS, errno.EROFS, "folder", "state"),
     "stat_in_unsearchable_folder": _Fault("stat", _ORPHAN, errno.EACCES, "folder", "transfer"),
     "open_file_in_unsearchable_folder": _Fault(
         "open", _PHOTO, errno.EACCES, "folder", "transfer", also=(("stat", _PHOTO, errno.EACCES),)
@@ -1144,6 +1149,276 @@ def test_a_run_stopped_part_way_is_finished_by_the_next_run(instance: _Instance,
     assert instance.photo_destination.read_bytes() == CONTENT["att_photo"]
 
 
+# --- The progress record: a run stopped part way, then another folder or none ----------------------------
+#
+# Each partial state comes from a real run stopped by an exception, so the progress record it leaves is the
+# one a real stop leaves.
+
+
+def _identity(path: Path) -> tuple[int, int]:
+    info = path.stat()
+    return (info.st_dev, info.st_ino)
+
+
+def _recorded(instance: _Instance) -> tuple[int, int]:
+    body = json.loads(instance.layout.adapter_host_files_upgrade_progress_path.read_text())
+    assert body["transfer_folder"] == str(instance.transfer) and body["started_at_utc"]
+    return (body["device"], body["inode"])
+
+
+def _point_record_at(instance: _Instance, identity: tuple[int, int]) -> None:
+    path = instance.layout.adapter_host_files_upgrade_progress_path
+    body = json.loads(path.read_text())
+    body["device"], body["inode"] = identity
+    path.write_text(json.dumps(body))
+
+
+def _stopped_after_the_rename(instance: _Instance, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real run renamed the photo into state/uploads and stopped before rewriting its records."""
+
+    original = _RelationalConversationRepository.relocate_turn_attachment
+
+    def stop(self, turns, attachment_id, *, local_path):
+        if local_path is not None:
+            raise _Stop("stopped right after the rename")
+        return original(self, turns, attachment_id, local_path=local_path)
+
+    monkeypatch.setattr(_RelationalConversationRepository, "relocate_turn_attachment", stop)
+    with pytest.raises(_Stop):
+        instance.run()
+    monkeypatch.undo()
+    assert instance.photo_destination.read_bytes() == CONTENT["att_photo"] and not instance.photo_source.exists()
+    _assert_photo_records_kept(instance)
+    assert _recorded(instance) == _identity(instance.transfer), "the record names the folder the run started on"
+
+
+def _throw(*_args: Any) -> None:
+    raise _Stop("stopped while dropping records")
+
+
+def _stopped_while_dropping(instance: _Instance, monkeypatch: pytest.MonkeyPatch, stop_in: str, **run: Any) -> None:
+    """A real run stopped at the start of forget_unmovable, or in _forget between a turn and its gateway record."""
+
+    if stop_in == "forget_unmovable":
+        monkeypatch.setattr(upgrade_module._Step, "forget_unmovable", _throw)
+    else:
+        monkeypatch.setattr(_RelationalGatewayStateRepository, "delete_attachment", _throw)
+    with pytest.raises(_Stop):
+        instance.run(**run)
+    monkeypatch.undo()
+
+
+def _mount_back(instance: _Instance) -> None:
+    if instance.transfer.exists():
+        instance.transfer.rmdir()
+    (instance.root / "unmounted").rename(instance.transfer)
+
+
+@pytest.mark.parametrize("record_names", ["the_real_folder", "the_empty_folder"])
+def test_after_a_partial_run_an_empty_mount_point_drops_nothing(instance: _Instance, monkeypatch, caplog, record_names) -> None:
+    """FAIL-2: the moved photo at its destination is no sign the folder is here; only its identity is.
+
+    With the record pointed at the empty folder (``the_empty_folder``) the step takes the empty folder for the
+    real one and drops the records of files that still exist: the identity comparison is what protects them.
+    """
+
+    _stopped_after_the_rename(instance, monkeypatch)
+    real = _identity(instance.transfer)
+    instance.transfer.rename(instance.root / "unmounted")
+    instance.transfer.mkdir()  # the volume is not mounted: an empty folder in its place
+    empty = _identity(instance.transfer)
+    assert empty != real
+    if record_names == "the_empty_folder":
+        _point_record_at(instance, empty)
+    before = _untouched(instance)
+
+    with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    if record_names == "the_empty_folder":
+        assert result.finished and "att_orphan" not in instance.files(), "the orphan's file still exists elsewhere"
+        return
+    assert not result.finished and result.folder_missing and result.waiting == 3
+    assert _untouched(instance) == before and not instance.layout.adapter_host_files_upgrade_path.exists()
+    assert _recorded(instance) == real, "a waiting run changes nothing, the record included"
+    (error,) = _events(caplog, "adapter_host_files_folder_missing")
+    assert "--files-gone" in error and "mounted again" in error
+    assert error.endswith("recorded=device=%s,inode=%s current=device=%s,inode=%s" % (*real, *empty))
+
+    _mount_back(instance)
+    finished = instance.run()
+
+    assert finished.finished and (finished.counts.already_moved, finished.counts.missing) == (1, 1)
+    assert instance.turn_paths("task_1")["att_photo"] == str(instance.photo_destination)
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+    assert instance.files()["att_orphan"] == str(instance.transfer / "adapter_upload_orphan"), "its file is here: kept"
+
+
+def test_after_a_partial_run_a_missing_folder_waits_until_the_files_are_declared_gone(
+    instance: _Instance, monkeypatch, caplog
+) -> None:
+    """EVI-1: the step waits as the docs say, naming --files-gone, and --files-gone finishes without a record."""
+
+    _stopped_after_the_rename(instance, monkeypatch)
+    recorded = _recorded(instance)
+    instance.transfer.rename(instance.root / "unmounted")
+    before = _untouched(instance)
+
+    with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
+        waiting = instance.run()
+
+    assert waiting.folder_missing and waiting.waiting == 3 and _untouched(instance) == before
+    (error,) = _events(caplog, "adapter_host_files_folder_missing")
+    assert "--files-gone" in error and "it is now not here" in error and "mounted again" not in error
+    assert error.endswith("recorded=device=%s,inode=%s current=-" % recorded)
+
+    real_write = upgrade_module._write_state_file
+
+    def no_progress_record(path, body):
+        assert path != instance.layout.adapter_host_files_upgrade_progress_path, "--files-gone needs no record"
+        return real_write(path, body)
+
+    monkeypatch.setattr(upgrade_module, "_write_state_file", no_progress_record)
+    gone = instance.run(files_gone=True)
+    monkeypatch.undo()
+
+    assert gone.finished and (gone.counts.already_moved, gone.counts.missing, gone.counts.no_record) == (1, 1, 1)
+    assert instance.turn_paths("task_1")["att_photo"] == str(instance.photo_destination)
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+    assert set(instance.files()) == {"att_photo", "att_web"} and instance.gateway().get_attachment("att_lost") is None
+    assert _recorded(instance) == recorded and instance.layout.adapter_host_files_upgrade_path.is_file()
+
+
+def test_a_files_gone_run_stopped_while_dropping_is_finished_by_another(instance: _Instance, monkeypatch, caplog) -> None:
+    _stopped_after_the_rename(instance, monkeypatch)
+    instance.transfer.rename(instance.root / "unmounted")
+    _stopped_while_dropping(instance, monkeypatch, "delete_attachment", files_gone=True)
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+    assert "att_lost" not in instance.turn_paths("task_1") and instance.gateway().get_attachment("att_lost") is not None
+
+    with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
+        waiting = instance.run()
+
+    assert waiting.folder_missing and waiting.waiting == 2  # att_lost's gateway record, the orphan's entry
+    (error,) = _events(caplog, "adapter_host_files_folder_missing")
+    assert "--files-gone" in error
+    gone = instance.run(files_gone=True)
+    assert gone.finished and instance.gateway().get_attachment("att_lost") is None and "att_orphan" not in instance.files()
+
+
+@pytest.mark.parametrize("stop_in", ["forget_unmovable", "delete_attachment"])
+def test_a_run_stopped_while_dropping_records_is_finished_by_the_next_start(instance: _Instance, monkeypatch, stop_in) -> None:
+    """FAIL-1: once the photo moved only absent files wait, so only the recorded identity says the folder is here."""
+
+    (instance.transfer / "adapter_upload_orphan").unlink()
+    _stopped_while_dropping(instance, monkeypatch, stop_in)
+    assert _recorded(instance) == _identity(instance.transfer)
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+    if stop_in == "delete_attachment":
+        assert "att_lost" not in instance.turn_paths("task_1"), "its turn entry was dropped"
+        assert instance.gateway().get_attachment("att_lost") is not None, "its gateway record was not yet"
+
+    result = instance.run()
+
+    assert result.finished and (result.counts.missing, result.counts.no_record) == (1, 1)
+    assert instance.gateway().get_attachment("att_lost") is None
+    assert set(instance.files()) == {"att_photo", "att_web"} and instance.recorded("task_1") == 0
+    assert instance.layout.adapter_host_files_upgrade_path.is_file()
+
+
+def test_a_copied_folder_holding_a_waiting_file_is_here_and_the_record_names_it(instance: _Instance, monkeypatch) -> None:
+    _stopped_after_the_rename(instance, monkeypatch)
+    old = _recorded(instance)
+    shutil.copytree(instance.transfer, instance.root / "copied")
+    instance.transfer.rename(instance.root / "old-disk")
+    (instance.root / "copied").rename(instance.transfer)
+    assert _identity(instance.transfer) != old
+
+    result = instance.run()
+
+    assert result.finished and result.counts.already_moved == 1
+    assert instance.files()["att_orphan"] == str(instance.transfer / "adapter_upload_orphan")
+    assert _recorded(instance) == _identity(instance.transfer), "the record was rewritten before the first change"
+
+
+@pytest.mark.parametrize(
+    "body", [b"not json", b"[]", b'{"device": "1", "inode": 2}', b"\xff"], ids=["text", "list", "string", "bytes"]
+)
+def test_a_progress_record_that_does_not_parse_is_ignored_and_the_step_waits(instance: _Instance, monkeypatch, caplog, body) -> None:
+    (instance.transfer / "adapter_upload_orphan").unlink()
+    _stopped_while_dropping(instance, monkeypatch, "forget_unmovable")
+    instance.layout.adapter_host_files_upgrade_progress_path.write_bytes(body)
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.folder_missing and instance.gateway().get_attachment("att_lost") is not None
+    assert len(_events(caplog, "adapter_host_files_progress_unreadable")) == 1
+    assert instance.run(files_gone=True).finished and instance.gateway().get_attachment("att_lost") is None
+
+
+def _vanish(instance: _Instance) -> None:
+    instance.transfer.rename(instance.root / "unmounted")
+
+
+def _empty_in_its_place(instance: _Instance) -> None:
+    _vanish(instance)
+    instance.transfer.mkdir()
+
+
+@pytest.mark.parametrize(
+    ("change", "before"),
+    [(_vanish, "handle"), (_vanish, "forget_unmovable"), (_empty_in_its_place, "forget_unmovable")],
+    ids=["vanished_before_the_moves", "vanished_before_the_drops", "emptied_before_the_drops"],
+)
+def test_a_transfer_folder_that_changes_during_the_run_drops_nothing(
+    instance: _Instance, monkeypatch, caplog, change, before
+) -> None:
+    """U14 and C06: every look opens the folder by path, so it is checked again before anything is dropped.
+
+    Only a folder that is no longer there names --files-gone; one replaced by another folder does not.
+    """
+
+    real = getattr(upgrade_module._Step, before)
+    changed: list[bool] = []
+
+    def change_first(self, *args):
+        if not changed:
+            changed.append(True)
+            change(instance)
+        return real(self, *args)
+
+    monkeypatch.setattr(upgrade_module._Step, before, change_first)
+    with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
+        with pytest.raises(upgrade_module.FolderProblem) as raised:
+            instance.run()
+    monkeypatch.undo()
+
+    problem = raised.value
+    assert problem.folder == instance.transfer
+    assert ("--files-gone" in str(problem)) == (change is _vanish)
+    assert instance.gateway().get_attachment("att_lost") is not None and instance.recorded("task_1") == 1, "nothing dropped"
+    assert "att_orphan" in instance.files() and not instance.layout.adapter_host_files_upgrade_path.exists()
+    _mount_back(instance)
+    result = instance.run()
+    assert result.finished and instance.gateway().get_attachment("att_lost") is None
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permissions do not stop root")
+def test_files_gone_is_not_advised_for_a_folder_it_cannot_read(instance: _Instance) -> None:
+    """--files-gone only turns a folder that is not there into proven absence; it cannot get past EACCES."""
+
+    os.chmod(instance.transfer, 0)
+    try:
+        for files_gone in (False, True):
+            with pytest.raises(upgrade_module.FolderProblem) as raised:
+                instance.run(files_gone=files_gone)
+            assert raised.value.folder == instance.transfer and "--files-gone" not in str(raised.value)
+    finally:
+        os.chmod(instance.transfer, 0o755)
+
+
 def test_across_file_systems_it_copies_and_removes_the_original_after_both_records_change(instance: _Instance, monkeypatch) -> None:
     real_rename = os.rename
 
@@ -1276,6 +1551,35 @@ def test_the_operator_command_stops_with_the_folder_named(monkeypatch, capsys) -
         assistant_cli._upgrade_adapter_host_files(SimpleNamespace(config="instance_config.yaml", files_gone=False))
 
     assert str(folder) in str(raised.value.code) and "restart" in str(raised.value.code)
+    assert "--files-gone" not in str(raised.value.code)
+
+
+def test_the_operator_command_names_files_gone_where_it_helps(monkeypatch, capsys) -> None:
+    import assistant_cli
+
+    monkeypatch.setattr(assistant_cli.GatewayInstanceConfig, "load_for_process", staticmethod(lambda _path: object()))
+    problem = upgrade_module.FolderProblem(Path("/srv/transfer"), "root_unavailable", "No such file", not_there=True)
+    problem.files_gone_helps = True
+    waiting = upgrade_module.UpgradeResult(finished=False, counts=upgrade_module.UpgradeCounts(), waiting=2)
+    outcomes: list[Any] = [problem, waiting]
+
+    def run(_config, *, files_gone):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(upgrade_module, "upgrade_adapter_host_files", run)
+    args = SimpleNamespace(config="instance_config.yaml", files_gone=False)
+    with pytest.raises(SystemExit) as raised:
+        assistant_cli._upgrade_adapter_host_files(args)
+    assert "--files-gone" in str(raised.value.code)
+
+    assistant_cli._upgrade_adapter_host_files(args)
+
+    printed = capsys.readouterr().out
+    assert "2 file(s) wait" in printed and "not the folder an earlier run started on" in printed
+    assert "--files-gone" in printed
 
 
 # --- After the step ------------------------------------------------------------------------------

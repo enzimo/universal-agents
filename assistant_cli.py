@@ -2629,8 +2629,9 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
 
     Exits 0 when the step finished (a file it refused keeps its records and
     is logged; it never stops startup) or is waiting for a transfer folder
-    that is not here or holds none of the files (startup goes on and the next
-    start tries again), and non-zero when a folder cannot be used
+    that is not here (not there, holding none of the files, or not the folder
+    an earlier run started on; startup goes on and the next start tries
+    again), and non-zero when a folder cannot be used
     (``FolderProblem``, with a message naming it) or on another unexpected
     error, which stops startup until a restart finishes it.
     """
@@ -2646,8 +2647,9 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
         print("The adapter-host files were already moved into state/uploads.")
     elif result.folder_missing:
         print(
-            f"{result.waiting} file(s) wait for the adapter host's transfer folder, which is not here or holds "
-            "none of them. See the log."
+            f"{result.waiting} file(s) wait for the adapter host's transfer folder, which is not here, holds "
+            "none of them, or is not the folder an earlier run started on. See the log; if the files are really "
+            "gone, run this command again with --files-gone."
         )
     else:
         counts = result.counts

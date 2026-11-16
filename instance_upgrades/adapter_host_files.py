@@ -68,17 +68,36 @@ What it does, per attachment id:
    the source removed only after both records changed;
 4. rewrites the conversation entries first and the gateway record second.
    A run that stops part way is finished by the next one: a destination that
-   already holds the file (same sha256) counts as ``already_moved`` and both
-   records are rewritten again.
+   already holds the file (same sha256) counts as ``already_moved`` without
+   needing the transfer folder, and both records are rewritten again.
 
-Whether the files are here is decided from what the step finds, not from the
-folder alone: when records wait for files and none of them is in the transfer
-folder or already at its destination (the folder is not there, or a mount
-point or a folder the 0.10 adapter host created is empty), nothing changes and
-no marker is written: one error says to mount the folder and restart, or, if
-the files are really gone, to run the command with ``--files-gone``. Startup
-goes on either way, and the next start tries again. A stored name that cannot
-be looked up (a NUL byte, too long a name) is no sign either way.
+Whether the transfer folder is here is decided only from the folder itself,
+never from a file an earlier run already moved to its destination: it is here
+when it opens and holds one of the waiting files, or when its device and inode
+are the ones the progress record names
+(``InstanceLayout.adapter_host_files_upgrade_progress_path``). A run that will
+change anything writes that record first, once the folder opened (by its files,
+by the recorded identity, or, with ``--files-gone``, merely present), so a run
+that stopped after moving every file still in the folder is finished by the
+next one, which finds only absent files left. When records wait for files and
+the folder is not here (it is not there, or a mount point, a folder the 0.10
+adapter host created or another folder holds none of them and is not the
+recorded one), nothing changes and no marker is written: one error says to
+mount the folder and restart, or, if the files are really gone, to run the
+command with ``--files-gone``, and, when the record names another identity,
+logs both. Startup goes on either way, and the next start tries again. A
+``--files-gone`` run whose folder is not there writes no record and needs
+none; one that stops part way leaves the next normal start waiting, and a
+second ``--files-gone`` run finishes. Device numbers are not stable on every
+file system (NFS, CIFS, FUSE, 9p, drvfs and overlay assign them at mount
+time): a folder mounted again that still holds a waiting file is here by its
+files and the record is rewritten; one that holds none waits until
+``--files-gone``, which is safe then, because every file it held was moved and
+its records point at the destination. Device and inode rather than a token
+file in the folder: the transfer folder belongs to the adapter host and may be
+read-only, and an identity that does not match only ever leads to waiting. A
+stored name that cannot be looked up (a NUL byte, too long a name) is no sign
+either way.
 
 One error rule holds for every file and path operation of the step (opening,
 reading, writing, syncing, renaming, removing and looking up a file or folder,
@@ -102,19 +121,28 @@ which of three cases it is.
 2. An error that concerns a folder (the transfer folder or ``state/uploads``
    not there, no permission to read or search a folder, a read-only or full
    ``state/uploads`` or a transfer folder the move cannot remove names from,
-   a folder sync that fails) changes nothing further:
-   every record not yet finished stays and no marker is written. A transfer
-   folder that is not here or holds none of the files waits, as above; any
-   other folder error raises ``FolderProblem``, whose message names the folder
-   and, when one file was being worked on, that file and its attachment id;
-   the launcher stops startup, and a restart after the fix finishes the work.
-   So does any other unexpected error (a database error). A sync the file
+   a folder sync that fails, a progress record or marker in
+   ``state/upgrades`` that cannot be read or written) changes nothing
+   further: every record not yet finished stays and no marker is written. A
+   transfer folder that is not here waits, as above; any other folder error
+   raises ``FolderProblem``, whose message names the folder and, when one
+   file was being worked on, that file and its attachment id; the launcher
+   stops startup, and a restart after the fix finishes the work. So does any
+   other unexpected error (a database error). When the transfer folder
+   vanished during the run the message also names ``--files-gone``, the one
+   cause that option changes; an unreadable folder or an I/O error does not.
+   Before any record is dropped the transfer folder is opened again and must
+   have the identity the run decided on: every look opens it by path, so a
+   folder unmounted or replaced meanwhile would look empty, and a changed
+   folder is a folder error that drops nothing. A progress record that does
+   not parse is logged (``event=adapter_host_files_progress_unreadable``) and
+   treated as absent, so the step waits rather than trust it. A sync the file
    system does not offer (``EINVAL`` or ``EOPNOTSUPP``, as some FUSE, 9p and
    shared-folder mounts answer) is no failure: it is logged once per folder
    (``event=adapter_host_files_sync_unsupported``) and the step goes on.
 3. A record is dropped only when its file moved and both records were
-   rewritten, when the file is proven absent from a transfer folder that
-   opened, or with ``--files-gone`` (a transfer folder that is not here then
+   rewritten, when the file is proven absent from a transfer folder that is
+   here (above), or with ``--files-gone`` (a transfer folder that is not here then
    holds none of the files). A dropped file's conversation entries are
    removed from the turns, which are marked as not recording all of their
    request's files (``attachments_recorded`` 0, the marker 0.9.12 shipped), so
@@ -193,6 +221,11 @@ RECORDS_DROPPED = "dropped"
 RECORDS_KEPT = "kept"
 RECORDS_PARTLY_DROPPED = "partly_dropped"
 
+# The operator's command that declares the waiting files gone (rule 3), named in messages.
+FILES_GONE_COMMAND = "assistant_cli upgrade adapter-host-files --config <instance_config.yaml> --files-gone"
+# Why a transfer folder that opened is not the one the run decided on (C06).
+REASON_FOLDER_CHANGED = "folder_changed"
+
 # What 0.9.13's adapter host named each file it kept, directly in its transfer folder
 # (``new_id("adapter_upload")`` in ``assistant_gateway.adapter_host.service``).
 TRANSFER_FILE_PREFIX = "adapter_upload_"
@@ -217,6 +250,7 @@ _UNKNOWN = "unknown"  # the name could not be looked up: no sign either way
 
 _BATCH = 500
 _CHUNK = 1024 * 1024
+_PROGRESS_LIMIT = 64 * 1024  # the progress record is a few lines
 
 
 @dataclass
@@ -307,24 +341,35 @@ class FolderProblem(Exception):
 
     ``file`` is the file being worked on when the error came, and
     ``attachment_id`` its attachment (set by the caller that knows it).
+    ``not_there`` says the folder itself is not there (``FileNotFoundError``),
+    the one cause ``--files-gone`` changes; ``upgrade_adapter_host_files``
+    sets ``files_gone_helps`` when that folder is the transfer folder, and
+    the message then names ``--files-gone``.
     """
 
-    def __init__(self, folder: Path, reason: str, detail: str, *, file: Optional[Path] = None) -> None:
+    def __init__(
+        self, folder: Path, reason: str, detail: str, *, file: Optional[Path] = None, not_there: bool = False
+    ) -> None:
         super().__init__(detail)
         self.folder = folder
         self.reason = reason
         self.detail = detail
         self.file = file
+        self.not_there = not_there
         self.attachment_id: Optional[str] = None
+        self.files_gone_helps = False
 
     def __str__(self) -> str:
         at = f", working on {self.file}" if self.file is not None else ""
         if self.attachment_id is not None:
             at += f" for attachment {self.attachment_id}"
-        return (
+        text = (
             f"The upgrade step for adapter-host files cannot use the folder {self.folder} ({self.detail}{at}). "
             "Fix the folder (mount it, its permissions, free space) and restart; nothing was lost."
         )
+        if self.files_gone_helps:
+            text += f" If the files are really gone, run '{FILES_GONE_COMMAND}'."
+        return text
 
 
 @contextmanager
@@ -358,27 +403,22 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
         gateway=gateway,
         conversations=conversations,
         marker=marker,
+        progress=Path(layout.adapter_host_files_upgrade_progress_path),
         files_gone=files_gone,
     )
     try:
         items = step.find()
-        waiting, found = step.survey(items)
-        if waiting and not found and not files_gone:
-            logger.error(
-                "Files sent through chat apps the adapter host ran are recorded in its transfer folder, but the "
-                "folder is not here or holds none of them, so they were not moved into state/uploads and nothing "
-                "was changed. Mount the folder (interactive_apps.adapter_host.upload_dir) and restart; if the files "
-                "are really gone, run 'assistant_cli upgrade adapter-host-files --config <instance_config.yaml> "
-                "--files-gone'. event=adapter_host_files_folder_missing folder=%s waiting=%s",
-                transfer,
-                waiting,
-            )
+        waiting, here = step.survey(items)
+        if waiting and not here and not files_gone:
+            step.report_waiting(waiting)
             return UpgradeResult(finished=False, counts=UpgradeCounts(), waiting=waiting)
+        step.start()
         for item in items:
             step.handle(item)
         step.forget_unmovable()
-        _write_marker(marker, step.counts)
+        _write_state_file(marker, {"finished_at_utc": _now(), **asdict(step.counts)})
     except FolderProblem as problem:
+        problem.files_gone_helps = problem.not_there and problem.folder == transfer
         logger.error(
             "%s event=adapter_host_files_folder_unusable folder=%s file=%s attachment_id=%s reason=%s",
             problem,
@@ -414,6 +454,7 @@ class _Step:
         gateway: GatewayStateRepository,
         conversations: ConversationRepository,
         marker: Path,
+        progress: Path,
         files_gone: bool = False,
     ) -> None:
         self._transfer = transfer
@@ -421,6 +462,10 @@ class _Step:
         self._gateway = gateway
         self._conversations = conversations
         self._marker = marker
+        self._progress = progress
+        # The transfer folder's (device, inode) when survey opened it, and what the progress record names.
+        self._identity: Optional[tuple[int, int]] = None
+        self._recorded: Optional[tuple[int, int]] = None
         # With --files-gone a transfer folder that is not here holds none of the files (rule 3).
         self._files_gone = files_gone
         self.counts = UpgradeCounts()
@@ -485,40 +530,166 @@ class _Step:
         return path
 
     def survey(self, items: list[_Item]) -> tuple[int, bool]:
-        """How many attachment ids wait for files in the transfer folder, and whether one of those files is here.
+        """How many attachment ids wait for files in the transfer folder, and whether that folder is here.
 
-        A file is here when it is in the transfer folder or already at its
-        destination (an earlier run moved it and stopped). When none is, the
-        folder is not here or is not the one 0.9.13 wrote (an empty mount
-        point, a folder the 0.10 adapter host created), so the caller changes
-        nothing. A name that cannot be looked up says nothing about the
-        folder. A folder that answers with another error raises ``FolderProblem``.
+        Decided only from the transfer folder itself, never from a file an
+        earlier run already moved to its destination: the folder is here when
+        it opens and holds one of the waiting files, or when its device and
+        inode are the ones the progress record names (an earlier run started
+        on this folder, so a file it lacks is proven absent). Otherwise it is
+        not there, or is not the one 0.9.13 wrote (an empty mount point, a
+        folder the 0.10 adapter host created, a folder mounted again with a
+        new device number), and the caller changes nothing. A name that
+        cannot be looked up says nothing about the folder. A folder or record
+        that answers with another error raises ``FolderProblem``.
         """
 
-        waiting = 0
-        found = False
+        if not items:
+            return 0, False
+        self._identity = self._folder_identity(absent_is_missing=True)
+        self._recorded = self._read_progress()
+        if self._identity is None:
+            return len(items), False
+        if self._recorded == self._identity:
+            return len(items), True
         for item in items:
-            waiting += 1
-            if not found:
-                with _naming(item.attachment_id):
-                    found = self._here(item)
-        return waiting, found
+            with _naming(item.attachment_id):
+                if self._holds_one(item):
+                    return len(items), True
+        return len(items), False
 
-    def _here(self, item: _Item) -> bool:
+    def _holds_one(self, item: _Item) -> bool:
+        """Whether the transfer folder holds a file one of ``item``'s records names."""
+
         candidates = {entry.path for entry in item.entries}
         if item.record is not None:
-            try:
-                source, destination = self._names(item, item.record)
-            except _Unmovable:
-                pass  # a record whose names cannot be used is no sign either way
-            else:
-                if _look(self._uploads, destination, absent_is_missing=True) == _THERE:
-                    return True
+            source = self._in_transfer(item.record.local_path)
+            if source is not None:
                 candidates.add(source)
         return any(
             _look(self._transfer, (path.name,), absent_is_missing=True) == _THERE
             for path in sorted(candidates)
         )
+
+    def report_waiting(self, waiting: int) -> None:
+        """Log why the step waits; when an earlier run started, both identities and the way out."""
+
+        recorded = ""
+        if self._recorded is not None:
+            now = "not here" if self._identity is None else "device %s inode %s" % self._identity
+            recorded = (
+                " An earlier run started on the folder at device %s inode %s; it is now %s." % (*self._recorded, now)
+            )
+            if self._identity is not None:
+                recorded += (
+                    " If it is the same folder mounted again (some file systems give it a new device number), the "
+                    "files that run did not move are not in it, and --files-gone finishes the step safely."
+                )
+        logger.error(
+            "Files sent through chat apps the adapter host ran are recorded in its transfer folder, but the "
+            "folder is not here, holds none of them, or is not the folder an earlier run started on, so they were "
+            "not moved into state/uploads and nothing was changed. Mount the folder "
+            "(interactive_apps.adapter_host.upload_dir) and restart; if the files are really gone, run '%s'.%s "
+            "event=adapter_host_files_folder_missing folder=%s waiting=%s recorded=%s current=%s",
+            FILES_GONE_COMMAND,
+            recorded,
+            self._transfer,
+            waiting,
+            _identity_text(self._recorded),
+            _identity_text(self._identity),
+        )
+
+    def start(self) -> None:
+        """Before the first change: record the transfer folder's identity, unless it already names it.
+
+        A run that will change anything writes it when the transfer folder
+        opened (here by its files or its recorded identity, or, with
+        ``--files-gone``, merely present). A ``--files-gone`` run whose folder
+        is not there writes none and needs none: ``--files-gone`` replaces the
+        presence decision.
+        """
+
+        if self._identity is None or self._identity == self._recorded:
+            return
+        device, inode = self._identity
+        _write_state_file(
+            self._progress,
+            {"transfer_folder": str(self._transfer), "device": device, "inode": inode, "started_at_utc": _now()},
+        )
+        self._recorded = self._identity
+
+    def _folder_identity(self, *, absent_is_missing: bool) -> Optional[tuple[int, int]]:
+        """The transfer folder's (device, inode) from the folder as it opens now; None when it is not there.
+
+        Opened like every other look (``_open_folder``), so not there and the
+        other folder errors follow the same rules.
+        """
+
+        descriptor = _open_folder(self._transfer, (), None, absent_is_missing=absent_is_missing)
+        if descriptor is None:
+            return None
+        try:
+            info = os.fstat(descriptor)
+        except OSError as exc:
+            raise FolderProblem(self._transfer, safe_open.REASON_OPEN_FAILED, _detail(exc)) from exc
+        finally:
+            os.close(descriptor)
+        return (info.st_dev, info.st_ino)
+
+    def _read_progress(self) -> Optional[tuple[int, int]]:
+        """The (device, inode) the progress record names; None when there is none or it does not parse.
+
+        A record that does not parse (edited by hand, a damaged disk) is
+        logged and treated as absent: at worst the step waits and names
+        ``--files-gone``; it never drops records on its strength. A record
+        that cannot be read is a folder error on ``state/upgrades`` (rule 2).
+        """
+
+        try:
+            descriptor = os.open(self._progress, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise FolderProblem(self._progress.parent, safe_open.REASON_OPEN_FAILED, _detail(exc), file=self._progress) from exc
+        try:
+            with os.fdopen(descriptor, "rb") as opened:
+                raw = opened.read(_PROGRESS_LIMIT)
+        except OSError as exc:
+            raise FolderProblem(self._progress.parent, safe_open.REASON_OPEN_FAILED, _detail(exc), file=self._progress) from exc
+        try:
+            body = json.loads(raw)
+            device, inode = body["device"], body["inode"]
+            if not all(isinstance(value, int) and not isinstance(value, bool) for value in (device, inode)):
+                raise ValueError("device and inode must be numbers")
+        except (ValueError, TypeError, KeyError) as exc:
+            logger.warning(
+                "The upgrade step's progress record cannot be read, so it is ignored: the step waits rather than "
+                "trust it. event=adapter_host_files_progress_unreadable file=%s reason=%s",
+                self._progress,
+                exc,
+            )
+            return None
+        return (device, inode)
+
+    def _check_folder_unchanged(self) -> None:
+        """Before anything is dropped: the transfer folder must still be the one ``survey`` opened (C06).
+
+        Every later look opens the folder by path again, so a folder unmounted
+        or replaced meanwhile (a lazy unmount, a network mount dropping) would
+        look empty. A folder no longer there, or with another identity, is a
+        folder error: nothing is dropped, and the next run finishes the moves
+        done (``already_moved``).
+        """
+
+        if self._identity is None or not any(n.drop_entries or n.drop_record for n in self._not_moved):
+            return
+        now = self._folder_identity(absent_is_missing=False)
+        if now != self._identity:
+            detail = "it changed during the run: %s at the start, %s now" % (
+                _identity_text(self._identity),
+                _identity_text(now),
+            )
+            raise FolderProblem(self._transfer, REASON_FOLDER_CHANGED, detail)
 
     # -- handling one file -------------------------------------------------------
 
@@ -891,6 +1062,7 @@ class _Step:
     def forget_unmovable(self) -> None:
         """Report every file that did not move and drop the records decided on, after the moves."""
 
+        self._check_folder_unchanged()
         for not_moved in self._not_moved:
             self._forget(not_moved)
         self._not_moved.clear()
@@ -969,7 +1141,7 @@ def _write_error(exc: OSError, folder: Path, file: Path, reason: str) -> _Unmova
     return _file_error(exc, folder, file, reason)
 
 
-def _open_folder(root: Path, parts: tuple[str, ...], file: Path, *, absent_is_missing: bool = False, create: bool = False) -> Optional[int]:
+def _open_folder(root: Path, parts: tuple[str, ...], file: Optional[Path], *, absent_is_missing: bool = False, create: bool = False) -> Optional[int]:
     """``root/parts`` opened as a folder without following links; None when it is not there.
 
     ``root`` not there counts as absent only when ``absent_is_missing``; it,
@@ -985,9 +1157,10 @@ def _open_folder(root: Path, parts: tuple[str, ...], file: Path, *, absent_is_mi
         if exc.reason == safe_open.REASON_NOT_FOUND:
             return None
         if exc.reason == safe_open.REASON_ROOT_UNAVAILABLE:
-            if absent_is_missing and isinstance(cause, FileNotFoundError):
+            not_there = isinstance(cause, FileNotFoundError)
+            if absent_is_missing and not_there:
                 return None
-            raise FolderProblem(root, exc.reason, _detail(cause or exc), file=file) from exc
+            raise FolderProblem(root, exc.reason, _detail(cause or exc), file=file, not_there=not_there) from exc
         if exc.reason == safe_open.REASON_OPEN_FAILED and isinstance(cause, OSError):
             if cause.errno not in _NAME_ERRNOS:
                 raise FolderProblem(root, exc.reason, _detail(cause), file=file) from exc
@@ -1107,17 +1280,29 @@ def _log_source_left(file: Path, reason: str, attachment_id: Optional[str] = Non
     )
 
 
-def _write_marker(marker: Path, counts: UpgradeCounts) -> None:
-    """Record that the step finished, written to a temporary file and renamed into place (a failure is rule 2)."""
+def _identity_text(identity: Optional[tuple[int, int]]) -> str:
+    return "-" if identity is None else "device=%s,inode=%s" % identity
 
-    temporary = marker.with_name(f".{marker.name}.writing")
-    body = {"finished_at_utc": datetime.now(timezone.utc).isoformat(), **asdict(counts)}
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _write_state_file(path: Path, body: dict[str, Any]) -> None:
+    """Write the marker or the progress record in ``state/upgrades``: a temporary file renamed into place (rule 2).
+
+    Not synced: losing the progress record only makes a later run wait (it
+    is never proof that files are absent), and losing the marker runs the
+    step again, which finds nothing left to do.
+    """
+
+    temporary = path.with_name(f".{path.name}.writing")
     try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, marker)
+        os.replace(temporary, path)
     except OSError as exc:
-        raise FolderProblem(marker.parent, safe_open.REASON_OPEN_FAILED, _detail(exc), file=marker) from exc
+        raise FolderProblem(path.parent, safe_open.REASON_OPEN_FAILED, _detail(exc), file=path) from exc
 
 
 __all__ = ["FolderProblem", "UpgradeCounts", "UpgradeResult", "upgrade_adapter_host_files"]
