@@ -58,10 +58,13 @@ supported, because it may not read what a newer one saved.
     `docker exec <container> python -m assistant_cli upgrade adapter-host-files --config /data/instance_config.yaml --files-gone`
     while the team runs; their records are then removed as above.
     The same error comes when a start after an interrupted upgrade finds
-    another folder in its place: if it is the same folder mounted again
-    (some file systems give it a new device number at each mount) and the
-    log says it holds none of the files, the files that start did not move
-    are not in it, and `--files-gone` finishes the upgrade safely.
+    another folder in its place. If the log says the device number changed
+    and the folder is the same one mounted again (some file systems give it
+    a new device number at each mount), the files that start did not move
+    are not in it, and `--files-gone` finishes the upgrade safely. If the log
+    says it is another folder on the same disk, the earlier folder was
+    probably moved or renamed: put it back where `upload_dir` points and
+    restart, because the files that start did not move are still in it.
   - **A folder it cannot use** (a read-only or full `state/uploads`, a
     folder it has no permission to read): startup stops with a message
     naming the folder. Fix it and restart; the step goes on where it

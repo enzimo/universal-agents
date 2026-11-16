@@ -93,9 +93,14 @@ file system (NFS, CIFS, FUSE, 9p, drvfs and overlay assign them at mount
 time): a folder mounted again that still holds a waiting file is here by its
 files and the record is rewritten; one that holds none waits until
 ``--files-gone``, which is safe then, because every file it held was moved and
-its records point at the destination. Device and inode rather than a token
-file in the folder: the transfer folder belongs to the adapter host and may be
-read-only, and an identity that does not match only ever leads to waiting. A
+its records point at the destination. The log calls ``--files-gone`` safe only
+when the device number changed: the same device with another inode is another
+folder on the same disk (the earlier one moved or renamed and an empty one made
+at its path), so the log says to put the earlier folder back. Device and inode
+rather than a token file in the folder: the transfer folder belongs to the
+adapter host and may be read-only, and an identity that does not match at the
+start only ever leads to waiting; one found by the re-check before the drops
+stops the run with nothing dropped (``FolderProblem``, ``folder_changed``). A
 stored name that cannot be looked up (a NUL byte, too long a name) is no sign
 either way.
 
@@ -572,7 +577,15 @@ class _Step:
         )
 
     def report_waiting(self, waiting: int) -> None:
-        """Log why the step waits; when an earlier run started, both identities and the way out."""
+        """Log why the step waits; when an earlier run started, both identities and the way out.
+
+        The remount advice (``--files-gone`` is safe) is given only when the
+        device number changed, the one case a remount explains. The same
+        device with another inode is another folder on the same disk, for
+        example the earlier folder moved or renamed and an empty one created
+        at its path (Docker's ``-v`` does that): the earlier folder may still
+        hold the files, so the log says to put it back instead (C08).
+        """
 
         recorded = ""
         if self._recorded is not None:
@@ -580,10 +593,17 @@ class _Step:
             recorded = (
                 " An earlier run started on the folder at device %s inode %s; it is now %s." % (*self._recorded, now)
             )
-            if self._identity is not None:
+            if self._identity is not None and self._identity[0] != self._recorded[0]:
                 recorded += (
-                    " If it is the same folder mounted again (some file systems give it a new device number), the "
-                    "files that run did not move are not in it, and --files-gone finishes the step safely."
+                    " The device number changed: if it is the same folder mounted again (some file systems give it "
+                    "a new device number at each mount), the files that run did not move are not in it, and "
+                    "--files-gone finishes the step safely."
+                )
+            elif self._identity is not None:
+                recorded += (
+                    " It is another folder on the same disk, not the same folder mounted again: if that run's "
+                    "folder was moved or renamed, put it back where upload_dir points and restart; the files it "
+                    "did not move are still in it."
                 )
         logger.error(
             "Files sent through chat apps the adapter host ran are recorded in its transfer folder, but the "

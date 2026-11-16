@@ -1242,7 +1242,8 @@ def test_after_a_partial_run_an_empty_mount_point_drops_nothing(instance: _Insta
     assert _untouched(instance) == before and not instance.layout.adapter_host_files_upgrade_path.exists()
     assert _recorded(instance) == real, "a waiting run changes nothing, the record included"
     (error,) = _events(caplog, "adapter_host_files_folder_missing")
-    assert "--files-gone" in error and "mounted again" in error
+    assert "--files-gone" in error and "another folder on the same disk" in error, "same device, another inode"
+    assert "The device number changed" not in error, "C08: no remount advice when only the inode differs"
     assert error.endswith("recorded=device=%s,inode=%s current=device=%s,inode=%s" % (*real, *empty))
 
     _mount_back(instance)
@@ -1252,6 +1253,33 @@ def test_after_a_partial_run_an_empty_mount_point_drops_nothing(instance: _Insta
     assert instance.turn_paths("task_1")["att_photo"] == str(instance.photo_destination)
     assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
     assert instance.files()["att_orphan"] == str(instance.transfer / "adapter_upload_orphan"), "its file is here: kept"
+
+
+def test_after_a_partial_run_a_new_device_number_gets_the_remount_advice(instance: _Instance, monkeypatch, caplog) -> None:
+    """C08: only a changed device number is explained by a remount, so only then is --files-gone called safe.
+
+    The test's empty folder is on the same file system, so its device number is shifted to stand for a remount.
+    """
+
+    _stopped_after_the_rename(instance, monkeypatch)
+    real = _recorded(instance)
+    _empty_in_its_place(instance)  # holds none of the waiting files
+    read_identity = upgrade_module._Step._folder_identity
+
+    def remounted(self, *, absent_is_missing):
+        identity = read_identity(self, absent_is_missing=absent_is_missing)
+        return None if identity is None else (identity[0] + 1, identity[1])
+
+    monkeypatch.setattr(upgrade_module._Step, "_folder_identity", remounted)
+    before = _untouched(instance)
+    with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.folder_missing and result.waiting == 3 and _untouched(instance) == before
+    assert _recorded(instance) == real
+    (error,) = _events(caplog, "adapter_host_files_folder_missing")
+    assert "The device number changed" in error and "--files-gone finishes the step safely" in error
+    assert "another folder on the same disk" not in error
 
 
 def test_after_a_partial_run_a_missing_folder_waits_until_the_files_are_declared_gone(
@@ -1368,8 +1396,13 @@ def _empty_in_its_place(instance: _Instance) -> None:
 
 @pytest.mark.parametrize(
     ("change", "before"),
-    [(_vanish, "handle"), (_vanish, "forget_unmovable"), (_empty_in_its_place, "forget_unmovable")],
-    ids=["vanished_before_the_moves", "vanished_before_the_drops", "emptied_before_the_drops"],
+    [
+        (_vanish, "handle"),
+        (_vanish, "forget_unmovable"),
+        (_empty_in_its_place, "handle"),
+        (_empty_in_its_place, "forget_unmovable"),
+    ],
+    ids=["vanished_before_the_moves", "vanished_before_the_drops", "emptied_before_the_moves", "emptied_before_the_drops"],
 )
 def test_a_transfer_folder_that_changes_during_the_run_drops_nothing(
     instance: _Instance, monkeypatch, caplog, change, before

@@ -4579,12 +4579,16 @@ the desktop app never offers an older version.
   CIFS, FUSE, 9p, drvfs and overlay assign them at mount time): a folder
   mounted again that still holds a waiting file is here by its files and the
   record is rewritten; one that holds none waits until `--files-gone`, which
-  is safe then because every file it held already moved. Device and inode
-  rather than a token file: the folder belongs to the adapter host and may be
-  read-only, and a mismatch only ever leads to waiting. Before any record is
-  dropped the folder is opened again and must have the same identity, because
-  every look opens it by path and a folder unmounted meanwhile would look
-  empty. A stored name that cannot be looked up (a NUL byte, too long a name)
+  is safe then because every file it held already moved. The log calls
+  `--files-gone` safe only when the device number changed; the same device
+  with another inode is another folder on the same disk (the earlier one
+  moved or renamed, an empty one made at its path), and the log says to put
+  the earlier folder back. Device and inode rather than a token file: the
+  folder belongs to the adapter host and may be read-only, and a mismatch at
+  the start only ever leads to waiting; one found before the drops stops the
+  run with nothing dropped. Before any record is dropped the folder is opened
+  again and must have the same identity, because every look opens it by path
+  and a folder unmounted meanwhile would look empty. A stored name that cannot be looked up (a NUL byte, too long a name)
   is no sign either way. One error rule holds for every file and path operation of
   the step (opening, reading, writing, syncing, renaming, removing and
   looking up a file or folder, and building its path; each catches `OSError`
