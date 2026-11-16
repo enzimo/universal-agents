@@ -36,6 +36,7 @@ from custom_agents.task_human_interaction_blockers import (
     record_human_interaction_blocker,
 )
 from custom_agents.task_manager import TaskManager
+from custom_agents.task_message_runtime import SECURE_CREDENTIAL_RESULT_EVENT
 from custom_agents.task_steering_runtime import (
     GUIDANCE_ACCEPTED_EVENT,
     INTERRUPT_REQUEST_EVENT,
@@ -550,6 +551,58 @@ async def test_the_incidents_stranded_request_is_reported_once_and_cleared_when_
     assert chats(lead)[-1].msg_content.reason == "work_recovered"
     assert f'The warning for your request "{REQUEST}" has cleared' in chats(lead)[-1].msg_content.text
     assert not open_incidents(lead)
+
+
+@pytest.mark.asyncio
+async def test_a_task_stranded_after_its_form_result_and_a_later_setup_pause_is_reported(lead):
+    """Review F1: the form's batch keeps its waiting status after the result, and set_up_tools adds no batch."""
+    manager = lead.task_manager
+    held = record("root", state=ProgressState.ACCEPTED)
+    assert manager.add_task(held.task.model_copy(update={"task_state": []}), held.header, held.meta, owner_person_id="jordan")
+    manager.update_main_task_state("root", ProgressState.IN_PROGRESS, iso(datetime.now(timezone.utc) - timedelta(seconds=1)))
+    form = manager.create_turn_action_batch("root", [{"action_type": "secure_credential_collection_request"}])
+    manager.mark_turn_action_batch_status(form.batch_id, BATCH_WAITING_EXTERNAL_RESULT)
+    asked = datetime.fromisoformat(form.created_at)
+
+    def after(minutes):
+        return iso(asked + timedelta(minutes=minutes))
+
+    manager.update_main_task_state("root", ProgressState.WAITING, after(0.5))
+    # The form's result arrives and the task runs again.
+    manager.append_history_entry(
+        "root", "Secure credential result: stored.", timestamp=after(1), details={"event": SECURE_CREDENTIAL_RESULT_EVENT}
+    )
+    manager.update_main_task_state("root", ProgressState.IN_PROGRESS, after(1))
+    # set_up_tools pauses the turn: a blocker and WAITING, but no new batch.
+    record_human_interaction_blocker(manager, "root", {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"})
+    manager.append_history_entry(
+        "root", "Strands turn interrupted for requester input.", timestamp=after(2),
+        details={"event": INTERRUPT_REQUEST_EVENT, INTERRUPT_WAITS_ON_REQUESTER_KEY: False},
+    )
+    manager.update_main_task_state("root", ProgressState.WAITING, after(2))
+    # The setup run ends, but the wake-up is lost.
+    clear_human_interaction_blocker(manager, "root")
+    assert manager.get_turn_action_batch(form.batch_id).status == BATCH_WAITING_EXTERNAL_RESULT
+
+    first = asked + timedelta(minutes=3)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    (notice,) = notices(lead)
+    assert notice.title == STRANDED_TITLE
+
+
+@pytest.mark.asyncio
+async def test_a_received_mailbox_record_does_not_hide_a_stranded_request(lead):
+    """Review F2: a stop recorded during the tree's batch was handled when it arrived."""
+    stop = RuntimeMailboxEventRecord(
+        event_id="e1", root_task_id="root", event_type="control_stop", event_class="preemptive", status="received",
+    )
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)], runtime_mailbox_events={"e1": stop})
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    (notice,) = notices(lead)
+    assert notice.title == STRANDED_TITLE
 
 
 @pytest.mark.asyncio

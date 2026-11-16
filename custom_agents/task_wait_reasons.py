@@ -14,8 +14,10 @@ Read from the agent's saved work (``RuntimeSnapshotV3``):
 - ``RUNNING_ACTIONS``: an action batch holds the task tree's runtime lease
   (``get_active_runtime_lease``).
 - ``PENDING_EVENT``: a reply or a fired retry was held for the task tree while
-  a batch ran and is still to be handled (``runtime_mailbox_events``; the same
-  statuses recovery replays).
+  a batch ran and is still to be handled (``runtime_mailbox_events`` deferred
+  or being processed). A ``received`` record only logs an event handled when
+  it arrived (a stop during a batch, or one observed but not held) and may
+  keep that status, so it explains nothing.
 - ``DELEGATED_WORK``: a task this one delegated has not ended
   (``has_pending_subtasks``).
 - ``QUESTION``: the task's latest TaskQuery asks and is unanswered
@@ -30,7 +32,11 @@ Read from the agent's saved work (``RuntimeSnapshotV3``):
   holds in memory, needs no saved record of its own.
 - ``OUTSIDE_RESULT``: the task's latest action batch stopped to wait for a
   secure credential form or signup automation (the outbox's external-wait
-  barrier, ``BATCH_WAITING_EXTERNAL_RESULT``). Earlier batches do not count.
+  barrier, ``BATCH_WAITING_EXTERNAL_RESULT``), and since then neither has the
+  result arrived (``SECURE_CREDENTIAL_RESULT_EVENT``, which signup results use
+  too) nor has the task run again. The batch keeps its status after the wait
+  ends, and a later pause (``set_up_tools``) adds no batch, so the status alone
+  would excuse the task for good. Earlier batches do not count.
 - ``REQUESTER_ANSWER``: the turn paused on an interrupt it sent to its
   requester (the chat), after the task last started
   (``INTERRUPT_REQUEST_EVENT`` with ``INTERRUPT_WAITS_ON_REQUESTER_KEY``). No
@@ -72,9 +78,9 @@ from enum import StrEnum
 from typing import Any
 
 from custom_agents.agent_liveness import parse_utc
-from custom_agents.runtime_snapshot_codec import REPLAYABLE_EVENT_STATUSES
 from custom_agents.runtime_task_controls import is_explicit_queue_pause
 from custom_agents.task_manager_plans import plan_execution_active
+from custom_agents.task_message_runtime import SECURE_CREDENTIAL_RESULT_EVENT
 from custom_agents.task_steering_runtime import (
     INTERRUPT_REQUEST_EVENT,
     INTERRUPT_WAITS_ON_REQUESTER_KEY,
@@ -106,6 +112,9 @@ IDLE_STATES = frozenset(set(ProgressState) - TERMINAL_STATES - RUNNING_STATES)
 ACTIVE_LEASE = "active"
 PENDING_PAUSE = "pending"
 UNMERGED_RECOVERY = "pending"
+# Held mailbox events still to be handled (``RuntimeMailboxEventRecord.status``).
+# Not ``received``: that records an event handled when it arrived.
+HELD_EVENT_STATUSES = frozenset({"deferred", "processing"})
 
 
 class WaitReason(StrEnum):
@@ -157,7 +166,8 @@ class SavedWork:
     queued: frozenset[str]
     parents_with_open_delegations: frozenset[str]
     tasks_with_pending_pause: frozenset[str]
-    latest_batch_status: Mapping[str, str]
+    # Per task, its latest action batch: (when it was created, its status).
+    latest_batch: Mapping[str, tuple[datetime, str]]
     roots_with_active_lease: frozenset[str]
     roots_with_pending_event: frozenset[str]
     tasks_in_isolated_recovery: frozenset[str]
@@ -187,14 +197,14 @@ class SavedWork:
             tasks_with_pending_pause=frozenset(
                 pause.task_id for pause in snapshot.recoverable_pause_records.values() if pause.status == PENDING_PAUSE
             ),
-            latest_batch_status={task_id: status for task_id, (_moment, status) in latest.items()},
+            latest_batch=latest,
             roots_with_active_lease=frozenset(
                 lease.root_task_id for lease in snapshot.runtime_leases.values() if lease.status == ACTIVE_LEASE
             ),
             roots_with_pending_event=frozenset(
                 event.root_task_id
                 for event in snapshot.runtime_mailbox_events.values()
-                if event.status in REPLAYABLE_EVENT_STATUSES
+                if event.status in HELD_EVENT_STATUSES
             ),
             tasks_in_isolated_recovery=frozenset(
                 link.original_task_id
@@ -263,6 +273,23 @@ def _waits_on_requester(task: Task) -> bool:
     return False
 
 
+def _awaits_outside_result(work: SavedWork, record: TaskSnapshotRecord) -> bool:
+    """The latest batch waits for an outside result that has not arrived, and the task has not run since."""
+    latest = work.latest_batch.get(record.task_id)
+    if latest is None or latest[1] != BATCH_WAITING_EXTERNAL_RESULT:
+        return False
+    waiting_since = latest[0]
+    started = last_started_at(record.task)
+    if started is not None and started > waiting_since:
+        return False
+    return not any(
+        (entry.details or {}).get("event") == SECURE_CREDENTIAL_RESULT_EVENT
+        and (arrived := parse_utc(entry.timestamp)) is not None
+        and arrived > waiting_since
+        for entry in record.task.execution_history or []
+    )
+
+
 def _asks_unanswered_question(work: SavedWork, task_id: str) -> bool:
     queries = work.snapshot.task_queries.get(task_id) or []
     return bool(queries) and queries[-1].query_type == MessageMetaType.REQUEST
@@ -279,13 +306,14 @@ def saved_wait_reason(work: SavedWork, record: TaskSnapshotRecord) -> WaitReason
         (WaitReason.DELEGATED_WORK, task_id in work.parents_with_open_delegations),
         (WaitReason.RECOVERABLE_PAUSE, task_id in work.tasks_with_pending_pause),
         (WaitReason.PERSON_DECISION, task_id in work.snapshot.human_interaction_blockers),
-        (WaitReason.OUTSIDE_RESULT, work.latest_batch_status.get(task_id) == BATCH_WAITING_EXTERNAL_RESULT),
         (WaitReason.ISOLATED_RECOVERY, task_id in work.tasks_in_isolated_recovery),
     )
     for reason, holds in checks:
         if holds:
             return reason
     # These read the task's own history and queries, so they run last.
+    if _awaits_outside_result(work, record):
+        return WaitReason.OUTSIDE_RESULT
     if _asks_unanswered_question(work, task_id):
         return WaitReason.QUESTION
     if _waits_on_requester(record.task):

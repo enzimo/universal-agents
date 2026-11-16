@@ -98,6 +98,11 @@ from custom_messages.enums import (
 )
 
 
+# History event of a secure credential form's (or signup's) result reaching
+# its waiting task; it ends the task's outside-result wait
+# (``custom_agents.task_wait_reasons``).
+SECURE_CREDENTIAL_RESULT_EVENT = "secure_credential_result"
+
 # What a specialist that asked for a credential form or signup is told: only
 # TeamArchitect may ask the person (ADR-018), so it escalates instead.
 DELEGATE_CREDENTIAL_REQUEST_REFUSAL = (
@@ -624,7 +629,7 @@ async def _handle_secure_credential_collection_result(
         timestamp=now_ts,
         related_task_id=credential_result.credential_request_id,
         details={
-            "event": "secure_credential_result",
+            "event": SECURE_CREDENTIAL_RESULT_EVENT,
             "credential_request_id": credential_result.credential_request_id,
             "credential_key": credential_result.credential_key,
             "status": credential_result.status,

@@ -16,6 +16,7 @@ import pytest
 from custom_agents.runtime_task_controls import QUEUE_PAUSE_EVENT
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_manager_plans import plan_execution_active
+from custom_agents.task_message_runtime import SECURE_CREDENTIAL_RESULT_EVENT
 from custom_agents.task_steering_runtime import INTERRUPT_REQUEST_EVENT, INTERRUPT_WAITS_ON_REQUESTER_KEY
 from custom_agents.task_wait_reasons import (
     IDLE_STATES,
@@ -126,6 +127,7 @@ WAITS: dict[str, tuple[WaitReason, Callable[[], SavedWork]]] = {
     "queued": (WaitReason.QUEUED, lambda: work(record(state=ProgressState.ACCEPTED), task_queue=["t"])),
     "running batch": (WaitReason.RUNNING_ACTIONS, lambda: work(record(), runtime_leases=lease())),
     "pending event": (WaitReason.PENDING_EVENT, lambda: work(record(), runtime_mailbox_events=event("deferred"))),
+    "event being handled": (WaitReason.PENDING_EVENT, lambda: work(record(), runtime_mailbox_events=event("processing"))),
     "delegated work": (
         WaitReason.DELEGATED_WORK,
         lambda: work(record(), record("sub", ProgressState.IN_PROGRESS, parent="t"), subtask_to_parent_map={"sub": "t"}),
@@ -145,6 +147,13 @@ WAITS: dict[str, tuple[WaitReason, Callable[[], SavedWork]]] = {
     "outside result": (
         WaitReason.OUTSIDE_RESULT,
         lambda: work(record(), turn_action_batches=dict([batch("b1", BATCH_WAITING_EXTERNAL_RESULT, 1.5)])),
+    ),
+    "outside result after an earlier form's result": (
+        WaitReason.OUTSIDE_RESULT,
+        lambda: work(
+            record(history=[entry(1.2, event=SECURE_CREDENTIAL_RESULT_EVENT)]),
+            turn_action_batches=dict([batch("b1", BATCH_WAITING_EXTERNAL_RESULT, 1.5)]),
+        ),
     ),
     "requester answer": (
         WaitReason.REQUESTER_ANSWER, lambda: work(record(history=[interrupt(1.5, waits_on_requester=True)]))
@@ -172,6 +181,19 @@ ENDED: dict[str, Callable[[], SavedWork]] = {
     "a decided pause": lambda: work(record(state=ProgressState.PAUSED), recoverable_pause_records=pause("retry_scheduled")),
     "an outside result followed by a later batch": lambda: work(
         record(), turn_action_batches=dict([batch("b1", BATCH_WAITING_EXTERNAL_RESULT, 1.2), batch("b2", "completed", 1.6)])
+    ),
+    # The batch keeps its waiting status after the wait ends (review F1).
+    "an outside result that has arrived": lambda: work(
+        record(history=[entry(1.8, event=SECURE_CREDENTIAL_RESULT_EVENT)]),
+        turn_action_batches=dict([batch("b1", BATCH_WAITING_EXTERNAL_RESULT, 1.5)]),
+    ),
+    "an outside result after which the task ran again": lambda: work(
+        record(states=[(ProgressState.IN_PROGRESS, at(1)), (W, at(1.6)), (ProgressState.IN_PROGRESS, at(3)), (W, at(4))]),
+        turn_action_batches=dict([batch("b1", BATCH_WAITING_EXTERNAL_RESULT, 1.5)]),
+    ),
+    # A received record logs an event handled when it arrived (review F2).
+    "a received record of an event handled when it arrived": lambda: work(
+        record(), runtime_mailbox_events=event("received")
     ),
     # An access or setup-run interrupt waits through its blocker; once that is
     # cleared its history entry explains nothing (review C01).
