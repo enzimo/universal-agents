@@ -24,13 +24,17 @@ module:
 
 Setup pages come from ``set_up_tools`` runs (``custom_agents.tool_setup_run_runtime``),
 several at once for one task: a sibling page of a task that already waits on a
-page opens too (``credential_handoff``). The run itself tells the person about
-its workflow page in one chat message before the pages open
-(``tool_setup_run_runtime``): a card here shows only its own reason, and
-channels without cards show only its text. An ``external_step`` is a step the
-person does outside Universal Agents; the gateway shows the catalog's words
-for it (``SetupGuide``, never words from the request), opens no broker page,
-and waits until the person marks it done on the workflow page
+page opens too (``credential_handoff``), and each page's card stays until that
+page ends, whatever happens to the others (``page_status``), or until a
+gateway restart (cards live only in memory). The run itself
+tells the person about its workflow page in one chat message before the pages
+open (``tool_setup_run_runtime``): a card here shows only its own reason, and
+channels without cards show only its text. Chat history keeps each page's
+receipt, never its address or the task's reason. An ``external_step`` is a
+step the person does outside Universal Agents; the gateway shows the
+catalog's words for it (``SetupGuide``, never words from the request), keeps
+its title, instructions and link in chat history, opens no broker page, and
+waits until the person marks it done on the workflow page
 (``external_step_done``); it does not expire.
 
 Two other ways end a wait: the person finishing the same setup on their own
@@ -458,6 +462,16 @@ class GatewayToolSetups:
             return False
         return bool(self._setups.list_tool_setups(status=SETUP_STATUS_WAITING, parent_task_id=request.parent_task_id))
 
+    def page_status(self, setup_request_id: str) -> str | None:
+        """The page's status: ``waiting`` until it ends, then how it ended; None when no page has that id.
+
+        A page's chat card follows this, not the chat request its task's pages
+        share (``credential_handoff.ToolSetupHandoffs``).
+        """
+
+        record = self._setups.get_tool_setup(setup_request_id)
+        return record.status if record is not None else None
+
     def _external_page(self, request: ToolSetupRequestV1, roles: tuple[str, ...]) -> _OpenedPage:
         """A step outside Universal Agents, in the catalog's words; the person marks it done."""
 
@@ -486,13 +500,18 @@ class GatewayToolSetups:
             raise RuntimeError("External steps end when the person marks them done.")
 
         expires = self._clock.now_utc() + timedelta(hours=EXTERNAL_STEP_ACTION_HOURS)
+        instructions = f"{_sentence(step.instructions)}{where}{check}{done}"
         return _OpenedPage(
             label=f"{tool_name}: {step.title}",
-            receipt=f"Setup step for {tool_name} shown: {step.title}.",
+            # Chat history keeps the whole step, so a refresh never loses what to
+            # do or where. Only catalog words and links an administrator approved
+            # (checked by ExternalSetupStepV1) and the workflow page, never the
+            # task's own reason.
+            receipt=f"Setup step for {tool_name} shown: {_sentence(step.title)} {instructions}",
             url=step.url or workflow or "",
             expires_at_utc=expires.isoformat(),
             watch=never,
-            instructions=f"{_sentence(step.instructions)}{where}{check}{done}",
+            instructions=instructions,
         )
 
     async def external_step_done(self, setup_request_id: str, *, person_id: str, step_title: str) -> bool:

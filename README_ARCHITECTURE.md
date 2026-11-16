@@ -2820,16 +2820,44 @@ person which command to run or asking whether to start:
    a conditional update so exactly one result reaches the task whether the
    page's watcher, the person's own `/link` or `/auth ... team_client`
    (`link_results`), the Mark Done button, or start-up recovery ends it. After
-   a gateway restart, pages still waiting are reported as unwatched (and
-   offered again); page addresses are never stored. The way that ends a page
-   writes the one chat line that closes its card (`PageEnding.closing`, else
-   the task's message). The line names the page by kind and the tool by the
+   a gateway restart, broker pages still waiting are reported as unwatched
+   (and offered again); an outside step keeps waiting, because nothing
+   watches it. Page addresses are never stored.
+   The way that ends a page writes the one chat line that closes its card
+   (`PageEnding.closing`, else the task's message). The line names the page by kind and the tool by the
    name its page showed: the sign-in name for sign-ins, the catalog's display
    name for account links and outside steps. Mark Done uses the step title
    stored on the workflow page, never words from the browser. Rationale (an
    incident on 2026-11-14): the gateway rebuilt the line from the result's
    source alone, which covers both the person's own `/link` and Mark Done,
    so Mark Done read as an account link with the raw tool id.
+   A page that opens after the chat reply closed (usually every page of a run
+   but the first) is listed for Web Chat and the workflow page by
+   `credential_handoff.ToolSetupHandoffs`. A page shown in the live reply is
+   not listed again: its address goes only into that first no-store response,
+   so after a refresh only its history line remains. A listed card stays
+   until that page's own `ToolSetupRecord` ends
+   (`GatewayToolSetups.page_status`), its expiry
+   passes, or the task ends (the chat request has a terminal status or a
+   finished run state). Cards live only in gateway memory, so a gateway
+   restart drops them: a broker page is offered again with a new card, while
+   an outside step keeps only its history line and its Mark Done button on
+   the workflow page. Each removal is logged once
+   (`event=gateway_credential_handoff_card_closed` with a `reason`; a missing
+   request or page record is a warning). A card holding a sign-in or account
+   link page's bearer link stays in memory at most 31 minutes
+   (`BEARER_CARD_MAX_LIFETIME`); an outside step's card holds none and keeps
+   its 48-hour expiry. Chat history keeps each page's own secret-free receipt
+   on both paths (`GatewayTranscriptService.history_text`: a reply's
+   `transcript_text`, otherwise the fixed safe text for reply types that can
+   carry a page address); an outside step's line also keeps its catalog
+   title, instructions and link and the workflow page link, never the task's
+   own reason. Rationale (incident 2026-11-14): a task's pages share one chat
+   request, and every page's result sets it to
+   `waiting_for_credential_result`; the card list followed that status, so
+   finishing one page removed the other open pages' cards, and the handoff's
+   history line was the generic "A setup page is ready" text, so a reload lost
+   which page was open.
 
 5. Last known states instead of model re-checks (owner's decision 2026-09-28).
    Trusted code keeps one `ToolSetupStateV1` per team, person and account tool
