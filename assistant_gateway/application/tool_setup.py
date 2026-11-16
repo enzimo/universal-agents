@@ -172,14 +172,50 @@ def _sentence(text: str) -> str:
     return words if not words or words.endswith((".", "!", "?")) else f"{words}."
 
 
-def _what(kind: str, tool_words: str) -> str:
-    """The setup in plain words: "the GitHub sign-in", "the account link for Portainer"."""
+def _what(kind: str, tool_name: str, step_title: str = "") -> str:
+    """The setup page in plain words; the one place each kind's phrase is written.
+
+    "the GitHub sign-in", "the team's Google sign-in app", "the account link
+    for Portainer", "the Gitea setup step 'Create a Gitea token'" ("the Gitea
+    setup step" when the step's title is not known). Records hold only kinds
+    the ``ToolSetupKind`` contract accepted, so any other kind is a
+    programming error, never a reason to borrow another kind's words.
+    """
 
     if kind == TOOL_SETUP_SIGN_IN:
-        return f"the {tool_words} sign-in"
+        return f"the {tool_name} sign-in"
     if kind == TOOL_SETUP_TEAM_SIGN_IN_APP:
-        return f"the team's {tool_words} sign-in app"
-    return f"the account link for {tool_words}"
+        return f"the team's {tool_name} sign-in app"
+    if kind == TOOL_SETUP_ACCOUNT_LINK:
+        return f"the account link for {tool_name}"
+    if kind == TOOL_SETUP_EXTERNAL_STEP:
+        return f"the {tool_name} setup step '{step_title}'" if step_title else f"the {tool_name} setup step"
+    raise ValueError(f"Unknown tool setup kind {kind!r}.")
+
+
+# Lines several page endings share; ``what`` is always a ``_what`` phrase.
+
+
+def _capitalized(text: str) -> str:
+    """``text`` with its first letter in upper case, for a sentence that starts with it."""
+
+    return f"{text[0].upper()}{text[1:]}" if text else text
+
+
+def _is_done(what: str, account_label: str | None = None) -> str:
+    return f"{_capitalized(what)} is done" + (f" (account {account_label})." if account_label else ".")
+
+
+def _did_not_finish(what: str, why: str) -> str:
+    return f"{_capitalized(what)} did not finish. {why}".strip()
+
+
+def _unconfirmed(what: str) -> str:
+    return f"Nobody could confirm whether {what} finished."
+
+
+def _form_expired(what: str) -> str:
+    return f"The form for {what} expired before it was used."
 
 
 @dataclass(frozen=True)
@@ -224,21 +260,16 @@ def sign_in_page_ending(outcome: BrokerSessionOutcome, *, what: str) -> PageEndi
         return PageEnding(TOOL_SETUP_EXPIRED, f"The page for {what} expired before it was finished.")
     status = str(outcome.payload.get("status") or "")
     if outcome.ending != WATCH_FINISHED or status not in _SIGN_IN_FINAL:
-        return PageEnding(
-            TOOL_SETUP_UNAVAILABLE,
-            f"Nobody could confirm whether {what} finished.",
-            reason_code=REASON_PAGE_UNCONFIRMED,
-        )
+        return PageEnding(TOOL_SETUP_UNAVAILABLE, _unconfirmed(what), reason_code=REASON_PAGE_UNCONFIRMED)
     if status == SIGN_IN_STATUS_ERROR:
         why = _sentence(str(outcome.payload.get("message") or ""))[:300]
         return PageEnding(
             TOOL_SETUP_UNAVAILABLE,
-            f"{what[0].upper()}{what[1:]} did not finish. {why}".strip(),
+            _did_not_finish(what, why),
             reason_code=str(outcome.payload.get("failure_reason") or REASON_SIGN_IN_FAILED),
         )
     label = " ".join(str(outcome.payload.get("username") or "").split())[:200] or None
-    done = f"{what[0].upper()}{what[1:]} is done" + (f" (account {label})." if label else ".")
-    return PageEnding(TOOL_SETUP_COMPLETED, done, account_label=label)
+    return PageEnding(TOOL_SETUP_COMPLETED, _is_done(what, label), account_label=label)
 
 
 def account_link_page_ending(
@@ -247,29 +278,26 @@ def account_link_page_ending(
     """An account link form's ending; a created link for another tool or owner is never reported as linked."""
 
     if outcome.ending == WATCH_EXPIRED:
-        return PageEnding(TOOL_SETUP_EXPIRED, f"The form for {what} expired before it was used.")
+        return PageEnding(TOOL_SETUP_EXPIRED, _form_expired(what))
     if outcome.ending != WATCH_FINISHED:
-        return PageEnding(
-            TOOL_SETUP_UNAVAILABLE, f"Nobody could confirm whether {what} finished.", REASON_PAGE_UNCONFIRMED
-        )
+        return PageEnding(TOOL_SETUP_UNAVAILABLE, _unconfirmed(what), reason_code=REASON_PAGE_UNCONFIRMED)
     result = outcome.payload.get("result")
     result = result if isinstance(result, dict) else {}
     status = str(result.get("status") or outcome.payload.get("status") or "")
     if status == ACCOUNT_LINK_STATUS_CREATED:
         link_id = str(result.get("link_id") or "") or None
         if link_id and result.get("tool_id") == tool_id and result.get("owner_kind") == owner:
-            return PageEnding(TOOL_SETUP_COMPLETED, f"{what[0].upper()}{what[1:]} is done.", link_id=link_id)
-        return PageEnding(
-            TOOL_SETUP_UNAVAILABLE, f"Nobody could confirm whether {what} finished.", REASON_LINK_MISMATCH
-        )
+            return PageEnding(TOOL_SETUP_COMPLETED, _is_done(what), link_id=link_id)
+        return PageEnding(TOOL_SETUP_UNAVAILABLE, _unconfirmed(what), reason_code=REASON_LINK_MISMATCH)
     if status == ACCOUNT_LINK_STATUS_DECLINED:
         return PageEnding(TOOL_SETUP_DECLINED, f"The form for {what} was closed without linking anything.")
     if result.get("reason_code") == REASON_SESSION_EXPIRED:
-        return PageEnding(TOOL_SETUP_EXPIRED, f"The form for {what} expired before it was used.")
+        return PageEnding(TOOL_SETUP_EXPIRED, _form_expired(what))
+    # The broker refused the form (its plain reason follows); name the page like every other ending.
     why = _sentence(str(result.get("error") or ""))[:300]
     return PageEnding(
         TOOL_SETUP_UNAVAILABLE,
-        f"Nothing was linked. {why}".strip(),
+        _did_not_finish(what, why),
         reason_code=str(result.get("reason_code") or REASON_PAGE_REFUSED),
     )
 

@@ -24,19 +24,27 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 import pytest_asyncio
 
 from assistant_gateway import gateway as gateway_module
+from assistant_gateway.application.broker_session_watch import (
+    WATCH_EXPIRED,
+    WATCH_FINISHED,
+    WATCH_UNCONFIRMED,
+    BrokerSessionOutcome,
+)
 from assistant_gateway.application.interactive_commands import GatewayCommandRequest
+from assistant_gateway.application.tool_setup import _what, account_link_page_ending, sign_in_page_ending
 from assistant_gateway.domain.message_types import (
     TOOL_SETUP_MESSAGE_TYPE,
     TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE,
 )
 from assistant_gateway.domain.request_state import ToolSetupRecord
 from assistant_gateway.gateway import UserGateway
-from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1, ToolSetupResultV1
+from custom_messages.contracts.credentials_v1 import ToolSetupKind, ToolSetupRequestV1, ToolSetupResultV1
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from tests.test_gateway_account_links import (  # noqa: F401 - pytest fixtures
@@ -737,3 +745,129 @@ async def test_web_chat_records_the_closing_line_under_the_pages_own_id(chat_set
     )
     [line] = [message for message in page.messages if message.message_type == "tool_setup_result"]
     assert (line.correlation_id, line.role) == ("tool_setup_req_web", "system")
+
+
+# The words for each page and each way it ends (the 2026-11-14 Mark Done line) ------------
+
+
+def test_every_setup_kind_in_the_contract_has_its_own_words() -> None:
+    """A kind added to the contract fails here until ``_what`` names it, never borrowing another kind's words."""
+
+    phrases = {kind: _what(kind, "Gitea", "Create a Gitea token") for kind in get_args(ToolSetupKind)}
+
+    assert phrases == {
+        "sign_in": "the Gitea sign-in",
+        "account_link": "the account link for Gitea",
+        "team_sign_in_app": "the team's Gitea sign-in app",
+        "external_step": "the Gitea setup step 'Create a Gitea token'",
+    }
+    assert _what("external_step", "Gitea") == "the Gitea setup step", "a step whose title is not known"
+    with pytest.raises(ValueError):
+        _what("password_reset", "Gitea")
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (
+            BrokerSessionOutcome(WATCH_EXPIRED),
+            ("expired", "The page for the GitHub sign-in expired before it was finished.", None),
+        ),
+        (
+            BrokerSessionOutcome(WATCH_UNCONFIRMED),
+            ("unavailable", "Nobody could confirm whether the GitHub sign-in finished.", "tool_setup_page_unconfirmed"),
+        ),
+        (
+            BrokerSessionOutcome(WATCH_FINISHED, {"status": "pending"}),
+            ("unavailable", "Nobody could confirm whether the GitHub sign-in finished.", "tool_setup_page_unconfirmed"),
+        ),
+        (
+            BrokerSessionOutcome(
+                WATCH_FINISHED,
+                {"status": "error", "message": "The sign-in was cancelled", "failure_reason": "sign_in_cancelled"},
+            ),
+            ("unavailable", "The GitHub sign-in did not finish. The sign-in was cancelled.", "sign_in_cancelled"),
+        ),
+        (
+            BrokerSessionOutcome(WATCH_FINISHED, {"status": "error"}),
+            ("unavailable", "The GitHub sign-in did not finish.", "tool_setup_sign_in_failed"),
+        ),
+        (
+            BrokerSessionOutcome(WATCH_FINISHED, {"status": "success", "username": "exampleuser"}),
+            ("completed", "The GitHub sign-in is done (account exampleuser).", None),
+        ),
+        (BrokerSessionOutcome(WATCH_FINISHED, {"status": "success"}), ("completed", "The GitHub sign-in is done.", None)),
+    ],
+)
+def test_each_way_a_sign_in_page_ends_names_the_page(outcome, expected) -> None:
+    ending = sign_in_page_ending(outcome, what="the GitHub sign-in")
+
+    assert (ending.status, ending.message, ending.reason_code) == expected
+
+
+def _link_result(**result) -> BrokerSessionOutcome:
+    return BrokerSessionOutcome(WATCH_FINISHED, {"result": result})
+
+
+_CREATED = {"status": "account_link_created", "link_id": "account_link_1", "owner_kind": "person"}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (
+            BrokerSessionOutcome(WATCH_EXPIRED),
+            ("expired", "The form for the account link for Portainer expired before it was used.", None),
+        ),
+        (
+            BrokerSessionOutcome(WATCH_UNCONFIRMED),
+            (
+                "unavailable",
+                "Nobody could confirm whether the account link for Portainer finished.",
+                "tool_setup_page_unconfirmed",
+            ),
+        ),
+        (
+            _link_result(**_CREATED, tool_id="http:portainer"),
+            ("completed", "The account link for Portainer is done.", None),
+        ),
+        (
+            _link_result(**_CREATED, tool_id="http:other"),
+            (
+                "unavailable",
+                "Nobody could confirm whether the account link for Portainer finished.",
+                "tool_setup_link_mismatch",
+            ),
+        ),
+        (
+            _link_result(status="account_link_declined"),
+            ("declined", "The form for the account link for Portainer was closed without linking anything.", None),
+        ),
+        (
+            _link_result(status="account_link_unavailable", reason_code="account_link_session_expired"),
+            ("expired", "The form for the account link for Portainer expired before it was used.", None),
+        ),
+        (
+            _link_result(
+                status="account_link_unavailable",
+                reason_code="account_link_credential_mismatch",
+                error="That credential is not one of this tool's credentials",
+            ),
+            (
+                "unavailable",
+                "The account link for Portainer did not finish. That credential is not one of this tool's credentials.",
+                "account_link_credential_mismatch",
+            ),
+        ),
+        (
+            _link_result(status="account_link_unavailable"),
+            ("unavailable", "The account link for Portainer did not finish.", "tool_setup_page_refused"),
+        ),
+    ],
+)
+def test_each_way_an_account_link_form_ends_names_the_page(outcome, expected) -> None:
+    ending = account_link_page_ending(
+        outcome, what="the account link for Portainer", tool_id="http:portainer", owner="person"
+    )
+
+    assert (ending.status, ending.message, ending.reason_code) == expected
