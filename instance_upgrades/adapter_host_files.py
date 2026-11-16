@@ -99,7 +99,11 @@ which of three cases it is.
    moved, so a run that stops on a folder problem has dropped none. Once a
    file has moved, a later error (a folder sync) raises ``FolderProblem``,
    never a refusal, and the next run counts the file ``already_moved``. A
-   conversation entry with no gateway record (no chat session for its folder)
+   file is not absent while something is at its destination in
+   ``state/uploads`` or that cannot be told: a run that stopped between the
+   rename and the record rewrite left it there, so when the next run cannot
+   read that copy it refuses the file and keeps its records, and a run after
+   the fix counts it ``already_moved``. A conversation entry with no gateway record (no chat session for its folder)
    or naming another path or sha256 than the gateway record is never moved:
    it is dropped when its file is proven absent and kept otherwise.
 
@@ -124,7 +128,7 @@ import json
 import logging
 import os
 import stat
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -501,14 +505,23 @@ class _Step:
                 unmovable = _Unmovable(OUTCOME_NO_RECORD, REASON_NO_GATEWAY_RECORD, self._transfer)
                 self._keep_or_drop(item, unmovable, item.entries, record_path=None, absent_source=None)
                 return
+            names: Optional[tuple[Path, tuple[str, str]]] = None
             try:
-                source, destination = self._names(item, record)
-                outcome, remove_source = self._place(source, destination, record.sha256)
+                names = self._names(item, record)
+                outcome, remove_source = self._place(*names, record.sha256)
             except _Unmovable as unmovable:
                 source_path = self._in_transfer(record.local_path)
                 absent = source_path if unmovable.outcome == OUTCOME_MISSING else None
-                self._keep_or_drop(item, unmovable, item.entries, record_path=source_path, absent_source=absent)
+                self._keep_or_drop(
+                    item,
+                    unmovable,
+                    item.entries,
+                    record_path=source_path,
+                    absent_source=absent,
+                    destination=names[1] if names is not None else None,
+                )
                 return
+            source, destination = names
             moved_with = [
                 entry for entry in item.entries if entry.path == source and entry.attachment.sha256 == record.sha256
             ]
@@ -688,8 +701,15 @@ class _Step:
         try:
             try:
                 self._fill(source, descriptor, info, target, temporary_file, sha256)
-            finally:
+            except BaseException:
+                with suppress(OSError):  # the first error is the one reported
+                    os.close(target)
+                raise
+            try:
+                # A network file system may report a delayed write error only at close.
                 os.close(target)
+            except OSError as exc:
+                raise _write_error(exc, self._uploads, temporary_file, REASON_MOVE_FAILED) from exc
             try:
                 os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
             except OSError as exc:
@@ -789,6 +809,7 @@ class _Step:
         *,
         record_path: Optional[Path],
         absent_source: Optional[Path],
+        destination: Optional[tuple[str, str]] = None,
         counted: bool = True,
     ) -> None:
         """Decide which records of a file that did not move are dropped (rule 3); applied by ``forget_unmovable``.
@@ -796,12 +817,20 @@ class _Step:
         Each record is dropped only when the file it names is proven absent:
         ``absent_source`` already was (the open found no file), any other
         path is looked up. So a record refused for one reason whose file is
-        also gone is dropped like a missing one. Everything is decided before
-        anything is dropped.
+        also gone is dropped like a missing one. A file is not absent while
+        something is at its ``destination`` in ``state/uploads``, or that
+        cannot be told: an earlier run may have renamed it there and stopped
+        before rewriting its records, so its records stay and a later run
+        counts it ``already_moved``. Everything is decided before anything is
+        dropped.
         """
 
+        at_destination = destination is not None and self._maybe_at_destination(destination)
+
         def absent(path: Optional[Path]) -> bool:
-            return path is not None and (path == absent_source or self._proven_absent(path))
+            if path is None or at_destination:
+                return False
+            return path == absent_source or self._proven_absent(path)
 
         drop_entries: list[_Entry] = []
         kept_entries: list[_Entry] = []
@@ -814,6 +843,19 @@ class _Step:
         )
         if counted:
             setattr(self.counts, unmovable.outcome, getattr(self.counts, unmovable.outcome) + 1)
+
+    def _maybe_at_destination(self, destination: tuple[str, str]) -> bool:
+        """Whether something is at ``destination``, or that cannot be told; only a proven absence says no.
+
+        This decides only whether records are kept for a file already refused
+        (rule 1), so an error looking it up keeps them rather than stopping
+        startup.
+        """
+
+        try:
+            return _look(self._uploads, destination, absent_is_missing=True) != _ABSENT
+        except FolderProblem:
+            return True
 
     def _proven_absent(self, path: Path) -> bool:
         """Whether ``path`` is missing from a transfer folder that opened (or, with ``--files-gone``, is not here)."""

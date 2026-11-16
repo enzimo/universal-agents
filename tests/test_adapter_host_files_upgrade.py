@@ -356,10 +356,16 @@ def _assert_not_opened(instance: _Instance, attachment: UserTaskAttachment) -> N
 def _assert_photo_kept(instance: _Instance) -> None:
     """The photo's records still name its file in the transfer folder, and the file is there."""
 
+    _assert_photo_records_kept(instance)
+    assert instance.photo_source.read_bytes() == CONTENT["att_photo"]
+
+
+def _assert_photo_records_kept(instance: _Instance) -> None:
+    """The photo's gateway record and both conversation entries still name its file in the transfer folder."""
+
     source = str(instance.photo_source)
     assert instance.gateway().get_attachment("att_photo").local_path == source
     assert instance.turn_paths("task_1")["att_photo"] == source and instance.turn_paths("task_2")["att_photo"] == source
-    assert instance.photo_source.read_bytes() == CONTENT["att_photo"]
 
 
 def _link_source(instance: _Instance) -> None:
@@ -638,6 +644,14 @@ def _photo_already_at_destination(instance: _Instance) -> Path:
     return instance.photo_destination
 
 
+def _photo_renamed_before_records(instance: _Instance) -> Path:
+    """An earlier run renamed the photo into ``state/uploads`` and stopped before rewriting its records (C18)."""
+
+    instance.photo_destination.parent.mkdir(parents=True, exist_ok=True)
+    instance.photo_source.rename(instance.photo_destination)
+    return instance.photo_destination
+
+
 @pytest.mark.parametrize(
     "where", ["source", "destination"], ids=["source", "destination"]
 )
@@ -856,9 +870,13 @@ _FAULTS = {
     "fsync_copy_io": _Fault("fsync", _copy, errno.EIO, "refused", "move_failed", cross_disk=True),
     "read_back_copy_io": _Fault("pread", _copy, errno.EIO, "refused", "unreadable", cross_disk=True),
     "fchmod_copy_io": _Fault("fchmod", _copy, errno.EIO, "refused", "move_failed", cross_disk=True),
+    "close_copy_io": _Fault("close", _copy, errno.EIO, "refused", "move_failed", cross_disk=True),
     "rename_copy_bad_name": _Fault("rename", _copy, errno.EINVAL, "refused", "name_refused", cross_disk=True),
     "open_destination_io": _Fault(
         "open", _DESTINATION, errno.EIO, "refused", "unreadable", setup=_photo_already_at_destination
+    ),
+    "open_destination_io_after_earlier_rename": _Fault(
+        "open", _DESTINATION, errno.EIO, "refused", "unreadable", setup=_photo_renamed_before_records
     ),
     "path_construction": _Fault("path", _PHOTO, ValueError("no file name"), "refused", "unsafe_name"),
     # Rule 2: a folder.
@@ -871,6 +889,7 @@ _FAULTS = {
     "rename_read_only": _Fault("rename", _PHOTO, errno.EROFS, "folder", "uploads"),
     "rename_destination_folder_gone": _Fault("rename", _PHOTO, errno.ENOENT, "folder", "uploads"),
     "write_copy_full": _Fault("write", _copy, errno.ENOSPC, "folder", "uploads", cross_disk=True),
+    "close_copy_full": _Fault("close", _copy, errno.ENOSPC, "folder", "uploads", cross_disk=True),
     "fsync_folder_after_rename": _Fault("fsync", _SESSION, errno.EIO, "folder", "uploads"),
     "fsync_folder_after_copy": _Fault("fsync", _SESSION, errno.EIO, "folder", "uploads", cross_disk=True),
     "write_marker": _Fault("replace", _MARKER, errno.EROFS, "folder", "state"),
@@ -908,6 +927,8 @@ def _inject(instance: _Instance, monkeypatch: pytest.MonkeyPatch, fault: _Fault)
             subject = _subject(function, args, kwargs)
             if subject is not None and target(instance, subject):
                 fired.append(function)
+                if function == "close":
+                    real(*args, **kwargs)  # a close that reports an error still releases the descriptor
                 made = error(instance) if callable(error) and not isinstance(error, BaseException) else error
                 raise OSError(made, os.strerror(made)) if isinstance(made, int) else made
             return real(*args, **kwargs)
@@ -936,7 +957,10 @@ def test_one_error_rule_holds_at_every_operation(instance: _Instance, monkeypatc
 
     if fault.expect == "refused":
         assert result.finished and result.counts.refused == 1 and result.counts.moved == 0
-        _assert_photo_kept(instance)
+        if fault.setup is _photo_renamed_before_records:
+            _assert_photo_records_kept(instance)  # the file sits at its destination; its records are not dropped
+        else:
+            _assert_photo_kept(instance)
         assert fault.setup is not None or not instance.photo_destination.exists()
         assert not list(instance.photo_destination.parent.glob(".moving-*"))
         (warning,) = [message for message in _events(caplog, "adapter_host_file_not_moved") if "attachment_id=att_photo" in message]

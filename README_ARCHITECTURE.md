@@ -4591,7 +4591,11 @@ the desktop app never offers an older version.
   the person to send it again, and its gateway record is deleted. Records are
   dropped only after every file that can move has moved, so a run that stops
   drops none, and once a file has moved a later error is a folder error, never
-  a refusal, so the next run counts it `already_moved`. A conversation entry
+  a refusal, so the next run counts it `already_moved`. A file is not absent
+  while something is at its destination in `state/uploads`, or that cannot be
+  told: a run that stopped between the rename and the record rewrite left it
+  there, so a read error on that copy refuses the file and keeps its records,
+  and a run after the fix counts it `already_moved`. A conversation entry
   with no gateway record (no chat session for its folder) or naming another
   path or sha256 is never moved; it is dropped only when its file is proven
   absent. One line, `event=adapter_host_files_upgraded` with the counts,
