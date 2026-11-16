@@ -35,6 +35,9 @@ one batch, a transfer folder set to ``state/uploads``, a run that waits for
 another's lock (and a state folder without locks), the launcher step and the
 operator command. A held request still naming the old path gets
 the stuck-task notice: ``tests/test_stuck_tasks.py`` (``ADAPTER_HOST_FOLDER``).
+Held guidance the gateway sends again after the step keeps its file through
+the team lead's real steering handler:
+``tests/test_adapter_host_held_guidance_resend.py``.
 Runs on SQLite and, with ``LIVE_TEST_POSTGRES_DSN``, on PostgreSQL.
 """
 
@@ -619,7 +622,8 @@ def test_held_guidance_follows_its_moved_file_and_the_lead_keeps_it_when_sent_ag
     assert moved.local_path() == str(instance.photo_destination)
     assert after.model_dump(exclude={"attachments"}) == before.model_dump(exclude={"attachments"})
     assert moved.model_dump(exclude={"storage_refs"}) == photo.model_dump(exclude={"storage_refs"})
-    # What the team lead does with the files of guidance it receives (sent_files_runtime._kept_upload_files).
+    # What the team lead does with the files of guidance it receives (sent_files_runtime._kept_upload_files);
+    # the whole send is in tests/test_adapter_host_held_guidance_resend.py.
     folder = UploadFolder.for_instance(instance.root)
     assert keep_upload_files(after.attachments, folder, task_id="task_2", conversation_id=CONVERSATION) == [moved]
     located = locate_upload(moved, folder, task_id="task_2", conversation_id=CONVERSATION)

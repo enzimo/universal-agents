@@ -3030,13 +3030,14 @@ class _RelationalGatewayStateRepository:
         transfer folder (``instance_upgrades.adapter_host_files``): the
         gateway signs held guidance again from its stored copy at each send,
         so the rewritten path is the one the team lead receives. Each copy is
-        read again in one transaction (its row locked on PostgreSQL), so a
-        copy the gateway released meanwhile is skipped and one already
-        pointing there is left alone; only the matching entries' local storage
-        references change (``storage.turn_attachments.relocate_steering_attachment``).
-        No store-wide write lock is taken: apart from this step the gateway
-        only inserts and deletes held copies, so a copy that changes between
-        the read and the write was deleted, and the update then changes no row.
+        read again (its row locked on PostgreSQL), so a copy the gateway
+        released meanwhile is skipped and one already pointing there is left
+        alone; only the matching entries' local storage references change
+        (``storage.turn_attachments.relocate_steering_attachment``). No
+        store-wide write lock is taken: apart from this step the gateway only
+        inserts and deletes held copies, so a copy that changes between the
+        read and the write (possible on SQLite, which takes no row lock) was
+        deleted, the update changes no row, and the count leaves it out.
         """
 
         bind = self._dialect.bind
@@ -3051,11 +3052,10 @@ class _RelationalGatewayStateRepository:
                 relocated = relocate_steering_attachment(row["steering_json"], attachment_id, local_path) if row else None
                 if relocated is None:
                     continue
-                conn.execute(
+                changed += conn.execute(
                     f"UPDATE gateway_held_guidance SET steering_json = {bind} WHERE correlation_id = {bind}",
                     (relocated, correlation_id),
-                )
-                changed += 1
+                ).rowcount
             conn.commit()
         return changed
 
