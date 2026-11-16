@@ -380,9 +380,8 @@ is linked, the team does not accept your messages, and an answer it does
 accept arrives without its files. If your team runs without gateway users
 (`gateway.users.enabled: false`), files sent with a follow-up message or an
 answer in a chat app are not kept and earlier files are not offered; Web Chat
-keeps them. After
-the retention period the agent says the file is no longer stored, and you send
-it again. Agents cannot reach files from another chat or another person, nor
+keeps them. After the retention period the agent says the file is no longer
+stored, and you send it again. Agents cannot reach files from another chat or another person, nor
 files sent before the team's update that started keeping each message's
 files; send those again. The same holds for files sent with a request that
 was still waiting to start when the team was updated: the request runs, but

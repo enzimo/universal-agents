@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from custom_agents.agent_instructions import (
     ACCESS_PROMPT_RULE,
     shared_agent_base_prompt,
@@ -92,6 +94,48 @@ def test_shared_prompt_asks_to_resend_a_file_only_when_the_slice_and_the_tools_c
     )
     assert f"or when opening it returns `{RESULT_UPLOAD_UNAVAILABLE}`" in rule
     assert "if it is not listed" not in rule
+
+
+def test_instructions_open_the_persons_files_by_id_and_say_what_a_delegation_passes() -> None:
+    """Every text an agent reads names the person's files by ``attachment_id`` and says what a delegation passes.
+
+    Ported from #137 against the merged texts: files stay usable after their turn, so no text may say the
+    media loader takes only a workspace path, and ``attachment_ids`` on ``delegate_task`` is the one choice of
+    a specialist's files. Guidance passed on to a working specialist carries no files (decision D3), so no
+    text may still say that guidance files go to it, or that an answer to an escalation cannot carry files.
+    """
+
+    from assistant_gateway.config import DeliverySettings
+    from custom_agents.instance_delivery_context import render_delivery_settings_context
+    from custom_tools.local_media_context_tool import load_local_media_for_model_context
+
+    delivery = render_delivery_settings_context(DeliverySettings())
+    assert "use inspect_user_attachment with the attachment_id" in delivery
+    assert "uploaded image or supported document (by attachment_id)" in delivery
+    assert "open it by `attachment_id` instead of asking for it again" in shared_agent_base_prompt
+    assert "When delegating, `attachment_ids` chooses the files the new task gets" in shared_agent_base_prompt
+    media = load_local_media_for_model_context.tool_spec
+    assert "attachment_id" in media["inputSchema"]["json"]["properties"]
+    assert "Give exactly one of `attachment_id` or `path`" in media["description"]
+
+    team_lead = (
+        Path(__file__).resolve().parents[1] / "ua_definitions/agent_definitions/prompts/team_architect.md"
+    ).read_text(encoding="utf-8")
+    skill = " ".join((RUNTIME_OPERATIONS_WORKFLOWS_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8").split())
+    assert "Choose them with `attachment_ids` on `delegate_task`" in team_lead
+    assert "`attachment_ids` chooses the files the new task gets" in skill
+    assert "(by `attachment_id`) or one in this task's folders (by path), use `load_local_media_for_model_context`" in skill
+    guidance = "Guidance the person sends later reaches a specialist already working without its files"
+    for name, text in {"team lead": team_lead, "skill template": skill}.items():
+        assert guidance in " ".join(text.split()), name
+    for name, text in {
+        "agent instructions": shared_agent_base_prompt,
+        "team lead": team_lead,
+        "skill template": skill,
+    }.items():
+        flattened = " ".join(text.split())
+        assert "also go to the specialists" not in flattened, name
+        assert "escalation cannot carry files" not in flattened and "escalation carries no files" not in flattened, name
 
 
 def test_shared_prompt_prohibits_generated_site_url_guessing() -> None:

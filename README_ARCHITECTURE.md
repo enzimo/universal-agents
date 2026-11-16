@@ -3916,8 +3916,8 @@ link put in its place after the check is refused (`custom_tools.task_uploads`,
 same way. A file that cannot be opened says why: `unknown_attachment_id`
 (with the files the task may use), `upload_unavailable` (deleted, or this
 host cannot read it: any error checking it other than "not found", such as
-no permission or a link loop, is logged with the ids and answered with a
-fixed text), `remote_copy_required` (stored on another host) or `refused` (a
+no permission, a link loop or a file where the session folder should be,
+is logged with the ids and answered with a fixed text), `remote_copy_required` (stored on another host) or `refused` (a
 record that points outside the upload folder). No result includes a storage
 path, and a turn's direct image input skips an image it cannot read instead of
 failing. `copy_to_workspace` inspects the copy it made, so a deletion right

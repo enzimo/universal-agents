@@ -1448,18 +1448,9 @@ be opened here; a file sent again is stored in the same place. Do not paste
 raw bytes, base64, or full binary content into task text, steering guidance,
 or user notifications.
 
-The team lead chooses which of the person's files a delegated task gets with
-`attachment_ids` on `delegate_task`. Left out, the task gets the files that
-came with the request's own message (for a specialist's escalation, the files
-it came with); a list passes exactly those files and `[]` passes none. Files
-the person sends later as guidance also go to the specialists already
-working on tasks delegated from the request itself, whatever `attachment_ids`
-gave them; specialists working for a plan step or a recovery task get them
-only when the team lead passes them with `attachment_ids`. An id the task
-cannot use creates nothing, and the team lead is shown the files it can
-pass. A reply to a specialist's escalation carries no files: when the
-person answers an escalation with files, the team lead delegates the work
-that needs them from the escalation with their ids.
+Guidance the person sends later reaches a specialist already working without
+its files; the team lead passes those files with `attachment_ids` when it
+delegates again.
 
 ## Whole-goal specialist and delegation scenarios
 
