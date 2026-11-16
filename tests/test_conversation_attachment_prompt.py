@@ -358,6 +358,49 @@ async def test_a_focused_turn_lists_and_opens_its_requests_files(lead: Any, layo
         assert inspect_user_attachment._tool_func(attachment_id=attachment_id)["status"] == "success"
 
 
+@pytest.mark.asyncio
+async def test_a_recovery_task_whose_plan_step_ended_still_uses_its_requests_files_and_logs_nothing(
+    lead: Any, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#137 F12: a recovery task started on a plan step keeps finding its request after the step ends.
+
+    The plan-step and recovery links stay while their tasks run, and ``resolve_root_task_id`` follows
+    them without needing the step to be held, so no prompt or tool call warns that the request may not
+    share its files (#137 warned on every one).
+    """
+
+    page = _upload(layout, "page one.png")
+    await _admit(lead, task_id=CURRENT, text="Read this recipe for that plant.", attachments=[page])
+    manager = lead.task_manager
+    step_id = _focused_task(lead, "plan_step_task").task.task_id
+    root = manager.get_task_info(CURRENT)
+    recovery = manager.start_isolated_recovery_task(
+        step_id,
+        failure_type="tool_failure",
+        failure_summary="The page did not load.",
+        recovery_brief="Try another way.",
+        header=root.header.model_copy(deep=True),
+        meta=root.meta.model_copy(update={"conversation_id": "recov_conv_1", "msg_correlation_id": "recovery_corr_1"}),
+        notify_user=False,
+    )
+    assert recovery is not None
+    recovery_id = recovery.task.task_id
+    assert manager.remove_task(step_id) and manager.get_task_info(step_id) is None  # the step ended
+
+    with caplog.at_level(logging.INFO, logger="custom_agents.conversation_attachments"):
+        listed = [
+            _listed_ids(_section(_assemble(lead, recovery_id, isolated_recovery_task=True), CONVERSATION_ATTACHMENTS_SECTION))
+            for _ in range(3)
+        ]
+        use_agent(lead, recovery_id)
+        opened = inspect_user_attachment._tool_func(attachment_id=page.attachment_id)
+
+    assert manager.resolve_root_task_id(recovery_id) == CURRENT
+    assert all(page.attachment_id in ids for ids in listed)
+    assert opened["status"] == "success"
+    assert "step_request_files_not_usable" not in caplog.text
+
+
 @pytest.mark.parametrize("flag", ["plan_step_task", "isolated_recovery_task"])
 @pytest.mark.asyncio
 async def test_a_focused_turn_lists_and_opens_its_requests_files_when_its_turn_has_no_records(

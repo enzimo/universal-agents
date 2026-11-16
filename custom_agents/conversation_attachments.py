@@ -972,7 +972,9 @@ def locate_upload(
     Inside the folder, when it exists here, a missing file was deleted (upload
     retention, or its person left the team); when the folder is not here, the
     file is on another host. Any other error while checking the file (no
-    permission, a link loop, an I/O error) makes it unreadable here: logged
+    permission, a link loop, an I/O error, or a file where the session
+    folder should be, ``NotADirectoryError``, which no clean-up produces)
+    makes it unreadable here: logged
     with the ids and the error number, and never shown to the model, because
     its text names where the file is stored.
     """
@@ -989,7 +991,7 @@ def locate_upload(
     folder = upload_folder.path
     try:
         entry = resolved.stat()
-    except (FileNotFoundError, NotADirectoryError):
+    except FileNotFoundError:  # only a removal: anything else is a fault, logged below
         entry = None
     except OSError as exc:
         logger.warning(

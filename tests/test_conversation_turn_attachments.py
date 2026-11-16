@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -195,34 +196,76 @@ def test_merging_adds_only_new_files_and_reports_how_many(backend: _Backend, cap
     ]
 
 
+MERGE_START_TIMEOUT_SECONDS = 30.0
+MERGE_JOIN_TIMEOUT_SECONDS = 120.0
+
+
+def _run_writers(
+    writers: int, work: Callable[[int, threading.Barrier], None], *, join_timeout: float = MERGE_JOIN_TIMEOUT_SECONDS
+) -> list[BaseException]:
+    """Run ``work(writer, start)`` in one thread per writer and return what they raised (#137 F6).
+
+    A writer that fails before the start line (its store does not open) aborts the barrier, so the
+    others stop at once with ``BrokenBarrierError`` instead of waiting forever; a thread still running
+    after ``join_timeout`` fails the test instead of hanging the run.
+    """
+
+    start = threading.Barrier(writers, timeout=MERGE_START_TIMEOUT_SECONDS)
+    errors: list[BaseException] = []
+
+    def run(writer: int) -> None:
+        try:
+            work(writer, start)
+        except BaseException as exc:  # reported by the caller's assertion
+            errors.append(exc)
+            start.abort()
+
+    threads = [threading.Thread(target=run, args=(writer,), name=f"merge-writer-{writer}", daemon=True) for writer in range(writers)]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + join_timeout
+    for thread in threads:
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    still_running = [thread.name for thread in threads if thread.is_alive()]
+    assert not still_running, f"Merge writers still running after {join_timeout} s: {still_running}"
+    return errors
+
+
+def test_a_writer_whose_store_does_not_open_fails_the_run_at_once() -> None:
+    """The others stop at the start line instead of waiting there for it (#137 F6)."""
+
+    def work(writer: int, start: threading.Barrier) -> None:
+        if writer == 0:
+            raise RuntimeError("the store did not open")
+        start.wait()
+
+    began = time.monotonic()
+    errors = _run_writers(3, work, join_timeout=10.0)
+
+    assert time.monotonic() - began < MERGE_START_TIMEOUT_SECONDS
+    assert any(isinstance(error, RuntimeError) for error in errors)
+    assert sum(isinstance(error, threading.BrokenBarrierError) for error in errors) == 2
+
+
 def test_concurrent_merges_into_one_turn_lose_no_file(backend: _Backend) -> None:
     _thread(backend.open())
     _turn(backend.open(), "task_1", (_file("att_initial"),))
     writers, files_each = 6, 5
-    start = threading.Barrier(writers)
-    errors: list[BaseException] = []
 
-    def merge(writer: int) -> None:
+    def merge(writer: int, start: threading.Barrier) -> None:
         # Each thread has its own store and connections, like separate processes.
         repo = backend.open()
         start.wait()
-        try:
-            for number in range(files_each):
-                # Every file is also sent by the next writer, so retries race with first writes.
-                for owner in (writer, (writer + 1) % writers):
-                    repo.merge_turn_attachments(
-                        conversation_id=CONVERSATION,
-                        task_id="task_1",
-                        attachments=[_file(f"att_{owner}_{number}")],
-                    )
-        except BaseException as exc:  # pragma: no cover - reported below
-            errors.append(exc)
+        for number in range(files_each):
+            # Every file is also sent by the next writer, so retries race with first writes.
+            for owner in (writer, (writer + 1) % writers):
+                repo.merge_turn_attachments(
+                    conversation_id=CONVERSATION,
+                    task_id="task_1",
+                    attachments=[_file(f"att_{owner}_{number}")],
+                )
 
-    threads = [threading.Thread(target=merge, args=(writer,)) for writer in range(writers)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    errors = _run_writers(writers, merge)
 
     assert errors == []
     stored = [item["attachment_id"] for item in backend.open().get_turn_by_task_id("task_1")["attachments"]]

@@ -11,6 +11,7 @@ reading bytes only from this host's upload folder.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 from pathlib import Path
@@ -32,6 +33,7 @@ from custom_agents.conversation_attachments import (
     UPLOAD_NO_LOCAL_COPY,
     UPLOAD_NOT_ON_THIS_HOST,
     UPLOAD_OUTSIDE_FOLDERS,
+    UPLOAD_UNREADABLE,
     UNRECORDED_TURNS_NOTE,
     AttachmentSelectionError,
     LocatedUpload,
@@ -631,6 +633,29 @@ def test_a_deleted_upload_says_to_send_it_again(layout, caplog) -> None:
     assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_FILE_MISSING
     assert "send it again" in result.message and str(layout.root) not in result.message
     assert "event=attachment_upload_missing attachment_id=att_photo" in caplog.text
+
+
+def test_a_file_where_the_session_folder_should_be_is_a_fault_not_a_deletion(layout, caplog) -> None:
+    """#137 delta F2: looking inside a file raises NotADirectoryError, which no clean-up produces.
+
+    So it is not told as deleted ("send it again"): it is unreadable here and logged with the error
+    number, without the path.
+    """
+
+    photo = _record("att_photo", layout.uploads_dir / "session_file" / "att_photo.bin")
+    layout.uploads_dir.mkdir(parents=True, exist_ok=True)
+    (layout.uploads_dir / "session_file").write_bytes(b"not a folder")
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = locate_upload(photo, UploadFolder.for_instance(layout.root), task_id=CURRENT, conversation_id=CONVERSATION)
+
+    assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_UNREADABLE
+    assert "event=attachment_upload_missing" not in caplog.text
+    assert (
+        f"event=attachment_upload_unreadable attachment_id=att_photo task_id={CURRENT} conversation_id={CONVERSATION} "
+        f"error_type=NotADirectoryError errno={errno.ENOTDIR}"
+    ) in caplog.text
+    assert "session_file" not in caplog.text and str(layout.root) not in result.message
 
 
 def test_an_upload_folder_missing_on_this_host_means_another_host(tmp_path: Path, layout) -> None:
