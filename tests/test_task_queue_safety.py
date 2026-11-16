@@ -182,6 +182,8 @@ async def test_access_resume_clears_old_blocker_before_final_review(
         task_manager=manager,
         _interrupted_turn_sessions={task.task_id: session},
         _pending_interrupt_responses={task.task_id: steering},
+        # A resumed turn checks for unread guidance after its call (task_steering_runtime).
+        _pending_proactive_task_steering={},
         _strands_agent=sdk,
         _strands_agent_replacement_required=True,
         _set_active_execution_context=lambda task_id: ToolStop(agent_id="manager", task_id=task_id),

@@ -3048,6 +3048,31 @@ question to a person uses the preserved gateway reply route. Steering that
 names a task applies only to that task. Accepted guidance and duplicate keys
 are saved with its history, and guidance survives a restart until the model
 turn records its decision.
+The model reads accepted guidance at the start of its turn and, mid-turn, at
+its next new tool call, which is cancelled with the guidance text
+(`task_steering_runtime.RuntimeSteeringPlugin`). After each call to the agent
+that did not pause, the turn checks again before carrying out its decision: a
+fresh turn calls the model again with the guidance
+(`custom_agents.sdk.strands.turn`), and a resumed turn sends it as the next
+prompt of the same conversation (`task_steering_runtime._call_until_guidance_read`).
+That check is needed because the turn decision is not always a tool call:
+providers that enforce structured output themselves (Anthropic, Bedrock) can
+answer Strands' forced decision as JSON text. Guidance that arrives after the
+check is found only when the task's result is applied
+(`_apply_task_processing_result`), after the decision's actions, a final
+answer included, were carried out; the task then runs again with it. A tool
+call that resumes after its pause (`set_up_tools` waiting for setup pages,
+`request_access` or `apply_change` waiting for a decision, any local Strands
+interrupt) is not a new call: it runs with its answer, and the guidance waits
+for the next new call or the check after the call.
+Why: cancelling the resumed call threw away the answer the task had waited
+for, and the model then repeated setup that was already done. Strands gives
+no sign in the event that a call resumes, so
+`custom_agents.sdk.strands.paused_tool_calls` recognises one with public hooks
+only: its tool use id started in a call to the agent that paused and has not
+finished since. One consequence: a change approved in the Inbox while guidance
+waits is applied before the model reads that guidance. To stop such a change,
+decline it in the Inbox or stop the request.
 An explicitly addressed receiver answers `STALE` for a missing task. The gateway
 holds guidance for that request until the lead admits its task, and retries
 with the same idempotency key. Guidance never becomes another root request.
