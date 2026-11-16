@@ -3849,9 +3849,11 @@ chat apps are signed for nobody, so files sent there with guidance or an
 answer are never kept and the earlier files of a conversation are not
 offered; a request's own files still are. Web Chat and the console sign for
 their signed-in person in both modes.
-`tests/test_gateway_signed_answer_files.py` round-trips a gateway-signed answer
-with a file through the transport codec (encode and decode, as NATS delivery
-does) into the team lead's answer handler; it does not run a NATS server.
+`tests/test_question_answer_files.py`
+(`test_a_web_chat_answer_with_a_file_reaches_the_request_named_by_id_and_stays_usable`)
+round-trips a gateway-signed answer with a file from Web Chat through the
+transport codec (encode and decode, as NATS delivery does) into the team
+lead's answer handler; it does not run a NATS server.
 
 Where the records live. Kept files are written in two trusted places: the
 task's own history (one files entry per accepted guidance or answer,
@@ -4518,14 +4520,18 @@ the desktop app never offers an older version.
   work before upgrading. Work that was not finished is reported by the team
   lead's stuck-task check (`custom_agents.stuck_tasks`, condition
   `task_files_sent_before_upgrade`): on each pass it reads every agent's saved
-  work, finds file records outside `state/uploads` (the rule by which the tools
-  answer `remote_copy_required`) and tells the person in the request's signed
-  context, once and at once, in the Inbox and the request's chat, which files
-  to send again. It reads each task's own files and the files the person sent
-  while it ran, with guidance (also the copy a worker got for its subtask) or
-  with an answer (`conversation_attachments.received_attachments`, the files
-  the tools offer by id), so guidance sent through such a chat app before the
-  upgrade, or held by the gateway and sent again after it, is reported too.
+  work, finds file records outside `state/uploads` (decided from the record
+  alone by `conversation_attachments.recorded_upload_folder`; for such a record
+  the file tools answer `refused` with reason `outside_upload_folders`) and
+  tells the person in the request's signed context, once and at once, in the
+  Inbox and the request's chat, which files to send again. It reads each
+  task's own files (`TaskAttachments.own`: the request's files and the files
+  kept from guidance, answers and escalation results, the files the tools
+  offer by id) and the files on guidance accepted by releases before 0.9.12,
+  which kept them only in the guidance's history entry. So guidance sent
+  through such a chat app before the upgrade, or held by the gateway and sent
+  again after it, is reported too. A copy of guidance passed on to a working
+  specialist carries no files (the team lead keeps them), so it adds none.
   The files of a request's subtasks, plan steps and recovery tasks (found
   through the plan-step and recovery links in the team lead's saved work) go
   into the request's one notice. Without a verified person (also every

@@ -1,11 +1,12 @@
-"""Files a person sends with an answer to an agent's question, through the real gateway.
+"""Files a person sends with an answer in Web Chat, through the real gateway.
 
-The real ``UserGateway`` with its SQLite store, the chat bridge and Web Chat;
-only the lead is a transport that records what the gateway sends
-(``tests.test_gateway_question_queue``). An answer carries the files the
-gateway stored for that chat (``TaskQuery.attachments``), a file-only answer
-gets the usual file-only text, and a message that does not answer the
-question (not shown yet, already answered) says its files were not sent.
+The real ``UserGateway`` with its SQLite store and Web Chat; only the lead is a
+transport that records what the gateway sends (``tests.test_gateway_question_queue``).
+Web Chat saves an answer's files after its owner checks, shows them with the
+answer in the transcript, sends them with the answer (``TaskQuery.attachments``)
+and saves nothing new on a browser retry; a message sent before the question
+was shown says its files were not sent. Ported from #137; the chat bridge's
+cases are main's tests in ``tests.test_question_answer_files``.
 """
 
 from __future__ import annotations
@@ -19,44 +20,10 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 from assistant_gateway.application.clarification import ANSWER_FILES_NOT_SENT_TEXT
-from assistant_gateway.application.pending_questions import (
-    ALREADY_ANSWERED_TEXT,
-    QUESTION_WAITING_INTRO_TEXT,
-)
-from assistant_gateway.channel_bridge import ATTACHMENT_ONLY_TASK_TEXT, ChannelBridge
-from assistant_gateway.translation import ChannelInboundMessage
-from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
-from tests.test_gateway_question_queue import (
-    REPORT_QUESTION,
-    TELEGRAM_ID,
-    TRIP_QUESTION,
-    _Chat,
-    _two_requests_ask,
-)
+from assistant_gateway.application.pending_questions import QUESTION_WAITING_INTRO_TEXT
+from assistant_gateway.channel_bridge import ATTACHMENT_ONLY_TASK_TEXT
+from tests.test_gateway_question_queue import REPORT_QUESTION, TRIP_QUESTION, _Chat, _two_requests_ask
 from tests.test_gateway_website_app import InternalWebsiteInteractiveApp
-
-FILES_NOT_SENT = f"\n\n{ANSWER_FILES_NOT_SENT_TEXT}"
-
-
-def _stored_file(chat: _Chat, attachment_id: str, filename: str) -> UserTaskAttachment:
-    """A file the chat adapter stored for this chat, as it hands it to the bridge."""
-
-    path = chat.config.layout.uploads_dir / "telegram" / attachment_id
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"photo")
-    return UserTaskAttachment(
-        attachment_id=attachment_id, filename=filename, content_type="image/jpeg", kind="image",
-        size_bytes=5, sha256="0" * 64, storage_refs=[AttachmentStorageRef(storage_type="local", path=str(path))],
-    )
-
-
-async def _person_sends(chat: _Chat, text: str, files: list[UserTaskAttachment]):
-    return await ChannelBridge(chat.gateway.application).handle_inbound(
-        ChannelInboundMessage(
-            channel_name="telegram", user_id=TELEGRAM_ID, chat_id=TELEGRAM_ID,
-            session_key=chat.session.session_key, text=text, attachments=files,
-        )
-    )
 
 
 def _ask_unseen(chat: _Chat) -> str:
@@ -68,71 +35,6 @@ def _ask_unseen(chat: _Chat) -> str:
         parent_task_id="task_report", conversation_id=chat.session.conversation_id, query_text=REPORT_QUESTION,
     )
     return "question_unseen"
-
-
-@pytest.mark.asyncio
-async def test_a_chat_app_answer_carries_its_files_and_a_file_only_answer_gets_the_file_only_text(
-    tmp_path: Path,
-) -> None:
-    chat = _Chat(tmp_path)
-    first, second = await _two_requests_ask(chat)
-    chat.finish_each_answered_task()
-    receipt = _stored_file(chat, "att_receipt", "receipt.jpg")
-    map_photo = _stored_file(chat, "att_map", "map.jpg")
-
-    replies = await _person_sends(chat, "This is the report folder", [receipt])
-    await _person_sends(chat, "", [map_photo])
-
-    answers = chat.lead.answers()
-    assert [answer.task_query_id for answer in answers] == [first.task_query_id, second.task_query_id]
-    assert (answers[0].message, answers[0].attachments) == ("This is the report folder", [receipt])
-    assert (answers[1].message, answers[1].attachments) == (ATTACHMENT_ONLY_TASK_TEXT, [map_photo])
-    assert replies[0].text == "Done with task_report"
-    assert chat.open_question_ids() == []
-
-
-@pytest.mark.asyncio
-async def test_a_chat_app_message_with_files_for_a_question_not_shown_yet_says_they_were_not_sent(
-    tmp_path: Path,
-) -> None:
-    chat = _Chat(tmp_path)
-    question_id = _ask_unseen(chat)
-
-    replies = await _person_sends(chat, "Here it is", [_stored_file(chat, "att_receipt", "receipt.jpg")])
-
-    assert chat.lead.answers() == []
-    assert replies[0].text == f"{QUESTION_WAITING_INTRO_TEXT}\n\n{REPORT_QUESTION}{FILES_NOT_SENT}"
-    assert chat.open_question_ids() == [question_id]
-
-
-@pytest.mark.asyncio
-async def test_a_second_answer_with_files_says_they_were_not_sent(tmp_path: Path) -> None:
-    chat = _Chat(tmp_path)
-    first, second = await _two_requests_ask(chat)
-    chat.finish_each_answered_task()
-    application = chat.gateway.application
-    # Two messages found the same question before either answered it.
-    question_id = await application.waiting_question_id(chat.session.session_key)
-    receipt = _stored_file(chat, "att_receipt", "receipt.jpg")
-
-    await application.reply_to_pending_query(
-        session_key=chat.session.session_key, task_query_id=question_id, response_text="The folder",
-        attachments=(receipt,),
-    )
-    duplicate = await application.reply_to_pending_query(
-        session_key=chat.session.session_key, task_query_id=question_id, response_text="The folder",
-        attachments=(_stored_file(chat, "att_again", "again.jpg"),),
-    )
-    # Without files, the refusal is unchanged.
-    plain = await application.reply_to_pending_query(
-        session_key=chat.session.session_key, task_query_id=question_id, response_text="The folder",
-    )
-
-    assert duplicate.text == f"{ALREADY_ANSWERED_TEXT}{FILES_NOT_SENT}"
-    assert plain.text == ALREADY_ANSWERED_TEXT
-    assert [(answer.task_query_id, answer.attachments) for answer in chat.lead.answers()] == [
-        (first.task_query_id, [receipt])
-    ]
 
 
 class _WebChat:
@@ -201,14 +103,15 @@ async def test_web_chat_saves_an_answers_files_shows_them_and_sends_them_with_th
         assert Path(report.local_path()).read_bytes() == b"%PDF-1"
         assert chat.store.get_attachment(report.attachment_id) is not None
         [week] = answers[1].attachments
-        assert (answers[1].message, week.filename, week.kind) == ("User sent attachment(s).", "week.png", "image")
+        assert (answers[1].message, week.filename, week.kind) == (ATTACHMENT_ONLY_TASK_TEXT, "week.png", "image")
         # A browser retry of the answer sends and saves nothing new.
         assert retried["messages"][-1]["message_id"] == answered["messages"][-1]["message_id"]
         assert len(list(chat.config.layout.uploads_dir.rglob("*.pdf"))) == 1
         # The transcript shows each answer with its file.
         sent = {message["content"]: message for message in transcript if message["role"] == "user"}
         assert [item["filename"] for item in sent["This is the report"]["attachments"]] == ["report.pdf"]
-        assert [item["filename"] for item in sent["User sent attachment(s)."]["attachments"]] == ["week.png"]
+        # A file-only answer shows the person's empty text with its file.
+        assert [item["filename"] for item in sent[""]["attachments"]] == ["week.png"]
         contents = [message["content"] for message in transcript]
         assert contents.index("This is the report") < contents.index(TRIP_QUESTION)
 
@@ -228,11 +131,13 @@ async def test_web_chat_files_sent_before_the_question_was_shown_are_not_sent_an
         transcript = await web.transcript()
 
         assert chat.lead.answers() == []
-        assert reply["messages"][-1]["content"] == f"{QUESTION_WAITING_INTRO_TEXT}\n\n{REPORT_QUESTION}{FILES_NOT_SENT}"
-        # The transcript shows what the person sent, then the note.
+        assert reply["messages"][-1]["content"] == (
+            f"{ANSWER_FILES_NOT_SENT_TEXT}\n\n{QUESTION_WAITING_INTRO_TEXT}\n\n{REPORT_QUESTION}"
+        )
+        # The transcript shows what the person sent, then the note, which leads with the files.
         [sent] = [message for message in transcript if message["role"] == "user"]
         assert (sent["content"], [item["filename"] for item in sent["attachments"]]) == ("Here it is", ["report.pdf"])
-        assert transcript[-1]["content"].endswith(ANSWER_FILES_NOT_SENT_TEXT)
+        assert transcript[-1]["content"].startswith(ANSWER_FILES_NOT_SENT_TEXT)
         assert chat.open_question_ids() == [question_id]
 
     await _web_chat(chat, monkeypatch, test)

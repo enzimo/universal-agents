@@ -546,6 +546,42 @@ async def test_a_deferred_answer_keeps_its_files_once_when_handled_from_the_runt
 
 
 @pytest.mark.asyncio
+async def test_a_store_error_leaves_the_answer_unrecorded_and_the_resend_records_it_with_its_file(
+    asking_lead, layout: InstanceLayout
+) -> None:
+    # Ported from #137 (test_answer_attachments_runtime): the answer's files are
+    # recorded before its text, so a failed save records no answer and resumes no
+    # turn; the delivery comes again and is recorded once.
+    notes = _upload(layout, "list.png")
+    answer = _answer_to([notes])
+    store = asking_lead._conversation_store
+    failures = iter([OSError("database is locked")])
+
+    def merge_once_failing(**kwargs):
+        error = next(failures, None)
+        if error is not None:
+            raise error
+        return store.merge_turn_attachments(**kwargs)
+
+    asking_lead._conversation_store = SimpleNamespace(merge_turn_attachments=merge_once_failing)
+    with pytest.raises(OSError):
+        await _deliver(asking_lead, answer, _answer_meta(answer))
+
+    answers = lambda: [  # noqa: E731
+        query for query in asking_lead.task_manager.get_task_queries(TASK) if query.query_type == MessageMetaType.RESPONSE
+    ]
+    assert answers() == []
+    assert asking_lead.process_llm_interaction.prompts == []
+
+    asking_lead._conversation_store = store
+    await _deliver(asking_lead, answer, _answer_meta(answer))
+
+    assert [query.attachments for query in answers()] == [[notes]]
+    assert _turn_files(asking_lead).count(notes.attachment_id) == 1
+    assert _own(asking_lead.task_manager, store).count(notes.attachment_id) == 1
+
+
+@pytest.mark.asyncio
 async def test_records_outside_the_upload_folders_are_not_kept_with_an_answer(
     asking_lead, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
 ) -> None:

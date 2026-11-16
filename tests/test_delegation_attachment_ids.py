@@ -45,7 +45,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from custom_agents import task_message_runtime
 from custom_agents.conversation_attachments import QUESTION_ANSWER_MESSAGE_TYPE, AttachmentSelectionError
@@ -63,6 +63,7 @@ from custom_agents.structured_llm_messages import (
     ModelManagerEscalationAction,
     ModelWorkerTurnDecision,
     StructuredTaskPayload,
+    TurnAction,
 )
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.routing_v1 import ManagerEscalationContext, MessageHeader, MessageMeta
@@ -166,6 +167,19 @@ def test_attachment_ids_are_refused_when_invalid(decision_type: type, attachment
     if decision_type in FLAT_DECISIONS and action_type != "delegate_task":
         # The flat action says why before the canonical contract is asked.
         assert "attachment_ids may only be set when action_type is delegate_task" in str(refused.value)
+
+
+def test_a_saved_delegation_keeps_left_out_apart_from_an_empty_list() -> None:
+    # Ported from #137: the outbox saves actions with exclude_none and reads them
+    # back after a restart (release/0.10's commit point, plan decision D4); an
+    # action saved before the field existed reads as left out.
+    adapter = TypeAdapter(TurnAction)
+    task = StructuredTaskPayload(task_type=MessageMetaType.REQUEST, problem_statement="Help.")
+    for attachment_ids in (None, [], ["att_photo"]):
+        saved = DelegateTaskAction(task=task, attachment_ids=attachment_ids).model_dump(mode="json", exclude_none=True)
+        assert adapter.validate_python(saved).attachment_ids == attachment_ids
+    older = DelegateTaskAction(task=task).model_dump(mode="json", exclude_none=True)
+    assert "attachment_ids" not in older and adapter.validate_python(older).attachment_ids is None
 
 
 @pytest.mark.parametrize("decision_type", DECISIONS, ids=lambda item: item.__name__)

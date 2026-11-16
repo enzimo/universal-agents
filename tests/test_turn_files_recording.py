@@ -373,31 +373,42 @@ async def test_a_delegated_task_keeps_no_files_from_guidance(
 
 
 @pytest.mark.asyncio
-async def test_the_lead_sends_guidance_on_to_its_workers_without_files(lead, layout: InstanceLayout, monkeypatch) -> None:
-    child = SimpleNamespace(
-        task=SimpleNamespace(task_id="task_child"),
-        meta=SimpleNamespace(to_named_agent_type="RecipeParser", to_agent_name=None, msg_correlation_id="corr_child"),
+async def test_the_lead_sends_guidance_on_to_its_workers_without_files(lead, layout: InstanceLayout, tmp_path: Path) -> None:
+    # The lead delegated a subtask and worker_1 admitted it, so team-wide task custody
+    # names worker_1 as its holder (the real stores; release/0.10 finds the holder there).
+    lead.task_manager.add_subtask(
+        TASK,
+        Task(task_id="task_child", parent_task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="Parse."),
+        MessageHeader(from_agent_id="lead", to_routing_path=f"{TEAM}_RecipeParser"),
+        MessageMeta(msg_correlation_id="corr_child", to_named_agent_type="RecipeParser"),
     )
-    monkeypatch.setattr(lead.task_manager, "get_pending_subtasks", lambda _task_id: [child])
-    sent: list[Any] = []
-
-    async def capture(envelope):
-        sent.append(envelope)
-
-    monkeypatch.setattr(lead, "_send_operational_message", capture)
+    worker = TaskManager(db_path=str(tmp_path / "tasks.db"))
+    worker.set_owner_identity("worker_1", "worker_1", TEAM, "RecipeParser")
+    assert worker.add_task(
+        Task(task_id="task_child", parent_task_id=TASK, task_type=MessageMetaType.REQUEST),
+        MessageHeader(from_agent_id="lead"),
+        MessageMeta(),
+        owner_person_id=None,
+    )
     page_two = _upload(layout, "page two.png")
 
     await _send(lead, _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [page_two], "guide_on", "Use page two too."))
     await _send(lead, _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [], "guide_plain", "And keep it short."))
 
-    with_file, without = sent
-    assert with_file.msg_content.target_task_id == "task_child"
+    # Each copy goes durably to the holder's own mailbox; the status replies go to the gateway.
+    forwarded = [
+        call.kwargs
+        for call in lead.team_comms.send_message.await_args_list
+        if isinstance(call.kwargs["message"].msg_content, TaskSteering)
+        and call.kwargs["message"].msg_content.target_task_id == "task_child"
+    ]
+    assert [sent["routing_key"] for sent in forwarded] == ["worker_1", "worker_1"]
+    with_file, without = (sent["message"].msg_content for sent in forwarded)
+    assert with_file.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE
     # The worker learns a file came with it and who has it (review GEN-5), but gets none.
-    assert with_file.msg_content.guidance_text == (
-        "Use page two too.\n\n1 file(s) came with this guidance; the team lead has them."
-    )
-    assert with_file.msg_content.attachments == []
-    assert without.msg_content.guidance_text == "And keep it short."
+    assert with_file.guidance_text == "Use page two too.\n\n1 file(s) came with this guidance; the team lead has them."
+    assert with_file.attachments == []
+    assert without.guidance_text == "And keep it short."
     # The lead itself keeps the file; it can name it in a new delegation.
     assert page_two.attachment_id in _own(lead.task_manager, lead._conversation_store)
 

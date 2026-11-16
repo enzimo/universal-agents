@@ -39,7 +39,8 @@ from custom_agents.runtime_guardrails import RuntimeGuardrailsPlugin
 from custom_agents.model_keys import ModelKeyError, ModelKeys
 from custom_agents.strands_model_factory import StrandsModelFactoryConfig, build_strands_model
 from custom_agents.strands_team import AGENT_TYPE_MAP, build_system_prompt
-from custom_agents.conversation_attachments import ScopeFiles, SentFile, render_earlier_files
+from custom_agents.conversation_attachments import TaskAttachments, inventory_text
+from custom_agents.conversation_store import ConversationStore
 from custom_agents.structured_llm_messages import (
     CompatibleModelAgentTurnDecision,
     DelegateTaskAction,
@@ -47,7 +48,7 @@ from custom_agents.structured_llm_messages import (
     ModelAgentTurnDecision,
     TaskResponseAction,
 )
-from custom_messages.contracts.attachments_v1 import UserTaskAttachment
+from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
 from custom_messages.enums import MessageMetaType
 from custom_tools.providers.runtime_settings import plan_runtime_settings_change
 from model_providers.endpoints import openai_compatible_endpoint
@@ -549,15 +550,16 @@ def test_live_litellm_model_agent_turn_decision_structured_output_works(stream: 
     _assert_turn_decision_answer(result, "READY")
 
 
-def test_live_litellm_team_lead_passes_an_earlier_file_to_a_specialist_by_id() -> None:
-    """The team lead names a file from its earlier-files list in ``attachment_ids``.
+def test_live_litellm_team_lead_passes_an_earlier_file_to_a_specialist_by_id(tmp_path: Path) -> None:
+    """The team lead names a file from its prompt's earlier-files list in ``attachment_ids``.
 
-    The team lead's system prompt and turn schema, and the earlier-files section
-    as its prompt shows it (``render_earlier_files``): the photo came with an
-    earlier turn, so leaving ``attachment_ids`` out would pass no file. This
-    checks that the provider carries the field through structured output and
-    that the model uses it; the runtime's lookup is tested without a model
-    (``tests/test_delegation_attachment_selection.py``).
+    The team lead's system prompt and turn schema, and the Conversation
+    Attachments section as its prompt shows it (``inventory_text`` over a real
+    conversation store): the photo came with an earlier turn, so leaving
+    ``attachment_ids`` out would pass only the current request's own files
+    (none). This checks that the provider carries the field through
+    structured output and that the model uses it; the runtime's lookup is
+    tested without a model (``tests/test_delegation_attachment_ids.py``).
     """
 
     settings = _runtime_settings()
@@ -565,15 +567,29 @@ def test_live_litellm_team_lead_passes_an_earlier_file_to_a_specialist_by_id() -
         UserTaskAttachment(
             attachment_id=attachment_id, filename=filename, content_type=content_type, kind=kind, size_bytes=2048,
             sha256="ab" * 32,
+            storage_refs=[AttachmentStorageRef(storage_type="local", path=str(tmp_path / "uploads" / attachment_id))],
         )
         for attachment_id, filename, content_type, kind in (
             ("att_photo_1", "photo.png", "image/png", "image"),
             ("att_notes_1", "notes.txt", "text/plain", "document"),
         )
     ]
-    files_section = render_earlier_files(
-        ScopeFiles(current=(), earlier=tuple(SentFile(attachment, turn_index=1) for attachment in earlier))
+    store = ConversationStore(db_path=str(tmp_path / "conversations.db"), artifacts_dir=tmp_path / "artifacts")
+    store.ensure_thread(
+        conversation_id="conv_live", team_id="team_live", owner_canonical_user_id="alice", owner_agent_id="lead",
+        owner_agent_name="Lead", requester_name="alice", requester_id="alice", root_task_id="task_turn_1",
     )
+    for task_id, files in (("task_turn_1", earlier), ("task_turn_2", [])):
+        store.append_turn(
+            conversation_id="conv_live", task_id=task_id, followup_to_task_id=None, owner_agent_id="lead",
+            requester_name="alice", requester_id="alice", correlation_id=f"corr_{task_id}",
+            problem_text="Here are my photo and notes." if files else "Make a shopping list.",
+            owner_canonical_user_id="alice", attachments=files,
+        )
+    files_section = inventory_text(
+        TaskAttachments(task_id="task_turn_2", conversation_id="conv_live", store=store, turn_task_id="task_turn_2")
+    )
+    assert "`att_photo_1` photo.png" in files_section and str(tmp_path) not in files_section
     agent = Agent(
         system_prompt=_manager_system_prompt(),
         model=_litellm_model(stream=None, max_tokens=1200, settings=settings),

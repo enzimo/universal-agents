@@ -226,7 +226,8 @@ async def test_a_remote_channel_carries_the_flag_and_a_missing_one_is_not_privat
             received.append(values)
             return GatewayCommandResult(handled=False, session_key=None, text=None)
 
-    handler = GatewayAdapterRequestHandler(_Application(), lambda: None)  # type: ignore[arg-type]
+    # A command carries no files, so the adapter host's upload store (release/0.10's hand-off) is a stand-in.
+    handler = GatewayAdapterRequestHandler(_Application(), lambda: None, attachments=SimpleNamespace())  # type: ignore[arg-type]
     other = {key: value for key, value in command.arguments.items() if key != "private_chat"}
     await handler.handle_command(command.model_copy(update={"arguments": {**other, **arguments}}))
 

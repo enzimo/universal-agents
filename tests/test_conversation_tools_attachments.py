@@ -4,8 +4,8 @@ Turns now keep the files the person sent (``storage.conversation_repository``).
 The tools that return turns to a model (``get_conversation_summary``,
 ``get_conversation_turns`` and ``get_conversation_context_slice``) must show a
 file's name, type, size and id, never its path in the instance's uploads
-folder or its digest. A summary slice names at most 10 files of a turn and
-counts them all. The tools run for the conversation's owner through the real
+folder or its digest. A summary slice names at most ``INVENTORY_LIMIT`` files
+of a turn and counts them all (a turn that records all its request's files). The tools run for the conversation's owner through the real
 signed-context check.
 """
 
@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from custom_agents.conversation_attachments import INVENTORY_LIMIT
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
@@ -85,7 +86,7 @@ def _conversation_with(layout: InstanceLayout, files: list[UserTaskAttachment]) 
         correlation_id="corr_tools",
         problem_text="Here is my receipt.",
         owner_canonical_user_id=PERSON,
-        attachments=[file.model_dump(mode="json") for file in files],
+        attachments=files,
     )
     task_manager = TaskManager(db_path=str(layout.root / "tasks.db"))
     task_manager.set_owner_identity("lead", "TeamLead", TEAM, "TeamArchitect")
@@ -114,6 +115,13 @@ def _conversation_with(layout: InstanceLayout, files: list[UserTaskAttachment]) 
     )
 
 
+def _described(shown: dict) -> dict:
+    """A shown file's descriptive fields, after checking it names nothing about its storage."""
+
+    assert not {"storage_refs", "sha256", "local_path", "path"} & set(shown), shown
+    return {key: shown[key] for key in ("attachment_id", "filename", "content_type", "kind", "size_bytes")}
+
+
 def test_the_conversation_tools_never_show_where_a_file_is_stored(tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path / "instance")
     layout.ensure_directories()
@@ -133,29 +141,32 @@ def test_the_conversation_tools_never_show_where_a_file_is_stored(tmp_path: Path
         assert str(layout.uploads_dir) not in output, name
         assert "storage_refs" not in output and receipt.sha256 not in output, name
     turn = json.loads(outputs["turns"])["turns"][0]
-    assert turn["attachments"] == [
-        {
-            "attachment_id": "att_receipt",
-            "filename": "receipt.jpg",
-            "content_type": "image/jpeg",
-            "kind": "image",
-            "size_bytes": 2048,
-        }
-    ]
+    [shown] = turn["attachments"]
+    assert _described(shown) == {
+        "attachment_id": "att_receipt",
+        "filename": "receipt.jpg",
+        "content_type": "image/jpeg",
+        "kind": "image",
+        "size_bytes": 2048,
+    }
 
 
-def test_a_summary_slice_names_each_turns_files_up_to_ten_and_counts_them(tmp_path: Path) -> None:
+def test_a_summary_slice_names_each_turns_files_up_to_the_limit_and_counts_them(tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path / "instance")
     layout.ensure_directories()
-    files = [_file(layout, f"att_page_{index:02d}", filename=f"page_{index:02d}.jpg") for index in range(12)]
+    files = [
+        _file(layout, f"att_page_{index:02d}", filename=f"page_{index:02d}.jpg") for index in range(INVENTORY_LIMIT + 2)
+    ]
     _conversation_with(layout, files)
 
     output = get_conversation_context_slice(conversation_id=CONVERSATION, mode="summary")
 
     turn = json.loads(output)["turns"][0]
-    assert turn["attachment_count"] == 12
-    assert [item["attachment_id"] for item in turn["attachments"]] == [f"att_page_{index:02d}" for index in range(10)]
-    assert turn["attachments"][0] == {
+    assert (turn["attachments_recorded"], turn["attachment_count"]) == (True, INVENTORY_LIMIT + 2)
+    assert [item["attachment_id"] for item in turn["attachments"]] == [
+        f"att_page_{index:02d}" for index in range(INVENTORY_LIMIT)
+    ]
+    assert _described(turn["attachments"][0]) == {
         "attachment_id": "att_page_00",
         "filename": "page_00.jpg",
         "content_type": "image/jpeg",

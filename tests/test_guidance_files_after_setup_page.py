@@ -78,7 +78,7 @@ from custom_agents.tool_setup_run_runtime import send_setup_request
 from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1, ToolSetupResultV1
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
-from custom_messages.enums import MessageMetaType, RequesterType, TaskSteeringStatus
+from custom_messages.enums import MessageMetaType, RequesterType, TaskSteeringStatus, TaskSteeringType
 from custom_messages.transport_codec import decode_envelope, encode_envelope
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from runtime_settings.instance_layout import InstanceLayout
@@ -90,6 +90,7 @@ from tests.test_escalation_answer_files import (  # noqa: F401  (autouse fixture
     _no_background_work,
     _sent,
     _Team,
+    WORKER_ID,
     _until,
     _worker,
     layout,
@@ -139,6 +140,7 @@ class _Scenario:
     handoff_rejected: list[str]
     guidance: list[MessageEnvelope]
     guidance_statuses: list[TaskSteering]
+    forwarded: list[tuple[str, MessageEnvelope]]
     kept: _Kept
     restarted_kept: _Kept
     refused: list[str]
@@ -164,7 +166,9 @@ class _SetupPageTeam(_Team):
     The person's answer is handled by the lead, and the escalation's turn
     sends a setup page while the chat waits for its reply. Guidance reaches
     the lead as NATS delivers it, and the lead's own status goes back to the
-    gateway. Setup results the gateway sends are kept for the test.
+    gateway; the copy the lead passes on to the worker holding the delegated
+    task (found through task custody, sent to the worker's own mailbox) is
+    kept with its route. Setup results the gateway sends are kept for the test.
     """
 
     def __init__(self, lead: Any, worker: Any) -> None:
@@ -174,7 +178,7 @@ class _SetupPageTeam(_Team):
         self.setup_results: list[ToolSetupResultV1] = []
         self.guidance: list[MessageEnvelope] = []
         self.guidance_statuses: list[TaskSteering] = []
-        self.forwarded: list[MessageEnvelope] = []
+        self.forwarded: list[tuple[str, MessageEnvelope]] = []
 
     @property
     def escalation_id(self) -> str:
@@ -219,11 +223,6 @@ class _SetupPageTeam(_Team):
         assert self.gateway is not None
         await self.gateway._manager_client.handle_response(page)
 
-    async def forward(self, envelope: MessageEnvelope) -> None:
-        """The lead's operational sends: it passes guidance on to the worker's waiting task."""
-
-        self.forwarded.append(envelope)
-
     async def escalation_turn(self, *, msg_content: Any, msg_header: Any, msg_meta: Any) -> None:
         """The lead's model on the escalation after the answer: it needs a tool set up (``set_up_tools``)."""
 
@@ -241,7 +240,13 @@ class _SetupPageTeam(_Team):
         await task_steering_runtime.handle_task_steering_message(
             self.lead, delivered.msg_content, delivered.msg_header, delivered.msg_meta
         )
-        [status] = [item for _route, item in _sent(self.lead)[sent_before:] if isinstance(item.msg_content, TaskSteering)]
+        steering = [(route, item) for route, item in _sent(self.lead)[sent_before:] if isinstance(item.msg_content, TaskSteering)]
+        # The lead's status answers the guidance's own task; a copy passed on to a
+        # delegated task names that task and goes to the worker holding it.
+        [status] = [item for _route, item in steering if item.msg_content.target_task_id == delivered.msg_content.target_task_id]
+        self.forwarded.extend(
+            (route, item) for route, item in steering if item.msg_content.target_task_id != delivered.msg_content.target_task_id
+        )
         self.guidance_statuses.append(status.msg_content)
         assert self.gateway is not None
         await self.gateway._manager_client.handle_response(status)
@@ -279,7 +284,6 @@ async def scenario(
     lead.instance_config_path = "instance.yaml"
     monkeypatch.setattr(GatewayInstanceConfig, "load_for_process", lambda _path: gateway.config)
     object.__setattr__(lead, "process_llm_interaction", team.escalation_turn)
-    object.__setattr__(lead, "_send_operational_message", team.forward)
     app = InternalWebsiteInteractiveApp(gateway.config, gateway=gateway, bridge=SimpleNamespace())
 
     with caplog.at_level(logging.INFO):
@@ -332,6 +336,7 @@ async def scenario(
         handoff_rejected=_messages(caplog, "gateway_credential_handoff_lineage_rejected"),
         guidance=team.guidance,
         guidance_statuses=team.guidance_statuses,
+        forwarded=team.forwarded,
         kept=kept,
         restarted_kept=restarted_kept,
         refused=_messages(caplog, "sent_file_refused"),
@@ -385,6 +390,19 @@ async def test_guidance_after_the_page_is_addressed_and_signed_to_the_request_an
     assert (signed.root_task_id, signed.context_id) == (scenario.root_id, steering_context_id(steering))
     status = scenario.guidance_statuses[0]
     assert (status.status, status.target_task_id) == (TaskSteeringStatus.ACCEPTED, scenario.root_id)
+
+
+@pytest.mark.asyncio
+async def test_the_worker_holding_the_delegated_task_gets_the_guidance_without_its_file(scenario: _Scenario) -> None:
+    # Plan decision D3 (#138 F12): the copy names how many files came and that the
+    # team lead has them, and carries none; the lead keeps the file on the request.
+    [(route, copy)] = scenario.forwarded
+    assert route == WORKER_ID
+    assert copy.msg_content.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE
+    # The worker's delegated task, whose escalation asked the question.
+    assert copy.msg_content.target_task_id == scenario.escalation_parent_id
+    assert copy.msg_content.attachments == []
+    assert copy.msg_content.guidance_text.endswith("\n\n1 file(s) came with this guidance; the team lead has them.")
 
 
 @pytest.mark.asyncio
