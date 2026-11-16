@@ -18,6 +18,11 @@ unfinished steps is not allowed to report success:
   task fails, and the person is told in plain words, followed by the agent's
   last reply, labelled as given before the open steps were finished so it is
   never read as a completed result. Administrators' notices never quote it.
+- The same held answer run again by the outbox (an automatic retry after a
+  failure before it saved the action as held back, or a restart in that
+  window) is held again, not refused: the hold records its outbox action id,
+  and no turn has read the continuation note yet.
+- An answer given as a structured TaskAnswer is handled as its text.
 
 A short preview of each held answer stays in the task's history
 (``attempted_answer_preview``), so a held answer can be recovered.
@@ -36,10 +41,12 @@ import logging
 from typing import Any
 
 from custom_agents.access_workflows import AccessWorkflowService
+from custom_agents.task_records import task_answer_text
 from custom_agents.tool_call_limits import compact_debug_preview
 from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_messages.contracts.access_v2 import contract_digest
 from custom_messages.contracts.access_workflow_v2 import CLOSED_STEP_STATES, WorkflowEventV2, utc_now
+from custom_messages.contracts.task_v1 import TaskAnswer
 from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType
 from storage.access_workflow_repository import AccessWorkflowRepository
 
@@ -59,10 +66,13 @@ ANSWER_PREVIEW_CHARS = 600
 class WorkflowCompletionRefused(TurnActionRefused):
     """A task tried to finish again without progress on its workflow's unfinished steps."""
 
-    def __init__(self, *, workflow_id: str, task_id: str, title: str, attempted_answer: str = "") -> None:
+    def __init__(
+        self, *, workflow_id: str, task_id: str, title: str, attempted_answer: TaskAnswer | str | None = ""
+    ) -> None:
         self.workflow_id = workflow_id
         self.task_id = task_id
-        self.attempted_answer = attempted_answer
+        # An answer may be a structured TaskAnswer; the message quotes its text.
+        self.attempted_answer = task_answer_text(attempted_answer)
         super().__init__(
             f'This task was stopped because its plan "{title}" still has unfinished steps and it tried to '
             "finish again without making progress on them. Results it already finished are kept. Reply here "
@@ -155,18 +165,42 @@ def _refuse_completion(
 
 
 def _reconcile_open_work(
-    manager: Any, service: AccessWorkflowService, record: Any, evidence: list[dict[str, Any]], attempted_answer: str
-) -> None:
+    manager: Any,
+    service: AccessWorkflowService,
+    record: Any,
+    evidence: list[dict[str, Any]],
+    attempted_answer: str,
+    action_id: str | None,
+) -> bool:
+    """Hold the answer back and queue the task to run again; False when it was already held.
+
+    The outbox can run the same held answer again: an automatic retry after a
+    failure before it saved the action as held back, or a restart in that
+    window. That answer is held again, not refused: no turn has read the
+    continuation note yet, so it is not a second answer.
+    """
+
     task_id = record.source_task_id
     signature = contract_digest(
         {"steps": [{"step_id": item["step_id"], "state": item["state"], "requests": item["requests"]} for item in evidence]}
     )
     info = manager.get_task_info(task_id)
-    repeated = any(
-        (entry.details or {}).get("workflow_reconciliation_signature") == signature
+    earlier = [
+        details
         for entry in info.task.execution_history or []
-    )
-    if repeated:
+        if (details := entry.details or {}).get("workflow_reconciliation_signature") == signature
+    ]
+    if action_id is not None and any(details.get("outbox_action_id") == action_id for details in earlier):
+        logger.warning(
+            "The outbox ran a held answer again after a failure; it is held again and the task queued. "
+            "event=workflow_completion_hold_replayed workflow_id=%s task_id=%s action_id=%s",
+            record.workflow_id,
+            task_id,
+            action_id,
+        )
+        _continue(manager, record, evidence)  # an identical continuation note is not added twice
+        return False
+    if earlier:
         raise _refuse_completion(manager, service, record, evidence, attempted_answer)
     manager.append_history_entry(
         task_id,
@@ -177,17 +211,30 @@ def _reconcile_open_work(
             "event": "workflow_completion_deferred",
             "workflow_id": record.workflow_id,
             "workflow_reconciliation_signature": signature,
+            "outbox_action_id": action_id,
             "attempted_answer_preview": compact_debug_preview(attempted_answer, max_chars=ANSWER_PREVIEW_CHARS),
         },
     )
     _continue(manager, record, evidence)
+    return True
 
 
-def defer_workflow_completion(manager: Any, *, task_id: str, team_id: str, attempted_answer: str = "") -> bool:
+def defer_workflow_completion(
+    manager: Any,
+    *,
+    task_id: str,
+    team_id: str,
+    attempted_answer: TaskAnswer | str | None = "",
+    action_id: str | None = None,
+) -> bool:
     """Return true when a premature final answer must be held back (see the module docstring).
 
-    Raises ``WorkflowCompletionRefused`` for a repeated answer without progress.
+    ``action_id`` is the outbox action of the answer: the same action run again
+    is held again. Raises ``WorkflowCompletionRefused`` for a repeated answer
+    without progress.
     """
+
+    answer = task_answer_text(attempted_answer)
 
     service = _service(manager)
     for record in service.repository.for_task(task_id=task_id, team_id=team_id):
@@ -203,7 +250,8 @@ def defer_workflow_completion(manager: Any, *, task_id: str, team_id: str, attem
                 task_id,
                 ",".join(waiting),
             )
-        _reconcile_open_work(manager, service, record, evidence, attempted_answer)
+        if not _reconcile_open_work(manager, service, record, evidence, answer, action_id):
+            return True  # held again; its event and log were recorded the first time
         service.repository.append_event(
             WorkflowEventV2(
                 workflow_id=record.workflow_id,

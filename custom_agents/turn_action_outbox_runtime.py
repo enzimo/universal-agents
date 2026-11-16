@@ -20,7 +20,7 @@ from custom_agents.delegated_work_runtime import (
 from custom_agents.pending_work_runtime import wake_pending_work_after
 from custom_agents.schedule_installation import create_schedule_from_turn_action
 from custom_agents.task_runtime_state import TurnStartNotes
-from custom_agents.task_records import TaskInfo
+from custom_agents.task_records import TaskInfo, task_answer_text
 from custom_agents.worker_result_reports import is_worker_result_report, prepare_worker_result_report
 from custom_agents.conversation_delivery_states import (
     DELIVERY_STATE_NOTIFICATION_QUEUED,
@@ -413,7 +413,7 @@ async def _defer_terminal_task_response_for_pending_parent_work(
         if await self.task_manager.operations_runtime.run(
             partial(defer_workflow_completion, self.task_manager),
             task_id=incoming_content.task_id, team_id=self.team_id,
-            attempted_answer=outgoing_content.answer or "",
+            attempted_answer=task_answer_text(outgoing_content.answer), action_id=record_id,
         ):
             # A held answer, not a wait: the hold queued the task to run again at
             # once (task_message_runtime._keep_held_answer_state keeps that state).

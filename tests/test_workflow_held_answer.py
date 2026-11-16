@@ -50,7 +50,7 @@ from custom_messages.contracts.access_workflow_v2 import (
     WorkflowStepV2,
 )
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
+from custom_messages.contracts.task_v1 import Task, TaskAnswer, TaskQuery, TaskSteering
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType, TaskSteeringType
 from custom_tools.tool_stop import ToolStop
 from storage.access_workflow_repository import AccessWorkflowRepository
@@ -110,10 +110,22 @@ def _event_codes(manager, workflow_id: str) -> list[str]:
     return [event.code for event in AccessWorkflowRepository(manager.storage_settings).events(workflow_id, limit=50)]
 
 
-def _final_answer(text: str) -> StructuredAgentTurnDecision:
+def _final_answer(text: str, *, structured: bool = False) -> StructuredAgentTurnDecision:
+    """A final answer as text, or as a structured TaskAnswer (the form the answer schema prefers)."""
+
+    answer: TaskAnswer | str = TaskAnswer(answer=text) if structured else text
     return StructuredAgentTurnDecision(
-        actions=[TaskResponseAction(task=StructuredTaskPayload(task_type=MessageMetaType.RESPONSE, answer=text))]
+        actions=[TaskResponseAction(task=StructuredTaskPayload(task_type=MessageMetaType.RESPONSE, answer=answer))]
     )
+
+
+# The outbox retries a failed publish at once, so a test can drive the retry right away.
+RETRY_AT_ONCE = {
+    "max_auto_attempts": 3,
+    "initial_retry_delay_seconds": 0.0,
+    "max_retry_delay_seconds": 0.0,
+    "retry_jitter_ratio": 0.0,
+}
 
 
 def _records(manager) -> list:
@@ -393,8 +405,12 @@ def test_the_queue_runs_the_held_task_again_with_its_note_and_the_guidance_sent_
 # -- a repeated answer without progress fails the task and tells the person (A4) --
 
 
-def test_a_second_answer_without_progress_fails_the_task_and_tells_the_person(tmp_path, caplog) -> None:
-    """Before, the refusal went to model recovery, and each recovery turn made a new batch: no limit ever stopped it."""
+@pytest.mark.parametrize("structured", [False, True], ids=["text-answers", "structured-answers"])
+def test_a_second_answer_without_progress_fails_the_task_and_tells_the_person(tmp_path, caplog, structured) -> None:
+    """Before, the refusal went to model recovery, and each recovery turn made a new batch: no limit ever stopped it.
+
+    A structured TaskAnswer once crashed building the person's message, leaving the task holding the main slot.
+    """
 
     manager = _make_task_manager(tmp_path)
     task = _queued_request(manager)
@@ -402,10 +418,10 @@ def test_a_second_answer_without_progress_fails_the_task_and_tells_the_person(tm
     last_reply = "Here are the prices from the first registrar.\n\nI still need the second registrar's account ID."
 
     async def first(_agent, _content):
-        return _final_answer("Here are the prices from the first registrar.")
+        return _final_answer("Here are the prices from the first registrar.", structured=structured)
 
     async def second(_agent, _content):
-        return _final_answer(last_reply)  # nothing reported on the open step
+        return _final_answer(last_reply, structured=structured)  # nothing reported on the open step
 
     agent = _queue_agent(tmp_path, manager, [first, second])
 
@@ -485,7 +501,10 @@ async def test_a_refused_answer_ends_the_turn_as_a_reported_failure_not_a_model_
     assert not any("Error in LLM interaction" in record.getMessage() for record in caplog.records)
 
 
-def test_a_repeated_answer_replayed_by_the_outbox_retry_fails_the_task_and_frees_the_queue(tmp_path, caplog) -> None:
+@pytest.mark.parametrize("structured", [False, True], ids=["text-answers", "structured-answers"])
+def test_a_repeated_answer_replayed_by_the_outbox_retry_fails_the_task_and_frees_the_queue(
+    tmp_path, caplog, structured
+) -> None:
     """The outbox's retry of a batch also runs its final answer (not only a turn does).
 
     The continuation turn's first action (a credential form) failed to publish,
@@ -507,7 +526,7 @@ def test_a_repeated_answer_replayed_by_the_outbox_retry_fails_the_task_and_frees
         return number
 
     async def first(_agent, _content):
-        return _final_answer("Here are the prices from the first registrar.")
+        return _final_answer("Here are the prices from the first registrar.", structured=structured)
 
     async def second(_agent, content):
         form = SecureCredentialCollectionAction(
@@ -518,7 +537,9 @@ def test_a_repeated_answer_replayed_by_the_outbox_retry_fails_the_task_and_frees
                 purpose="Read domain prices.",
             )
         )
-        return StructuredAgentTurnDecision(actions=[form, *_final_answer("Here are the prices.").actions])
+        return StructuredAgentTurnDecision(
+            actions=[form, *_final_answer("Here are the prices.", structured=structured).actions]
+        )
 
     started: list[str] = []
 
@@ -526,9 +547,7 @@ def test_a_repeated_answer_replayed_by_the_outbox_retry_fails_the_task_and_frees
         started.append(content.task_id)
         return _final_answer("Done.")
 
-    retry_at_once = {"max_auto_attempts": 3, "initial_retry_delay_seconds": 0.0, "max_retry_delay_seconds": 0.0,
-                     "retry_jitter_ratio": 0.0}
-    agent = _queue_agent(tmp_path, manager, [first, second, next_request], turn_action_outbox=retry_at_once)
+    agent = _queue_agent(tmp_path, manager, [first, second, next_request], turn_action_outbox=RETRY_AT_ONCE)
     agent.team_comms.send_message = AsyncMock(side_effect=publish)
     object.__setattr__(agent, "_continue_pending_work", AsyncMock())  # the test drives the drain itself
 
@@ -550,5 +569,94 @@ def test_a_repeated_answer_replayed_by_the_outbox_retry_fails_the_task_and_frees
     failures = [item for item in _sent_tasks(agent) if item.task_id == task.task_id]
     assert len(failures) == 1 and failures[0].task_state[-1][0] == ProgressState.FAILED
     assert failures[0].answer.startswith('This task was stopped because its plan "Check domain prices"')
+    assert failures[0].answer.endswith(f"{LAST_REPLY_LABEL}\n\n> Here are the prices.")
     assert "source_task_completion_rejected" in _event_codes(manager, workflow.workflow_id)
     assert any("event=turn_action_refused" in record.getMessage() for record in caplog.records)
+
+
+# -- the same held answer run again after a failure is held again (project review F2) --
+
+
+def _fail_once_after_the_hold(manager, task_id: str, fault: str) -> dict[str, bool]:
+    """One storage fault between the hold's effects and the outbox saving the answer as held back."""
+
+    failed = {"done": False}
+
+    def held() -> bool:
+        info = manager.get_task_info(task_id)
+        return info is not None and any(
+            (entry.details or {}).get("event") == "workflow_completion_deferred" for entry in info.task.execution_history
+        )
+
+    if fault == "held_back_save":
+        save = manager.mark_turn_action_record
+
+        def flaky_save(action_id, *args, **kwargs):
+            if kwargs.get("status") == "held_back" and not failed["done"]:
+                failed["done"] = True
+                raise OSError("database is locked")
+            return save(action_id, *args, **kwargs)
+
+        manager.mark_turn_action_record = flaky_save
+    else:  # a failed cancellation lookup counts as cancelled (it fails closed)
+        store = manager.runtime_state_store
+        lookup = store.get_task_cancellation
+
+        def flaky_lookup(*args, **kwargs):
+            if held() and not failed["done"]:
+                failed["done"] = True
+                raise OSError("could not read cancellations: database is locked")
+            return lookup(*args, **kwargs)
+
+        store.get_task_cancellation = flaky_lookup
+    return failed
+
+
+@pytest.mark.parametrize("fault", ["held_back_save", "cancellation_lookup"])
+def test_a_held_answer_run_again_after_a_failure_is_held_again_and_a_real_repeat_still_fails(
+    tmp_path, caplog, fault
+) -> None:
+    """A fault after the hold made the outbox's retry run the same answer again, which counted as a second
+    answer: the task failed with a false message before any turn read the continuation note."""
+
+    manager = _make_task_manager(tmp_path)
+    task = _queued_request(manager)
+    workflow = _open_workflow(manager, task.task_id)
+    notes: list[str] = []
+
+    async def first(_agent, _content):
+        return _final_answer("Here are the prices from the first registrar.")
+
+    async def continuation(_agent, content):
+        notes.append(manager.read_runtime_resume_directive(content.task_id) or "")
+        return _final_answer("Here are the prices again.")  # no progress: a real repeat
+
+    agent = _queue_agent(tmp_path, manager, [first, continuation], turn_action_outbox=RETRY_AT_ONCE)
+    object.__setattr__(agent, "_continue_pending_work", AsyncMock())  # the test drives the drain itself
+    failed = _fail_once_after_the_hold(manager, task.task_id, fault)
+
+    async def scenario() -> None:
+        assert await agent._check_and_process_next_task()  # held, then the fault
+        assert failed["done"] and manager.get_task_info(task.task_id).state == ProgressState.RETRYING
+        assert await agent._drain_due_turn_action_outbox(MAIN_LANE)  # the same answer: held again
+        assert manager.get_task_info(task.task_id).state == ProgressState.PARTIAL
+        assert list(manager.task_state.task_queue) == [task.task_id]
+        assert _records(manager)[0].status == "held_back"
+        agent.team_comms.send_message.assert_not_awaited()
+        assert await agent._check_and_process_next_task()  # the continuation turn, which repeats itself
+        assert not await agent._check_and_process_next_task()
+        await close_pending_work(agent)
+
+    asyncio.run(scenario())
+
+    assert len(notes) == 1 and WORKFLOW_CONTINUATION_NOTE in notes[0]
+    saved = manager.get_task_from_db(task.task_id, owner_agent_id=agent.id)["main_task"]
+    assert saved.task_state[-1][0] == ProgressState.FAILED
+    held = [entry for entry in saved.execution_history if (entry.details or {}).get("event") == "workflow_completion_deferred"]
+    assert len(held) == 1  # the replay added no second hold
+    codes = _event_codes(manager, workflow.workflow_id)
+    assert codes.count("source_task_reconciliation_requested") == 1 and "source_task_completion_rejected" in codes
+    [message] = [item for item in _sent_tasks(agent) if item.task_id == task.task_id]
+    assert message.answer.endswith(f"{LAST_REPLY_LABEL}\n\n> Here are the prices again.")
+    replayed = [record for record in caplog.records if "event=workflow_completion_hold_replayed" in record.getMessage()]
+    assert len(replayed) == 1 and replayed[0].levelno == logging.WARNING

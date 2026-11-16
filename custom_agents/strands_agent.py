@@ -282,6 +282,7 @@ from custom_agents.structured_llm_messages import (
     TurnAction,
 )
 from custom_agents.task_manager import TaskInfo, TaskManager
+from custom_agents.task_records import task_answer_text
 from custom_messages.contracts.activity_v1 import TaskActivityEvent
 from custom_messages.contracts.control_v1 import (
     AgentCreationRequest,
@@ -396,14 +397,6 @@ def _optional_int_from_env(name: str) -> Optional[int]:
     return int(raw_value)
 
 
-def _task_answer_text(answer: Union[TaskAnswer, str, None]) -> str:
-    if isinstance(answer, TaskAnswer):
-        return str(answer.answer or "")
-    if answer is None:
-        return ""
-    return str(answer)
-
-
 def _has_unbalanced_markdown_delimiter(text: str) -> bool:
     if len(MARKDOWN_FENCE_PATTERN.findall(text)) % 2:
         return True
@@ -428,7 +421,7 @@ def _has_unbalanced_markdown_delimiter(text: str) -> bool:
 def _terminal_answer_quality_error(
     answer: Union[TaskAnswer, str, None],
 ) -> Optional[str]:
-    text = _task_answer_text(answer)
+    text = task_answer_text(answer)
     stripped = text.strip()
     if not stripped:
         return "answer is empty"
@@ -2353,7 +2346,7 @@ class UniversalAgent(BaseModel):
                     )
                     if quality_error:
                         answer_preview = _compact_debug_preview(
-                            _task_answer_text(outgoing_content.answer),
+                            task_answer_text(outgoing_content.answer),
                             max_chars=240,
                         )
                         self._logger.warning(
