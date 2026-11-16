@@ -46,8 +46,9 @@ is safe for three reasons, which a later change to the step must keep:
   return False for a missing record.
 
 A file that turns up and moves during such a run while the gateway deletes
-its record stays in ``state/uploads`` without a record, and upload retention
-removes it by its age (the move keeps the time it was sent).
+its record stays in ``state/uploads`` without a record. Upload retention
+removes it by its age (the move keeps the time it was sent) when retention is
+on; with ``retention_days`` 0 it stays until someone deletes it.
 ``test_a_files_gone_run_beside_the_running_team_keeps_what_the_team_writes``
 pins what one process can show of the second and third reasons: a file
 merged into the turn between the scan and the rewrite stays (the fresh read),
@@ -99,7 +100,7 @@ next one, which finds only absent files left. When records wait for files and
 the folder is not here (it is not there, or a mount point, a folder the 0.10
 adapter host created or another folder holds none of them and is not the
 recorded one), nothing changes and no marker is written: one error says to
-mount the folder and restart, or, if the files are really gone, to run the
+copy or mount the folder and restart, or, if the files are really gone, to run the
 command with ``--files-gone``, and, when the record names another identity,
 logs both. Startup goes on either way, and the next start tries again. A
 ``--files-gone`` run whose folder is not there writes no record and needs
@@ -187,10 +188,14 @@ with its moved file: the gateway signs it again from that copy at each send,
 so the team lead receives the new path. A held copy whose file did not move
 is left as it is and named in the not-moved warning (``held_guidance_ids``);
 it arrives without the file, which the team lead logs, and the stuck-task
-check does not see it. Held task records and messages still queued are not
-rewritten: the message-bound context id hashes every field of each file
-record, path included (``access_control.ownership``), so a rewritten record
-would no longer match what the gateway signed. The file tools refuse those
+check does not see it. Messages still queued are not rewritten: the
+message-bound context id hashes every field of each file record, path
+included (``access_control.ownership``), so a rewritten record would no
+longer match what the gateway signed. Task records an agent already admitted
+are not rewritten either, for another reason: the signature was checked once,
+at admission, but those records are the agent's saved work (its runtime
+snapshot), which only the agent holding it writes, under custody
+(``storage.runtime_custody``). The file tools refuse those
 records as outside ``state/uploads``, and the team lead's stuck-task check
 tells the person which files to send again (``custom_agents.stuck_tasks``,
 ``task_files_sent_before_upgrade``).
@@ -713,10 +718,10 @@ class _Step:
                     "in it."
                 )
         logger.error(
-            "Files sent through chat apps the adapter host ran are recorded in its transfer folder, but the "
-            "folder is not here, holds none of them, or is not the folder an earlier run started on, so they were "
-            "not moved into state/uploads and nothing was changed. Mount the folder "
-            "(interactive_apps.adapter_host.upload_dir) and restart; if the files are really gone, run '%s'.%s "
+            "Files sent through chat apps the adapter host ran are recorded in the gateway's transfer folder, but "
+            "the folder is not here, holds none of them, or is not the folder an earlier run started on, so they "
+            "were not moved into state/uploads and nothing was changed. Copy or mount the folder 0.9's gateway "
+            "wrote (interactive_apps.adapter_host.upload_dir) and restart; if the files are really gone, run '%s'.%s "
             "event=adapter_host_files_folder_missing folder=%s waiting=%s recorded=%s current=%s",
             FILES_GONE_COMMAND,
             recorded,

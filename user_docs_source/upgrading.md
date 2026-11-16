@@ -56,10 +56,13 @@ supported, because it may not read what a newer one saved.
     trying again does not help. Its conversation records are kept while
     the file is there, the team cannot open it, and the person can send it
     again. The log counts these as `no_record`.
-  - **The transfer folder is not on this machine** (the adapter host ran
-    elsewhere, or its folder is not mounted): nothing changes, startup goes
-    on and an error in the log says so. Mount the folder where `upload_dir`
-    points and restart. If the files are really gone, run
+  - **The transfer folder is not here.** It belongs to the gateway: 0.9
+    wrote it on the gateway's machine, also when the adapter host ran
+    elsewhere. It is missing when it was not copied or mounted with the
+    instance (for example a container started without the volume that
+    held it). Nothing changes, startup goes on and an error in the log
+    says so. Copy or mount the folder where `upload_dir` points and
+    restart. If the files are really gone, run
     `docker exec <container> python -m assistant_cli upgrade adapter-host-files --config /data/instance_config.yaml --files-gone`
     while the team runs; their records are then removed as above.
     The same error comes when a start after an interrupted upgrade finds

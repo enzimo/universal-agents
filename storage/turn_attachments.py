@@ -13,10 +13,14 @@ the descriptive fields only (``TURN_ATTACHMENT_SUMMARY_FIELDS``).
 
 A NULL or ``[]`` list only means no files are recorded. Whether all of the
 turn's request files are recorded is kept apart, in the row's
-``attachments_recorded`` marker, which only ``append_turn`` sets: 1 when it
+``attachments_recorded`` marker. ``append_turn`` sets it: 1 when it
 records all the files sent with the request (none included), 0 when some or
 all of them were not kept at admission
-(``custom_agents.conversation_attachments.admit_request_files``). A turn
+(``custom_agents.conversation_attachments.admit_request_files``). The one
+other writer is the adapter-host files upgrade step
+(``instance_upgrades.adapter_host_files``, through
+``ConversationRepository.relocate_turn_attachment``), which sets it to 0 on a
+turn whose file it drops because the file could not be moved. A turn
 saved before turns kept their files reads 0 as well. Files sent to a turn
 later (guidance, answers) are merged into its list without changing the
 marker, so a turn marked 0 can list kept request files and later files while

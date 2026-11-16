@@ -642,9 +642,10 @@ class _RelationalConversationRepository:
             ensure_column(conn, "conversation_task_links", "attachments_json", "TEXT", logger=self._logger)
             # 1 when all of the turn's own request files are recorded, 0 when some or all
             # are not (not kept at admission, or the row was saved before turns kept their
-            # files): append_turn writes it, nothing else changes it, and merging files
-            # sent later leaves it as it is (storage.turn_attachments). Added before the
-            # partial index below, which reads it.
+            # files): append_turn writes it, the adapter-host files upgrade step sets it
+            # to 0 when it drops a file it could not move (relocate_turn_attachment),
+            # and merging files sent later leaves it as it is (storage.turn_attachments).
+            # Added before the partial index below, which reads it.
             ensure_column(
                 conn,
                 "conversation_task_links",

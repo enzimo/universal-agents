@@ -1050,7 +1050,8 @@ def admit_request_files(
     (``keep_upload_files``; ``upload_folder`` finds it, only when files are left
     to check). Each dropped file is logged with why. The task's own files and
     its turn then hold the same records. Blocking (it verifies the signed
-    context and reads settings): run it in a thread from async code.
+    context and resolves each record's path on the file system): run it in a
+    thread from async code.
     """
 
     sent = list(task.attachments or [])

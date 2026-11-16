@@ -3867,10 +3867,14 @@ guidance and answers are merged into it in one write transaction that
 adds each id once, so concurrent merges lose nothing and a retry adds nothing
 twice. The list is a column on the turn row rather than a table because
 person departure moves whole turn rows out of the conversation store and back
-(hold and restore, `storage/person_departure_repository.py`), so a turn's
-file list goes with its turn without a second table to move. Nothing else
-deletes or moves turn rows: the task archive only reads them, and output
-retention keeps conversations. Records leave the runtime only as
+(hold and restore, `storage/person_departure_repository.py`) and history
+clean-up deletes them (`storage/history_cleanup_repository.py`), so a turn's
+file list goes with its turn without a second table to move or delete. The
+task archive only reads turn rows, and output retention keeps conversations.
+The files themselves are deleted separately, by the gateway from its own
+upload records (`storage/gateway_state_repository.py`): by age for retention
+and, in a clean-up, by time, not by turn, so a partial clean-up can delete a
+kept turn's file while its list still names it (Limits below). Records leave the runtime only as
 descriptions (id, name, type, size and turn,
 `storage.turn_attachments.TURN_ATTACHMENT_SUMMARY_FIELDS`), never with storage
 paths. The task's history keeps full records, because trusted code reads where
@@ -3963,8 +3967,10 @@ Limits:
   lacks the dropped ones. There is no backfill: the gateway's records are not
   a trusted per-turn source on the agent side, and a backfill would be a
   migration. Whether all of a turn's request files are recorded is a column
-  of its own (`attachments_recorded`, set only when the turn is saved: 0 when
-  some or all are missing), so files kept, and files sent to such a turn
+  of its own (`attachments_recorded`, set when the turn is saved: 0 when
+  some or all are missing; the adapter-host files upgrade step also sets it
+  to 0 when it drops a file it could not move, "Upgrading an instance in
+  place"), so files kept, and files sent to such a turn
   later while its request still ran (guidance, answers), are recorded and
   listed without making the missing ones look known. The list names the
   latest such turn (`UNRECORDED_TURNS_NOTE`), and the model asks the person
@@ -3976,10 +3982,41 @@ Limits:
   (`REQUEST_FILES_NOT_KEPT_EVENT`), so its first turn cannot miss it.
 - A file list and the file's bytes are deleted separately. The list follows
   its turn row; the bytes are deleted by upload retention
-  (`attachments.retention_days`, by age) and when a person is removed
-  (`assistant_gateway/person_departure.py`). A listed file whose bytes are
-  gone answers `upload_unavailable`, and so does a file deleted while it is
-  being read; both ask for the file to be sent again, without a path.
+  (`attachments.retention_days`, by age), by history clean-up (by time) and
+  when a person is removed (`assistant_gateway/person_departure.py`). A
+  listed file whose bytes are gone answers `upload_unavailable`, and so does
+  a file deleted while it is being read; both ask for the file to be sent
+  again, without a path.
+- A partial history clean-up (one that keeps a conversation's newer turns)
+  deletes the uploads older than the first kept turn's earliest transcript or
+  request row (`_history_cut_end`). The gateway stores a message's files a
+  moment before it writes that message's rows, so the first kept turn's own
+  file is deleted while its file list still names it: the file stays listed,
+  and opening or delegating it answers that it is no longer stored. This is
+  older gateway behavior that the file lists make visible. It is not fixed
+  here; the follow-up deletes uploads by the turns a clean-up deletes, not by
+  time.
+- Files sent with an answer to a question stay with the conversation of the
+  chat they were sent in. The gateway records each upload under the
+  conversation of the chat, or Web Chat page, it came from, and a clean-up
+  deletes uploads by that record; the team lead lists an answer's files with
+  the turn of the request the question serves, which can be another
+  conversation (a scheduled run with its own conversation, or a request in
+  another Web Chat thread). A clean-up of the request's conversation then
+  leaves the file stored until the upload retention ends, and a clean-up of
+  the chat's conversation deletes it while the request's turn still lists it,
+  so the tools answer that it is no longer stored. Moving the gateway's record
+  to the question's conversation would not fix this: a question that a plan
+  step or recovery task asks carries that task's own private conversation id
+  (`task_manager_plans`), not the request's. The same follow-up (a clean-up
+  deletes the uploads its deleted turns list) covers answers too.
+- Copies in the adapter host's transfer folder that no gateway record or
+  conversation turn names stay there: copies 0.9 made whose records are
+  gone, which the upgrade step cannot find ("Upgrading an instance in
+  place"), and copies of a message the gateway never handled. Retention,
+  history clean-up and person removal cover only `state/uploads`, and the
+  adapter host's own prune deletes its rows, not their files. Follow-up:
+  delete each expired row's transfer file.
 - Protocol 1's `task.answer` message has no files field. Answers still travel
   in the older message, which carries `TaskQuery.attachments`; moving answers
   to protocol 1 needs that field.
@@ -4543,8 +4580,9 @@ the desktop app never offers an older version.
   and an operator's run never move the same file or share a temporary copy;
   on a file system without locks the step warns
   (`event=adapter_host_files_lock_unsupported`) and goes on. A file that moves
-  while the gateway deletes its record is left without a record, and upload
-  retention removes it by its age. It finds the gateway records and conversation entries (decoded from
+  while the gateway deletes its record is left without a record; upload
+  retention removes it by its age when retention is on, and with
+  `retention_days` 0 it stays until someone deletes it. It finds the gateway records and conversation entries (decoded from
   the stored JSON) that name a file as 0.9.13 wrote it,
   `adapter_upload_<id>` directly in the transfer folder, so a folder an
   operator pointed at other files has none of those moved or dropped. Records are not trusted by themselves, because agent
@@ -4649,10 +4687,14 @@ the desktop app never offers an older version.
   moved file, between the turns and the gateway record and under the same
   path-and-sha256 rule, because the gateway signs it again from that copy at
   each send; a held copy whose file did not move is left as it is and named
-  in the not-moved warning (`held_guidance_ids`). Held
-  task records and messages still queued are not rewritten: the message-bound
-  context id hashes each file record's path (`access_control.ownership`), and
-  task records change only through custody. The module goes with the other
+  in the not-moved warning (`held_guidance_ids`). Messages
+  still queued are not rewritten because the message-bound context id hashes
+  each file record's path (`access_control.ownership`), so a rewritten record
+  would no longer match what the gateway signed. Task records an agent
+  already admitted are not rewritten for another reason: the signature was
+  checked once, at admission, but they are the agent's saved work (its
+  runtime snapshot), which only the agent holding it writes, under custody
+  (`storage.runtime_custody`). The module goes with the other
   upgrade steps from 0.9.
 - **Hosted-chat files in unfinished work.** A request still running or queued
   at the upgrade keeps its file records as the gateway signed them, pointing
