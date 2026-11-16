@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import BaseModel
@@ -36,11 +38,13 @@ from strands.types.tools import ToolContext
 from custom_agents.sdk.strands.changes_first import ChangesFirstToolExecutor
 from custom_agents.sdk.strands.paused_tool_calls import INTERRUPT_STOP_REASON, PausedToolCalls
 from custom_agents.sdk.strands.turn_tool_stop import invoke_with_tool_stop
+from custom_agents.structured_llm_messages import StructuredAgentTurnDecision, StructuredTaskPayload, TaskResponseAction
 from custom_agents.task_manager import TaskManager
-from custom_agents.task_message_runtime import _apply_task_processing_result
 from custom_agents.task_steering_runtime import (
     GUIDANCE_APPLIED_EVENT,
     RuntimeSteeringPlugin,
+    StrandsInterruptedTurnSession,
+    _run_resumed_turn,
     handle_task_steering_message,
 )
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -48,6 +52,8 @@ from custom_messages.contracts.task_v1 import Task, TaskSteering
 from custom_messages.enums import MessageMetaType, ProgressState, TaskSteeringType
 from custom_tools.runtime_context import task_work
 from custom_tools.tool_stop import ToolStop
+from tests.task_work_support import strands_parts
+from tests.test_task_wait_limit import _executor
 
 LOGGER = logging.getLogger(__name__)
 TASK = "task_two_services"
@@ -81,14 +87,18 @@ class TurnDecision(BaseModel):
     done: bool
 
 
+Step = list[tuple[str, dict[str, Any]]] | str
+
+
 class StepsModel(Model):
     """Answers each model call with the next scripted step and records what it read.
 
-    A step is a list of tool calls ``(name, arguments)`` or a final text.
-    Tool use ids are ``step<N>-call<I>``.
+    A step is a list of tool calls ``(name, arguments)``, a final text, or a
+    function that gives one of those from what the model read (its messages as
+    JSON). Tool use ids are ``step<N>-call<I>``.
     """
 
-    def __init__(self, steps: list[list[tuple[str, dict[str, Any]]] | str]) -> None:
+    def __init__(self, steps: list[Step | Callable[[str], Step]]) -> None:
         self.steps = steps
         self.inputs: list[str] = []
 
@@ -107,6 +117,8 @@ class StepsModel(Model):
         number = len(self.inputs)
         assert number <= len(self.steps), "the model was called more often than scripted"
         step = self.steps[number - 1]
+        if callable(step):
+            step = step(self.inputs[-1])
         yield {"messageStart": {"role": "assistant"}}
         if isinstance(step, str):
             yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": step}}}
@@ -339,27 +351,82 @@ async def test_guidance_reaches_the_turn_decision_after_a_resumed_call(tmp_path)
     assert resumed.structured_output == TurnDecision(done=True)
 
 
+def _final_answer(text: str) -> StructuredAgentTurnDecision:
+    return StructuredAgentTurnDecision(
+        actions=[TaskResponseAction(task=StructuredTaskPayload(task_type=MessageMetaType.RESPONSE, answer=text))]
+    )
+
+
+ANSWER_WITHOUT_GUIDANCE = _final_answer("Both services are ready.")
+ANSWER_WITH_GUIDANCE = _final_answer("Checked the second service first; both are ready.")
+
+
+def _decide(read: str) -> Step:
+    """The model's turn decision: it follows the guidance once the model has read it."""
+
+    decision = ANSWER_WITH_GUIDANCE if GUIDANCE in read else ANSWER_WITHOUT_GUIDANCE
+    return [(StructuredAgentTurnDecision.__name__, json.loads(decision.model_dump_json()))]
+
+
+def _resume_executor(manager: TaskManager) -> Any:
+    """The turn executor _run_resumed_turn uses, set up as tests/test_resumed_turn_work.py does."""
+
+    executor = _executor(manager, 5)
+    executor.read_settings = lambda: SimpleNamespace(id="lead", name="Lead", max_waits_per_task=5, debug={})
+    executor.tasks = replace(executor.tasks, record_turn_work=manager.record_turn_work)
+    executor.effects = replace(
+        executor.effects, transform_result=lambda _content, result: result,
+        turn_decision_from_structured_output=lambda output: output,
+    )
+    executor.model = lambda: SimpleNamespace(messages=[])
+    return executor
+
+
 @pytest.mark.asyncio
-async def test_guidance_left_after_a_resumed_turn_defers_its_final_answer(tmp_path):
+async def test_a_resumed_turn_carries_out_the_decision_made_after_reading_the_guidance(tmp_path):
+    # The production resume path. A resumed turn carries out its decision's
+    # actions, a final answer included, before its result is applied, and it
+    # has no check after the model call; so the guidance must reach the model
+    # at its turn decision call.
     runtime = _runtime_agent(tmp_path)
-    model = StepsModel([[("wait_for_setup", {"name": "service-a"})], "Both services are ready."])
-    sdk = _strands_agent(runtime, model)
-
-    paused = await _call(sdk, "Check the services.")
-    await _send_guidance(runtime)
-    resumed = await _call(sdk, _answers(paused))
-
-    assert resumed.stop_reason == "end_turn"
-    assert _tool_results(sdk)["step1-call0"] == ("success", f"setup service-a finished: {ANSWER}")
-    # No later call read the guidance, so the existing check before a final
-    # answer is committed finds it and runs the task again with it.
     manager = runtime.task_manager
-    answer = Task(task_id=TASK, task_type=MessageMetaType.RESPONSE, answer="Both services are ready.")
-    await _apply_task_processing_result(runtime, TASK, manager.get_task_info(TASK), answer)
-    assert "task_steering_terminal_commit_deferred" in _history_events(runtime)
-    assert GUIDANCE in (manager.read_runtime_resume_directive(TASK) or "")
-    assert manager.get_task_info(TASK).state == ProgressState.ACCEPTED
-    assert manager.get_task_info(TASK).task.answer in (None, "")
+    model = StepsModel([[("wait_for_setup", {"name": "service-a"})], _decide, _decide])
+    sdk = _strands_agent(runtime, model)
+    invoke_kwargs = {"structured_output_model": StructuredAgentTurnDecision}
+    paused = await _call(sdk, "Check the services.", **invoke_kwargs)
+    assert paused.stop_reason == "interrupt"
+    await _send_guidance(runtime)
+
+    info = manager.get_task_info(TASK)
+    session = StrandsInterruptedTurnSession(
+        task_id=TASK, strands=strands_parts(sdk), invoke_kwargs=invoke_kwargs, callback_handler=lambda **_: None,
+        full_prompt="", msg_content=info.task, msg_header=info.header, msg_meta=info.meta, created_at=_now(),
+        interrupts=[],
+    )
+    carried_out = []
+
+    async def outbox(**kwargs):
+        carried_out.append(kwargs["decision"])
+        return info.task
+
+    runtime.turn_executor = _resume_executor(manager)
+    runtime._execute_turn_decision_outbox = outbox
+    runtime._apply_task_processing_result = AsyncMock()
+    runtime._interrupted_turn_sessions = {TASK: session}
+    answer = TaskSteering(steering_type=TaskSteeringType.INTERRUPT_RESPONSE, target_task_id=TASK)
+    with task_work(TASK):
+        await _run_resumed_turn(
+            runtime, session, answer, info, _answers(paused), ToolStop(agent_id="lead", task_id=TASK),
+        )
+
+    results = _tool_results(sdk)
+    assert results["step1-call0"] == ("success", f"setup service-a finished: {ANSWER}")
+    # The first decision brought the guidance; the decision carried out follows it.
+    _assert_cancelled_with_guidance(results["step2-call0"])
+    assert carried_out == [ANSWER_WITH_GUIDANCE]
+    runtime._apply_task_processing_result.assert_awaited_once()
+    assert TASK not in runtime._pending_proactive_task_steering
+    assert TASK not in runtime._interrupted_turn_sessions
 
 
 @pytest.mark.asyncio

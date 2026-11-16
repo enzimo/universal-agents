@@ -3041,15 +3041,20 @@ names a task applies only to that task. Accepted guidance and duplicate keys
 are saved with its history, and guidance survives a restart until the model
 turn records its decision.
 The model reads accepted guidance at the start of its turn and, mid-turn, at
-the next safe point: the next new tool call, the turn decision included
-(Strands delivers it as a tool call), is cancelled with the guidance text
-(`task_steering_runtime.RuntimeSteeringPlugin`); guidance that arrives after a
-model call makes the turn call the model again; and a final answer is held back
-while guidance is unread, and the task runs again with it
-(`_apply_task_processing_result`). A tool call that resumes after its pause (`set_up_tools` waiting for setup pages,
-`request_access` or `apply_change` waiting for a decision, any local Strands
-interrupt) is not a new call: it runs with its answer, and the guidance waits
-for the next call, the turn decision or the check before the final answer.
+its next new tool call, which is cancelled with the guidance text
+(`task_steering_runtime.RuntimeSteeringPlugin`). Every turn ends with such a
+call, its turn decision (Strands delivers structured output as a tool call),
+so guidance accepted before that call reaches the model before the decision is
+carried out. A fresh turn also checks for guidance right after its model call
+and, when some arrived, calls the model again before carrying out the
+decision (`custom_agents.sdk.strands.turn`); a resumed turn has no such check.
+Guidance that arrives after the decision call is found only when the task's
+result is applied (`_apply_task_processing_result`), after the decision's
+actions, a final answer included, were carried out; the task then runs again
+with it. A tool call that resumes after its pause (`set_up_tools` waiting for
+setup pages, `request_access` or `apply_change` waiting for a decision, any
+local Strands interrupt) is not a new call: it runs with its answer, and the
+guidance waits for the next new call, at the latest the turn decision.
 Why: cancelling the resumed call threw away the answer the task had waited
 for, and the model then repeated setup that was already done. Strands gives
 no sign in the event that a call resumes, so
