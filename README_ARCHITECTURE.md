@@ -2785,8 +2785,9 @@ person which command to run or asking whether to start:
    a conditional update so exactly one result reaches the task whether the
    page's watcher, the person's own `/link` or `/auth ... team_client`
    (`link_results`), the Mark Done button, or start-up recovery ends it. After
-   a gateway restart, pages still waiting are reported as unwatched (and
-   offered again); page addresses are never stored.
+   a gateway restart, broker pages still waiting are reported as unwatched
+   (and offered again); an outside step keeps waiting, because nothing
+   watches it. Page addresses are never stored.
    A page that opens after the chat reply closed (usually every page of a run
    but the first) is listed for Web Chat and the workflow page by
    `credential_handoff.ToolSetupHandoffs`. A page shown in the live reply is
@@ -2795,7 +2796,10 @@ person which command to run or asking whether to start:
    until that page's own `ToolSetupRecord` ends
    (`GatewayToolSetups.page_status`), its expiry
    passes, or the task ends (the chat request has a terminal status or a
-   finished run state). Each removal is logged once
+   finished run state). Cards live only in gateway memory, so a gateway
+   restart drops them: a broker page is offered again with a new card, while
+   an outside step keeps only its history line and its Mark Done button on
+   the workflow page. Each removal is logged once
    (`event=gateway_credential_handoff_card_closed` with a `reason`; a missing
    request or page record is a warning). A card holding a sign-in or account
    link page's bearer link stays in memory at most 31 minutes

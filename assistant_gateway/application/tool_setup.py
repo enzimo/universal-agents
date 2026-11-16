@@ -25,7 +25,8 @@ module:
 Setup pages come from ``set_up_tools`` runs (``custom_agents.tool_setup_run_runtime``),
 several at once for one task: a sibling page of a task that already waits on a
 page opens too (``credential_handoff``), and each page's card stays until that
-page ends, whatever happens to the others (``page_status``). The run itself
+page ends, whatever happens to the others (``page_status``), or until a
+gateway restart (cards live only in memory). The run itself
 tells the person about its workflow page in one chat message before the pages
 open (``tool_setup_run_runtime``): a card here shows only its own reason, and
 channels without cards show only its text. Chat history keeps each page's

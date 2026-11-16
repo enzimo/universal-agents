@@ -94,6 +94,10 @@ page ends, but a refresh removes the card and the workflow page does not list
 it; a step outside Universal Agents can still be marked done on its step.
 Chat history keeps one line per page; for a step outside Universal Agents it
 keeps the step's title, instructions and link, so a refresh never loses them.
+A gateway restart removes the cards of pages still open: a sign-in or account
+link page is offered again as a fresh page, while a step outside Universal
+Agents keeps waiting with its line in chat history and its **Mark Done**
+button on the workflow page.
 
 Setting the tool up yourself with `/link <tool>` while the task waits marks
 the step the same way. The task continues by itself. The agent learns only

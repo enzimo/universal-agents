@@ -18,6 +18,10 @@ pages of one task share a chat request whose status each page's result
 changes, so that status never decides a card on its own (incident
 2026-11-14: finishing one page removed the other open pages' cards). A card
 with a bearer link stays in memory at most ``BEARER_CARD_MAX_LIFETIME``.
+Cards live only in gateway memory, so a gateway restart drops them: a broker
+page is reported unwatched and offered again with a new card
+(``tool_setup.recover_unwatched``), while an outside step keeps waiting with
+only its history line and Mark Done on the workflow page.
 """
 
 from __future__ import annotations

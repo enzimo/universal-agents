@@ -1532,21 +1532,23 @@ which is decided at every call.
 The gateway records each waiting page, so if it restarts while a page is open,
 the task is told that nobody could see how the page ended, and a fresh page
 opens (it counts toward the three). A step done outside Universal Agents does
-not expire and still waits after a restart. The agents' side keeps the setup
-run too, so an agent restart during the wait resumes the task once the pages
-end. Refreshing chat can recover a live page while the gateway is running; a
-restart does not recover an already-issued page.
+not expire and still waits after a restart; its card is gone, but its line in
+chat history and its **Mark Done** button on the workflow page remain. The
+agents' side keeps the setup run too, so an agent restart during the wait
+resumes the task once the pages end. Refreshing chat can recover a live page
+while the gateway is running; a restart does not recover an already-issued
+page.
 
 Each page's card stays until that page itself ends (finished, closed,
-expired) or the task ends, however the task's other pages end. Pages that
-open after the chat's first reply (usually every page but the first) also
-show on the workflow page and come back after a refresh. A page shown in the
-chat's first reply keeps its card in that chat until the page ends, but a
-refresh removes the card and the workflow page does not list it; a step done
-outside Universal Agents can still be marked done on the workflow page. Chat
-history keeps one line per page and never a page's address: for example "X
-sign-in page opened."; for a step done outside Universal Agents, the step's
-title, instructions and link.
+expired), the task ends or the gateway restarts, however the task's other
+pages end. Pages that open after the chat's first reply (usually every page
+but the first) also show on the workflow page and come back after a refresh.
+A page shown in the chat's first reply keeps its card in that chat until the
+page ends, but a refresh removes the card and the workflow page does not list
+it; a step done outside Universal Agents can still be marked done on the
+workflow page. Chat history keeps one line per page and never a page's
+address: for example "X sign-in page opened."; for a step done outside
+Universal Agents, the step's title, instructions and link.
 
 ## Complete workflow reviews
 
