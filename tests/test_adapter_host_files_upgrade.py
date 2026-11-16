@@ -14,19 +14,23 @@ v0.9.13's own code (``tests/fixtures/upgrade/0.9.13-adapter-host-files.sql``):
 - ``att_web``: a web chat file already in ``state/uploads`` (left alone).
 
 Covered here: the move (same bytes and modification time, both records point
-at it, it opens by id and is listed for the model), files it cannot move
+at it, it opens by id and is listed for the model), files proven absent
 (dropped from their turns, which then say their request's files are not all
-recorded), records it refuses (a link, another checksum, an id that is not a
-file name, a destination already taken, a conversation entry naming another
-path, a file that is not what 0.9.13 wrote, a name the file system refuses),
-the folder missing or holding none of the files (nothing changes, also
-when one record names a file too long for the file system; ``--files-gone``
-then finishes), a folder or one file it cannot use or read (startup stops,
-the error names the file, and nothing changes), a pipe in place of a file
-(refused without waiting), a run stopped part way (the next run finishes), a
-move across file systems (short writes, a copy that reads back differently),
-upload retention and a person's removal finding the moved file, the launcher
-step and the operator command. A held request still naming the old path gets
+recorded), records it refuses and keeps (a link, another checksum, an id that
+is not a file name, a destination already taken, a conversation entry naming
+another path or with no gateway record while its file is here, a file that is
+not what 0.9.13 wrote, a name the file system refuses, a NUL byte in a stored
+name, a file it cannot read, a pipe in place of a file, refused without
+waiting, a copy that reads back differently), the folder missing or holding
+none of the files (nothing changes, also when one record names a file too
+long or with a NUL byte; ``--files-gone`` then finishes), a folder it cannot
+use (startup stops naming the folder and nothing changes), one error rule
+checked by injecting an error at each file and folder operation in turn
+(``test_one_error_rule_holds_at_every_operation``), a run stopped part way
+(the next run finishes), a move across file systems (short writes, a folder
+sync that fails or is not offered after the copy is in place), upload
+retention and a person's removal finding the moved file, the launcher step
+and the operator command. A held request still naming the old path gets
 the stuck-task notice: ``tests/test_stuck_tasks.py`` (``ADAPTER_HOST_FOLDER``).
 Runs on SQLite and, with ``LIVE_TEST_POSTGRES_DSN``, on PostgreSQL.
 """
@@ -274,7 +278,7 @@ def test_a_hosted_chat_file_moves_into_state_uploads_and_opens_by_id(instance: _
     # One summary line, a warning because two files could not be moved, and the marker with the counts.
     (summary,) = _events(caplog, "adapter_host_files_upgraded")
     assert summary.endswith(
-        "moved=1 already_moved=0 missing=1 refused=0 no_record=1 gateway_rows_removed=1 turns_marked_unrecorded=2"
+        "moved=1 already_moved=0 missing=1 refused=0 no_record=1 gateway_rows_removed=1 turns_marked_unrecorded=1"
     )
     assert [record.levelno for record in caplog.records if "adapter_host_files_upgraded" in record.getMessage()] == [logging.WARNING]
     marker = json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())
@@ -302,26 +306,60 @@ def test_once_finished_it_does_not_run_again(instance: _Instance) -> None:
 # --- Files it cannot move ------------------------------------------------------------------------
 
 
-def test_files_it_cannot_move_leave_their_turns_and_the_model_is_told_to_ask_for_them(instance: _Instance, caplog) -> None:
+def test_a_file_proven_absent_leaves_its_turns_and_the_model_is_told_to_ask_for_it(instance: _Instance, caplog) -> None:
     assert (instance.recorded("task_1"), instance.recorded("task_2")) == (1, 1)
 
     with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
         instance.run()
 
-    # The lost file (gone from the folder) and the orphan (no gateway record, so no chat session for its folder).
-    assert set(instance.files()) == {"att_photo", "att_web"}
-    assert (instance.recorded("task_1"), instance.recorded("task_2")) == (0, 0)
-    assert instance.conversations().last_turn_without_file_records(CONVERSATION) == 2
+    # The lost file is gone from a folder that opened: its records are dropped. The orphan (no gateway record, so
+    # no chat session for its folder) is not moved, but its file is here, so its entry is kept (rule 3).
+    assert set(instance.files()) == {"att_photo", "att_web", "att_orphan"}
+    assert (instance.recorded("task_1"), instance.recorded("task_2")) == (0, 1)
+    assert instance.conversations().last_turn_without_file_records(CONVERSATION) == 1
     assert instance.gateway().get_attachment("att_lost") is None
+    assert instance.turn_paths("task_2")["att_orphan"] == str(instance.transfer / "adapter_upload_orphan")
     assert (instance.transfer / "adapter_upload_orphan").read_bytes() == CONTENT["att_orphan"], "the file is left alone"
     request = Task(task_id="task_next", task_type=MessageMetaType.REQUEST, problem_statement="And the PDF?")
     held = SimpleNamespace(task=request, meta=SimpleNamespace(conversation_id=CONVERSATION), owner_person_id=PERSON)
     scope = TaskAttachments.load(held, instance.conversations())
-    assert scope.find(["att_lost", "att_orphan"])[1] == ["att_lost", "att_orphan"]
-    assert UNRECORDED_TURNS_NOTE.format(turn=2) in inventory_text(scope, exclude_ids=[])
-    reasons = sorted(message.rsplit("reason=", 1)[1] for message in _events(caplog, "adapter_host_file_not_moved"))
-    assert reasons == ["missing", "no_gateway_record"]
+    (orphan,), unknown = scope.find(["att_lost", "att_orphan"])
+    assert unknown == ["att_lost"]
+    assert UNRECORDED_TURNS_NOTE.format(turn=1) in inventory_text(scope, exclude_ids=[])
+    _assert_not_opened(instance, orphan)
+    records = sorted(message.rsplit("records=", 1)[1] for message in _events(caplog, "adapter_host_file_not_moved"))
+    assert records == ["dropped reason=missing", "kept reason=no_gateway_record"]
     assert all(f"conversation_ids={CONVERSATION}" in message for message in _events(caplog, "adapter_host_file_not_moved"))
+
+
+def test_a_conversation_entry_with_no_gateway_record_is_dropped_once_its_file_is_proven_absent(instance: _Instance, caplog) -> None:
+    (instance.transfer / "adapter_upload_orphan").unlink()
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.finished and result.counts.no_record == 1
+    assert "att_orphan" not in instance.files() and instance.recorded("task_2") == 0
+    assert any(
+        "attachment_id=att_orphan" in message and message.endswith("records=dropped reason=no_gateway_record")
+        for message in _events(caplog, "adapter_host_file_not_moved")
+    )
+
+
+def _assert_not_opened(instance: _Instance, attachment: UserTaskAttachment) -> None:
+    """A kept record outside state/uploads is refused by the file tools, so the file is not opened."""
+
+    located = locate_upload(attachment, UploadFolder.for_instance(instance.root), task_id="task_next", conversation_id=CONVERSATION)
+    assert not isinstance(located, LocatedUpload)
+
+
+def _assert_photo_kept(instance: _Instance) -> None:
+    """The photo's records still name its file in the transfer folder, and the file is there."""
+
+    source = str(instance.photo_source)
+    assert instance.gateway().get_attachment("att_photo").local_path == source
+    assert instance.turn_paths("task_1")["att_photo"] == source and instance.turn_paths("task_2")["att_photo"] == source
+    assert instance.photo_source.read_bytes() == CONTENT["att_photo"]
 
 
 def _link_source(instance: _Instance) -> None:
@@ -389,7 +427,7 @@ def _record(attachment_id: str, path: str, sha256: str) -> UserTaskAttachment:
     ],
     ids=["link", "sha256", "destination", "id"],
 )
-def test_a_file_it_refuses_is_not_moved_and_not_offered(instance: _Instance, caplog, change, attachment_id, reason) -> None:
+def test_a_file_it_refuses_keeps_its_records_and_is_not_opened(instance: _Instance, caplog, change, attachment_id, reason) -> None:
     change(instance)
     before = {path: path.read_bytes() for path in instance.root.rglob("*") if path.is_file() and not path.is_symlink() and "uploads" in path.parts}
 
@@ -397,19 +435,29 @@ def test_a_file_it_refuses_is_not_moved_and_not_offered(instance: _Instance, cap
         result = instance.run()
 
     assert result.finished and result.counts.refused == 1 and result.counts.moved == 0
-    assert attachment_id not in instance.files()
-    assert instance.gateway().get_attachment(attachment_id) is None
-    assert instance.recorded("task_1") == 0
-    assert any(message.endswith(f"attachment_id={attachment_id} conversation_ids={CONVERSATION} reason={reason}") for message in _events(caplog, "adapter_host_file_not_moved"))
+    assert instance.files()[attachment_id] == str(instance.photo_source), "its conversation entry is kept"
+    assert instance.gateway().get_attachment(attachment_id).local_path == str(instance.photo_source)
+    (entry,) = [item for item in instance.conversations().list_turn_attachments(CONVERSATION) if item.attachment.attachment_id == attachment_id][:1]
+    _assert_not_opened(instance, entry.attachment)
+    assert any(
+        f"attachment_id={attachment_id} conversation_ids={CONVERSATION} " in message
+        and message.endswith(f"records=kept reason={reason}")
+        for message in _events(caplog, "adapter_host_file_not_moved")
+    )
     assert os.path.lexists(instance.photo_source), "a refused file is left where it is"
     after = {path: path.read_bytes() for path in instance.root.rglob("*") if path.is_file() and not path.is_symlink() and "uploads" in path.parts}
     assert after == before, "nothing in state/uploads was written or replaced"
 
 
-def test_a_conversation_entry_naming_another_path_does_not_follow_the_moved_file(instance: _Instance, caplog) -> None:
-    """Agent processes write conversation turns, so an entry is moved only when it names the gateway's file."""
+@pytest.mark.parametrize("other_there", [True, False], ids=["other_file_here", "other_file_absent"])
+def test_a_conversation_entry_naming_another_path_does_not_follow_the_moved_file(instance: _Instance, caplog, other_there) -> None:
+    """Agent processes write conversation turns, so an entry is moved only when it names the gateway's file.
 
-    _write(instance.transfer / "adapter_upload_other", b"some other upload")
+    It is dropped only when the file it names is proven absent (rule 3).
+    """
+
+    if other_there:
+        _write(instance.transfer / "adapter_upload_other", b"some other upload")
     record = instance.gateway().get_attachment("att_photo")
     conversations = instance.conversations()
     conversations.append_turn(
@@ -429,9 +477,14 @@ def test_a_conversation_entry_naming_another_path_does_not_follow_the_moved_file
         result = instance.run()
 
     assert result.counts.moved == 1
-    assert "att_photo" not in instance.turn_paths("task_3") and instance.recorded("task_3") == 0
+    if other_there:
+        assert instance.turn_paths("task_3")["att_photo"] == str(instance.transfer / "adapter_upload_other")
+        assert instance.recorded("task_3") == 1
+    else:
+        assert "att_photo" not in instance.turn_paths("task_3") and instance.recorded("task_3") == 0
     assert instance.turn_paths("task_1")["att_photo"] == str(instance.photo_destination)
-    assert any(message.endswith("reason=record_mismatch") for message in _events(caplog, "adapter_host_file_not_moved"))
+    records = "kept" if other_there else "dropped"
+    assert any(message.endswith(f"records={records} reason=record_mismatch") for message in _events(caplog, "adapter_host_file_not_moved"))
 
 
 # --- The transfer folder is not here -------------------------------------------------------------
@@ -445,11 +498,11 @@ def test_with_the_folder_missing_nothing_changes_until_the_files_are_declared_go
     with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
         waiting = instance.run()
 
-    assert not waiting.finished and waiting.folder_missing and waiting.waiting == 2  # the two gateway records
+    assert not waiting.finished and waiting.folder_missing and waiting.waiting == 3  # two gateway records, one orphan
     assert (instance.files(), instance.recorded("task_1"), instance.gateway().get_attachment("att_photo")) == before
     assert not instance.layout.adapter_host_files_upgrade_path.exists()
     (error,) = _events(caplog, "adapter_host_files_folder_missing")
-    assert "--files-gone" in error and error.endswith(f"folder={instance.transfer} waiting=2")
+    assert "--files-gone" in error and error.endswith(f"folder={instance.transfer} waiting=3")
 
     gone = instance.run(files_gone=True)
 
@@ -495,7 +548,7 @@ def test_a_folder_holding_none_of_the_files_changes_nothing(instance: _Instance,
     with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
         result = instance.run()
 
-    assert not result.finished and result.folder_missing and result.waiting == 2
+    assert not result.finished and result.folder_missing and result.waiting == 3
     assert _untouched(instance) == before
     assert not instance.layout.adapter_host_files_upgrade_path.exists()
     assert _events(caplog, "adapter_host_files_folder_missing")
@@ -506,6 +559,13 @@ def _unreadable_transfer(instance: _Instance) -> Path:
     return instance.transfer
 
 
+def _read_only_transfer(instance: _Instance) -> Path:
+    """The move would also remove the name from the transfer folder, which cannot be written."""
+
+    os.chmod(instance.transfer, 0o555)
+    return instance.transfer
+
+
 def _read_only_uploads(instance: _Instance) -> Path:
     uploads = instance.layout.uploads_dir.resolve()
     os.chmod(uploads, 0o555)
@@ -513,7 +573,9 @@ def _read_only_uploads(instance: _Instance) -> Path:
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="permissions do not stop root")
-@pytest.mark.parametrize("change", [_unreadable_transfer, _read_only_uploads], ids=["transfer", "uploads"])
+@pytest.mark.parametrize(
+    "change", [_unreadable_transfer, _read_only_transfer, _read_only_uploads], ids=["transfer", "transfer_read_only", "uploads"]
+)
 def test_a_folder_it_cannot_use_stops_startup_and_changes_nothing(instance: _Instance, caplog, change) -> None:
     folder = change(instance)
     try:
@@ -540,32 +602,35 @@ def test_a_name_the_file_system_refuses_is_refused_not_retried_forever(instance:
         result = instance.run()
 
     assert result.finished and result.counts.refused == 1 and result.counts.moved == 0
-    assert instance.gateway().get_attachment(long_id) is None
+    assert instance.gateway().get_attachment(long_id).local_path == str(instance.photo_source), "its record is kept"
     assert instance.photo_source.read_bytes() == CONTENT["att_photo"]
-    assert any(message.endswith("reason=name_refused") for message in _events(caplog, "adapter_host_file_not_moved"))
+    assert any(message.endswith("records=kept reason=name_refused") for message in _events(caplog, "adapter_host_file_not_moved"))
+
+
+def _rerun_after_fix(instance: _Instance) -> upgrade_module.UpgradeCounts:
+    """What the operator does after fixing a file the step refused: delete the marker and start again."""
+
+    instance.layout.adapter_host_files_upgrade_path.unlink()
+    return instance.run().counts
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="permissions do not stop root")
-def test_a_file_it_cannot_read_stops_startup_naming_that_file(instance: _Instance, caplog) -> None:
-    """The folder is fine and only the photo is unreadable: the message names the photo, not just its folder."""
+def test_a_file_it_cannot_read_is_refused_naming_that_file_and_keeps_its_records(instance: _Instance, caplog) -> None:
+    """The folder is fine and only the photo is unreadable: that record is refused and kept, and startup goes on."""
 
     os.chmod(instance.photo_source, 0)
     try:
-        before = _untouched(instance)
-        with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
-            with pytest.raises(upgrade_module.FolderProblem) as raised:
-                instance.run()
-        assert _untouched(instance) == before
+        with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+            result = instance.run()
     finally:
         os.chmod(instance.photo_source, 0o640)
 
-    problem = raised.value
-    assert problem.file == instance.photo_source and problem.attachment_id == "att_photo"
-    assert str(instance.photo_source) in str(problem) and "att_photo" in str(problem)
-    (error,) = _events(caplog, "adapter_host_files_folder_unusable")
-    assert f"file={instance.photo_source}" in error and "attachment_id=att_photo" in error
-    assert not instance.layout.adapter_host_files_upgrade_path.exists()
-    assert instance.run().counts.moved == 1, "a restart after the fix finishes the work"
+    assert result.finished and result.counts.refused == 1 and result.counts.moved == 0
+    _assert_photo_kept(instance)
+    (warning,) = [message for message in _events(caplog, "adapter_host_file_not_moved") if "attachment_id=att_photo" in message]
+    assert f"folder={instance.transfer} file={instance.photo_source} records=kept reason=unreadable" in warning
+    assert str(instance.layout.adapter_host_files_upgrade_path) in warning, "it says how to try again"
+    assert _rerun_after_fix(instance).moved == 1, "after the fix, a run without the marker moves it"
 
 
 def _photo_already_at_destination(instance: _Instance) -> Path:
@@ -576,34 +641,30 @@ def _photo_already_at_destination(instance: _Instance) -> Path:
 @pytest.mark.parametrize(
     "where", ["source", "destination"], ids=["source", "destination"]
 )
-def test_a_read_error_stops_startup_naming_the_file_and_keeps_every_record(
+def test_a_read_error_refuses_that_file_naming_it_and_keeps_its_records(
     instance: _Instance, monkeypatch, caplog, where
 ) -> None:
-    """An I/O error (a bad sector) while reading a file is a ``FolderProblem`` naming it, not a bare ``OSError``."""
+    """An I/O error (a bad sector) while reading one file refuses that record only: it never stops startup."""
 
     if where == "destination":
         file, folder = _photo_already_at_destination(instance), instance.layout.uploads_dir.resolve()
     else:
         file, folder = instance.photo_source, instance.transfer
-    before = _untouched(instance)
 
     def failing_pread(*_args):
         raise OSError(errno.EIO, "Input/output error")
 
     monkeypatch.setattr(upgrade_module.os, "pread", failing_pread)
-    with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
-        with pytest.raises(upgrade_module.FolderProblem) as raised:
-            instance.run()
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
     monkeypatch.undo()
 
-    problem = raised.value
-    assert (problem.folder, problem.file, problem.attachment_id) == (folder, file, "att_photo")
-    assert "Input/output error" in str(problem) and str(file) in str(problem)
-    (error,) = _events(caplog, "adapter_host_files_folder_unusable")
-    assert f"file={file}" in error and "attachment_id=att_photo" in error
-    assert _untouched(instance) == before and not instance.layout.adapter_host_files_upgrade_path.exists()
-    counts = instance.run().counts
-    assert counts.moved + counts.already_moved == 1, "a restart after the fix finishes the work"
+    assert result.finished and result.counts.refused == 1
+    _assert_photo_kept(instance)
+    (warning,) = [message for message in _events(caplog, "adapter_host_file_not_moved") if "attachment_id=att_photo" in message]
+    assert "Input/output error" in warning and f"folder={folder} file={file} records=kept reason=unreadable" in warning
+    counts = _rerun_after_fix(instance)
+    assert counts.moved + counts.already_moved == 1, "after the fix, a run without the marker finishes the work"
 
 
 def test_a_pipe_in_place_of_a_file_is_refused_without_waiting(instance: _Instance, caplog) -> None:
@@ -627,10 +688,10 @@ def test_a_pipe_in_place_of_a_file_is_refused_without_waiting(instance: _Instanc
         signal.signal(signal.SIGALRM, previous)
 
     assert result.finished and result.counts.moved == 0 and result.counts.refused == 1
-    assert instance.gateway().get_attachment("att_photo") is None
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_source), "its record is kept"
     assert instance.photo_source.is_fifo(), "the pipe is left where it is"
     assert any(
-        "attachment_id=att_photo" in message and message.endswith("reason=not_regular_file")
+        "attachment_id=att_photo" in message and message.endswith("records=kept reason=not_regular_file")
         for message in _events(caplog, "adapter_host_file_not_moved")
     )
 
@@ -658,11 +719,265 @@ def test_a_name_too_long_for_the_file_system_is_no_sign_the_folder_holds_the_fil
     with caplog.at_level(logging.ERROR, logger=MODULE_LOGGER):
         result = instance.run()
 
-    assert not result.finished and result.folder_missing and result.waiting == 3
+    assert not result.finished and result.folder_missing and result.waiting == 4
     assert _untouched(instance) == before
     assert instance.gateway().get_attachment("att_long") is not None
     assert not instance.layout.adapter_host_files_upgrade_path.exists()
     assert _events(caplog, "adapter_host_files_folder_missing")
+
+
+def _record_named(instance: _Instance, attachment_id: str, local_path: str) -> None:
+    instance.gateway().upsert_attachment(
+        attachment_id=attachment_id,
+        session_key="telegram:chat:7",
+        conversation_id=CONVERSATION,
+        correlation_id=None,
+        filename="named.png",
+        content_type="image/png",
+        kind="image",
+        size_bytes=1,
+        sha256=hashlib.sha256(b"x").hexdigest(),
+        local_path=local_path,
+        owner_canonical_user_id=PERSON,
+    )
+
+
+@pytest.mark.parametrize("files_here", [True, False], ids=["files_here", "empty_mount_point"])
+def test_a_nul_byte_in_a_stored_name_refuses_only_that_record(instance: _Instance, request, caplog, files_here) -> None:
+    """A corrupt record whose file name holds a NUL byte (only SQLite can store one) never stops startup (C16).
+
+    With the files here it is refused and kept, and the rest moves, also with ``--files-gone``; on an empty
+    mount point it is no sign of the files, so the step waits and nothing changes.
+    """
+
+    if "postgres" in request.node.callspec.id:
+        pytest.skip("PostgreSQL refuses a NUL byte in text, so it cannot hold such a record.")
+    if not files_here:
+        _empty_mount_point(instance)
+    nul_path = str(instance.transfer / "adapter_upload_a\x00b")
+    _record_named(instance, "att_nul", nul_path)
+    before = _untouched(instance)
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert instance.gateway().get_attachment("att_nul").local_path == nul_path
+    if not files_here:
+        assert result.folder_missing and result.waiting == 4 and _untouched(instance) == before
+        assert instance.run(files_gone=True).finished, "--files-gone finishes; the NUL record is refused, not an error"
+        assert instance.gateway().get_attachment("att_nul").local_path == nul_path
+        return
+    assert result.finished and result.counts.moved == 1 and result.counts.refused == 1
+    assert any(
+        "attachment_id=att_nul" in message and message.endswith("records=kept reason=unsafe_name")
+        for message in _events(caplog, "adapter_host_file_not_moved")
+    )
+
+
+# --- One error rule at every operation ----------------------------------------------------------------
+#
+# Each case injects one error at one operation the step performs on the photo, its folders or its copy, and
+# checks which case of the module's rule it falls under: "refused" (rule 1: only that record is refused, its
+# records are kept, startup goes on), "folder" (rule 2: FolderProblem names the folder, nothing is dropped, no
+# marker, and a run after the fix finishes the work), "missing" (rule 3: proven absent, records dropped) or
+# "moved" (the error comes after the file and its records are safe, or is a sync the file system does not offer).
+
+
+def _is(path: Callable[[_Instance], Path]) -> Callable[[_Instance, Path], bool]:
+    return lambda instance, subject: subject == path(instance)
+
+
+def _copy(instance: _Instance, subject: Path) -> bool:
+    return subject.parent == instance.photo_destination.parent and subject.name.startswith(".moving-")
+
+
+_PHOTO = _is(lambda instance: instance.photo_source)
+_ORPHAN = _is(lambda instance: instance.transfer / "adapter_upload_orphan")
+_TRANSFER = _is(lambda instance: instance.transfer)
+_SESSION = _is(lambda instance: instance.photo_destination.parent)
+_DESTINATION = _is(lambda instance: instance.photo_destination)
+_MARKER = _is(lambda instance: instance.layout.adapter_host_files_upgrade_path)
+_FD_FUNCTIONS = {"pread", "write", "fsync", "fstat", "fchmod"}
+
+
+def _subject(function: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Path | None:
+    """The path an ``os`` call works on: its descriptor's file, or its name in its folder descriptor."""
+
+    first = args[0] if args else None
+    if function in _FD_FUNCTIONS or isinstance(first, int):
+        try:
+            return Path(os.readlink(f"/proc/self/fd/{first}"))
+        except OSError:
+            return None
+    if function == "rename":
+        folder = kwargs.get("src_dir_fd")
+    elif function == "replace":
+        folder, first = None, args[1]  # what it replaces
+    else:
+        folder = kwargs.get("dir_fd")
+    name = os.fsdecode(first)
+    if folder is not None:
+        return Path(os.readlink(f"/proc/self/fd/{folder}")) / name
+    return Path(os.path.normpath(name))
+
+
+def _vanish_then(error: int) -> Callable[[_Instance], OSError]:
+    def make(instance: _Instance) -> OSError:
+        instance.photo_source.unlink()  # someone removed the file between the check and the rename
+        return OSError(error, os.strerror(error))
+
+    return make
+
+
+@dataclass(frozen=True)
+class _Fault:
+    function: str
+    target: Callable[[_Instance, Path], bool]
+    error: Any  # an errno, an exception, or a callable making one from the instance
+    expect: str
+    reason: str = ""  # the refusal's reason, or which folder a FolderProblem names ("transfer", "uploads", "state")
+    cross_disk: bool = False
+    also: tuple[tuple[str, Callable[[_Instance, Path], bool], Any], ...] = ()
+    setup: Callable[[_Instance], Any] | None = None
+
+
+_FAULTS = {
+    # Rule 1: one file or one record.
+    "open_file_permission": _Fault("open", _PHOTO, errno.EACCES, "refused", "unreadable"),
+    "open_file_bad_name": _Fault("open", _PHOTO, ValueError("embedded null byte"), "refused", "unsafe_name"),
+    "open_file_name_too_long": _Fault("open", _PHOTO, errno.ENAMETOOLONG, "refused", "name_refused"),
+    "fstat_file_io": _Fault("fstat", _PHOTO, errno.EIO, "refused", "unreadable"),
+    "read_file_io": _Fault("pread", _PHOTO, errno.EIO, "refused", "unreadable"),
+    "rename_file_io": _Fault("rename", _PHOTO, errno.EIO, "refused", "move_failed"),
+    "rename_file_bad_name": _Fault("rename", _PHOTO, errno.EINVAL, "refused", "name_refused"),
+    "unlink_stale_copy_io": _Fault("unlink", _copy, errno.EISDIR, "refused", "move_failed", cross_disk=True),
+    "open_copy_io": _Fault("open", _copy, errno.EIO, "refused", "move_failed", cross_disk=True),
+    "write_copy_io": _Fault("write", _copy, errno.EIO, "refused", "move_failed", cross_disk=True),
+    "fsync_copy_io": _Fault("fsync", _copy, errno.EIO, "refused", "move_failed", cross_disk=True),
+    "read_back_copy_io": _Fault("pread", _copy, errno.EIO, "refused", "unreadable", cross_disk=True),
+    "fchmod_copy_io": _Fault("fchmod", _copy, errno.EIO, "refused", "move_failed", cross_disk=True),
+    "rename_copy_bad_name": _Fault("rename", _copy, errno.EINVAL, "refused", "name_refused", cross_disk=True),
+    "open_destination_io": _Fault(
+        "open", _DESTINATION, errno.EIO, "refused", "unreadable", setup=_photo_already_at_destination
+    ),
+    "path_construction": _Fault("path", _PHOTO, ValueError("no file name"), "refused", "unsafe_name"),
+    # Rule 2: a folder.
+    "open_transfer_folder": _Fault("open", _TRANSFER, errno.EACCES, "folder", "transfer"),
+    "stat_in_unsearchable_folder": _Fault("stat", _ORPHAN, errno.EACCES, "folder", "transfer"),
+    "open_file_in_unsearchable_folder": _Fault(
+        "open", _PHOTO, errno.EACCES, "folder", "transfer", also=(("stat", _PHOTO, errno.EACCES),)
+    ),
+    "mkdir_session_read_only": _Fault("mkdir", _SESSION, errno.EROFS, "folder", "uploads"),
+    "rename_read_only": _Fault("rename", _PHOTO, errno.EROFS, "folder", "uploads"),
+    "rename_destination_folder_gone": _Fault("rename", _PHOTO, errno.ENOENT, "folder", "uploads"),
+    "write_copy_full": _Fault("write", _copy, errno.ENOSPC, "folder", "uploads", cross_disk=True),
+    "fsync_folder_after_rename": _Fault("fsync", _SESSION, errno.EIO, "folder", "uploads"),
+    "fsync_folder_after_copy": _Fault("fsync", _SESSION, errno.EIO, "folder", "uploads", cross_disk=True),
+    "write_marker": _Fault("replace", _MARKER, errno.EROFS, "folder", "state"),
+    # Rule 3: proven absent.
+    "rename_file_vanished": _Fault("rename", _PHOTO, _vanish_then(errno.ENOENT), "missing"),
+    # After the file and its records are safe, or a sync the file system does not offer.
+    "stat_name_too_long_is_no_sign": _Fault("stat", _ORPHAN, errno.ENAMETOOLONG, "moved"),
+    "unlink_source_after_copy": _Fault("unlink", _PHOTO, errno.EACCES, "moved", cross_disk=True),
+    "fsync_folder_not_offered": _Fault("fsync", _SESSION, errno.EINVAL, "moved"),
+    "fsync_copy_not_offered": _Fault("fsync", _copy, errno.EINVAL, "moved", cross_disk=True),
+}
+
+
+def _inject(instance: _Instance, monkeypatch: pytest.MonkeyPatch, fault: _Fault) -> list[str]:
+    """Make the fault's operations fail; the returned list names each failure as it happens."""
+
+    fired: list[str] = []
+    if fault.cross_disk:
+        _across_file_systems(monkeypatch)
+    for function, target, error in ((fault.function, fault.target, fault.error), *fault.also):
+        if function == "path":
+            real_sanitize = upgrade_module.sanitize_attachment_filename
+
+            def refuse(value, error=error):
+                if value == "photo.png":  # only the photo's record
+                    fired.append("path")
+                    raise error
+                return real_sanitize(value)
+
+            monkeypatch.setattr(upgrade_module, "sanitize_attachment_filename", refuse)
+            continue
+        real = getattr(os, function)
+
+        def failing(*args, real=real, function=function, target=target, error=error, **kwargs):
+            subject = _subject(function, args, kwargs)
+            if subject is not None and target(instance, subject):
+                fired.append(function)
+                made = error(instance) if callable(error) and not isinstance(error, BaseException) else error
+                raise OSError(made, os.strerror(made)) if isinstance(made, int) else made
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(os, function, failing)
+    return fired
+
+
+@pytest.mark.parametrize("case", sorted(_FAULTS))
+def test_one_error_rule_holds_at_every_operation(instance: _Instance, monkeypatch, caplog, case) -> None:
+    fault = _FAULTS[case]
+    if fault.setup is not None:
+        fault.setup(instance)
+    if fault.expect == "folder" and fault.reason != "state":
+        before = _untouched(instance)
+    fired = _inject(instance, monkeypatch, fault)
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        if fault.expect == "folder":
+            with pytest.raises(upgrade_module.FolderProblem) as raised:
+                instance.run()
+        else:
+            result = instance.run()
+    monkeypatch.undo()
+    assert fault.function in fired, "the error was injected"
+    marker = instance.layout.adapter_host_files_upgrade_path
+
+    if fault.expect == "refused":
+        assert result.finished and result.counts.refused == 1 and result.counts.moved == 0
+        _assert_photo_kept(instance)
+        assert fault.setup is not None or not instance.photo_destination.exists()
+        assert not list(instance.photo_destination.parent.glob(".moving-*"))
+        (warning,) = [message for message in _events(caplog, "adapter_host_file_not_moved") if "attachment_id=att_photo" in message]
+        assert " folder=/" in warning and " file=/" in warning and warning.endswith(f"records=kept reason={fault.reason}")
+        assert marker.is_file()
+        counts = _rerun_after_fix(instance)
+        assert counts.moved + counts.already_moved == 1, "after the fix, a run without the marker moves it"
+    elif fault.expect == "folder":
+        folder = {
+            "transfer": instance.transfer,
+            "uploads": instance.layout.uploads_dir.resolve(),
+            "state": marker.parent,
+        }[fault.reason]
+        problem = raised.value
+        assert problem.folder == folder and str(folder) in str(problem)
+        (error,) = _events(caplog, "adapter_host_files_folder_unusable")
+        assert f"folder={folder}" in error
+        assert not marker.exists()
+        if fault.reason != "state":
+            gateway = instance.gateway()
+            assert gateway.get_attachment("att_photo").local_path == str(instance.photo_source), "nothing finished"
+            assert gateway.get_attachment("att_lost") is not None, "nothing was dropped"
+            assert instance.files() == before[0] and instance.recorded("task_1") == before[1]
+        result = instance.run()
+        assert result.finished and result.counts.moved + result.counts.already_moved <= 1
+    elif fault.expect == "missing":
+        assert result.finished and result.counts.missing == 2
+        assert instance.gateway().get_attachment("att_photo") is None and "att_photo" not in instance.files()
+    else:
+        assert result.finished and result.counts.moved == 1
+    assert instance.gateway().get_attachment("att_photo") is None or (
+        instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+    )
+    if fault.expect != "missing":
+        assert instance.photo_destination.read_bytes() == CONTENT["att_photo"]
+    if case == "unlink_source_after_copy":
+        assert instance.photo_source.exists() and _events(caplog, "adapter_host_file_source_left")
+    elif fault.expect != "missing":
+        assert not instance.photo_source.exists()
+    if case.endswith("not_offered"):
+        assert _events(caplog, "adapter_host_files_sync_unsupported")
 
 
 def test_only_files_0_9_13_wrote_are_moved(instance: _Instance) -> None:
@@ -811,20 +1126,64 @@ def test_a_short_write_across_file_systems_is_finished(instance: _Instance, monk
     assert instance.photo_destination.read_bytes() == CONTENT["att_photo"] and not instance.photo_source.exists()
 
 
-def test_a_copy_that_reads_back_differently_keeps_the_original(instance: _Instance, monkeypatch) -> None:
+def test_a_copy_that_reads_back_differently_keeps_the_original_and_its_records(instance: _Instance, monkeypatch, caplog) -> None:
     _across_file_systems(monkeypatch)
     real_write = os.write
     monkeypatch.setattr(upgrade_module.os, "write", lambda descriptor, data: real_write(descriptor, b"x" * len(data)))
-    before = _untouched(instance)
 
-    with pytest.raises(upgrade_module.FolderProblem) as raised:
-        instance.run()
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
 
-    assert raised.value.reason == "copy_mismatch" and raised.value.folder == instance.layout.uploads_dir.resolve()
-    assert _untouched(instance) == before and instance.photo_source.read_bytes() == CONTENT["att_photo"]
+    assert result.finished and result.counts.refused == 1
+    _assert_photo_kept(instance)
     assert not instance.photo_destination.exists() and not list(instance.photo_destination.parent.glob(".*"))
+    assert any(message.endswith("records=kept reason=copy_mismatch") for message in _events(caplog, "adapter_host_file_not_moved"))
     monkeypatch.undo()
-    assert instance.run().counts.moved == 1
+    assert _rerun_after_fix(instance).moved == 1
+
+
+@pytest.mark.parametrize("error", [errno.EIO, errno.EINVAL], ids=["fails", "not_offered"])
+def test_a_folder_sync_after_the_copy_is_in_place_never_drops_the_copied_files_records(
+    instance: _Instance, monkeypatch, caplog, error
+) -> None:
+    """Once the copy is renamed into place, a folder sync that fails stops startup with every record kept, and the
+    next run counts the file already moved; a sync the file system does not offer (EINVAL) is logged and the step
+    goes on (C17)."""
+
+    _across_file_systems(monkeypatch)
+    real_fsync = os.fsync
+
+    def fsync(descriptor):
+        if Path(os.readlink(f"/proc/self/fd/{descriptor}")) == instance.photo_destination.parent:
+            raise OSError(error, os.strerror(error))
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(upgrade_module.os, "fsync", fsync)
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        if error == errno.EIO:
+            with pytest.raises(upgrade_module.FolderProblem) as raised:
+                instance.run()
+        else:
+            result = instance.run()
+    monkeypatch.undo()
+
+    if error == errno.EIO:
+        problem = raised.value
+        assert (problem.folder, problem.file, problem.attachment_id) == (
+            instance.layout.uploads_dir.resolve(), instance.photo_destination, "att_photo"
+        )
+        assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_source)
+        assert instance.turn_paths("task_1")["att_photo"] == str(instance.photo_source)
+        assert instance.gateway().get_attachment("att_lost") is not None, "nothing was dropped"
+        assert not instance.layout.adapter_host_files_upgrade_path.exists()
+        result = instance.run()
+        assert result.counts.already_moved == 1
+    else:
+        assert result.counts.moved == 1
+        (note,) = _events(caplog, "adapter_host_files_sync_unsupported")
+        assert f"folder={instance.layout.uploads_dir.resolve()}" in note
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+    assert instance.photo_destination.read_bytes() == CONTENT["att_photo"] and not instance.photo_source.exists()
 
 
 def test_the_operator_command_stops_with_the_folder_named(monkeypatch, capsys) -> None:

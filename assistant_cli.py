@@ -2627,11 +2627,12 @@ def _resolve_instance_config_path(config_path: str | None) -> str:
 def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
     """``upgrade adapter-host-files`` (``instance_upgrades.adapter_host_files``).
 
-    Exits 0 when the step finished or is waiting for a transfer folder that
-    is not here or holds none of the files (startup goes on and the next start
-    tries again), and non-zero when a folder cannot be used (``FolderProblem``,
-    with a message naming it) or on another unexpected error, which stops
-    startup until a restart finishes it.
+    Exits 0 when the step finished (a file it refused keeps its records and
+    is logged; it never stops startup) or is waiting for a transfer folder
+    that is not here or holds none of the files (startup goes on and the next
+    start tries again), and non-zero when a folder cannot be used
+    (``FolderProblem``, with a message naming it) or on another unexpected
+    error, which stops startup until a restart finishes it.
     """
 
     from instance_upgrades.adapter_host_files import FolderProblem, upgrade_adapter_host_files
@@ -2652,7 +2653,7 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
         counts = result.counts
         print(
             f"Moved {counts.moved + counts.already_moved} file(s) into state/uploads; "
-            f"{counts.not_moved} could not be moved and must be sent again."
+            f"{counts.not_moved} could not be moved; the log says which, and whether their records were kept."
         )
 
 

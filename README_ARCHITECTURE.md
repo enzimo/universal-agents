@@ -4547,35 +4547,55 @@ the desktop app never offers an older version.
   `merge_turn_attachments` takes, because remote workers may share a
   PostgreSQL store), then the gateway record, so a run that stops part way is
   finished by the next one (a destination already holding the file counts as
-  `already_moved`). A file it cannot move (missing, refused, or named only by
-  a conversation entry, which gives no chat session for its folder) is
-  removed from its turns, which are marked as not recording all of their
-  request's files (`attachments_recorded` 0, the marker 0.9.12 shipped), so
-  the model asks the person to send it again; its gateway record is deleted
-  and the file is left where it is. Those records are dropped only after
-  every file that can move has moved, so a run that stops leaves them. One line,
-  `event=adapter_host_files_upgraded` with the counts, reports the result, at
-  warning level when a file could not be moved, with one warning per file.
-  Whether the files are here is decided from what the step finds, not from
-  the folder alone: if gateway records wait for files and none of them is in
-  the transfer folder or already at its destination (the folder is not
-  there, an unmounted disk left an empty mount point, or the 0.10 adapter
-  host created the folder for a new upload), nothing changes and no marker is
-  written: an error (`event=adapter_host_files_folder_missing`) says to mount
-  it and restart, or, if the files are gone, to run the command with
-  `--files-gone`; startup goes on and the next start tries again. A folder
-  or file the step cannot use (permission denied, an I/O error while reading
-  or writing, a read-only or full `state/uploads`, a copy that reads back
-  differently) stops startup with `event=adapter_host_files_folder_unusable`
-  and a message naming the folder and, when one file was being worked on,
-  that file and its attachment id, so the operator can fix or move away that
-  one file; any other unexpected error (a database error) stops it too, and
-  a restart after the fix finishes the work. Only a file missing from a
-  folder that opens counts as missing; an error that comes from one record's
-  names and would recur at every start (`ENAMETOOLONG`, `EINVAL`) refuses
-  that file, so one bad record cannot stop startup for good, and such a name
-  does not count as a file found in the folder. A source that is not a
-  regular file (a pipe) is opened without waiting and refused. Held
+  `already_moved`). Whether the files are here is decided from what the step
+  finds, not from the folder alone: if records wait for files and none of
+  them is in the transfer folder or already at its destination (the folder
+  is not there, an unmounted disk left an empty mount point, or the 0.10
+  adapter host created the folder for a new upload), nothing changes and no
+  marker is written: an error (`event=adapter_host_files_folder_missing`)
+  says to mount it and restart, or, if the files are gone, to run the command
+  with `--files-gone`; startup goes on and the next start tries again. A
+  stored name that cannot be looked up (a NUL byte, too long a name) is no
+  sign either way. One error rule holds for every file and path operation of
+  the step (opening, reading, writing, syncing, renaming, removing and
+  looking up a file or folder, and building its path; each catches `OSError`
+  and `ValueError`), because finding rare errors one at a time kept turning
+  up another that either dropped records wrongly or blocked every start:
+  (1) an error that concerns one record or one file (a stored name the file
+  system or `safe_open` refuses, a file it cannot read, a pipe, a link,
+  several links, another sha256, a destination already taken, a copy, sync,
+  rename or removal of that file that fails) refuses only that record, keeps
+  its records and the file as they are, is logged
+  (`event=adapter_host_file_not_moved` with the folder, the file, the
+  attachment id, `records=kept` and the reason) and never stops startup; the
+  file tools refuse such a record as outside `state/uploads`, and after the
+  operator fixes the file, deleting the marker and restarting tries the kept
+  records again (moved files are no longer found there, so nothing moves
+  twice); (2) an error that concerns a folder (not there, no permission to
+  read or search it, a read-only or full `state/uploads` or a transfer folder
+  the move cannot remove names from, a folder sync that fails) changes
+  nothing further, keeps every record not yet finished and writes no marker:
+  a folder that holds none of the files waits as above, any other stops
+  startup with `event=adapter_host_files_folder_unusable` and a message
+  naming the folder and, when one file was being worked on, that file and its
+  attachment id, and a restart after the fix finishes the work (so does any
+  other unexpected error, such as a database error); a sync the file system
+  does not offer (`EINVAL`, `EOPNOTSUPP`, as some FUSE, 9p and shared-folder
+  mounts answer) is logged once per folder
+  (`event=adapter_host_files_sync_unsupported`) and is no failure; (3) a
+  record is dropped only when its file moved and both records were
+  rewritten, when the file is proven absent from a transfer folder that
+  opened, or with `--files-gone`. A dropped file's entries are removed from
+  its turns, which are marked as not recording all of their request's files
+  (`attachments_recorded` 0, the marker 0.9.12 shipped), so the model asks
+  the person to send it again, and its gateway record is deleted. Records are
+  dropped only after every file that can move has moved, so a run that stops
+  drops none, and once a file has moved a later error is a folder error, never
+  a refusal, so the next run counts it `already_moved`. A conversation entry
+  with no gateway record (no chat session for its folder) or naming another
+  path or sha256 is never moved; it is dropped only when its file is proven
+  absent. One line, `event=adapter_host_files_upgraded` with the counts,
+  reports the result, at warning level when a file was not moved. Held
   task records and messages still queued are not rewritten: the message-bound
   context id hashes each file record's path (`access_control.ownership`), and
   task records change only through custody. The module goes with the other
