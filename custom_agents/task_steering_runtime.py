@@ -1017,8 +1017,13 @@ async def handle_task_steering_message(
         if steering.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE and (steering.guidance_text or "").strip():
             # Guidance this agent saved earlier (in memory, or in the task's history after a
             # restart): the gateway sends it again until it is accepted, so pass it on again; a
-            # copy that failed the first time reaches its worker now.
-            await _pass_on_guidance_and_answer(agent, task_id, steering, msg_header, msg_meta, repeated=True)
+            # copy that failed the first time reaches its worker now. The resend carries every
+            # file the person sent, so the copy passed on carries only the files an earlier
+            # delivery kept (by its steering_id, which resends keep), as on the first path:
+            # the workers' copies then count the files the lead really has.
+            kept = list(kept_message_files(task_info.task, steering.steering_id))
+            as_kept = steering.model_copy(update={"attachments": kept})
+            await _pass_on_guidance_and_answer(agent, task_id, as_kept, msg_header, msg_meta, repeated=True)
             return
         await _send_steering_status_response(
             agent,

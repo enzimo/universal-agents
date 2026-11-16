@@ -53,6 +53,8 @@ from custom_agents.sent_files_runtime import keep_escalation_result_files, resul
 from custom_agents.strands_agent import TurnActionRecoveryScheduled
 from custom_agents.structured_llm_messages import (
     COMPATIBLE_MODEL_AGENT_TURN_DECISION_FORCE_PROMPT,
+    COMPATIBLE_WORKER_TURN_DECISION_FORCE_PROMPT,
+    FIREWORKS_MODEL_AGENT_TURN_DECISION_FORCE_PROMPT,
     MODEL_AGENT_TURN_DECISION_FORCE_PROMPT,
     MODEL_WORKER_TURN_DECISION_FORCE_PROMPT,
     CompatibleModelAgentTurnDecision,
@@ -202,13 +204,23 @@ def test_every_provider_schema_describes_the_three_cases(decision_type: type) ->
         assert field["anyOf"][0] == {"items": {"type": "string"}, "type": "array"}
 
 
-def test_the_recovery_prompts_name_the_three_cases() -> None:
-    for prompt in (
+@pytest.mark.parametrize(
+    "prompt",
+    [
         MODEL_AGENT_TURN_DECISION_FORCE_PROMPT,
         MODEL_WORKER_TURN_DECISION_FORCE_PROMPT,
         COMPATIBLE_MODEL_AGENT_TURN_DECISION_FORCE_PROMPT,
-    ):
-        assert "Leave `actions[].attachment_ids` out to send this task's own files" in prompt
+        COMPATIBLE_WORKER_TURN_DECISION_FORCE_PROMPT,
+        FIREWORKS_MODEL_AGENT_TURN_DECISION_FORCE_PROMPT,
+    ],
+    ids=["canonical", "canonical_worker", "compatible", "compatible_worker", "fireworks"],
+)
+def test_the_recovery_prompts_name_the_three_cases(prompt: str) -> None:
+    # Compared with line breaks folded, as the model reads the prose.
+    text = " ".join(prompt.split())
+    assert "Leave `actions[].attachment_ids` out to send this task's own files" in text
+    # Carried by the merge (review EVI-3): without it a model may expect earlier files to go along.
+    assert "A file sent earlier in the conversation goes only when its id is listed." in text
 
 
 def test_a_workers_escalation_shortcut_takes_no_attachment_ids() -> None:

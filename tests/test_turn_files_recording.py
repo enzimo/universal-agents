@@ -413,6 +413,51 @@ async def test_the_lead_sends_guidance_on_to_its_workers_without_files(lead, lay
     assert page_two.attachment_id in _own(lead.task_manager, lead._conversation_store)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restarted", [False, True], ids=["in_memory", "after_restart"])
+async def test_guidance_sent_again_counts_only_the_files_the_lead_kept(
+    lead, layout: InstanceLayout, tmp_path: Path, restarted: bool
+) -> None:
+    """F12 (CONC-3): the gateway's resend carries every file the person sent, refused ones too.
+
+    The copy the lead passes on again names only the files it kept, as the first copy does. With
+    ``restarted`` the lead forgot the keys it saw, so the task's history finds the repeat.
+    """
+
+    lead.task_manager.add_subtask(
+        TASK,
+        Task(task_id="task_child", parent_task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="Parse."),
+        MessageHeader(from_agent_id="lead", to_routing_path=f"{TEAM}_RecipeParser"),
+        MessageMeta(msg_correlation_id="corr_child", to_named_agent_type="RecipeParser"),
+    )
+    worker = TaskManager(db_path=str(tmp_path / "tasks.db"))
+    worker.set_owner_identity("worker_1", "worker_1", TEAM, "RecipeParser")
+    assert worker.add_task(
+        Task(task_id="task_child", parent_task_id=TASK, task_type=MessageMetaType.REQUEST),
+        MessageHeader(from_agent_id="lead"),
+        MessageMeta(),
+        owner_person_id=None,
+    )
+    page_two = _upload(layout, "page two.png")
+    guidance = _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [page_two, _outside(layout)], "guide_twice", "Use it.")
+
+    await _send(lead, guidance)
+    if restarted:
+        lead._processed_task_steering_ids.clear()
+    await _send(lead, guidance)
+
+    copies = [
+        call.kwargs["message"].msg_content
+        for call in lead.team_comms.send_message.await_args_list
+        if isinstance(call.kwargs["message"].msg_content, TaskSteering)
+        and call.kwargs["message"].msg_content.target_task_id == "task_child"
+    ]
+    assert [copy.guidance_text for copy in copies] == [
+        "Use it.\n\n1 file(s) came with this guidance; the team lead has them."
+    ] * 2
+    assert [copy.attachments for copy in copies] == [[], []]
+
+
 # --- Answers -----------------------------------------------------------------------------------
 
 

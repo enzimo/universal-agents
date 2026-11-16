@@ -247,6 +247,23 @@ def test_a_writer_whose_store_does_not_open_fails_the_run_at_once() -> None:
     assert sum(isinstance(error, threading.BrokenBarrierError) for error in errors) == 2
 
 
+def test_a_writer_that_never_finishes_fails_the_run_instead_of_hanging_it() -> None:
+    """The join deadline: a writer stuck after the start line fails the test (#137 final F6, review EVI-4)."""
+
+    release = threading.Event()
+
+    def work(writer: int, start: threading.Barrier) -> None:
+        start.wait()
+        if writer == 0:
+            release.wait()  # a merge that never returns
+
+    try:
+        with pytest.raises(AssertionError, match=r"still running after 0\.5 s: \['merge-writer-0'\]"):
+            _run_writers(2, work, join_timeout=0.5)
+    finally:
+        release.set()
+
+
 def test_concurrent_merges_into_one_turn_lose_no_file(backend: _Backend) -> None:
     _thread(backend.open())
     _turn(backend.open(), "task_1", (_file("att_initial"),))
