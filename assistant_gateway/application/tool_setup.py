@@ -823,9 +823,12 @@ class GatewayToolSetups:
     async def recover_unwatched(self) -> int:
         """After a gateway start: report every page still marked waiting as unwatched.
 
-        Each record is reported on its own: a record that cannot be reported
-        (a kind this version does not know, or a failed send) is logged and
-        stays waiting, and the records after it are still reported.
+        Each record is reported on its own, so a record that cannot be
+        reported never stops the records after it. Its failure is logged with
+        the record's stored status: ``waiting`` when it failed before it was
+        claimed (a kind this version does not know), so the next start tries
+        again; a finished status when it failed after the claim (the result
+        could not be sent), so its task was not told.
         """
 
         recovered = 0
@@ -837,12 +840,15 @@ class GatewayToolSetups:
                     recovered += 1
             except Exception:  # noqa: BLE001 - one bad record must not keep every later page waiting
                 self._logger.exception(
-                    "Could not report a setup page nobody watched after the gateway started; it stays waiting. "
-                    "event=gateway_tool_setup_recovery_failed setup_request_id=%s task_id=%s tool_id=%s kind=%s",
+                    "Could not report a setup page nobody watched after the gateway started "
+                    "(status waiting: the next start tries again; a finished status: its task was not told). "
+                    "event=gateway_tool_setup_recovery_failed setup_request_id=%s task_id=%s tool_id=%s kind=%s "
+                    "status=%s",
                     record.setup_request_id,
                     record.parent_task_id,
                     record.tool_id,
                     record.kind,
+                    self._stored_status(record.setup_request_id),
                 )
         if recovered:
             self._logger.warning(
@@ -851,6 +857,15 @@ class GatewayToolSetups:
                 recovered,
             )
         return recovered
+
+    def _stored_status(self, setup_request_id: str) -> str:
+        """A record's stored status for a failure log line; never raises, so the first failure stays visible."""
+
+        try:
+            record = self._setups.get_tool_setup(setup_request_id)
+        except Exception:  # noqa: BLE001 - the failure being logged matters more than this read
+            return "unreadable"
+        return record.status if record is not None else "missing"
 
     async def _report_unwatched(self, record: ToolSetupRecord) -> bool:
         """Tell the record's task that nobody saw how its page ended; False when another path finished it."""

@@ -737,7 +737,32 @@ async def test_a_record_that_cannot_be_reported_is_logged_and_the_later_ones_sti
         record for record in caplog.records if "event=gateway_tool_setup_recovery_failed" in record.getMessage()
     ]
     assert "setup_request_id=tool_setup_req_bad" in failure.getMessage() and failure.exc_info is not None
+    assert "status=waiting" in failure.getMessage(), "it failed before it was claimed, so the next start tries again"
     assert _setups(gateway).get_tool_setup("tool_setup_req_bad").status == "waiting"
+
+
+@pytest.mark.asyncio
+async def test_a_record_whose_result_cannot_be_sent_is_logged_as_finished_not_waiting(chat_setup_gateway, caplog) -> None:
+    """The record is claimed before its result is sent; the log line says so instead of 'still waiting'."""
+
+    gateway, _broker, _transport, _events = chat_setup_gateway
+    _setups(gateway).record_tool_setup(
+        ToolSetupRecord(
+            setup_request_id="tool_setup_req_no_chat", parent_task_id=TASK, person_id=gateway.config.user.canonical_user_id,
+            tool_id="cli:github", kind="sign_in", owner_kind="person", session_key="session_gone",
+            correlation_id=CHAT_REQUEST, conversation_id="conversation_link", status="waiting",
+            created_at="2026-09-28T08:00:00+00:00",
+        )
+    )
+
+    with caplog.at_level("WARNING"):
+        assert await gateway._credential_workflow.tool_setups.recover_unwatched() == 0
+
+    [failure] = [
+        record for record in caplog.records if "event=gateway_tool_setup_recovery_failed" in record.getMessage()
+    ]
+    assert "setup_request_id=tool_setup_req_no_chat" in failure.getMessage()
+    assert "status=unavailable" in failure.getMessage(), "claimed before the send failed: its task was not told"
 
 
 @pytest.mark.asyncio
