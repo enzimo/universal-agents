@@ -178,7 +178,8 @@ Choose exactly the action that matches the turn:
 - For delegated work, use `action_type="delegate_task"` with
   `actions[].task.problem_statement` and the exact specialist target on the action.
   Leave `actions[].attachment_ids` out to send this task's own files, set it to
-  `[]` to send none, or list the attachment ids of the files to send.
+  `[]` to send none, or list the attachment ids of the files to send. A file
+  sent earlier in the conversation goes only when its id is listed.
 - If you are a specialist or worker and need user input or another specialist,
   use `action_type="manager_escalation"` with a task for TeamArchitect and an
   `escalation` payload. Then wait for TeamArchitect's reply instead of
