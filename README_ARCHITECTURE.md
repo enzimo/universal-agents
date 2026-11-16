@@ -4768,7 +4768,13 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   `InstanceLayout.exports_dir` and reports the result to the page with the
   same token, so no other process can end the export; the gateway watches the
   page (`link_results.watch_team_export`) and posts the file, its parts and
-  the next steps in the chat. The supervisor gains no listening socket:
+  the next steps in the chat. The result also carries the export's notices
+  (the `NATS:` lines an external-NATS owner needs before starting the new
+  instance), which the page and the chat show before the next steps. Each is
+  logged (`event=team_export_notice`); the result holds at most
+  `EXPORT_NOTICES_MAX`, so a published archive's result always validates, and
+  any beyond it stay in the log with a warning (`event=team_export_notices_cut`)
+  rather than failing a finished export. The supervisor gains no listening socket:
   request files under `runtime/` stay its only way in, and a request proves
   nothing without the operator token. A request file is deleted before it is
   parsed, and every export error in the supervisor is logged without stopping
@@ -4926,7 +4932,8 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   refuses the login, with the steps, while the new instance's settings name a
   local server. Because the launcher lays the container's environment over
   `team.env`, the export also names any NATS address or login the instance
-  would use with the command's environment that it did not, comparing the
+  would use with the command's environment that it did not (under `/upgrade`
+  that environment is the running instance's own), comparing the
   login by the variable each side reads (the instance a `_FILE` form first,
   the export the plain value first); the guide's advice then puts the login
   the instance runs with into `team.env` beside the address. An import that

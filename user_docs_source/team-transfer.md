@@ -119,7 +119,7 @@ still finish, so check `exports/`.
    ([Export from chat with /upgrade](#export-from-chat-with-upgrade)) or run
    `team export` on the old instance as shown in
    [Export and review](#export-and-review), then stop the old instance.
-2. **Start the new version with an empty data folder.** Onboarding opens, as for
+2. **Start the new instance with a blank data folder.** Onboarding opens, as for
    a new team. Import works only on a fresh data folder and, for PostgreSQL, an
    empty database named by `POSTGRES_DSN` in the container's environment.
 3. **Copy the export into the new data folder's `import/` folder**, for example
@@ -312,7 +312,10 @@ chat, and the launcher's log has them):
   local or external otherwise, or, with an external server, when they set
   another address, user or password. An address there that the export cannot
   read, such as a mistyped `NATS_URL`, is named the same way; the export did
-  not use it.
+  not use it. `/upgrade` runs the export in the instance's own environment,
+  so there this line means the running instance does use those variables,
+  for example a `NATS_URL` its compose file sets that differs from
+  `team.env`.
 
 If the instance really runs with the variables that line names (for example
 from its container's environment in a compose file), put them in its

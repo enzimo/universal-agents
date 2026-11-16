@@ -653,15 +653,25 @@ def _cannot_describe(_manifest):
     raise RuntimeError("cannot describe")
 
 
+COMPOSE_NATS = "nats://compose.example.invalid:4222"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("report_incomplete", [False, True], ids=["described", "report_incomplete"])
+@pytest.mark.parametrize("compose_address", [False, True], ids=["team_env_address", "compose_address"])
 async def test_upgrade_tells_the_owner_what_an_external_nats_server_needs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, report_incomplete: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    report_incomplete: bool,
+    compose_address: bool,
 ) -> None:
     """F3 (GEN-1): the NATS lines ``team export`` prints reach /upgrade's result, page and chat message, and the log.
 
     Without them an owner moving a team on an external NATS server starts the new instance with its own
     server, cutting off remote workers. A result whose parts could not be read afterwards keeps them too.
+    With ``compose_address`` the instance's container sets another NATS_URL than team.env (the supervisor
+    starts the export with that environment), so the first line comes too, worded for /upgrade (C14).
     """
 
     from assistant_gateway.application.broker_session_watch import WATCH_FINISHED, BrokerSessionOutcome
@@ -670,6 +680,8 @@ async def test_upgrade_tells_the_owner_what_an_external_nats_server_needs(
     from team_transfer.export_requests import NOTICES_HEADING
 
     config_path = _export_with_external_nats(tmp_path, monkeypatch)
+    if compose_address:
+        monkeypatch.setenv("NATS_URL", COMPOSE_NATS)
     layout = InstanceLayout.at(config_path.parent)
     if report_incomplete:
         monkeypatch.setattr(requested_export, "export_sections", _cannot_describe)
@@ -689,16 +701,30 @@ async def test_upgrade_tells_the_owner_what_an_external_nats_server_needs(
         await server.close()
 
     assert result.ok and (result.note == requested_export.REPORT_INCOMPLETE_NOTE) is report_incomplete
-    (notice,) = result.notices
+    *unused, notice = result.notices
     assert notice.startswith("NATS: the server is external. Login carried: NATS_USER, NATS_PASSWORD.")
     assert "do not travel: TEAM_LOCAL_NATS_ENABLED=false, NATS_URL." in notice
-    assert EXTERNAL_NATS not in notice and NATS_PASSWORD_VALUE not in notice, "names only, never values"
-    assert status["status"] == "success" and status["result"]["notices"] == [notice]
-    assert f"<h2>{NOTICES_HEADING}</h2><ul><li>{team_export_page._e(notice)}</li></ul><h2>Next steps</h2>" in shown
+    if compose_address:
+        # The line reads right where the owner sees it: the export ran in the instance's own environment.
+        (first,) = unused
+        assert first.startswith(
+            "NATS: with the environment this export ran in (the instance's own, under /upgrade) laid over team.env, "
+            "the instance would use NATS_URL, which this export did not use."
+        )
+        assert "this command" not in first
+    else:
+        assert unused == []
+    notices = list(result.notices)
+    for each in notices:
+        assert EXTERNAL_NATS not in each and COMPOSE_NATS not in each and NATS_PASSWORD_VALUE not in each, "names only"
+    assert status["status"] == "success" and status["result"]["notices"] == notices
+    listed = "".join(f"<li>{team_export_page._e(each)}</li>" for each in notices)
+    assert f"<h2>{NOTICES_HEADING}</h2><ul>{listed}</ul><h2>Next steps</h2>" in shown
     chat = team_export_result_text(BrokerSessionOutcome(WATCH_FINISHED, status))
-    assert f"\n\n{NOTICES_HEADING}:\n- {notice}\n\nNext steps:\n1. " in chat
-    (logged,) = [record.getMessage() for record in caplog.records if "event=team_export_notice " in record.getMessage()]
-    assert logged.endswith(f"export_id={request.export_id} notice={notice}")
+    bullets = "".join(f"\n- {each}" for each in notices)
+    assert f"\n\n{NOTICES_HEADING}:{bullets}\n\nNext steps:\n1. " in chat
+    logged = [record.getMessage() for record in caplog.records if "event=team_export_notice " in record.getMessage()]
+    assert logged == [f"Team export notice. event=team_export_notice export_id={request.export_id} notice={each}" for each in notices]
 
 
 def test_notices_past_the_results_bound_stay_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
