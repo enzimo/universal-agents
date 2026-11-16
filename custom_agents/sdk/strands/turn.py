@@ -1008,8 +1008,8 @@ class LLMTurnExecutor:
         Whether to include them is decided for each attempt from the current
         settings, never from the model the turn started with: an inline
         failover (``_recover_after_provider_failure``) can switch to a model
-        that takes no images, or to one that does. Reading them loads the
-        instance settings for the upload folders and reads up to
+        that takes no images, or to one that does. Reading them resolves each
+        record's path on the file system and reads up to
         ``DIRECT_MODEL_IMAGE_MAX_BYTES`` per image, so it runs in a thread,
         at most once per turn (``_TurnState.direct_images``), the first time
         an attempt's model takes them.
@@ -1038,7 +1038,7 @@ class LLMTurnExecutor:
         images = self._direct_images(msg_content)
         if not images:
             return [], []
-        # The turn's settings carry the instance root and config path UploadFolders reads.
+        # The turn's settings carry the instance root UploadFolders reads.
         folders = UploadFolders.for_agent(self.settings)
         task_id = str(getattr(msg_content, "task_id", "") or "")
         blocks: list[ContentBlock] = []

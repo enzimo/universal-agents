@@ -3821,7 +3821,7 @@ results unread, including a successful response discarded by a retry hook.
 
 A person can refer to a file sent in an earlier turn of the same chat, and the
 team opens it by its `attachment_id`. The gateway stores the bytes in
-`state/uploads` (or the adapter host's upload folder) and puts a
+`state/uploads`, also for chat apps an adapter host runs, and puts a
 `UserTaskAttachment` record on the message: a request's files on
 `Task.attachments`, files sent while it runs on its guidance and interrupt
 answers (`TaskSteering.attachments`), and files sent with an answer to a

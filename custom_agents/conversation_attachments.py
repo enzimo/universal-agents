@@ -114,8 +114,7 @@ stored, so they leave this module only as descriptive summaries
 storage references or paths.
 
 Where bytes are read from (``UploadFolders``, ``locate_upload``): only from
-inside this host's upload folders, ``state/uploads`` and the adapter host's
-upload folder. A record's path is not trusted by itself (a delegated task's
+inside this host's upload folder, ``state/uploads``. A record's path is not trusted by itself (a delegated task's
 files are not vouched for by the gateway): it is resolved, following any
 links in it, and a record whose resolved path lies anywhere else is refused
 and logged. The bytes are then read from that folder one component of the
@@ -861,64 +860,40 @@ def _conversation_in_scope(task_info: Any, conversation_store: Any) -> Optional[
 class UploadFolders:
     """This host's upload folders: the only places a file is read from by id.
 
-    ``state/uploads`` (``InstanceLayout.uploads_dir``) and the adapter host's
-    upload folder (``AdapterHostSettings.resolved_upload_dir``), resolved.
+    One folder, ``state/uploads`` (``InstanceLayout.uploads_dir``), resolved.
+    The gateway stores every file a person sends there, also the files of chat
+    apps an adapter host runs (``assistant_gateway.inbound_attachments``). Up
+    to 0.9.13 such files stayed in the adapter host's transfer folder; nothing
+    here reads that folder. Records that still point into it are refused
+    (``UPLOAD_OUTSIDE_FOLDERS``) and the person is asked to send the file
+    again (``custom_agents.stuck_tasks``).
     """
 
     paths: tuple[Path, ...]
 
     @classmethod
-    def for_instance(cls, instance_root: str | Path, adapter_host: Any = None) -> "UploadFolders":
-        """The folders of the instance at ``instance_root``; ``adapter_host`` is its adapter-host settings."""
+    def for_instance(cls, instance_root: str | Path) -> "UploadFolders":
+        """The upload folder of the instance at ``instance_root``."""
 
-        layout = InstanceLayout.at(instance_root)
-        folders = [layout.uploads_dir.resolve()]
-        if adapter_host is not None:
-            folders.append(adapter_host.resolved_upload_dir(layout.root))
-        return cls(tuple(dict.fromkeys(folders)))
+        return cls((InstanceLayout.at(instance_root).uploads_dir.resolve(),))
 
     @classmethod
     def for_agent(cls, agent: Any) -> "UploadFolders":
-        """The folders of the instance ``agent`` runs in, read from its saved settings.
+        """The upload folder of the instance ``agent`` runs in.
 
         ``agent`` is a running agent or a turn's ``TurnRuntimeSettings``: both
         carry the ``instance_root``, ``instance_config_path`` and
-        ``workspace_dir`` this reads.
+        ``workspace_dir`` that ``infer_instance_root`` reads.
         """
 
         from custom_agents.runtime_paths import infer_instance_root
 
-        return cls.for_instance(infer_instance_root(agent), _adapter_host_settings(agent))
+        return cls.for_instance(infer_instance_root(agent))
 
     def containing(self, path: Path) -> Optional[Path]:
         """The folder that holds the resolved ``path``, or None."""
 
         return next((folder for folder in self.paths if folder in path.parents), None)
-
-
-def _adapter_host_settings(agent: Any) -> Any:
-    """The agent's adapter-host settings, or None without an instance config.
-
-    An unreadable config is logged; then only ``state/uploads`` is trusted, so
-    adapter-host files are refused rather than read from an unchecked place.
-    """
-
-    config_path = str(getattr(agent, "instance_config_path", "") or "").strip()
-    if not config_path:
-        return None
-    from assistant_gateway.config import GatewayInstanceConfig
-
-    try:
-        return GatewayInstanceConfig.load_for_process(config_path).interactive_apps.adapter_host
-    except Exception:
-        logger.warning(
-            "The instance settings could not be read, so only state/uploads is used to open files by id. "
-            "event=upload_folders_settings_unreadable agent_id=%s instance_config_path=%s",
-            getattr(agent, "id", None),
-            config_path,
-            exc_info=True,
-        )
-        return None
 
 
 def recorded_upload_folder(attachment: UserTaskAttachment, folders: UploadFolders) -> Optional[Path]:

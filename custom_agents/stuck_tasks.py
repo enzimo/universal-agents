@@ -79,7 +79,6 @@ from custom_agents.instance_delivery_context import configured_owner_route
 from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc, retain_decisions
 from custom_agents.conversation_attachments import TaskAttachments, UploadFolders, recorded_upload_folder
 from custom_agents.liveness_observation import heartbeat_checks_deferred
-from custom_agents.runtime_paths import agent_layout
 from custom_agents.task_steering_runtime import GUIDANCE_ACCEPTED_EVENT, GUIDANCE_STEERING_KEY
 from custom_agents.stuck_work import (
     ChatRoute,
@@ -469,11 +468,11 @@ class StuckTasks:
         while it ran, with guidance or with an answer, or that an escalation
         result brought: ``TaskAttachments.own`` reads them from the task's
         record as the file tools do, and ``_guidance_files`` adds the files of
-        guidance accepted before 0.9.12. Only ``state/uploads`` counts, also while
-        an adapter host's own upload folder is configured: files the upgrade
-        step has not moved there are the ones to send again.
+        guidance accepted before 0.9.12. A file whose record points outside
+        ``state/uploads`` (``UploadFolders``, the folder the file tools open)
+        is one to send again.
         """
-        uploads = UploadFolders((agent_layout(self.agent).uploads_dir.resolve(),))
+        uploads = UploadFolders.for_agent(self.agent)
         files_by_request: dict[str, dict[str, str]] = {}  # request task id -> attachment id -> file name
         for task in held.values():
             try:

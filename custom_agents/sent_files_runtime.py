@@ -194,8 +194,7 @@ async def _kept_upload_files(
 ) -> list[UserTaskAttachment]:
     """``attachments`` without the records outside this host's upload folders (``keep_upload_files``, logged).
 
-    Runs in a thread: finding the folders loads the instance settings, and
-    each record's path is resolved on the file system.
+    Runs in a thread: each record's path is resolved on the file system.
     """
 
     def check() -> list[UserTaskAttachment]:

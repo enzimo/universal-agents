@@ -24,7 +24,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from access_control.caller_tokens import CALLER_GATEWAY, derive_caller_token
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from runtime_settings.instance_layout import InstanceLayout
 from secure_tool_broker.service import SecureToolBrokerService
 from storage.access_repository import AccessRepository
@@ -45,6 +45,8 @@ from team_transfer.export_requests import (
     write_export_request,
 )
 from team_transfer.people import PeopleSection
+from team_transfer.sections import RecordOutcome
+from team_transfer.service import import_team
 from team_transfer.settings import SettingsSection
 from size_presentation import size_words
 from tests.broker_access_support import open_gate
@@ -70,8 +72,8 @@ def _instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     AccessRepository(config.manager_storage_settings).replace_people(
         TEAM,
         [
-            TeamPersonV1(team_id=TEAM, person_id="usr_owner", standing=PersonStanding.ACTIVE, roles=("owner", "admin"), changed_at_utc=now),
-            TeamPersonV1(team_id=TEAM, person_id="usr_member", standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=now),
+            TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id="usr_owner", standing=PersonStanding.ACTIVE, roles=("owner", "admin"), changed_at_utc=now),
+            TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id="usr_member", standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=now),
         ],
         at=now,
     )
@@ -161,6 +163,20 @@ async def test_an_owners_export_collects_the_passphrase_writes_the_archive_and_e
         if path.is_file() and path.suffix != ".uatransfer":
             data = path.read_bytes()
             assert PASSPHRASE.encode() not in data and GITHUB_TOKEN.encode() not in data, path
+
+    # Round trip: the archive /upgrade wrote imports into a fresh instance of this version.
+    # (Its stored sign-in goes through the running broker; tests/test_team_transfer_broker_credentials.py.)
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    target = tmp_path / "fresh"
+    with TransferReader.open(archive, PASSPHRASE) as reader:
+        plan = import_team(reader, target, dry_run=False, sections=(SettingsSection(), PeopleSection()))
+    assert plan.by_outcome(RecordOutcome.REFUSED) == []
+    imported = create_gateway_state_repository(
+        GatewayInstanceConfig.load(target / "instance_config.yaml").state_storage_settings
+    )
+    assert [(m.team_id, m.role, m.status) for m in imported.list_team_memberships("usr_owner")] == [(TEAM, "owner", "active")]
+    assert imported.get_gateway_user("usr_member").display_name == "Ben Ode"
 
 
 @pytest.mark.asyncio

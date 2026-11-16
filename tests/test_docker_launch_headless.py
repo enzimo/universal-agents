@@ -1509,8 +1509,24 @@ class _SupervisedProcess:
         return self.code
 
 
-def _supervised_with_message_services(tmp_path: Path, monkeypatch, *, restart_team_services):
-    """run_supervised with real MessageServices and one restart of everything; returns the events and the run."""
+class _RecordedExports:
+    """Stands in for TeamExportRunner (/upgrade's export requests): records each poll and the stop."""
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def poll(self) -> None:
+        self.events.append("poll:exports")
+
+    def stop(self) -> None:
+        self.events.append("stop:exports")
+
+
+def _supervised_with_message_services(tmp_path: Path, monkeypatch, *, restart_team_services, with_exports=False):
+    """run_supervised with real MessageServices and one restart of everything; returns the events and the run.
+
+    ``with_exports`` also passes main's /upgrade export runner (a recorder), as ``main()`` does.
+    """
 
     from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts
     from runtime_settings.instance_layout import InstanceLayout
@@ -1565,6 +1581,7 @@ def _supervised_with_message_services(tmp_path: Path, monkeypatch, *, restart_te
         # Recomputes each restarted process's copies of saved settings (docker.settings_environment).
         settings_environment=SimpleNamespace(refresh=lambda env, process: {**env, "REFRESHED": process}),
         message_services=services,
+        team_exports=_RecordedExports(events) if with_exports else None,
     )
     return events, code
 
@@ -1619,6 +1636,46 @@ def test_a_stop_while_the_restarted_team_services_start_ends_the_run_cleanly(tmp
     assert code == 0
     assert events.count("start:manager") == 1
     assert events[-3:] == ["stop:team-services", "stop:authority", "stop:nats"]
+
+
+def test_the_upgrade_export_runner_is_polled_with_the_message_services_and_stopped_before_everything(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Main's /upgrade export runner beside release's message services (the merged supervise loop).
+
+    It is polled while the team runs, after a restart of everything has finished, and is stopped first,
+    before the processes an export talks to and before the team services and the authority.
+    """
+
+    events, code = _supervised_with_message_services(
+        tmp_path, monkeypatch, with_exports=True,
+        restart_team_services=lambda events, _handlers: _SupervisedProcess("team-services", events),
+    )
+
+    assert code == 0
+    assert events.count("poll:exports") == 1
+    assert events.index("poll:exports") > events.index("start:team-services:team services"), "after the restart"
+    final_stop = events.index("stop:exports")
+    assert events[final_stop:] == [
+        "stop:exports", "stop:gateway", "stop:activity", "stop:agent", "stop:team-services", "stop:authority",
+        "stop:nats",
+    ]
+
+
+def test_a_stop_during_a_restart_takes_no_export_request_and_still_stops_the_runner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def stopped_meanwhile(events, handlers):
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
+        return _SupervisedProcess("team-services", events)
+
+    events, code = _supervised_with_message_services(
+        tmp_path, monkeypatch, with_exports=True, restart_team_services=stopped_meanwhile
+    )
+
+    assert code == 0
+    assert "poll:exports" not in events, "the loop ends before it takes a new export request"
+    assert events[-4:] == ["stop:exports", "stop:team-services", "stop:authority", "stop:nats"]
 
 
 def test_finish_import_step_runs_only_when_onboarding_left_credentials(tmp_path: Path) -> None:

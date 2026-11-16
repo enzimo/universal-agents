@@ -41,6 +41,7 @@ from custom_agents.conversation_attachments import (
     inventory_text,
     keep_upload_files,
     locate_upload,
+    recorded_upload_folder,
     task_files_details,
 )
 from custom_agents.conversation_store import ConversationStore
@@ -675,7 +676,9 @@ def test_a_record_pointing_outside_the_upload_folders_is_refused(layout, caplog,
     ) in caplog.text
 
 
-def test_the_adapter_hosts_upload_folder_is_trusted_from_the_saved_settings(tmp_path: Path, layout, caplog) -> None:
+def test_only_state_uploads_is_trusted_even_with_an_adapter_host_transfer_folder(layout, caplog) -> None:
+    """D2: one upload folder. A file left in the adapter host's transfer folder is refused, not read."""
+
     config = GatewayInstanceConfig.create(
         instance_name="files", instance_root=str(layout.root), team_id="team", timezone="UTC"
     )
@@ -687,17 +690,13 @@ def test_the_adapter_hosts_upload_folder_is_trusted_from_the_saved_settings(tmp_
 
     folders = UploadFolders.for_agent(agent)
 
-    assert folders.paths == (layout.uploads_dir.resolve(), adapter_folder.resolve())
+    assert folders.paths == (layout.uploads_dir.resolve(),)
     photo = _upload(adapter_folder, "att_adapter")
-    assert isinstance(locate_upload(photo, folders, task_id=CURRENT, conversation_id=None), LocatedUpload)
-    Path(photo.local_path()).unlink()
-    assert locate_upload(photo, folders, task_id=CURRENT, conversation_id=None).reason == UPLOAD_FILE_MISSING
-
-    # Unreadable settings: logged, and only state/uploads is trusted.
-    agent.instance_config_path = str(tmp_path / "missing" / "instance_config.yaml")
     with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
-        assert UploadFolders.for_agent(agent).paths == (layout.uploads_dir.resolve(),)
-    assert "event=upload_folders_settings_unreadable agent_id=lead" in caplog.text
+        result = locate_upload(photo, folders, task_id=CURRENT, conversation_id=None)
+    assert isinstance(result, UnavailableUpload) and result.reason == UPLOAD_OUTSIDE_FOLDERS
+    assert recorded_upload_folder(photo, folders) is None
+    assert "event=attachment_outside_upload_folders attachment_id=att_adapter" in caplog.text
 
 
 def test_the_adapter_host_upload_folder_resolves_under_the_instance_root(tmp_path: Path) -> None:

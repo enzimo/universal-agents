@@ -783,12 +783,12 @@ class AdapterHostSettings(BaseModel):
         return normalized
 
     def resolved_upload_dir(self, instance_root: str | Path) -> Path:
-        """Where the gateway stores adapter-host uploads: ``upload_dir``, a relative one under the instance root.
+        """The adapter host's transfer folder: ``upload_dir``, a relative one under the instance root.
 
-        The gateway writes them there (``assistant_gateway.adapter_host.composition``),
-        and agents open an upload by id only from this folder or ``state/uploads``
-        (``custom_agents.conversation_attachments.UploadFolders``), so both use
-        this one method and cannot disagree.
+        An adapter host's upload lands here first
+        (``assistant_gateway.adapter_host.composition``); the gateway then stores
+        it in ``state/uploads``, the only folder agents open files from
+        (``custom_agents.conversation_attachments.UploadFolders``).
         """
 
         path = Path(self.upload_dir).expanduser()

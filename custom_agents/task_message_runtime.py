@@ -1464,7 +1464,8 @@ async def _admit_request_turn(
 
     The files go through the one admission rule
     (``conversation_attachments.admit_request_files``) in a thread, because
-    it verifies the signed context and reads the upload folders' settings.
+    it verifies the signed context and resolves each record's path on the
+    file system.
     The task then holds only the kept files, plus the record of how many
     were dropped, which ``add_task`` saves with it; the turn records exactly
     those files and whether all of the request's files were kept
