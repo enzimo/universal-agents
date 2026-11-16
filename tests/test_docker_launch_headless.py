@@ -1696,6 +1696,39 @@ def test_finish_import_step_runs_only_when_onboarding_left_credentials(tmp_path:
     assert step_env is env
 
 
+def test_first_start_steps_import_credentials_then_move_adapter_host_files_once(tmp_path: Path) -> None:
+    """The credential import (broker's environment) runs before the file move (gateway's), each only when needed."""
+
+    from docker.launch_headless import build_first_start_tasks
+
+    config = _make_config(tmp_path)
+    config_path = tmp_path / "instance" / "instance_config.yaml"
+    broker_env, gateway_env = {"SECURE_TOOL_BROKER_TOKEN": "root"}, {"ROLE": "gateway"}
+
+    def steps() -> list[tuple[str, list[str], object]]:
+        return [
+            (name, command[-4:], env)
+            for name, command, env in build_first_start_tasks(
+                config, config_path, broker_env=broker_env, gateway_env=gateway_env
+            )
+        ]
+
+    move = ("upgrade step for adapter-host files", ["upgrade", "adapter-host-files", "--config", str(config_path)], gateway_env)
+    assert steps() == [move]
+    handover = config.layout.team_import_credentials_path
+    handover.parent.mkdir(parents=True)
+    handover.write_text("{}")
+    assert steps() == [
+        ("first-start credential import", ["team", "finish-import", "--config", str(config_path)], broker_env),
+        move,
+    ]
+    marker = config.layout.adapter_host_files_upgrade_path
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    handover.unlink()
+    assert steps() == []
+
+
 def test_imported_keys_exist_when_real_model_processes_initialize(tmp_path: Path) -> None:
     """Exercise child process scheduling, rather than treating Popen as completion."""
 

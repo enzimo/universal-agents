@@ -195,6 +195,51 @@ def merge_unique(
     return merged, added
 
 
+
+def relocate_turn_attachment(raw: Any, attachment_id: str, local_path: str | None) -> str | None:
+    """One turn's column with ``attachment_id``'s entries moved to ``local_path``, or removed when it is None.
+
+    For the upgrade step that moves files out of the adapter host's transfer
+    folder (``assistant_gateway.adapter_host_files_upgrade``). It edits the
+    stored JSON, not decoded records, so every other entry, an unreadable one
+    included, is kept exactly as stored: only the matching entries' local
+    storage references change. Returns None when nothing changes (no entry
+    has that id, they already point there, or the value is not a list), so
+    the caller writes nothing.
+    """
+
+    items = _stored_list(raw)
+    if items is None or not any(_has_id(item, attachment_id) for item in items):
+        return None
+    if local_path is None:
+        return json.dumps([item for item in items if not _has_id(item, attachment_id)])
+    changed = [_point_at(item, local_path) for item in items if _has_id(item, attachment_id)]
+    return json.dumps(items) if any(changed) else None
+
+
+def _stored_list(raw: Any) -> list[Any] | None:
+    try:
+        items = json.loads(raw) if raw not in (None, "") else []
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return items if isinstance(items, list) else None
+
+
+def _has_id(item: Any, attachment_id: str) -> bool:
+    return isinstance(item, dict) and item.get("attachment_id") == attachment_id
+
+
+def _point_at(item: dict[str, Any], local_path: str) -> bool:
+    """Set the stored record's local storage references to ``local_path``; whether any changed."""
+
+    local_refs = [
+        ref for ref in item.get(_STORAGE_REFS_FIELD) or [] if isinstance(ref, dict) and ref.get("storage_type") == "local"
+    ]
+    changed = [ref for ref in local_refs if ref.get("path") != local_path]
+    for ref in changed:
+        ref["path"] = local_path
+    return bool(changed)
+
 class NewestFilesFirst:
     """Picks a conversation's files from its turns, given newest turn first.
 

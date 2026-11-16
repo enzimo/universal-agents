@@ -1580,6 +1580,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_team_parsers(subparsers)
 
+    upgrade = subparsers.add_parser(
+        "upgrade",
+        help="One-time steps for an instance upgraded in place (the launcher runs them at the first start)",
+    )
+    upgrade_commands = upgrade.add_subparsers(dest="upgrade_command", required=True)
+    adapter_host_files = upgrade_commands.add_parser(
+        "adapter-host-files",
+        help="Move files of chat apps the adapter host ran (0.9.13 and earlier) into state/uploads",
+    )
+    adapter_host_files.add_argument("--config", required=True, help="Path to instance_config.yaml")
+    adapter_host_files.add_argument(
+        "--files-gone",
+        action="store_true",
+        help="The adapter host's transfer folder is gone for good: handle every file not found as one to send again",
+    )
+
     migrate_config = subparsers.add_parser(
         "migrate-config",
         help="Inspect or migrate an instance_config.yaml to the latest schema",
@@ -2606,6 +2622,30 @@ def _resolve_instance_config_path(config_path: str | None) -> str:
         "Path to instance_config.yaml is required. Pass --config <path>, set TEAM_INSTANCE_CONFIG, "
         "or set TEAM_INSTANCE_ROOT to an onboarded instance directory."
     )
+
+
+def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
+    """``upgrade adapter-host-files`` (``assistant_gateway.adapter_host_files_upgrade``).
+
+    Exits 0 when the step finished or is waiting for a missing transfer
+    folder (startup goes on and the next start tries again), and non-zero on
+    an unexpected error, which stops startup until a restart finishes it.
+    """
+
+    from assistant_gateway.adapter_host_files_upgrade import upgrade_adapter_host_files
+
+    config = GatewayInstanceConfig.load_for_process(args.config)
+    result = upgrade_adapter_host_files(config, files_gone=args.files_gone)
+    if result.already_done:
+        print("The adapter-host files were already moved into state/uploads.")
+    elif result.folder_missing:
+        print(f"{result.waiting} file(s) wait for the adapter host's transfer folder, which is not here. See the log.")
+    else:
+        counts = result.counts
+        print(
+            f"Moved {counts.moved + counts.already_moved} file(s) into state/uploads; "
+            f"{counts.not_moved} could not be moved and must be sent again."
+        )
 
 
 def _ensure_instance_config_ready(config_path: str | None) -> str:
@@ -5363,6 +5403,9 @@ def main() -> None:
 
         _load_cli_env_file(getattr(args, "env", None))
         run_team_command(args)
+        return
+    if args.command == "upgrade":
+        _upgrade_adapter_host_files(args)
         return
     if args.command == "mcp-operation-levels":
         _mcp_operation_levels(args)

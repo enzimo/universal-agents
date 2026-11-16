@@ -42,6 +42,7 @@ from .turn_attachments import (
     decode_turn_attachments,
     encode_turn_attachments,
     merge_unique,
+    relocate_turn_attachment,
 )
 
 # A stable signed-bigint PostgreSQL advisory lock, shared by every tag writer.
@@ -274,6 +275,14 @@ class ConversationRepository(Protocol):
     def last_turn_without_file_records(
         self, conversation_id: str, *, exclude_task_id: Optional[str] = None
     ) -> Optional[int]: ...
+
+    def scan_turn_attachments(
+        self, *, after: Optional[tuple[str, str]] = None, limit: int = TURN_ATTACHMENT_SCAN_BATCH_ROWS
+    ) -> list[tuple[str, str, list[UserTaskAttachment]]]: ...
+
+    def relocate_turn_attachment(
+        self, turns: Sequence[tuple[str, str]], attachment_id: str, *, local_path: Optional[str]
+    ) -> int: ...
 
     def append_clarification(
         self,
@@ -1348,6 +1357,92 @@ class _RelationalConversationRepository:
                 params,
             ).fetchone()
         return None if row is None or row[0] is None else int(row[0])
+
+    def scan_turn_attachments(
+        self, *, after: Optional[tuple[str, str]] = None, limit: int = TURN_ATTACHMENT_SCAN_BATCH_ROWS
+    ) -> list[tuple[str, str, list[UserTaskAttachment]]]:
+        """One batch of every conversation's turns that recorded files: ``(conversation_id, task_id, files)``.
+
+        Ordered by conversation and task id; ``after`` is the last pair of the
+        previous batch. For the upgrade step that moves files out of the
+        adapter host's transfer folder (``assistant_gateway.adapter_host_files_upgrade``),
+        which reads every turn once. The records are complete, storage
+        references included: trusted callers only.
+        """
+
+        bind = self._dialect.bind
+        later = ""
+        params: tuple[Any, ...] = ()
+        if after is not None:
+            later = f" AND (conversation_id > {bind} OR (conversation_id = {bind} AND task_id > {bind}))"
+            params = (after[0], after[0], after[1])
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT conversation_id, task_id, attachments_json FROM conversation_task_links
+                WHERE attachments_json IS NOT NULL AND attachments_json <> '[]'{later}
+                ORDER BY conversation_id, task_id
+                LIMIT {int(limit)}
+                """,
+                params,
+            ).fetchall()
+        return [
+            (
+                str(row["conversation_id"]),
+                str(row["task_id"]),
+                decode_turn_attachments(
+                    row["attachments_json"],
+                    logger=self._logger,
+                    conversation_id=str(row["conversation_id"]),
+                    task_id=str(row["task_id"]),
+                ),
+            )
+            for row in rows
+        ]
+
+    def relocate_turn_attachment(
+        self, turns: Sequence[tuple[str, str]], attachment_id: str, *, local_path: Optional[str]
+    ) -> int:
+        """Point ``attachment_id``'s entries on ``turns`` at ``local_path``, or remove them; how many turns changed.
+
+        For the upgrade step that moves files out of the adapter host's
+        transfer folder. With ``local_path`` None the file could not be moved:
+        its entries are removed and each changed turn's ``attachments_recorded``
+        is set to 0, the marker 0.9.12 shipped for a turn that does not record
+        all of its request's files, so the model is told to ask for it again
+        (``storage.turn_attachments``). Every turn is changed in one write
+        transaction with the row locks ``merge_turn_attachments`` takes, because
+        remote workers may share a PostgreSQL store while the step runs. A turn
+        already changed is left as it is, so a step run again changes nothing
+        twice.
+        """
+
+        bind = self._dialect.bind
+        row_lock = " FOR UPDATE" if self._dialect == POSTGRES else ""
+        recorded = ", attachments_recorded = 0" if local_path is None else ""
+        changed = 0
+        with self._write() as conn:
+            for conversation_id, task_id in turns:
+                row = conn.execute(
+                    f"""
+                    SELECT attachments_json FROM conversation_task_links
+                    WHERE conversation_id = {bind} AND task_id = {bind}{row_lock}
+                    """,
+                    (conversation_id, task_id),
+                ).fetchone()
+                relocated = relocate_turn_attachment(row["attachments_json"], attachment_id, local_path) if row else None
+                if relocated is None:
+                    continue
+                conn.execute(
+                    f"""
+                    UPDATE conversation_task_links
+                    SET attachments_json = {bind}, updated_at = {bind}{recorded}
+                    WHERE conversation_id = {bind} AND task_id = {bind}
+                    """,
+                    (relocated, utc_now_iso(), conversation_id, task_id),
+                )
+                changed += 1
+        return changed
 
     def append_clarification(
         self,

@@ -145,6 +145,9 @@ TEAM_IMPORT_MARKER_FILENAME = "in-progress.json"
 IMPORT_DIRNAME = "import"
 TEAM_IMPORT_REVIEW_DIRNAME = "review"
 TEAM_IMPORT_CREDENTIALS_FILENAME = "team_import_credentials.json"
+# One-time upgrade steps record here that they finished (``state/upgrades``).
+UPGRADES_DIRNAME = "upgrades"
+ADAPTER_HOST_FILES_UPGRADE_FILENAME = "adapter-host-files.json"
 # /upgrade: team exports the supervisor wrote, and the requests it reads
 # (team_transfer.export_requests).
 EXPORTS_DIRNAME = "exports"
@@ -645,6 +648,20 @@ class InstanceLayout:
         task's attachment list and may copy it into the task's own folder."""
 
         return self.state_dir / "uploads"
+
+    @property
+    def adapter_host_files_upgrade_path(self) -> Path:
+        """The record that the upgrade step for adapter-host files finished.
+
+        Up to 0.9.13 a file sent through a chat app the adapter host runs
+        stayed in the adapter host's transfer folder; from 0.10 agents open
+        files only in ``uploads_dir``. The step that moves those files
+        (``assistant_gateway.adapter_host_files_upgrade``) writes this file,
+        with its finish time and counts, once every file was handled, and the
+        launcher runs the step only while it is missing. Under ``state/``, so
+        no agent tool or sandboxed code can reach it."""
+
+        return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_FILENAME
 
     @property
     def storage_levels_path(self) -> Path:

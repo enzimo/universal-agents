@@ -1914,6 +1914,61 @@ def build_finish_import_task(
     )
 
 
+def build_adapter_host_files_task(
+    config: GatewayInstanceConfig,
+    config_path: Path,
+    env: Mapping[str, str],
+    *,
+    python_executable: str | None = None,
+) -> tuple[str, list[str], Mapping[str, str]] | None:
+    """Move files of chat apps the adapter host ran (0.9.13 and earlier) into ``state/uploads``, once.
+
+    Only while ``InstanceLayout.adapter_host_files_upgrade_path`` is missing
+    (``assistant_gateway.adapter_host_files_upgrade``). It runs after the
+    credential import and before the gateway, the adapter host and the agents
+    start, so nothing else on this host writes the files or their records
+    while they move. ``env`` is the gateway's, the process that owns
+    ``state/uploads`` and the attachment records.
+    """
+
+    if config.layout.adapter_host_files_upgrade_path.is_file():
+        return None
+    return (
+        "upgrade step for adapter-host files",
+        [
+            python_executable or sys.executable,
+            "-u",
+            str(resolve_python_entrypoint(REPO_ROOT / "assistant_cli.py")),
+            "upgrade",
+            "adapter-host-files",
+            "--config",
+            str(config_path),
+        ],
+        env,
+    )
+
+
+def build_first_start_tasks(
+    config: GatewayInstanceConfig,
+    config_path: Path,
+    *,
+    broker_env: Mapping[str, str],
+    gateway_env: Mapping[str, str],
+) -> tuple[tuple[str, list[str], Mapping[str, str]], ...]:
+    """The steps ``run_supervised`` finishes before the team starts, in order, leaving out those with nothing to do.
+
+    The credential import first (it reaches the running broker as the
+    ``operator`` caller, so it gets the broker's environment), then the move
+    of adapter-host files (with the gateway's).
+    """
+
+    steps = (
+        build_finish_import_task(config, config_path, broker_env),
+        build_adapter_host_files_task(config, config_path, gateway_env),
+    )
+    return tuple(step for step in steps if step is not None)
+
+
 def build_secure_tool_broker_command(
     config_path: Path,
     *,
@@ -2363,7 +2418,7 @@ def _run_first_start_tasks(
     current_processes: Callable[[], tuple[tuple[str, subprocess.Popen[bytes]], ...]],
     stop_requested: Callable[[], bool],
 ) -> int | None:
-    """Complete credential restoration before any model-dependent process starts.
+    """Run the first-start steps (credential import, adapter-host files) before the team starts.
 
     None permits startup. An exit code stops it, including a requested stop.
     The broker and external services remain supervised while each step waits.
@@ -2439,8 +2494,10 @@ def run_supervised(
 
     The broker starts first. ``first_start_tasks`` must then finish successfully
     before the manager, startup agents or gateway initialize, so their model
-    and embedding keys are already stored (``build_finish_import_task``).
-    Failure stops startup; the retained handover retries at the next start.
+    and embedding keys are already stored (``build_finish_import_task``) and
+    files of chat apps the adapter host ran are in ``state/uploads``
+    (``build_adapter_host_files_task``). Failure stops startup; the retained
+    handover or the missing marker retries at the next start.
 
     ``message_services``, the installation authority and the team services, are already
     running and ready (``docker.message_hosts``). The supervisor watches them with the
@@ -3095,7 +3152,9 @@ def main() -> int:
     def cleanup_managed_openshell() -> None:
         cleanup_openshell_sandbox(managed_openshell_sandbox, env=inherited_env)
 
-    finish_import = build_finish_import_task(config, config_path, inherited_env)
+    first_start_tasks = build_first_start_tasks(
+        config, config_path, broker_env=inherited_env, gateway_env=gateway_env
+    )
     # Last step before any service starts, so every check finds the streams.
     if not prepare_message_streams_before_services(
         config_path,
@@ -3143,7 +3202,7 @@ def main() -> int:
         startup_agent_envs=startup_agent_envs,
         settings_environment=settings_environment,
         agent_pass_fds=process_run.pass_fds(),
-        first_start_tasks=(finish_import,) if finish_import else (),
+        first_start_tasks=first_start_tasks,
         message_services=message_services,
         team_exports=TeamExportRunner(layout=config.layout, config_path=config_path, env=inherited_env),
     )

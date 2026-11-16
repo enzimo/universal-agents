@@ -421,6 +421,12 @@ class GatewayStateRepository(
 
     def delete_uploads_created_before(self, cutoff: str, *, uploads_dir: str, limit: int) -> tuple[str, ...]: ...
 
+    def list_attachments_under(self, folder: str, *, after_id: str = "", limit: int) -> list[AttachmentRecord]: ...
+
+    def set_attachment_local_path(self, attachment_id: str, local_path: str) -> bool: ...
+
+    def delete_attachment(self, attachment_id: str) -> bool: ...
+
     def update_attachment_nats_ref(
         self,
         *,
@@ -2971,6 +2977,55 @@ class _RelationalGatewayStateRepository:
             ).fetchall()
             conn.commit()
         return tuple(str(row[0] or "") for row in rows)
+
+    def list_attachments_under(self, folder: str, *, after_id: str = "", limit: int) -> list[AttachmentRecord]:
+        """Up to ``limit`` attachment records whose file path lies under ``folder``, by id after ``after_id``.
+
+        Matched with a trailing slash and a literal prefix comparison, as in
+        ``delete_uploads_created_before``. For the upgrade step that moves
+        files out of the adapter host's transfer folder
+        (``assistant_gateway.adapter_host_files_upgrade``).
+        """
+
+        bind = self._dialect.bind
+        prefix = folder.rstrip("/") + "/"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT attachment_id, session_key, conversation_id, correlation_id, filename, content_type, kind,
+                       size_bytes, sha256, local_path, nats_bucket, nats_object_name, created_at, expires_at,
+                       owner_canonical_user_id
+                FROM gateway_attachments
+                WHERE substr(local_path, 1, {bind}) = {bind} AND attachment_id > {bind}
+                ORDER BY attachment_id
+                LIMIT {bind}
+                """,
+                (len(prefix), prefix, after_id, int(limit)),
+            ).fetchall()
+        return [AttachmentRecord(**dict(row)) for row in rows]
+
+    def set_attachment_local_path(self, attachment_id: str, local_path: str) -> bool:
+        """Record where an attachment's file now is; False when there is no such record."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            updated = conn.execute(
+                f"UPDATE gateway_attachments SET local_path = {bind} WHERE attachment_id = {bind}",
+                (local_path, attachment_id),
+            ).rowcount
+            conn.commit()
+        return bool(updated)
+
+    def delete_attachment(self, attachment_id: str) -> bool:
+        """Delete one attachment record (its file is left alone); False when there is none."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            deleted = conn.execute(
+                f"DELETE FROM gateway_attachments WHERE attachment_id = {bind}", (attachment_id,)
+            ).rowcount
+            conn.commit()
+        return bool(deleted)
 
     def chat_text_bytes_by_owner(self) -> dict[str, int]:
         """Bytes of each person's chat text kept here, by owner: transcripts, requests and deliveries.

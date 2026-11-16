@@ -46,11 +46,14 @@ request produces one message however many agents work on it. Conditions:
 Files sent before the upgrade. Up to 0.9 the adapter host recorded the files of
 chat apps it runs (``execution: "adapter_host"``) in its own transfer folder,
 and the file tools opened them there. From 0.10 the gateway stores every file
-in ``state/uploads`` and the tools open nothing else, so a request still
-running or queued at the upgrade cannot open such a file with its tools again
-(images still reach a vision model directly). The person is told which files
-to send again. Nothing is opened, moved or copied: the check reads the saved
-records only. A check that fails for one task is logged
+in ``state/uploads`` and the tools open nothing else. At the first start the
+upgrade step (``assistant_gateway.adapter_host_files_upgrade``) moves those
+files there and rewrites the gateway's records and the conversation turns,
+but not held task records: the gateway signed each message's files with
+their paths. So a request still running or queued at the upgrade cannot
+open such a file with its tools or as a direct image input, and the person
+is told which files to send again. The check itself opens, moves and copies
+nothing: it reads the saved records only. A check that fails for one task is logged
 (``event=stuck_task_upgrade_files_check_failed``) and skips that task, so it
 never stops the other conditions. This is an upgrade step from 0.9: remove it
 with the other upgrade steps from 0.9 once 0.11 ships (README_ARCHITECTURE.md,

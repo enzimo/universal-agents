@@ -4508,16 +4508,63 @@ the desktop app never offers an older version.
   reach anyone, because the gateway that waited for it restarted with the
   upgrade. The model, its handler and the list go with the other upgrade steps
   from 0.9.
-- **Hosted-chat files in unfinished work.** Up to 0.9 the adapter host
-  recorded the files of the chat apps it runs (`execution: "adapter_host"`) in
-  its own transfer folder; from 0.10 the file tools open only `state/uploads`
-  ("Files a person sent in a conversation"), with no fallback and no migration
-  of the old files. Chat apps the gateway runs (`execution: "in_process"`, the
-  default) and Web Chat already stored their files in `state/uploads`, so
-  they are not affected. A request
-  still running or queued at the upgrade cannot open such a file with its
-  tools, so its pull request carries `breaking-change` and says to finish that
-  work before upgrading. Work that was not finished is reported by the team
+- **Hosted-chat files in conversations.** Up to 0.9.13 a file sent through
+  a chat app the adapter host runs (`execution: "adapter_host"`) stayed in
+  the adapter host's transfer folder (`interactive_apps.adapter_host.upload_dir`,
+  by default `runtime/adapter-host-uploads`), and its path was saved in the
+  gateway's attachment record and in the conversation turns that received it.
+  From 0.10 the file tools open only `state/uploads` ("Files a person sent in
+  a conversation"), and upload retention, history clean-up and a person's
+  removal delete only files there. Chat apps the gateway runs
+  (`execution: "in_process"`, the default) and Web Chat already stored their
+  files in `state/uploads`. So the launcher runs one upgrade step,
+  `assistant_cli upgrade adapter-host-files`
+  (`assistant_gateway.adapter_host_files_upgrade`), as a first-start step
+  after the credential import and before the gateway, the adapter host and
+  the agents start (`docker.launch_headless.build_first_start_tasks`), while
+  `InstanceLayout.adapter_host_files_upgrade_path`
+  (`state/upgrades/adapter-host-files.json`, the finish time and the counts)
+  is missing. Nothing else on the host writes the files or their records
+  then. It finds the gateway records under the transfer folder (a literal
+  prefix match) and the conversation entries that point into it (decoded from
+  the stored JSON). Records are not trusted by themselves, because agent
+  processes write conversation turns: the attachment id must be a plain file
+  name, the file is opened from the folder without following links, must be
+  a regular file with one link and carry the gateway record's sha256, and a
+  conversation entry moves with it only when it names the same path and
+  checksum. The file moves to `state/uploads/<session>/<attachment_id><suffix>`,
+  where new uploads go, by `rename`, which keeps its modification time, so
+  upload retention counts from when it was sent and files older than
+  `retention_days` go at the gateway's first cleanup; across file systems it
+  is copied with its mode and times and renamed into place, and the original
+  is removed only after both records changed. The conversation entries are
+  rewritten first (one transaction, with the row locks
+  `merge_turn_attachments` takes, because remote workers may share a
+  PostgreSQL store), then the gateway record, so a run that stops part way is
+  finished by the next one (a destination already holding the file counts as
+  `already_moved`). A file it cannot move (missing, refused, or named only by
+  a conversation entry, which gives no chat session for its folder) is
+  removed from its turns, which are marked as not recording all of their
+  request's files (`attachments_recorded` 0, the marker 0.9.12 shipped), so
+  the model asks the person to send it again; its gateway record is deleted
+  and the file is left where it is. One line,
+  `event=adapter_host_files_upgraded` with the counts, reports the result, at
+  warning level when a file could not be moved, with one warning per file. If
+  records point into the transfer folder and the folder is not there (not
+  mounted), nothing changes and no marker is written: an error
+  (`event=adapter_host_files_folder_missing`) says to mount it and restart,
+  or, if the files are gone, to run the command with `--files-gone`; startup
+  goes on and the next start tries again. An unexpected error (a database
+  error, a full disk) stops startup, and a restart finishes the work. Held
+  task records and messages still queued are not rewritten: the message-bound
+  context id hashes each file record's path (`access_control.ownership`), and
+  task records change only through custody. The module goes with the other
+  upgrade steps from 0.9.
+- **Hosted-chat files in unfinished work.** A request still running or queued
+  at the upgrade keeps its file records as the gateway signed them, pointing
+  into the transfer folder, so it cannot open such a file with its tools; its
+  pull request carries `breaking-change` and says to finish that work before
+  upgrading. Work that was not finished is reported by the team
   lead's stuck-task check (`custom_agents.stuck_tasks`, condition
   `task_files_sent_before_upgrade`): on each pass it reads every agent's saved
   work, finds file records outside `state/uploads` (decided from the record
