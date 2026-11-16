@@ -361,11 +361,53 @@ ANSWER_WITHOUT_GUIDANCE = _final_answer("Both services are ready.")
 ANSWER_WITH_GUIDANCE = _final_answer("Checked the second service first; both are ready.")
 
 
-def _decide(read: str) -> Step:
+def _decision(read: str) -> StructuredAgentTurnDecision:
     """The model's turn decision: it follows the guidance once the model has read it."""
 
-    decision = ANSWER_WITH_GUIDANCE if GUIDANCE in read else ANSWER_WITHOUT_GUIDANCE
-    return [(StructuredAgentTurnDecision.__name__, json.loads(decision.model_dump_json()))]
+    return ANSWER_WITH_GUIDANCE if GUIDANCE in read else ANSWER_WITHOUT_GUIDANCE
+
+
+def _decide(read: str) -> Step:
+    """The turn decision as a call to Strands' structured-output tool."""
+
+    return [(StructuredAgentTurnDecision.__name__, json.loads(_decision(read).model_dump_json()))]
+
+
+class NativeStructuredOutputModel(StepsModel):
+    """A provider that enforces structured output itself, as Anthropic and Bedrock do.
+
+    When Strands forces the turn decision it passes the output model, and this
+    provider answers with the decision as JSON text, not a tool call. Other
+    calls follow the steps.
+    """
+
+    _supports_structured_output = True
+
+    def __init__(self, steps: list[Step | Callable[[str], Step]]) -> None:
+        super().__init__(steps)
+        self.forced_inputs: list[str] = []
+
+    async def stream(self, messages, tool_specs=None, system_prompt=None, *, structured_output_model=None, **kwargs):
+        if structured_output_model is None:
+            async for event in super().stream(messages, tool_specs, system_prompt, **kwargs):
+                yield event
+            return
+        self.forced_inputs.append(json.dumps(messages, default=str))
+        yield {"messageStart": {"role": "assistant"}}
+        yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": _decision(self.forced_inputs[-1]).model_dump_json()}}}
+        yield {"contentBlockStop": {"contentBlockIndex": 0}}
+        yield {"messageStop": {"stopReason": "end_turn"}}
+
+
+RESUME_PROVIDERS = {
+    # The decision is a tool call, which RuntimeSteeringPlugin cancels with the guidance.
+    "decision-tool-call": lambda: StepsModel([[("wait_for_setup", {"name": "service-a"})], _decide, _decide]),
+    # The model answers in text, so Strands forces the decision, and the
+    # provider gives it as JSON text: no tool call reads the guidance.
+    "decision-as-json-text": lambda: NativeStructuredOutputModel(
+        [[("wait_for_setup", {"name": "service-a"})], "Both services are ready.", "Both services are ready."]
+    ),
+}
 
 
 def _resume_executor(manager: TaskManager) -> Any:
@@ -383,14 +425,15 @@ def _resume_executor(manager: TaskManager) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_a_resumed_turn_carries_out_the_decision_made_after_reading_the_guidance(tmp_path):
+@pytest.mark.parametrize("provider", sorted(RESUME_PROVIDERS))
+async def test_a_resumed_turn_carries_out_the_decision_made_after_reading_the_guidance(tmp_path, caplog, provider):
     # The production resume path. A resumed turn carries out its decision's
-    # actions, a final answer included, before its result is applied, and it
-    # has no check after the model call; so the guidance must reach the model
-    # at its turn decision call.
+    # actions, a final answer included, before its result is applied, so the
+    # guidance must reach the model first: at the decision call, or through
+    # the check after the call when the decision is no tool call.
     runtime = _runtime_agent(tmp_path)
     manager = runtime.task_manager
-    model = StepsModel([[("wait_for_setup", {"name": "service-a"})], _decide, _decide])
+    model = RESUME_PROVIDERS[provider]()
     sdk = _strands_agent(runtime, model)
     invoke_kwargs = {"structured_output_model": StructuredAgentTurnDecision}
     paused = await _call(sdk, "Check the services.", **invoke_kwargs)
@@ -414,6 +457,7 @@ async def test_a_resumed_turn_carries_out_the_decision_made_after_reading_the_gu
     runtime._apply_task_processing_result = AsyncMock()
     runtime._interrupted_turn_sessions = {TASK: session}
     answer = TaskSteering(steering_type=TaskSteeringType.INTERRUPT_RESPONSE, target_task_id=TASK)
+    caplog.set_level(logging.INFO, logger=LOGGER.name)
     with task_work(TASK):
         await _run_resumed_turn(
             runtime, session, answer, info, _answers(paused), ToolStop(agent_id="lead", task_id=TASK),
@@ -421,8 +465,16 @@ async def test_a_resumed_turn_carries_out_the_decision_made_after_reading_the_gu
 
     results = _tool_results(sdk)
     assert results["step1-call0"] == ("success", f"setup service-a finished: {ANSWER}")
-    # The first decision brought the guidance; the decision carried out follows it.
-    _assert_cancelled_with_guidance(results["step2-call0"])
+    reruns = [record for record in caplog.records if "event=task_steering_resumed_turn_guidance_rerun" in record.getMessage()]
+    if provider == "decision-tool-call":
+        # The first decision call brought the guidance.
+        _assert_cancelled_with_guidance(results["step2-call0"])
+        assert reruns == []
+    else:
+        # The check after the call sent the guidance; the model decided again.
+        assert len(reruns) == 1 and TASK in reruns[0].getMessage()
+        assert GUIDANCE in model.forced_inputs[-1]
+    # Either way, the decision carried out is the one made after reading the guidance.
     assert carried_out == [ANSWER_WITH_GUIDANCE]
     runtime._apply_task_processing_result.assert_awaited_once()
     assert TASK not in runtime._pending_proactive_task_steering

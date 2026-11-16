@@ -357,6 +357,21 @@ def _remember_context_assembly(assembly: AssembledContext) -> None:
         work.context_assembly = assembly
 
 
+def late_guidance_instruction(guidance: str) -> str:
+    """What the model reads for guidance that arrived after a call to the agent, before its decision was carried out.
+
+    A fresh turn appends it to its prompt and calls the model again (below); a
+    resumed turn sends it as the next prompt of the same conversation
+    (``task_steering_runtime._run_resumed_turn``).
+    """
+
+    return (
+        "Runtime mid-turn requester steering:\n"
+        + guidance
+        + "\n\nThis steering arrived before the task result was committed. Treat it as authoritative and regenerate the task result accordingly."
+    )
+
+
 def _turn_decision_initial_guidance(tool_name: str) -> str:
     return (
         "Terminal structured-output instruction: use regular tools as needed, but when this task turn is complete, "
@@ -2590,14 +2605,9 @@ class LLMTurnExecutor:
                             self.settings.id,
                             turn.active_task_id or "unknown",
                         )
-                        late_guidance_instruction = (
-                            "Runtime mid-turn requester steering:\n"
-                            + late_guidance
-                            + "\n\nThis steering arrived before the task result was committed. Treat it as authoritative and regenerate the task result accordingly."
-                        )
                         turn.assembly = self._append_provider_prompt_suffix(
                             turn.assembly,
-                            text=late_guidance_instruction,
+                            text=late_guidance_instruction(late_guidance),
                             name="late_requester_steering",
                             source="task_steering_runtime.consume_pending_proactive_guidance_message",
                         )
