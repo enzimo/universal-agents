@@ -603,11 +603,14 @@ class _Step:
         """Log why the step waits; when an earlier run started, both identities and the way out.
 
         The remount advice (``--files-gone`` is safe) is given only when the
-        device number changed, the one case a remount explains. The same
-        device with another inode is another folder on the same disk, for
-        example the earlier folder moved or renamed and an empty one created
-        at its path (Docker's ``-v`` does that): the earlier folder may still
-        hold the files, so the log says to put it back instead (C08).
+        device number changed, the one case a remount usually explains. The
+        same device with another inode is most likely another folder on the
+        same disk, for example the earlier folder moved or renamed and an
+        empty one created at its path (Docker's ``-v`` does that): the earlier
+        folder may still hold the files, so the log says to put it back (C08).
+        That sentence stays tentative because a file system that makes up
+        inode numbers at mount time can give the same folder mounted again
+        the same device number back and another inode (C12).
         """
 
         recorded = ""
@@ -624,9 +627,9 @@ class _Step:
                 )
             elif self._identity is not None:
                 recorded += (
-                    " It is another folder on the same disk, not the same folder mounted again: if that run's "
-                    "folder was moved or renamed, put it back where upload_dir points and restart; the files it "
-                    "did not move are still in it."
+                    " It is probably another folder on the same disk (the earlier one moved or renamed): if so, "
+                    "put it back where upload_dir points and restart; the files that run did not move are still "
+                    "in it."
                 )
         logger.error(
             "Files sent through chat apps the adapter host ran are recorded in its transfer folder, but the "

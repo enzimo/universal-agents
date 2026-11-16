@@ -67,7 +67,7 @@ supported, because it may not read what a newer one saved.
     and the folder is the same one mounted again (some file systems give it
     a new device number at each mount), the files that start did not move
     are not in it, and `--files-gone` finishes the upgrade safely. If the log
-    says it is another folder on the same disk, the earlier folder was
+    says it is probably another folder on the same disk, the earlier folder was
     probably moved or renamed: put it back where `upload_dir` points and
     restart, because the files that start did not move are still in it.
   - **A folder it cannot use** (a read-only or full `state/uploads`, a

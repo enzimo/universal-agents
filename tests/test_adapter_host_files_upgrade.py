@@ -607,6 +607,55 @@ def test_a_run_that_finds_the_lock_held_waits_for_the_other(instance: _Instance,
         assert instance.files()["att_photo"] == str(instance.photo_destination)
 
 
+@pytest.mark.parametrize("cross_disk", [False, True], ids=["same_disk", "cross_disk"])
+def test_the_run_holds_its_lock_from_find_to_the_marker(instance: _Instance, monkeypatch, cross_disk) -> None:
+    """C11 (F13): the lock covers every phase, the cross-disk copy and the marker included, not only its taking.
+
+    Each phase tries the lock from a descriptor of its own, as another run would; it must find it held.
+    """
+
+    if cross_disk:
+        _across_file_systems(monkeypatch)
+    lock_path = instance.layout.adapter_host_files_upgrade_lock_path
+    marker = instance.layout.adapter_host_files_upgrade_path
+    held_in: dict[str, bool] = {}
+
+    def lock_is_held() -> bool:
+        descriptor = os.open(lock_path, os.O_RDWR)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(descriptor)
+        return False
+
+    def probed(name: str, real: Callable[..., Any]) -> Callable[..., Any]:
+        def probe(*args, **kwargs):
+            held_in[name] = held_in.get(name, True) and lock_is_held()
+            return real(*args, **kwargs)
+
+        return probe
+
+    phases = ["find", "survey", "start", "handle", "forget_unmovable"] + (["_copy_into_place"] if cross_disk else [])
+    for phase in phases:
+        monkeypatch.setattr(upgrade_module._Step, phase, probed(phase, getattr(upgrade_module._Step, phase)))
+    real_write = upgrade_module._write_state_file
+
+    def write(path, body):
+        if Path(path) == Path(marker):
+            held_in["marker"] = lock_is_held()
+        return real_write(path, body)
+
+    monkeypatch.setattr(upgrade_module, "_write_state_file", write)
+
+    result = instance.run()
+
+    assert result.finished and result.counts.moved == 1
+    assert held_in == {phase: True for phase in [*phases, "marker"]}
+    assert not lock_is_held(), "the lock is released when the run ends"
+
+
 def test_a_state_folder_without_file_locks_warns_and_goes_on(instance: _Instance, monkeypatch, caplog) -> None:
     """F13: ENOLCK (a network state folder) must neither stop every start nor pass silently."""
 
@@ -1371,7 +1420,7 @@ def test_after_a_partial_run_an_empty_mount_point_drops_nothing(instance: _Insta
     assert _untouched(instance) == before and not instance.layout.adapter_host_files_upgrade_path.exists()
     assert _recorded(instance) == real, "a waiting run changes nothing, the record included"
     (error,) = _events(caplog, "adapter_host_files_folder_missing")
-    assert "--files-gone" in error and "another folder on the same disk" in error, "same device, another inode"
+    assert "--files-gone" in error and "probably another folder on the same disk" in error, "C12: same device, another inode"
     assert "The device number changed" not in error, "C08: no remount advice when only the inode differs"
     assert error.endswith("recorded=device=%s,inode=%s current=device=%s,inode=%s" % (*real, *empty))
 

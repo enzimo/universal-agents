@@ -4588,9 +4588,11 @@ the desktop app never offers an older version.
   record is rewritten; one that holds none waits until `--files-gone`, which
   is safe then because every file it held already moved. The log calls
   `--files-gone` safe only when the device number changed; the same device
-  with another inode is another folder on the same disk (the earlier one
-  moved or renamed, an empty one made at its path), and the log says to put
-  the earlier folder back. Device and inode rather than a token file: the
+  with another inode is most likely another folder on the same disk (the
+  earlier one moved or renamed, an empty one made at its path), and the log
+  says to put the earlier folder back if so; it stays tentative because a
+  file system that makes up inode numbers at mount time can give the same
+  folder mounted again its old device number and a new inode. Device and inode rather than a token file: the
   folder belongs to the adapter host and may be read-only, and a mismatch at
   the start only ever leads to waiting; one found before the drops stops the
   run with nothing dropped. Before any record is dropped the folder is opened
