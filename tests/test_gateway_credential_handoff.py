@@ -204,7 +204,9 @@ async def test_resumed_setup_page_delivered_through_authenticated_polling(
         limit=20,
     )
     assert "link_bearer_secret" not in history.model_dump_json()
-    assert "A setup page is ready" in history.model_dump_json()
+    # A reload shows this page's own line, never the generic one.
+    assert history.messages[-1].content == "Account link form opened for Hugging Face (hf) (your account)."
+    assert "A setup page is ready" not in history.model_dump_json()
     assert "link_bearer_secret" not in caplog.text
 
 

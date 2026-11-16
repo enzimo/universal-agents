@@ -214,8 +214,9 @@ class ToolSetupHandoffs:
             conversation_id=record.conversation_id,
             source_kind=CREDENTIAL_HANDOFF_SOURCE_KIND,
             source_id=content.setup_request_id,
-            content=response.transcript_text or response.text,
+            content=response.text,
             message_type=response.message_type,
+            transcript_text=response.transcript_text,
         )
         action = response.transient_action
         if action is not None:

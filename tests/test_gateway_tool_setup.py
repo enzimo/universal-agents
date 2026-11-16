@@ -30,6 +30,7 @@ import pytest_asyncio
 
 from assistant_gateway import gateway as gateway_module
 from assistant_gateway.application.interactive_commands import GatewayCommandRequest
+from assistant_gateway.application.transient_presentation import TOOL_SETUP_READY_TEXT
 from assistant_gateway.domain.message_types import (
     TOOL_SETUP_MESSAGE_TYPE,
     TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE,
@@ -40,6 +41,7 @@ from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1, ToolSet
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from tests.test_gateway_account_links import (  # noqa: F401 - pytest fixtures
+    BROKER_TOKEN,
     PUBLIC_BROKER_BASE,
     _member,
     _waiting_task,
@@ -558,6 +560,12 @@ async def test_an_external_step_shows_the_catalogs_words_and_ends_when_marked_do
     assert "generate a token that can read repositories" in response.text
     assert "Mark done on the workflow page: /workflows/access_flow_gitea" in response.text
     assert response.transient_action.url == "https://gitea.example.com/user/settings/applications"
+    # Chat history keeps the whole step in the catalog's words, never the task's reason.
+    assert response.transcript_text == (
+        "Setup step for Gitea shown: Create a Gitea token. In Gitea, open Settings, then Applications, "
+        "and generate a token that can read repositories. Open: https://gitea.example.com/user/settings/applications "
+        "When it is done, choose Mark done on the workflow page: /workflows/access_flow_gitea"
+    )
     record = _setups(gateway).get_tool_setup("tool_setup_req_step")
     assert (record.kind, record.status) == ("external_step", "waiting")
     setups = gateway._credential_workflow.tool_setups
@@ -582,6 +590,99 @@ async def test_an_external_step_the_catalog_lacks_is_refused(setup_gateway) -> N
     assert response.message_type == TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE
     [result] = await _results(transport)
     assert (result.status, result.reason_code) == ("unavailable", "tool_setup_step_unknown")
+
+
+# What chat history keeps for each page (incident 2026-11-14) ----------------------------
+
+WEB_SESSION = "session_web_setup"
+WEB_REQUEST = "correlation_web_setup"
+WEB_CONVERSATION = "conversation_web_setup"
+REASON = "Needed so I can compare the two accounts you named."
+
+
+def _web_chat_waiting_task(gateway: UserGateway, *, owner: str) -> None:
+    """A Web Chat request whose task already waits, so a later page opens through the handoff."""
+
+    gateway.state_store.create_session(
+        session_key=WEB_SESSION, conversation_id=WEB_CONVERSATION,
+        manager_agent_id=gateway.config.manager.manager_agent_id, channel_name="website", user_id=owner,
+        chat_id="web-chat", owner_canonical_user_id=owner,
+    )
+    gateway.state_store.record_request(
+        correlation_id=WEB_REQUEST, session_key=WEB_SESSION, request_kind="interactive",
+        request_text="compare my accounts", conversation_id=WEB_CONVERSATION, followup_to_task_id=None,
+        status="waiting_for_permission", owner_canonical_user_id=owner,
+    )
+    gateway.state_store.update_request_coordination(WEB_REQUEST, status="waiting_for_permission", active_task_id=TASK)
+
+
+def _page_request(setup_request_id: str, *, tool_id: str, kind: str, owner: str) -> ToolSetupRequestV1:
+    return ToolSetupRequestV1(
+        setup_request_id=setup_request_id, parent_task_id=TASK, tool_id=tool_id, kind=kind, owner=owner,
+        step_id="create_token" if kind == "external_step" else None, reason=REASON,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_id", "kind", "owner"),
+    [
+        ("cli:x", "sign_in", "person"),
+        ("cli:google", "team_sign_in_app", "team"),
+        ("http:portainer", "account_link", "person"),
+        ("http:portainer", "account_link", "team"),
+        ("http:gitea", "external_step", "person"),
+    ],
+)
+async def test_chat_history_keeps_each_pages_own_line_and_never_its_address(setup_gateway, tool_id, kind, owner) -> None:
+    gateway, _broker, _transport = setup_gateway
+    person = gateway.config.user.canonical_user_id  # an administrator, so team pages open too
+    _waiting_task(gateway, owner=person)
+    _web_chat_waiting_task(gateway, owner=person)
+    setups = gateway._credential_workflow.tool_setups
+    setups.guide = _Guide()
+    # The live reply: the line Web Chat stores for it is the reply's transcript_text.
+    live = await setups.start(
+        request_content=_page_request("tool_setup_req_live", tool_id=tool_id, kind=kind, owner=owner),
+        request_envelope=_setup_envelope(gateway), correlation_id=CHAT_REQUEST,
+        conversation_id="conversation_link", session_key=SESSION,
+    )
+    assert live.message_type == TOOL_SETUP_MESSAGE_TYPE, live.text
+    # A later page of the same task, after the chat reply closed: the handoff.
+    later = _setup_envelope(gateway)
+    later.msg_content = _page_request("tool_setup_req_later", tool_id=tool_id, kind=kind, owner=owner)
+    later.msg_meta = MessageMeta(
+        msg_correlation_id=WEB_REQUEST, conversation_id=WEB_CONVERSATION,
+        gateway_context=GatewayContext(
+            session_key=WEB_SESSION, canonical_user_id=person, channel_name="website", chat_id="web-chat"
+        ),
+    )
+
+    assert await gateway._credential_handoffs.try_present(later) is True
+
+    card = gateway._credential_handoffs._pending["tool_setup_req_later"].action
+    history = gateway.application.transcripts.list_messages(
+        owner_canonical_user_id=person, session_key=WEB_SESSION, before_cursor=None, limit=20
+    )
+    [line] = [message for message in history.messages if message.message_type == TOOL_SETUP_MESSAGE_TYPE]
+    assert line.content == card.receipt == live.transcript_text
+    assert line.content != TOOL_SETUP_READY_TEXT
+    kept = history.model_dump_json()
+    assert REASON not in kept and REASON not in live.transcript_text, "the task's own words stay out"
+    assert BROKER_TOKEN not in kept
+    if kind == "external_step":
+        for part in (
+            "Create a Gitea token.",
+            "generate a token that can read repositories.",
+            "Open: https://gitea.example.com/user/settings/applications",
+            "Mark done on the workflow page: /workflows/access_flow_gitea",
+        ):
+            assert part in line.content
+    else:
+        # The page's bearer address, its broker session and its status route are never kept.
+        assert card.url and card.url not in kept and live.transient_action.url not in kept
+        for secret in ("link_session_", "signed_session", "/account-link/", "/auth/", "/v1/", PUBLIC_BROKER_BASE):
+            assert secret not in kept
 
 
 # Closing the card when a page ends (live run, 2026-09-28) ---------------------------------

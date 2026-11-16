@@ -445,13 +445,18 @@ class GatewayToolSetups:
             raise RuntimeError("External steps end when the person marks them done.")
 
         expires = self._clock.now_utc() + timedelta(hours=EXTERNAL_STEP_ACTION_HOURS)
+        instructions = f"{_sentence(step.instructions)}{where}{check}{done}"
         return _OpenedPage(
             label=f"{tool_name}: {step.title}",
-            receipt=f"Setup step for {tool_name} shown: {step.title}.",
+            # Chat history keeps the whole step, so a refresh never loses what to
+            # do or where. Only catalog words and links an administrator approved
+            # (checked by ExternalSetupStepV1) and the workflow page, never the
+            # task's own reason.
+            receipt=f"Setup step for {tool_name} shown: {_sentence(step.title)} {instructions}",
             url=step.url or workflow or "",
             expires_at_utc=expires.isoformat(),
             watch=never,
-            instructions=f"{_sentence(step.instructions)}{where}{check}{done}",
+            instructions=instructions,
         )
 
     async def external_step_done(self, setup_request_id: str, *, person_id: str) -> bool:

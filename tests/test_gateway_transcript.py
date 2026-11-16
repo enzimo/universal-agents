@@ -265,6 +265,47 @@ def test_response_projection_persists_safe_text_and_authorized_attachment_refere
     assert stored_attachment.local_path == str(file_path)
 
 
+def test_a_system_receipt_keeps_its_own_line_and_otherwise_the_fixed_safe_text(
+    tmp_path: Path,
+) -> None:
+    """A setup page opened after the chat reply closed keeps the line its page chose.
+
+    Before, every such page was kept as the fixed "A setup page is ready ..."
+    text, so a reload lost which page it was (incident 2026-11-14).
+    """
+
+    store = GatewayStateStore(str(tmp_path / "gateway.db"))
+    _create_web_session(store)
+    service = _service(store)
+    session = store.session_repository.get_session(SESSION)
+    assert session is not None
+    page_text = "Open Choose your account for Portainer: https://broker.example.test/account-link/bearer-secret"
+
+    kept = service.append_system_message(
+        session=session,
+        owner_canonical_user_id=OWNER,
+        conversation_id=CONVERSATION,
+        source_kind="credential_handoff",
+        source_id="tool_setup_req_one",
+        content=page_text,
+        message_type="tool_setup",
+        transcript_text="Account link form opened for Portainer (your account).",
+    )
+    fixed = service.append_system_message(
+        session=session,
+        owner_canonical_user_id=OWNER,
+        conversation_id=CONVERSATION,
+        source_kind="credential_handoff",
+        source_id="tool_setup_req_two",
+        content=page_text,
+        message_type="tool_setup",
+    )
+
+    assert kept.content == "Account link form opened for Portainer (your account)."
+    assert fixed.content == "A setup page is ready in the trusted credential workflow."
+    assert (kept.role, fixed.role) == ("system", "system")
+
+
 def test_website_transcript_facet_returns_not_found_across_owners(
     tmp_path: Path,
 ) -> None:
