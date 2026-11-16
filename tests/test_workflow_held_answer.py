@@ -16,7 +16,9 @@ naming the turn's own task is a held answer and keeps the state its hold saved.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -24,7 +26,11 @@ import pytest
 
 from custom_agents import task_message_runtime, task_steering_runtime
 from custom_agents.access_workflows import AccessWorkflowService
-from custom_agents.access_workflow_runtime import WORKFLOW_CONTINUATION_NOTE
+from custom_agents.access_workflow_runtime import (
+    LAST_REPLY_LABEL,
+    WORKFLOW_CONTINUATION_NOTE,
+    WorkflowCompletionRefused,
+)
 from custom_agents.structured_llm_messages import (
     StructuredAgentTurnDecision,
     StructuredTaskPayload,
@@ -44,6 +50,7 @@ from custom_messages.enums import MessageMetaType, ProgressState, RequesterType,
 from custom_tools.tool_stop import ToolStop
 from storage.access_workflow_repository import AccessWorkflowRepository
 from tests.task_work_support import strands_parts
+from tests.test_runtime_owner_boundaries import build_turn_owner
 from tests.test_turn_action_outbox import (
     _add_active_parent_task,
     _delegation,
@@ -367,3 +374,88 @@ def test_the_queue_runs_the_held_task_again_with_its_note_and_the_guidance_sent_
     assert manager.get_task_info(task.task_id) is None  # finished and archived
     saved = manager.get_task_from_db(task.task_id, owner_agent_id=agent.id)
     assert saved["main_task"].task_state[-1][0] == ProgressState.COMPLETED
+
+
+# -- a repeated answer without progress fails the task and tells the person (A4) --
+
+
+def test_a_second_answer_without_progress_fails_the_task_and_tells_the_person(tmp_path, caplog) -> None:
+    """Before, the refusal went to model recovery, and each recovery turn made a new batch: no limit ever stopped it."""
+
+    manager = _make_task_manager(tmp_path)
+    task = _queued_request(manager)
+    workflow = _open_workflow(manager, task.task_id)
+    last_reply = "Here are the prices from the first registrar.\n\nI still need the second registrar's account ID."
+
+    async def first(_agent, _content):
+        return _final_answer("Here are the prices from the first registrar.")
+
+    async def second(_agent, _content):
+        return _final_answer(last_reply)  # nothing reported on the open step
+
+    agent = _queue_agent(tmp_path, manager, [first, second])
+
+    async def scenario() -> None:
+        assert await agent._check_and_process_next_task()
+        assert await agent._check_and_process_next_task()
+        assert not await agent._check_and_process_next_task()  # nothing runs it again
+
+    asyncio.run(scenario())
+
+    # The person reads the plain statement first, then the labelled last reply.
+    [message] = _sent_tasks(agent)
+    assert message.task_type == MessageMetaType.RESPONSE and message.task_state[-1][0] == ProgressState.FAILED
+    statement, _, rest = message.answer.partition("\n\n")
+    assert statement.startswith('This task was stopped because its plan "Check domain prices" still has unfinished steps')
+    assert "Open Chat to go over the remaining work" in statement
+    assert rest == (
+        f"{LAST_REPLY_LABEL}\n\n"
+        "> Here are the prices from the first registrar.\n>\n> I still need the second registrar's account ID."
+    )
+    # The task failed, gave back the main slot and left nothing to retry.
+    assert manager.get_task_info(task.task_id) is None
+    saved = manager.get_task_from_db(task.task_id, owner_agent_id=agent.id)["main_task"]
+    assert saved.task_state[-1][0] == ProgressState.FAILED
+    assert not manager.task_state.task_queue and manager.can_start_new_task()
+    # The refused action failed for good; no model recovery or automatic retry was tried.
+    summaries = [entry.summary for entry in saved.execution_history]
+    assert any("was refused for good" in summary for summary in summaries)
+    assert not any("needs model recovery" in summary or "automatic retry" in summary for summary in summaries)
+    assert "source_task_completion_rejected" in _event_codes(manager, workflow.workflow_id)
+    # Both held answers can be recovered from the task's history.
+    previews = {
+        entry.details.get("event"): entry.details.get("attempted_answer_preview")
+        for entry in saved.execution_history
+        if entry.details and "attempted_answer_preview" in entry.details
+    }
+    assert "first registrar" in previews["workflow_completion_deferred"]
+    assert "account ID" in previews["workflow_completion_refused"]
+    for event in ("event=workflow_completion_refused", "event=turn_action_refused"):
+        [record] = [record for record in caplog.records if event in record.getMessage()]
+        assert record.levelno == logging.WARNING
+    assert not any(record.exc_info for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_answer_ends_the_turn_as_a_reported_failure_not_a_model_error(caplog) -> None:
+    """The turn owner hands the refusal on at once; it is not a provider problem or an unexpected error."""
+
+    async def invoke(_prompt, **_kwargs):
+        return decided
+
+    executor, decided = build_turn_owner(invoke=invoke, guidance=deque(["", ""]), committed=[], cleared=[])
+    refusal = WorkflowCompletionRefused(
+        workflow_id="access_flow_1", task_id="task_prices", title="Check domain prices", attempted_answer="Done."
+    )
+
+    async def refuse(**_kwargs):
+        raise refusal
+
+    executor.effects = dataclasses.replace(executor.effects, execute_turn_decision_outbox=refuse)
+    task = Task(task_id="task_prices", task_type=MessageMetaType.REQUEST, problem_statement="Check domain prices.")
+
+    with pytest.raises(WorkflowCompletionRefused) as raised:
+        await executor.process_llm_interaction(task, MessageHeader(), MessageMeta())
+
+    assert raised.value is refusal
+    assert not any("Error in LLM interaction" in record.getMessage() for record in caplog.records)

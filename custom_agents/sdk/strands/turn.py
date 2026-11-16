@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError
 from custom_agents.task_wait_limit import TaskWaitLimitReached
+from custom_agents.turn_action_refusal import TurnActionRefused
 
 import asyncio
 import hashlib
@@ -2158,7 +2159,9 @@ class LLMTurnExecutor:
                 after_action_report=turn.after_action_report,
                 error=e,
             )
-            if isinstance(e, (ProviderTimeoutError, UnroutableTaskInterruptError, TaskWaitLimitReached)):
+            if isinstance(
+                e, (ProviderTimeoutError, UnroutableTaskInterruptError, TaskWaitLimitReached, TurnActionRefused)
+            ):
                 # The task owner records and reports this classified failure once.
                 raise
             if self._is_provider_connectivity_error(e):
