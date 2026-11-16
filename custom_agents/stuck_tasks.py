@@ -25,6 +25,16 @@ request produces one message however many agents work on it. Conditions:
 - ``task_waiting_for_answer``: the task asked the person a question (a
   recoverable pause) that is still unanswered.
 - ``task_no_progress``: in progress on a live agent with no new history entry.
+- ``task_waiting_on_nothing``: a live agent's task that is not running (waiting,
+  paused or ready), not in its queue, and has no reason to wait in its saved
+  work (``custom_agents.task_wait_reasons`` lists every reason). Nothing will
+  continue it: it was left waiting by mistake. No saved record says when the
+  last reason ended, so the wait counts from the first pass that sees it, and
+  the person is told only after it has been seen on every pass for
+  ``no_progress_after_seconds``; a pass that no longer sees it closes the untold
+  incident. Accepted guidance adds history to such a task without moving it, so
+  the last history entry cannot start the wait. The person is told to stop it
+  and ask again, because a message to it would only be taken as guidance.
 
 Who is told: the person in the root task's signed context (read with
 ``check_expiry=False``, which reads facts and authorizes nothing, because a
@@ -52,6 +62,7 @@ from custom_agents.stuck_work import (
     report_stuck_work,
 )
 from custom_agents.task_context_runtime import context_verifier
+from custom_agents.task_wait_reasons import PENDING_PAUSE, TERMINAL_STATES, SavedWork, saved_wait_reason
 from custom_messages.contracts.access_v2 import AccessRequestStatus, SchedulePermitV1, TaskContextV1
 from custom_messages.contracts.runtime_snapshot_v3 import (
     RuntimeSnapshotV3,
@@ -73,12 +84,8 @@ TASK_HANDBACK_UNCLAIMED = "task_handback_unclaimed"
 TASK_WAITING_FOR_ACCESS = "task_waiting_for_access_decision"
 TASK_WAITING_FOR_ANSWER = "task_waiting_for_answer"
 TASK_NO_PROGRESS = "task_no_progress"
-# A recoverable pause still waiting for the person (RecoverablePauseRecord.status).
-PAUSE_PENDING = "pending"
+TASK_WAITING_ON_NOTHING = "task_waiting_on_nothing"
 
-TERMINAL_STATES = frozenset(
-    {ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED}
-)
 EXECUTING_STATES = frozenset({ProgressState.IN_PROGRESS, ProgressState.RETRYING})
 _LABEL_LENGTH = 80
 
@@ -136,6 +143,12 @@ def last_activity(record: TaskSnapshotRecord) -> datetime | None:
     ] + [_utc(state[1]) for state in (record.task.task_state or [])[-1:]]
     known = [time for time in times if time is not None]
     return max(known) if known else None
+
+
+def last_moved(record: TaskSnapshotRecord) -> datetime | None:
+    """When the task last changed state; history such as accepted guidance does not move it."""
+    states = record.task.task_state or []
+    return _utc(states[-1][1]) if states else None
 
 
 class StuckTasks:
@@ -256,12 +269,16 @@ class StuckTasks:
         since: datetime,
         agent_ids: set[str],
         agent_type: str | None,
+        notice_after: timedelta | None = None,
+        shown_since: datetime | None = None,
+        log_detail: str = "",
     ) -> StuckFinding:
+        """One finding for a request; ``shown_since`` is the time the texts name, when not ``since``."""
         identity = self.identity_of(meta)
         person = identity.person_id if identity is not None else None
         subject, description = _work_description(identity)
-        label, when = self.label(root_task), self._when(meta, since)
-        text, admin_text, tell_admins = _texts(reason, when, agent_type, description)
+        label, when = self.label(root_task), self._when(meta, shown_since or since)
+        text, admin_text, tell_admins = _texts(reason, when, agent_type, description, root_task.task_id)
         return StuckFinding(
             subject_kind=TASK_SUBJECT,
             subject_id=root_task.task_id,
@@ -273,6 +290,8 @@ class StuckTasks:
             message=StuckMessage(title=f'Your request "{label}" {_TITLES[reason]}', text=text),
             chat_route=self.chat_route(header, meta, person, agent_ids),
             administrator_message=StuckMessage(title=f"{subject} {_TITLES[reason]}", text=admin_text),
+            notice_after=notice_after,
+            log_detail=log_detail,
         )
 
     def findings(self, now: datetime) -> list[StuckFinding]:
@@ -281,14 +300,14 @@ class StuckTasks:
         agent_ids = {owner.owner_agent_id for owner in owners} | {str(self.agent.id)}
         found: dict[tuple[str, str], StuckFinding] = {}
 
-        def add(task: HeldTask, reason: str, since: datetime) -> None:
+        def add(task: HeldTask, reason: str, since: datetime, **extra: Any) -> None:
             root = self.root(held, task)
             key = (root.record.task_id, reason)
             if key not in found:
                 found[key] = self._finding(
                     root.record.task, root.record.header, root.record.meta,
                     reason=reason, since=since, agent_ids=agent_ids,
-                    agent_type=task.owner_named_agent_type,
+                    agent_type=task.owner_named_agent_type, **extra,
                 )
 
         live_owners = self._owners_gone(owners, held, now, add)
@@ -297,6 +316,7 @@ class StuckTasks:
         for owner in owners:
             if owner.owner_agent_id in live_owners:
                 self._live_owner_waits(owner, held, now, add)
+                self._waiting_on_nothing(owner, now, add)
         return list(found.values())
 
     def _owners_gone(self, owners: list[OwnerWork], held: dict[str, HeldTask], now: datetime, add: Any) -> set[str]:
@@ -320,12 +340,40 @@ class StuckTasks:
         no_progress = timedelta(seconds=self.settings.no_progress_after_seconds)
         for pause in owner.snapshot.recoverable_pause_records.values():
             created = _utc(pause.created_at)
-            if pause.status == PAUSE_PENDING and created and now - created >= waiting and pause.task_id in held:
+            if pause.status == PENDING_PAUSE and created and now - created >= waiting and pause.task_id in held:
                 add(held[pause.task_id], TASK_WAITING_FOR_ANSWER, created)
         for record in owner.snapshot.tasks:
             last = last_activity(record)
             if record.state in EXECUTING_STATES and last and now - last >= no_progress:
                 add(held[record.task_id], TASK_NO_PROGRESS, last)
+
+    def _waiting_on_nothing(self, owner: OwnerWork, now: datetime, add: Any) -> None:
+        """Idle tasks a live owner runs that nothing will continue (module docstring).
+
+        ``since`` is now, so the incident's first sight starts the wait, which
+        ``notice_after`` then requires to last. The finding names the request
+        by the owner's own root walk (a plan step's plan root, a recovery
+        task's original) and the agent type of the owner that runs the task.
+        """
+        threshold = timedelta(seconds=self.settings.no_progress_after_seconds)
+        work = SavedWork.from_snapshot(owner.snapshot)
+        for record in work.idle_tasks():
+            if saved_wait_reason(work, record) is not None:
+                continue
+            request = work.tasks.get(work.root_of(record.task_id), record)
+            moved = last_moved(record)
+            add(
+                HeldTask(owner.owner_agent_id, owner.owner_named_agent_type, request),
+                TASK_WAITING_ON_NOTHING,
+                now,
+                notice_after=threshold,
+                shown_since=moved,
+                log_detail=(
+                    f"task_id={record.task_id} owner_agent_id={owner.owner_agent_id} "
+                    f"owner_agent_type={owner.owner_named_agent_type or '-'} state={record.state.value} "
+                    f"last_moved={moved.isoformat() if moved else '-'}"
+                ),
+            )
 
     def _waiting_for_access(self, now: datetime, held: dict[str, HeldTask], add: Any) -> None:
         threshold = timedelta(seconds=self.settings.waiting_on_person_after_seconds)
@@ -362,10 +410,14 @@ class StuckTasks:
 
     # -- recovery -----------------------------------------------------------------
 
-    def recovery(self, incident: StuckWorkIncidentV1) -> Recovery:
+    def recovery(self, incident: StuckWorkIncidentV1) -> Recovery | None:
         owners = self.owners()
         held = self.held_tasks(owners)
         task = held.get(incident.subject_id)
+        if task is None and incident.reason == TASK_WAITING_ON_NOTHING:
+            # The person stopped it, as the notice told them to, and the stop
+            # already replied; nothing can have finished it on its own.
+            return None
         if task is None:
             # No saved owner remains. Do not infer a successful result from
             # disappearing custody; the task's history owns its final outcome.
@@ -396,6 +448,7 @@ _TITLES = {
     TASK_WAITING_FOR_ACCESS: "is waiting for an access decision",
     TASK_WAITING_FOR_ANSWER: "is waiting for your answer",
     TASK_NO_PROGRESS: "has made no progress",
+    TASK_WAITING_ON_NOTHING: "will not continue on its own",
 }
 
 
@@ -410,7 +463,7 @@ def _work_description(identity: TaskContextV1 | SchedulePermitV1 | None) -> tupl
     return "System work", "system work"
 
 
-def _texts(reason: str, when: str, agent_type: str | None, work: str) -> tuple[str, str, bool]:
+def _texts(reason: str, when: str, agent_type: str | None, work: str, task_id: str) -> tuple[str, str, bool]:
     """(person text, administrator text, whether administrators are told)."""
     kind = agent_type or "agent"
     if reason == TASK_OWNER_GONE:
@@ -436,6 +489,15 @@ def _texts(reason: str, when: str, agent_type: str | None, work: str) -> tuple[s
             "in the Inbox (Settings > Inbox). It continues as soon as it is decided.",
             f"A task has been waiting since {when} for an access decision in the Inbox.",
             True,
+        )
+    if reason == TASK_WAITING_ON_NOTHING:
+        return (
+            f"It has not moved since {when}, and it is not waiting for anything that could still "
+            "continue it (an answer, an approval, a setup step or another agent's work). Stop it "
+            f"with /stop task {task_id} or in Settings > Tasks, then send your request again.",
+            f"A task held by {kind} has not moved since {when} and is not waiting for anything that "
+            f"could continue it, so it will not continue on its own. Check the runtime log for task {task_id}.",
+            False,
         )
     if reason == TASK_WAITING_FOR_ANSWER:
         return (

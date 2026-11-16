@@ -187,18 +187,38 @@ class SavedWork:
         ]
 
     def root_of(self, task_id: str) -> str:
-        """The task tree's root in this saved work (the walk of ``resolve_root_task_id``)."""
-        seen = {task_id}
+        """The task tree's root, by the walk of ``resolve_root_task_id``.
+
+        The runtime keys leases and held events by this root. A plan step
+        belongs to its plan's root task and a recovery task to the task it
+        recovers, so those links come before the parent link.
+        """
+        seen: set[str] = set()
         current = task_id
-        while True:
+        while current not in seen:
+            seen.add(current)
+            linked = self._linked_execution_parent(current)
+            if linked is not None:
+                current = linked
+                continue
             record = self.tasks.get(current)
             if record is None:
                 return current
             parent = self.snapshot.subtask_to_parent_map.get(current) or record.task.parent_task_id
-            if not parent or parent not in self.tasks or parent in seen:
+            if not parent or parent not in self.tasks:
                 return current
-            seen.add(parent)
             current = parent
+        return current
+
+    def _linked_execution_parent(self, task_id: str) -> str | None:
+        """The plan root of a plan step, or the original of a recovery task (``_linked_execution_parent_id``)."""
+        step = self.snapshot.plan_step_task_links.get(task_id)
+        if step is not None and step.root_task_id != task_id:
+            return step.root_task_id
+        recovery = self.snapshot.recovery_links.get(task_id)
+        if recovery is not None and recovery.original_task_id != task_id:
+            return recovery.original_task_id
+        return None
 
 
 def _waits_on_requester(task: Task) -> bool:

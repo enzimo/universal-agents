@@ -26,11 +26,24 @@ from custom_agents.stuck_tasks import (
     TASK_OWNER_GONE,
     TASK_WAITING_FOR_ACCESS,
     TASK_WAITING_FOR_ANSWER,
+    TASK_WAITING_ON_NOTHING,
     report_stuck_tasks,
 )
+from custom_agents.task_human_interaction_blockers import (
+    clear_human_interaction_blocker,
+    record_human_interaction_blocker,
+)
 from custom_agents.task_manager import TaskManager
+from custom_agents.task_steering_runtime import (
+    GUIDANCE_ACCEPTED_EVENT,
+    INTERRUPT_REQUEST_EVENT,
+    INTERRUPT_RESUMED_EVENT,
+    INTERRUPT_WAITS_ON_REQUESTER_KEY,
+)
+from custom_agents.tool_setup_runs import RUN_FINISHED, TOOL_SETUP_RUN_KIND, ToolSetupRunV1
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
+    AccessRequestStatus,
     AccessRequestV1,
     PersonStanding,
     SubjectKind,
@@ -42,11 +55,12 @@ from custom_messages.contracts.access_v2 import (
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import (
+    BATCH_WAITING_EXTERNAL_RESULT,
     RecoverablePauseRecord,
     RuntimeSnapshotV3,
     TaskSnapshotRecord,
 )
-from custom_messages.contracts.task_v1 import Task
+from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry
 from custom_messages.contracts.worker_handback_v1 import (
     HandedBackTaskV1,
     WorkerLeaseLossEvidenceV1,
@@ -55,9 +69,11 @@ from custom_messages.contracts.worker_handback_v1 import (
 from custom_messages.enums import ControlType, MessageMetaType, ProgressState, RequesterType
 from storage.access_repository import AccessRepository
 from storage.stuck_work_repository import StuckWorkRepository
+from storage.tool_setup_run_repository import ToolSetupRunRepository
 from storage.worker_handback_repository import HANDBACK_STATUS_REDISPATCHED, WorkerHandbackRepository
 from tests.broker_access_support import context_signer, use_scheduler_key
 from tests.change_approval_support import use_signed_contexts
+from time_presentation import format_user_timestamp
 
 GATEWAY_ROUTE = "gateway.instance.responses"
 REQUEST = "Compare ETH/BTC momentum strategies and report the backtest results"
@@ -166,9 +182,16 @@ def open_incidents(lead):
     return StuckWorkRepository(lead.task_manager.storage_settings).open_incidents("team", "task")
 
 
+def lead_waits_on(lead, *children):
+    """The lead's request waiting on work it delegated; a parent saves a record of each delegation."""
+    delegated = [record(child, parent="root", route="lead") for child in children]
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING), *delegated],
+         subtask_to_parent_map={child: "root" for child in children})
+
+
 @pytest.mark.asyncio
 async def test_a_request_whose_worker_stopped_is_reported_once_as_the_persons_request(lead):
-    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)])
+    lead_waits_on(lead, "child-a", "child-b")
     save(lead, "worker-1", "WebResearchAgent", [
         record("child-a", parent="root", route="lead"), record("child-b", parent="root", route="lead"),
     ])
@@ -227,7 +250,8 @@ async def test_an_unanswered_question_reminds_the_person_after_a_day(lead):
 @pytest.mark.asyncio
 async def test_an_undecided_access_request_reminds_the_person_and_administrators(lead):
     now = datetime.now(timezone.utc)
-    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)])
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)],
+         human_interaction_blockers={"root": {"kind": "access_request", "access_request_id": "req-1"}})
     AccessRepository(lead.task_manager.storage_settings).create_request(
         AccessRequestV1(
             request_id="req-1", team_id="team", requester_agent_id="lead", requester_agent_type="TeamArchitect",
@@ -271,7 +295,7 @@ async def test_a_handed_back_task_nobody_picked_up_is_reported(lead):
 async def test_an_owner_who_is_an_administrator_gets_only_the_administrators_notice(lead):
     """Administrators read other words here, so the owner who is one does not get both copies."""
     record_people(lead, ("jordan", (PERSON_ROLE_OWNER,)))
-    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)])
+    lead_waits_on(lead, "child-a")
     save(lead, "worker-1", "WebResearchAgent", [record("child-a", parent="root", route="lead")])
     await report_stuck_tasks(lead, now=datetime.now(timezone.utc) + timedelta(minutes=11))
     (notice,) = notices(lead, roles=(PERSON_ROLE_ADMIN,))
@@ -387,3 +411,247 @@ async def test_resume_grace_does_not_close_an_existing_stuck_incident(lead, monk
     await report_stuck_tasks(lead, now=woke)
     assert open_incidents(lead)[0].incident_id == incident.incident_id
     assert len(notices(lead)) == 1 and len(admin_notices(lead)) == 1
+
+
+# -- a task waiting on nothing (task_waiting_on_nothing) -------------------------------
+
+# The threshold is no_progress_after_seconds (2 hours by default), counted from
+# the first pass that sees the task, which must then see it on every pass.
+PAST_THRESHOLD = timedelta(hours=2, minutes=1)
+STRANDED_TITLE = f'Your request "{REQUEST}" will not continue on its own'
+
+
+def waiting_reasons(lead):
+    return {incident.reason for incident in open_incidents(lead)}
+
+
+def alive(lead, agent_id, when, agent_type="WebResearchAgent"):
+    seen(lead, agent_id, agent_type)
+    status = lead._agent_state_store.get_by_id(agent_id)
+    status.last_seen_at = iso(when)
+    lead._agent_state_store.upsert(status)
+
+
+def with_history(held, *entries):
+    task = held.task.model_copy(update={"execution_history": [*held.task.execution_history, *entries]})
+    return held.model_copy(update={"task": task})
+
+
+def moved_to(held, state, when):
+    """The same request (same signed identity) after a state change."""
+    task = held.task.model_copy(update={"task_state": [*held.task.task_state, (state, iso(when))]})
+    return held.model_copy(update={"state": state, "task": task})
+
+
+def guidance(when):
+    return TaskHistoryEntry(
+        summary="Mid-turn proactive steering accepted: why did you stop?",
+        timestamp=iso(when),
+        details={"event": GUIDANCE_ACCEPTED_EVENT},
+    )
+
+
+def strand_the_incidents_request(lead, started):
+    """The incident's sequence through the real TaskManager, which saves the lead's work itself.
+
+    It ran, paused for set_up_tools and resumed; an earlier action batch waited
+    for a credential form and a later one finished; the saved workflow queued it
+    to continue, and its turn's result then set it WAITING, which removed the
+    queue entry. Its setup run is finished and its access request granted.
+    """
+    manager = lead.task_manager
+    held = record("root", state=ProgressState.ACCEPTED, at=started)
+    assert manager.add_task(held.task.model_copy(update={"task_state": []}), held.header, held.meta, owner_person_id="jordan")
+
+    def moment(minutes):
+        return iso(started + timedelta(minutes=minutes))
+
+    manager.update_main_task_state("root", ProgressState.IN_PROGRESS, moment(0))
+    record_human_interaction_blocker(manager, "root", {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"})
+    manager.append_history_entry(
+        "root", "Strands turn interrupted for requester input.", timestamp=moment(1),
+        details={"event": INTERRUPT_REQUEST_EVENT, INTERRUPT_WAITS_ON_REQUESTER_KEY: False},
+    )
+    manager.update_main_task_state("root", ProgressState.WAITING, moment(1))
+    clear_human_interaction_blocker(manager, "root")
+    manager.update_main_task_state("root", ProgressState.IN_PROGRESS, moment(10))
+    manager.append_history_entry("root", "Resumed.", timestamp=moment(10), details={"event": INTERRUPT_RESUMED_EVENT})
+    form = manager.create_turn_action_batch("root", [{"action_type": "secure_credential_collection_request"}])
+    manager.mark_turn_action_batch_status(form.batch_id, BATCH_WAITING_EXTERNAL_RESULT)
+    answer = manager.create_turn_action_batch("root", [{"action_type": "task_response"}])
+    manager.mark_turn_action_batch_status(answer.batch_id, "completed")
+    manager.update_main_task_state("root", ProgressState.ACCEPTED, moment(20))
+    assert manager.enqueue_task("root", front=True)
+    manager.update_main_task_state("root", ProgressState.WAITING, moment(21))
+    assert "root" not in manager.task_state.task_queue
+
+    ToolSetupRunRepository(manager.storage_settings).create(
+        ToolSetupRunV1(
+            run_id="run-1", team_id="team", person_id="jordan", task_id="root", agent_id="lead",
+            agent_type="TeamArchitect", tool_ids=("http:registrar",), status=RUN_FINISHED,
+        )
+    )
+    AccessRepository(manager.storage_settings).create_request(
+        AccessRequestV1(
+            request_id="req-1", team_id="team", requester_agent_id="lead", requester_agent_type="TeamArchitect",
+            person_id="jordan", subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id="TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="http:registrar"), level=AccessLevel.READ,
+            reason="Check prices", task_id="root", created_at_utc=started, status=AccessRequestStatus.GRANTED,
+        )
+    )
+    return started + timedelta(minutes=21)
+
+
+@pytest.mark.asyncio
+async def test_the_incidents_stranded_request_is_reported_once_and_cleared_when_it_moves(lead, caplog):
+    stopped = strand_the_incidents_request(lead, datetime.now(timezone.utc) - timedelta(hours=1))
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    assert not notices(lead) and not chats(lead)  # not told before it has lasted the threshold
+    assert waiting_reasons(lead) == {TASK_WAITING_ON_NOTHING}
+
+    caplog.set_level(logging.WARNING)
+    for minute in range(3):
+        await report_stuck_tasks(lead, now=first + PAST_THRESHOLD + timedelta(minutes=minute))
+    (notice,) = notices(lead)
+    assert notice.title == STRANDED_TITLE
+    assert format_user_timestamp(stopped, timezone_name=None) in notice.summary
+    assert "/stop task root" in notice.summary and "Settings > Tasks" in notice.summary
+    assert "send your request again" in notice.summary and "ask your assistant" not in notice.summary
+    assert not admin_notices(lead)  # the person can recover; the warning records it for operators
+    (envelope,) = chats(lead)
+    assert envelope.msg_content.reason == "work_stuck"
+    assert envelope.msg_header.to_routing_path == GATEWAY_ROUTE
+    assert caplog.text.count("event=stuck_work_notified") == 1
+    assert "reason=task_waiting_on_nothing" in caplog.text
+    assert "detail=task_id=root owner_agent_id=lead owner_agent_type=TeamArchitect state=waiting" in caplog.text
+
+    manager = lead.task_manager
+    manager.update_main_task_state("root", ProgressState.ACCEPTED, iso(first + PAST_THRESHOLD))
+    assert manager.enqueue_task("root")
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD + timedelta(minutes=5))
+    assert chats(lead)[-1].msg_content.reason == "work_recovered"
+    assert f'The warning for your request "{REQUEST}" has cleared' in chats(lead)[-1].msg_content.text
+    assert not open_incidents(lead)
+
+
+@pytest.mark.asyncio
+async def test_guidance_neither_restarts_nor_clears_the_wait(lead):
+    """The person's "why did you stop?" adds history to the stranded task without moving it."""
+    stopped = datetime.now(timezone.utc) - timedelta(hours=5)
+    stranded = record("root", state=ProgressState.WAITING, at=stopped)
+    save(lead, "lead", "TeamArchitect", [stranded])
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    asked = first + timedelta(hours=1)
+    save(lead, "lead", "TeamArchitect", [with_history(stranded, guidance(asked))])
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    (notice,) = notices(lead)
+    assert format_user_timestamp(stopped, timezone_name=None) in notice.summary
+    assert format_user_timestamp(asked, timezone_name=None) not in notice.summary
+
+    save(lead, "lead", "TeamArchitect", [with_history(stranded, guidance(asked), guidance(first + PAST_THRESHOLD))])
+    await report_stuck_tasks(lead, now=first + timedelta(hours=3))
+    assert [envelope.msg_content.reason for envelope in chats(lead)] == ["work_stuck"]
+    assert waiting_reasons(lead) == {TASK_WAITING_ON_NOTHING}
+
+
+@pytest.mark.asyncio
+async def test_a_short_wait_between_steps_is_never_reported(lead):
+    first = datetime.now(timezone.utc)
+    waiting = record("root", state=ProgressState.WAITING, at=first)
+    save(lead, "lead", "TeamArchitect", [waiting])
+    await report_stuck_tasks(lead, now=first)
+    assert waiting_reasons(lead) == {TASK_WAITING_ON_NOTHING}
+    running = moved_to(waiting, ProgressState.IN_PROGRESS, first + timedelta(seconds=30))
+    save(lead, "lead", "TeamArchitect", [running])
+    await report_stuck_tasks(lead, now=first + timedelta(minutes=1))
+    assert not open_incidents(lead)  # closed without telling anyone
+
+    save(lead, "lead", "TeamArchitect", [moved_to(running, ProgressState.WAITING, first + timedelta(minutes=2))])
+    await report_stuck_tasks(lead, now=first + timedelta(minutes=2))
+    await report_stuck_tasks(lead, now=first + timedelta(hours=2))  # 1 h 58 min since this wait was first seen
+    assert not notices(lead) and not chats(lead)
+
+
+def preempted():
+    paused = record("root", state=ProgressState.PAUSED)
+    return [with_history(paused, TaskHistoryEntry(summary="Task paused because task other was preempted.")
+                         )], {}
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(preempted, id="paused after preemption"),
+        pytest.param(lambda: ([record("root", state=ProgressState.ACCEPTED)], {}), id="ready but not queued"),
+        pytest.param(
+            lambda: ([record("root", state=ProgressState.WAITING)], {"final_review_pending_task_ids": ["root"]}),
+            id="final review left waiting",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_same_gap_in_other_states_is_reported(lead, build):
+    records, sections = build()
+    save(lead, "lead", "TeamArchitect", records, **sections)
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    (notice,) = notices(lead)
+    assert notice.title == STRANDED_TITLE
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_agents_stranded_task_is_reported_as_stopped(lead):
+    save(lead, "worker-1", "WebResearchAgent", [record("root", state=ProgressState.WAITING)])
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    assert waiting_reasons(lead) == {TASK_OWNER_GONE}
+    (notice,) = notices(lead)
+    assert notice.title == f'Your request "{REQUEST}" stopped'
+
+
+@pytest.mark.asyncio
+async def test_a_workers_stranded_task_is_reported_as_its_request_naming_the_worker(lead, caplog):
+    """The lead's delegation record waits on it; the warning names the agent that runs it (review C06)."""
+    lead_waits_on(lead, "child-a")
+    save(lead, "worker-1", "WebResearchAgent", [record("child-a", state=ProgressState.WAITING, parent="root", route="lead")])
+    first = datetime.now(timezone.utc)
+    alive(lead, "worker-1", first)
+    await report_stuck_tasks(lead, now=first)
+    caplog.set_level(logging.WARNING)
+    alive(lead, "worker-1", first + PAST_THRESHOLD)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    # The person's request, not the delegated part. (The lead's own copy of the
+    # delegation, left in progress here, also reports no progress.)
+    (notice,) = [item for item in notices(lead) if item.title == STRANDED_TITLE]
+    assert "/stop task root" in notice.summary
+    assert "task_id=child-a owner_agent_id=worker-1 owner_agent_type=WebResearchAgent" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_without_a_verified_person_administrators_hear_without_the_request(lead):
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING, signed=False)])
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    assert not notices(lead)
+    (admin,) = admin_notices(lead)
+    assert admin.title == "A task will not continue on its own"
+    assert "TeamArchitect" in admin.summary and "task root" in admin.summary
+    assert REQUEST not in admin.title + admin.summary
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_request_as_told_closes_the_warning_quietly(lead):
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)])
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    assert len(notices(lead)) == 1 and len(chats(lead)) == 1
+    lead.task_manager.runtime_state_store.clear_task_runtime("lead")  # stopped: no saved work holds it
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD + timedelta(minutes=1))
+    assert len(notices(lead)) == 1 and len(chats(lead)) == 1
+    assert not open_incidents(lead)

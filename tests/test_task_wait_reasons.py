@@ -29,6 +29,7 @@ from custom_agents.task_wait_reasons import (
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import (
     BATCH_WAITING_EXTERNAL_RESULT,
+    PlanStepTaskLink,
     RecoverablePauseRecord,
     RecoveryTaskLink,
     RuntimeMailboxEventRecord,
@@ -211,6 +212,27 @@ def test_a_reason_on_the_tree_root_holds_its_other_tasks() -> None:
     saved = work(record("root"), record("t", parent="root"), runtime_leases=lease(root="root"))
     assert saved.root_of("t") == "root"
     assert saved_wait_reason(saved, saved.tasks["t"]) is WaitReason.RUNNING_ACTIONS
+
+
+def test_a_plan_steps_root_is_its_plan_root() -> None:
+    """Leases and held events are keyed by the plan root (review C07)."""
+    step_link = {"step": PlanStepTaskLink(root_task_id="root", plan_id="plan", step_id="s1", step_task_id="step")}
+    leased = work(record("root"), record("step", ProgressState.ACCEPTED), plan_step_task_links=step_link,
+                  runtime_leases=lease(root="root"))
+    assert leased.root_of("step") == "root"
+    assert saved_wait_reason(leased, leased.tasks["step"]) is WaitReason.RUNNING_ACTIONS
+    held = work(record("root"), record("step", ProgressState.ACCEPTED), plan_step_task_links=step_link,
+                runtime_mailbox_events={"e1": RuntimeMailboxEventRecord(
+                    event_id="e1", root_task_id="root", event_type="task_response", event_class="deferrable",
+                    status="deferred")})
+    assert saved_wait_reason(held, held.tasks["step"]) is WaitReason.PENDING_EVENT
+
+
+def test_a_recovery_tasks_root_is_the_task_it_recovers() -> None:
+    saved = work(record("t"), record("rec", ProgressState.ACCEPTED), recovery_links=recovery(),
+                 runtime_leases=lease(root="t"))
+    assert saved.root_of("rec") == "t"
+    assert saved_wait_reason(saved, saved.tasks["rec"]) is WaitReason.RUNNING_ACTIONS
 
 
 def test_root_walk_stops_at_a_parent_loop() -> None:

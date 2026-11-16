@@ -18,8 +18,8 @@ How it works:
   them.
 - ``report_stuck_work`` keeps one open incident per finding
   (``storage.stuck_work_repository``). Once an incident has lasted
-  ``notice_after``, the affected person gets one Inbox notice and one chat
-  message; administrators get an Inbox notice when only they can fix it or
+  ``notice_after`` (the source's, or the finding's own), the affected person
+  gets one Inbox notice and one chat message; administrators get an Inbox notice when only they can fix it or
   when the work is the team's. When a finding disappears, everyone who was
   told gets a "working again" notice and message, and the incident closes.
   A source may close it with no message instead (``recovery`` returns
@@ -90,6 +90,8 @@ class StuckFinding:
     subject_id: str
     incident_key: str
     reason: str
+    # When it began; a new incident keeps this as its first sight. A condition
+    # whose start is not saved anywhere gives the time it was first seen.
     since: datetime
     person_id: str | None
     tell_administrators: bool
@@ -98,6 +100,14 @@ class StuckFinding:
     # What administrators read instead, when ``message`` quotes the person's
     # private work (a task's request text); None sends them ``message``.
     administrator_message: StuckMessage | None = None
+    # How long the incident must stay open, from its first sight, before people
+    # are told; None uses the source's ``notice_after``. A condition seen anew
+    # on each pass uses this so that it must last without a break: a pass that
+    # no longer sees it closes the untold incident, and the wait starts over.
+    notice_after: timedelta | None = None
+    # key=value diagnostics added to the ``event=stuck_work_notified`` warning;
+    # never shown to people.
+    log_detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -271,7 +281,7 @@ async def _tell_stuck(agent: Any, finding: StuckFinding, incident: StuckWorkInci
     )
     agent._logger.warning(
         "Told people that work is stuck. event=stuck_work_notified kind=%s subject_id=%s "
-        "incident_id=%s reason=%s person_id=%s administrators=%s chat=%s since=%s",
+        "incident_id=%s reason=%s person_id=%s administrators=%s chat=%s since=%s detail=%s",
         incident.subject_kind,
         incident.subject_id,
         incident.incident_id,
@@ -280,6 +290,7 @@ async def _tell_stuck(agent: Any, finding: StuckFinding, incident: StuckWorkInci
         incident.tell_administrators,
         sent,
         incident.first_seen_at_utc.isoformat(),
+        finding.log_detail or "-",
     )
 
 
@@ -363,7 +374,8 @@ async def report_stuck_work(
         try:
             incident = await runtime.run(repository.record_seen, _incident(agent, finding))
             current.add(incident.incident_id)
-            if incident.notified_at_utc is not None or now - incident.first_seen_at_utc < notice_after:
+            wait = notice_after if finding.notice_after is None else finding.notice_after
+            if incident.notified_at_utc is not None or now - incident.first_seen_at_utc < wait:
                 continue
             # Tell with the current reason, then remember that it was told.
             incident = incident.model_copy(
