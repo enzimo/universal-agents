@@ -3,8 +3,10 @@
 # Work, request and event subjects start with ua.v1.<audience team>.<sender slot>.:
 # the sender slot is the issuer's runtime id, or x-<installation> for a frame from
 # another installation. Replies use the requester's _INBOX.<runtime>.<token(s)>
-# subject, signed in the reply frame. Pull and acknowledgement API permissions name
-# exact consumers.
+# subject, signed in the reply frame. An agent's inbox, control queue and live-control
+# address are stored and delivered with one more token, the agent's partition (partitions).
+# Pull and acknowledgement API permissions name exact consumers, or every consumer of a
+# partition stream the host owns.
 # Edit by hand, then run scripts/export_message_contract.py.
 
 subject_prefix: ua.v1.{team}.{sender}
@@ -21,11 +23,13 @@ installation_scope: _install
 # wrong_sender). Every role that receives at an address receives every kind sent there,
 # so no role hears requests it does not answer.
 
-# Receivers' grants name exact ids: trusted membership code fills each {agent}, {pool} and
-# {edge} with the ids a host runs or serves, never with a wildcard, and {team} in the same
-# subject with that agent's, pool's or edge's own team (custom_messages.wire.permissions).
-# A host reads only the queues and control requests of its own agents and pools, and gets a
-# new credential when it gains or loses one, after its old one stops working (README,
+# Receivers' grants name exact partitions and pools: trusted membership code fills each
+# {partition} with the partitions the host owns (partition ownership records), each {pool} and
+# {edge} with the pools it runs and the edges it serves, never with a wildcard, and {team} in
+# the same subject with that partition's, pool's or edge's own team
+# (custom_messages.wire.permissions). A host reads only the queues and control requests of the
+# agents in its own partitions and of its own pools, and gets a new credential when it gains or
+# loses a partition or a pool, never an agent, after its old one stops working (README,
 # "Grants for the agents a host runs").
 
 # Which host roles serve each audience target. A role receives a kind's address, and
@@ -56,7 +60,29 @@ limits:
   max_frame_bytes: 262144      # larger content goes to the object store by reference
   max_header_bytes: 1024       # a frame's NATS headers: the largest block the contract allows is 891 bytes (README, "NATS headers")
   nats_max_payload_bytes: 1048576
-  max_credential_bytes: 65536  # a host's NATS user JWT, which grows with the agents and pools it runs; servers' max_control_line fits it
+  max_credential_bytes: 65536  # a host's NATS user JWT, which grows with the partitions and pools it owns; servers' max_control_line fits it
+
+# Partitioned host queues (README, "Partitions"; decisions 96 to 99). The installation's NATS
+# account maps every agent's inbox, control queue and live-control address to the signed
+# subject plus one token, the agent's partition: FNV-1a (32 bits) over the UTF-8 bytes of the
+# team id followed at once by the agent id, modulo the count, which is what nats-server's
+# partition(COUNT,1,3) computes over the subject's team and agent tokens. Senders publish the
+# signed subject; NATS checks publish grants against the mapped one and stores and delivers it,
+# so a receiver checks that the subject it got is the signed subject plus exactly the agent's
+# partition (subject_mismatch otherwise). COUNT is the installation's count, from the setting
+# named here and fixed when the installation is created: changing it moves every queued
+# message to another stream, an upgrade that drains the queues. max_count is the largest
+# multiple of 32 at which both a host owning every partition of its team beside 10 pools and
+# the team services, with the longest ids, fit max_credential_bytes (README, "Credential
+# size").
+partitions:
+  count_setting: transport.queues.partitions
+  default_count: 96
+  max_count: 128
+  account_mappings:
+    "ua.v1.*.*.work.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
+    "ua.v1.*.*.work.control.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.control.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
+    "ua.v1.*.*.ctl.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.ctl.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
 
 # Stream sizes (README, "Stream sizes"). Every work and dead-letter stream has a byte limit
 # besides its age limit. The installation authority, which creates the streams, reads the
@@ -75,7 +101,7 @@ limits:
 # is dropped unread.
 queues:
   max_bytes_setting: transport.queues.max_bytes                # one byte limit per size kind
-  size_kinds: [agent_work, work, dead_letter]
+  size_kinds: [partition, pool, work, dead_letter]
   warn_at_percent_setting: transport.queues.warn_at_percent
   warn_at_percent_default: 80
 
@@ -83,7 +109,7 @@ classes:
   durable:
     description: at least once; the sender records before publishing, the receiver admits durably before acknowledging
     between_installations: true   # the only class another installation may send: NATS forgets reply routes between accounts
-    streams: ["UA1_AGENT_WORK_{team}", UA1_WORK]
+    streams: ["UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", UA1_WORK]
     addresses:
       - work.agent.{agent}
       - work.control.{agent}
@@ -125,33 +151,47 @@ agent_queues:
   inbox: work.agent.{agent}
   control: work.control.{agent}
 
-# A stream whose name holds {team} exists once per team; the topology owner creates it with
-# the team. Each durable or dead-letter address is stored in exactly one of its class's
-# streams.
+# A stream whose name holds {team} exists once per team, and one whose name also holds
+# {partition} once per team and partition (joined by ~, which ids cannot hold); the topology
+# owner creates them with the team. Each durable or dead-letter address is stored in exactly
+# one of its class's streams.
 streams:
-  UA1_AGENT_WORK_{team}:
-    # One team's agent inboxes, agent control queues and worker pools; each host reads only
-    # its own agents' and pools' consumers here.
-    subjects: ["ua.v1.{team}.*.work.agent.*", "ua.v1.{team}.*.work.control.*", "ua.v1.{team}.*.work.pool.*"]
+  UA1_PART_{team}~{partition}:
+    # The inboxes and control queues of one team's agents whose ids fall in one partition. The
+    # host that owns the partition reads every consumer here: the topology owner creates them
+    # only for agents placed in it, and all of those run on that host.
+    subjects: ["ua.v1.{team}.*.work.agent.*.{partition}", "ua.v1.{team}.*.work.control.*.{partition}"]
     retention: workqueue
     storage: file
     max_age_seconds: 604860     # the durable class's longest expiry plus a minute (more than the clock tolerance): no receiver could still accept older work
     duplicate_window_seconds: 120
-    max_consumers: 4096         # two per agent (inbox and control queue) and one per pool of one team; NATS 2.15 defaults to 1,000 per stream
+    max_consumers: 1024         # two per agent (inbox and control queue): up to 512 agents in one partition; NATS 2.15 defaults to 1,000 per stream
     max_message_bytes: 263168   # max_frame_bytes plus max_header_bytes: JetStream counts headers in a message's size
-    size_kind: agent_work
+    size_kind: partition
     discard: new                # a full stream refuses new work and control messages alike; senders keep them in their outboxes until they expire
+  UA1_POOL_WORK_{team}:
+    # One team's worker pools and nothing else; each host reads only its own pools' consumers
+    # here, and the worker pool controller's host reads every pool consumer's information.
+    subjects: ["ua.v1.{team}.*.work.pool.*"]
+    retention: workqueue
+    storage: file
+    max_age_seconds: 604860     # as UA1_PART_{team}~{partition}
+    duplicate_window_seconds: 120
+    max_consumers: 1024         # one per worker type of the team
+    max_message_bytes: 263168   # as UA1_PART_{team}~{partition}
+    size_kind: pool
+    discard: new                # as UA1_PART_{team}~{partition}
   UA1_WORK:
     # Edge deliveries and the team services' inbox, read through exact consumer grants.
     subjects: [ua.v1.*.*.work.edge.*, ua.v1.*.*.work.team]
     retention: workqueue
     storage: file
-    max_age_seconds: 604860     # as UA1_AGENT_WORK_{team}
+    max_age_seconds: 604860     # as UA1_PART_{team}~{partition}
     duplicate_window_seconds: 120
     max_consumers: 4096         # NATS 2.15 defaults to 1,000 per stream
-    max_message_bytes: 263168   # as UA1_AGENT_WORK_{team}
+    max_message_bytes: 263168   # as UA1_PART_{team}~{partition}
     size_kind: work
-    discard: new                # as UA1_AGENT_WORK_{team}
+    discard: new                # as UA1_PART_{team}~{partition}
   UA1_DLQ_{team}:
     # One team's set-aside copies and notices; of the hosts, only its team services read and
     # delete here (the topology owner, which creates every stream's consumers, could too).
@@ -159,7 +199,7 @@ streams:
     retention: limits
     storage: file
     max_age_seconds: 2592060    # the dead-letter class's expiry plus a minute
-    max_message_bytes: 263168   # as UA1_AGENT_WORK_{team}; a raw copy keeps at most max_frame_bytes of the refused message, and a larger message gets a notice with raw.stored false
+    max_message_bytes: 263168   # as UA1_PART_{team}~{partition}; a raw copy keeps at most max_frame_bytes of the refused message, and a larger message gets a notice with raw.stored false
     max_consumers: 16           # the team services' notice consumer, and a few the topology owner creates for an administrator's inspection
     max_msgs_per_subject: 1     # each copy id names one subject: a retried publish replaces its copy, so deleting a copy leaves no duplicate
     size_kind: dead_letter
@@ -173,26 +213,27 @@ streams:
 # Consumer names join ids with ~, which ids cannot contain: with _ (allowed in ids),
 # team "team_example" with agent "researcher-2" and team "team" with agent
 # "example_researcher-2" would share one consumer, and NATS silently updates the
-# first consumer's filter when the second is created.
+# first consumer's filter when the second is created. A name holds every id of its filter
+# that its stream's name does not; a name is unique within its stream only.
 consumers:
   agent_inbox:
-    stream: UA1_AGENT_WORK_{team}
-    name: agent~{team}~{agent}
-    filter: ua.v1.{team}.*.work.agent.{agent}
+    stream: UA1_PART_{team}~{partition}
+    name: agent~{agent}
+    filter: ua.v1.{team}.*.work.agent.{agent}.{partition}
     mode: pull
     ack: explicit
     ack_wait_seconds: 60
     max_deliveries: 20
   agent_control:
-    stream: UA1_AGENT_WORK_{team}
-    name: control~{team}~{agent}
-    filter: ua.v1.{team}.*.work.control.{agent}
+    stream: UA1_PART_{team}~{partition}
+    name: control~{agent}
+    filter: ua.v1.{team}.*.work.control.{agent}.{partition}
     mode: pull
     ack: explicit
     ack_wait_seconds: 60
     max_deliveries: 20
   pool:
-    stream: UA1_AGENT_WORK_{team}
+    stream: UA1_POOL_WORK_{team}
     name: pool~{team}~{pool}
     filter: ua.v1.{team}.*.work.pool.{pool}
     mode: pull
@@ -227,14 +268,25 @@ consumers:
 
 # Who manages the JetStream objects above (README, "Who sets up the streams"). The
 # topology owner creates and updates every stream and consumer: the installation authority,
-# which already decides which hosts serve which teams, agents and pools. The withdrawal role
-# finds a queued task in its own team's stream by its task id, and deletes it by its stream
-# sequence; no other role may. Only per-team streams, so neither grant reaches
+# which already decides which hosts serve which teams, partitions and pools, and holds the
+# account's signing key, so its JetStream grants name every stream of the account rather than
+# a line per team and partition. The withdrawal role finds a queued task in its own team's
+# streams by its task id, and deletes it by its stream sequence; no other role may. A task's
+# copy does not name the agent or pool it went to, so withdrawal searches each of the team's
+# partition streams and its pool stream. Only per-team streams, so neither grant reaches
 # another team's messages (README, "Withdrawing queued work").
 topology_owner: installation_authority
 withdrawal:
   role: team_services
-  streams: ["UA1_AGENT_WORK_{team}"]
+  streams: ["UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}"]
+# The worker pool controller (custom_agents.worker_pool_controller) runs with the team lead and
+# starts workers from how much work waits for each pool, so its host role reads the
+# information (pending counts, never contents) of every pool consumer of its team. The pool
+# stream holds only pool consumers, so one grant per team covers them and no other role holds
+# it (README, "Grants for the agents a host runs").
+pool_controller:
+  role: lead_host
+  stream: UA1_POOL_WORK_{team}
 # The dead-letter custody role finds a raw copy by its subject (the last message for
 # ua.v1.<team>.<notice sender>.dlq.raw.<copy id>), reads it, and deletes it by the sequence that
 # read returns; it deletes the raw copies that name a departed person the same way (README, "Dead
@@ -260,7 +312,7 @@ key_value_stream:
 # Key-value buckets. readers are the roles that read a bucket (generated grants: direct
 # reads, watches through their own inbox, and the bucket's stream information); writers name,
 # per role, the keys it may write, as templates that membership code fills like subjects
-# ({self} its runtime id, {team} each team it serves, {agent} each agent it runs,
+# ({self} its runtime id, {team} each team it serves, {partition} each partition it owns,
 # {installation} its own installation, {peer} each installation an agreement names; README,
 # "Key-value grants"). A record's writers in registry state_records are among its bucket's
 # writers. A bucket whose name holds {team} exists once per team, so its grants reach no other
@@ -292,8 +344,8 @@ key_value:
     per_key_ttl_seconds: 180
     readers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     writers:
-      lead_host: ["{team}.{agent}"]
-      worker_host: ["{team}.{agent}"]
+      lead_host: ["{team}.{partition}.*"]    # the agents of the host's own partitions, all of which it runs
+      worker_host: ["{team}.{partition}.*"]
   UA1_PLACEMENT:
     description: which host runs an agent and that host's epoch; the record's signed sequence is the fencing token
     per_key_ttl_seconds: 0

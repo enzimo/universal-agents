@@ -90,12 +90,11 @@ def consumer_name(template: str, **ids: str) -> str:
     return TRANSPORT["consumers"][template]["name"].format(team=TEAM, **ids)
 
 
-def consumer_stream(template: str, team: str = TEAM) -> str:
-    return TRANSPORT["consumers"][template]["stream"].format(team=team)
+def consumer_stream(template: str, team: str = TEAM, partition: int = 0) -> str:
+    return TRANSPORT["consumers"][template]["stream"].format(team=team, partition=partition)
 
 
-# The team's agent inboxes, agent control queues and worker pools; each host reads only its own
-# agents' and pools' consumers.
+# One partition's stream of the team's agent inboxes and control queues.
 AGENT_STREAM = consumer_stream("agent_inbox")
 # Each agent's two queues (README, "An agent's two queues").
 AGENT_QUEUES = ("agent_inbox", "agent_control")

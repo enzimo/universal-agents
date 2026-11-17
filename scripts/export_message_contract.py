@@ -1155,7 +1155,8 @@ def check_consumer_names(transport: dict[str, Any]) -> None:
     NATS silently updates an existing consumer's filter when a consumer with the
     same name is created, so one team could take another's work. Each name starts
     with a fixed word that ends in a character ids cannot contain, separates its
-    ids the same way, and uses exactly its filter's placeholders.
+    ids the same way, and holds every id of its filter that its stream's name does not
+    (a name is unique within its stream only), and no other.
     """
 
     prefixes = []
@@ -1163,8 +1164,11 @@ def check_consumer_names(transport: dict[str, Any]) -> None:
         where = f"transport.yaml consumers.{key}"
         parts = re.split(r"(\{[a-z_]+\})", consumer["name"])
         literals, placeholders = parts[::2], parts[1::2]
-        if sorted(placeholders) != sorted(re.findall(r"\{[a-z_]+\}", consumer["filter"])):
-            raise ContractError(f"{where}: the name must use exactly the filter's placeholders")
+        filter_ids = set(re.findall(r"\{[a-z_]+\}", consumer["filter"]))
+        stream_ids = set(re.findall(r"\{[a-z_]+\}", consumer["stream"]))
+        if not filter_ids - stream_ids <= set(placeholders) <= filter_ids or len(set(placeholders)) != len(placeholders):
+            raise ContractError(f"{where}: the name holds each of its filter's ids that its stream's name does not, "
+                                "once, and no other")
         if not literals[0] or ID_CHARACTER.fullmatch(literals[0][-1]):
             raise ContractError(f"{where}: start the name with a fixed word ending in a character ids cannot contain")
         if any(all(ID_CHARACTER.fullmatch(character) for character in literal) for literal in literals[1:-1]):
@@ -1199,9 +1203,85 @@ def check_transport(transport: dict[str, Any]) -> None:
         if not isinstance(spec.get("between_installations"), bool):
             raise ContractError(f"transport.yaml: class {name} states between_installations")
         check_class_streams(name, spec, transport, skew)
+    check_partitions(transport)
     check_stream_subjects(transport)
     check_agent_queues(transport)
     check_stream_sizes(transport)
+
+
+# The installation setting that holds the partition count (transport.yaml partitions), what
+# the account mapping's last token computes, and the step max_count is a multiple of.
+PARTITION_SETTING = "transport.queues.partitions"
+PARTITION_PLACEHOLDER = "partition"
+PARTITION_FUNCTION = "{{partition(COUNT,1,3)}}"
+PARTITION_COUNT_STEP = 32
+# A stream name that holds a partition joins it to its team with ~, which ids cannot hold.
+PARTITION_STREAM_PART = "{team}~{partition}"
+
+
+def partitioned_addresses(transport: dict[str, Any]) -> list[str]:
+    """The addresses the account maps to the agent's partition: every address delivered to an agent (README, "Partitions")."""
+
+    return [address for spec in transport["classes"].values() for address in spec["addresses"]
+            if audience_target(address) == "agent"]
+
+
+def partition_mapping(address: str) -> tuple[str, str]:
+    """The account mapping for one agent address: any team, sender and agent, to the same subject plus the partition.
+
+    nats-server's mapping functions must fill a whole token, and partition(COUNT,1,3) hashes the
+    first and third wildcards, the team and the agent, in that order.
+    """
+
+    source = SUBJECT_ROOT + "*.*." + address.replace("{agent}", "*")
+    target = (SUBJECT_ROOT + "{{wildcard(1)}}.{{wildcard(2)}}." + address.replace("{agent}", "{{wildcard(3)}}")
+              + "." + PARTITION_FUNCTION)
+    return source, target
+
+
+def stored_subject(address: str, owner: str, transport: dict[str, Any]) -> str:
+    """The subject NATS stores and delivers an address under: the signed subject, plus {partition} where the account maps it."""
+
+    subject = full_subject(address, owner)
+    return subject + ".{" + PARTITION_PLACEHOLDER + "}" if address in partitioned_addresses(transport) else subject
+
+
+def publish_subject(address: str, transport: dict[str, Any]) -> str:
+    """A sender's publish grant for an address under its own id; NATS checks it against the mapped subject (any partition)."""
+
+    subject = full_subject(send_pattern(address), "{self}")
+    return subject + ".*" if address in partitioned_addresses(transport) else subject
+
+
+def subscribe_subject(address: str, transport: dict[str, Any]) -> str:
+    """A receiver's subscription for a request or event address: per partition it owns, any agent there; otherwise per id."""
+
+    subject = stored_subject(address, "*", transport)
+    return subject.replace("{agent}", "*") if address in partitioned_addresses(transport) else subject
+
+
+def check_partitions(transport: dict[str, Any]) -> None:
+    """The partition count's setting and limits, and the account mappings that put each agent's addresses in its partition.
+
+    The mappings must be exactly the ones the contract derives from the agent addresses: a
+    mapping that missed one would leave its subjects unmapped, stored in no partition stream,
+    and one that hashed other tokens would put an agent's queues where its host does not read.
+    """
+
+    where = "transport.yaml partitions"
+    spec = transport.get("partitions")
+    if not isinstance(spec, dict) or set(spec) != {"count_setting", "default_count", "max_count", "account_mappings"} \
+            or spec["count_setting"] != PARTITION_SETTING:
+        raise ContractError(f"{where}: names the setting {PARTITION_SETTING}, the default and largest counts and the "
+                            "account mappings")
+    largest, default = spec["max_count"], spec["default_count"]
+    if type(largest) is not int or largest < PARTITION_COUNT_STEP or largest % PARTITION_COUNT_STEP:
+        raise ContractError(f"{where}: max_count is a positive multiple of {PARTITION_COUNT_STEP}")
+    if type(default) is not int or not 1 <= default <= largest:
+        raise ContractError(f"{where}: default_count is a whole number from 1 to max_count")
+    expected = dict(partition_mapping(address) for address in partitioned_addresses(transport))
+    if spec["account_mappings"] != expected:
+        raise ContractError(f"{where}: account_mappings map exactly the agent addresses to their partition: {expected}")
 
 
 # The instance settings that size the streams (transport.yaml queues).
@@ -1254,10 +1334,9 @@ def check_agent_queues(transport: dict[str, Any]) -> None:
             or len(durable) != 2:
         raise ContractError("transport.yaml: agent_queues names the inbox and the control queue, the durable class's "
                             "two agent addresses")
-    prefix = transport["subject_prefix"].replace("{sender}", "*") + "."
     filters = [consumer["filter"] for consumer in transport["consumers"].values()]
     for queue, address in queues.items():
-        if filters.count(prefix + address) != 1:
+        if filters.count(stored_subject(address, "*", transport)) != 1:
             name = "control queue" if queue == "control" else queue
             raise ContractError(f"transport.yaml: the agent's {name} ({address}) has exactly one consumer, so the host "
                                 "reads it on its own")
@@ -1311,12 +1390,34 @@ def check_stream_management(registry: dict[str, Any], transport: dict[str, Any])
         # copy under the same subject, from a retried publish, would survive that delete.
         if transport["streams"][stream].get("max_msgs_per_subject") != 1:
             raise ContractError(f"transport.yaml: stream {stream} keeps one message per subject (max_msgs_per_subject: 1)")
+    check_pool_controller(registry, transport)
     check_key_value(registry, transport)
 
 
-# What a key template may name: the host itself, each team it serves, each agent it runs, its own
-# installation and each installation an agreement names.
-KEY_PLACEHOLDERS = {"self", "team", "agent", "installation", "peer"}
+def check_pool_controller(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """The worker pool controller's host reads every pool consumer's information, and that stream holds nothing else (A3).
+
+    The grant names any consumer of the stream, so the stream must hold only pool
+    consumers: an agent's consumer there would show another host's agent to it.
+    """
+
+    where = "transport.yaml pool_controller"
+    spec = transport.get("pool_controller")
+    if not isinstance(spec, dict) or set(spec) != {"role", "stream"} or spec["role"] not in registry["host_roles"] \
+            or spec["role"] not in transport["audience_targets"]["pool"]:
+        raise ContractError(f"{where}: names a host role that serves pools and the stream of its team's pools")
+    pool = stored_subject(next(address for address in transport["classes"]["durable"]["addresses"]
+                               if audience_target(address) == "pool"), "*", transport)
+    stream = transport["streams"].get(spec["stream"])
+    readers = [consumer for consumer in transport["consumers"].values() if consumer["stream"] == spec["stream"]]
+    if stream is None or "{team}" not in spec["stream"] or [consumer["filter"] for consumer in readers] != [pool] \
+            or not all(subject_covers(subject, pool) for subject in stream["subjects"]):
+        raise ContractError(f"{where}: stream is a per-team stream that holds only the pool queues and their consumers")
+
+
+# What a key template may name: the host itself, each team it serves, each partition it owns, its
+# own installation and each installation an agreement names.
+KEY_PLACEHOLDERS = {"self", "team", PARTITION_PLACEHOLDER, "installation", "peer"}
 # What a bucket name may name: a bucket per team holds that team's records only.
 BUCKET_PLACEHOLDERS = {"team"}
 # The stream settings every bucket has (transport.yaml key_value_stream): only the consumer
@@ -1590,7 +1691,7 @@ def check_stream_subjects(transport: dict[str, Any]) -> None:
     check_streams_disjoint(patterns)
     for class_name, spec in transport["classes"].items():
         for address in class_addresses(transport, class_name):
-            check_address_storage(class_name, spec.get("streams"), address, patterns)
+            check_address_storage(class_name, spec.get("streams"), address, stored_subject(address, "*", transport), patterns)
     for key, consumer in transport["consumers"].items():
         stream = transport["streams"].get(consumer["stream"])
         if stream is None or not any(subject_covers(pattern, consumer["filter"]) for pattern in stream["subjects"]):
@@ -1611,22 +1712,28 @@ def check_streams_disjoint(patterns: list[tuple[str, str]]) -> None:
 
 
 def check_stream_name(name: str, spec: dict[str, Any]) -> None:
-    """A stream name may hold {team}; that stream exists once per team and stores only that team's subjects."""
+    """A stream name may hold {team}, and {partition} joined to it; it stores only that team's (and partition's) subjects."""
 
     placeholders = set(re.findall(r"\{([a-z_]+)\}", name))
-    if placeholders - {"team"}:
-        raise ContractError(f"transport.yaml: stream {name} may name only {{team}}")
+    if placeholders - {"team", PARTITION_PLACEHOLDER} or (
+            PARTITION_PLACEHOLDER in placeholders and PARTITION_STREAM_PART not in name):
+        raise ContractError(f"transport.yaml: stream {name} may name only {{team}}, and {{partition}} as "
+                            f"{PARTITION_STREAM_PART}")
     team_token = f"{SUBJECT_ROOT}{{team}}."
     if placeholders and not all(subject.startswith(team_token) for subject in spec["subjects"]):
         raise ContractError(f"transport.yaml: each subject of stream {name} starts {team_token}")
-    if re.search(r"[\s.*>/\\]", name.replace("{team}", "")):
+    partition_token = ".{" + PARTITION_PLACEHOLDER + "}"
+    if (PARTITION_PLACEHOLDER in placeholders) != all(subject.endswith(partition_token) for subject in spec["subjects"]) \
+            or any(partition_token in subject[:-len(partition_token)] for subject in spec["subjects"]):
+        raise ContractError(f"transport.yaml: stream {name}'s subjects end with {{partition}} exactly when its name holds it")
+    if re.search(r"[\s.*>/\\]", name.replace("{team}", "").replace("{" + PARTITION_PLACEHOLDER + "}", "")):
         raise ContractError(f"transport.yaml: stream {name}: NATS stream names cannot hold whitespace, ., *, >, / or \\")
 
 
-def check_address_storage(class_name: str, streams: list[str] | None, address: str, patterns: list[tuple[str, str]]) -> None:
-    """A queued class's address is stored in exactly one of its streams; any other class's in none."""
+def check_address_storage(class_name: str, streams: list[str] | None, address: str, subject: str,
+                          patterns: list[tuple[str, str]]) -> None:
+    """A queued class's address, stored under ``subject``, is in exactly one of its streams; any other class's in none."""
 
-    subject = full_subject(address, "*")
     storing = [stream for stream, pattern in patterns if subjects_overlap(pattern, subject)]
     if streams is None:
         if storing:
@@ -1672,20 +1779,23 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
     """Pull, inspect and acknowledge the consumers for this delivery address.
 
     Consumer names keep their {team} and receiver placeholders; membership code fills
-    them with the host's own teams and each id it runs or serves, never with wildcards,
-    so a host reads no other host's agents' queues. Creating consumers stays with the
-    topology owner.
+    them with the host's own teams and each pool and edge it runs or serves, never with
+    wildcards, so a host reads no other host's pools. In a partition stream the grant
+    names the stream and any consumer: the topology owner creates consumers there only
+    for agents placed in the partition, and they all run on the host that owns it, so
+    the host's credential changes with its partitions, never its agents. Creating
+    consumers stays with the topology owner.
     """
 
     # A dead-letter address names the copy id, which no consumer filters on.
-    expected_filter = transport["subject_prefix"].replace("{sender}", "*") + "." + address.replace("{copy}", "*")
+    expected_filter = stored_subject(address.replace("{copy}", "*"), "*", transport)
     matches = [consumer for consumer in transport["consumers"].values() if consumer["filter"] == expected_filter]
     if not matches:
         raise ContractError(f"no pull consumer for {address}")
     subjects = set()
     for consumer in matches:
         stream = consumer["stream"]
-        name = consumer["name"]
+        name = "*" if "{" + PARTITION_PLACEHOLDER + "}" in stream else consumer["name"]
         subjects.update({
             f"$JS.API.CONSUMER.INFO.{stream}.{name}",
             f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
@@ -1694,32 +1804,33 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
     return subjects
 
 
-def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
-    """The JetStream API subjects of the topology owner and of the role that withdraws queued work.
+# The topology owner's JetStream grants, on every stream of the account (README, "Who sets up
+# the streams"): the account's information (its storage and what the streams set aside, checked
+# before it creates any), streams, their consumers (bucket watches that readers left behind
+# among them) and single messages (a team's removal and the old streams at an upgrade).
+TOPOLOGY_OWNER_GRANTS = frozenset({
+    "$JS.API.INFO",
+    *(f"$JS.API.STREAM.{action}.*" for action in ("CREATE", "UPDATE", "INFO", "DELETE", "MSG.GET", "MSG.DELETE")),
+    *(f"$JS.API.CONSUMER.{action}.*.*" for action in ("CREATE", "DURABLE.CREATE", "INFO", "DELETE")),
+    "$JS.API.CONSUMER.CREATE.*.*.>", "$JS.API.CONSUMER.NAMES.*", "$JS.API.CONSUMER.LIST.*",
+})
 
-    The topology owner creates, updates and inspects every stream, and creates, inspects
-    and deletes every consumer of them. Consumer names are a wildcard for it: it serves
-    every agent, pool and edge, and membership code fills {team} with every team of the
-    installation. The withdrawal role reads its own team's stream to find a queued
-    message and deletes it by its stream sequence; NATS cannot narrow either to some
-    subjects of a stream, so withdrawal uses per-team streams only.
+
+def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
+    """The JetStream API subjects of the topology owner, the role that withdraws queued work and the pool controller.
+
+    The topology owner creates, updates, inspects and deletes every stream and consumer of
+    the account: it already decides which hosts serve which teams, partitions and pools and
+    holds the account's signing key, so wider grants add no power, and lines per team and
+    partition would grow with both. The withdrawal role reads its own team's streams to
+    find a queued message and deletes it by its stream sequence; NATS cannot narrow either
+    to some subjects of a stream, so withdrawal uses per-team streams only. The pool
+    controller's host reads the information of every consumer of its team's pool stream.
     """
 
-    owner: set[str] = set()
-    buckets = [bucket_stream(bucket) for bucket in transport["key_value"]]
-    objects = [object_stream(bucket) for bucket in transport["object_store"]]
-    for stream in [*transport["streams"], *buckets, *objects]:
-        owner |= {f"$JS.API.STREAM.{action}.{stream}" for action in ("CREATE", "UPDATE", "INFO")}
-    for stream in {consumer["stream"] for consumer in transport["consumers"].values()}:
-        owner |= {f"$JS.API.CONSUMER.CREATE.{stream}.*", f"$JS.API.CONSUMER.CREATE.{stream}.*.>",
-                  f"$JS.API.CONSUMER.DURABLE.CREATE.{stream}.*", f"$JS.API.CONSUMER.INFO.{stream}.*",
-                  f"$JS.API.CONSUMER.DELETE.{stream}.*"}
-    # Readers create the buckets' watch consumers; the owner finds and deletes them when a
-    # host left too many behind and filled a bucket's consumer limit.
-    for stream in buckets:
-        owner |= {f"$JS.API.CONSUMER.NAMES.{stream}", f"$JS.API.CONSUMER.LIST.{stream}",
-                  f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.API.CONSUMER.DELETE.{stream}.*"}
-    grants = {transport["topology_owner"]: owner}
+    grants = {transport["topology_owner"]: set(TOPOLOGY_OWNER_GRANTS)}
+    controller = transport["pool_controller"]
+    grants.setdefault(controller["role"], set()).add(f"$JS.API.CONSUMER.INFO.{controller['stream']}.*")
     # Withdrawal and dead-letter custody read a message by its sequence and delete it there.
     for key in ("withdrawal", "dead_letter_custody"):
         custody = transport[key]
@@ -1799,11 +1910,12 @@ def object_store_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Per host role: the NATS permissions it gets, as templates.
 
-    {team} is each team the host serves and {self} its runtime id. {agent}, {pool} and
-    {edge} are each agent and pool the host runs and each edge it serves: membership
-    code repeats a subject once per id and never turns one into a wildcard, so a host
-    receives requests and queued work only for its own agents and pools, and its
-    credential changes when it gains or loses one. A host publishes only under its own id.
+    {team} is each team the host serves and {self} its runtime id. {partition}, {pool} and
+    {edge} are each partition the host owns, each pool it runs and each edge it serves:
+    membership code repeats a subject once per id and never turns one into a wildcard, so
+    a host receives requests and queued work only for the agents of its own partitions and
+    its own pools, and its credential changes when it gains or loses a partition or a
+    pool, never an agent. No template names an agent. A host publishes only under its own id.
     A receiver of requests answers each one once, within the class's expiry, through
     NATS allow_responses; it holds no grant on other runtimes' inboxes.
     """
@@ -1818,7 +1930,7 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
         subscribe = {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         answers_requests = False
         for entry in registry["kinds"].values():
-            publish.update(full_subject(send_pattern(address), "{self}") for address in publication_addresses(entry, transport)
+            publish.update(publish_subject(address, transport) for address in publication_addresses(entry, transport)
                            if role in address_senders(entry, address))
             for address in entry_addresses(entry):
                 if role not in receiving_roles(entry, address, transport):
@@ -1827,8 +1939,10 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                     # Queued work and dead-letter notices are pulled from their consumers.
                     publish.update(consumer_permissions(address, transport))
                 else:
-                    subscribe.add(full_subject(address, "*"))
+                    subscribe.add(subscribe_subject(address, transport))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
+        if any("{agent}" in subject for subject in publish | subscribe):
+            raise ContractError(f"{role}: generated grants name partitions, not agents (README, \"Partitions\")")
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
         if answers_requests:
             document["allow_responses"] = {"max": 1, "expires": f"{reply_window}s"}
@@ -2239,6 +2353,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"MAX_HEADER_BYTES = {transport['limits']['max_header_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
+        f"MAX_PARTITION_COUNT = {transport['partitions']['max_count']!r}\n"
         f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
         f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"
         f"PEER_SENDER_SLOT = {transport['peer_sender_slot']!r}\n"

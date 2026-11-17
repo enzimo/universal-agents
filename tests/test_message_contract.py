@@ -318,7 +318,9 @@ def test_two_schemas_with_one_generated_name_are_refused() -> None:
     ("agent~{team}_{agent}", "separate the ids"),
     ("agent_{team}~{agent}", "fixed word"),
     ("agent{team}~{agent}", "fixed word"),
-    ("agent~{team}", "exactly the filter's placeholders"),
+    ("agent~{team}", "holds each of its filter's ids that its stream's name does not"),
+    ("agent~{agent}~{agent}", "once, and no other"),
+    ("agent~{agent}~{pool}", "once, and no other"),
     ("agent.{team}~{agent}", "consumer names cannot hold"),
 ])
 def test_consumer_names_that_different_ids_could_share_are_refused(name: str, problem: str) -> None:
@@ -379,7 +381,7 @@ def test_outcomes_that_ask_for_a_retry_are_not_stored() -> None:
         (lambda t: t["streams"]["UA1_WORK"].update(max_age_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
          "must keep messages"),
         (lambda t: t["streams"]["UA1_WORK"].pop("max_age_seconds"), "must keep messages"),
-        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"].pop("max_age_seconds"), "must keep messages"),
+        (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].pop("max_age_seconds"), "must keep messages"),
         (lambda t: t["classes"]["durable"].update(streams=["UA1_MISSING"]), "unknown stream"),
         (lambda t: t.update(replay_ledger_retention_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
          "replay records"),
@@ -398,17 +400,25 @@ def test_transport_settings_that_would_lose_or_replay_messages_are_refused(chang
         # NATS refuses a stream whose subjects overlap another's.
         (lambda t: t["streams"]["UA1_WORK"].update(subjects=["ua.v1.*.*.work.>"]), "overlap"),
         # Agent work left out of every stream would never be stored.
-        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"].update(subjects=["ua.v1.{team}.*.work.pool.*"]),
+        (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].update(subjects=["ua.v1.{team}.*.work.control.*.{partition}"]),
          "work.agent.{agent} is stored in exactly one"),
+        # The account stores an agent's queues under the partition token; a stream without it stores nothing mapped.
+        (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].update(
+            subjects=["ua.v1.{team}.*.work.agent.*", "ua.v1.{team}.*.work.control.*"]), "end with {partition} exactly"),
+        (lambda t: t["streams"]["UA1_POOL_WORK_{team}"].update(subjects=["ua.v1.{team}.*.work.pool.*.{partition}"]),
+         "end with {partition} exactly"),
+        (lambda t: t["streams"].update({"UA1_PART_{partition}_{team}": t["streams"]["UA1_PART_{team}~{partition}"]}),
+         "{partition} as {team}~{partition}"),
         # Requests are answered at once; a stream holding them would keep every request.
         (lambda t: t["streams"]["UA1_WORK"]["subjects"].append("ua.v1.*.*.svc.team"), "stores request_reply traffic"),
         # A team's stream holds only that team's work.
-        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"]["subjects"].append("ua.v1.*.*.work.agent.extra"),
+        (lambda t: t["streams"]["UA1_POOL_WORK_{team}"]["subjects"].append("ua.v1.*.*.work.edge.extra"),
          "starts ua.v1.{team}."),
         (lambda t: t["streams"].update({"UA1_{team}_{edge}": {"subjects": ["ua.v1.{team}.*.spare"]}}), "may name only"),
-        (lambda t: t["consumers"]["edge"].update(stream="UA1_AGENT_WORK_{team}"), "stores its filter's subjects"),
+        (lambda t: t["consumers"]["edge"].update(stream="UA1_POOL_WORK_{team}"), "stores its filter's subjects"),
+        (lambda t: t["consumers"]["agent_inbox"].update(filter="ua.v1.{team}.*.work.agent.{agent}"), "stores its filter's subjects"),
         # An agent's control queue is read on its own, with its own consumer.
-        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"]["subjects"].remove("ua.v1.{team}.*.work.control.*"),
+        (lambda t: t["streams"]["UA1_PART_{team}~{partition}"]["subjects"].remove("ua.v1.{team}.*.work.control.*.{partition}"),
          "work.control.{agent} is stored in exactly one"),
         (lambda t: t.pop("agent_queues"), "agent_queues names the inbox and the control queue"),
         (lambda t: t["agent_queues"].update(control="work.agent.{agent}"), "agent_queues names the inbox and the control queue"),
@@ -431,10 +441,10 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
     assert (queues["max_bytes_setting"], queues["warn_at_percent_setting"], queues["warn_at_percent_default"]) == (
         "transport.queues.max_bytes", "transport.queues.warn_at_percent", 80)
     queued = {stream for spec in TRANSPORT["classes"].values() for stream in spec.get("streams", [])}
-    assert queued == {"UA1_AGENT_WORK_{team}", "UA1_WORK", "UA1_DLQ_{team}"}
+    assert queued == {"UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_WORK", "UA1_DLQ_{team}"}
     assert {name: (TRANSPORT["streams"][name]["size_kind"], TRANSPORT["streams"][name]["discard"]) for name in queued} == {
-        "UA1_AGENT_WORK_{team}": ("agent_work", "new"), "UA1_WORK": ("work", "new"),
-        "UA1_DLQ_{team}": ("dead_letter", "new")}
+        "UA1_PART_{team}~{partition}": ("partition", "new"), "UA1_POOL_WORK_{team}": ("pool", "new"),
+        "UA1_WORK": ("work", "new"), "UA1_DLQ_{team}": ("dead_letter", "new")}
     readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
     for text in ("**Stream sizes.**", "`transport.queues.max_bytes`", "`transport.queues.warn_at_percent`",
                  "(80 by default)", "**When the stream is full.**"):
@@ -447,9 +457,9 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
         # Dropping the oldest messages would lose unread set-aside copies and notices.
         (lambda t: t["streams"]["UA1_DLQ_{team}"].update(discard="old"), "UA1_DLQ_{team} refuses new messages"),
         (lambda t: t["streams"]["UA1_WORK"].pop("discard"), "UA1_WORK refuses new messages"),
-        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"].pop("size_kind"), "names its byte limit's size kind"),
-        (lambda t: t["streams"]["UA1_WORK"].update(size_kind="pool"), "names its byte limit's size kind"),
-        (lambda t: t["queues"]["size_kinds"].append("pool"), "unused ['pool']"),
+        (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].pop("size_kind"), "names its byte limit's size kind"),
+        (lambda t: t["streams"]["UA1_WORK"].update(size_kind="agent_work"), "names its byte limit's size kind"),
+        (lambda t: t["queues"]["size_kinds"].append("agent_work"), "unused ['agent_work']"),
         (lambda t: t["queues"]["size_kinds"].append("work"), "distinct snake_case"),
         (lambda t: t["queues"].update(max_bytes_setting="queues.max_bytes"), "names the settings"),
         (lambda t: t["queues"].pop("warn_at_percent_setting"), "names the settings"),
@@ -458,6 +468,49 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
     ],
 )
 def test_stream_sizes_that_would_drop_messages_or_name_no_setting_are_refused(change, problem) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    change(transport)
+    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+        EXPORT.check_transport(transport)
+
+
+def test_the_account_maps_every_agent_address_to_its_partition_and_nothing_else() -> None:
+    """README, "Partitions": the inbox, the control queue and live control get the partition token."""
+
+    partitions = TRANSPORT["partitions"]
+    assert (partitions["count_setting"], partitions["default_count"]) == ("transport.queues.partitions", 96)
+    assert partitions["max_count"] == kinds.MAX_PARTITION_COUNT
+    assert EXPORT.partitioned_addresses(TRANSPORT) == ["work.agent.{agent}", "work.control.{agent}", "ctl.agent.{agent}"]
+    assert partitions["account_mappings"]["ua.v1.*.*.work.agent.*"] == (
+        "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}")
+    # The signed subject stays unmapped; NATS stores, delivers and checks grants on the mapped one.
+    assert EXPORT.stored_subject("work.agent.{agent}", "*", TRANSPORT) == "ua.v1.{team}.*.work.agent.{agent}.{partition}"
+    assert EXPORT.stored_subject("work.pool.{pool}", "*", TRANSPORT) == "ua.v1.{team}.*.work.pool.{pool}"
+    assert EXPORT.publish_subject("work.control.{agent}", TRANSPORT) == "ua.v1.{team}.{self}.work.control.*.*"
+    assert EXPORT.subscribe_subject("ctl.agent.{agent}", TRANSPORT) == "ua.v1.{team}.*.ctl.agent.*.{partition}"
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (lambda t: t.pop("partitions"), "names the setting transport.queues.partitions"),
+        (lambda t: t["partitions"].update(count_setting="transport.partitions"), "names the setting"),
+        (lambda t: t["partitions"].update(max_count=100), "positive multiple of 32"),
+        (lambda t: t["partitions"].update(max_count=0), "positive multiple of 32"),
+        (lambda t: t["partitions"].update(default_count=0), "from 1 to max_count"),
+        (lambda t: t["partitions"].update(default_count=t["partitions"]["max_count"] + 1), "from 1 to max_count"),
+        (lambda t: t["partitions"].update(default_count=96.0), "from 1 to max_count"),
+        # Live control left unmapped would reach no host: hosts subscribe per partition.
+        (lambda t: t["partitions"]["account_mappings"].pop("ua.v1.*.*.ctl.agent.*"), "account_mappings map exactly"),
+        # Hashing the sender slot would spread one agent's queues over partitions.
+        (lambda t: t["partitions"]["account_mappings"].update({"ua.v1.*.*.work.agent.*": (
+            "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.agent.{{wildcard(3)}}.{{partition(COUNT,2,3)}}")}),
+         "account_mappings map exactly"),
+        (lambda t: t["partitions"]["account_mappings"].update({"ua.v1.*.*.work.pool.*": "ua.v1.x"}),
+         "account_mappings map exactly"),
+    ],
+)
+def test_partition_settings_and_mappings_the_contract_cannot_keep_are_refused(change, problem) -> None:
     transport = copy.deepcopy(TRANSPORT)
     change(transport)
     with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
@@ -516,11 +569,15 @@ def test_every_kind_has_a_model_and_every_model_a_kind() -> None:
 
 
 def consumer_grants() -> set[str]:
-    """Every JetStream subject a reader may be granted: each consumer by its exact name, ids still placeholders."""
+    """Every JetStream subject a reader may be granted: each consumer by its exact name, ids still placeholders.
+
+    In a partition stream, any consumer: they all belong to agents of the partition's owner.
+    """
 
     grants = set()
     for consumer in TRANSPORT["consumers"].values():
-        stream, name = consumer["stream"], consumer["name"]
+        stream = consumer["stream"]
+        name = "*" if "{partition}" in stream else consumer["name"]
         grants |= {f"$JS.API.CONSUMER.INFO.{stream}.{name}", f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
                    f"$JS.ACK.{stream}.{name}.>"}
     return grants
@@ -545,27 +602,29 @@ def test_permissions_name_exact_receivers_and_publish_only_under_the_senders_own
         assert document["subscribe"][0] == "_INBOX.{self}.>"
         for subject in document["subscribe"][1:]:
             prefix = "ua.v1._install.*." if subject.startswith("ua.v1._install.") else "ua.v1.{team}.*."
-            # Only the sender slot is a wildcard; every receiver id is a placeholder.
-            assert subject.startswith(prefix) and "*" not in subject.removeprefix(prefix), subject
+            # Only the sender slot is a wildcard, and the agent within a partition the host owns; every
+            # other receiver id is a placeholder.
+            rest = subject.removeprefix(prefix).removesuffix(".*.{partition}")
+            assert subject.startswith(prefix) and "*" not in rest and "{agent}" not in subject, subject
         receives_requests = False
         for entry in REGISTRY["kinds"].values():
             for address in EXPORT.entry_addresses(entry):
                 if role in EXPORT.address_senders(entry, address):
-                    assert EXPORT.full_subject(EXPORT.send_pattern(address), "{self}") in document["publish"]
+                    assert EXPORT.publish_subject(address, TRANSPORT) in document["publish"]
                 receives = role in EXPORT.receiving_roles(entry, address, TRANSPORT)
                 if entry["class"] not in {"durable", "dead_letter"}:
-                    granted = EXPORT.full_subject(address, "*")
+                    granted = EXPORT.subscribe_subject(address, TRANSPORT)
                     assert (granted in document["subscribe"]) == receives, (role, address)
                 receives_requests |= receives and entry["class"] == "request_reply"
         expires = f"{TRANSPORT['classes']['request_reply']['max_expiry_seconds'] + TRANSPORT['clock_skew_seconds']}s"
         assert document.get("allow_responses") == ({"max": 1, "expires": expires} if receives_requests else None)
 
 
-def expanded(role: str, placement: HostPlacement | None = None, **ids: list[str]) -> set[str]:
+def expanded(role: str, placement: HostPlacement | None = None, **ids: list[str] | list[int]) -> set[str]:
     """A role's permission subjects filled for one host, as membership code fills them (README, "Filling the templates").
 
-    Without ``placement``, the host serves team_example and runs or serves ``ids``
-    (``agent``, ``pool`` and ``edge`` lists) there.
+    Without ``placement``, the host serves team_example and owns, runs or serves ``ids``
+    (``partition``, ``pool`` and ``edge`` lists) there.
     """
 
     document = json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
@@ -577,35 +636,33 @@ def expanded(role: str, placement: HostPlacement | None = None, **ids: list[str]
     return set(filled["publish"]) | set(filled["subscribe"])
 
 
-def test_a_host_holds_no_grant_on_another_hosts_agents() -> None:
-    """The worker host running researcher-2 cannot read the lead's queue or hear the lead's control requests."""
+def test_a_host_holds_no_grant_on_another_hosts_partitions() -> None:
+    """The worker host owning partition 3 cannot read partition 5's queues or hear its agents' control requests."""
 
-    worker = expanded("worker_host", agent=["researcher-2"], pool=["researcher"])
-    lead = TRANSPORT["consumers"]["agent_inbox"]["name"].format(team="team_example", agent="lead")
-    own = TRANSPORT["consumers"]["agent_inbox"]["name"].format(team="team_example", agent="researcher-2")
-    stream = "UA1_AGENT_WORK_team_example"
-    assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{own}" in worker
-    assert "ua.v1.team_example.*.ctl.agent.researcher-2" in worker
-    assert not {subject for subject in worker if lead in subject or subject.endswith(".ctl.agent.lead")}
-    # Bucket watches and blob reads read their own consumers' information by any name; no queue
-    # consumer is a wildcard.
+    worker = expanded("worker_host", partition=[3], pool=["researcher"])
+    own, other = "UA1_PART_team_example~3", "UA1_PART_team_example~5"
+    assert {f"$JS.API.CONSUMER.MSG.NEXT.{own}.*", f"$JS.API.CONSUMER.INFO.{own}.*", f"$JS.ACK.{own}.*.>",
+            "ua.v1.team_example.*.ctl.agent.*.3", "$KV.UA1_AGENTS.team_example.3.*"} <= worker
+    assert not {subject for subject in worker if other in subject or subject.endswith(".5") or ".5." in subject}
+    # Bucket watches, blob reads and the partition streams' consumers are read by any name; no pool
+    # consumer is a wildcard for a worker host, which runs no pool controller.
     assert not {subject for subject in worker if subject.endswith(".*") and "CONSUMER" in subject
-                and ".KV_" not in subject and ".OBJ_" not in subject}
-    # Gaining an agent is a new credential, with that agent's subjects added.
-    moved = expanded("worker_host", agent=["researcher-2", "lead"], pool=["researcher"])
-    assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{lead}" in moved - worker
+                and ".KV_" not in subject and ".OBJ_" not in subject and ".UA1_PART_" not in subject}
+    # Gaining a partition is a new credential, with that partition's subjects added; gaining an agent
+    # in a partition it owns changes nothing.
+    moved = expanded("worker_host", partition=[3, 5], pool=["researcher"])
+    assert f"$JS.API.CONSUMER.MSG.NEXT.{other}.*" in moved - worker
 
 
-def test_a_host_serving_two_teams_gets_grants_only_on_each_agents_own_team() -> None:
-    """Team A's researcher and team B's researcher are different agents; a host running one never reaches the other."""
+def test_a_host_serving_two_teams_gets_grants_only_on_each_partitions_own_team() -> None:
+    """Team A's partition 7 and team B's partition 7 are different queues; a host owning one never reaches the other."""
 
     placement = HostPlacement("worker-host-1", ("team_a", "team_b"),
-                              agents={"team_a": ("researcher",)}, pools={"team_b": ("writer",)})
+                              partitions={"team_a": (7,)}, pools={"team_b": ("writer",)})
     subjects = expanded("worker_host", placement)
-    inbox = TRANSPORT["consumers"]["agent_inbox"]["name"].format(team="team_a", agent="researcher")
-    assert f"$JS.API.CONSUMER.MSG.NEXT.UA1_AGENT_WORK_team_a.{inbox}" in subjects
-    assert "ua.v1.team_a.*.ctl.agent.researcher" in subjects
-    assert not {subject for subject in subjects if "researcher" in subject and "team_b" in subject}
+    assert "$JS.API.CONSUMER.MSG.NEXT.UA1_PART_team_a~7.*" in subjects
+    assert "ua.v1.team_a.*.ctl.agent.*.7" in subjects
+    assert not {subject for subject in subjects if "team_b" in subject and ("~7" in subject or subject.endswith(".7"))}
     assert not {subject for subject in subjects if "writer" in subject and "team_a" in subject}
     # A subject that names no agent, pool or edge serves every team of the host.
     assert {subject for subject in subjects if subject.startswith("ua.v1.team_b.worker-host-1.")}
@@ -613,7 +670,7 @@ def test_a_host_serving_two_teams_gets_grants_only_on_each_agents_own_team() -> 
 
 @pytest.mark.parametrize("role", sorted(path.stem for path in (CONTRACT / "generated" / "permissions").glob("*.json")))
 def test_every_roles_templates_fill_to_exact_ids(role: str) -> None:
-    placement = HostPlacement(f"{role}-1", ("team_a", "team_b"), agents={"team_a": ("lead",), "team_b": ("lead",)},
+    placement = HostPlacement(f"{role}-1", ("team_a", "team_b"), partitions={"team_a": (0, 95), "team_b": (0,)},
                               pools={"team_a": ("researcher",)}, edges={"team_b": ("web",)},
                               installation="install_example", peers=("install_peer", "install_other"))
     subjects = expanded(role, placement)
@@ -634,7 +691,13 @@ def test_a_credential_fits_the_limit_servers_read_and_the_jwt_field_allows() -> 
 
 def test_a_placement_names_only_teams_its_host_serves() -> None:
     with pytest.raises(ValueError, match="teams the host does not serve"):
-        HostPlacement("worker-host-1", ("team_a",), agents={"team_b": ("researcher",)})
+        HostPlacement("worker-host-1", ("team_a",), partitions={"team_b": (1,)})
+    for numbers in ((-1,), (kinds.MAX_PARTITION_COUNT,), (3, 3), (True,), ("3",)):
+        with pytest.raises(ValueError, match="distinct numbers from 0"):
+            HostPlacement("worker-host-1", ("team_a",), partitions={"team_a": numbers})
+    # No template names an agent any more: a host's grants follow its partitions.
+    with pytest.raises(ValueError, match="cannot fill"):
+        host_subjects("ua.v1.{team}.*.ctl.agent.{agent}", HostPlacement("worker-host-1", ("team_a",)))
     with pytest.raises(ValueError, match="cannot fill"):
         host_subjects("ua.v1.{team}.{person}.x", HostPlacement("worker-host-1", ("team_a",)))
     # {installation} needs the host's installation; a peer is never the host's own installation.
@@ -657,51 +720,85 @@ def longest_id(definition: str) -> int:
     return int(found.group(1)) + 1
 
 
-# Each permission placeholder, filled with the longest id its definition allows.
-PLACEHOLDER_IDS = {"team": "team_id", "agent": "agent_id", "pool": "agent_type", "edge": "token_id", "self": "runtime_id"}
+# Each permission placeholder, filled with the longest id its definition allows; a partition is
+# filled with the most digits a number below the count can have (permission_bytes).
+PLACEHOLDER_IDS = {"team": "team_id", "pool": "agent_type", "edge": "token_id", "self": "runtime_id",
+                   "installation": "installation_id", "peer": "installation_id"}
+# The JWT's header, claims and signature beside its permissions (README, "Credential size").
+JWT_ROOM = 1024
 
 
-def permission_bytes(subjects: list[str]) -> int:
+def permission_bytes(subjects: list[str], partitions: int = kinds.MAX_PARTITION_COUNT) -> int:
     """Bytes of permission JSON for these templates, each placeholder filled with its longest id."""
 
     def longest(match: re.Match[str]) -> str:
+        if match.group(1) == "partition":
+            return "9" * len(str(partitions - 1))
         return "a" * longest_id(PLACEHOLDER_IDS[match.group(1)])
 
     return sum(len(re.sub(r"\{([a-z_]+)\}", longest, subject)) + len('"",') for subject in subjects)
 
 
-def credential_growth(role: str, placeholder: str) -> int:
+def role_templates(role: str) -> list[str]:
+    document = json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
+    return document["publish"] + document["subscribe"]
+
+
+def credential_growth(role: str, placeholder: str, partitions: int = kinds.MAX_PARTITION_COUNT) -> int:
     """Bytes of permission JSON one more ``placeholder`` id adds to ``role``'s credential, every id as long as allowed."""
 
-    document = json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
-    return permission_bytes([template for template in document["publish"] + document["subscribe"]
-                             if "{" + placeholder + "}" in template])
+    return permission_bytes([template for template in role_templates(role) if "{" + placeholder + "}" in template],
+                            partitions)
 
 
-def test_the_readme_states_what_each_hosted_agent_and_pool_adds_to_a_credential() -> None:
-    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+def credential_json(role: str, partitions: int, pools: int) -> int:
+    """Permission JSON of a host of ``role`` that serves one team, owns ``partitions`` of it and runs ``pools``."""
+
+    fixed = permission_bytes([template for template in role_templates(role)
+                              if not re.search(r"\{(partition|pool|edge)\}", template)], partitions)
+    return (fixed + partitions * credential_growth(role, "partition", partitions)
+            + pools * credential_growth(role, "pool", partitions))
+
+
+def fits(json_bytes: int) -> bool:
+    """Whether a NATS user JWT with this much permission JSON fits max_credential_bytes (base64url: 3 bytes become 4)."""
+
+    return json_bytes <= TRANSPORT["limits"]["max_credential_bytes"] * 3 // 4 - JWT_ROOM
+
+
+def test_the_readme_states_what_each_owned_partition_and_pool_adds_to_a_credential() -> None:
+    readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
     assert (longest_id("team_id"), longest_id("agent_id"), longest_id("agent_type")) == (24, 32, 24)
-    agent = max(credential_growth(role, "agent") for role in ("lead_host", "worker_host"))
-    pool = max(credential_growth(role, "pool") for role in ("lead_host", "worker_host"))
-    assert f"{agent} bytes of permission JSON" in readme and f"{pool} bytes with" in readme
-    assert f"about {-(-agent * 4 // 3):,} bytes" in readme
+    default = TRANSPORT["partitions"]["default_count"]
+    partition = max(credential_growth(role, "partition", default) for role in ("lead_host", "worker_host"))
+    pool = max(credential_growth(role, "pool", default) for role in ("lead_host", "worker_host"))
+    assert f"{partition} bytes of permission JSON" in readme and f"{pool} bytes with" in readme
+    assert f"about {-(-partition * 4 // 3):,} bytes" in readme
+    # A host's credential names no agent, so the agent id cap no longer bounds how many agents it runs.
+    assert credential_growth("lead_host", "agent") == credential_growth("worker_host", "agent") == 0
 
 
-def test_a_credential_names_about_fifty_agents_beside_ten_pools_with_the_longest_ids() -> None:
-    """README, "Credential size": what the id caps buy, counted as a NATS user JWT.
+def test_the_partition_cap_is_the_largest_count_every_credential_still_fits() -> None:
+    """README, "Credential size" (C02): max_count is derived, not chosen.
 
-    The count allows 1,024 bytes for the JWT's header, claims and signature, and
-    base64url turns three bytes into four.
+    At the cap, a host that owns every partition of its team beside 10 worker pools and the
+    team services, which withdraw from every partition stream, both fit max_credential_bytes
+    with the longest ids; one step more and at least one does not. The default, 96, fits.
     """
 
-    document = json.loads((CONTRACT / "generated" / "permissions" / "lead_host.json").read_text(encoding="utf-8"))
-    subjects = document["publish"] + document["subscribe"]
-    fixed = permission_bytes([s for s in subjects if not re.search(r"\{(agent|pool|edge)\}", s)])
-    agent, pool = credential_growth("lead_host", "agent"), credential_growth("lead_host", "pool")
-    room = TRANSPORT["limits"]["max_credential_bytes"] * 3 // 4 - 1024 - fixed - 10 * pool
-    assert room // agent in range(45, 50)
+    cap, step = kinds.MAX_PARTITION_COUNT, EXPORT.PARTITION_COUNT_STEP
+
+    def every_credential_fits(count: int) -> bool:
+        return all(fits(credential_json(role, count, 10)) for role in ("lead_host", "worker_host")) \
+            and fits(credential_json("team_services", count, 0))
+
+    assert every_credential_fits(cap) and not every_credential_fits(cap + step)
+    default = TRANSPORT["partitions"]["default_count"]
+    host = max(credential_json(role, default, 10) for role in ("lead_host", "worker_host"))
+    assert fits(host)
     readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
-    assert "about 45 agents beside 10 worker pools" in readme
+    assert f"about {round((host * 4 // 3 + JWT_ROOM) / 1000)} KB" in readme
+    assert f"at most {cap} partitions" in readme
 
 
 def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_withdraw_queued_work() -> None:
@@ -718,31 +815,59 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
         deletes = {subject for subject in creates if ".MSG.DELETE." in subject}
         reads = {subject for subject in publish if ".MSG.GET." in subject or ".DIRECT.GET." in subject}
         if role == "installation_authority":
-            assert "$JS.API.STREAM.CREATE.UA1_AGENT_WORK_{team}" in publish and not deletes and not reads
-            assert "$JS.API.CONSUMER.CREATE.UA1_AGENT_WORK_{team}.*.>" in publish
-            assert {f"$JS.API.STREAM.CREATE.KV_{bucket}" for bucket in TRANSPORT["key_value"]} <= set(publish)
-            assert "$JS.API.STREAM.CREATE.OBJ_UA1_BLOBS" in publish
+            # Every stream of the account: it holds the account's signing key, so a line per team and
+            # partition would add no safety and grow with both.
+            assert EXPORT.TOPOLOGY_OWNER_GRANTS <= set(publish)
+            assert {"$JS.API.INFO", "$JS.API.STREAM.CREATE.*", "$JS.API.STREAM.DELETE.*", "$JS.API.CONSUMER.CREATE.*.*.>",
+                    "$JS.API.STREAM.MSG.DELETE.*"} <= set(publish)
+            assert not {subject for subject in publish if "{team}" in subject and subject.startswith("$JS.")}
         elif role == "team_services":
             # Their own team's streams only: no grant reaches the shared UA1_WORK or another team's dead letters.
-            assert deletes == creates == {"$JS.API.STREAM.MSG.DELETE.UA1_AGENT_WORK_{team}",
-                                          "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}"}
-            assert reads == {"$JS.API.STREAM.MSG.GET.UA1_AGENT_WORK_{team}", "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}"}
+            streams = ("UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_DLQ_{team}")
+            assert deletes == creates == {f"$JS.API.STREAM.MSG.DELETE.{stream}" for stream in streams}
+            assert reads == {f"$JS.API.STREAM.MSG.GET.{stream}" for stream in streams}
         else:
             assert not creates and not reads, role
     for change, problem in ((lambda t: t.update(topology_owner="nobody"), "name host roles"),
                             (lambda t: t["withdrawal"].update(streams=["UA1_DLQ_{team}"]), "only from the durable class's streams"),
-                            (lambda t: t["withdrawal"].update(streams=["UA1_WORK"]), "only in per-team streams")):
+                            (lambda t: t["withdrawal"].update(streams=["UA1_WORK"]), "only in per-team streams"),
+                            (lambda t: t.pop("pool_controller"), "names a host role that serves pools"),
+                            (lambda t: t["pool_controller"].update(role="team_services"), "names a host role that serves pools"),
+                            (lambda t: t["pool_controller"].update(stream="UA1_PART_{team}~{partition}"),
+                             "holds only the pool queues"),
+                            # An agent's consumer in the pool stream would show another host's agent to the controller.
+                            (lambda t: t["consumers"]["agent_inbox"].update(stream="UA1_POOL_WORK_{team}"),
+                             "holds only the pool queues"),
+                            (lambda t: t["streams"]["UA1_POOL_WORK_{team}"]["subjects"].append("ua.v1.{team}.*.work.edge.*"),
+                             "holds only the pool queues")):
         transport = copy.deepcopy(TRANSPORT)
         change(transport)
         with pytest.raises(EXPORT.ContractError, match=problem):
             EXPORT.check_stream_management(EXPORT.load_yaml("registry.yaml"), transport)
 
 
+def test_only_the_pool_controllers_host_reads_every_pool_consumers_information() -> None:
+    """README, "Grants for the agents a host runs" (A3): pending counts of its team's pools, never their contents."""
+
+    controller = TRANSPORT["pool_controller"]
+    assert controller == {"role": "lead_host", "stream": "UA1_POOL_WORK_{team}"}
+    grant = "$JS.API.CONSUMER.INFO.UA1_POOL_WORK_{team}.*"
+    assert [role for role in REGISTRY["host_roles"] if grant in role_permissions(role)["publish"]] == ["lead_host"]
+    # It reads information only: no pull or acknowledgement on another host's pools.
+    lead = expanded("lead_host", pool=["writer"])
+    assert "$JS.API.CONSUMER.INFO.UA1_POOL_WORK_team_example.*" in lead
+    assert not {subject for subject in lead if "UA1_POOL_WORK" in subject and subject.endswith((".*", ".*.>"))
+                and "INFO" not in subject}
+    # The stream holds only pool consumers, so the grant shows no agent.
+    assert {consumer["stream"] for consumer in TRANSPORT["consumers"].values()
+            if consumer["filter"].split(".")[4:6] != ["work", "pool"]}.isdisjoint({controller["stream"]})
+
+
 def test_outside_agents_cannot_publish_into_worker_pools() -> None:
     edge = json.loads((CONTRACT / "generated" / "permissions" / "edge_adapter.json").read_text(encoding="utf-8"))
     assert "ua.v1.{team}.{self}.work.pool.*" not in edge["publish"]
-    # Tasks, results and answers to an agent's inbox; claims and progress to its control queue.
-    assert {"ua.v1.{team}.{self}.work.agent.*", "ua.v1.{team}.{self}.work.control.*"} <= set(edge["publish"])
+    # Tasks, results and answers to an agent's inbox; claims and progress to its control queue (any partition).
+    assert {"ua.v1.{team}.{self}.work.agent.*.*", "ua.v1.{team}.{self}.work.control.*.*"} <= set(edge["publish"])
 
 
 # README, "An agent's two queues": the inbox holds what needs a free slot, the control queue the rest.
@@ -785,12 +910,14 @@ def test_an_agents_control_queue_holds_every_kind_its_host_takes_at_once() -> No
     for name in CONTROL_KINDS:
         assert not kinds.KINDS[name].execution_slot and kinds.KINDS[name].accepted_while_paused, name
     # Each queue has its own consumer, and an agent's host may read both.
+    # Both consumers are in the agent's partition stream, whose consumers its host reads by any name.
     for role in ("lead_host", "worker_host"):
         publish = role_permissions(role)["publish"]
         for consumer in ("agent_inbox", "agent_control"):
             spec = TRANSPORT["consumers"][consumer]
-            assert f"$JS.API.CONSUMER.MSG.NEXT.{spec['stream']}.{spec['name']}" in publish
-            assert f"$JS.ACK.{spec['stream']}.{spec['name']}.>" in publish
+            assert spec["stream"] == "UA1_PART_{team}~{partition}"
+            assert f"$JS.API.CONSUMER.MSG.NEXT.{spec['stream']}.*" in publish
+            assert f"$JS.ACK.{spec['stream']}.*.>" in publish
 
 
 @pytest.mark.parametrize(
@@ -1295,9 +1422,9 @@ def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_servi
         assert kinds.KINDS[kind].senders_by_target == {"team_services": ("gateway",), "agent": ("team_services",)}
     gateway, services = role_permissions("gateway"), role_permissions("team_services")
     assert "ua.v1.{team}.{self}.svc.team" in gateway["publish"]
-    assert "ua.v1.{team}.{self}.ctl.agent.*" in services["publish"]
+    assert "ua.v1.{team}.{self}.ctl.agent.*.*" in services["publish"]
     for host in ("lead_host", "worker_host"):
-        assert "ua.v1.{team}.*.ctl.agent.{agent}" in role_permissions(host)["subscribe"]
+        assert "ua.v1.{team}.*.ctl.agent.*.{partition}" in role_permissions(host)["subscribe"]
     # Operations share their address, and the gateway sends other agent controls there,
     # so the agent's host, not NATS, refuses a relayed kind straight from the gateway.
     case = json.loads((EXAMPLES / "invalid" / "tasks-list-from-the-gateway-to-an-agent.json").read_text(encoding="utf-8"))
@@ -1373,11 +1500,12 @@ def test_every_request_address_puts_the_sender_slot_where_answer_subject_reads_i
 def test_key_value_grants_let_a_host_write_only_its_own_records() -> None:
     """README, "Key-value grants": each writer's keys are filled for one host, never as a wildcard of an id."""
 
-    worker = expanded("worker_host", agent=["researcher-2"], pool=["researcher"])
+    worker = expanded("worker_host", partition=[3], pool=["researcher"])
     assert "$KV.UA1_HOSTS.worker_host-1" in worker
-    assert "$KV.UA1_AGENTS.team_example.researcher-2" in worker
+    # The records of the agents of its own partitions, which all run on it.
+    assert "$KV.UA1_AGENTS.team_example.3.*" in worker
     assert not {subject for subject in worker if subject.startswith("$KV.")} - {
-        "$KV.UA1_HOSTS.worker_host-1", "$KV.UA1_AGENTS.team_example.researcher-2"}
+        "$KV.UA1_HOSTS.worker_host-1", "$KV.UA1_AGENTS.team_example.3.*"}
     services = expanded("team_services")
     assert {"$KV.UA1_PLACEMENT.team_example.*", "$KV.UA1_CERTS.session.install_example.team_example.*",
             "$KV.UA1_LOCKS.team_services.team_example", "$KV.UA1_BLOCK_LIST_team_example.team_example",
@@ -1412,9 +1540,9 @@ def test_no_bucket_reader_changes_or_deletes_another_hosts_watch() -> None:
         # The unnamed create: no consumer name in the subject, so no durable and no existing consumer.
         assert creates == {f"$JS.API.CONSUMER.CREATE.KV_{bucket}" for bucket, spec in TRANSPORT["key_value"].items()
                            if role in spec["readers"]}, role
-        deletes = {subject for subject in publish if subject.startswith("$JS.API.CONSUMER.DELETE.KV_")}
-        assert deletes == ({f"$JS.API.CONSUMER.DELETE.KV_{bucket}.*" for bucket in TRANSPORT["key_value"]}
-                           if role == TRANSPORT["topology_owner"] else set()), role
+        deletes = {subject for subject in publish if subject.startswith("$JS.API.CONSUMER.DELETE.")}
+        # Only the topology owner deletes consumers, on every stream of the account.
+        assert deletes == ({"$JS.API.CONSUMER.DELETE.*.*"} if role == TRANSPORT["topology_owner"] else set()), role
         # Readers read through direct gets; no reader reads a bucket's stream by sequence.
         assert not {subject for subject in publish if subject.startswith("$JS.API.STREAM.MSG.GET.KV_")}, role
 
@@ -1492,8 +1620,11 @@ def test_blob_grants_follow_who_receives_writes_and_deletes_blobs() -> None:
         assert not (reads - publish) or not (reads & publish - {"$JS.API.STREAM.INFO.OBJ_UA1_BLOBS"}), role
         assert (writes & publish) == (writes if role in blobs["writers"] else set()), role
         assert ("$JS.API.STREAM.PURGE.OBJ_UA1_BLOBS" in publish) == (role == "team_services"), role
-        # Only the topology owner creates the bucket's stream; no role names a consumer on it.
-        assert ("$JS.API.STREAM.CREATE.OBJ_UA1_BLOBS" in publish) == (role == TRANSPORT["topology_owner"]), role
+        # Only the topology owner creates the bucket's stream (any stream of the account); no role names a
+        # consumer on it.
+        assert not {subject for subject in publish if subject.startswith("$JS.API.STREAM.CREATE.")} - (
+            {"$JS.API.STREAM.CREATE.*"} if role == TRANSPORT["topology_owner"] else set()), role
+        assert ("$JS.API.STREAM.CREATE.*" in publish) == (role == TRANSPORT["topology_owner"]), role
         assert not {subject for subject in publish if subject.startswith("$JS.API.CONSUMER.DURABLE.CREATE.OBJ_")}, role
     # Each team's copies are its own; rollups are off so no writer can erase the bucket.
     assert blobs["object_name"] == "{team}~{sha256}"
@@ -1609,12 +1740,9 @@ def test_only_the_team_services_read_their_teams_dead_letters() -> None:
                                   "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_{team}.dlq~{team}", "$JS.ACK.UA1_DLQ_{team}.dlq~{team}.>",
                                   "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}"}
         elif role == TRANSPORT["topology_owner"]:
-            # It creates the stream and its consumers like every stream's, which is how it could read
-            # the copies (README, "Dead letters"); it reads and deletes no message by sequence.
-            assert set(reads) == {"$JS.API.STREAM.CREATE.UA1_DLQ_{team}", "$JS.API.STREAM.UPDATE.UA1_DLQ_{team}",
-                                  "$JS.API.STREAM.INFO.UA1_DLQ_{team}", "$JS.API.CONSUMER.CREATE.UA1_DLQ_{team}.*",
-                                  "$JS.API.CONSUMER.CREATE.UA1_DLQ_{team}.*.>", "$JS.API.CONSUMER.DURABLE.CREATE.UA1_DLQ_{team}.*",
-                                  "$JS.API.CONSUMER.INFO.UA1_DLQ_{team}.*", "$JS.API.CONSUMER.DELETE.UA1_DLQ_{team}.*"}
+            # Its grants name every stream of the account, this one included, which is how it could read
+            # the copies (README, "Dead letters"); none names this stream.
+            assert not reads and EXPORT.TOPOLOGY_OWNER_GRANTS <= set(role_permissions(role)["publish"])
         else:
             assert not reads, (role, reads)
 

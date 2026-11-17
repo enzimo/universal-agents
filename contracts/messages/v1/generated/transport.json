@@ -67,7 +67,8 @@
       "description": "at least once; the sender records before publishing, the receiver admits durably before acknowledging",
       "max_expiry_seconds": 604800,
       "streams": [
-        "UA1_AGENT_WORK_{team}",
+        "UA1_PART_{team}~{partition}",
+        "UA1_POOL_WORK_{team}",
         "UA1_WORK"
       ]
     },
@@ -98,20 +99,20 @@
     "agent_control": {
       "ack": "explicit",
       "ack_wait_seconds": 60,
-      "filter": "ua.v1.{team}.*.work.control.{agent}",
+      "filter": "ua.v1.{team}.*.work.control.{agent}.{partition}",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "control~{team}~{agent}",
-      "stream": "UA1_AGENT_WORK_{team}"
+      "name": "control~{agent}",
+      "stream": "UA1_PART_{team}~{partition}"
     },
     "agent_inbox": {
       "ack": "explicit",
       "ack_wait_seconds": 60,
-      "filter": "ua.v1.{team}.*.work.agent.{agent}",
+      "filter": "ua.v1.{team}.*.work.agent.{agent}.{partition}",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "agent~{team}~{agent}",
-      "stream": "UA1_AGENT_WORK_{team}"
+      "name": "agent~{agent}",
+      "stream": "UA1_PART_{team}~{partition}"
     },
     "dead_letters": {
       "ack": "explicit",
@@ -138,7 +139,7 @@
       "max_deliveries": 20,
       "mode": "pull",
       "name": "pool~{team}~{pool}",
-      "stream": "UA1_AGENT_WORK_{team}"
+      "stream": "UA1_POOL_WORK_{team}"
     },
     "team_services": {
       "ack": "explicit",
@@ -172,10 +173,10 @@
       ],
       "writers": {
         "lead_host": [
-          "{team}.{agent}"
+          "{team}.{partition}.*"
         ],
         "worker_host": [
-          "{team}.{agent}"
+          "{team}.{partition}.*"
         ]
       }
     },
@@ -370,11 +371,26 @@
     "deny_purge": false,
     "storage": "file"
   },
+  "partitions": {
+    "account_mappings": {
+      "ua.v1.*.*.ctl.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.ctl.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}",
+      "ua.v1.*.*.work.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}",
+      "ua.v1.*.*.work.control.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.control.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
+    },
+    "count_setting": "transport.queues.partitions",
+    "default_count": 96,
+    "max_count": 128
+  },
   "peer_sender_slot": "x-{installation}",
+  "pool_controller": {
+    "role": "lead_host",
+    "stream": "UA1_POOL_WORK_{team}"
+  },
   "queues": {
     "max_bytes_setting": "transport.queues.max_bytes",
     "size_kinds": [
-      "agent_work",
+      "partition",
+      "pool",
       "work",
       "dead_letter"
     ],
@@ -390,21 +406,6 @@
     "minimum_version": "2.15.1"
   },
   "streams": {
-    "UA1_AGENT_WORK_{team}": {
-      "discard": "new",
-      "duplicate_window_seconds": 120,
-      "max_age_seconds": 604860,
-      "max_consumers": 4096,
-      "max_message_bytes": 263168,
-      "retention": "workqueue",
-      "size_kind": "agent_work",
-      "storage": "file",
-      "subjects": [
-        "ua.v1.{team}.*.work.agent.*",
-        "ua.v1.{team}.*.work.control.*",
-        "ua.v1.{team}.*.work.pool.*"
-      ]
-    },
     "UA1_DLQ_{team}": {
       "discard": "new",
       "max_age_seconds": 2592060,
@@ -416,6 +417,33 @@
       "storage": "file",
       "subjects": [
         "ua.v1.{team}.*.dlq.>"
+      ]
+    },
+    "UA1_PART_{team}~{partition}": {
+      "discard": "new",
+      "duplicate_window_seconds": 120,
+      "max_age_seconds": 604860,
+      "max_consumers": 1024,
+      "max_message_bytes": 263168,
+      "retention": "workqueue",
+      "size_kind": "partition",
+      "storage": "file",
+      "subjects": [
+        "ua.v1.{team}.*.work.agent.*.{partition}",
+        "ua.v1.{team}.*.work.control.*.{partition}"
+      ]
+    },
+    "UA1_POOL_WORK_{team}": {
+      "discard": "new",
+      "duplicate_window_seconds": 120,
+      "max_age_seconds": 604860,
+      "max_consumers": 1024,
+      "max_message_bytes": 263168,
+      "retention": "workqueue",
+      "size_kind": "pool",
+      "storage": "file",
+      "subjects": [
+        "ua.v1.{team}.*.work.pool.*"
       ]
     },
     "UA1_WORK": {
@@ -438,7 +466,8 @@
   "withdrawal": {
     "role": "team_services",
     "streams": [
-      "UA1_AGENT_WORK_{team}"
+      "UA1_PART_{team}~{partition}",
+      "UA1_POOL_WORK_{team}"
     ]
   }
 }

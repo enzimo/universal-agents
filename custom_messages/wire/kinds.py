@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = '89f54476cdbca7b27c1fd21b0926dcdd858705f5639132f8394b8c3dc660ea79'
+CONTRACT_SHA256 = 'b33f310f2b2fa8ec24bef32ce4b69aafba5736b881d487e7668b4c04466af5c8'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -21,6 +21,7 @@ MAX_FRAME_BYTES = 262144
 MAX_HEADER_BYTES = 1024
 MAX_NESTING_DEPTH = 64
 CLOCK_SKEW_SECONDS = 8
+MAX_PARTITION_COUNT = 128
 REPLAY_LEDGER_RETENTION_SECONDS = 2592060
 SUBJECT_PREFIX = 'ua.v1.{team}.{sender}'
 PEER_SENDER_SLOT = 'x-{installation}'

@@ -774,19 +774,32 @@ only when it is among the kind's receivers and serves that target (`audience_tar
 `transport.yaml`): team services receive a task's copy on `work.team`, not the agent and
 pool inboxes the same kind also uses.
 
-**Grants for the agents a host runs.** A lead or worker host receives requests and queued
-work only for the agents and pools it runs:
-- it subscribes to `ua.v1.<team>.*.ctl.agent.<agent>` for each agent it runs, and its
-  permission names exactly those agents;
-- agent inboxes, agent control queues and worker pools live in a stream per team,
-  `UA1_AGENT_WORK_<team>`, and the host may read and acknowledge only its own agents' and
-  pools' consumers there.
+**Grants for the agents a host runs.** A lead or worker host owns whole partitions of its
+team ("Partitions"): every agent whose id falls in one of them runs on it. It receives
+requests and queued work only for the agents of its own partitions and the pools it runs:
+- it subscribes to `ua.v1.<team>.*.ctl.agent.*.<partition>` for each partition it owns;
+- agent inboxes and control queues live in a stream per team and partition,
+  `UA1_PART_<team>~<partition>`, and the host may read, inspect and acknowledge any consumer
+  of its own partitions' streams. The topology owner creates consumers there only for
+  agents placed in the partition, which all run on its owner, and the host holds no grant
+  to create one;
+- worker pools live in a stream of their own per team, `UA1_POOL_WORK_<team>`, and the host
+  may read and acknowledge only its own pools' consumers there;
+- its credential therefore names partitions and pools, never agents: it changes when the
+  host gains or loses a partition or a pool, not when an agent is placed or ends.
 
 A broken-into host therefore cannot read, take or acknowledge work queued for agents on
 other hosts, or hear their control requests, and it cannot sign as them either, since every
 frame names its agent's session ("Who sent it"). Edge deliveries and the team services'
 inbox stay in `UA1_WORK`, read through grants on their exact consumers, so agent hosts reach
 neither.
+
+The worker pool controller (`custom_agents.worker_pool_controller`) runs with the team lead
+and starts workers from how much work waits for each pool, so the lead host also reads the
+information of every pool consumer of its team (`pool_controller` in `transport.yaml`:
+`$JS.API.CONSUMER.INFO.UA1_POOL_WORK_<team>.*`). That shows pending counts, never contents,
+and the pool stream holds only pool consumers, so it shows no agent. No other host role holds
+it, and the generator checks both.
 
 **An agent's two queues.** A host asks for queued work only while it can act on it: it
 pulls from an agent's inbox only while the agent can take more work, and stops while the
@@ -795,7 +808,7 @@ already holds must not wait there behind tasks it cannot start yet: a stop or a 
 the task that holds the slot, the renewal of its custody window, a smaller access list, or
 the access decision or the end of a coordination wait one of its tasks waits for. So each
 agent has two queues (`agent_queues` in `transport.yaml`), each with its own consumer in
-`UA1_AGENT_WORK_<team>`:
+its partition's stream, `UA1_PART_<team>~<partition>`:
 - the **inbox**, `work.agent.<agent>`, holds the kinds that need an execution slot: new
   tasks, results, questions, answers, closed questions, and credential form and tool setup
   results;
@@ -865,21 +878,24 @@ new host takes it; its custody moves by the rules of "Custody windows". A creden
 outlives the certificate it comes with: a join or renewal reply whose `connection` ends
 after its certificate is refused (`invalid_body` at `/body/connection/expires_at`).
 
-**Credential size.** A credential grows with the agents its host runs: each hosted agent
-adds eight subjects (the info, next-message and acknowledgement subjects of its inbox's and
-its control queue's consumers, its control address, and the key of its agent record),
-911 bytes of permission JSON with the longest team and agent ids (24 and 32 characters),
-which a NATS user JWT's base64url encoding turns into about 1,215 bytes. Each worker pool adds
-three subjects, 349 bytes with a 24-character agent type. `tests/test_message_contract.py`
-recomputes these figures from the generated templates. A credential is at most
-`max_credential_bytes` (65,536 bytes, `transport.yaml`), the `jwt` field's limit, so no more
-agents and pools are placed on one host than its credential can name: the team services
-refuse an open beyond it (`limit_reached`, "Agent sessions"). With the longest ids, that is
-about 45 agents beside 10 worker pools. The id caps exist for this; with
-64-character ids a host held about 25. A host writes only its own agents' records, rather
-than any agent record of its team: readers would refuse another host's record, but agent
-records are written only when they change, so an overwritten one would stay missing until
-the next change. A certificate's `session_limit` does not lift that limit. NATS reads a user JWT in the
+**Credential size.** A credential grows with the partitions its host owns and the pools it
+runs, never with its agents: each owned partition adds five subjects (the info,
+next-message and acknowledgement subjects of its stream's consumers, its control address
+and the keys of its agents' records), 278 bytes of permission JSON with the longest team id
+(24 characters) and partition numbers of two digits, which a NATS user JWT's base64url
+encoding turns into about 371 bytes. Each worker pool adds three subjects, 346 bytes with a
+24-character agent type. A credential is at most `max_credential_bytes` (65,536 bytes,
+`transport.yaml`), the `jwt` field's limit. A host that owns all 96 partitions of its team
+beside 10 worker pools needs about 46 KB with the longest ids, and the team services, which
+read and delete in every partition stream of their teams, need less. That sets the largest
+partition count an installation may choose (`partitions.max_count`): the largest multiple of
+32 at which both still fit, at most 128 partitions. `tests/test_message_contract.py`
+recomputes these figures from the generated templates and checks that one step more does
+not fit. A host may run any number of agents in its partitions; a certificate's
+`session_limit` is what limits them. A host writes the records of its partitions' agents
+only, rather than any agent record of its team: readers would refuse another host's record,
+but agent records are written only when they change, so an overwritten one would stay
+missing until the next change. NATS reads a user JWT in the
 client's `CONNECT` line, which the server's `max_control_line` limits (4,096 bytes unless
 configured), so an installation's servers set `max_control_line` above
 `max_credential_bytes` plus the rest of the `CONNECT` line.
@@ -887,10 +903,11 @@ configured), so an installation's servers set `max_control_line` above
 **Filling the templates.** Before installing permissions, trusted membership code fills
 each role's templates for the host (`custom_messages.wire.permissions.host_permissions`):
 - `{self}` becomes its runtime id;
-- a subject that names `{agent}`, `{pool}` or `{edge}` is repeated for each agent and pool
-  the host runs and each edge it serves, with `{team}` set to that agent's, pool's or
-  edge's own team. A host that serves two teams and runs team A's `researcher` therefore
-  gets no grant on team B's `researcher`;
+- a subject that names `{partition}`, `{pool}` or `{edge}` is repeated for each partition
+  the host owns (from the team services' partition ownership records), each pool it runs
+  and each edge it serves, with `{team}` set to that partition's, pool's or edge's own team.
+  A host that serves two teams and owns team A's partition 7 therefore gets no grant on team
+  B's partition 7. No template names an agent;
 - any other subject with `{team}` is repeated for each team the host serves;
 - `{installation}` becomes the host's own installation, and a subject that names `{peer}` is
   repeated for each installation the installation's agreements name ("Key-value grants").
@@ -898,7 +915,7 @@ each role's templates for the host (`custom_messages.wire.permissions.host_permi
 These placeholders never become wildcards. Clients use `_INBOX.<runtime>` as their inbox
 prefix. Hosts cannot reach another host's, another team's or another role's queue
 consumers. Hosts read no queue stream directly, except the team services, which read their
-own team's agent stream to withdraw work and their own team's dead letters ("Dead
+own team's partition and pool streams to withdraw work and their own team's dead letters ("Dead
 letters"); bucket readers read their buckets' streams through direct gets and watches
 ("Key-value grants"). Only the topology owner and the team services (withdrawing work, and
 keeping dead letters) create, change or delete JetStream objects or stored messages; bucket
@@ -906,27 +923,40 @@ readers create only their own unnamed watch consumers, and writers change only t
 keys. The live conformance tests prove both allowed and refused operations.
 
 **Who sets up the streams.** The topology owner (`topology_owner` in `transport.yaml`) is
-the installation authority. It already decides which hosts serve which teams, agents and
-pools, since it issues their certificates and credentials, so it knows when a team, agent
-or pool appears or leaves, and it runs no model. It creates a team's streams with the team (its work stream and its dead-letter stream),
-each agent's or pool's consumer with the agent or pool, and the key-value buckets. Its generated grants create,
-update and inspect every stream, and create, inspect and delete every consumer of them:
-consumer names are a wildcard for it, and membership code fills `{team}` with every team of
-the installation.
+the installation authority. It already decides which hosts serve which teams, partitions
+and pools, since it issues their certificates and credentials, so it knows when a team,
+agent or pool appears or leaves, and it runs no model. It creates a team's streams with the
+team (a stream per partition, its pool stream and its dead-letter stream), each agent's two
+consumers in its partition's stream when the agent is placed, each pool's consumer with the
+pool, and the key-value buckets and the object store. Its generated grants name every stream
+of the account rather than a line per team and partition, which would grow with both: it
+reads the account's information (`$JS.API.INFO`, the storage check of "Stream sizes"),
+creates, updates, inspects and deletes streams, creates, inspects, lists and deletes their
+consumers (bucket watches that readers left behind among them), and reads and deletes
+single messages (a team's removal, and the old streams at an upgrade). This adds no power:
+it holds the account's signing key and could issue itself any permission.
 
 **Withdrawing queued work.** The team services withdraw a task queued for one of their
-team's agents or worker pools by deleting its message from `UA1_AGENT_WORK_<team>`
-(`withdrawal` in `transport.yaml`); no other role may. Only the publisher learns a
+team's agents or worker pools by deleting its message from one of the team's partition
+streams or its pool stream (`withdrawal` in `transport.yaml`); no other role may. Only the publisher learns a
 message's stream sequence, and the task's copy names the task (`task_id`) but neither the
 agent or pool its frame went to nor that frame's message id, so the team services find it
 themselves:
-1. They read their own team's stream from its first sequence, across the team's work
-   subjects (`$JS.API.STREAM.MSG.GET` with `next_by_subj` set to `ua.v1.<team>.*.work.>`).
+1. They read each of their own team's partition streams and its pool stream from its first
+   sequence, across the stream's work subjects (`$JS.API.STREAM.MSG.GET` with
+   `next_by_subj` set to `ua.v1.<team>.*.work.>`).
 2. They verify each `task.request` frame they find (its `UA-Kind` header names the kind)
    and delete, by its sequence (`$JS.API.STREAM.MSG.DELETE`), every one whose body names
    the task: a task handed back and dispatched again can wait there more than once.
 
-The stream holds only their team's messages, so neither grant reaches another team, and
+Searching every partition stream is the accepted cost of a copy that does not name its
+destination: withdrawal is rare (a stop, or a person's message during a review), each search
+is one message get per stream (the partition count plus the pool stream, 97 at the default),
+and an empty stream answers at once with no message. Naming the destination would add a
+field to the `task.request` body, which the frame and its copy share, and a receiver check
+that it matches the subject, for this one rare path.
+
+These streams hold only their team's messages, so neither grant reaches another team, and
 the generator allows withdrawal only from per-team streams. Work queued for an outside
 agent or a gateway route waits in the shared `UA1_WORK`, where they have neither grant:
 they stop it with `task.stop` to that edge instead.
@@ -951,9 +981,10 @@ generator refuses settings that break these rules.
 limit, so a growing backlog cannot fill the server's disk. The installation authority
 reads the limits from the instance's settings when it creates or updates a stream:
 `transport.queues.max_bytes` holds one limit per size kind, and each stream names its kind
-(`size_kind` in `transport.yaml`: `agent_work`, `work` or `dead_letter`). A kind's limit
-applies to each stream of that kind: every team's `UA1_AGENT_WORK_{team}` and
-`UA1_DLQ_{team}` has the limit of its kind, and `UA1_WORK`, which every team shares, has its
+(`size_kind` in `transport.yaml`: `partition`, `pool`, `work` or `dead_letter`). A kind's
+limit applies to each stream of that kind: each of every team's `UA1_PART_{team}~{partition}`
+streams, and every team's `UA1_POOL_WORK_{team}` and `UA1_DLQ_{team}`, has the limit of its
+kind (so a team's partitions together hold the partition count times the `partition` limit), and `UA1_WORK`, which every team shares, has its
 limit once for all teams. These settings enter the `config.yaml` and
 `instance_config.yaml` schemas, with their measured defaults, in the step whose code first
 reads them; `transport.yaml` names them so that step builds on a fixed contract.
@@ -1321,8 +1352,9 @@ session record:
   a restarting lead host closes its earlier sessions before opening its new lead. An agent
   that runs on another host is refused with
   `already_placed`, naming that host: agents stay on their host and move only by a handover
-  ("Custody windows"). A host that already runs as many agents as its certificate allows, or
-  as its NATS credential can name ("Credential size"), gets `limit_reached`. An open for an
+  ("Custody windows"). A host that already runs as many agents as its certificate allows
+  gets `limit_reached`; its NATS credential names partitions, not agents, so it sets no
+  limit of its own ("Credential size"). An open for an
   agent already placed on the asking host places it there again, with the placement's next
   sequence, and signs a new session; the earlier session names the earlier placement, so it
   can no longer be renewed and ends with its end time. A lead's earlier session is ended
@@ -1419,9 +1451,10 @@ While the hosts share one NATS login ("Installation traffic"), every process may
 role may, and only the records' signatures protect them. Each bucket in `transport.yaml`
 names its `readers` and, per writer role, the keys that role may write, as templates
 membership code fills like subjects:
-`{self}` is the host's runtime id, `{team}` each team it serves, `{agent}` each agent it
-runs, including an earlier agent whose record it still owns and must remove, `{installation}` its own installation and `{peer}` each installation an agreement
-names. The generated permissions follow:
+`{self}` is the host's runtime id, `{team}` each team it serves, `{partition}` each
+partition of that team it owns (the agent records of every agent in it, an earlier agent's
+record it still owns and must remove among them), `{installation}` its own installation and
+`{peer}` each installation an agreement names. The generated permissions follow:
 - a reader gets the bucket's stream information, its direct reads (the bucket serves
   last-value gets as `$JS.API.DIRECT.GET.<stream>.<subject>`), and what a watch needs:
   creating an unnamed consumer, whose deliveries arrive on the reader's own inbox, reading
@@ -1632,10 +1665,11 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
   `original.stream_sequence` is where the refused message sat in its own stream, not in
   this one. The stream keeps one message per subject, so a retried publish replaces its
   copy and deleting a copy leaves no duplicate. Of the hosts, only the team services read
-  the stream, and no grant reaches another team's copies. The topology owner creates the
-  stream's consumers, as it does every stream's, so it could read the copies too, as it
-  could queued work; it creates only the team services' consumer and an administrator's
-  inspection consumers.
+  the stream, and no grant reaches another team's copies. The topology owner's grants name
+  every stream ("Who sets up the streams"), so it could read the copies too, as it could
+  queued work; it creates only the team services' consumer and an administrator's
+  inspection consumers here, and reads or deletes single messages only when it removes a
+  team or the old streams at an upgrade.
 - **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference: they read the team's raw copies subject by subject (`next_by_subj` on `ua.v1.<team>.*.dlq.raw.*`) and delete each one that names the person by the sequence that read returned.
 - **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
 - **When the stream is full.** The dead-letter stream refuses new messages when it reaches
