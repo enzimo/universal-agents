@@ -31,9 +31,15 @@ _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 
 @dataclass(frozen=True)
 class HostPlacement:
-    """What one host serves: its runtime, its certificate's teams, per team the partitions it owns (from the team
-    services' partition ownership records) and the pools and edges it runs, its own installation and the peer
-    installations its installation's agreements name."""
+    """What one host serves: its runtime, its certificate's teams, per team the partitions its grants name, the
+    pools and edges it runs, its own installation and the peer installations its installation's agreements name.
+
+    A lead or worker host's partitions are those it owns (the team services' partition
+    ownership records). The team services own none but withdraw queued work from every
+    partition stream of each team they serve, so theirs are
+    ``custom_messages.wire.partitions.every_partition(teams, count)`` (README, "Filling the
+    templates").
+    """
 
     runtime: str
     teams: tuple[str, ...]

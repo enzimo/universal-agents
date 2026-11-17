@@ -815,6 +815,9 @@ class BusyClaim(WireModel):
     notes_total: Count
 
 
+Partition = Annotated[int, Field(ge=0, le=127)]
+
+
 class Frame(WireModel):
     "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The issuer's host certificate and agent session are looked up in the receiver's trust store. The body is checked against the schema its kind names in the registry."
 
@@ -839,7 +842,7 @@ class Frame(WireModel):
 class State(WireModel):
     "Every key-value record is one state record, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the record without its signature. The registry names, per record, who signs it and the schema its body follows. Readers verify every record they use; where it is stored adds no trust."
 
-    record: Literal['agent', 'agent_session', 'agreement', 'block_list', 'certificate', 'host', 'placement', 'revocations', 'team_view']
+    record: Literal['agent', 'agent_session', 'agreement', 'block_list', 'certificate', 'host', 'partition_owner', 'placement', 'revocations', 'team_view']
     protocol: ProtocolLabel
     key: StateKey
     writer: StateWriter
@@ -994,6 +997,18 @@ class HostState(WireModel):
     started_at: Timestamp
     heartbeat_at: Timestamp
     software: Union[Software, MISSING] = Field(default=MISSING)
+
+
+class PartitionOwnerState(WireModel):
+    "Which host owns one partition of a team. The host serves the agents placed in the partition, and its NATS credential names the partition; its signed sequence is the fencing token, as a placement's is."
+
+    team: TeamId
+    partition: Partition
+    host: RuntimeId
+    host_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
+    assigned_at: Timestamp
+    reason: Literal['initial', 'host_lost', 'rebalanced', 'drained', 'operator']
+    previous_host: Union[RuntimeId, MISSING] = Field(default=MISSING)
 
 
 class PlacementState(WireModel):
@@ -7465,6 +7480,12 @@ class SessionsOpenReplyLimitReached(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
+class SessionsOpenReplyPartitionNotOwned(WireModel):
+    outcome: Literal['partition_not_owned']
+    partition: Partition
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class SessionsOpenReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
@@ -9147,7 +9168,7 @@ SchedulesUpdateReplyAdapter = TypeAdapter(Annotated[Union[SchedulesUpdateReplyOk
 SessionsCloseBodyAdapter = TypeAdapter(SessionsCloseBody)
 SessionsCloseReplyAdapter = TypeAdapter(Annotated[Union[SessionsCloseReplyOk, SessionsCloseReplyNotFound, SessionsCloseReplyRuntimeError], Field(discriminator='outcome')])
 SessionsOpenBodyAdapter = TypeAdapter(SessionsOpenBody)
-SessionsOpenReplyAdapter = TypeAdapter(Annotated[Union[SessionsOpenReplyOk, SessionsOpenReplyNotAllowed, SessionsOpenReplyAlreadyPlaced, SessionsOpenReplyLimitReached, SessionsOpenReplyRuntimeError], Field(discriminator='outcome')])
+SessionsOpenReplyAdapter = TypeAdapter(Annotated[Union[SessionsOpenReplyOk, SessionsOpenReplyNotAllowed, SessionsOpenReplyAlreadyPlaced, SessionsOpenReplyLimitReached, SessionsOpenReplyPartitionNotOwned, SessionsOpenReplyRuntimeError], Field(discriminator='outcome')])
 SessionsRenewBodyAdapter = TypeAdapter(SessionsRenewBody)
 SessionsRenewReplyAdapter = TypeAdapter(Annotated[Union[SessionsRenewReplyOk, SessionsRenewReplyNotFound, SessionsRenewReplyNotAllowed, SessionsRenewReplyRuntimeError], Field(discriminator='outcome')])
 SharedWorkCheckBodyAdapter = TypeAdapter(SharedWorkCheckBody)
@@ -9217,6 +9238,7 @@ AgreementStateAdapter = TypeAdapter(AgreementState)
 BlockListStateAdapter = TypeAdapter(BlockListState)
 CertificateStateAdapter = TypeAdapter(CertificateState)
 HostStateAdapter = TypeAdapter(HostState)
+PartitionOwnerStateAdapter = TypeAdapter(PartitionOwnerState)
 PlacementStateAdapter = TypeAdapter(PlacementState)
 RevocationsStateAdapter = TypeAdapter(RevocationsState)
 TeamViewStateAdapter = TypeAdapter(Annotated[Union[TeamViewStateRoster, TeamViewStateTask, TeamViewStateRequest, TeamViewStateObjective, TeamViewStateTopologies], Field(discriminator='entry')])

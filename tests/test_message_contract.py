@@ -47,6 +47,7 @@ from custom_messages.wire.frame import (
     signing_bytes,
     verify_frame,
 )
+from custom_messages.wire.partitions import every_partition
 from custom_messages.wire.permissions import HostPlacement, host_permissions, host_subjects
 from custom_messages.wire.trust import TrustStore, ed25519_public_key, sign_state, state_signing_bytes
 from custom_messages.wire.values import parse_timestamp
@@ -799,6 +800,111 @@ def test_the_partition_cap_is_the_largest_count_every_credential_still_fits() ->
     readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
     assert f"about {round((host * 4 // 3 + JWT_ROOM) / 1000)} KB" in readme
     assert f"at most {cap} partitions" in readme
+
+
+def credential_json_for_teams(role: str, teams: int, pairs: int, pools: int, partitions: int) -> int:
+    """Permission JSON of a ``role`` credential naming ``teams`` teams, ``pairs`` partition-team pairs and ``pools``."""
+
+    receivers = r"\{(partition|pool|edge)\}"
+    templates = [template for template in role_templates(role) if not re.search(receivers, template)]
+    per_team = permission_bytes([template for template in templates if "{team}" in template], partitions)
+    fixed = permission_bytes([template for template in templates if "{team}" not in template], partitions)
+    return (fixed + teams * per_team + pairs * credential_growth(role, "partition", partitions)
+            + pools * credential_growth(role, "pool", partitions))
+
+
+def test_a_credential_holds_a_bounded_number_of_partition_team_pairs() -> None:
+    """README, "Credential size" (C20): the bound counts partition-team pairs, so several teams share it.
+
+    A lead or worker host serving two teams beside 10 pools holds a stated number of pairs,
+    fewer than every partition of both teams at the default count; the team services, which
+    name every partition of each team they serve, hold a stated number of teams.
+    """
+
+    default, cap = TRANSPORT["partitions"]["default_count"], kinds.MAX_PARTITION_COUNT
+    readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
+
+    def most(fitting) -> int:
+        return max(number for number in range(1, 2 * cap * 4) if fitting(number))
+
+    pairs = min(most(lambda count: fits(credential_json_for_teams(role, 2, count, 10, default)))
+                for role in ("lead_host", "worker_host"))
+    assert default <= pairs < 2 * default
+    assert f"two teams holds at most {pairs} partition-team pairs" in readme
+    both = max(credential_json_for_teams(role, 2, 2 * default, 10, default) for role in ("lead_host", "worker_host"))
+    assert not fits(both) and f"about {round((both * 4 // 3 + JWT_ROOM) / 1000)} KB)" in readme
+    teams = {count: most(lambda number: fits(credential_json_for_teams("team_services", number, number * count, 0, count)))
+             for count in (default, cap)}
+    assert f"at most {teams[default]} teams at {default} partitions ({teams[cap]} at {cap})" in readme
+    one = credential_json_for_teams("team_services", 1, default, 0, default)
+    further = credential_json_for_teams("team_services", 2, 2 * default, 0, default) - one
+    assert f"about {round((one * 4 // 3 + JWT_ROOM) / 1000)} KB for one team at {default} partitions" in readme
+    assert f"about {round(further * 4 / 3 / 1000)} KB for each further team" in readme
+    # The wrong statements this replaced.
+    assert "need less" not in readme and "sets no limit of its own" not in readme
+
+
+def test_the_team_services_withdraw_from_every_partition_of_each_team_they_serve() -> None:
+    """README, "Filling the templates" (C21): their {partition} is every partition, not ownership records."""
+
+    count = TRANSPORT["partitions"]["default_count"]
+    placement = HostPlacement("team-services-1", ("team_a", "team_b"),
+                              partitions=every_partition(("team_a", "team_b"), count), installation="install_example")
+    publish = set(host_permissions(role_permissions("team_services"), placement)["publish"])
+    for team in ("team_a", "team_b"):
+        for action in ("GET", "DELETE"):
+            streams = {subject.rsplit(".", 1)[-1] for subject in publish
+                       if subject.startswith(f"$JS.API.STREAM.MSG.{action}.UA1_PART_{team}~")}
+            assert streams == {f"UA1_PART_{team}~{number}" for number in range(count)}
+    assert every_partition(("team_a",), 3) == {"team_a": (0, 1, 2)}
+    with pytest.raises(ValueError, match="partition count"):
+        every_partition(("team_a",), kinds.MAX_PARTITION_COUNT + 1)
+
+
+def test_only_the_gateway_lists_the_streams_for_the_size_warning() -> None:
+    """README, "Stream sizes" (C22): the gateway's storage warnings read every stream's limit and size."""
+
+    assert TRANSPORT["size_check"] == {"role": "gateway"}
+    for role in REGISTRY["host_roles"]:
+        publish = set(role_permissions(role)["publish"])
+        assert ("$JS.API.STREAM.LIST" in publish) == (role == "gateway"), role
+        assert ("$JS.API.INFO" in publish) == (role in {"gateway", "installation_authority"}), role
+    for spec in ({"role": "installation_authority"}, {"role": "nobody"}, {"role": "gateway", "every": 60}, None):
+        transport = copy.deepcopy(TRANSPORT)
+        transport["size_check"] = spec
+        with pytest.raises(EXPORT.ContractError, match="size_check"):
+            EXPORT.check_size_check(REGISTRY, transport)
+
+
+@pytest.mark.parametrize(("form", "template", "covered"), [
+    ("<team>.<partition>.<agent>", "{team}.{partition}.*", True),
+    ("<team>.<agent>", "{team}.{partition}.*", False),
+    ("<team>.<partition>.<agent>", "{team}.*", False),
+    ("<team>.partition.<partition>", "{team}.partition.*", True),
+    ("<team>.partition.<partition>", "{team}.*", False),
+    ("host.<installation>.<runtime>.<membership_epoch>", "host.{peer}.>", True),
+    ("host.<installation>.<runtime>.<membership_epoch>", "host.{installation}.>", True),
+    ("<runtime>", "{self}", True),
+    ("<team>", "{self}", False),
+    ("<team>.<entry>.<id>", "{team}.>", True),
+    ("<team>", "{team}.>", False),
+    ("revocations.<installation>", "revocations.{team}", False),
+])
+def test_a_records_key_form_must_fit_its_writers_key_templates(form: str, template: str, covered: bool) -> None:
+    """C23: a record's key and its writers' grants cannot drift apart unnoticed."""
+
+    assert EXPORT.key_form_covered(form, template) is covered
+
+
+def test_the_generator_refuses_a_record_key_its_writers_cannot_write() -> None:
+    registry = copy.deepcopy(REGISTRY)
+    registry["state_records"]["agent"]["key"] = "<team>.<agent>"
+    with pytest.raises(EXPORT.ContractError, match="fits none of lead_host's key templates"):
+        EXPORT.check_key_value(registry, TRANSPORT)
+    schemas = copy.deepcopy(EXPORT.load_schemas())
+    schemas["common.schema.json"]["$defs"]["partition"]["maximum"] = kinds.MAX_PARTITION_COUNT
+    with pytest.raises(EXPORT.ContractError, match="partition is a whole number"):
+        EXPORT.check_state_records(REGISTRY, TRANSPORT, schemas)
 
 
 def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_withdraw_queued_work() -> None:

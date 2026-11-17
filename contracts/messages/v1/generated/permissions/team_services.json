@@ -69,6 +69,7 @@
     "$KV.UA1_HOSTS.{self}",
     "$KV.UA1_LOCKS.team_services.{team}",
     "$KV.UA1_PLACEMENT.{team}.*",
+    "$KV.UA1_PLACEMENT.{team}.partition.*",
     "$KV.UA1_TEAM_VIEW_{team}.{team}.>",
     "$O.UA1_BLOBS.C.>",
     "$O.UA1_BLOBS.M.>",

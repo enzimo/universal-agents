@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/partition_owner.schema.json",
+  "title": "partition_owner state record body",
+  "description": "Which host owns one partition of a team. The host serves the agents placed in the partition, and its NATS credential names the partition; its signed sequence is the fencing token, as a placement's is.",
+  "type": "object",
+  "properties": {
+    "team": {
+      "$ref": "../common.schema.json#/$defs/team_id"
+    },
+    "partition": {
+      "$ref": "../common.schema.json#/$defs/partition"
+    },
+    "host": {
+      "$ref": "../common.schema.json#/$defs/runtime_id"
+    },
+    "host_epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991,
+      "description": "The membership epoch of the host's certificate when it was given the partition. Renewals do not move the partition: a reader accepts the record while the host's liveness record names a certificate of that runtime at this epoch or later."
+    },
+    "assigned_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "initial",
+        "host_lost",
+        "rebalanced",
+        "drained",
+        "operator"
+      ]
+    },
+    "previous_host": {
+      "$ref": "../common.schema.json#/$defs/runtime_id"
+    }
+  },
+  "required": [
+    "team",
+    "partition",
+    "host",
+    "host_epoch",
+    "assigned_at",
+    "reason"
+  ],
+  "additionalProperties": false
+}

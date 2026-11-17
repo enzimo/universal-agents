@@ -23,6 +23,7 @@ from nats.js.errors import KeyWrongLastSequenceError
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import Receiver, VerifiedFrame
+from custom_messages.wire.partitions import agent_record_key
 from custom_messages.wire.refusals import REFUSAL_AT_HEADER, REFUSAL_HEADER
 from custom_transport.protocol1.host_keys import HostKeys
 from custom_transport.protocol1.identity import HostIdentity
@@ -211,11 +212,14 @@ async def test_signed_records_are_written_with_compare_and_set_and_verified_when
         agents = StateRecords(worker.nc.jetstream(), lambda: worker.identity, worker.trust)
         state = {"team": TEAM, "agent": "researcher-2", "agent_type": "researcher", "session": "s-researcher-2-1",
                  "state": "idle", "accepting_work": True, "since": format_timestamp(fixtures.NOW)}
-        await agents.put("agent", key, agents.signed("agent", key, state, sequence=1, issued_at=fixtures.NOW,
-                                                   expires_at=fixtures.NOW + timedelta(seconds=180)))
-        read = await StateRecords(js, lambda: services.identity, services.trust).read_report("agent", key, now=fixtures.NOW)
+        # Its key names the agent's partition, which the worker host owns.
+        agent_key = agent_record_key(TEAM, "researcher-2")
+        await agents.put("agent", agent_key, agents.signed("agent", agent_key, state, sequence=1, issued_at=fixtures.NOW,
+                                                         expires_at=fixtures.NOW + timedelta(seconds=180)))
+        read = await StateRecords(js, lambda: services.identity, services.trust).read_report("agent", agent_key,
+                                                                                            now=fixtures.NOW)
         assert read is not None and read.record.signer.runtime == "worker-host-1"
-        assert await reader.read_report("agent", f"{TEAM}.nobody", now=fixtures.NOW) is None
+        assert await reader.read_report("agent", agent_record_key(TEAM, "nobody"), now=fixtures.NOW) is None
         changes: list[tuple[str, bool]] = []
 
         async def first_change() -> None:
@@ -224,7 +228,7 @@ async def test_signed_records_are_written_with_compare_and_set_and_verified_when
                 return
 
         await asyncio.wait_for(first_change(), timeout=5)
-        assert changes == [(key, True)]
+        assert changes == [(agent_key, True)]
 
 
 @pytest.mark.asyncio

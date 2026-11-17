@@ -4555,6 +4555,7 @@
           "not_allowed",
           "already_placed",
           "limit_reached",
+          "partition_not_owned",
           "runtime_error"
         ]
       },
@@ -6251,7 +6252,7 @@
       "body": "state/agent.schema.json",
       "bucket": "UA1_AGENTS",
       "description": "An agent's state, written on change and refreshed by the host it is placed on.",
-      "key": "<team>.<agent>",
+      "key": "<team>.<partition>.<agent>",
       "signer": "host",
       "signer_roles": [
         "lead_host",
@@ -6346,6 +6347,20 @@
         "edge_adapter",
         "installation_authority",
         "scheduler"
+      ]
+    },
+    "partition_owner": {
+      "body": "state/partition_owner.schema.json",
+      "bucket": "UA1_PLACEMENT",
+      "description": "Which host owns one partition of a team, and that host's epoch; a host serves the agents of the partitions it owns, and its NATS credential names them (README, \"Partitions\").",
+      "key": "<team>.partition.<partition>",
+      "signer": "host",
+      "signer_roles": [
+        "team_services"
+      ],
+      "write_rule": "compare-and-set on the last key-value revision, with the next sequence, like a placement; written when the team services give a host a partition that holds no placed agent, or move the partition with all its agents to another host (a group move); a partition without a record has no owner, and the team services place no agent in it",
+      "writers": [
+        "team_services"
       ]
     },
     "placement": {

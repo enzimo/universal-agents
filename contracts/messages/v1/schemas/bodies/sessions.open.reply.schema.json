@@ -74,6 +74,26 @@
       "type": "object",
       "properties": {
         "outcome": {
+          "const": "partition_not_owned"
+        },
+        "partition": {
+          "description": "The agent's partition, which the asking host does not own: a host draws new agent ids until one falls in a partition it owns.",
+          "$ref": "../common.schema.json#/$defs/partition"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "partition"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
           "const": "runtime_error"
         },
         "message": {

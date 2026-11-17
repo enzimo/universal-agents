@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from custom_agents import agent_host, agent_requests
+from custom_messages.wire.partitions import agent_record_key
 from tests.test_agent_host_sessions import _Answers, _hosted, _process
+
+# Agent a1's record key, which names its partition.
+A1_RECORD = agent_record_key("team_one", "a1")
 
 
 @pytest.mark.asyncio
@@ -85,7 +89,7 @@ async def test_cancelled_detach_retains_the_exit_until_upkeep_can_finish(failure
     await process._finish_departure("a1")
     assert process._pending_departures == {} and "a1" not in process.agents
     assert calls.ids("sessions.close") == ["close-s-a1-1"]
-    assert process.host.records.removed == ["team_one.a1"]
+    assert process.host.records.removed == [A1_RECORD]
     assert process.host.records.written[0]["body"]["state"] == "exiting"
 
 
@@ -161,7 +165,7 @@ async def test_detach_while_the_address_is_subscribing_removes_the_late_subscrip
     release.set()
     await asyncio.wait_for(opening, 1)
     assert unsubscribed == [True] and hosted.subscription is None
-    assert process.host.records.removed == ["team_one.a1"]
+    assert process.host.records.removed == [A1_RECORD]
     assert [record["body"]["state"] for record in process.host.records.written] == ["exiting"]
 
 
@@ -185,7 +189,7 @@ async def test_conditional_removal_keeps_a_replacement_and_retries():
     assert "a1" in process._pending_departures and hosted.session in hosted.closed_sessions
     process.host.records.delete = original
     await process._finish_departure("a1")
-    assert not process._pending_departures and process.host.records.removed == ["team_one.a1"]
+    assert not process._pending_departures and process.host.records.removed == [A1_RECORD]
 
 
 @pytest.mark.asyncio
@@ -228,7 +232,7 @@ async def test_detach_closes_a_replacement_session_that_arrives_after_the_first_
     assert closed == ["s-old", "s-new"]
     assert hosted.closed_sessions == {"s-old", "s-new"}
     assert not process._pending_departures and not process._pending_closes and not process.agents
-    assert process.host.records.removed == ["team_one.a1", "team_one.a1"]
+    assert process.host.records.removed == [A1_RECORD, A1_RECORD]
     assert not process.host.records.values
 
 
@@ -293,7 +297,7 @@ async def test_an_unsubscribe_failure_does_not_prevent_session_closure(caplog):
     await process._close("a1", "exited")
     assert calls.ids("sessions.close") == ["close-s-a1-1"]
     assert "a1" in process._pending_departures and not process.host.records.written[-1]["body"]["accepting_work"]
-    assert process.host.records.removed == ["team_one.a1"]
+    assert process.host.records.removed == [A1_RECORD]
     await process._finish_departure("a1")
     assert attempts == 2 and not process._pending_departures
     assert "event=agent_record_unsubscribe_pending" in caplog.text

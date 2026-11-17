@@ -2486,6 +2486,12 @@
         "notes_total"
       ],
       "additionalProperties": false
+    },
+    "partition": {
+      "description": "One partition of a team's queued agent work: FNV-1a (32 bits) over the team id followed by the agent id, modulo the installation's partition count, which is at most transport.yaml partitions.max_count (README, \"Partitions\").",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 127
     }
   }
 }

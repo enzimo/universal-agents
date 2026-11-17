@@ -284,7 +284,8 @@
       ],
       "writers": {
         "team_services": [
-          "{team}.*"
+          "{team}.*",
+          "{team}.partition.*"
         ]
       }
     },
@@ -404,6 +405,9 @@
       "sync_interval": "always"
     },
     "minimum_version": "2.15.1"
+  },
+  "size_check": {
+    "role": "gateway"
   },
   "streams": {
     "UA1_DLQ_{team}": {

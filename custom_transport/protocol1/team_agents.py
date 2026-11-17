@@ -3,7 +3,9 @@
 Three report buckets and the team's session records say it, each verified as it is read:
 - ``UA1_AGENTS``: each agent's state (starting, idle, busy, paused, exiting), whether it
   accepts work and its name, written by the host it runs on when it changes
-  and refreshed every minute, expiring within three (``custom_agents.agent_host``);
+  and refreshed every minute, expiring within three (``custom_agents.agent_host``), under
+  ``<team>.<partition>.<agent>``: only those keys are watched, and the trust store refuses
+  one whose partition is not the agent's;
 - ``UA1_PLACEMENT``: which host runs each agent, written by the team services;
 - ``UA1_HOSTS``: each host's liveness, written every 10 seconds, each record lasting 30
   (``custom_transport.protocol1.host_runtime``).
@@ -103,6 +105,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from pydantic import MISSING
 
+from custom_messages.wire.partitions import agent_record_key
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import AgentSession, VerifiedRecord
 from custom_messages.wire.values import parse_timestamp
@@ -299,7 +302,7 @@ class TeamAgents:
         caught_up = [asyncio.Event() for _ in range(4)]
         sessions = f"session.{self._host.identity.installation}.{self.team}.*"
         watches = [
-            asyncio.create_task(self._follow("agent", f"{self.team}.*", self._agents, caught_up[0], stop)),
+            asyncio.create_task(self._follow("agent", f"{self.team}.*.*", self._agents, caught_up[0], stop)),
             asyncio.create_task(self._follow("placement", f"{self.team}.*", self._placements, caught_up[1], stop)),
             asyncio.create_task(self._follow("host", ">", self._hosts, caught_up[2], stop)),
             asyncio.create_task(self._follow("agent_session", sessions, {}, caught_up[3], stop)),
@@ -361,6 +364,24 @@ class TeamAgents:
             except asyncio.TimeoutError:
                 pass
 
+    def _name(self, record: str, key: str) -> str:
+        """What a record is held under: the host's runtime, or the agent its key ends with."""
+
+        if record == "host":
+            return key
+        if record == "agent":
+            return key.rsplit(".", 1)[-1]
+        return key.removeprefix(f"{self.team}.")
+
+    def _key(self, record: str, name: str) -> str:
+        """The bucket key of a held record's name (``_name`` reversed)."""
+
+        if record == "host":
+            return name
+        if record == "agent":
+            return agent_record_key(self.team, name)
+        return f"{self.team}.{name}"
+
     async def _take_over(self, record: str, held: dict[str, _Held], before: set[str], seen: set[str],
                          attempt_caught_up: asyncio.Event, caught_up: asyncio.Event) -> None:
         """Once a watch has caught up, forget the held records it did not deliver: they were deleted while
@@ -371,7 +392,7 @@ class TeamAgents:
         await attempt_caught_up.wait()
         try:
             for name in sorted(before - seen):
-                self._remove(record, name if record == "host" else f"{self.team}.{name}", name, held)
+                self._remove(record, self._key(record, name), name, held)
             if self.ready.is_set():
                 self._rebuild()
         except Exception:
@@ -384,7 +405,7 @@ class TeamAgents:
                      seen: set[str]) -> None:
         records = self._host.records
         async for key, raw in records.watch(record, keys, caught_up=caught_up):
-            name = key.removeprefix(f"{self.team}.") if record != "host" else key
+            name = self._name(record, key)
             seen.add(name)
             if raw is None:
                 self._remove(record, key, name, held)
@@ -424,7 +445,7 @@ class TeamAgents:
             verified = await self._verified(record, key, raw, None)
             if verified is None:
                 return
-            name = key.removeprefix(f"{self.team}.") if record != "host" else key
+            name = self._name(record, key)
             signer = verified.signer
             assert signer is not None
             if record == "agent":

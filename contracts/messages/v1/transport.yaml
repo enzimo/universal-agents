@@ -92,13 +92,13 @@ partitions:
 # limits as its size_kind, and a kind's limit applies to each stream of that kind (UA1_WORK's
 # once for all teams). NATS sets aside every stream's whole limit from the server's and the
 # account's storage when it creates the stream (error 10047 when it does not fit), so the
-# authority checks the limits fit before it creates any. The team services warn administrators
-# once a stream holds more than warn_at_percent of its limit, with the release margin of the
-# existing storage warnings. Every stream refuses new messages when full (discard: new, error
-# 10077): a full work stream makes the sender keep the frame in its outbox and send it again
-# until it expires, then report it as failed, and a full dead-letter stream makes the receiver
-# leave the refused message unacknowledged in its own stream, so nothing queued or set aside
-# is dropped unread.
+# authority checks the limits fit before it creates any. The size check's role (size_check
+# below) warns administrators once a stream holds more than warn_at_percent of its limit, with
+# the release margin of the existing storage warnings. Every stream refuses new messages when
+# full (discard: new, error 10077): a full work stream makes the sender keep the frame in its
+# outbox and send it again until it expires, then report it as failed, and a full dead-letter
+# stream makes the receiver leave the refused message unacknowledged in its own stream, so
+# nothing queued or set aside is dropped unread.
 queues:
   max_bytes_setting: transport.queues.max_bytes                # one byte limit per size kind
   size_kinds: [partition, pool, work, dead_letter]
@@ -274,7 +274,10 @@ consumers:
 # streams by its task id, and deletes it by its stream sequence; no other role may. A task's
 # copy does not name the agent or pool it went to, so withdrawal searches each of the team's
 # partition streams and its pool stream. Only per-team streams, so neither grant reaches
-# another team's messages (README, "Withdrawing queued work").
+# another team's messages (README, "Withdrawing queued work"). The withdrawal role owns no
+# partitions: membership code fills its {partition} with every partition of each team it
+# serves, 0 to the installation's count minus 1 (custom_messages.wire.partitions.every_partition;
+# README, "Filling the templates").
 topology_owner: installation_authority
 withdrawal:
   role: team_services
@@ -287,6 +290,14 @@ withdrawal:
 pool_controller:
   role: lead_host
   stream: UA1_POOL_WORK_{team}
+# The stream size check (README, "Stream sizes") runs with the gateway's storage warnings
+# (assistant_gateway.storage_capacity), which already read the account's JetStream usage and
+# tell administrators. Its role reads the account's information and lists every stream with its
+# limits and current size: two lines whatever the number of teams and partitions, and metadata
+# only, never a message. No other role lists the streams; the topology owner also reads the
+# account information, for its storage check.
+size_check:
+  role: gateway
 # The dead-letter custody role finds a raw copy by its subject (the last message for
 # ua.v1.<team>.<notice sender>.dlq.raw.<copy id>), reads it, and deletes it by the sequence that
 # read returns; it deletes the raw copies that name a departed person the same way (README, "Dead
@@ -351,7 +362,7 @@ key_value:
     per_key_ttl_seconds: 0
     readers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     writers:
-      team_services: ["{team}.*"]
+      team_services: ["{team}.*", "{team}.partition.*"]   # placements, <team>.<agent>, and partition ownership records
   UA1_TEAM_VIEW_{team}:
     description: one team's shared view of open work; one bucket per team, since an Objective's title is a person's own words
     per_key_ttl_seconds: 0

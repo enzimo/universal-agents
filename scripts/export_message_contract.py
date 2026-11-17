@@ -1051,6 +1051,11 @@ def check_state_records(registry: dict[str, Any], transport: dict[str, Any], sch
     """Each signed record names its bucket, key form, signer, writer roles and body schema."""
 
     roles = set(registry["host_roles"])
+    partition = schemas["common.schema.json"]["$defs"].get("partition", {})
+    if partition.get("type") != "integer" or partition.get("minimum") != 0 \
+            or partition.get("maximum") != transport["partitions"]["max_count"] - 1:
+        raise ContractError("common.schema.json $defs.partition is a whole number from 0 to transport.yaml "
+                            "partitions.max_count minus 1")
     names = set(schemas[registry["state_schema"]]["properties"]["record"]["enum"])
     if set(registry["state_records"]) != names:
         raise ContractError(f"registry.yaml state_records and {registry['state_schema']} record names differ")
@@ -1391,6 +1396,7 @@ def check_stream_management(registry: dict[str, Any], transport: dict[str, Any])
         if transport["streams"][stream].get("max_msgs_per_subject") != 1:
             raise ContractError(f"transport.yaml: stream {stream} keeps one message per subject (max_msgs_per_subject: 1)")
     check_pool_controller(registry, transport)
+    check_size_check(registry, transport)
     check_key_value(registry, transport)
 
 
@@ -1413,6 +1419,20 @@ def check_pool_controller(registry: dict[str, Any], transport: dict[str, Any]) -
     if stream is None or "{team}" not in spec["stream"] or [consumer["filter"] for consumer in readers] != [pool] \
             or not all(subject_covers(subject, pool) for subject in stream["subjects"]):
         raise ContractError(f"{where}: stream is a per-team stream that holds only the pool queues and their consumers")
+
+
+def check_size_check(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """The stream size check runs in one host role other than the topology owner, which holds its grants anyway.
+
+    Its grants read the account's information and every stream's limits and size, never a
+    message (README, "Stream sizes").
+    """
+
+    spec = transport.get("size_check")
+    if not isinstance(spec, dict) or set(spec) != {"role"} or spec["role"] not in registry["host_roles"] \
+            or spec["role"] == transport["topology_owner"]:
+        raise ContractError("transport.yaml size_check: names the one host role, other than the topology owner, "
+                            "that checks the streams' sizes")
 
 
 # What a key template may name: the host itself, each team it serves, each partition it owns, its
@@ -1455,10 +1475,45 @@ def check_key_value(registry: dict[str, Any], transport: dict[str, Any]) -> None
             for key in keys:
                 check_key_template(where, key)
     for name, entry in registry["state_records"].items():
-        writers = set(transport["key_value"][entry["bucket"]]["writers"])
-        if not set(entry["writers"]) <= writers:
-            raise ContractError(f"registry.yaml state_records.{name}: its writers {sorted(set(entry['writers']) - writers)} "
+        writers = transport["key_value"][entry["bucket"]]["writers"]
+        if not set(entry["writers"]) <= set(writers):
+            raise ContractError(f"registry.yaml state_records.{name}: its writers {sorted(set(entry['writers']) - set(writers))} "
                                 f"have no key template in transport.yaml key_value.{entry['bucket']}")
+        for role in entry["writers"]:
+            if not any(key_form_covered(entry["key"], template) for template in writers[role]):
+                raise ContractError(f"registry.yaml state_records.{name}: its key {entry['key']!r} fits none of {role}'s key "
+                                    f"templates in transport.yaml key_value.{entry['bucket']} {writers[role]}")
+
+
+# Which parts of a record's key form (registry.yaml state_records, <name>) a key template's
+# placeholder may stand for: membership code fills {self} with the host's runtime, {peer} with
+# another installation's id, and the others with the value of the same name.
+KEY_FORM_FILLERS = {"self": {"runtime"}, "team": {"team"}, PARTITION_PLACEHOLDER: {"partition"},
+                    "installation": {"installation"}, "peer": {"installation", "peer"}}
+
+
+def key_form_covered(form: str, template: str) -> bool:
+    """Whether a writer holding ``template`` may write every key of the record's key ``form``.
+
+    Token by token: a word is itself, a placeholder only the parts of the form it fills
+    (KEY_FORM_FILLERS), ``*`` any one part and a final ``>`` one part or more. So a record's
+    key and its writers' grants cannot drift apart unnoticed (an agent record's key gained
+    the partition, which its writers' templates name).
+    """
+
+    parts, tokens = form.split("."), template.split(".")
+    for index, token in enumerate(tokens):
+        if token == ">":
+            return len(parts) > index
+        if index >= len(parts):
+            return False
+        placeholder, part = re.fullmatch(r"\{([a-z_]+)\}", token), re.fullmatch(r"<([a-z_]+)>", parts[index])
+        if placeholder is not None:
+            if part is None or part.group(1) not in KEY_FORM_FILLERS.get(placeholder.group(1), set()):
+                return False
+        elif token != "*" and token != parts[index]:
+            return False
+    return len(parts) == len(tokens)
 
 
 # The stream settings every object store has (transport.yaml object_store_stream): no rollup
@@ -1814,6 +1869,10 @@ TOPOLOGY_OWNER_GRANTS = frozenset({
     *(f"$JS.API.CONSUMER.{action}.*.*" for action in ("CREATE", "DURABLE.CREATE", "INFO", "DELETE")),
     "$JS.API.CONSUMER.CREATE.*.*.>", "$JS.API.CONSUMER.NAMES.*", "$JS.API.CONSUMER.LIST.*",
 })
+# The stream size check's grants (README, "Stream sizes"): the account's information, and every
+# stream's settings and state in one paged list, two lines whatever the number of teams and
+# partitions. Metadata only: neither reads a message.
+SIZE_CHECK_GRANTS = frozenset({"$JS.API.INFO", "$JS.API.STREAM.LIST"})
 
 
 def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
@@ -1825,10 +1884,12 @@ def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     partition would grow with both. The withdrawal role reads its own team's streams to
     find a queued message and deletes it by its stream sequence; NATS cannot narrow either
     to some subjects of a stream, so withdrawal uses per-team streams only. The pool
-    controller's host reads the information of every consumer of its team's pool stream.
+    controller's host reads the information of every consumer of its team's pool stream, and
+    the size check's role the account's information and every stream's size.
     """
 
     grants = {transport["topology_owner"]: set(TOPOLOGY_OWNER_GRANTS)}
+    grants.setdefault(transport["size_check"]["role"], set()).update(SIZE_CHECK_GRANTS)
     controller = transport["pool_controller"]
     grants.setdefault(controller["role"], set()).add(f"$JS.API.CONSUMER.INFO.{controller['stream']}.*")
     # Withdrawal and dead-letter custody read a message by its sequence and delete it there.
@@ -2353,6 +2414,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"MAX_HEADER_BYTES = {transport['limits']['max_header_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
+        f"DEFAULT_PARTITION_COUNT = {transport['partitions']['default_count']!r}\n"
         f"MAX_PARTITION_COUNT = {transport['partitions']['max_count']!r}\n"
         f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
         f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"

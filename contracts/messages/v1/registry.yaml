@@ -229,7 +229,7 @@ state_records:
   agent:
     description: An agent's state, written on change and refreshed by the host it is placed on.
     bucket: UA1_AGENTS
-    key: "<team>.<agent>"
+    key: "<team>.<partition>.<agent>"
     signer: host
     signer_roles: [lead_host, worker_host]
     writers: [lead_host, worker_host]
@@ -245,6 +245,15 @@ state_records:
     writers: [team_services]
     body: state/placement.schema.json
     write_rule: compare-and-set on the last key-value revision, with the next sequence; the signed sequence, not the unsigned revision, is the fencing token, so a stored copy written back is never newer
+  partition_owner:
+    description: Which host owns one partition of a team, and that host's epoch; a host serves the agents of the partitions it owns, and its NATS credential names them (README, "Partitions").
+    bucket: UA1_PLACEMENT
+    key: "<team>.partition.<partition>"
+    signer: host
+    signer_roles: [team_services]
+    writers: [team_services]
+    body: state/partition_owner.schema.json
+    write_rule: compare-and-set on the last key-value revision, with the next sequence, like a placement; written when the team services give a host a partition that holds no placed agent, or move the partition with all its agents to another host (a group move); a partition without a record has no owner, and the team services place no agent in it
   team_view:
     description: One entry of a team's shared view of its members, requests, tasks and Objectives.
     bucket: UA1_TEAM_VIEW_{team}
@@ -2495,7 +2504,7 @@ kinds:
     body: bodies/sessions.open.schema.json
     reply:
       body: bodies/sessions.open.reply.schema.json
-      errors: [not_allowed, already_placed, limit_reached, runtime_error]
+      errors: [not_allowed, already_placed, limit_reached, partition_not_owned, runtime_error]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30

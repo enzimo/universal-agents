@@ -12,12 +12,14 @@ from types import SimpleNamespace
 import pytest
 
 from custom_messages.wire.encoding import format_timestamp
+from custom_messages.wire.partitions import agent_record_key
 from custom_messages.wire.trust import sign_state
 from custom_transport.protocol1.team_agents import TeamAgents
 from tests.message_contract_support import EXAMPLES, NOW, private_key, trust_store
 
 TEAM, INSTALL = "team_example", "install_example"
-KEY = f"{TEAM}.lead"
+KEY = f"{TEAM}.lead"  # the lead's placement
+AGENT_KEY = agent_record_key(TEAM, "lead")  # its agent record, which names its partition
 
 
 def _example(name):
@@ -112,7 +114,7 @@ async def _reading(*, store=None, closed_before_start=False, preload=None, on_re
         if preload is None:
             await records.feed("placement", KEY, _signed(_example("placement/lead.json")))
             await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
-            await records.feed("agent", KEY, _signed(_agent()))
+            await records.feed("agent", AGENT_KEY, _signed(_agent()))
             await _until(lambda: reader.lead() is not None)
         yield reader, records, host
     finally:
@@ -124,7 +126,7 @@ async def _reading(*, store=None, closed_before_start=False, preload=None, on_re
 @pytest.mark.asyncio
 async def test_copied_records_cannot_relabel_an_agent_or_extend_another_hosts_liveness(caplog):
     async with _reading() as (reader, records, host):
-        await records.feed("agent", f"{TEAM}.other", _signed(_agent()))
+        await records.feed("agent", agent_record_key(TEAM, "other"), _signed(_agent()))
         assert reader.agent("other") is None
         await records.feed("host", "other-host", _signed(_example("host/lead-host.json")))
         assert "other-host" not in reader._hosts
@@ -139,9 +141,9 @@ async def test_another_signing_host_cannot_poison_the_sequence_or_publish_an_exi
     async with _reading() as (reader, records, host):
         poison = _agent(sequence=9007199254740991, state="exiting")
         poison["writer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
-        await records.feed("agent", KEY, _signed(poison))
+        await records.feed("agent", AGENT_KEY, _signed(poison))
         assert reader.lead() is not None
-        await records.feed("agent", KEY, _signed(_agent(sequence=101, state="paused")))
+        await records.feed("agent", AGENT_KEY, _signed(_agent(sequence=101, state="paused")))
         assert reader.agent("lead").state == "paused"
         assert not reader.agent("lead").takes_work
         assert "code=wrong_issuer" in caplog.text
@@ -150,13 +152,13 @@ async def test_another_signing_host_cannot_poison_the_sequence_or_publish_an_exi
 @pytest.mark.asyncio
 async def test_deleting_a_key_does_not_reset_replay_protection_and_same_sequence_conflicts_are_logged(caplog):
     async with _reading() as (reader, records, host):
-        await records.feed("agent", KEY, _signed(_agent(sequence=101, state="paused")))
+        await records.feed("agent", AGENT_KEY, _signed(_agent(sequence=101, state="paused")))
         for raw in (_signed(_agent()), _signed(_agent(sequence=101, state="idle")),
                     _signed(_agent(sequence=101, state="paused"))):
-            await records.feed("agent", KEY, None)
-            await records.feed("agent", KEY, raw)
+            await records.feed("agent", AGENT_KEY, None)
+            await records.feed("agent", AGENT_KEY, raw)
             assert reader.agent("lead") is None
-        await records.feed("agent", KEY, _signed(_agent(sequence=102)))
+        await records.feed("agent", AGENT_KEY, _signed(_agent(sequence=102)))
         assert reader.lead() is not None
         assert "code=replayed at=/sequence" in caplog.text
 
@@ -172,11 +174,11 @@ async def test_session_role_is_bound_to_its_agent_host_type_and_current_lifetime
         placement["body"]["agent"] = "impostor"
         await records.feed("placement", placement["key"], _signed(placement))
         impostor = _agent(agent="impostor")
-        impostor["key"] = placement["key"]
+        impostor["key"] = agent_record_key(TEAM, "impostor")
         await records.feed("agent", impostor["key"], _signed(impostor))
         assert reader.lead() == original and reader.agent("impostor") is None
         changed = _agent(sequence=101, agent_type="researcher")
-        await records.feed("agent", KEY, _signed(changed))
+        await records.feed("agent", AGENT_KEY, _signed(changed))
         assert reader.of_type("researcher") == []
 
         session_path = EXAMPLES / "trust" / "sessions" / "lead.json"
@@ -205,7 +207,7 @@ async def test_a_trust_timeout_retries_without_a_new_agent_write_and_failed_watc
             return original(*args, **kwargs)
 
         host.live.trust.store.verify = verify
-        await records.feed("agent", KEY, _signed(_agent(sequence=101, state="busy")))
+        await records.feed("agent", AGENT_KEY, _signed(_agent(sequence=101, state="busy")))
         await _until(lambda: reader.agent("lead").state == "busy")
         assert reader.running and reader.ready.is_set()
         await records.queues["agent"].put(ConnectionError("watch connection lost"))
@@ -223,7 +225,7 @@ async def test_missing_session_is_retried_and_duplicate_names_do_not_pick_an_arb
         placement["body"].update(agent="researcher-2", agent_type="researcher", host="worker-host-1")
         await records.feed("placement", placement["key"], _signed(placement))
         document = _agent(agent="researcher-2", agent_type="researcher", session="s-researcher-2-1")
-        document["key"] = placement["key"]
+        document["key"] = agent_record_key(TEAM, "researcher-2")
         document["writer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
         # Give the worker host a genuine liveness record by re-signing its own
         # certificate reference, rather than faking a verified record.
@@ -370,7 +372,7 @@ async def test_an_exit_seen_only_as_the_records_deletion_is_known_from_the_close
         _heard(reader, changes)
         last = reader.agent("lead")
         # A reader that was disconnected while the agent exited sees only the deletion.
-        await records.feed("agent", KEY, None)
+        await records.feed("agent", AGENT_KEY, None)
         assert reader.agent("lead") is None and reader.departure_reason("lead") == "record_removed"
         assert not reader.left_for_good("lead")
         await records.feed("agent_session", *_closed_lead_session())
@@ -389,7 +391,7 @@ async def test_an_exit_whose_placement_deletion_is_read_first_is_still_recognise
         await records.feed("placement", KEY, None)
         assert reader.departure_reason("lead") == "placement_removed" and not reader.left_for_good("lead")
         # The exiting record arrives after the placement went, so it is not accepted; the session's end is.
-        await records.feed("agent", KEY, _signed(_agent(sequence=101, state="exiting")))
+        await records.feed("agent", AGENT_KEY, _signed(_agent(sequence=101, state="exiting")))
         await records.feed("agent_session", *_closed_lead_session())
 
         await _until(lambda: reader.left_for_good("lead"))
@@ -402,7 +404,7 @@ async def test_an_exit_while_the_record_watch_reopens_is_recognised():
     async with _reading() as (reader, records, host):
         changes = []
         _heard(reader, changes)
-        records.values["agent"].pop(KEY)  # it exited and its record went while the watch was down
+        records.values["agent"].pop(AGENT_KEY)  # it exited and its record went while the watch was down
         await records.queues["agent"].put(ConnectionError("watch connection lost"))
         await records.queues["agent"].join()
         await _until(lambda: reader.agent("lead") is None)
@@ -461,7 +463,7 @@ async def test_an_exiting_record_after_the_agent_went_quiet_is_heard_once():
         await _until(lambda: reader.agent("lead") is None)
         assert reader.departure_reason("lead") == "host_unavailable" and not reader.left_for_good("lead")
         # Its host is back and writes that the agent is exiting, still placed there.
-        await records.feed("agent", KEY, _signed(_agent(sequence=101, state="exiting")))
+        await records.feed("agent", AGENT_KEY, _signed(_agent(sequence=101, state="exiting")))
 
         await _until(lambda: reader.left_for_good("lead"))
         assert reader.departure_reason("lead") == "exiting"
@@ -492,7 +494,7 @@ async def test_a_forged_exit_from_another_host_is_not_an_exit():
         _heard(reader, changes)
         forged = _agent(sequence=101, state="exiting")
         forged["writer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
-        await records.feed("agent", KEY, _signed(forged))
+        await records.feed("agent", AGENT_KEY, _signed(forged))
         await asyncio.sleep(0.1)
 
         assert reader.lead() is not None and not reader.left_for_good("lead") and changes == []
@@ -557,7 +559,7 @@ async def test_an_earlier_session_running_out_is_not_the_exit_of_an_agent_out_of
 @pytest.mark.asyncio
 async def test_a_fresh_reader_without_the_host_record_does_not_count_an_earlier_session_as_the_exit():
     preload = {"agent_session": dict([_current_lead_session(), _superseded_lead_session()]),
-               "placement": _placed(), "agent": {KEY: _signed(_agent())}}
+               "placement": _placed(), "agent": {AGENT_KEY: _signed(_agent())}}
     async with _reading(preload=preload) as (reader, records, host):
         assert reader.agent("lead") is None  # its host's record has not arrived
         await asyncio.sleep(0.1)
@@ -612,7 +614,7 @@ async def test_a_held_record_keeps_the_agent_only_while_it_names_a_session_the_r
             "both closed": [_superseded_lead_session(), _closed_lead_session()],
             "only the earlier one": [_superseded_lead_session()]}[sessions]
     preload = {"agent_session": dict(held), "placement": _placed(),
-               "agent": {KEY: _signed(_agent(session=record_session))}}
+               "agent": {AGENT_KEY: _signed(_agent(session=record_session))}}
     async with _reading(preload=preload) as (reader, records, host):
         await _until(lambda: "lead" in reader._agents)
         assert not reader.left_for_good("lead")  # still placed
@@ -633,7 +635,7 @@ async def test_an_agent_that_left_the_view_under_an_earlier_session_has_not_left
     async with _reading(preload=preload) as (reader, records, host):
         await records.feed("placement", KEY, _placed()[KEY])
         await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
-        await records.feed("agent", KEY, _signed(_agent(session="s-lead-0")))
+        await records.feed("agent", AGENT_KEY, _signed(_agent(session="s-lead-0")))
         await _until(lambda: reader.lead() is not None)
         changes = []
         _heard(reader, changes)
@@ -647,7 +649,7 @@ async def test_an_agent_that_left_the_view_under_an_earlier_session_has_not_left
         assert not reader.left_for_good("lead") and not any(exited for _, exited in changes)
 
         # The host rewrites the record with the session it holds now.
-        await records.feed("agent", KEY, _signed(_agent(sequence=101, session="s-lead-1")))
+        await records.feed("agent", AGENT_KEY, _signed(_agent(sequence=101, session="s-lead-1")))
         await _until(lambda: reader.lead() is not None)
 
 
@@ -742,7 +744,7 @@ async def test_an_exit_while_the_readers_run_was_restarting_is_told():
     await asyncio.wait_for(reader.ready.wait(), 2)
     await records.feed("placement", KEY, _signed(_example("placement/lead.json")))
     await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
-    await records.feed("agent", KEY, _signed(_agent()))
+    await records.feed("agent", AGENT_KEY, _signed(_agent()))
     await _until(lambda: reader.lead() is not None)
 
     checks = reader._retry_pending
@@ -755,7 +757,7 @@ async def test_an_exit_while_the_readers_run_was_restarting_is_told():
         await asyncio.wait_for(first, 2)
     reader._retry_pending = checks
     # Meanwhile the lead exits. The buckets keep delete markers, which a new watch gives as deletions.
-    records.values["agent"][KEY] = None
+    records.values["agent"][AGENT_KEY] = None
     records.values["placement"][KEY] = None
     records.values["agent_session"].update([_closed_lead_session()])
 
@@ -791,7 +793,7 @@ async def test_a_record_naming_the_leads_session_from_another_host_does_not_make
         placement["body"].update(agent="impostor", agent_type="researcher", host="worker-host-1")
         await records.feed("placement", placement["key"], _signed(placement))
         impostor = _agent(agent="impostor", agent_type="researcher", session="s-lead-1")
-        impostor["key"] = placement["key"]
+        impostor["key"] = agent_record_key(TEAM, "impostor")
         impostor["writer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
         await records.feed("agent", impostor["key"], _signed(impostor))
         await asyncio.sleep(0.1)
@@ -825,13 +827,13 @@ async def test_a_retry_waiting_for_trust_never_overwrites_a_newer_record_or_revi
             return True
 
         store.verify, host.fetch_trust = verify, fetch
-        await records.feed("agent", KEY, stale)
+        await records.feed("agent", AGENT_KEY, stale)
         await _until(lambda: len(fetched) > 1)  # the retry is waiting now
         if meanwhile == "newer":
-            await records.feed("agent", KEY, _signed(_agent(sequence=102, state="busy")))
+            await records.feed("agent", AGENT_KEY, _signed(_agent(sequence=102, state="busy")))
             assert reader.agent("lead").state == "busy"
         else:
-            await records.feed("agent", KEY, None)
+            await records.feed("agent", AGENT_KEY, None)
             assert reader.agent("lead") is None
         release.set()
         await asyncio.sleep(0.1)

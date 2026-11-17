@@ -57,7 +57,10 @@ Why it is shaped this way:
 - **Agent records.** State changes are coalesced within two seconds; an unchanged record
   is refreshed every minute and expires within three. Each agent has its own supervised
   refresh and exit jobs. A refused session repair cannot starve another agent's refresh.
-  Exits write `exiting`, close every session returned to the attachment, and conditionally
+  A record's key names the agent's partition (``<team>.<partition>.<agent>``, contract
+  README "State records"), computed with the contract's default partition count until the
+  installation's count becomes a setting; a two-part key an earlier release wrote is left to
+  expire within three minutes. Exits write `exiting`, close every session returned to the attachment, and conditionally
   remove its verified record. Cancellation retains that work for upkeep.
 - **A process on another contract drains.** While the contract's label is a pre-release,
   hosts of one installation refuse a peer whose contract digest differs (contract README
@@ -91,6 +94,7 @@ import rfc8785
 
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.kinds import STATE_RECORDS
+from custom_messages.wire.partitions import agent_record_key
 from custom_agents.contract_drain import drain_agent, holds_work
 from custom_messages.wire.frame import Receiver, VerifiedFrame
 from custom_messages.wire.refusals import FrameRefused
@@ -263,7 +267,12 @@ class _HostedAgent:
     closed_sessions: set[str] = field(default_factory=set)
     close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    def key(self, team: str) -> str:
+    def record_key(self, team: str) -> str:
+        """The agent record's key, which names the agent's partition."""
+
+        return agent_record_key(team, str(self.agent.id))
+
+    def placement_key(self, team: str) -> str:
         return f"{team}.{self.agent.id}"
 
 
@@ -970,7 +979,7 @@ class AgentProcessHost:
                         return
                     if hosted.session == session:
                         break
-                await self._remove_record(hosted.key(self.team), agent_id)
+                await self._remove_record(hosted.record_key(self.team), agent_id)
                 if hosted.subscription is not None:
                     return  # its session is closed; upkeep still removes the address
             except Exception:
@@ -1057,7 +1066,7 @@ class AgentProcessHost:
                                     "since": format_timestamp(hosted.since or now)}
             if hosted.display_name:
                 body["display_name"] = hosted.display_name
-            key = hosted.key(self.team)
+            key = hosted.record_key(self.team)
             try:
                 document = self.host.records.signed("agent", key, body, sequence=hosted.record_sequence, issued_at=now,
                                                     expires_at=now + AGENT_RECORD_LIFETIME)
@@ -1140,7 +1149,7 @@ class AgentProcessHost:
         if hosted.session is None or hosted.state == "exiting":
             return
         try:
-            placement = await self.host.records.read_report("placement", hosted.key(self.team), now=self.host.clock())
+            placement = await self.host.records.read_report("placement", hosted.placement_key(self.team), now=self.host.clock())
             if placement is None:
                 self.logger.warning("An attached agent's placement is missing; opening its session again. "
                                     "event=agent_record_placement_missing runtime=%s agent=%s",
@@ -1170,9 +1179,9 @@ class AgentProcessHost:
                                 "event=agent_record_listing_failed runtime=%s", self.profile.runtime, exc_info=True)
             return
         for key in keys:
-            agent_id = key.removeprefix(f"{self.team}.")
-            if agent_id == key or agent_id in self.agents:
-                continue
+            agent_id = key.rsplit(".", 1)[-1]
+            if key != agent_record_key(self.team, agent_id) or agent_id in self.agents:
+                continue  # a running agent's own, or no agent record key of this release: it expires on its own
             try:
                 await self._remove_earlier_record(key, agent_id)
             except Exception:

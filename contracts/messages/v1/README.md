@@ -886,12 +886,23 @@ and the keys of its agents' records), 278 bytes of permission JSON with the long
 encoding turns into about 371 bytes. Each worker pool adds three subjects, 346 bytes with a
 24-character agent type. A credential is at most `max_credential_bytes` (65,536 bytes,
 `transport.yaml`), the `jwt` field's limit. A host that owns all 96 partitions of its team
-beside 10 worker pools needs about 46 KB with the longest ids, and the team services, which
-read and delete in every partition stream of their teams, need less. That sets the largest
-partition count an installation may choose (`partitions.max_count`): the largest multiple of
-32 at which both still fit, at most 128 partitions. `tests/test_message_contract.py`
-recomputes these figures from the generated templates and checks that one step more does
-not fit. A host may run any number of agents in its partitions; a certificate's
+beside 10 worker pools needs about 46 KB with the longest ids. The team services own no
+partitions, but they read and delete in every partition stream of each team they serve
+("Filling the templates"), so their credential grows with their teams: about 23 KB for one
+team at 96 partitions and about 20 KB for each further team. That sets the largest partition
+count an installation may choose (`partitions.max_count`): the largest multiple of 32 at
+which both still fit for one team, at most 128 partitions.
+
+What a credential holds is counted in partition-team pairs: one for each partition of each
+team it names, plus each team's own grants (about 2 KB per team). Beside 10 worker pools with
+the longest ids, a lead or worker host that serves two teams holds at most 141 partition-team
+pairs, so at the default count a host can own every partition of one team but not of two
+(that would need about 84 KB). The team services' credential holds every partition of at most
+3 teams at 96 partitions (2 at 128). `tests/test_message_contract.py` recomputes these
+figures from the generated templates and checks that one step more does not fit. Open for the
+step that issues these credentials: who keeps a host's and the team services' teams within
+these bounds, and so how many teams one host or team services runtime may serve. A
+certificate may name up to 64 teams, and nothing refuses a credential past the bound yet. A host may run any number of agents in its partitions; a certificate's
 `session_limit` is what limits them. A host writes the records of its partitions' agents
 only, rather than any agent record of its team: readers would refuse another host's record,
 but agent records are written only when they change, so an overwritten one would stay
@@ -907,7 +918,10 @@ each role's templates for the host (`custom_messages.wire.permissions.host_permi
   the host owns (from the team services' partition ownership records), each pool it runs
   and each edge it serves, with `{team}` set to that partition's, pool's or edge's own team.
   A host that serves two teams and owns team A's partition 7 therefore gets no grant on team
-  B's partition 7. No template names an agent;
+  B's partition 7. No template names an agent. The team services own no partitions: for them
+  `{partition}` is every partition of each team they serve, 0 to the installation's count
+  minus 1 (`custom_messages.wire.partitions.every_partition`), because they withdraw queued
+  work from every partition stream ("Withdrawing queued work");
 - any other subject with `{team}` is repeated for each team the host serves;
 - `{installation}` becomes the host's own installation, and a subject that names `{peer}` is
   repeated for each installation the installation's agreements name ("Key-value grants").
@@ -950,11 +964,14 @@ themselves:
    the task: a task handed back and dispatched again can wait there more than once.
 
 Searching every partition stream is the accepted cost of a copy that does not name its
-destination: withdrawal is rare (a stop, or a person's message during a review), each search
-is one message get per stream (the partition count plus the pool stream, 97 at the default),
-and an empty stream answers at once with no message. Naming the destination would add a
-field to the `task.request` body, which the frame and its copy share, and a receiver check
-that it matches the subject, for this one rare path.
+destination: withdrawal is rare (a stop, or a person's message during a review). A search
+reads every message queued for the team, one message get each, plus one get per stream that
+answers that no message is left (the partition count plus the pool stream, 97 at the
+default); it cannot stop at the first match, because a task can wait more than once.
+Partitions add only those 97 gets to what one team stream cost. Naming the destination would
+narrow the search to one partition's backlog, but would add a field to the `task.request`
+body, which the frame and its copy share, and a receiver check that it matches the subject,
+for this one rare path.
 
 These streams hold only their team's messages, so neither grant reaches another team, and
 the generator allows withdrawal only from per-team streams. Work queued for an outside
@@ -1013,8 +1030,12 @@ reads them; `transport.yaml` names them so that step builds on a fixed contract.
 - **Lowering a limit drops nothing.** A stream that holds more than a lowered limit keeps
   every message and refuses new ones until it falls below the limit.
 - **The size warning** follows the rules of the existing storage warnings
-  (`assistant_gateway.storage_capacity`): the team services check their streams' sizes
-  every minute, and when a stream first holds more than `transport.queues.warn_at_percent`
+  (`assistant_gateway.storage_capacity`), and the gateway runs it with them (`size_check` in
+  `transport.yaml`). It already reads the account's JetStream usage for those warnings
+  (`$JS.API.INFO`), and
+  its grants add one list of every stream with its limit and current size
+  (`$JS.API.STREAM.LIST`): two lines whatever the number of teams and partitions, metadata
+  only, never a message. It checks every work and dead-letter stream every minute, and when a stream first holds more than `transport.queues.warn_at_percent`
   of its limit (80 by default), administrators get one Inbox notice and the Status page
   shows a problem; the warning ends only once the stream falls a release margin below that
   level, so a stream hovering at the level does not send a notice on every crossing. The
@@ -1353,8 +1374,11 @@ session record:
   that runs on another host is refused with
   `already_placed`, naming that host: agents stay on their host and move only by a handover
   ("Custody windows"). A host that already runs as many agents as its certificate allows
-  gets `limit_reached`; its NATS credential names partitions, not agents, so it sets no
-  limit of its own ("Credential size"). An open for an
+  gets `limit_reached`. Its NATS credential names partitions, not agents, so more agents
+  never make it larger; the partitions it owns across its teams do ("Credential size"). An
+  agent whose partition the asking host does not own is refused with `partition_not_owned`,
+  naming the partition: a host draws new agent ids until one falls in a partition it owns
+  ("Partitions"), so the refusal means its ownership changed. An open for an
   agent already placed on the asking host places it there again, with the placement's next
   sequence, and signs a new session; the earlier session names the earlier placement, so it
   can no longer be renewed and ends with its end time. A lead's earlier session is ended
@@ -1441,8 +1465,9 @@ Trust records (`TrustStore.add`) follow the same order without the reader's chec
 
 What each record says, and what `TrustStore.verify` checks about it:
 - **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
-- **Agent records.** The key is `<team>.<agent>` of the body, and the team is one the writer's certificate serves. A reader accepts an agent record only from the host its placement names, with the same agent type. Its session must name the same agent, type and host and still be current; only that session decides its role. The reader checks these joins, since verification of one record cannot establish them. Readers bind every report to its actual bucket key and retain replay protection after deletion, separately for each signing host. The record may carry the agent's `display_name`, the name the team lead routes by and the gateway's Team page shows; it names an agent, never a person. Hosts remove their agents' records after writing `exiting` and closing their sessions, and retry unfinished cleanup. They remove only a current verified record of their own, with a conditional delete on its bucket revision. Unchanged records are refreshed with current certificates. A record whose signer cannot be verified is left in place; its key alone authorizes no deletion.
+- **Agent records.** The key is `<team>.<partition>.<agent>` of the body, where the partition is the agent's ("Partitions", `custom_messages.wire.partitions.agent_record_key`), and the team is one the writer's certificate serves. A host's write grant names the partitions it owns, so only the owner of an agent's partition can store its record; a key with another partition, or the two-part key of an earlier release, is refused (`invalid_body` at `/key`). A reader accepts an agent record only from the host its placement names, with the same agent type. Its session must name the same agent, type and host and still be current; only that session decides its role. The reader checks these joins, since verification of one record cannot establish them. Readers bind every report to its actual bucket key and retain replay protection after deletion, separately for each signing host. The record may carry the agent's `display_name`, the name the team lead routes by and the gateway's Team page shows; it names an agent, never a person. Hosts remove their agents' records after writing `exiting` and closing their sessions, and retry unfinished cleanup. They remove only a current verified record of their own, with a conditional delete on its bucket revision. Unchanged records are refreshed with current certificates. A record whose signer cannot be verified is left in place; its key alone authorizes no deletion.
 - **Placement.** The key and team follow the same rule. The team services write a placement with compare-and-set on the last key-value revision and the next sequence. The fencing token written into admission records is the signed sequence, not the revision, which the server assigns and nobody signs. `host_epoch` is the membership epoch of the host's certificate when the agent was placed. Renewals raise the epoch without moving the agent: a reader accepts the placement while the host's liveness record names a certificate of that runtime at `host_epoch` or later.
+- **Partition ownership.** The key is `<team>.partition.<partition>` of the body, in `UA1_PLACEMENT` beside the placements, and only the team services sign it. The partition is below the installation's count (`invalid_body` at `/body/partition`). The team services write it like a placement, with compare-and-set and the next sequence, when they give a host a partition that holds no placed agent or move a partition with all its agents to another host. `host_epoch` follows the placement's rule. A partition without a record has no owner, and the team services place no agent in it. The team services refuse a session or placement for an agent whose partition the asking host does not own (`partition_not_owned`, "Agent sessions").
 - **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs. A task's entry repeats its holder's custody window ("Custody windows").
 - **Block list.** The key is the body's team, one the writer's certificate serves, and only the team services sign it. No block id and no person appears twice. Readers keep the highest sequence they have seen, also across restarts, and `fresh(record, now)` tells whether the list is recent enough for `fresh_check` tools ("Access on remote hosts").
 
@@ -1463,8 +1488,9 @@ record it still owns and must remove among them), `{installation}` its own insta
   through it, and a request that names no consumer cannot change an existing one, so no
   host changes another host's watch. No reader may delete a bucket's consumers;
 - a writer publishes only its own keys: each host its own liveness record (`UA1_HOSTS`,
-  key its runtime id) and its own agents' records (`UA1_AGENTS`, `<team>.<agent>`); the team
-  services their team's placements, sessions of their own installation (`UA1_CERTS`,
+  key its runtime id) and the records of its own partitions' agents (`UA1_AGENTS`,
+  `<team>.<partition>.*`); the team services their team's placements and partition ownership
+  records, sessions of their own installation (`UA1_CERTS`,
   `session.<installation>.<team>.*`), team view, block list and single-instance lock; the
   installation authority its own installation's certificates and revocations, and
   agreements; the edge adapter unchanged copies of peers' certificates, revocations and
@@ -1678,7 +1704,7 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
   stored. When the dead-letter stream refuses either, the receiver leaves the message
   unacknowledged and logs it with its ids; the message stops after its consumer's
   `max_deliveries` and waits in its own stream until that stream's age limit, where it counts
-  toward that stream's size warning. The team services' size check warns administrators as
+  toward that stream's size warning. The gateway's size check warns administrators as
   the dead-letter stream fills, and says set-asides are refused while it is full.
 - **Two upgrade reasons.** `upgrade_drain` and `upgrade_old_format` both come from upgrades
   but name different messages:

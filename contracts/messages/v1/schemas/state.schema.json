@@ -14,6 +14,7 @@
         "block_list",
         "certificate",
         "host",
+        "partition_owner",
         "placement",
         "revocations",
         "team_view"

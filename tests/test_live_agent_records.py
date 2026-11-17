@@ -23,6 +23,7 @@ import nats
 from assistant_gateway.message_host import GATEWAY_RUNTIME, GatewayMessageHost, gateway_profile
 from custom_agents import agent_host as agent_host_module
 from custom_agents.agent_host import AgentProcessHost, definition_sha256, lead_host_profile, startup_agent_host_profile
+from custom_messages.wire.partitions import agent_record_key
 from custom_transport.protocol1.host_runtime import LIVENESS_LIFETIME, MessageHost
 from custom_transport.protocol1.team_agents import TeamAgents
 from runtime_settings.instance_layout import InstanceLayout
@@ -124,7 +125,7 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
         close_release.set()
         await asyncio.wrap_future(leaving)
         assert written[-1] == "exiting"
-        assert await records.read_report("agent", f"{TEAM}.researcher_1", now=agent_host.host.clock()) is None
+        assert await records.read_report("agent", agent_record_key(TEAM, "researcher_1"), now=agent_host.host.clock()) is None
         # It said it was leaving, so readers know it exited rather than went quiet.
         assert any("researcher_1" in exited for _, exited in changes)
 
@@ -137,7 +138,7 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
         restarted.attach(_agent("researcher_3", "Researcher-3"), agent_type="Researcher", definition=DEFINITION,
                          nc=await connect(stack, broker, RUNTIME), state=("idle", True))
         await _until(lambda: reader.agent("researcher_3") is not None)
-        assert await restarted.host.records.read_report("agent", f"{TEAM}.researcher_2",
+        assert await restarted.host.records.read_report("agent", agent_record_key(TEAM, "researcher_2"),
                                                         now=restarted.host.clock()) is None
         assert set(reader.live()) == {"researcher_3"}
 
@@ -210,7 +211,7 @@ async def test_the_team_leads_record_names_it_the_lead(
         await _until(lambda: reader.agent("worker_1") is None)
         assert replacement[0] in hosted.closed_sessions
         records, now = lead_host.host.records, lead_host.host.clock()
-        assert await records.read_report("agent", f"{TEAM}.worker_1", now=now) is None
+        assert await records.read_report("agent", agent_record_key(TEAM, "worker_1"), now=now) is None
         assert await records.read_report("placement", f"{TEAM}.worker_1", now=now) is None
         key = f"session.{lead_host.host.identity.installation}.{TEAM}.{replacement[0]}"
         await records.take_trust_record("agent_session", key, now=now)
@@ -263,11 +264,11 @@ async def test_a_real_reader_reconnect_recovers_and_a_host_that_stops_publishing
             assert not reading.done()
 
             records = process.host.records
-            key = f"{TEAM}.researcher_1"
+            key, record_key = f"{TEAM}.researcher_1", agent_record_key(TEAM, "researcher_1")
             bucket = await process.host.nc.jetstream().stream_info("KV_UA1_AGENTS")
             assert bucket.config.max_age == 180
-            stored = await records.read_report("agent", key, now=process.host.clock())
-            assert await records.delete("agent", key, last_revision=stored.revision)
+            stored = await records.read_report("agent", record_key, now=process.host.clock())
+            assert await records.delete("agent", record_key, last_revision=stored.revision)
             await _until(lambda: reader.agent("researcher_1") is None)
             await _until(lambda: reader.agent("researcher_1") is not None)
 
