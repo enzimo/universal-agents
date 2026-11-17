@@ -32,6 +32,14 @@ installation_scope: _install
 # loses a partition or a pool, never an agent, after its old one stops working (README,
 # "Grants for the agents a host runs").
 
+# Roles whose every runtime serves exactly one team (owner decision 2026-11-17): a lead or worker
+# host and a team services runtime belong to one team, and a machine that works for several teams
+# runs one runtime per team. The authority grants these roles in a certificate only with one
+# team (a join for more is denied, team_not_allowed), so a credential holds at most one team's
+# partitions and pools (README, "Credential size"). The gateway and the installation authority
+# stay installation-wide. Every role whose grants name {partition} is listed here.
+single_team_roles: [lead_host, worker_host, team_services]
+
 # Which host roles serve each audience target. A role receives a kind's address, and
 # gets its subscription or consumer grants, only when it is one of the kind's receivers
 # and serves the target that address delivers to.
@@ -79,6 +87,7 @@ partitions:
   count_setting: transport.queues.partitions
   default_count: 96
   max_count: 128
+  handover_seconds: 600   # a handover's step 2 ends this long after the released record's issued_at at the latest; tasks still held are handed back (README, "Credentials follow ownership")
   account_mappings:
     "ua.v1.*.*.work.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
     "ua.v1.*.*.work.control.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.control.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
@@ -90,10 +99,16 @@ partitions:
 # authority holds. account_settings are what the launcher writes into the bundled server's
 # account and what an external server's operator includes in the installation's account.
 # users names where each process's user JWT comes from and which generated permission set
-# (generated/permissions/<role>.json) it holds.
+# (generated/permissions/<role>.json) it holds. Revocation (owner decision 2026-11-17): every
+# user JWT ends after the lifetime the setting below holds (its schema entry and measured
+# default come with step 2), so on any server a credential stops within that lifetime; on the
+# bundled server the authority also holds an operator signing key and revokes at once. An
+# external server's operator gives no operator key (README, "NATS users and the account").
 nats_account:
   mode: operator
-  signing_key_holder: installation_authority   # the topology owner: it issues the hosts' users; revoking needs an operator signature, whose holder is open (README)
+  signing_key_holder: installation_authority   # the topology owner: it issues the hosts' users
+  operator_signing_key_holder: installation_authority   # on the bundled server only, where the launcher makes the operator key: it signs revocations
+  credential_lifetime_setting: transport.nats.credential_lifetime_seconds   # every user JWT, the bootstrap user's included; hosts renew before it ends
   account_settings:
     jetstream: true               # with no storage limit, or one that fits every stream's limit (README, "Stream sizes")
     mappings: partitions.account_mappings   # COUNT replaced by the installation's partition count
@@ -124,11 +139,13 @@ nats_account:
 # the release margin of the existing storage warnings. Every stream refuses new messages when
 # full (discard: new, error 10077): a full work stream makes the sender keep the frame in its
 # outbox and send it again until it expires, then report it as failed, and a full dead-letter
-# stream makes the receiver leave the refused message unacknowledged in its own stream, so
-# nothing queued or set aside is dropped unread.
+# stream makes the receiver hold the refused message with in-progress acknowledgements and try
+# again, so nothing set aside is dropped to make room. A held message whose receiver stops
+# until its deliveries run out is removed unread at its stream's age limit; the sweep that
+# finds such messages is step 4's (README, "Dead letters").
 queues:
   max_bytes_setting: transport.queues.max_bytes                # one byte limit per size kind
-  size_kinds: [partition, pool, work, dead_letter]
+  size_kinds: [partition, pool, edge, team_services, dead_letter]
   warn_at_percent_setting: transport.queues.warn_at_percent
   warn_at_percent_default: 80
 
@@ -136,7 +153,7 @@ classes:
   durable:
     description: at least once; the sender records before publishing, the receiver admits durably before acknowledging
     between_installations: true   # the only class another installation may send: NATS forgets reply routes between accounts
-    streams: ["UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_WORK_{team}"]
+    streams: ["UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_EDGE_WORK_{team}", "UA1_TEAM_WORK_{team}"]
     addresses:
       - work.agent.{agent}
       - work.control.{agent}
@@ -208,18 +225,32 @@ streams:
     max_message_bytes: 263168   # as UA1_PART_{team}~{partition}
     size_kind: pool
     discard: new                # as UA1_PART_{team}~{partition}
-  UA1_WORK_{team}:
-    # One team's edge deliveries and its team services' inbox, read through exact consumer
-    # grants. One stream per team, so a team whose edge or team services stop reading fills
-    # only its own stream's byte limit, never another team's.
-    subjects: ["ua.v1.{team}.*.work.edge.*", "ua.v1.{team}.*.work.team"]
+  UA1_EDGE_WORK_{team}:
+    # One team's edge deliveries (its gateway routes and outside agents' adapters), each edge
+    # read through its own consumer's exact grants. Per team, so an edge that stops reading
+    # fills only its own team's edge stream, never another team's or its team services' inbox.
+    subjects: ["ua.v1.{team}.*.work.edge.*"]
     retention: workqueue
     storage: file
     max_age_seconds: 604860     # as UA1_PART_{team}~{partition}
     duplicate_window_seconds: 120
-    max_consumers: 1024         # one per edge of the team, and the team services' inbox
+    max_consumers: 1024         # one per edge of the team
     max_message_bytes: 263168   # as UA1_PART_{team}~{partition}
-    size_kind: work
+    size_kind: edge
+    discard: new                # as UA1_PART_{team}~{partition}
+  UA1_TEAM_WORK_{team}:
+    # One team's team-services inbox and nothing else. Every copied kind (registry copy_to) is
+    # stored here before its frame is published, so no other reader's backlog may share this
+    # byte limit: a stalled edge, pool or agent then never refuses the copies, and with them
+    # every task, result and claim of the team (README, "Stream sizes").
+    subjects: ["ua.v1.{team}.*.work.team"]
+    retention: workqueue
+    storage: file
+    max_age_seconds: 604860     # as UA1_PART_{team}~{partition}
+    duplicate_window_seconds: 120
+    max_consumers: 16           # the team services' inbox, and a few the topology owner creates for an administrator's inspection
+    max_message_bytes: 263168   # as UA1_PART_{team}~{partition}
+    size_kind: team_services
     discard: new                # as UA1_PART_{team}~{partition}
   UA1_DLQ_{team}:
     # One team's set-aside copies and notices; of the hosts, only its team services read and
@@ -234,9 +265,8 @@ streams:
     size_kind: dead_letter
     # A full stream refuses a set-aside instead of dropping the oldest unread copies and
     # notices. The receiver acknowledges the refused message only after both its raw copy and
-    # its notice are stored; when this stream refuses either, it leaves the message
-    # unacknowledged and logs it with its ids, so the message stops after max_deliveries and
-    # waits in its own stream until its age limit (README, "Dead letters").
+    # its notice are stored; while this stream refuses either, it holds the message with
+    # in-progress acknowledgements (+WPI) and tries again (README, "Dead letters").
     discard: new
 
 # Consumer names join ids with ~, which ids cannot contain: with _ (allowed in ids),
@@ -270,7 +300,7 @@ consumers:
     ack_wait_seconds: 60
     max_deliveries: 20
   team_services:
-    stream: UA1_WORK_{team}
+    stream: UA1_TEAM_WORK_{team}
     name: team~{team}
     filter: ua.v1.{team}.*.work.team
     mode: pull
@@ -278,7 +308,7 @@ consumers:
     ack_wait_seconds: 60
     max_deliveries: 20
   edge:
-    stream: UA1_WORK_{team}
+    stream: UA1_EDGE_WORK_{team}
     name: edge~{team}~{edge}
     filter: ua.v1.{team}.*.work.edge.{edge}
     mode: pull
@@ -301,16 +331,17 @@ consumers:
 # account's signing key, so its JetStream grants name every stream of the account rather than
 # a line per team and partition. The withdrawal role finds a queued task in its own team's
 # streams by its task id, and deletes it by its stream sequence; no other role may. A task's
-# copy does not name the agent or pool it went to, so withdrawal searches each of the team's
-# partition streams and its pool stream. Only per-team streams, so neither grant reaches
-# another team's messages (README, "Withdrawing queued work"). The withdrawal role owns no
+# copy does not name the agent, pool or edge it went to, so withdrawal searches each of the
+# team's partition streams, its pool stream and its edge stream, never its own inbox's stream,
+# where the tasks' copies wait. Only per-team streams, so neither grant reaches another team's
+# messages (README, "Withdrawing queued work"). The withdrawal role owns no
 # partitions: membership code fills its {partition} with every partition of each team it
 # serves, 0 to the installation's count minus 1 (custom_messages.wire.partitions.every_partition;
 # README, "Filling the templates").
 topology_owner: installation_authority
 withdrawal:
   role: team_services
-  streams: ["UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}"]
+  streams: ["UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_EDGE_WORK_{team}"]
 # The worker pool controller (custom_agents.worker_pool_controller) runs with the team lead and
 # starts workers from how much work waits for each pool, so its host role reads the
 # information (pending counts, never contents) of every pool consumer of its team. The pool

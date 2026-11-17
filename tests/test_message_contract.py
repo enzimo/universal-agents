@@ -279,6 +279,8 @@ def test_the_schema_subset_refuses_what_other_implementations_read_differently(s
 @pytest.mark.parametrize("pattern", [
     "a+", "^a", "^a|b$", "^(?=a)a$", "^(?i)a$", "^(?P<n>a)$", "^(a)\\1$", "^\\d+$", "^\\w+$", "^\\s$",
     "^.+$", "^[[:alpha:]]$", "^a++$", "^\\Aa$", "^a\\b$", "^\\p{L}$", "^[a$", "^a$b$",
+    # Braces that are not {n}, {n,} or {n,m}: Python reads {,n} as 0 to n, ECMAScript as text.
+    "^[a-z]{,40000}$", "^a{}$", "^a{x}$", "^a{2,1}$", "^a}$", "^a{2}+$", "^{$",
 ])
 def test_patterns_that_engines_read_differently_are_refused(pattern: str) -> None:
     assert EXPORT.pattern_problem(pattern), pattern
@@ -286,6 +288,7 @@ def test_patterns_that_engines_read_differently_are_refused(pattern: str) -> Non
 
 @pytest.mark.parametrize("pattern", [
     "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$", "^1\\.(0|[1-9][0-9]{0,3})-pre$", "^(?:a|b)$", "^[a$^.-]+$", "^a{1,3}?$",
+    "^\\{[a-z{}]{2}\\}$", "^a{2}$", "^a{2,}$", "^a{2,2}$",
 ])
 def test_portable_patterns_are_allowed(pattern: str) -> None:
     assert EXPORT.pattern_problem(pattern) is None
@@ -380,9 +383,9 @@ def test_outcomes_that_ask_for_a_retry_are_not_stored() -> None:
 @pytest.mark.parametrize(
     ("change", "problem"),
     [
-        (lambda t: t["streams"]["UA1_WORK_{team}"].update(max_age_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
+        (lambda t: t["streams"]["UA1_EDGE_WORK_{team}"].update(max_age_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
          "must keep messages"),
-        (lambda t: t["streams"]["UA1_WORK_{team}"].pop("max_age_seconds"), "must keep messages"),
+        (lambda t: t["streams"]["UA1_EDGE_WORK_{team}"].pop("max_age_seconds"), "must keep messages"),
         (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].pop("max_age_seconds"), "must keep messages"),
         (lambda t: t["classes"]["durable"].update(streams=["UA1_MISSING"]), "unknown stream"),
         (lambda t: t.update(replay_ledger_retention_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
@@ -400,7 +403,7 @@ def test_transport_settings_that_would_lose_or_replay_messages_are_refused(chang
     ("change", "problem"),
     [
         # NATS refuses a stream whose subjects overlap another's.
-        (lambda t: t["streams"]["UA1_WORK_{team}"].update(subjects=["ua.v1.{team}.*.work.>"]), "overlap"),
+        (lambda t: t["streams"]["UA1_EDGE_WORK_{team}"].update(subjects=["ua.v1.{team}.*.work.>"]), "overlap"),
         # Agent work left out of every stream would never be stored.
         (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].update(subjects=["ua.v1.{team}.*.work.control.*.{partition}"]),
          "work.agent.{agent} is stored in exactly one"),
@@ -412,7 +415,7 @@ def test_transport_settings_that_would_lose_or_replay_messages_are_refused(chang
         (lambda t: t["streams"].update({"UA1_PART_{partition}_{team}": t["streams"]["UA1_PART_{team}~{partition}"]}),
          "{partition} as {team}~{partition}"),
         # Requests are answered at once; a stream holding them would keep every request.
-        (lambda t: t["streams"]["UA1_WORK_{team}"]["subjects"].append("ua.v1.{team}.*.svc.team"), "stores request_reply traffic"),
+        (lambda t: t["streams"]["UA1_EDGE_WORK_{team}"]["subjects"].append("ua.v1.{team}.*.svc.team"), "stores request_reply traffic"),
         # A team's stream holds only that team's work.
         (lambda t: t["streams"]["UA1_POOL_WORK_{team}"]["subjects"].append("ua.v1.*.*.work.edge.extra"),
          "starts ua.v1.{team}."),
@@ -443,10 +446,12 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
     assert (queues["max_bytes_setting"], queues["warn_at_percent_setting"], queues["warn_at_percent_default"]) == (
         "transport.queues.max_bytes", "transport.queues.warn_at_percent", 80)
     queued = {stream for spec in TRANSPORT["classes"].values() for stream in spec.get("streams", [])}
-    assert queued == {"UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_WORK_{team}", "UA1_DLQ_{team}"}
+    assert queued == {"UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_EDGE_WORK_{team}", "UA1_TEAM_WORK_{team}",
+                      "UA1_DLQ_{team}"}
     assert {name: (TRANSPORT["streams"][name]["size_kind"], TRANSPORT["streams"][name]["discard"]) for name in queued} == {
         "UA1_PART_{team}~{partition}": ("partition", "new"), "UA1_POOL_WORK_{team}": ("pool", "new"),
-        "UA1_WORK_{team}": ("work", "new"), "UA1_DLQ_{team}": ("dead_letter", "new")}
+        "UA1_EDGE_WORK_{team}": ("edge", "new"), "UA1_TEAM_WORK_{team}": ("team_services", "new"),
+        "UA1_DLQ_{team}": ("dead_letter", "new")}
     readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
     for text in ("**Stream sizes.**", "`transport.queues.max_bytes`", "`transport.queues.warn_at_percent`",
                  "(80 by default)", "**When the stream is full.**"):
@@ -458,11 +463,11 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
     [
         # Dropping the oldest messages would lose unread set-aside copies and notices.
         (lambda t: t["streams"]["UA1_DLQ_{team}"].update(discard="old"), "UA1_DLQ_{team} refuses new messages"),
-        (lambda t: t["streams"]["UA1_WORK_{team}"].pop("discard"), "UA1_WORK_{team} refuses new messages"),
+        (lambda t: t["streams"]["UA1_TEAM_WORK_{team}"].pop("discard"), "UA1_TEAM_WORK_{team} refuses new messages"),
         (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].pop("size_kind"), "names its byte limit's size kind"),
-        (lambda t: t["streams"]["UA1_WORK_{team}"].update(size_kind="agent_work"), "names its byte limit's size kind"),
+        (lambda t: t["streams"]["UA1_EDGE_WORK_{team}"].update(size_kind="agent_work"), "names its byte limit's size kind"),
         (lambda t: t["queues"]["size_kinds"].append("agent_work"), "unused ['agent_work']"),
-        (lambda t: t["queues"]["size_kinds"].append("work"), "distinct snake_case"),
+        (lambda t: t["queues"]["size_kinds"].append("edge"), "distinct snake_case"),
         (lambda t: t["queues"].update(max_bytes_setting="queues.max_bytes"), "names the settings"),
         (lambda t: t["queues"].pop("warn_at_percent_setting"), "names the settings"),
         (lambda t: t["queues"].update(warn_at_percent_default=100), "from 1 to 99"),
@@ -527,7 +532,7 @@ def test_streams_store_a_full_size_frame_with_the_largest_headers_senders_may_se
     assert "is 891 bytes" in readme and "is 1,024" in readme
     for change, problem in (
             (lambda t: t["limits"].update(max_header_bytes=890), "max_header_bytes holds the largest header block"),
-            (lambda t: t["streams"]["UA1_WORK_{team}"].update(max_message_bytes=262144), "UA1_WORK_{team}'s max_message_bytes"),
+            (lambda t: t["streams"]["UA1_EDGE_WORK_{team}"].update(max_message_bytes=262144), "UA1_EDGE_WORK_{team}'s max_message_bytes"),
             (lambda t: t["limits"].update(nats_max_payload_bytes=262144), "fit nats_max_payload_bytes")):
         transport = copy.deepcopy(TRANSPORT)
         change(transport)
@@ -819,46 +824,31 @@ def test_the_partition_cap_is_the_largest_count_every_credential_still_fits() ->
     assert f"at most {cap} partitions" in readme
 
 
-def credential_json_for_teams(role: str, teams: int, pairs: int, pools: int, partitions: int) -> int:
-    """Permission JSON of a ``role`` credential naming ``teams`` teams, ``pairs`` partition-team pairs and ``pools``."""
+def test_a_runtime_that_owns_or_withdraws_partitions_serves_one_team() -> None:
+    """README, "Credential size" (owner decision of 2026-11-17): the bound counts one team per such runtime.
 
-    receivers = r"\{(partition|pool|edge)\}"
-    templates = [template for template in role_templates(role) if not re.search(receivers, template)]
-    per_team = permission_bytes([template for template in templates if "{team}" in template], partitions)
-    fixed = permission_bytes([template for template in templates if "{team}" not in template], partitions)
-    return (fixed + teams * per_team + pairs * credential_growth(role, "partition", partitions)
-            + pools * credential_growth(role, "pool", partitions))
-
-
-def test_a_credential_holds_a_bounded_number_of_partition_team_pairs() -> None:
-    """README, "Credential size" (C20): the bound counts partition-team pairs, so several teams share it.
-
-    A lead or worker host serving two teams beside 10 pools holds a stated number of pairs,
-    fewer than every partition of both teams at the default count; the team services, which
-    name every partition of each team they serve, hold a stated number of teams.
+    Every role whose grants name partitions is a single-team role, so its credential holds one
+    team's partitions and pools; the team services' credential for their team at the default
+    count is the stated size. The multi-team figures this replaced are gone.
     """
 
-    default, cap = TRANSPORT["partitions"]["default_count"], kinds.MAX_PARTITION_COUNT
+    default = TRANSPORT["partitions"]["default_count"]
     readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
-
-    def most(fitting) -> int:
-        return max(number for number in range(1, 2 * cap * 4) if fitting(number))
-
-    pairs = min(most(lambda count: fits(credential_json_for_teams(role, 2, count, 10, default)))
-                for role in ("lead_host", "worker_host"))
-    assert default <= pairs < 2 * default
-    assert f"two teams holds at most {pairs} partition-team pairs" in readme
-    both = max(credential_json_for_teams(role, 2, 2 * default, 10, default) for role in ("lead_host", "worker_host"))
-    assert not fits(both) and f"about {round((both * 4 // 3 + JWT_ROOM) / 1000)} KB)" in readme
-    teams = {count: most(lambda number: fits(credential_json_for_teams("team_services", number, number * count, 0, count)))
-             for count in (default, cap)}
-    assert f"at most {teams[default]} teams at {default} partitions ({teams[cap]} at {cap})" in readme
-    one = credential_json_for_teams("team_services", 1, default, 0, default)
-    further = credential_json_for_teams("team_services", 2, 2 * default, 0, default) - one
-    assert f"about {round((one * 4 // 3 + JWT_ROOM) / 1000)} KB for one team at {default} partitions" in readme
-    assert f"about {round(further * 4 / 3 / 1000)} KB for each further team" in readme
-    # The wrong statements this replaced.
-    assert "need less" not in readme and "sets no limit of its own" not in readme
+    assert TRANSPORT["single_team_roles"] == list(kinds.SINGLE_TEAM_ROLES) == ["lead_host", "worker_host", "team_services"]
+    partitioned = {role for role in REGISTRY["host_roles"]
+                   if any("{partition}" in template for template in role_templates(role))}
+    assert partitioned <= set(kinds.SINGLE_TEAM_ROLES)
+    services = credential_json("team_services", default, 0)
+    assert fits(services) and f"about {round((services * 4 // 3 + JWT_ROOM) / 1000)} KB at {default} partitions" in readme
+    for gone in ("partition-team pairs", "each further team", "serves two teams"):
+        assert gone not in readme
+    for change, problem in ((lambda t: t["single_team_roles"].remove("team_services"), "missing ['team_services']"),
+                            (lambda t: t["single_team_roles"].append("installation_authority"), "whole installation"),
+                            (lambda t: t["single_team_roles"].append("nobody"), "distinct host roles")):
+        transport = copy.deepcopy(EXPORT.load_yaml("transport.yaml"))
+        change(transport)
+        with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+            EXPORT.check_single_team_roles(REGISTRY, transport)
 
 
 def test_the_team_services_withdraw_from_every_partition_of_each_team_they_serve() -> None:
@@ -946,14 +936,18 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
             assert not {subject for subject in publish if "{team}" in subject and subject.startswith("$JS.")}
         elif role == "team_services":
             # Their own team's streams only: no grant reaches another team's streams, or their own inbox's stream.
-            streams = ("UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_DLQ_{team}")
+            streams = ("UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_EDGE_WORK_{team}", "UA1_DLQ_{team}")
             assert deletes == creates == {f"$JS.API.STREAM.MSG.DELETE.{stream}" for stream in streams}
             assert reads == {f"$JS.API.STREAM.MSG.GET.{stream}" for stream in streams}
         else:
             assert not creates and not reads, role
     for change, problem in ((lambda t: t.update(topology_owner="nobody"), "name host roles"),
                             (lambda t: t["withdrawal"].update(streams=["UA1_DLQ_{team}"]), "only from the durable class's streams"),
-                            (lambda t: t["withdrawal"].update(streams=["UA1_WORK_{team}"]), "holds the team_services role's own inbox"),
+                            (lambda t: t["withdrawal"].update(streams=["UA1_TEAM_WORK_{team}"]), "holds the team_services role's own inbox"),
+                            # The copies' inbox shares its byte limit with no other reader's backlog.
+                            (lambda t: (t["streams"]["UA1_TEAM_WORK_{team}"]["subjects"].append("ua.v1.{team}.*.work.edge.*"),
+                                        t["streams"]["UA1_EDGE_WORK_{team}"].update(subjects=["ua.v1.{team}.*.work.edge.none"])),
+                             "a backlog there would refuse every copied kind"),
                             (lambda t: (t["classes"]["durable"]["streams"].append("UA1_SHARED"),
                                         t["withdrawal"].update(streams=["UA1_SHARED"])), "only in per-team streams"),
                             (lambda t: t.pop("pool_controller"), "names a host role that serves pools"),
@@ -1585,7 +1579,7 @@ def test_a_receiver_answers_on_the_requesters_own_inbox(request_subject: str, re
 @pytest.mark.parametrize(("request_subject", "reply_subject"), [
     # Where the answer would be written with the receiver's rights.
     ("ua.v1.team_example.worker-host-1.svc.team", "$JS.API.STREAM.DELETE.KV_UA1_CERTS"),
-    ("ua.v1._install.new-host-1.svc", "$JS.API.STREAM.DELETE.UA1_WORK_team_example"),
+    ("ua.v1._install.new-host-1.svc", "$JS.API.STREAM.DELETE.UA1_TEAM_WORK_team_example"),
     ("ua.v1.team_example.worker-host-1.svc.team", "$KV.UA1_LOCKS.team_services.team_example"),
     ("ua.v1.team_example.gateway-1.ctl.agent.lead", "ua.v1.team_example.gateway-1.work.agent.lead"),
     # Another runtime's inbox, or an inbox prefix that only starts like the requester's.
@@ -1717,7 +1711,7 @@ def test_a_buckets_stream_refuses_rollups_and_serves_direct_reads() -> None:
     (lambda t: t["key_value"]["UA1_AGENTS"]["writers"].update(worker_host=[">"]), "starts with a fixed word"),
     (lambda t: t["key_value"]["UA1_HOSTS"]["writers"].update(worker_host=["*"]), "starts with a fixed word"),
     (lambda t: t["key_value"]["UA1_CERTS"]["writers"].update(edge_adapter=["host.>.x"]), "ends with >"),
-    (lambda t: t["dead_letter_custody"].update(streams=["UA1_WORK_{team}"]), "dead_letter class's streams"),
+    (lambda t: t["dead_letter_custody"].update(streams=["UA1_EDGE_WORK_{team}"]), "dead_letter class's streams"),
     (lambda t: t["streams"]["UA1_DLQ_{team}"].pop("max_msgs_per_subject"), "one message per subject"),
 ])
 def test_the_generator_refuses_buckets_and_custody_it_cannot_grant(change, problem: str) -> None:
@@ -2659,6 +2653,30 @@ def test_a_notice_names_a_refusal_up_to_the_last_field_the_schema_knows() -> Non
     assert not validator("bodies/dlq.notice.schema.json").is_valid(dict(notice, pointer="/body/Dear Bob, my password"))
 
 
+def test_dead_letter_examples_name_a_stream_the_contract_has() -> None:
+    """A notice's original names the stream the message sat in: the one transport.yaml stores its subject in."""
+
+    from custom_messages.wire.partitions import agent_partition, signed_subject_of
+
+    checked = 0
+    for path in sorted((EXAMPLES / "valid" / "dlq.notice").glob("*.json")):
+        body = json.loads(path.read_text(encoding="utf-8"))["body"]
+        if body["reason"] == "upgrade_old_format":  # the old work stream, named by the operator's prefix
+            continue
+        assert validator("bodies/dlq.notice.schema.json").is_valid(body), path.name
+        subject, team = body["original"]["subject"], body["original"]["subject"].split(".")[2]
+        signed = signed_subject_of(subject)
+        tokens = signed.split(".")
+        partition = agent_partition(team, tokens[6]) if tokens[4] == "work" and tokens[5] in ("agent", "control") else None
+        names = {template.format(team=team, partition=partition) for template, stream in TRANSPORT["streams"].items()
+                 if any(re.fullmatch(pattern.replace("{team}", re.escape(team)).replace("{partition}", str(partition))
+                                     .replace(".", r"\.").replace("*", r"[^.]+").replace(">", ".+"), subject)
+                        for pattern in stream["subjects"])}
+        assert names == {body["original"]["stream"]}, path.name
+        checked += 1
+    assert checked
+
+
 def test_dead_letter_senders_can_publish_raw_copies_under_their_own_id() -> None:
     for role in REGISTRY["kinds"]["dlq.notice"]["senders"]:
         document = json.loads((CONTRACT / f"generated/permissions/{role}.json").read_text())
@@ -2783,10 +2801,12 @@ def test_rotation_proof_covers_a_newer_minors_unknown_fields() -> None:
     assert refusal(fixtures.resign(document), document).code == "invalid_body"
 
 
-def test_a_host_that_has_not_joined_may_only_ask_to_join_and_read_its_inbox() -> None:
+def test_a_host_that_has_not_joined_may_only_ask_to_join_and_read_its_joins_replies() -> None:
+    """README, "NATS users and the account": a leftover bootstrap login hears none of the joined host's replies."""
+
     joining = role_permissions(EXPORT.JOINING)
     assert joining == {"role": EXPORT.JOINING, "publish": ["ua.v1._install.{self}.svc"],
-                       "subscribe": ["_INBOX.{self}.>"]}
+                       "subscribe": ["_INBOX.{self}.join.>"]}
     assert EXPORT.JOINING not in REGISTRY["host_roles"]
 
 
@@ -2883,6 +2903,9 @@ def test_knowledge_text_that_may_be_long_has_a_blob_form_and_examples_show_both(
         ("summary", {"type": "string", "pattern": "^[a-z]{0,40000}$"}),
         ("summary", {"type": "string", "pattern": "^(?:[a-z]{0,200}){0,200}$"}),
         ("summary", {"type": "string", "pattern": "^(?:ab|c*)$"}),
+        # {,n}: Python reads it as 0 to n, so it is no literal; a pattern the count cannot read is unbounded.
+        ("summary", {"type": "string", "pattern": "^[a-z ]{,40000}$"}),
+        ("summary", {"type": "string", "pattern": "^(?:[a-z ]{,200}){0,200}$"}),
         # Schema forms the contract's Knowledge schemas do not use yet are walked too.
         ("summary", {"type": ["string", "null"]}),
         ("summary", {"anyOf": [{"type": "string"}, {"type": "null"}]}),
@@ -2921,6 +2944,7 @@ def test_bounded_knowledge_text_patterns_pass() -> None:
     ("^(?:[a-z]{0,200}){0,200}$", 40000),
     ("^[a-z]{1,}$", None),
     ("^(?:ab|c+)$", None),
+    ("^[a-z ]{,40000}$", None),
 ])
 def test_a_patterns_longest_match_counts_every_repetition(pattern: str, longest: int | None) -> None:
     assert EXPORT.pattern_longest_match(pattern) == longest

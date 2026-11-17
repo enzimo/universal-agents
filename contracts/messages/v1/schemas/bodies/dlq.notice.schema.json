@@ -54,8 +54,8 @@
         },
         "stream": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9_-]{1,255}$",
-          "description": "The stream the message sat in: a protocol 1 stream, or for upgrade_old_format the old work stream, whose name the operator's subject prefix makes and may be longer than an id (README, \"Dead letters\")."
+          "pattern": "^[A-Za-z0-9_~-]{1,255}$",
+          "description": "The stream the message sat in: a protocol 1 stream (a partition stream's name holds ~, UA1_PART_<team>~<partition>), or for upgrade_old_format the old work stream, whose name the operator's subject prefix makes and may be longer than an id (README, \"Dead letters\")."
         },
         "stream_sequence": {
           "$ref": "../common.schema.json#/$defs/count"

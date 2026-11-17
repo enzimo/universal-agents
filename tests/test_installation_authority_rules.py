@@ -65,6 +65,20 @@ def test_a_join_gets_no_more_than_the_launcher_listed(changes: dict[str, Any], r
     assert _denial(LISTED, join_body(**changes), LISTED.agent_types) == reason
 
 
+def test_a_lead_worker_or_team_services_runtime_serves_one_team_even_when_listed_for_more() -> None:
+    """transport.yaml single_team_roles: a credential holds one team's partitions; the gateway stays installation-wide."""
+
+    teams = frozenset({"team_one", "team_two"})
+    for role in ("worker_host", "lead_host", "team_services"):
+        listed = ExpectedHost("host-1", "worker.key1", "PUBLIC1", frozenset({role}), teams, frozenset({"researcher"}), 4)
+        body = join_body(runtime="host-1", roles=[role])
+        assert _denial(listed, dict(body, teams=["team_one", "team_two"]), listed.agent_types) == "team_not_allowed"
+        assert _denial(listed, dict(body, teams=["team_two"]), listed.agent_types) is None
+    gateway = ExpectedHost("gateway-1", "worker.key1", "PUBLIC1", frozenset({"gateway"}), teams, frozenset(), 0)
+    body = join_body(runtime="gateway-1", roles=["gateway"], agent_types=[], session_limit=0)
+    assert _denial(gateway, dict(body, teams=["team_one", "team_two"]), frozenset()) is None
+
+
 def test_a_host_nobody_listed_is_not_approved() -> None:
     assert _denial(None, join_body(), frozenset()) == "not_approved"
 

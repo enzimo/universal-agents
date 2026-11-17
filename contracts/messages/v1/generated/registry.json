@@ -1218,6 +1218,11 @@
       },
       "authority": "none",
       "body": "bodies/host.renew.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/partitions"
+        }
+      ],
       "class": "request_reply",
       "description": "A host renews its certificate and connection credential, or rotates its keys.",
       "expiry_seconds": 30,

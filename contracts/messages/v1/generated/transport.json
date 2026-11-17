@@ -69,7 +69,8 @@
       "streams": [
         "UA1_PART_{team}~{partition}",
         "UA1_POOL_WORK_{team}",
-        "UA1_WORK_{team}"
+        "UA1_EDGE_WORK_{team}",
+        "UA1_TEAM_WORK_{team}"
       ]
     },
     "event": {
@@ -130,7 +131,7 @@
       "max_deliveries": 20,
       "mode": "pull",
       "name": "edge~{team}~{edge}",
-      "stream": "UA1_WORK_{team}"
+      "stream": "UA1_EDGE_WORK_{team}"
     },
     "pool": {
       "ack": "explicit",
@@ -148,7 +149,7 @@
       "max_deliveries": 20,
       "mode": "pull",
       "name": "team~{team}",
-      "stream": "UA1_WORK_{team}"
+      "stream": "UA1_TEAM_WORK_{team}"
     }
   },
   "dead_letter_custody": {
@@ -325,7 +326,9 @@
       "jetstream": true,
       "mappings": "partitions.account_mappings"
     },
+    "credential_lifetime_setting": "transport.nats.credential_lifetime_seconds",
     "mode": "operator",
+    "operator_signing_key_holder": "installation_authority",
     "signing_key_holder": "installation_authority",
     "users": {
       "host": {
@@ -411,6 +414,7 @@
     },
     "count_setting": "transport.queues.partitions",
     "default_count": 96,
+    "handover_seconds": 600,
     "max_count": 128
   },
   "peer_sender_slot": "x-{installation}",
@@ -423,7 +427,8 @@
     "size_kinds": [
       "partition",
       "pool",
-      "work",
+      "edge",
+      "team_services",
       "dead_letter"
     ],
     "warn_at_percent_default": 80,
@@ -437,6 +442,11 @@
     },
     "minimum_version": "2.15.1"
   },
+  "single_team_roles": [
+    "lead_host",
+    "worker_host",
+    "team_services"
+  ],
   "size_check": {
     "role": "gateway"
   },
@@ -452,6 +462,19 @@
       "storage": "file",
       "subjects": [
         "ua.v1.{team}.*.dlq.>"
+      ]
+    },
+    "UA1_EDGE_WORK_{team}": {
+      "discard": "new",
+      "duplicate_window_seconds": 120,
+      "max_age_seconds": 604860,
+      "max_consumers": 1024,
+      "max_message_bytes": 263168,
+      "retention": "workqueue",
+      "size_kind": "edge",
+      "storage": "file",
+      "subjects": [
+        "ua.v1.{team}.*.work.edge.*"
       ]
     },
     "UA1_PART_{team}~{partition}": {
@@ -481,17 +504,16 @@
         "ua.v1.{team}.*.work.pool.*"
       ]
     },
-    "UA1_WORK_{team}": {
+    "UA1_TEAM_WORK_{team}": {
       "discard": "new",
       "duplicate_window_seconds": 120,
       "max_age_seconds": 604860,
-      "max_consumers": 1024,
+      "max_consumers": 16,
       "max_message_bytes": 263168,
       "retention": "workqueue",
-      "size_kind": "work",
+      "size_kind": "team_services",
       "storage": "file",
       "subjects": [
-        "ua.v1.{team}.*.work.edge.*",
         "ua.v1.{team}.*.work.team"
       ]
     }
@@ -502,7 +524,8 @@
     "role": "team_services",
     "streams": [
       "UA1_PART_{team}~{partition}",
-      "UA1_POOL_WORK_{team}"
+      "UA1_POOL_WORK_{team}",
+      "UA1_EDGE_WORK_{team}"
     ]
   }
 }

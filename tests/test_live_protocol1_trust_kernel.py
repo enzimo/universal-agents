@@ -33,7 +33,7 @@ from custom_transport.protocol1.trust_state import PersistentTrustStore
 from tests import message_contract_support as fixtures
 from tests.live_nats_support import flush_fully
 from tests.own_nats_server import own_nats_server
-from tests.test_live_message_contract import WORK, WORK_STREAM, connect, create_buckets, nats_server, stream_config
+from tests.test_live_message_contract import TEAM_STREAM, TEAM_WORK, connect, create_buckets, nats_server, stream_config
 from tests.test_live_message_contract import isolated_broker  # noqa: F401  (the per-role broker fixture)
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
@@ -266,7 +266,7 @@ async def test_a_served_address_answers_only_the_requesters_inbox_under_per_role
         services_client = await connect(stack, isolated_broker, "services")
         worker_client = await connect(stack, isolated_broker, "worker")
         js = admin.nc.jetstream()
-        await js.add_stream(config=stream_config(WORK_STREAM))
+        await js.add_stream(config=stream_config(TEAM_STREAM))
         await create_buckets(admin)
         revocations = (fixtures.TRUST / "revocations" / "install_example.json").read_bytes()
         certificates = await js.key_value("UA1_CERTS")
@@ -285,7 +285,7 @@ async def test_a_served_address_answers_only_the_requesters_inbox_under_per_role
         await services.serve("svc.team", SERVICES_RECEIVER, close)
         await flush_fully(services_client.nc)
         body = {"session": "s-researcher-2-1", "reason": "exited"}
-        for number, reply in enumerate((f"$JS.API.STREAM.DELETE.{WORK}", "$KV.UA1_CERTS.revocations.install_example",
+        for number, reply in enumerate((f"$JS.API.STREAM.DELETE.{TEAM_WORK}", "$KV.UA1_CERTS.revocations.install_example",
                                         "_INBOX.lead-host-1.x")):
             frame = worker.sign("sessions.close", {**body, "request_id": f"close_{number}"}, TO_SERVICES, team=TEAM)
             data, headers = worker.encode(frame)
@@ -294,7 +294,7 @@ async def test_a_served_address_answers_only_the_requesters_inbox_under_per_role
         await worker_client.nc.flush()
         answered = await worker.request("sessions.close", {**body, "request_id": "close_own"}, TO_SERVICES, team=TEAM)
         assert answered.body.outcome == "ok" and handled == ["close_own"]
-        assert (await js.stream_info(WORK)).config.name == WORK
+        assert (await js.stream_info(TEAM_WORK)).config.name == TEAM_WORK
         assert (await certificates.get("revocations.install_example")).value == revocations
         assert services_client.errors.empty() and worker_client.errors.empty()
 

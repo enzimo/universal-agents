@@ -1,6 +1,6 @@
 {
   "publish": [
-    "$JS.ACK.UA1_WORK_{team}.edge~{team}~{edge}.>",
+    "$JS.ACK.UA1_EDGE_WORK_{team}.edge~{team}~{edge}.>",
     "$JS.API.CONSUMER.CREATE.KV_UA1_AGENTS",
     "$JS.API.CONSUMER.CREATE.KV_UA1_CERTS",
     "$JS.API.CONSUMER.CREATE.KV_UA1_HOSTS",
@@ -11,8 +11,8 @@
     "$JS.API.CONSUMER.INFO.KV_UA1_HOSTS.*",
     "$JS.API.CONSUMER.INFO.KV_UA1_PLACEMENT.*",
     "$JS.API.CONSUMER.INFO.OBJ_UA1_BLOBS.*",
-    "$JS.API.CONSUMER.INFO.UA1_WORK_{team}.edge~{team}~{edge}",
-    "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK_{team}.edge~{team}~{edge}",
+    "$JS.API.CONSUMER.INFO.UA1_EDGE_WORK_{team}.edge~{team}~{edge}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_EDGE_WORK_{team}.edge~{team}~{edge}",
     "$JS.API.DIRECT.GET.KV_UA1_AGENTS",
     "$JS.API.DIRECT.GET.KV_UA1_AGENTS.>",
     "$JS.API.DIRECT.GET.KV_UA1_CERTS",

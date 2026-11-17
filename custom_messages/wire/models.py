@@ -1712,7 +1712,7 @@ class DeliveryRefusedBody(WireModel):
 
 class DlqNoticeBodyOriginal(WireModel):
     subject: Annotated[str, StringConstraints(min_length=1, max_length=512)]
-    stream: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,255}$')]
+    stream: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_~-]{1,255}$')]
     stream_sequence: Count
     deliveries: Count
 
@@ -2216,6 +2216,7 @@ class HostRenewBody(WireModel):
     contract_sha256: ContractSha256
     software: Union[Software, MISSING] = Field(default=MISSING)
     new_nats_public_key: Union[NatsUserKey, MISSING] = Field(default=MISSING)
+    partitions: Union[Annotated[list[Partition], Field(max_length=128)], MISSING] = Field(default=MISSING)
     application_key_rotation: Union[HostRenewBodyApplicationKeyRotation, MISSING] = Field(default=MISSING)
 
 

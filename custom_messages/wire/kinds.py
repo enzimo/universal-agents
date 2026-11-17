@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = '7da5ee8e2f4aacf1fa4566671eb0bf51720f2975b756216689d0c88d781b80d4'
+CONTRACT_SHA256 = 'db2d735f1a08e5d0612c8d80ec0a9dc1aad3ba58888475066628021d78661ac4'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -23,6 +23,7 @@ MAX_NESTING_DEPTH = 64
 CLOCK_SKEW_SECONDS = 8
 DEFAULT_PARTITION_COUNT = 96
 MAX_PARTITION_COUNT = 128
+SINGLE_TEAM_ROLES = ('lead_host', 'worker_host', 'team_services')
 PARTITIONED_ADDRESSES = ('ctl.agent.{agent}', 'work.agent.{agent}', 'work.control.{agent}')
 REPLAY_LEDGER_RETENTION_SECONDS = 2592060
 SUBJECT_PREFIX = 'ua.v1.{team}.{sender}'
@@ -784,7 +785,7 @@ KINDS: dict[str, KindSpec] = {
         authority='none',
         authority_by_target={},
         authority_binding=(),
-        body_rules=(),
+        body_rules=({'unique': '/body/partitions'},),
         execution_slot=False,
         accepted_while_paused=True,
         priority='high',
@@ -793,7 +794,7 @@ KINDS: dict[str, KindSpec] = {
         ledger='none',
         wakes_model='never',
         rendering='none',
-        body_shape={'properties': {'renew_id': None, 'certificate_id': None, 'membership_epoch': None, 'profile_sha256': None, 'contract_sha256': None, 'software': {'properties': {'name': None, 'version': None}}, 'new_nats_public_key': None, 'application_key_rotation': {'properties': {'key': {'properties': {'key_id': None, 'public_key': None}}, 'proof': None}}}},
+        body_shape={'properties': {'renew_id': None, 'certificate_id': None, 'membership_epoch': None, 'profile_sha256': None, 'contract_sha256': None, 'software': {'properties': {'name': None, 'version': None}}, 'new_nats_public_key': None, 'partitions': {'items': None}, 'application_key_rotation': {'properties': {'key': {'properties': {'key_id': None, 'public_key': None}}, 'proof': None}}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'certificate': {'properties': {'record': None, 'protocol': None, 'key': None, 'writer': {'properties': {'type': None, 'installation': None, 'key_id': None}}, 'sequence': None, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'body_digest': None, 'body': {'properties': {'certificate_id': None, 'installation': None, 'runtime': None, 'teams': {'items': None}, 'roles': {'items': None}, 'membership_epoch': None, 'revocation_epoch': None, 'application_key': {'properties': {'key_id': None, 'public_key': None}}, 'nats_public_key': None, 'agent_types': {'items': None}, 'session_limit': None, 'connection_class': None, 'tools': {'items': None}, 'protocol': None, 'deployment': None, 'profile_sha256': None, 'software': {'properties': {'name': None, 'version': None}}, 'issued_at': None, 'expires_at': None, 'replaces': None}}, 'signature': None}}, 'connection': {'properties': {'type': None, 'jwt': None, 'expires_at': None}}}}, 'revoked': {'properties': {'outcome': None, 'revocation_epoch': None, 'message': None}}, 'needs_approval': {'properties': {'outcome': None, 'join_id': None, 'message': None}}, 'protocol_mismatch': {'properties': {'outcome': None, 'accepted': None, 'accepted_contract_sha256': None, 'install': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),

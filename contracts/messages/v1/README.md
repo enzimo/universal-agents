@@ -271,7 +271,10 @@ refuses anything else.
 - **Patterns** use only syntax that every common regular-expression engine reads the same
   way, including Python's `re`, Pydantic's validator and ECMAScript: literal characters,
   character classes (without nested `[`), escaped punctuation, groups and `(?:`,
-  alternatives inside a group, and quantifiers. They start with `^` and end with `$`, and
+  alternatives inside a group, and the quantifiers `?`, `*`, `+`, `{n}`, `{n,}` and `{n,m}`
+  (`m` not below `n`). A brace outside a character class starts one of those three forms,
+  and a literal brace is escaped (`\{`): engines read others, such as `{,n}`, differently
+  (Python as 0 to n, ECMAScript as text, and Pydantic's engine refuses it). They start with `^` and end with `$`, and
   `$` means the end of the value. Shorthand classes (`\d`, `\w`, `\s`), an unescaped `.`,
   other group forms (lookaround, named groups, inline flags), backreferences, word
   boundaries and possessive quantifiers are refused. Python's `re` also lets `$` match
@@ -835,9 +838,9 @@ requests and queued work only for the agents of its own partitions and the pools
 
 A broken-into host therefore cannot read, take or acknowledge work queued for agents on
 other hosts, or hear their control requests, and it cannot sign as them either, since every
-frame names its agent's session ("Who sent it"). Edge deliveries and the team services'
-inbox stay in the team's `UA1_WORK_<team>`, read through grants on their exact consumers, so
-agent hosts reach neither.
+frame names its agent's session ("Who sent it"). Edge deliveries wait in the team's
+`UA1_EDGE_WORK_<team>` and the team services' inbox in its `UA1_TEAM_WORK_<team>`, each read
+through grants on exact consumers, so agent hosts reach neither.
 
 The worker pool controller (`custom_agents.worker_pool_controller`) runs with the team lead
 and starts workers from how much work waits for each pool, so the lead host also reads the
@@ -901,38 +904,54 @@ ends no local wait: the lead goes on, and sees the result at its next turn.
 the pools it runs, so it changes when the host gains or loses one, never when an agent is
 placed or ends. NATS checks a user's permissions only when it connects, and acknowledgements
 are not signed, so a credential that names a partition must stop working before another host
-reads that partition's queues. A partition moves only whole, with every agent placed in it:
-moving one agent to another host moves the other agents of its partition too, and no path
-copies one agent's queued work. Before a move starts, the team services check that the new
-host's credential would still fit ("Credential size"); a move that would not fit is not
-started, and the partition stays with its old host. The authority fills a credential's
-partitions from the team services' ownership records ("Filling the templates"), so a move
-first tells it, through the record, that the old host is giving the partition up. A
+reads that partition's queues. Every credential stops on its own: each user JWT ends after
+the lifetime `transport.nats.credential_lifetime_seconds` holds (`nats_account` in
+`transport.yaml`; step 2 measures the renewal load and sets it), and hosts renew before it
+ends. On the bundled server the authority also revokes a NATS key at once; on an external
+server, whose operator gives no operator key, a credential stops only when it ends ("NATS
+users and the account").
+
+A partition moves only whole, with every agent placed in it: moving one agent to another
+host moves the other agents of its partition too, and no path copies one agent's queued
+work. Before a move starts, the team services check that the new host's credential would
+still fit ("Credential size"); a move that would not fit is not started, and the partition
+stays with its old host. A lead or worker host's renewal names the partitions its new
+credential is to hold (`partitions` in `host.renew`), and the authority issues exactly
+those that an `owned` ownership record names for that host ("Filling the templates"), so a
+move first tells it, through the record, that the old host is giving the partition up. A
 connected host hands a partition over in this order:
 1. The team services write the partition's ownership record as `released`, still naming the
-   old host, with compare-and-set. From then on the authority leaves the partition out of
-   every credential it issues, a renewal by the old host needs a new NATS key, and no new
-   agent is placed in the partition (`partition_not_owned`). The old host starts the
-   handover only once it reads the `released` record.
+   old host, with compare-and-set. From then on the authority names the partition in no
+   credential it issues, a renewal by the old host needs a new NATS key, and no new agent is
+   placed in the partition (`partition_not_owned`). The old host starts the handover only
+   once it reads the `released` record, and asks for no other renewal until step 3, which
+   also takes up any partition it gained meanwhile.
 2. The old host stops pulling the inboxes and answering the control addresses of the
    partition's agents. It keeps reading their control queues while it finishes, or hands
    back with `task.handback`, every task they admitted, and acknowledges their messages
    while its credential still names the partition; then it stops reading those control
-   queues too. The handover sends each agent's ledger to the team services ("Custody
-   windows").
-3. The old host renews (`host.renew`) with a new NATS key (`new_nats_public_key`) and
-   connects with the credential of the reply, which no longer names the partition. A
-   renewal gives up a partition when a `released` record names its host, and a pool when
-   its profile drops one; the authority refuses either without a new NATS key
-   (`invalid_body` at `/body/new_nats_public_key`). The host's old NATS key is then revoked
-   ("NATS users and the account"), which refuses every credential issued for that key and
-   closes any connection still using one. Revoking the old key rather than a time on the
-   same key matters: NATS revokes every credential of a key issued at or before the
-   revocation's time, in whole seconds, so a new credential for the same key issued in that
-   second would be revoked with the old ones.
+   queues too. A task that waits for a message its agent receives in the inbox, which is no
+   longer read, is handed back at once rather than finished. Step 2 ends at the latest
+   `partitions.handover_seconds` (10 minutes) after the `released` record's `issued_at`, or
+   earlier when the host's credential or certificate would otherwise end before step 3;
+   every task still held then is handed back. The handover sends each agent's ledger to the
+   team services ("Custody windows").
+3. The old host renews (`host.renew`) with a new NATS key (`new_nats_public_key`), leaves
+   the partition out of its `partitions`, and connects with the credential of the reply. A
+   renewal gives up a partition when a `released` record names its host, and a pool when its
+   profile drops one; the authority refuses either without a new NATS key (`invalid_body` at
+   `/body/new_nats_public_key`). The host's old NATS key is then revoked where the authority
+   can revoke, which refuses every credential issued for that key until then and closes any
+   connection still using one. Revoking the old key rather than a time on the same key
+   matters: NATS revokes every credential of a key issued at or before the revocation's
+   time, in whole seconds, so a new credential for the same key issued in that second would
+   be revoked with the old ones. The authority issues no credential for a revoked NATS key
+   again: a later join or renewal that presents one is refused, and must bring a new key.
 4. Only then do the team services write the partition's record as `owned` by the new host,
-   and its agents' new placements, and the new host gets a credential that names the
-   partition.
+   and its agents' new placements, and the new host renews with the partition in its
+   `partitions`. On a server where the authority cannot revoke, "then" is once every
+   credential issued for the old key has ended: the credential lifetime after the step-3
+   renewal, plus the clock tolerance.
    Queued messages never move: they stay in the agents' consumers in the partition's stream
    with their stored times, and the new host reads them.
 
@@ -943,12 +962,21 @@ partition moves to the replacement's host as above. The topology owner deletes t
 agent's consumers once both are empty.
 
 A host that is cut off or retired cannot take the handover's step 2. Its partitions are released first, so
-no credential issued after that names them, then its NATS key is revoked (with its
-certificate, when an administrator retires it), its partitions move to other
-hosts, and the work it admitted without acknowledging comes back to the agents' queues after
+no credential issued after that names them, then its NATS key is revoked where the authority
+can revoke (with its certificate, when an administrator retires it), and its partitions move
+to other hosts once its key is revoked or every credential issued for it has ended. The work
+it admitted without acknowledging comes back to the agents' queues after
 `ack_wait_seconds`, where the new owner takes it; its custody moves by the rules of "Custody windows". A credential never
 outlives the certificate it comes with: a join or renewal reply whose `connection` ends
 after its certificate is refused (`invalid_body` at `/body/connection/expires_at`).
+
+**While hosts share one NATS login.** Until the release that gives every process its own
+NATS user, the installation issues no credentials ("Replies"), so no credential can name a
+partition. In that period a host counts a partition as its own once a verified `owned`
+record names it, under the certificate it holds; step 3 renews nothing, and the team
+services write step 4 once the old host has sent every agent's ledger or the step-2
+deadline has passed. The shared login reaches every queue, so the promise that a credential
+stops working before another host reads a partition holds only from that release on.
 
 **Credential size.** A credential grows with the partitions its host owns and the pools it
 runs, never with its agents: each owned partition adds five subjects (the info,
@@ -957,78 +985,70 @@ and the keys of its agents' records), 278 bytes of permission JSON with the long
 (24 characters) and partition numbers of two digits, which a NATS user JWT's base64url
 encoding turns into about 371 bytes. Each worker pool adds three subjects, 346 bytes with a
 24-character agent type. A credential is at most `max_credential_bytes` (65,536 bytes,
-`transport.yaml`), the `jwt` field's limit. A host that owns all 96 partitions of its team
-beside 10 worker pools needs about 46 KB with the longest ids. The team services own no
-partitions, but they read and delete in every partition stream of each team they serve
-("Filling the templates"), so their credential grows with their teams: about 23 KB for one
-team at 96 partitions and about 20 KB for each further team. That sets the largest partition
+`transport.yaml`), the `jwt` field's limit. Every lead or worker host and every team
+services runtime serves exactly one team (`single_team_roles` in `transport.yaml`, owner
+decision of 2026-11-17): the authority grants those roles only with one team, and a machine
+that works for several teams runs one runtime per team. A host that owns all 96 partitions
+of its team beside 10 worker pools needs about 46 KB with the longest ids. The team services
+own no partitions, but they read and delete in every partition stream of their team
+("Filling the templates"): about 23 KB at 96 partitions. That sets the largest partition
 count an installation may choose (`partitions.max_count`): the largest multiple of 32 at
-which both still fit for one team, at most 128 partitions.
-
-What a credential holds is counted in partition-team pairs: one for each partition of each
-team it names, plus each team's own grants (about 2 KB per team). Beside 10 worker pools with
-the longest ids, a lead or worker host that serves two teams holds at most 141 partition-team
-pairs, so at the default count a host can own every partition of one team but not of two
-(that would need about 84 KB). The team services' credential holds every partition of at most
-3 teams at 96 partitions (2 at 128). `tests/test_message_contract.py` recomputes these
+which both still fit, at most 128 partitions. `tests/test_message_contract.py` recomputes these
 figures from the generated templates and checks that one step more does not fit.
 
-The installation authority, which issues every certificate and its credential and sees every
-team, keeps credentials within the bound: it refuses a certificate whose credential would be
-larger than `max_credential_bytes`, computing the size from the same generated templates that
-fill it, so the bound and the check cannot disagree. For a lead or worker host it counts the
-partition-team pairs and the pools the host would own; for the team services every partition
-of each team they serve. At the default count that is every partition of one team for a host,
-and at most 3 teams for one team services runtime (2 at 128). A join is refused with
-`credential_too_large` (`host.join.reply`, `denied`), and a renewal, such as one asked for when
-a host would gain a partition, with `not_allowed` and a message naming the limit; both say what
-to do: give the host or the team services runtime fewer teams, or the host fewer partitions. A
-certificate may name up to 64 teams; the credential's size, not the certificate, is what
-limits them. A host may run any number of agents in its partitions; a certificate's
-`session_limit` is what limits them. A host writes the records of its partitions' agents
-only, rather than any agent record of its team: readers would refuse another host's record,
-but agent records are written only when they change, so an overwritten one would stay
-missing until the next change. NATS reads a user JWT in the
+The installation authority, which issues every certificate and its credential, keeps
+credentials within the bound: it refuses a certificate whose credential would be larger
+than `max_credential_bytes`, computing the size from the same generated templates that fill
+it, so the bound and the check cannot disagree. Only a host with more worker pools than the
+figure above can reach it. A join is refused with `credential_too_large` (`host.join.reply`,
+`denied`), and a renewal with `not_allowed` and a message naming the limit; both say what to
+do: give the host fewer pools or partitions. A host may run any number of agents in its
+partitions; a certificate's `session_limit` is what limits them. A host writes the records
+of its partitions' agents only, rather than any agent record of its team: readers would
+refuse another host's record, but agent records are written only when they change, so an
+overwritten one would stay missing until the next change. NATS reads a user JWT in the
 client's `CONNECT` line, which the server's `max_control_line` limits (4,096 bytes unless
 configured), so an installation's servers set `max_control_line` above
 `max_credential_bytes` plus the rest of the `CONNECT` line.
 
-The team services check first, since they decide which host owns a partition and the authority
-fills credentials from their ownership records: before they give a host a partition, they
-compute the credential it would then need with the same generated templates
-(`custom_messages.wire.permissions`), from the host's certificate (its teams and pools) and
-their own teams' ownership records, and write no ownership record for a host it would not fit.
-They cannot see the partitions a host owns in teams another team services runtime serves, so
-the authority's refusal stays as the fail-closed check behind theirs. When it refuses the
-renewal of a host that was just given a partition, that host never takes the partition up: a
-host counts a partition as its own, draws agent ids in it and asks for sessions and placements
-there, only once its current credential names it. The partition then has an owner record but
-no reader; its queued work waits in its stream, as during any move, and no new agent is placed
-there. The team services, once they learn of the refusal, give the partition to another host
-whose credential would fit, its previous owner included, or leave it without an owner. How
-they learn of it is step 2's to build with the authority's check.
+The team services check first, since they decide which host owns a partition: before they
+give a host a partition, they compute the credential it would then need with the same
+generated templates (`custom_messages.wire.permissions`), from the host's certificate (its
+team and pools) and their team's ownership records, and write no ownership record for a host
+it would not fit. Since a host serves only their team, they see every partition it owns, and
+the authority's refusal is only the fail-closed check behind theirs. A renewal names the
+partitions it asks for, so a refused one blocks nothing else: the host renews again without
+the partition it could not take up, and its later renewals, a handover's step 3 among them,
+go on. A host counts a partition as its own, draws agent ids in it and asks for sessions and
+placements there, only once its current credential names it. A partition whose new owner
+never takes it up has an owner record but no reader; its queued work waits in its stream, as
+during any move, and no new agent is placed there. The team services, once they learn of the
+refusal, give the partition to another host whose credential would fit, its previous owner
+included, or leave it without an owner. How they learn of it is step 2's to build with the
+authority's check.
 
 **Filling the templates.** Before installing permissions, trusted membership code fills
 each role's templates for the host (`custom_messages.wire.permissions.host_permissions`):
 - `{self}` becomes its runtime id;
 - a subject that names `{partition}`, `{pool}` or `{edge}` is repeated for each partition
-  the host owns (the team services' partition ownership records that say `owned` and name
-  the host, `custom_messages.wire.partitions.owned_partitions`; a `released` record's
-  partition is left out, "Credentials follow ownership"), each pool it runs
-  and each edge it serves, with `{team}` set to that partition's, pool's or edge's own team.
-  A host that serves two teams and owns team A's partition 7 therefore gets no grant on team
-  B's partition 7. No template names an agent. The team services own no partitions: for them
-  `{partition}` is every partition of each team they serve, 0 to the installation's count
-  minus 1 (`custom_messages.wire.partitions.every_partition`), because they withdraw queued
-  work from every partition stream ("Withdrawing queued work");
-- any other subject with `{team}` is repeated for each team the host serves;
+  the host owns (those its renewal's `partitions` names that the team services' partition
+  ownership records say are `owned` by the host, `custom_messages.wire.partitions.owned_partitions`;
+  a `released` record's partition is left out, "Credentials follow ownership"), each pool it
+  runs and each edge it serves, with `{team}` set to that partition's, pool's or edge's own
+  team. No template names an agent. The team services own no partitions: for them
+  `{partition}` is every partition of their team, 0 to the installation's count minus 1
+  (`custom_messages.wire.partitions.every_partition`), because they withdraw queued work from
+  every partition stream ("Withdrawing queued work");
+- any other subject with `{team}` is repeated for each team the host serves: one for a lead
+  or worker host and for the team services (`single_team_roles`), and every team it serves
+  for the other roles;
 - `{installation}` becomes the host's own installation, and a subject that names `{peer}` is
   repeated for each installation the installation's agreements name ("Key-value grants").
 
 These placeholders never become wildcards. Clients use `_INBOX.<runtime>` as their inbox
-prefix. Hosts cannot reach another host's, another team's or another role's queue
+prefix (a host that has not joined yet, `_INBOX.<runtime>.join`). Hosts cannot reach another host's, another team's or another role's queue
 consumers. Hosts read no queue stream directly, except the team services, which read their
-own team's partition and pool streams to withdraw work and their own team's dead letters ("Dead
+own team's partition, pool and edge streams to withdraw work and their own team's dead letters ("Dead
 letters"); bucket readers read their buckets' streams through direct gets and watches
 ("Key-value grants"). Only the topology owner and the team services (withdrawing work, and
 keeping dead letters) create, change or delete JetStream objects or stored messages; bucket
@@ -1039,8 +1059,8 @@ keys. The live conformance tests prove both allowed and refused operations.
 the installation authority. It already decides which hosts serve which teams, partitions
 and pools, since it issues their certificates and credentials, so it knows when a team,
 agent or pool appears or leaves, and it runs no model. It creates a team's streams with the
-team (a stream per partition, its pool stream, its stream for edge deliveries and the team
-services' inbox, and its dead-letter stream), each agent's two
+team (a stream per partition, its pool stream, its edge stream, its team services' inbox
+stream and its dead-letter stream), each agent's two
 consumers in its partition's stream when the agent is placed, each pool's consumer with the
 pool, and the key-value buckets and the object store. Its generated grants name every stream
 of the account rather than a line per team and partition, which would grow with both: it
@@ -1051,13 +1071,13 @@ single messages (a team's removal, and the old streams at an upgrade). This adds
 it holds the account's signing key and could issue itself any permission.
 
 **Withdrawing queued work.** The team services withdraw a task queued for one of their
-team's agents or worker pools by deleting its message from one of the team's partition
-streams or its pool stream (`withdrawal` in `transport.yaml`); no other role may. Only the publisher learns a
-message's stream sequence, and the task's copy names the task (`task_id`) but neither the
-agent or pool its frame went to nor that frame's message id, so the team services find it
-themselves:
-1. They read each of their own team's partition streams and its pool stream from its first
-   sequence, across the stream's work subjects (`$JS.API.STREAM.MSG.GET` with
+team's agents, worker pools or outside agents by deleting its message from one of the team's
+partition streams, its pool stream or its edge stream (`withdrawal` in `transport.yaml`); no
+other role may. Only the publisher learns a message's stream sequence, and the task's copy
+names the task (`task_id`) but neither the agent, pool or edge its frame went to nor that
+frame's message id, so the team services find it themselves:
+1. They read each of their own team's partition streams, its pool stream and its edge stream
+   from its first sequence, across the stream's work subjects (`$JS.API.STREAM.MSG.GET` with
    `next_by_subj` set to `ua.v1.<team>.*.work.>`).
 2. They verify each `task.request` frame they find (its `UA-Kind` header names the kind)
    and delete, by its sequence (`$JS.API.STREAM.MSG.DELETE`), every one whose body names
@@ -1066,19 +1086,20 @@ themselves:
 Searching every partition stream is the accepted cost of a copy that does not name its
 destination: withdrawal is rare (a stop, or a person's message during a review). A search
 reads every message queued for the team, one message get each, plus one get per stream that
-answers that no message is left (the partition count plus the pool stream, 97 at the
-default); it cannot stop at the first match, because a task can wait more than once.
-Partitions add only those 97 gets to what one team stream cost. Naming the destination would
+answers that no message is left (the partition count plus the pool and edge streams, 98 at
+the default); it cannot stop at the first match, because a task can wait more than once.
+Partitions add only those gets to what one team stream cost. Naming the destination would
 narrow the search to one partition's backlog, but would add a field to the `task.request`
 body, which the frame and its copy share, and a receiver check that it matches the subject,
 for this one rare path.
 
 These streams hold only their team's messages, so neither grant reaches another team, and
-the generator allows withdrawal only from per-team streams. Work queued for an outside
-agent or a gateway route waits in the team's `UA1_WORK_<team>`, beside the team services'
-own inbox, where the tasks' copies wait: withdrawal there would delete those copies with
-the task, so the team services have no withdrawal grant on that stream (the generator
-refuses one) and stop edge work with `task.stop` to that edge instead.
+the generator allows withdrawal only from per-team streams. The team services' own inbox,
+where the tasks' copies wait, is a stream of its own, `UA1_TEAM_WORK_<team>`: a search there
+would delete those copies with the task, so withdrawal never searches it (the generator
+refuses a withdrawal stream that holds the withdrawal role's own inbox). A task for an outside
+agent that its adapter has already passed on is out of the team's reach, so the team services
+also send `task.stop` to that edge, which the adapter passes on.
 
 A delete can come too late. A host may already have pulled the message without
 acknowledging it: NATS still deletes it, and the host starts the task. A holder claims a
@@ -1100,12 +1121,24 @@ generator refuses settings that break these rules.
 limit, so a growing backlog cannot fill the server's disk. The installation authority
 reads the limits from the instance's settings when it creates or updates a stream:
 `transport.queues.max_bytes` holds one limit per size kind, and each stream names its kind
-(`size_kind` in `transport.yaml`: `partition`, `pool`, `work` or `dead_letter`). A kind's
-limit applies to each stream of that kind: each of every team's `UA1_PART_{team}~{partition}`
-streams, and every team's `UA1_POOL_WORK_{team}`, `UA1_WORK_{team}` and `UA1_DLQ_{team}`, has
-the limit of its kind (so a team's partitions together hold the partition count times the
-`partition` limit). No stream holds two teams' work, so one team whose hosts, edges or team
-services stop reading fills only its own streams and never refuses another team's messages. These settings enter the `config.yaml` and
+(`size_kind` in `transport.yaml`: `partition`, `pool`, `edge`, `team_services` or
+`dead_letter`). A kind's limit applies to each stream of that kind: each of every team's
+`UA1_PART_{team}~{partition}` streams, and every team's `UA1_POOL_WORK_{team}`,
+`UA1_EDGE_WORK_{team}`, `UA1_TEAM_WORK_{team}` and `UA1_DLQ_{team}`, has the limit of its kind
+(so a team's partitions together hold the partition count times the `partition` limit). No
+stream holds two teams' work, so one team whose hosts, edges or team services stop reading
+fills only its own streams and never refuses another team's messages.
+
+Inside a team, the team services' inbox has a stream of its own. Every copied kind (a task,
+its result, progress, hold account, claim and handback: registry `copy_to`) is stored there
+before its frame is published ("Durable copies"), so no other reader's backlog shares that
+stream's room, and an outside agent offline for a day, a stalled pool or a busy agent never
+refuses the team's copies (the generator refuses a stream that holds a copy address beside
+any other). That stream fills only when the team services stop reading; then every copied
+kind of the team is refused until they read again or an administrator raises the
+`team_services` limit. The team's work needs the team services' custody answers anyway, so it
+waits on them either way. Readers that share a partition, pool or edge stream do share its
+room: see "Control messages share their stream's room" below. These settings enter the `config.yaml` and
 `instance_config.yaml` schemas, with their measured defaults, in the step whose code first
 reads them; `transport.yaml` names them so that step builds on a fixed contract.
 
@@ -1161,16 +1194,27 @@ yet, without anyone being told:
   `person.notify`. Open for the step that builds the senders' outboxes: what the scheduler
   records for a run whose task expired unsent, and what a task's holder does when a
   result, question or progress report it sends up expires unsent (a result's copy to the
-  team services travels through `UA1_WORK_<team>`, another stream).
+  team services travels through `UA1_TEAM_WORK_<team>`, another stream).
 - **Control messages share their stream's room.** An agent's control queue is stored in
-  the same stream as its inbox ("An agent's two queues"), so a stream that new tasks have
-  filled also refuses stops, steers, custody confirmations, access decisions and results
-  for every agent in it until room returns; their senders retry them as above, and each
-  one that expires unsent has the effect a lost message of its kind has. Room returns when
-  hosts take work, when the team services withdraw queued work, or when an administrator
-  raises the limit. The size warning reaches administrators before the stream is full,
-  and defaults are measured so that it leaves time to act. The two queues keep control
-  messages from waiting behind new work; they do not reserve room for them.
+  the same stream as its inbox ("An agent's two queues"), so a partition stream that new
+  tasks have filled also refuses stops, steers, custody confirmations, access decisions and
+  results for every agent in it until room returns; their senders retry them as above, and
+  each one that expires unsent has the effect a lost message of its kind has. One agent's
+  backlog is enough to lock its partition: its host stops pulling the agent's inbox while
+  the agent can start no more work, so when its running task waits for a control message,
+  such as an access decision, that the full stream refuses, the agent cannot free room
+  itself, and every other agent of its partition is refused as well. Pools sharing a pool
+  stream, and edges sharing an edge stream, share their room the same way. Room returns in
+  a partition, pool or edge stream when hosts or edges take work, when the team services
+  withdraw queued work (a person's stop does this without publishing into the full stream),
+  or when an administrator raises the limit. The size warning reaches administrators
+  before a stream is full, and defaults are measured so that it leaves time to act. NATS
+  2.15.1 has no byte limit per subject. A cap on messages per subject
+  (`max_msgs_per_subject` with `discard_new_per_subject`, refused with the same 10077)
+  would stop one sender's backlog for one agent at a fixed count without changing this
+  layout; it counts per sender and agent, since the sender's runtime is a subject token.
+  Step 2 measures it against the byte limits it needs and sets it. The two queues keep
+  control messages from waiting behind new work; they do not reserve room for them.
 - **A full dead-letter stream** refuses a set-aside: see "Dead letters".
 
 The generator refuses a work or dead-letter stream without a size kind or with any other
@@ -1271,10 +1315,11 @@ cannot read the requester's inbox; a kind's `copy_to` addresses get a second fra
   (`team_services` on `work.team`, audience id the team). A copy of a `task.request` to a
   worker pool carries the task's authority token, which the pool frame may not ("On behalf
   of a person");
-- its own `message_id`, and its own key: the kind's parts plus the audience target. A
-  stream drops a repeated `Nats-Msg-Id` on any of its subjects within its duplicate
-  window, and an edge delivery and its copy share `UA1_WORK_<team>`, so a copy with its
-  original's key would be lost;
+- its own `message_id`, and its own key: the kind's parts plus the audience target, since a
+  key names one message ("Idempotency keys") and the copy is another message, for another
+  reader. A copy and its original are never stored in one stream (the copies' inbox,
+  `UA1_TEAM_WORK_<team>`, holds nothing else), so no stream's duplicate window, which drops a
+  repeated `Nats-Msg-Id` on any of its subjects, can take one for the other;
 - saved before publishing and retried unchanged, like any durable frame;
 - published before the frame for the agent, pool or edge, which the sender publishes only
   after the stream acknowledged the copy, so the team services hold a task before anyone
@@ -1372,7 +1417,7 @@ keys (`tests/nats_operator_support.py`) and uses public fixture signing keys for
     stream by its task id and withdrawing it;
   - a full-size frame stored with the largest headers senders may set;
   - refusals of: another host reading or deleting in the team's stream, and the team
-    services deleting in their own inbox's stream, `UA1_WORK_<team>`; an outside agent's adapter publishing into a
+    services deleting in their own inbox's stream, `UA1_TEAM_WORK_<team>`; an outside agent's adapter publishing into a
     worker pool; fetches and acknowledgements on another host's agent consumer, another
     team's stream or the team services' consumer; consumer creation and deletion; stream reads; publishing under
     another runtime's id, dead-letter copies included; subscribing to another runtime's
@@ -1403,22 +1448,22 @@ A queued message can wait days, for example while a host is cut off.
 Joining an installation and renewing a certificate use the address `ua.v1._install.<sender>.svc`. Their frames name the scope `_install` (`transport.yaml` `installation_scope`) as both the issuer's and the audience's team, and never an agent.
 
 **NATS users and the account.** Every process of an installation logs in to NATS with its own user JWT, in NATS operator mode, on the bundled server as on an external one (`nats_account` in `transport.yaml`). The installation has one NATS account. Its signing key signs every user JWT: the launcher uses it for the first two users before any process starts, and after that only the installation authority does, as it already creates every stream ("Who sets up the streams"). Today's processes still share one NATS login; the release that installs operator mode moves them to these users.
-- **The keys.** For the bundled server the launcher creates the operator key, the account key and the account's signing key in the installation's trust folder, signs the account JWT (with the operator key) and the first two users (with the signing key) before any process starts, and holds none of them once it has. The signing key stays in the trust folder for the authority. Who signs revocations with the operator key is still open (below).
+- **The keys.** For the bundled server the launcher creates the operator key, the account key and the account's signing key in the installation's trust folder, signs the account JWT (with the operator key) and the first two users (with the signing key) before any process starts, and holds none of them once it has. The signing key stays in the trust folder for the authority. The launcher also creates an operator signing key there for the authority, which signs revocations with it (below); an external server's operator gives no operator key.
 - **The account's settings** are JetStream, with no storage limit or one that fits every stream's limit ("Stream sizes"), and the partition mappings (`partitions.account_mappings`, with `COUNT` the installation's partition count, "Partitions"). For the bundled server the launcher writes them into the account JWT. For an external server UA writes them for the server's operator, who includes them in the installation's account. Without the mappings no agent's inbox, control queue or control address reaches its partition, so a server without them delivers no agent work.
 - **The authority's own user** (`generated/permissions/installation_authority.json`) is written by the launcher into the trust folder before any process starts, since there is no certificate yet to issue it with.
-- **The bootstrap user** (`generated/permissions/joining_host.json`, `{self}` the new host's runtime) can only send the host's own installation requests and read its own reply inbox. The launcher writes it for the installation's own processes before they start; for a remote host the authority issues it into the bootstrap bundle an administrator makes, which names the new host's runtime ("Starting a host"). A user JWT logs in only with its private NATS key, which signs the server's challenge, so the bundle carries that key too.
+- **The bootstrap user** (`generated/permissions/joining_host.json`, `{self}` the new host's runtime) can only send the host's own installation requests and read the replies under `_INBOX.<runtime>.join.`, where a joining host asks for its join's reply. A joined host never uses that prefix, so a leftover bootstrap login hears none of its later replies, renewals' credentials among them. The launcher writes it for the installation's own processes before they start; for a remote host the authority issues it into the bootstrap bundle an administrator makes, which names the new host's runtime ("Starting a host"). A user JWT logs in only with its private NATS key, which signs the server's challenge, so the bundle carries that key too. Like every user, it ends after the credential lifetime; a bundle given to a remote host is made when the host is about to join. Its use ends at the join: the join presents a new NATS key, never the bundle's (the authority refuses the bundle's key, `invalid_body` at `/body/nats_public_key`), and on the bundled server the authority revokes the bootstrap user's key once the join is approved.
 - **Every other process's user** comes in the `connection` of its join or renewal reply, filled from the templates of its certificate's roles ("Filling the templates") and ending no later than the certificate.
-- **Revocation.** A host's old NATS key is revoked when the host renews to give up a partition or pool ("Credentials follow ownership"), and its key when the host is retired. Measured on nats-server 2.15.1 in operator mode:
+- **Revocation** (owner decision of 2026-11-17). Every user JWT ends after `transport.nats.credential_lifetime_seconds` (`nats_account.credential_lifetime_setting`), the bootstrap user's too, and hosts renew before it ends; step 2 measures the renewal load and sets the lifetime, with its schema entry. So on any server a host that gives up a partition or pool, or is retired, loses NATS access within that lifetime. On the bundled server the authority also revokes at once: a host's old NATS key when the host renews to give up a partition or pool ("Credentials follow ownership"), its key when the host is retired, and a bootstrap user's key at the join. The authority never issues a credential for a revoked key again. Measured on nats-server 2.15.1 in operator mode:
   - NATS revokes a user only through the account JWT, which lists the user's public key with a time: every user JWT of that key issued at or before the time (in whole seconds) is refused, and the server closes the key's open connections at once (`User Authentication Revoked`);
   - the server accepts that account JWT only when the operator key or an operator signing key signs it. Signed with the account's signing key, or with the account's own key, it is refused (`account validation failed`) and the user stays connected;
   - the signed account JWT reaches a running server as a claims update (`$SYS.REQ.CLAIMS.UPDATE`), which only a user of the server's system account can send (a user of the installation's account gets no responders), or, with the server's memory resolver, by rewriting the server's configuration and reloading it.
 
-  So the account signing key the authority holds issues users but cannot revoke them. Who signs revocations and how they reach the server is an open decision for the owner, which step 2 settles before any process logs in with its own user: on the bundled server the launcher creates the operator key in the trust folder; on an external server the operator key is the server operator's, and under decision 89 the authority holds only the account signing key. Until then, the handover steps say what must happen, not who does it.
+  So the account signing key issues users but cannot revoke them. On the bundled server the authority holds an operator signing key as well (`nats_account.operator_signing_key_holder`) and sends the signed account JWT to the server; on an external server the operator key is the server operator's, under decision 89 the authority holds only the account signing key, and a credential stops when it ends. The handover waits for that end where it cannot revoke ("Credentials follow ownership").
 
 **Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it. The bundle holds:
 - the installation's authority keys;
 - the certificates of the installation authority's hosts, so the host can check the authority's replies before it has a certificate of its own, and the installation's revocations record. The authority's replies need no current record, so a bundle older than a day still lets the host join; the host reads the current record before it accepts other hosts' frames;
-- the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`, with its private NATS key, so a bundle is a secret and reaches the host privately. With it the host can publish its own installation requests and read its own reply inbox, and nothing else. Of those requests only a join can succeed: a renewal needs a certificate the host does not have yet (`unknown_key`).
+- the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`, with its private NATS key, so a bundle is a secret and reaches the host privately. With it the host can publish its own installation requests and read the replies under `_INBOX.<runtime>.join.`, and nothing else; it ends after the credential lifetime, so a bundle that waits longer is made again. Of those requests only a join can succeed: a renewal needs a certificate the host does not have yet (`unknown_key`).
 
 **Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only. A receiver checks:
 - the join comes from the receiver's own installation and names, as its issuer's key, the key its body presents, which is not an authority key (`unknown_key`);
@@ -1430,16 +1475,17 @@ These comparisons, and a renewal's comparison with its certificate, read the bod
 
 The authority does not answer a join with a fresh challenge to sign. A join frame lasts 30 seconds, the receiver's replay record refuses other content under its message id, and its retry key names the runtime, key and join id. A copied join can therefore only repeat the same request within its lifetime, and the certificate it gets back is useless without the private key.
 
-**What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again, and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for. It issues no certificate whose NATS credential would be larger than `max_credential_bytes` (`credential_too_large`, "Credential size").
+**What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again, and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for, and a lead host, worker host or team services runtime exactly one team (`single_team_roles`; a join that asks for more is `denied` with `team_not_allowed`). It issues no certificate whose NATS credential would be larger than `max_credential_bytes` (`credential_too_large`, "Credential size"), and no credential for a NATS key it revoked or a bootstrap bundle's key (`invalid_body` at `/body/nats_public_key`, or at `/body/new_nats_public_key` for a renewal).
 
 **Connection class and tools.** A join states the host's `connection_class` (`connected` or `intermittent`, "Custody windows") and, for a host that decides tool calls from signed lists, the `tools` it can run ("Access on remote hosts"). Tool ids the catalog lacks, such as a local device's, are the host's proposal: the administrator reviews them with the join. The catalog's entries are records of the access store, not messages, so approving a proposal adds the entry there. The certificate names the connection class the join asked for and at most the tools it asked for, each once. A host whose connection class or tool list must change sends a new join under the key it holds, which an administrator approves like a lost-key recovery: its certificate gets a higher membership epoch and `replaces` the old one.
 
-**Renewing.** A host renews with `host.renew`, signed by the certificate it renews; the body names that certificate and its membership epoch. Every renewed certificate has a higher membership epoch than the one it replaces and names it in `replaces` ("Trust over time"). A renewal carries no connection class or tools: the renewed certificate keeps those of the certificate it replaces, and changing them needs a new join. A host whose reply was lost retries with the same renewal id while the old certificate still signs, or reads its new certificate from `UA1_CERTS`.
+**Renewing.** A host renews with `host.renew`, signed by the certificate it renews; the body names that certificate and its membership epoch. Every renewed certificate has a higher membership epoch than the one it replaces and names it in `replaces` ("Trust over time"). A renewal carries no connection class or tools: the renewed certificate keeps those of the certificate it replaces, and changing them needs a new join. A lead or worker host's renewal lists in `partitions` the partitions of its team that its new credential is to name; the authority names each one an `owned` record names for the host and refuses the renewal as `invalid_body` at `/body/partitions` for any other ("Credentials follow ownership"). A join's credential names no partition: a host takes its partitions up with a renewal. A host whose reply was lost retries with the same renewal id while the old certificate still signs, or reads its new certificate from `UA1_CERTS`.
 
 **Replies.** A success reply carries the signed certificate (`certificate-document.schema.json`), which only an authority key writes, and a connection credential, unless the installation issues none because its hosts share one NATS login; such a host keeps connecting with that login, and its NATS permissions are not narrowed to its role. The receiver verifies the certificate and refuses the reply as `invalid_body` at `/body/certificate/...` when:
 - it does not verify against the installation's own authority keys, or its record's `expires_at` differs from its body's;
 - it is for another installation or another runtime than the host that asked;
 - a join's certificate names another application or NATS key than the join presented, grants more teams, roles, agent types or sessions than it asked for, names another connection class, or names tools the join did not ask for;
+- a lead host's, worker host's or team services runtime's certificate names more than one team (`single_team_roles`);
 - a renewal's certificate does not replace the certificate that signed the renewal, does not have a higher membership epoch, names another key than the rotated one (or, without a rotation, the kept one), or another NATS key than the new one asked for (or the kept one), or changes the connection class or tools of the certificate it replaces;
 - the certificate names a tool twice.
 
@@ -1730,8 +1776,11 @@ request or answer over `long_text`, the files a result or notice carries, Knowle
     marked always are on every metadata message. It then purges the object's chunks by their
     subject and the name's earlier metadata messages (a purge of the metadata subject that
     keeps the last one);
-  - the team services also purge chunks that no metadata names, which a writer leaves when
-    it gives up or stops partway, or when two writers put the same blob at once. A sweep
+  - the team services also purge chunks that no live metadata names, which a writer leaves
+    when it gives up or stops partway, when two writers put the same blob at once, or when a
+    delete stopped after its deleted marker and before its purge. A deleted marker keeps the
+    `nuid` of the chunks it deleted but is not live, so those chunks are swept too, a departed
+    person's content among them; a new write of the same bytes always uses a new `nuid`. A sweep
     purges a chunk subject only when its newest message is older than
     `orphan_chunk_grace_seconds` (one day) plus the clock tolerance, and reads the
     metadata after it checked that age. A write in progress has a chunk newer than that, and
@@ -1816,16 +1865,25 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
   queued work; it creates only the team services' consumer and an administrator's
   inspection consumers here, and reads or deletes single messages only when it removes a
   team or the old streams at an upgrade.
-- **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference: they read the team's raw copies subject by subject (`next_by_subj` on `ua.v1.<team>.*.dlq.raw.*`) and delete each one that names the person by the sequence that read returned.
+- **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies that name that person: they read the team's raw copies subject by subject (`next_by_subj` on `ua.v1.<team>.*.dlq.raw.*`) and delete each one that names the person by the sequence that read returned. A protocol 1 copy names a person in an authority token or a person reference. An `upgrade_old_format` copy is no frame: it names a person in the old envelope's sender (`gateway_context.canonical_user_id`), which the team services already read to name the task in their notice, so they match it there. A copy they cannot read as either names nobody they can find, and leaves with the stream after 30 days.
 - **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
 - **When the stream is full.** The dead-letter stream refuses new messages when it reaches
   its byte limit ("Stream sizes"), so no unread copy or notice is ever dropped to make room.
   A receiver acknowledges a refused message only after both its raw copy and its notice are
-  stored. When the dead-letter stream refuses either, the receiver leaves the message
-  unacknowledged and logs it with its ids; the message stops after its consumer's
-  `max_deliveries` and waits in its own stream until that stream's age limit, where it counts
-  toward that stream's size warning. The gateway's size check warns administrators as
-  the dead-letter stream fills, and says set-asides are refused while it is full.
+  stored. While the dead-letter stream refuses either, the receiver holds the message: it
+  sends an in-progress acknowledgement (`+WPI`) within each `ack_wait_seconds`, which keeps
+  the delivery without using another one, and tries the set-aside again with growing pauses,
+  logging the message's ids once. A held message is not admitted, so it takes no execution
+  slot. The gateway's size check warns administrators as the dead-letter stream fills, and
+  says set-asides are refused while it is full.
+
+  Holding keeps a message only while its receiver runs. A receiver that stops while holding
+  one gives the delivery back, and NATS delivers it again with one more delivery counted; a
+  message whose consumer's `max_deliveries` runs out this way is delivered no more. It then
+  stays in its own stream below its consumer's acknowledgement floor, unread, until that
+  stream's age limit removes it with no notice. Finding such messages, and a final delivery
+  the receiver could not finish for another reason, with a sweep of the messages below each
+  consumer's acknowledgement floor is step 4's work.
 - **Two upgrade reasons.** `upgrade_drain` and `upgrade_old_format` both come from upgrades
   but name different messages:
   - `upgrade_drain`: a protocol 1 frame that waited in a queue while the installation moved

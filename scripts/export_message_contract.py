@@ -86,6 +86,8 @@ ANNOTATIONS = {"title", "description", "examples"}
 MAX_SAFE_INTEGER = 2**53 - 1
 # Escaped characters that every common engine reads as the character itself.
 PORTABLE_ESCAPES = set(".-\\[](){}*+?|^$/")
+# A bounded repetition: {n}, {n,} or {n,m}, the only forms a pattern's braces may take.
+REPETITION = re.compile(r"\{(\d+)(,(\d*))?\}")
 # Characters an id may hold (common.schema.json token_id). Consumer names join ids
 # with a character outside this set.
 ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
@@ -215,7 +217,22 @@ def pattern_problem(pattern: str) -> str | None:
             return "an unescaped . matches different characters in different engines"
         elif character in "^$":
             return "anchors belong only at the two ends"
-        elif character in "*+?}" and following == "+":
+        elif character == "{":
+            # Engines read a malformed brace differently: Python reads {,n} as 0 to n, ECMAScript
+            # without the u flag reads it as literal text, and Pydantic's engine refuses it. So a
+            # brace must start {n}, {n,} or {n,m}, the forms pattern_longest_match counts.
+            repetition = REPETITION.match(body, index)
+            if repetition is None:
+                return "a { starts only {n}, {n,} or {n,m}; escape a literal brace as \\{"
+            low, high = repetition.group(1), repetition.group(3)
+            if high and int(high) < int(low):
+                return f"the repetition {repetition.group(0)} has its upper bound below its lower one"
+            index = repetition.end() - 1
+            if body[index + 1:index + 2] == "+":
+                return "possessive quantifiers are not portable"
+        elif character == "}":
+            return "a } closes only {n}, {n,} or {n,m}; escape a literal brace as \\}"
+        elif character in "*+?" and following == "+":
             return "possessive quantifiers are not portable"
         index += 1
     return "a character class is not closed" if in_class else None
@@ -1277,10 +1294,16 @@ def check_partitions(transport: dict[str, Any]) -> None:
 
     where = "transport.yaml partitions"
     spec = transport.get("partitions")
-    if not isinstance(spec, dict) or set(spec) != {"count_setting", "default_count", "max_count", "account_mappings"} \
+    if not isinstance(spec, dict) \
+            or set(spec) != {"count_setting", "default_count", "max_count", "handover_seconds", "account_mappings"} \
             or spec["count_setting"] != PARTITION_SETTING:
-        raise ContractError(f"{where}: names the setting {PARTITION_SETTING}, the default and largest counts and the "
-                            "account mappings")
+        raise ContractError(f"{where}: names the setting {PARTITION_SETTING}, the default and largest counts, the "
+                            "handover deadline and the account mappings")
+    handover = spec["handover_seconds"]
+    if type(handover) is not int or not 2 * transport["clock_skew_seconds"] < handover <= 3600:
+        # Bounded so a host never holds back a renewal its credential or certificate needs for long.
+        raise ContractError(f"{where}: handover_seconds is a whole number of seconds above twice the clock tolerance "
+                            "and at most 3600")
     largest, default = spec["max_count"], spec["default_count"]
     if type(largest) is not int or largest < PARTITION_COUNT_STEP or largest % PARTITION_COUNT_STEP:
         raise ContractError(f"{where}: max_count is a positive multiple of {PARTITION_COUNT_STEP}")
@@ -1377,13 +1400,34 @@ def check_message_sizes(transport: dict[str, Any], schemas: dict[str, dict[str, 
                             "common.schema.json")
 
 
+def check_single_team_roles(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """Every role whose grants name {partition} serves one team per runtime (transport.yaml single_team_roles).
+
+    Partitions belong to a team, and the credential bound (README, "Credential size") counts
+    one team's partitions and pools for each such runtime; the authority grants these roles
+    only with one team. The topology owner and the gateway stay installation-wide.
+    """
+
+    roles = transport.get("single_team_roles")
+    if not isinstance(roles, list) or not roles or len(set(roles)) != len(roles) \
+            or not set(roles) <= set(registry["host_roles"]):
+        raise ContractError("transport.yaml: single_team_roles lists distinct host roles")
+    if transport["topology_owner"] in roles:
+        raise ContractError("transport.yaml: the topology owner serves the whole installation, not one team")
+    partitioned = sorted(role for role, document in permissions(registry, transport).items()
+                         if any("{partition}" in subject for subject in document["publish"] + document["subscribe"]))
+    missing = sorted(set(partitioned) - set(roles))
+    if missing:
+        raise ContractError(f"transport.yaml: single_team_roles lists every role whose grants name partitions; missing {missing}")
+
+
 def check_withdrawal_spares_own_inbox(transport: dict[str, Any]) -> None:
     """Withdrawal searches no stream that holds its own role's inbox.
 
     Withdrawal deletes every task.request whose body names the task, and a task's copy to the
     team services carries the same body, so a search of the stream that holds their inbox
-    (work.team, in UA1_WORK_{team}) would delete the copies too (README, "Withdrawing queued
-    work"). That stream also holds the team's edge deliveries, which are stopped with task.stop.
+    (work.team, in UA1_TEAM_WORK_{team}) would delete the copies too (README, "Withdrawing
+    queued work").
     """
 
     role = transport["withdrawal"]["role"]
@@ -1397,6 +1441,26 @@ def check_withdrawal_spares_own_inbox(transport: dict[str, Any]) -> None:
             if subjects_overlap(pattern, subject):
                 raise ContractError(f"transport.yaml: withdrawal searches {stream}, which holds the {role} role's own inbox "
                                     f"({address}), where the copies of the tasks it withdraws wait")
+
+
+def check_copy_inbox_alone(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """A stream that stores a copy address (registry copy_to) stores no other durable address.
+
+    A copied kind is stored at its copy address before its frame is published, so every
+    task, result, progress report, account, claim and handback of a team waits on room in
+    that stream. Another reader's backlog sharing its byte limit (an edge offline for a day)
+    would refuse them all; on its own, the stream fills only when its own reader stops
+    (README, "Stream sizes").
+    """
+
+    copies = {address for entry in registry["kinds"].values() for address in entry.get("copy_to", [])}
+    durable = transport["classes"]["durable"]["addresses"]
+    for name, stream in transport["streams"].items():
+        stored = {address for address in durable
+                  if any(subjects_overlap(pattern, stored_subject(address, "*", transport)) for pattern in stream["subjects"])}
+        if stored & copies and stored - copies:
+            raise ContractError(f"transport.yaml: stream {name} stores the copy address {sorted(stored & copies)} beside "
+                                f"{sorted(stored - copies)}; a backlog there would refuse every copied kind")
 
 
 def check_stream_management(registry: dict[str, Any], transport: dict[str, Any]) -> None:
@@ -1415,6 +1479,7 @@ def check_stream_management(registry: dict[str, Any], transport: dict[str, Any])
             raise ContractError(f"transport.yaml: {key} reads and deletes only in per-team streams ({{team}}), so it never "
                                 "reaches another team's messages")
     check_withdrawal_spares_own_inbox(transport)
+    check_copy_inbox_alone(registry, transport)
     for stream in transport["dead_letter_custody"]["streams"]:
         # A raw copy is found by its subject and deleted by the sequence that read returns; a second
         # copy under the same subject, from a retried publish, would survive that delete.
@@ -1601,8 +1666,6 @@ def check_object_store(registry: dict[str, Any], transport: dict[str, Any], sche
 # Knowledge text over long_text's length travels as a blob (README, "Knowledge"; decision 77).
 KNOWLEDGE_PREFIX = "knowledge."
 LONG_TEXT = ("common.schema.json", "/$defs/long_text")
-# A bounded repetition: {n}, {n,} or {n,m}.
-REPETITION = re.compile(r"\{(\d+)(,(\d*))?\}")
 
 
 def pattern_longest_match(pattern: str) -> int | None:
@@ -1612,9 +1675,13 @@ def pattern_longest_match(pattern: str) -> int | None:
     classes, groups with alternatives, and the quantifiers ?, *, +, {n}, {n,} and {n,m}, each
     optionally lazy. Every atom matches one character, a group the longest of its
     alternatives, and a quantifier multiplies by its upper bound, so nested repetitions such
-    as (?:[a-z]{0,200}){0,200} count 40,000.
+    as (?:[a-z]{0,200}){0,200} count 40,000. A pattern that is not portable, such as one with
+    {,n} (Python reads it as 0 to n, ECMAScript as literal text), counts as unbounded, so a
+    check that relies on this count fails closed.
     """
 
+    if pattern_problem(pattern):
+        return None
     longest, end = _sequence_longest(pattern[1:-1], 0)
     if end != len(pattern) - 2:
         raise ContractError(f"pattern {pattern!r}: an unmatched )")
@@ -1747,7 +1814,12 @@ def check_knowledge_text(registry: dict[str, Any], schemas: dict[str, dict[str, 
 # and the user every process logs in with. The installation authority's and a joining host's
 # users exist before any certificate does, so the launcher writes them (the authority writes a
 # remote host's bootstrap user); every other process's user comes with its certificate.
-NATS_ACCOUNT_FIELDS = {"mode", "signing_key_holder", "account_settings", "users"}
+NATS_ACCOUNT_FIELDS = {"mode", "signing_key_holder", "operator_signing_key_holder", "credential_lifetime_setting",
+                       "account_settings", "users"}
+# Every user JWT ends after this instance setting's lifetime (owner decision 2026-11-17, README "NATS users and the account").
+CREDENTIAL_LIFETIME_SETTING = "transport.nats.credential_lifetime_seconds"
+# A bootstrap user reads only replies under this token of its runtime's inbox: its join's ("Starting a host").
+JOIN_INBOX_TOKEN = "join"
 NATS_ACCOUNT_SETTINGS = {"jetstream": True, "mappings": "partitions.account_mappings"}
 NATS_USER_FIELDS = {"permissions", "issued_by", "carried_in"}
 HOST_USER = "host"
@@ -1771,16 +1843,21 @@ def check_nats_account(registry: dict[str, Any], transport: dict[str, Any], sche
     creates every stream; the settings carry the partition mappings, without which no agent's
     queue reaches its partition stream. The launcher signs only the first users, before any
     process starts; a remote host's bootstrap user comes from the authority. Revoking a user
-    needs an operator signature (README, "NATS users and the account"), whose holder the owner
-    decides with step 2, so the contract names none yet.
+    needs an operator signature (README, "NATS users and the account"): on the bundled server
+    the topology owner also holds an operator signing key; on any server every user JWT ends
+    after the lifetime the named setting holds, so it stops without one (owner decision
+    2026-11-17).
     """
 
     where = "transport.yaml nats_account"
     spec = transport.get("nats_account")
     owner = transport["topology_owner"]
     if not isinstance(spec, dict) or set(spec) != NATS_ACCOUNT_FIELDS or spec["mode"] != "operator" \
-            or spec["signing_key_holder"] != owner:
-        raise ContractError(f"{where}: operator mode, and the topology owner ({owner}) holds the account's signing key")
+            or spec["signing_key_holder"] != owner or spec["operator_signing_key_holder"] != owner:
+        raise ContractError(f"{where}: operator mode, and the topology owner ({owner}) holds the account's signing key "
+                            "and, on the bundled server, an operator signing key")
+    if spec["credential_lifetime_setting"] != CREDENTIAL_LIFETIME_SETTING:
+        raise ContractError(f"{where}: credential_lifetime_setting names {CREDENTIAL_LIFETIME_SETTING}")
     if spec["account_settings"] != NATS_ACCOUNT_SETTINGS:
         raise ContractError(f"{where}: account_settings are {NATS_ACCOUNT_SETTINGS}")
     expected = {
@@ -2241,7 +2318,7 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
     joins = [address for entry in registry["kinds"].values() if entry.get("verification") == "proof_of_possession"
              for address in own_addresses(entry)]
     result[JOINING] = {"role": JOINING, "publish": sorted(full_subject(send_pattern(address), "{self}") for address in joins),
-                       "subscribe": [f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"]}
+                       "subscribe": [f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.{JOIN_INBOX_TOKEN}.>"]}
     return result
 
 
@@ -2644,6 +2721,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
         f"DEFAULT_PARTITION_COUNT = {transport['partitions']['default_count']!r}\n"
         f"MAX_PARTITION_COUNT = {transport['partitions']['max_count']!r}\n"
+        f"SINGLE_TEAM_ROLES = {tuple(transport['single_team_roles'])!r}\n"
         f"PARTITIONED_ADDRESSES = {tuple(sorted(partitioned_addresses(transport)))!r}\n"
         f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
         f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"
@@ -2678,6 +2756,8 @@ def render() -> dict[Path, str]:
     check_consumer_names(transport)
     check_registry(registry, transport, topologies, schemas)
     check_stream_management(registry, transport)
+    # After every other check: it builds each role's permissions, which needs a whole transport.
+    check_single_team_roles(registry, transport)
     files: dict[Path, str] = {
         GENERATED / "registry.json": json_text(registry),
         GENERATED / "transport.json": json_text(transport),

@@ -3092,6 +3092,8 @@ kinds:
     class: request_reply
     address: _install.{sender}.svc
     body: bodies/host.renew.schema.json
+    body_rules:
+      - {unique: /body/partitions}
     reply:
       body: bodies/host.renew.reply.schema.json
       errors: [revoked, needs_approval, protocol_mismatch, not_allowed]

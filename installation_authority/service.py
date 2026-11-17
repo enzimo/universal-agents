@@ -79,7 +79,7 @@ from pydantic import ValidationError
 from custom_messages.wire.buckets import TEAM_PLACEHOLDER, bucket_name, bucket_stream
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.frame import Receiver, VerifiedFrame, body_model, expected_idempotency_key
-from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, KINDS, PROTOCOL
+from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, KINDS, PROTOCOL, SINGLE_TEAM_ROLES
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import CERTIFICATE, AuthorityKey, HostCertificate, TrustStore, kept_for, sign_state
 from custom_messages.wire.values import parse_timestamp
@@ -946,6 +946,9 @@ def _denial(expected: Any, body: Mapping[str, Any], agent_types: frozenset[str])
     if (expected.key_id, expected.public_key) != (key["key_id"], key["public_key"]):
         return "key_mismatch"
     if not set(body["teams"]) <= expected.teams:
+        return "team_not_allowed"
+    if set(body["roles"]) & set(SINGLE_TEAM_ROLES) and len(body["teams"]) != 1:
+        # One team per lead host, worker host and team services runtime (transport.yaml single_team_roles).
         return "team_not_allowed"
     if not set(body["roles"]) <= expected.roles or not set(body["agent_types"]) <= agent_types:
         return "role_not_allowed"

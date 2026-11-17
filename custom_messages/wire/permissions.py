@@ -36,7 +36,7 @@ class HostPlacement:
 
     A lead or worker host's partitions are those it owns (the team services' partition
     ownership records). The team services own none but withdraw queued work from every
-    partition stream of each team they serve, so theirs are
+    partition stream of their one team (transport.yaml single_team_roles), so theirs are
     ``custom_messages.wire.partitions.every_partition(teams, count)`` (README, "Filling the
     templates").
     """
