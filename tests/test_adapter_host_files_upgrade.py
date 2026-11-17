@@ -289,11 +289,13 @@ def test_a_hosted_chat_file_moves_into_state_uploads_and_opens_by_id(instance: _
     # One summary line, a warning because two files could not be moved, and the marker with the counts.
     (summary,) = _events(caplog, "adapter_host_files_upgraded")
     assert summary.endswith(
-        "moved=1 already_moved=0 missing=1 refused=0 no_record=1 gateway_rows_removed=1 turns_marked_unrecorded=1"
+        "moved=1 already_moved=0 missing=1 refused=0 no_record=1 gateway_rows_removed=1 turns_marked_unrecorded=1 "
+        "files_without_records=0"
     )
     assert [record.levelno for record in caplog.records if "adapter_host_files_upgraded" in record.getMessage()] == [logging.WARNING]
     marker = json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())
     assert (marker["moved"], marker["missing"], marker["no_record"]) == (1, 1, 1) and marker["finished_at_utc"]
+    assert marker["files_without_records"] == 0 and not _events(caplog, "adapter_host_files_without_records")
 
 
 def test_once_finished_it_does_not_run_again(instance: _Instance) -> None:
@@ -454,6 +456,7 @@ def test_a_file_it_refuses_keeps_its_records_and_is_not_opened(instance: _Instan
         result = instance.run()
 
     assert result.finished and result.counts.refused == 1 and result.counts.moved == 0
+    assert result.counts.files_without_records == 0, "a file not moved is reported by its own warning"
     assert instance.files()[attachment_id] == str(instance.photo_source), "its conversation entry is kept"
     assert instance.gateway().get_attachment(attachment_id).local_path == str(instance.photo_source)
     (entry,) = [item for item in instance.conversations().list_turn_attachments(CONVERSATION) if item.attachment.attachment_id == attachment_id][:1]
@@ -532,23 +535,152 @@ def test_records_past_one_batch_are_all_read(instance: _Instance, monkeypatch) -
     assert instance.gateway().get_attachment("att_lost") is None, "a gateway record past the first batch"
 
 
-def test_a_transfer_folder_set_to_state_uploads_moves_and_drops_nothing(instance: _Instance) -> None:
-    """EVI-2 (U7): a file already inside state/uploads is where agents open it, even named as 0.9.13 named them."""
+@pytest.mark.parametrize("folder", [(), ("telegram_chat_7",)], ids=["state_uploads", "session_folder_inside"])
+def test_a_transfer_folder_set_to_state_uploads_moves_and_drops_nothing(instance: _Instance, caplog, folder) -> None:
+    """EVI-2 (U7): a file already inside state/uploads is where agents open it, even named as 0.9.13 named them.
 
-    uploads = instance.layout.uploads_dir.resolve()
-    inside = uploads / "adapter_upload_inside"
+    Nothing there is counted as left either (C01): a recorded file, and a file no record names, are both where
+    agents open files, so the step gives no advice to delete them.
+    """
+
+    transfer = instance.layout.uploads_dir.resolve().joinpath(*folder)
+    inside = transfer / "adapter_upload_inside"
     _write(inside, b"already where agents open it")
+    _write(transfer / "adapter_upload_unnamed", b"no record names it")
     _record_named(instance, "att_inside", str(inside))
     config = instance.config()
-    config.interactive_apps = SimpleNamespace(adapter_host=AdapterHostSettings(upload_dir=str(uploads)))
+    config.interactive_apps = SimpleNamespace(adapter_host=AdapterHostSettings(upload_dir=str(transfer)))
     before = _untouched(instance)
 
-    result = upgrade_adapter_host_files(config)
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = upgrade_adapter_host_files(config)
 
-    assert result.finished and result.waiting == 0 and result.counts == upgrade_module.UpgradeCounts()
+    assert result.finished and result.waiting == 0
+    assert result.counts == upgrade_module.UpgradeCounts(files_without_records=0)
     assert inside.read_bytes() == b"already where agents open it"
     assert instance.gateway().get_attachment("att_inside").local_path == str(inside)
     assert _untouched(instance) == before
+    assert not _events(caplog, "adapter_host_files_without_records")
+
+
+# --- Files left that no record names (F16) -------------------------------------------------------
+
+STRAY = b"a file of a person removed on 0.9"
+
+
+def _opened_names(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The last path component of every ``os.open`` from here on: what the step opened."""
+
+    opened: list[str] = []
+    real = os.open
+
+    def recording(path, *args, **kwargs):
+        opened.append(os.path.basename(os.fsdecode(path)))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", recording)
+    return opened
+
+
+def _assert_reported(caplog: pytest.LogCaptureFixture, instance: _Instance, count: int) -> None:
+    (warning,) = _events(caplog, "adapter_host_files_without_records")
+    assert warning.endswith(f"folder={instance.transfer} files_without_records={count}")
+    assert "may delete" in warning and "while the instance is stopped" in warning
+    assert "another path under 0.9.13" in warning and "do not delete them" in warning, "C02"
+    assert "adapter_upload_stray" not in warning and STRAY.decode() not in warning, "no names, no contents"
+
+
+def test_files_no_record_names_are_counted_and_reported_once(instance: _Instance, monkeypatch, caplog) -> None:
+    """A1, A3, A5: only regular ``adapter_upload_*`` files directly in the folder, never opened, reported once."""
+
+    stray = _write(instance.transfer / "adapter_upload_stray", STRAY)
+    for other in (".moving-abc", "notes.txt", "sub/adapter_upload_nested"):
+        _write(instance.transfer / other, b"not 0.9.13's")
+    _write(instance.photo_destination.parent / ".moving-xyz", b"the step's temporary name")
+    opened = _opened_names(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = instance.run()
+    monkeypatch.undo()
+
+    # The moved photo is gone from the folder; the orphan is kept and named by its turn.
+    assert result.finished and result.counts.files_without_records == 1
+    assert "adapter_upload_stray" not in opened, "the count opens no file"
+    assert stray.read_bytes() == STRAY, "nothing is deleted"
+    _assert_reported(caplog, instance, 1)
+    (summary,) = _events(caplog, "adapter_host_files_upgraded")
+    assert summary.endswith("files_without_records=1")
+    assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())["files_without_records"] == 1
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        again = instance.run()
+
+    assert again.already_done and again.counts.files_without_records is None
+    assert not _events(caplog, "adapter_host_files_without_records")
+
+
+def test_files_whose_records_were_deleted_while_the_step_waited_are_counted(instance: _Instance, caplog) -> None:
+    """A5: the folder was missing at one start; meanwhile the photo's records went (a person's removal on 0.9)."""
+
+    moved_aside = instance.root / "unmounted"
+    instance.transfer.rename(moved_aside)
+    assert instance.run().folder_missing
+    assert instance.gateway().delete_attachment("att_photo")
+    instance.repository().relocate_turn_attachment(
+        [(CONVERSATION, "task_1"), (CONVERSATION, "task_2")], "att_photo", local_path=None
+    )
+    moved_aside.rename(instance.transfer)
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.finished and result.counts.moved == 0 and result.counts.files_without_records == 1
+    assert instance.photo_source.read_bytes() == CONTENT["att_photo"], "left where it is"
+    (warning,) = _events(caplog, "adapter_host_files_without_records")
+    assert warning.endswith(f"folder={instance.transfer} files_without_records=1")
+
+
+def test_a_link_in_the_transfer_folder_is_not_followed_or_counted(instance: _Instance, monkeypatch, tmp_path) -> None:
+    """A2: links, and folders, named as 0.9.13 named files are neither followed nor counted."""
+
+    outside_file = _write(tmp_path / "outside" / "secret", b"outside the folder")
+    (instance.transfer / "adapter_upload_link").symlink_to(outside_file)
+    (instance.transfer / "adapter_upload_folder_link").symlink_to(outside_file.parent, target_is_directory=True)
+    _write(instance.transfer / "adapter_upload_dir" / "inside", b"in a folder")
+    _write(instance.transfer / "adapter_upload_stray", STRAY)
+    opened = _opened_names(monkeypatch)
+
+    result = instance.run()
+    monkeypatch.undo()
+
+    assert result.finished and result.counts.files_without_records == 1
+    assert not {"adapter_upload_link", "adapter_upload_folder_link", "adapter_upload_dir", "secret"} & set(opened)
+    assert outside_file.read_bytes() == b"outside the folder"
+    assert (instance.transfer / "adapter_upload_link").is_symlink()
+
+
+def test_a_run_stopped_part_way_reports_at_the_run_that_finishes(instance: _Instance, monkeypatch, caplog) -> None:
+    """A3: a run that stops never counts; the run that finishes reports, and no later one does."""
+
+    _write(instance.transfer / "adapter_upload_stray", STRAY)
+    monkeypatch.setattr(
+        _RelationalGatewayStateRepository, "set_attachment_local_path", lambda *_args: (_ for _ in ()).throw(_Stop())
+    )
+    reports: list[int] = []
+    for run in range(3):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+            if run == 0:
+                with pytest.raises(_Stop):
+                    instance.run()
+                monkeypatch.undo()
+            else:
+                instance.run()
+        reports.append(len(_events(caplog, "adapter_host_files_without_records")))
+
+    assert reports == [0, 1, 0]
+    assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())["files_without_records"] == 1
 
 
 # --- Guidance the gateway holds ------------------------------------------------------------------
@@ -801,6 +933,7 @@ def test_with_the_folder_missing_nothing_changes_until_the_files_are_declared_go
     gone = instance.run(files_gone=True)
 
     assert gone.finished and (gone.counts.missing, gone.counts.no_record, gone.counts.moved) == (2, 1, 0)
+    assert gone.counts.files_without_records == 0, "a folder that is not there holds none"
     assert set(instance.files()) == {"att_web"}
     assert instance.layout.adapter_host_files_upgrade_path.is_file()
 
@@ -838,6 +971,7 @@ def test_a_files_gone_run_beside_the_running_team_keeps_what_the_team_writes(ins
     assert team_wrote, "the team wrote between the scan and the rewrites"
     assert result.finished and (result.counts.missing, result.counts.no_record) == (2, 1)
     assert result.counts.gateway_rows_removed == 1, "att_photo's record; att_lost's was already gone"
+    assert result.counts.files_without_records == 0
     assert instance.turn_paths("task_1") == {"att_new": new_path}
     assert instance.recorded("task_1") == 0
     assert instance.gateway().get_attachment("att_photo") is None
@@ -1394,7 +1528,7 @@ def test_a_new_instance_finishes_at_once(tmp_path: Path) -> None:
 
     result = upgrade_adapter_host_files(config)
 
-    assert result.finished and result.counts == upgrade_module.UpgradeCounts()
+    assert result.finished and result.counts == upgrade_module.UpgradeCounts(files_without_records=0)
     assert layout.adapter_host_files_upgrade_path.is_file()
 
 

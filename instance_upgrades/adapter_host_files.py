@@ -322,6 +322,9 @@ class UpgradeCounts:
     no_record: int = 0
     gateway_rows_removed: int = 0
     turns_marked_unrecorded: int = 0
+    # Files left in the transfer folder that no record the step found names (F16); None when not counted
+    # (the step was already done or waits, or the folder could not be listed), 0 when counted and none.
+    files_without_records: Optional[int] = None
 
     @property
     def not_moved(self) -> int:
@@ -486,6 +489,7 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
             for item in items:
                 step.handle(item)
             step.forget_unmovable()
+            step.counts.files_without_records = step.count_files_without_records()
             _write_state_file(marker, {"finished_at_utc": _now(), **asdict(step.counts)})
     except FolderProblem as problem:
         problem.files_gone_helps = problem.not_there and problem.folder == transfer
@@ -503,7 +507,7 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
         logging.WARNING if counts.not_moved else logging.INFO,
         "Files of chat apps the adapter host ran were moved into state/uploads. event=adapter_host_files_upgraded "
         "moved=%s already_moved=%s missing=%s refused=%s no_record=%s gateway_rows_removed=%s "
-        "turns_marked_unrecorded=%s",
+        "turns_marked_unrecorded=%s files_without_records=%s",
         counts.moved,
         counts.already_moved,
         counts.missing,
@@ -511,8 +515,39 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
         counts.no_record,
         counts.gateway_rows_removed,
         counts.turns_marked_unrecorded,
+        "-" if counts.files_without_records is None else counts.files_without_records,
     )
+    if counts.files_without_records:
+        _report_files_without_records(transfer, marker, counts.files_without_records)
     return UpgradeResult(finished=True, counts=counts)
+
+
+def _report_files_without_records(transfer: Path, marker: Path, count: int) -> None:
+    """Say once, from the run that wrote the marker, how many files no record names are left and what to do (F16).
+
+    No file names (people's text) and no contents: the folder and the count.
+    The advice to delete holds only while the instance is stopped, because the
+    running 0.10 adapter host passes new files through the same folder under
+    the same prefix until the gateway has handled them. When the folder was at
+    another path under 0.9.13, its records name that path and match nothing
+    here, so every file looks unrecorded; the warning says not to delete them
+    then, because putting the folder back lets the step move them (C02).
+    """
+
+    logger.warning(
+        "%s file(s) are left in the adapter host's transfer folder that no record names: files of people removed "
+        "on 0.9, files whose records were deleted, or files of messages the gateway never handled. 0.10 never "
+        "opens them. An administrator may delete the files there whose names start with %s while the instance "
+        "is stopped, keeping any an adapter_host_file_not_moved warning names (see upgrading.md). If this folder "
+        "was at another path under 0.9.13 (moved, mounted elsewhere or reached through another link), their "
+        "records may name that path: do not delete them; put the folder back at that path or set upload_dir to "
+        "it, delete %s and restart. event=adapter_host_files_without_records folder=%s files_without_records=%s",
+        count,
+        TRANSFER_FILE_PREFIX,
+        marker,
+        transfer,
+        count,
+    )
 
 
 class _Step:
@@ -540,6 +575,8 @@ class _Step:
         self._files_gone = files_gone
         self.counts = UpgradeCounts()
         self._unrecorded_turns: set[tuple[str, str]] = set()
+        # Names in the transfer folder that a record ``find`` saw names, held-only ids included (F16).
+        self._named: set[str] = set()
         self._not_moved: list[_NotMoved] = []
         self._absent: dict[Path, bool] = {}
         self._sync_unsupported: set[Path] = set()
@@ -561,14 +598,18 @@ class _Step:
         while True:
             records = self._gateway.list_attachments_under(str(self._transfer), after_id=after_id, limit=_BATCH)
             for record in records:
-                if self._in_transfer(record.local_path) is not None:
+                path = self._in_transfer(record.local_path)
+                if path is not None:
+                    self._named.add(path.name)
                     items.setdefault(record.attachment_id, _Item(record.attachment_id)).record = record
             if len(records) < _BATCH:
                 break
             after_id = records[-1].attachment_id
         for entry in self._entries():
+            self._named.add(entry.path.name)
             items.setdefault(entry.attachment.attachment_id, _Item(entry.attachment.attachment_id)).entries.append(entry)
         for held in self._held_entries():
+            self._named.add(held.path.name)
             item = items.get(held.attachment.attachment_id)
             if item is not None:
                 item.held.append(held)
@@ -639,9 +680,74 @@ class _Step:
         path = Path(os.path.normpath(raw))
         if path.parent != self._transfer or not path.name.startswith(TRANSFER_FILE_PREFIX):
             return None
-        if self._uploads == path or self._uploads in path.parents:
+        if self._transfer_in_uploads or self._uploads == path:
             return None
         return path
+
+    @property
+    def _transfer_in_uploads(self) -> bool:
+        """Whether an operator set the transfer folder to ``state/uploads`` or a folder inside it (EVI-2, U7).
+
+        Files there are where agents open them: nothing moves, drops or
+        counts them (C01).
+        """
+
+        return self._uploads == self._transfer or self._uploads in self._transfer.parents
+
+    def count_files_without_records(self) -> Optional[int]:
+        """How many files 0.9.13 could have written are left in the transfer folder that no record ``find`` saw names.
+
+        Counted after the moves and drops: regular files named
+        ``adapter_upload_*`` directly in the folder (the step's own scope,
+        ``_in_transfer``), checked with ``lstat`` only, so no link is
+        followed and no file is opened. A name a record names is left out:
+        a file that did not move is reported by its own warning. A transfer
+        folder that is not there holds none (0, most instances never ran the
+        adapter host), and one set to or inside ``state/uploads`` leaves
+        nothing (0). Any other error listing it is logged
+        (``event=adapter_host_files_without_records_uncounted``) and gives
+        None: the count only reports, so it never stops the start or keeps
+        the marker from being written (rule 2 does not apply).
+        """
+
+        if self._transfer_in_uploads:
+            return 0
+        try:
+            directory = safe_open.open_directory(self._transfer, ())
+        except safe_open.UnsafePath as exc:
+            if exc.reason == safe_open.REASON_ROOT_UNAVAILABLE and isinstance(exc.__cause__, FileNotFoundError):
+                return 0
+            self._log_uncounted(exc.__cause__ or exc)
+            return None
+        except (OSError, ValueError) as exc:
+            self._log_uncounted(exc)
+            return None
+        try:
+            count = 0
+            for name in os.listdir(directory):
+                if not name.startswith(TRANSFER_FILE_PREFIX) or name in self._named:
+                    continue
+                try:
+                    info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue  # removed since the listing
+                if stat.S_ISREG(info.st_mode):
+                    count += 1
+            return count
+        except (OSError, ValueError) as exc:
+            self._log_uncounted(exc)
+            return None
+        finally:
+            os.close(directory)
+
+    def _log_uncounted(self, exc: BaseException) -> None:
+        logger.warning(
+            "The files left in the adapter host's transfer folder could not be counted, so it is not known whether "
+            "any are left that no record names; nothing was changed and startup goes on. "
+            "event=adapter_host_files_without_records_uncounted folder=%s reason=%s",
+            self._transfer,
+            _detail(exc),
+        )
 
     def survey(self, items: list[_Item]) -> tuple[int, bool]:
         """How many attachment ids wait for files in the transfer folder, and whether that folder is here.
