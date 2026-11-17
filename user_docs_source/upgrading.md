@@ -49,13 +49,48 @@ supported, because it may not read what a newer one saved.
   - **A file it refuses** (a link, contents that differ from what was
     received, a file it cannot read) stays where it is and keeps its
     records, but the team cannot open it. The log names it
-    (`event=adapter_host_file_not_moved`). Fix the file, delete
+    (`event=adapter_host_file_not_moved`; its `sources=` field names the
+    file in the transfer folder). Fix the file, delete
     `state/upgrades/adapter-host-files.json` and restart to try again.
   - **A file with no record of the chat that sent it** (its gateway record
     was removed, for example by a restore on 0.9) cannot be moved, and
     trying again does not help. Its conversation records are kept while
     the file is there, the team cannot open it, and the person can send it
     again. The log counts these as `no_record`.
+  - **Files no record names** stay in the transfer folder: files of people
+    removed on 0.9, files whose records were deleted, or files of messages
+    the gateway never handled. The team cannot open them. The upgrade counts
+    them once, when it finishes, and a warning gives the folder and the
+    number (`event=adapter_host_files_without_records`). The count leaves out
+    files of messages the gateway took in but had not handled yet: at its
+    start 0.10 handles those messages, 0.9's included, reads their files and
+    then removes them. You may delete the files there whose names start
+    with `adapter_upload_` and that were last changed before
+    `state/upgrades/adapter-host-files.json` was written, but only after the
+    gateway has run on 0.10 since then, and only while the instance is
+    stopped. To list them:
+    `find <folder> -maxdepth 1 -type f -name 'adapter_upload_*' ! -newer state/upgrades/adapter-host-files.json`.
+    Keep every file named in the `sources=` field of an
+    `adapter_host_file_not_moved` warning: those can still be moved once
+    you fix them, as above. (Its `file=` field may name the copy in
+    `state/uploads` that stood in the way instead.) Wait for the gateway
+    because the 0.10 adapter host passes new files through the same folder
+    under the same names; a count taken beside the running team (with
+    `--files-gone`) or after you deleted
+    `state/upgrades/adapter-host-files.json` may include them. If the
+    adapter host is turned off, keep the files until it has run again.
+  - **The folder was at another path under 0.9** (moved, mounted elsewhere
+    or reached through another link): its records name that path, so every
+    file here looks like one no record names. Do not delete them. Move or
+    mount the folder back at that path (a link does not work), set
+    `upload_dir` to that path, delete
+    `state/upgrades/adapter-host-files.json` and restart. Putting the folder
+    back without changing `upload_dir` moves nothing: the upgrade looks only
+    where `upload_dir` points.
+  - **The files could not be counted**: the warning
+    `event=adapter_host_files_without_records_uncounted` gives the reason
+    (a folder that cannot be listed, or one replaced during the upgrade).
+    Counting them changed nothing and startup goes on.
   - **The transfer folder is not here.** It belongs to the gateway: 0.9
     wrote it on the gateway's machine, also when the adapter host ran
     elsewhere. It is missing when it was not copied or mounted with the
