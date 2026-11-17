@@ -4110,12 +4110,13 @@ Limits:
   conversation turn names stay there. The upgrade step counts and reports
   the ones left at the upgrade once, at the start that finishes it (copies
   0.9 made whose records are gone, "Upgrading an instance in place"), but
-  does not delete them: the owner chose reporting over deleting, and an
-  administrator deletes them while the instance is stopped. Copies of a
-  message the 0.10 gateway never handled still stay unreported. Retention,
-  history clean-up and person removal cover only `state/uploads`, and the
-  adapter host's own prune deletes its rows, not their files. Follow-up:
-  delete each expired row's transfer file.
+  does not delete them: the owner chose reporting over deleting. An
+  administrator deletes those older than the step's marker once the gateway
+  has run on 0.10 since, while the instance is stopped. Copies of a message
+  the 0.10 gateway never handled still stay unreported. Retention, history
+  clean-up and person removal cover only `state/uploads`, and the adapter
+  host's own prune deletes its rows, not their files. Follow-up: delete each
+  expired row's transfer file.
 - Protocol 1's `task.answer` message has no files field. Answers still travel
   in the older message, which carries `TaskQuery.attachments`; moving answers
   to protocol 1 needs that field.
@@ -4792,20 +4793,42 @@ the desktop app never offers an older version.
   count (the names 0.9.13 wrote; an operator's folder may hold other files),
   looked at with `lstat` only, so no link is followed and no file is opened,
   and a file a record still names is left out because it has its own
-  not-moved warning. A nonzero count logs one warning
+  not-moved warning. Also left out is a file the 0.10 gateway reads at its
+  start: at startup `AdapterHostApplicationService.start` handles every
+  hosted-chat message still `accepted` in `gateway_adapter_inbox`, 0.9.13's
+  included (the protocol and the tables are unchanged since then), resolves
+  its file references in order (a completed upload of the same registration
+  epoch, stopping at the first that does not resolve), reads those files and
+  removes them. The step resolves them the same way, reading the adapter
+  host's records only when a file no record names is found, because opening
+  them creates their tables on an instance that never ran the adapter host.
+  A nonzero count logs one warning
   (`event=adapter_host_files_without_records`) with the folder, the count and
   what to do, and no file names, which are people's text: an administrator
-  may delete those files while the instance is stopped, keeping the files
-  in the `sources` field of not-moved warnings (their `file` field may name
-  the `state/uploads` side, such as a destination already taken, so it cannot
-  carry that advice). Stopped, because the running 0.10 adapter host
-  passes new files through the same folder under the same prefix until the
-  gateway handles them, so a count beside a running team (`--files-gone`) may
-  include those. If the folder was at another path under 0.9.13, its records
-  name that path and every file here looks unrecorded, so the warning says
-  not to delete them then and to point `upload_dir` back. A folder that is not
-  there counts 0; any other error listing it logs
-  `event=adapter_host_files_without_records_uncounted` and leaves the count
+  may delete the `adapter_upload_*` files last changed before the marker was
+  written (`find … ! -newer <marker>`), only after the gateway has run on
+  0.10 since then and while the instance is stopped, keeping the files in
+  the `sources` field of not-moved warnings (their `file` field may name the
+  `state/uploads` side, such as a destination already taken, so it cannot
+  carry that advice). Both conditions are needed: the 0.10 adapter host
+  passes new files through the same folder under the same prefix, so a count
+  beside a running team (`--files-gone`) or at a re-run after the marker was
+  deleted may include its copies, all written before that marker; once the
+  gateway has run, the copies of messages it had taken in are gone, and the
+  rest (messages it marked `outcome_unknown`, uploads whose message never
+  came) are never read again, because each registration gets a new epoch.
+  An earlier version of this warning said 0.10 never opens these files;
+  that was wrong for messages taken in but not handled (review of PR #150).
+  If the folder was at another path under 0.9.13, its records name that
+  path and every file here looks unrecorded, so the warning says not to
+  delete them then; putting the folder back is not enough, because the step
+  reads only `upload_dir` (resolved through links), so it says to move or
+  mount the folder back at that path and set `upload_dir` to it. A folder
+  that is not there counts 0. One gone or with another device and inode
+  than the step saw when it started (every look opens it by path, so a
+  folder unmounted or replaced meanwhile would look empty), any other error
+  listing it and a database error reading the adapter host's records log
+  `event=adapter_host_files_without_records_uncounted` and leave the count
   unset (`null` in the marker), because the count only reports: it never
   stops startup, keeps the marker from being written or changes a record.
   Only the run that writes the marker reports, so the count is said once; a

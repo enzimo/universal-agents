@@ -194,17 +194,28 @@ or leaving them unmentioned). Only regular files named ``adapter_upload_*``
 directly in the folder count, the names 0.9.13 wrote (an operator's folder may
 hold other files); each is looked at with ``lstat`` only, so no link is
 followed and no file is opened, and a file a record names is left out (a file
-that did not move has its own warning). A nonzero count logs one warning
-(``event=adapter_host_files_without_records``) with the folder, the count and
-what an administrator may do, and no file names, which are people's text. The
-advice is to delete them only while the instance is stopped, because the
-running 0.10 adapter host passes new files through the same folder under the
-same prefix. A folder that is not there counts 0; any other error listing it
-logs ``event=adapter_host_files_without_records_uncounted`` and leaves the count
-unset: the count only reports, so it never stops startup, keeps the marker
-from being written or changes a record. Only the run that writes the marker
-reports, so the count is said once; a run that stops part way never counts,
-and the run that finishes it does.
+that did not move has its own warning). So is a file the 0.10 gateway reads
+at its start: one of a hosted-chat message still ``accepted`` in the adapter
+host's inbox, 0.9.13's included, whose file the gateway resolves, reads and
+then removes (``_Step._files_the_gateway_reads``). The adapter host's records
+are read only when a file no record names is found, because opening them
+creates their tables on an instance that never ran it. A nonzero count logs
+one warning (``event=adapter_host_files_without_records``) with the folder,
+the count and what an administrator may do, and no file names, which are
+people's text. The team cannot open those files, but the 0.10 adapter host
+passes new files through the same folder under the same prefix, so a count
+taken beside a running team (``--files-gone``) or after the marker was
+deleted may include its copies. The advice is therefore to delete only files
+last changed before the marker was written, only after the gateway has run on
+0.10 since then (it has then handled the messages taken in before), and only
+while the instance is stopped. A folder that is not there counts 0; one gone
+or replaced since the step first opened it (its device and inode differ), any
+other error listing it and a database error reading the adapter host's
+records log ``event=adapter_host_files_without_records_uncounted`` and leave
+the count unset: the count only reports, so it never stops startup, keeps the
+marker from being written or changes a record. Only the run that writes the
+marker reports, so the count is said once; a run that stops part way never
+counts, and the run that finishes it does.
 
 Guidance the gateway still holds (``gateway_held_guidance``) is rewritten
 with its moved file: the gateway signs it again from that copy at each send,
@@ -241,15 +252,23 @@ from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from pydantic import ValidationError
 
 from access_control import safe_open
+from assistant_gateway.adapter_host.domain import AdapterInboxRecord
+from assistant_gateway.adapter_host.repository import AdapterHostRepository
+from assistant_gateway.contracts.adapter_host_v1 import (
+    AdapterHostContractError,
+    ChannelInboundMessageV1,
+    decode_adapter_host_message_v1,
+)
 from assistant_gateway.domain.delivery import AttachmentRecord
 from assistant_gateway.inbound_attachments import safe_attachment_session_dir_name, sanitize_attachment_filename
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.task_v1 import TaskSteering
+from storage.adapter_host_repository import create_adapter_host_repository
 from storage.conversation_repository import ConversationRepository, create_conversation_repository
 from storage.gateway_state_repository import GatewayStateRepository, create_gateway_state_repository
 
@@ -308,6 +327,10 @@ REASON_FOLDER_CHANGED = "folder_changed"
 # What 0.9.13's adapter host named each file it kept, directly in its transfer folder
 # (``new_id("adapter_upload")`` in ``assistant_gateway.adapter_host.service``).
 TRANSFER_FILE_PREFIX = "adapter_upload_"
+# How a hosted-chat message names a file in the transfer folder (``AdapterAttachmentV1.storage_reference``).
+_UPLOAD_REFERENCE_SCHEME = "adapter-upload"
+# The upload status a message's file must have for the gateway to read it (``resolve_upload_reference``).
+_UPLOAD_COMPLETED = "completed"
 
 # Errors that come from one record's names and recur at every start (rule 1).
 _NAME_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.EINVAL})
@@ -500,6 +523,9 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
                 transfer=transfer,
                 uploads=Path(layout.uploads_dir).resolve(),
                 gateway=create_gateway_state_repository(config.state_storage_settings, logger=logger),
+                # Opened only when a file no record names is found: opening it creates the adapter host's
+                # tables, which an instance that never ran the adapter host does not have.
+                adapter_host=lambda: create_adapter_host_repository(config.state_storage_settings, logger=logger),
                 conversations=create_conversation_repository(
                     config.manager_storage_settings, artifacts_dir=layout.conversation_artifacts_dir, logger=logger
                 ),
@@ -553,24 +579,40 @@ def _report_files_without_records(transfer: Path, marker: Path, count: int) -> N
     """Say once, from the run that wrote the marker, how many files no record names are left and what to do (F16).
 
     No file names (people's text) and no contents: the folder and the count.
-    The advice to delete holds only while the instance is stopped, because the
-    running 0.10 adapter host passes new files through the same folder under
-    the same prefix until the gateway has handled them. When the folder was at
-    another path under 0.9.13, its records name that path and match nothing
-    here, so every file looks unrecorded; the warning says not to delete them
-    then, because putting the folder back lets the step move them (C02).
+    The delete advice is bounded by time and by the gateway (F2 of the
+    review of PR #150): the 0.10 adapter host passes new files through the
+    same folder under the same prefix, and at its start the gateway reads
+    the files of messages it took in but had not handled yet, 0.9's
+    included, and then removes them. The count leaves those out
+    (``_files_the_gateway_reads``), but a count taken beside a running team
+    (``--files-gone``) or at a re-run after the marker was deleted may still
+    include the 0.10 adapter host's own copies. So only files last changed
+    before the marker, and only once the gateway has run on 0.10 since, may
+    go, while the instance is stopped. When the folder was at another path
+    under 0.9.13, its records name that path and match nothing here, so
+    every file looks unrecorded; the step reads only ``upload_dir`` (resolved
+    through links), so the warning says to set ``upload_dir`` to that path
+    with the folder there (F1 of that review).
     """
 
     logger.warning(
         "%s file(s) are left in the adapter host's transfer folder that no record names: files of people removed "
-        "on 0.9, files whose records were deleted, or files of messages the gateway never handled. 0.10 never "
-        "opens them. An administrator may delete the files there whose names start with %s while the instance "
-        "is stopped, keeping every file named in the sources= field of an adapter_host_file_not_moved warning (see "
-        "upgrading.md). If this folder was at another path under 0.9.13 (moved, mounted elsewhere or reached "
-        "through another link), their records may name that path: do not delete them; put the folder back at that "
-        "path or set upload_dir to it, delete %s and restart. event=adapter_host_files_without_records folder=%s "
-        "files_without_records=%s",
+        "on 0.9, files whose records were deleted, or files of messages the gateway never handled. The team cannot "
+        "open them. An administrator may delete the files there whose names start with %s and that were last "
+        "changed before the step's marker %s was written (find %s -maxdepth 1 -type f -name '%s*' ! -newer %s), "
+        "keeping every file named in the sources= field of an adapter_host_file_not_moved warning, and only after "
+        "the gateway has run on 0.10 since then, while the instance is stopped: at its start the gateway handles "
+        "messages taken in but not handled yet (0.9's too) and removes their files, and the 0.10 adapter host "
+        "passes new files through this folder, so a count taken beside a running team (--files-gone) or after "
+        "the marker was deleted may include them. With the adapter host turned off, keep the files until it has "
+        "run again. If this folder was at another path under 0.9.13 (moved, mounted elsewhere or reached through "
+        "another link), their records may name that path: do not delete them; move or mount the folder back at "
+        "that path (a link does not work), set upload_dir to that path, delete the marker and restart. See "
+        "upgrading.md. event=adapter_host_files_without_records folder=%s files_without_records=%s",
         count,
+        TRANSFER_FILE_PREFIX,
+        marker,
+        transfer,
         TRANSFER_FILE_PREFIX,
         marker,
         transfer,
@@ -585,6 +627,7 @@ class _Step:
         transfer: Path,
         uploads: Path,
         gateway: GatewayStateRepository,
+        adapter_host: Callable[[], AdapterHostRepository],
         conversations: ConversationRepository,
         marker: Path,
         progress: Path,
@@ -593,6 +636,7 @@ class _Step:
         self._transfer = transfer
         self._uploads = uploads
         self._gateway = gateway
+        self._adapter_host = adapter_host
         self._conversations = conversations
         self._marker = marker
         self._progress = progress
@@ -723,45 +767,83 @@ class _Step:
         return self._uploads == self._transfer or self._uploads in self._transfer.parents
 
     def count_files_without_records(self) -> Optional[int]:
-        """How many files 0.9.13 could have written are left in the transfer folder that no record ``find`` saw names.
+        """How many files 0.9.13 could have written are left in the transfer folder that no record names.
 
         Counted after the moves and drops: regular files named
         ``adapter_upload_*`` directly in the folder (the step's own scope,
         ``_in_transfer``), checked with ``lstat`` only, so no link is
-        followed and no file is opened. A name a record names is left out:
-        a file that did not move is reported by its own warning. A transfer
-        folder that is not there holds none (0, most instances never ran the
-        adapter host), and one set to or inside ``state/uploads`` leaves
-        nothing (0). Any other error listing it is logged
-        (``event=adapter_host_files_without_records_uncounted``) and gives
+        followed and no file is opened. Left out: a name a record ``find``
+        saw names (a file that did not move is reported by its own warning),
+        and a file the gateway reads at its start (``_files_the_gateway_reads``).
+        A transfer folder that is not there and never was during the run
+        holds none (0, most instances never ran the adapter host), and one
+        set to or inside ``state/uploads`` leaves nothing (0). A folder that
+        is gone or has another identity than ``survey`` saw is not counted:
+        every look opens it by path, so a folder unmounted or replaced
+        meanwhile would look empty (``REASON_FOLDER_CHANGED``). That, any
+        other error listing it and a database error reading the adapter
+        host's records are logged
+        (``event=adapter_host_files_without_records_uncounted``) and give
         None: the count only reports, so it never stops the start or keeps
         the marker from being written (rule 2 does not apply).
         """
 
         if self._transfer_in_uploads:
             return 0
+        unnamed = self._list_unnamed_files()
+        if not unnamed:
+            return None if unnamed is None else 0
+        try:
+            unnamed -= self._files_the_gateway_reads()
+        except Exception as exc:  # a database error: the count only reports (A2), so it is left unset, logged
+            self._log_uncounted(f"{type(exc).__name__}: {exc}")
+            return None
+        return len(unnamed)
+
+    def _list_unnamed_files(self) -> Optional[set[str]]:
+        """The folder's files no found record names; None, logged, when the folder cannot be listed or changed."""
+
         try:
             directory = safe_open.open_directory(self._transfer, ())
         except safe_open.UnsafePath as exc:
             if exc.reason == safe_open.REASON_ROOT_UNAVAILABLE and isinstance(exc.__cause__, FileNotFoundError):
-                return 0
-            self._log_uncounted(exc.__cause__ or exc)
+                if self._identity is None:
+                    return set()
+                self._log_uncounted(f"{REASON_FOLDER_CHANGED}: {self._changed_detail(None)}")
+                return None
+            self._log_uncounted(_detail(exc.__cause__ or exc))
             return None
         except (OSError, ValueError) as exc:
-            self._log_uncounted(exc)
+            self._log_uncounted(_detail(exc))
             return None
         try:
-            return self._count_unnamed_files(directory)
+            changed = self._changed_since_survey(directory)
+            if changed is None:
+                return self._unnamed_files(directory)
+            self._log_uncounted(f"{REASON_FOLDER_CHANGED}: {changed}")
+            return None
         except (OSError, ValueError) as exc:
-            self._log_uncounted(exc)
+            self._log_uncounted(_detail(exc))
             return None
         finally:
             os.close(directory)
 
-    def _count_unnamed_files(self, directory: int) -> int:
+    def _changed_since_survey(self, directory: int) -> Optional[str]:
+        """What changed when the open folder is not the one ``survey`` opened, else None (FA-3 of PR #150's review)."""
+
+        if self._identity is None:
+            return None
+        info = os.fstat(directory)
+        now = (info.st_dev, info.st_ino)
+        return None if now == self._identity else self._changed_detail(now)
+
+    def _changed_detail(self, now: Optional[tuple[int, int]]) -> str:
+        return "it changed during the run: %s at the start, %s now" % (_identity_text(self._identity), _identity_text(now))
+
+    def _unnamed_files(self, directory: int) -> set[str]:
         """Regular ``adapter_upload_*`` files in the open folder no found record names; raises on a listing error."""
 
-        count = 0
+        unnamed: set[str] = set()
         for name in os.listdir(directory):
             if not name.startswith(TRANSFER_FILE_PREFIX) or name in self._named:
                 continue
@@ -770,16 +852,70 @@ class _Step:
             except FileNotFoundError:
                 continue  # removed since the listing
             if stat.S_ISREG(info.st_mode):
-                count += 1
-        return count
+                unnamed.add(name)
+        return unnamed
 
-    def _log_uncounted(self, exc: BaseException) -> None:
+    def _files_the_gateway_reads(self) -> set[str]:
+        """Names in the transfer folder of files the 0.10 gateway reads, then removes, at its start (F2 of PR #150's review).
+
+        At its start the gateway handles every hosted-chat message still
+        ``accepted`` in ``gateway_adapter_inbox``, 0.9.13's included (the
+        protocol and both tables are unchanged since then):
+        ``AdapterHostApplicationService.start``, then
+        ``GatewayAdapterRequestHandler._save_uploads``, which resolves each
+        file reference in order (``resolve_upload_reference``: a completed
+        upload of the same adapter and registration epoch), reads the files
+        and removes the transfer copies of those it resolved. It stops at
+        the first reference that does not resolve, so the files after it
+        stay. A message in ``processing`` is marked ``outcome_unknown`` and
+        never read again, and a completed upload no accepted message names
+        never resolves after a restart (each registration gets a new epoch),
+        so neither is left out. A payload that does not decode fails its
+        message without reading a file. Read only once a file no record
+        names is found, in pages (``list_inbox_for_recovery``).
+        """
+
+        repository = self._adapter_host()
+        names: set[str] = set()
+        after: Optional[tuple[str, str]] = None
+        while True:
+            records = repository.list_inbox_for_recovery(limit=_BATCH, after=after)
+            for record in records:
+                names.update(self._files_read_for(repository, record))
+            if len(records) < _BATCH:
+                return names
+            after = (records[-1].created_at_utc, records[-1].request_id)
+
+    def _files_read_for(self, repository: AdapterHostRepository, record: AdapterInboxRecord) -> Iterator[str]:
+        """The transfer-folder names of the files the gateway resolves for one accepted message, in its order."""
+
+        try:
+            message = decode_adapter_host_message_v1(json.loads(record.payload_json))
+        except (AdapterHostContractError, ValueError, TypeError, AttributeError):
+            return  # the gateway fails it without reading a file
+        if not isinstance(message, ChannelInboundMessageV1):
+            return
+        for attachment in message.attachments:
+            scheme, _, upload_id = attachment.storage_reference.partition(":")
+            upload = repository.get_upload(upload_id) if scheme == _UPLOAD_REFERENCE_SCHEME and upload_id else None
+            if upload is None or (
+                upload.status,
+                upload.plugin_id,
+                upload.adapter_instance_id,
+                upload.registration_epoch,
+            ) != (_UPLOAD_COMPLETED, message.plugin_id, message.adapter_instance_id, message.session_epoch):
+                return
+            path = self._in_transfer(upload.local_path)
+            if path is not None:
+                yield path.name
+
+    def _log_uncounted(self, reason: str) -> None:
         logger.warning(
             "The files left in the adapter host's transfer folder could not be counted, so it is not known whether "
             "any are left that no record names; counting them changed nothing and startup goes on. "
             "event=adapter_host_files_without_records_uncounted folder=%s reason=%s",
             self._transfer,
-            _detail(exc),
+            reason,
         )
 
     def survey(self, items: list[_Item]) -> tuple[int, bool]:
@@ -956,11 +1092,7 @@ class _Step:
             return
         now = self._folder_identity(absent_is_missing=False)
         if now != self._identity:
-            detail = "it changed during the run: %s at the start, %s now" % (
-                _identity_text(self._identity),
-                _identity_text(now),
-            )
-            raise FolderProblem(self._transfer, REASON_FOLDER_CHANGED, detail)
+            raise FolderProblem(self._transfer, REASON_FOLDER_CHANGED, self._changed_detail(now))
 
     # -- handling one file -------------------------------------------------------
 

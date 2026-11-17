@@ -2669,7 +2669,7 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
         elif counts.files_without_records:
             print(
                 f"{counts.files_without_records} file(s) are left in the transfer folder that no record names; "
-                "0.10 never opens them. See the log for what to do."
+                "the team cannot open them. See the log for which may be deleted, and when."
             )
 
 
