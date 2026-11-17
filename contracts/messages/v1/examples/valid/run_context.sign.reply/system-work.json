@@ -39,16 +39,17 @@
       },
       "bound_to": {
         "type": "root_task",
-        "id": "run_scheduled_job_id_2_0430"
+        "id": "run_scheduled_job_id_2_0430",
+        "request_id": "task_context_d00d1174ba15"
       },
       "schedule_id": "scheduled_job_id_2",
       "issued_at": "2026-10-22T04:30:00.000Z",
       "expires_at": "2026-10-23T04:30:00.000Z",
       "algorithm": "ed25519",
-      "signature": "Ca_vuqWINXyUhNPhcXoC9lUQwM_iFrRp2xe9Svc0v6aiTULdWQht6so_pDE7i2o-ukZdUWTZmlFnRtsJ2FZNCg"
+      "signature": "NEvwjRl57E4CG4Pso9NG9vAvO18WYwlPDbobGpB21pixB0BoT4hzL7okBGY34BdVDfDTeGfIBziIxgOglQKuDA"
     }
   },
   "causation_id": "01928f3a-7b2c-7b04-8000-000000000b04",
-  "body_digest": "03NzZloXzR5Cr2TX7A44ndIBve7Y8mqgQWMEFJbWI1o",
-  "signature": "SKE0ZSylAUSuYr9CcJGHK7nmzvn_U1MVyv_ZY8p7wjnQWTHSdKSQIUs--zqUUDx_ODtu_8Ha_TJpZCe6tZQIAw"
+  "body_digest": "5JknM9rGHscuDVElbIZzB7_3w4ObRRvzSZv2Ay4Q0so",
+  "signature": "c9CqUOaXzg2ZEkn093bOP1pJ87eAvA2omUP7D3syQKW9RgCkc-_dvrhEcKr1hCkmsjPBiy2JFsVKUFBiVITGDg"
 }

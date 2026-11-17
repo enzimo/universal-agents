@@ -37,12 +37,13 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "root_task",
-      "id": "task_root_7f"
+      "id": "task_root_7f",
+      "request_id": "task_context_7f3a9c1e5b2d"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
     "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "dzzXBO8v_hNRGvWWy4YmLnhrxjBvT4cwNUppkMFlppWFnNN0xnVQvCFqlnUMgeSz9rn5DZflrrnJLVTGVqBvCw"
+    "signature": "W3R5ktP9umdwQmdsnntzJuz_iHeOCLf_88aZNjbdi0ab_0iLruIrIqwpSqOVtb9Oi868MMXwx56FGVapynVODQ"
   },
   "algorithm": "ed25519",
   "body": {
@@ -101,5 +102,5 @@
     "system_schedule_kind": "unclassified"
   },
   "body_digest": "pQDv6lmhL8xTHSIgLgrXW2Muk9_yFaJ_9AfLOi7q7Mo",
-  "signature": "8PhWNAuq6ub-R3Gzxj3jMiB76RBbbj0UJyrJJ2Hle-o5oFM5vIeyiA8Ir3exQmLpaxIiZAZ9qYQJIGqrnYHKBg"
+  "signature": "TYZ4n26gN8CqoNCGS97j83w9oK7WTwacyH1MyZ9UO9utw4sNsr3O0W_PA9uRHeNF16nK8-pHf_O2PQgJxnFdCQ"
 }

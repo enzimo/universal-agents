@@ -265,25 +265,62 @@
           "$ref": "#/$defs/person_ref"
         },
         "bound_to": {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "enum": [
-                "root_task",
-                "command",
-                "access_request"
-              ]
+          "description": "The one record the token is for. Only a root task's binding carries a request id (README, \"On behalf of a person\").",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "root_task"
+                },
+                "id": {
+                  "$ref": "#/$defs/record_id"
+                },
+                "request_id": {
+                  "description": "The person's request the root task belongs to: the id that grants for one request, the change ledger's request rows and the coordination registry are keyed by. A new request keeps today's task_context_ form; a stored context converted at the upgrade keeps its id.",
+                  "$ref": "#/$defs/record_id"
+                }
+              },
+              "required": [
+                "type",
+                "id",
+                "request_id"
+              ],
+              "additionalProperties": false
             },
-            "id": {
-              "$ref": "#/$defs/record_id"
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "command"
+                },
+                "id": {
+                  "$ref": "#/$defs/record_id"
+                }
+              },
+              "required": [
+                "type",
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "access_request"
+                },
+                "id": {
+                  "$ref": "#/$defs/record_id"
+                }
+              },
+              "required": [
+                "type",
+                "id"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "type",
-            "id"
-          ],
-          "additionalProperties": false
+          ]
         },
         "schedule_id": {
           "description": "The schedule a scheduled job's run belongs to. Only a scheduler certificate signs it, and a run's schedule comes only from here (README, \"On behalf of a person\").",

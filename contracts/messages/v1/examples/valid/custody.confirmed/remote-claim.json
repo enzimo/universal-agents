@@ -60,7 +60,7 @@
     }
   },
   "body_digest": "hDSACK327gFam6zQlY8jPSDIHatQtgq0tWHDACS4fpo",
-  "signature": "3mCYtvTF4LHjmGUBDpuh_vgcKDnRHHmRGwwU4XAKnT0vJIe6sgi0-KBAvs6dSPBNXxQsdTvT4se3bqN2-hAABQ",
+  "signature": "xxaA8n7T9_GfYXiR09rN-AuX7SYZgjGUwgcIXZGsu6pbTN7_dYf9Pr1-wl0t8gFQZg3DqO4glQ30vlpUKM_MAQ",
   "authority": {
     "token_id": "01928f3a-7b2c-7116-9000-000000000116",
     "issuer": {
@@ -76,11 +76,12 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "root_task",
-      "id": "task_root_7f"
+      "id": "task_root_7f",
+      "request_id": "task_context_7f3a9c1e5b2d"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
     "expires_at": "2026-10-23T04:29:00.000Z",
     "algorithm": "ed25519",
-    "signature": "jELY9TnLxNgTvbK4CmdzfvdVKBtaxfFv0AzEv0IuTjy1bNwa6pXFc48_cfLafg3EA-b0zurB1H64GcSdPHzTBg"
+    "signature": "nQtHGZ3bJ4Zxx46yN1XSo3_608iyBrtNOB7kRZVJ7p7p36LXpxtFGaH4bBH2YfxA8ApsrOy4sHw5hdAVpzmFBw"
   }
 }

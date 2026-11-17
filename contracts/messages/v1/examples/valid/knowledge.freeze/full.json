@@ -37,12 +37,13 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "root_task",
-      "id": "task_root_7f"
+      "id": "task_root_7f",
+      "request_id": "task_context_7f3a9c1e5b2d"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
     "expires_at": "2026-10-22T04:34:00.000Z",
     "algorithm": "ed25519",
-    "signature": "--l-IfoJM1hCFQnGfkQ7tenBilB3YZmMHW5OcThF9wwgZD_eKW9NyuW4GK8DmWywpb84FrpYE-y5w0sgOaDJDA"
+    "signature": "D9U-ycwUs3yKj8LVFsGrvE_GWsXa534COMG4zVQgcNf_nfiXa8oiBgz13_vangxQW37SrQet9CGi2IlNvMPPCg"
   },
   "algorithm": "ed25519",
   "body": {
@@ -52,5 +53,5 @@
     "minutes": 90
   },
   "body_digest": "H7Y61Rfz_aift8pBa0Ses9QoQx7ZLUxPKKmyLfSJJRs",
-  "signature": "k2fQtJyc7jalJz8PptLKxS721uEqV7cPBGGu3coUGwgElBajzro_UPfnQkFB3lnVFnOAVJKDBx2lBdqFgiBqCw"
+  "signature": "FbSWJUCPIj1NnRTMZZ1lbBwyBovvDRtfarUz25QnltcQv2yVhJ1EwWkk280Z9oGBqfbw6KaKjYExO2q0P5FOCA"
 }

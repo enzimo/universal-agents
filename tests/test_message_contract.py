@@ -1218,6 +1218,48 @@ def test_a_command_token_lasts_no_longer_than_other_tokens() -> None:
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
+def test_only_a_root_task_token_names_the_persons_request_and_it_must() -> None:
+    """README, "On behalf of a person": a root-task token carries request_id; command and access-request tokens do not."""
+
+    token = fixtures.example_frame("task.request", "for-person")["authority"]
+    assert token["bound_to"]["request_id"] == "task_context_aed7c50ed538"
+    models.AuthorityToken.model_validate(token)
+    bound = token["bound_to"]
+    refused = ({key: value for key, value in bound.items() if key != "request_id"},  # a root task without it
+               {**bound, "type": "command"}, {**bound, "type": "access_request"})  # other bindings with it
+    for bound_to in refused:
+        with pytest.raises(ValidationError):
+            models.AuthorityToken.model_validate({**token, "bound_to": bound_to})
+    models.AuthorityToken.model_validate({**token, "bound_to": {"type": "command", "id": "cmd_1"}})
+
+    # Frame examples carry every binding, and every example token bound to a root task names
+    # its request in today's task_context_ form.
+    frames = [json.loads(path.read_text(encoding="utf-8")) for path in valid_examples()]
+    assert {frame["authority"]["bound_to"]["type"] for frame in frames if "authority" in frame} == \
+        {"root_task", "command", "access_request"}
+    root_task = [token for frame in frames for _, token in carried_tokens(frame, "")
+                 if token["bound_to"]["type"] == "root_task"]
+    assert len(root_task) > 100
+    assert all(re.fullmatch(r"task_context_[0-9a-f]{12}", token["bound_to"]["request_id"]) for token in root_task)
+    # The signing vectors cover a token with a request id and one without.
+    assert {vector["token"]["bound_to"]["type"]: "request_id" in vector["token"]["bound_to"]
+            for vector in VECTORS["authority_tokens"]} == {"root_task": True, "command": False}
+    case = json.loads((EXAMPLES / "invalid" / "root-task-token-without-request-id.json").read_text(encoding="utf-8"))
+    assert (case["refusal"], case["at"]) == ("malformed", "/authority/bound_to/request_id")
+
+
+@pytest.mark.parametrize(("binding", "edit"), [
+    ("root_task", lambda variant: variant["required"].remove("request_id")),
+    ("command", lambda variant: variant["properties"].update(request_id={"$ref": "#/$defs/record_id"})),
+])
+def test_the_generator_keeps_the_request_id_on_root_task_tokens_only(binding: str, edit) -> None:
+    schemas = copy.deepcopy(EXPORT.load_schemas())
+    bound_to = schemas["common.schema.json"]["$defs"]["authority_token"]["properties"]["bound_to"]
+    edit(next(variant for variant in bound_to["oneOf"] if variant["properties"]["type"]["const"] == binding))
+    with pytest.raises(EXPORT.ContractError, match="carries and requires request_id"):
+        EXPORT.check_registry(EXPORT.load_yaml("registry.yaml"), TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), schemas)
+
+
 def role_permissions(role: str) -> dict:
     return json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
 
@@ -1674,6 +1716,8 @@ def variant_values(file: str, node: dict, path: str, found: dict, depth: int = 0
 
     while "$ref" in node:
         file, fragment = RESOLVER.resolve(file, node["$ref"])
+        if (file, fragment) == ("common.schema.json", "/$defs/authority_token"):
+            return  # a carried token's bindings are covered where tokens travel, in frames' own authority
         node = RESOLVER.node(file, fragment)
     if depth > 32:
         raise AssertionError(f"{file}{path}: schema nesting exceeds the frame limit; example coverage cannot skip it")

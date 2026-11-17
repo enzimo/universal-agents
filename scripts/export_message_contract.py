@@ -527,6 +527,23 @@ def check_pool_tokens(where: str, entry: dict[str, Any]) -> None:
                                 "token: set its authority_by_address to none")
 
 
+def token_binding_types(schemas: dict[str, dict[str, Any]]) -> list[str]:
+    """The record types a token is bound to: the ``type`` constants of ``bound_to``'s alternatives.
+
+    Only the root task's alternative carries the person's request id, and it must
+    (13C.5): grants, change-ledger rows and the coordination registry are keyed by it.
+    """
+
+    bound_to = schemas["common.schema.json"]["$defs"]["authority_token"]["properties"]["bound_to"]
+    variants = {variant["properties"]["type"]["const"]: variant for variant in bound_to["oneOf"]}
+    for name, variant in variants.items():
+        if ("request_id" in variant["required"]) != (name == "root_task") or \
+                ("request_id" in variant["properties"]) != (name == "root_task"):
+            raise ContractError("common.schema.json: authority_token.bound_to: the root_task binding, and only it, "
+                                "carries and requires request_id")
+    return list(variants)
+
+
 def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
     """A kind that takes a token lists each token type it takes, where the body names its record, and who presents it.
 
@@ -540,7 +557,7 @@ def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str
     bindings = token_bindings(entry)
     if bool(bindings) != (entry["authority"] != "none"):
         raise ContractError(f"{where}: kinds that take an authority token, and only they, state authority_binding")
-    types = schemas["common.schema.json"]["$defs"]["authority_token"]["properties"]["bound_to"]["properties"]["type"]["enum"]
+    types = token_binding_types(schemas)
     named = [binding.get("type") if isinstance(binding, dict) else None for binding in bindings]
     if not all(isinstance(binding, dict) and not set(binding) - {"type", "at", "senders"} for binding in bindings) \
             or not all(isinstance(kind, str) and kind in types for kind in named) or len(set(named)) != len(named):

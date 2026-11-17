@@ -481,6 +481,12 @@ async def test_every_streams_limit_is_set_aside_at_creation_and_lowering_it_drop
                 await js.publish(subject, b"D" * 600)
             assert full.value.err_code == 10077, full.value
             assert (await js.get_msg(first.name, 1)).data == b"A" * 600
+
+            # Lowering gives the room back, so creating the refused stream again now succeeds:
+            # a run stopped partway is finished by running it again with lower limits.
+            info = json.loads((await connection.request("$JS.API.INFO", b"", timeout=5)).data)
+            assert info["reserved_storage"] == 1024
+            await js.add_stream(config=second)
         finally:
             await connection.close()
 

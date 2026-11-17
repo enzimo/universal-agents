@@ -129,8 +129,19 @@ class AuthorityTokenAudience(WireModel):
     team: TeamId
 
 
-class AuthorityTokenBoundTo(WireModel):
-    type: Literal['root_task', 'command', 'access_request']
+class AuthorityTokenBoundToRootTask(WireModel):
+    type: Literal['root_task']
+    id: RecordId
+    request_id: RecordId
+
+
+class AuthorityTokenBoundToCommand(WireModel):
+    type: Literal['command']
+    id: RecordId
+
+
+class AuthorityTokenBoundToAccessRequest(WireModel):
+    type: Literal['access_request']
     id: RecordId
 
 
@@ -141,7 +152,7 @@ class AuthorityToken(WireModel):
     issuer: AuthorityTokenIssuer
     audience: AuthorityTokenAudience
     person: Union[PersonRef, MISSING] = Field(default=MISSING)
-    bound_to: AuthorityTokenBoundTo
+    bound_to: Annotated[Union[AuthorityTokenBoundToRootTask, AuthorityTokenBoundToCommand, AuthorityTokenBoundToAccessRequest], Field(discriminator='type')]
     schedule_id: Union[RecordId, MISSING] = Field(default=MISSING)
     issued_at: Timestamp
     expires_at: Timestamp

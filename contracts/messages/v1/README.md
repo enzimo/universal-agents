@@ -447,10 +447,17 @@ An authority token (`authority` in the frame) proves that work acts for a person
   on it), and lasts at most `authority_token_max_seconds`. A command token lasts at most
   `command_token_max_seconds` (300 seconds): the gateway signs one for each command, and
   it is useful only for minutes.
+- A token bound to a root task also names the person's request the task belongs to
+  (`bound_to.request_id`), and must: grants for one request, the change ledger's request
+  rows and the coordination registry are keyed by it, and the `token_id`, a UUIDv7,
+  cannot hold those existing ids. A new request keeps today's form
+  (`task_context_<hex>`); a stored signed context converted at the upgrade keeps its id,
+  so nothing keyed by a request id is converted. A command or access-request token has
+  no request id, and a frame whose root-task token lacks one is refused as `malformed`.
 - It names no roles: receivers read the person's current roles and standing from the
   team's people records, so a role taken away while a token lasts no longer counts.
-- A scheduled job's run has a token the scheduler signed with the run's `schedule_id`;
-  the run's holder gets it with the task, or with `custody.confirmed` when the run went
+- A scheduled job's run has a token the scheduler signed with the run's `schedule_id`,
+  bound to the run's root task and so naming a request id; the run's holder gets it with the task, or with `custody.confirmed` when the run went
   to a worker pool. A run's schedule comes only from there: the work context names no
   schedule, so a host that passes the task on cannot change it, and a run handed back
   and dispatched again keeps it.
@@ -952,8 +959,14 @@ reads them; `transport.yaml` names them so that step builds on a fixed contract.
   limit, and stops with a message naming the `transport.queues.max_bytes` entry to lower
   when they do not. An account without a limit of its own reports none to check against,
   so there the server's 10047 refusal is the check, and it stops the authority the same
-  way. Defaults are
-  measured against what they set aside, not only against the expected backlog.
+  way. The server can also refuse when the account's check passed, because other accounts
+  or other uses share the server's storage. A refusal partway through a team's streams
+  leaves the streams already made in place, with their limits still set aside, and the
+  team only partly set up. The authority's next run, after the operator lowers the
+  `max_bytes` entry it named, applies the lower limits to those streams (which gives back
+  the room they had set aside and drops nothing) and creates the missing ones, so running
+  it again finishes a team it stopped partway through. Defaults are measured against what
+  they set aside, not only against the expected backlog.
 - **Lowering a limit drops nothing.** A stream that holds more than a lowered limit keeps
   every message and refuses new ones until it falls below the limit.
 - **The size warning** follows the rules of the existing storage warnings
