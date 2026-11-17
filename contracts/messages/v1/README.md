@@ -274,13 +274,17 @@ refuses anything else.
   alternatives inside a group, and the quantifiers `?`, `*`, `+`, `{n}`, `{n,}` and `{n,m}`
   (`m` not below `n`). A brace outside a character class starts one of those three forms,
   and a literal brace is escaped (`\{`): engines read others, such as `{,n}`, differently
-  (Python as 0 to n, ECMAScript as text, and Pydantic's engine refuses it). They start with `^` and end with `$`, and
+  (Python as 0 to n, ECMAScript as text, and Pydantic's engine refuses it). A literal `]`
+  is escaped too (`\]`): first in a class, Python reads it as a literal and ECMAScript as
+  the end of an empty class (`[]` never matches, `[^]` matches anything), and outside a
+  class ECMAScript's Unicode mode refuses it. They start with `^` and end with `$`, and
   `$` means the end of the value. Shorthand classes (`\d`, `\w`, `\s`), an unescaped `.`,
   other group forms (lookaround, named groups, inline flags), backreferences, word
   boundaries and possessive quantifiers are refused, and so is a quantifier directly after
   another (only one lazy `?` may follow one) or with nothing before it to repeat: Python
   refuses `[a-z]{100}{1000}`, while Pydantic's engine reads it as 100,000 characters. A
-  pattern Python's `re` cannot compile is refused too. Python's `re` also lets `$` match
+  pattern Python's `re` cannot compile, or whose repetition count is past `re`'s limit, is
+  refused too. Python's `re` also lets `$` match
   before a final newline, so a Python validator must refuse a value that ends with one
   (the tests replace a final `$` with `\Z`).
 - **Alternatives** (`oneOf`) are objects told apart by a string `const` property that
@@ -931,8 +935,13 @@ connected host hands a partition over in this order:
    also takes up any partition it gained meanwhile. The team services release no other
    partition of the same host until they write this handover's step 4: a second release
    during step 2 would have to be left out of step 3's renewal, whose new key ends the
-   connection that its own step 2 still needs. A host that is cut off or retired is the
-   exception: all its partitions are released at once (below).
+   connection that its own step 2 still needs. So the partitions of one connected host move
+   one at a time, each taking a handover and, where the authority cannot revoke, the
+   credential lifetime after its step 3. Whether one handover may release several
+   partitions of a host together is not settled yet (an open point for step 2, beside the
+   credential lifetime it sets): the records are written one by one, so the old host would
+   need to know when the set is complete before it starts. A host that is cut off or retired
+   is the exception: all its partitions are released at once (below).
 2. The old host stops pulling the inboxes and answering the control addresses of the
    partition's agents. It keeps reading their control queues while it finishes, or hands
    back with `task.handback`, every task they admitted, and acknowledges their messages

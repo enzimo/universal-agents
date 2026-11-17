@@ -187,7 +187,11 @@ def pattern_problem(pattern: str) -> str | None:
     ``(?:``, alternatives inside a group, and one quantifier per atom (?, *, +, {n},
     {n,} or {n,m}), optionally lazy. ``$`` means the end of the value; Python's ``re``
     also matches it before a final newline, which the README tells Python validators to
-    refuse. A pattern Python's ``re`` cannot compile is refused too, as a backstop.
+    refuse. A ``]`` directly after ``[`` or ``[^`` is refused: Python reads it as a literal,
+    ECMAScript as the end of an empty class (``[]`` never matches, ``[^]`` matches anything).
+    So is a ``]`` outside a class, which ECMAScript's Unicode mode refuses, like a lone ``}``.
+    A pattern Python's ``re`` cannot compile, or whose repetition count is past its limit
+    (``re`` raises OverflowError, not re.error), is refused too, as a backstop.
     """
 
     if len(pattern) < 2 or not (pattern.startswith("^") and pattern.endswith("$")) or pattern.endswith("\\$"):
@@ -216,6 +220,8 @@ def pattern_problem(pattern: str) -> str | None:
             previous = "lazy" if previous == "quantifier" else "quantifier"
             continue
         if character == "[":
+            if body.startswith("]", index + 1) or body.startswith("^]", index + 1):
+                return "a ] directly after [ or [^ reads differently between engines; escape a literal ] as \\]"
             in_class = True
         elif character == "(":
             if following == "?" and body[index + 2:index + 3] != ":":
@@ -232,13 +238,15 @@ def pattern_problem(pattern: str) -> str | None:
             return "anchors belong only at the two ends"
         elif character == "}":
             return "a } closes only {n}, {n,} or {n,m}; escape a literal brace as \\}"
+        elif character == "]":
+            return "a ] outside a character class is an error in ECMAScript's Unicode mode; escape it as \\]"
         previous = "atom" if character not in "(|" else "start"
         index += 1
     if in_class:
         return "a character class is not closed"
     try:
         re.compile(pattern)
-    except re.error as error:
+    except (re.error, OverflowError) as error:
         return f"Python's re refuses it ({error})"
     return None
 

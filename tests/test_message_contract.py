@@ -285,14 +285,21 @@ def test_the_schema_subset_refuses_what_other_implementations_read_differently(s
     "^[a-z]{100}{1000}$", "^a{2}{3}$", "^a?{2}$", "^a**$", "^a+?{3}$", "^a{1,3}??$",
     # A quantifier with nothing to repeat.
     "^*a$", "^(?:a|+)$", "^(?:*)$",
+    # A ] first in a class: a literal in Python, the end of an empty class ([] or [^]) in ECMAScript;
+    # a ] outside a class, which ECMAScript's Unicode mode refuses.
+    "^[]a]$", "^[^]a]$", "^[a]]$", "^a]$",
+    # Repetition counts past Python's limit, which re refuses with OverflowError.
+    "^a{4294967295}$", "^a{4294967296}$", "^a{1,99999999999999999999}$",
 ])
 def test_patterns_that_engines_read_differently_are_refused(pattern: str) -> None:
     assert EXPORT.pattern_problem(pattern), pattern
+    assert EXPORT.pattern_longest_match(pattern) is None, pattern
 
 
 @pytest.mark.parametrize("pattern", [
     "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$", "^1\\.(0|[1-9][0-9]{0,3})-pre$", "^(?:a|b)$", "^[a$^.-]+$", "^a{1,3}?$",
     "^\\{[a-z{}]{2}\\}$", "^a{2}$", "^a{2,}$", "^a{2,2}$", "^a+?$", "^(?:ab)*?b$", "^[*+?]{2}$", "^a\\*+$",
+    "^[\\]a]$", "^[^\\]a]$", "^[a]\\]$",
 ])
 def test_portable_patterns_are_allowed(pattern: str) -> None:
     assert EXPORT.pattern_problem(pattern) is None
