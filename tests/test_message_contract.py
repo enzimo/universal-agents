@@ -2771,6 +2771,111 @@ def test_a_host_that_has_not_joined_may_only_ask_to_join_and_read_its_inbox() ->
     assert EXPORT.JOINING not in REGISTRY["host_roles"]
 
 
+def test_every_process_has_a_nats_user_and_the_account_carries_the_partition_mappings() -> None:
+    """README, "NATS users and the account" (A8; decisions 88 and 89)."""
+
+    account = TRANSPORT["nats_account"]
+    owner = TRANSPORT["topology_owner"]
+    assert account["mode"] == "operator" and account["signing_key_holder"] == owner == "installation_authority"
+    assert account["account_settings"] == {"jetstream": True, "mappings": "partitions.account_mappings"}
+    assert TRANSPORT["partitions"]["account_mappings"]
+    users = account["users"]
+    # The authority's own user and the bootstrap user exist before any certificate does.
+    assert users[owner] == {"permissions": owner, "issued_by": "launcher", "carried_in": "trust_folder"}
+    assert users[EXPORT.JOINING] == {"permissions": EXPORT.JOINING, "issued_by": "launcher",
+                                     "carried_in": "bootstrap_bundle"}
+    assert users["host"] == {"permissions": "certificate_roles", "issued_by": owner,
+                             "carried_in": ["host.join.reply", "host.renew.reply"]}
+    for role in (owner, EXPORT.JOINING):
+        assert (CONTRACT / "generated" / "permissions" / f"{role}.json").is_file()
+    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    assert "**NATS users and the account.**" in readme and "(\"NATS users and the account\")" in readme
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (lambda t: t.pop("nats_account"), "operator mode"),
+        (lambda t: t["nats_account"].update(mode="server_config"), "operator mode"),
+        (lambda t: t["nats_account"].update(signing_key_holder="team_services"), "holds the account's signing key"),
+        # Without the mappings no agent's queue reaches its partition stream.
+        (lambda t: t["nats_account"]["account_settings"].pop("mappings"), "account_settings are"),
+        (lambda t: t["nats_account"]["account_settings"].update(jetstream=False), "account_settings are"),
+        (lambda t: t["nats_account"]["users"].pop("joining_host"), "users are"),
+        (lambda t: t["nats_account"]["users"]["joining_host"].pop("carried_in"), "users are"),
+        (lambda t: t["nats_account"]["users"]["joining_host"].update(permissions="worker_host"), "users.joining_host is"),
+        (lambda t: t["nats_account"]["users"]["host"].update(issued_by="launcher"), "users.host is"),
+        (lambda t: t["nats_account"]["users"]["host"].update(carried_in=["host.join.reply"]), "users.host is"),
+    ],
+)
+def test_nats_account_settings_and_users_the_contract_cannot_keep_are_refused(change, problem: str) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    change(transport)
+    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+        EXPORT.check_nats_account(REGISTRY, transport, EXPORT.load_schemas())
+
+
+def test_only_the_authority_may_answer_a_kind_whose_reply_carries_a_credential() -> None:
+    registry = copy.deepcopy(REGISTRY)
+    registry["kinds"]["host.renew"]["receivers"] = ["installation_authority", "team_services"]
+    with pytest.raises(EXPORT.ContractError, match="only installation_authority answers host.renew"):
+        EXPORT.check_nats_account(registry, TRANSPORT, EXPORT.load_schemas())
+
+
+def text_content_forms(node: object) -> set[str]:
+    """The forms (inline, blob) of every text_content value in an example."""
+
+    if isinstance(node, list):
+        return set().union(*(text_content_forms(item) for item in node))
+    if not isinstance(node, dict):
+        return set()
+    own = {node["type"]} if set(node) in ({"type", "text"}, {"type", "ref"}) and node.get("type") in {"inline", "blob"} \
+        else set()
+    return own.union(*(text_content_forms(value) for value in node.values()))
+
+
+def test_knowledge_text_that_may_be_long_has_a_blob_form_and_examples_show_both() -> None:
+    """README, "Knowledge" (A6): long text is text_content, and every other text is bounded at long_text."""
+
+    schemas = EXPORT.load_schemas()
+    EXPORT.check_knowledge_text(REGISTRY, schemas)
+    resolver = EXPORT.ModelWriter(schemas)
+    carrying = [label for name, entry in REGISTRY["kinds"].items() if name.startswith(EXPORT.KNOWLEDGE_PREFIX)
+                for label, file in ((name, entry["body"]), (f"{name}.reply", entry.get("reply", {}).get("body")))
+                if file and EXPORT.reaches_blob(resolver, file, schemas[file], set())]
+    assert {"knowledge.write", "knowledge.add_note", "knowledge.read.reply", "knowledge.history.reply",
+            "knowledge.publish_contribution", "knowledge.read_contribution.reply"} <= set(carrying)
+    for label in carrying:
+        forms = set().union(*(text_content_forms(json.loads(path.read_text(encoding="utf-8"))["body"])
+                              for path in (EXAMPLES / "valid" / label).glob("*.json")))
+        assert forms == {"inline", "blob"}, label
+
+
+@pytest.mark.parametrize(
+    ("field", "change"),
+    [
+        ("summary", {"type": "string", "maxLength": 40000}),
+        ("summary", {"type": "string"}),
+        ("summary", {"type": "string", "pattern": "^[a-z ]+$"}),
+        ("summary", {"type": "string", "pattern": "^[a-z]{1,}$"}),
+    ],
+)
+def test_a_knowledge_text_that_could_exceed_long_text_inline_is_refused(field: str, change: dict) -> None:
+    schemas = copy.deepcopy(EXPORT.load_schemas())
+    file = REGISTRY["kinds"]["knowledge.write"]["body"]
+    schemas[file]["properties"][field] = change
+    with pytest.raises(EXPORT.ContractError, match=re.escape(f"knowledge.write text at ['/{field}']")):
+        EXPORT.check_knowledge_text(REGISTRY, schemas)
+
+
+def test_bounded_knowledge_text_patterns_pass() -> None:
+    schemas = copy.deepcopy(EXPORT.load_schemas())
+    file = REGISTRY["kinds"]["knowledge.write"]["body"]
+    # A + inside a character class is a literal, and {1,80} has an upper bound.
+    schemas[file]["properties"]["summary"] = {"type": "string", "pattern": "^[a-z+*]{1,80}$"}
+    EXPORT.check_knowledge_text(REGISTRY, schemas)
+
+
 def renewed_lead_certificate(*, issued_at: str = "2026-10-22T04:30:00.000Z", epoch: int = 4,
                              key_id: str = "test-lead-key-2") -> bytes:
     """The certificate the rotation example's reply carries, issued at ``issued_at``."""

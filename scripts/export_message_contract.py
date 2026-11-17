@@ -366,6 +366,8 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
             raise ContractError(f"team-topologies.yaml: requester_kinds names {kind}, which is not a kind sent down")
     check_shared_addresses(registry, transport)
     check_object_store(registry, transport, schemas)
+    check_nats_account(registry, transport, schemas)
+    check_knowledge_text(registry, schemas)
     check_ledger_waits(registry)
     names: dict[str, str] = {}
     for name in registry["kinds"]:
@@ -1571,6 +1573,125 @@ def check_object_store(registry: dict[str, Any], transport: dict[str, Any], sche
             raise ContractError(f"{where}: writers also read (to find an object before putting it) and deleters also write")
         check_blob_headers(where, spec["headers"], schemas)
         check_blob_timing(where, spec, transport)
+
+
+# Knowledge text over long_text's length travels as a blob (README, "Knowledge"; decision 77).
+KNOWLEDGE_PREFIX = "knowledge."
+LONG_TEXT = ("common.schema.json", "/$defs/long_text")
+# A pattern quantifier that allows any length: *, + or {n,}, outside a character class.
+UNBOUNDED_QUANTIFIER = re.compile(r"(?<!\\)[*+]|\{\d+,\}")
+CHARACTER_CLASS = re.compile(r"\[(?:\\.|[^\]\\])*\]")
+
+
+def unbounded_text(resolver: "ModelWriter", file: str, node: Any, at: str, limit: int,
+                   seen: frozenset[tuple[str, str]], found: list[str]) -> None:
+    """Collect the string fields under a schema that may hold more than ``limit`` characters inline.
+
+    A blob reference is the long form and is not walked. A string is bounded by its maxLength,
+    a const or enum, a format, or a pattern whose every quantifier has an upper bound.
+    """
+
+    if isinstance(node, list):
+        for item in node:
+            unbounded_text(resolver, file, item, at, limit, seen, found)
+        return
+    if not isinstance(node, dict):
+        return
+    if "$ref" in node:
+        target = resolver.resolve(file, node["$ref"])
+        if target != BLOB_REF and target not in seen:
+            unbounded_text(resolver, target[0], resolver.node(*target), at, limit, seen | {target}, found)
+        return
+    if node.get("type") == "string" and "const" not in node and "enum" not in node and "format" not in node:
+        length = node.get("maxLength")
+        pattern = CHARACTER_CLASS.sub("", node.get("pattern", "*"))
+        if (length is None and UNBOUNDED_QUANTIFIER.search(pattern)) or (length is not None and length > limit):
+            found.append(at or "/")
+    for key, value in node.items():
+        if key == "properties":
+            for name, child in value.items():
+                unbounded_text(resolver, file, child, f"{at}/{name}", limit, seen, found)
+        elif key in {"items", "oneOf", "additionalProperties"}:
+            unbounded_text(resolver, file, value, at, limit, seen, found)
+
+
+def check_knowledge_text(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Every Knowledge field that may exceed long_text's length has a blob form (A6, decision 77).
+
+    Pages, notes, revisions and proposals have no length limit in the knowledge service, so
+    a request or reply field that held them as a plain string would either cut them or fail
+    for a long page. Fields that are text_content (inline up to long_text, or a blob) are
+    fine; any other string must be bounded at or below long_text's length.
+    """
+
+    resolver = ModelWriter(schemas)
+    limit = resolver.node(*LONG_TEXT)["maxLength"]
+    for name, entry in registry["kinds"].items():
+        if not name.startswith(KNOWLEDGE_PREFIX):
+            continue
+        for label, file in ((name, entry["body"]), (f"{name}.reply", entry.get("reply", {}).get("body"))):
+            found: list[str] = []
+            if file:
+                unbounded_text(resolver, file, schemas[file], "", limit, frozenset(), found)
+            if found:
+                raise ContractError(f"{file}: {label} text at {sorted(set(found))} may exceed {limit} characters "
+                                    "inline; use text_content, whose long form is a blob (README, \"Knowledge\")")
+
+
+# The installation's NATS account (transport.yaml nats_account; README, "NATS users and the
+# account"): the settings the launcher or an external server's operator puts in the account,
+# and the user every process logs in with. The installation authority's and a joining host's
+# users exist before any certificate does, so the launcher writes them; every other process's
+# user comes with its certificate.
+NATS_ACCOUNT_FIELDS = {"mode", "signing_key_holder", "account_settings", "users"}
+NATS_ACCOUNT_SETTINGS = {"jetstream": True, "mappings": "partitions.account_mappings"}
+NATS_USER_FIELDS = {"permissions", "issued_by", "carried_in"}
+HOST_USER = "host"
+CERTIFICATE_ROLES = "certificate_roles"
+CONNECTION_CREDENTIAL_REF = "common.schema.json#/$defs/connection_credential"
+
+
+def credential_replies(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> list[str]:
+    """The kinds whose reply carries a host's NATS connection credential (host.join, host.renew)."""
+
+    return sorted(name for name, entry in registry["kinds"].items()
+                  if "reply" in entry and CONNECTION_CREDENTIAL_REF in json.dumps(schemas[entry["reply"]["body"]]))
+
+
+def check_nats_account(registry: dict[str, Any], transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Operator mode, one account whose signing key the topology owner holds, its settings, and every process's user.
+
+    Decisions 88 and 89: every process logs in with its own user JWT, and an external server's
+    operator includes the settings in the installation's account. The authority issues and
+    revokes the hosts' users, so it is the one that holds the account's signing key, and it
+    already creates every stream; the settings carry the partition mappings, without which no
+    agent's queue reaches its partition stream.
+    """
+
+    where = "transport.yaml nats_account"
+    spec = transport.get("nats_account")
+    owner = transport["topology_owner"]
+    if not isinstance(spec, dict) or set(spec) != NATS_ACCOUNT_FIELDS or spec["mode"] != "operator" \
+            or spec["signing_key_holder"] != owner:
+        raise ContractError(f"{where}: operator mode, and the topology owner ({owner}) holds the account's signing key")
+    if spec["account_settings"] != NATS_ACCOUNT_SETTINGS:
+        raise ContractError(f"{where}: account_settings are {NATS_ACCOUNT_SETTINGS}")
+    expected = {
+        owner: {"permissions": owner, "issued_by": "launcher", "carried_in": "trust_folder"},
+        JOINING: {"permissions": JOINING, "issued_by": "launcher", "carried_in": "bootstrap_bundle"},
+        HOST_USER: {"permissions": CERTIFICATE_ROLES, "issued_by": owner,
+                    "carried_in": [f"{kind}.reply" for kind in credential_replies(registry, schemas)]},
+    }
+    users = spec["users"]
+    if not isinstance(users, dict) or set(users) != set(expected) \
+            or any(not isinstance(user, dict) or set(user) != NATS_USER_FIELDS for user in users.values()):
+        raise ContractError(f"{where}: users are {sorted(expected)}, each with {sorted(NATS_USER_FIELDS)}")
+    for name, user in expected.items():
+        if users[name] != user:
+            raise ContractError(f"{where}: users.{name} is {user}")
+    for kind in credential_replies(registry, schemas):
+        if registry["kinds"][kind]["receivers"] != [owner]:
+            raise ContractError(f"{where}: only {owner} answers {kind}, whose reply carries a credential")
 
 
 def check_blob_timing(where: str, spec: dict[str, Any], transport: dict[str, Any]) -> None:

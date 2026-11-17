@@ -320,6 +320,34 @@
     "max_header_bytes": 1024,
     "nats_max_payload_bytes": 1048576
   },
+  "nats_account": {
+    "account_settings": {
+      "jetstream": true,
+      "mappings": "partitions.account_mappings"
+    },
+    "mode": "operator",
+    "signing_key_holder": "installation_authority",
+    "users": {
+      "host": {
+        "carried_in": [
+          "host.join.reply",
+          "host.renew.reply"
+        ],
+        "issued_by": "installation_authority",
+        "permissions": "certificate_roles"
+      },
+      "installation_authority": {
+        "carried_in": "trust_folder",
+        "issued_by": "launcher",
+        "permissions": "installation_authority"
+      },
+      "joining_host": {
+        "carried_in": "bootstrap_bundle",
+        "issued_by": "launcher",
+        "permissions": "joining_host"
+      }
+    }
+  },
   "object_store": {
     "UA1_BLOBS": {
       "chunk_bytes": 131072,

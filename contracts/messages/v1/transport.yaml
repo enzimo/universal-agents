@@ -84,6 +84,33 @@ partitions:
     "ua.v1.*.*.work.control.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.control.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
     "ua.v1.*.*.ctl.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.ctl.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
 
+# NATS users and the account (README, "NATS users and the account"; decisions 88 and 89).
+# Every process logs in with its own NATS user JWT in operator mode, on the bundled server as
+# on an external one, in one account per installation whose signing key only the installation
+# authority holds. account_settings are what the launcher writes into the bundled server's
+# account and what an external server's operator includes in the installation's account.
+# users names where each process's user JWT comes from and which generated permission set
+# (generated/permissions/<role>.json) it holds.
+nats_account:
+  mode: operator
+  signing_key_holder: installation_authority   # the topology owner: it issues the hosts' users and revokes them
+  account_settings:
+    jetstream: true               # with no storage limit, or one that fits every stream's limit (README, "Stream sizes")
+    mappings: partitions.account_mappings   # COUNT replaced by the installation's partition count
+  users:
+    installation_authority:       # the authority's own user, written before any process starts
+      permissions: installation_authority
+      issued_by: launcher
+      carried_in: trust_folder
+    joining_host:                 # a host that holds no certificate yet; {self} filled with its runtime
+      permissions: joining_host
+      issued_by: launcher
+      carried_in: bootstrap_bundle
+    host:                         # every other process: its certificate's roles, filled from their templates
+      permissions: certificate_roles
+      issued_by: installation_authority
+      carried_in: [host.join.reply, host.renew.reply]
+
 # Stream sizes (README, "Stream sizes"). Every work and dead-letter stream has a byte limit
 # besides its age limit. The installation authority, which creates the streams, reads the
 # limits from the instance's settings named here (config.yaml and instance_config.yaml); their

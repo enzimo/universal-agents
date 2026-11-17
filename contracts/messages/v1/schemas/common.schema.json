@@ -2337,7 +2337,7 @@
     },
     "connection_credential": {
       "type": "object",
-      "description": "The credential a host connects to NATS with, naming the agents and pools it runs; it ends no later than the certificate it comes with. Never logged.",
+      "description": "The credential a host connects to NATS with, naming the partitions it owns and the pools it runs, never its agents; it ends no later than the certificate it comes with. Never logged.",
       "properties": {
         "type": {
           "const": "nats_user_jwt"
