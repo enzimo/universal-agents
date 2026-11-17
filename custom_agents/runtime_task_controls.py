@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from typing import Literal
 from id_generation import new_id
 from custom_messages.contracts.control_v1 import RuntimeWorkSummary, RuntimeWorkCancellationReceipt
+from custom_messages.contracts.task_v1 import Task
 
 QUEUE_PAUSE_EVENT = "task_queue_explicit_pause"
 
@@ -64,15 +65,24 @@ class TaskControlCommand(BaseModel):
 def has_explicit_queue_pause(manager: Any, task_id: str) -> bool:
     """A trusted queue pause applies only to its exact state transition."""
     info = manager.get_task_info(task_id)
-    if info is None or not info.task.task_state:
+    return info is not None and is_explicit_queue_pause(info.task)
+
+
+def is_explicit_queue_pause(task: Task) -> bool:
+    """Whether a person's queue pause made the task's current PAUSED state.
+
+    The pause marker must name the exact time of the latest state change, so a
+    marker from an earlier pause never explains a later one.
+    """
+    if not task.task_state:
         return False
-    state, timestamp = info.task.task_state[-1]
+    state, timestamp = task.task_state[-1]
     if str(getattr(state, "value", state)) != "paused":
         return False
     return any(
         entry.details.get("event") == QUEUE_PAUSE_EVENT
         and entry.details.get("paused_at") == timestamp
-        for entry in info.task.execution_history if entry.details
+        for entry in task.execution_history if entry.details
     )
 
 

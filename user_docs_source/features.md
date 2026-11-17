@@ -48,6 +48,11 @@ the request finishes before accepting it.
 Messages reach the request in the order they were saved; newer guidance waits
 while an earlier message is still unconfirmed.
 
+If the request is waiting for a setup page or for an approval when your message
+arrives, the team lead first gets the outcome of that wait and then reads your
+message. A change approved in the Inbox in the meantime still goes ahead. To
+stop it, decline it in the Inbox or stop the request.
+
 Use **New Chat** or `/new` to start separate work. Once a request finishes,
 your next message in its chat starts another request.
 
@@ -488,10 +493,20 @@ ended; check the task history for its actual progress.
 | It is waiting for an access decision in the Inbox | 1 day (a reminder) | Administrators |
 | It asked you a question that is still unanswered | 1 day (a reminder) | — |
 | It is in progress but has shown no progress at all | 2 hours | — |
+| It stopped and is waiting for nothing, so it will not continue on its own | 2 hours | — |
 | It uses files you sent through a chat app the adapter host runs before the team was upgraded from 0.9 | At once | — |
 
-That last notice asks you to send the files again. It gets no "cleared"
-message: it ends when the request ends.
+A request can stop with nothing left that could continue it: no question to
+you, no approval or setup step, no work by another agent and no retry is still
+open, and it is not waiting its turn. Messages you send to it are taken as
+guidance and do not start it again, so the notice asks you to stop it with
+`/stop task <task_id>` or in **Settings → Tasks** and send the request again.
+You are told only after the team lead has seen it like this on every check for
+two hours, so the short moments a request waits between its steps are never
+reported. If you stop it as told, you get no further notice about it.
+
+The notice about files sent before the upgrade asks you to send them again. It
+gets no "cleared" message: it ends when the request ends.
 
 When the team cannot tell whose request it is (for example on a team with
 gateway users off), the message still goes to the chat the request came from,
@@ -641,10 +656,12 @@ When an agent asks you to store or delete a credential, Web Chat shows a
 dismissible **Open secure credential form** action with a live expiry countdown.
 A setup page an agent asks for (see
 [When an agent needs a tool set up](#when-an-agent-needs-a-tool-set-up)) shows
-its own **Open** action the same way.
-The action is available only in the browser response that starts the workflow;
-it stays at its original position in the chat timeline and disappears as soon
-as the form ends: the chat then shows one line saying how it ended, such as
+its own **Open** action the same way; the pages that open after the first one
+come back after a refresh until each ends (a gateway restart removes them).
+A credential form's action is available only in the browser response that
+starts the workflow; it stays at its original position in the chat timeline
+and disappears as soon as the form ends: the chat then shows one line saying
+how it ended, such as
 "The secure form for `bifrost_virtual_key` is done: the credential was
 stored.", while the agent goes on with its task.
 If the gateway loses the form's status, it closes the card and says it cannot
@@ -715,11 +732,21 @@ same way.
 - If you close a page without finishing, or deny the access request, the
   setup stops, TeamLead tells you what cannot be done, and it does not ask
   again in this request.
+- Each page's card stays until that page ends, however the other pages end:
+  marking one step done never removes another step's card. Chat history keeps
+  one line per page, such as "Account link form opened for Portainer (your
+  account)."; for a step outside Universal Agents it keeps the step's title,
+  instructions and link, so a refresh never loses them. Page addresses for
+  sign-ins and account links are never saved. A gateway restart removes the
+  cards of open pages (see below).
 - If the missing step is an administrator's, such as the team's Google or X
   sign-in app or access you do not have, and you are not an administrator,
   nothing opens: TeamLead explains which step is missing and who can do it,
   and ends the task.
-- If the gateway restarts while a page is open, a fresh page opens.
+- If the gateway restarts while a sign-in or account link page is open, a
+  fresh page opens. A step outside Universal Agents keeps waiting without its
+  card: its line in chat history keeps the instructions and link, and you
+  mark it done on the workflow page.
 
 When the request needs two or more things, one chat message says so first
 and links the workflow page that tracks them all, for example "I need 2
@@ -733,7 +760,8 @@ the Inbox), **Sign in to GitHub** ("Waiting for the person to finish the
 page", then "Signed in as exampleuser"), and **Do the requested work** after both.
 The steps update by themselves. A step you do outside Universal Agents, such
 as creating a token, shows its instructions in chat and a **Mark Done** button
-on the workflow page. When only one thing is missing there is no workflow;
+on the workflow page; after you press it, chat says which step you marked
+done. When only one thing is missing there is no workflow;
 the page just opens. See
 [Complete workflow reviews](permissions.md#complete-workflow-reviews).
 

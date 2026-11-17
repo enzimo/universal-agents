@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from custom_agents.access_workflow_runtime import WorkflowCompletionRefused
 from custom_agents.heartbeat_store import HeartbeatStore
 from custom_agents.scheduled_run_failures import FailingScheduledRuns, report_failing_scheduled_runs
 from custom_agents.stuck_work import RECOVERED_NOTICE_REASON, STUCK_NOTICE_REASON
@@ -171,6 +172,39 @@ def test_a_run_stopped_at_the_wait_limit_gets_one_message(world):
     worker.team_comms.send_message.assert_not_awaited()
     assert len(report(world)) == 1
 
+
+
+@pytest.mark.parametrize("work", ["person", "team"])
+def test_a_refused_workflow_answer_is_never_quoted_in_notices(world, work):
+    """The agent's last reply reaches only the run's requester, never notices (lead's decision, 2026-11-16)."""
+    run = start_final_run(world, interval=DAILY, count=None)
+    if work == "team":
+        run.meta.gateway_context.schedule_run = None
+        run.meta.gateway_context.task_context = world.signer.issue(team_id=TEAM, person_id=None, schedule_id=SCHEDULE_ID)
+    finish(world, run.task.task_id, ProgressState.IN_PROGRESS)
+    reply = "The second registrar's account ID is still needed."
+    worker = SimpleNamespace(
+        id=world.worker.id, name="researcher", team_id=TEAM, named_agent_type=world.worker.named_agent_type,
+        task_manager=world.tasks, team_comms=SimpleNamespace(send_message=AsyncMock()),
+        _send_task_error_response=AsyncMock(), _notify_context_after_turn=AsyncMock(),
+        _conversation_store=None, _conversation_compactor=None, _conversation_artifact_offloader=None,
+        _conversation_summary_generator=None, _logger=logging.getLogger("workflow-refusal"), _strands_agent=None,
+        _custody_release=None,
+    )
+    refusal = WorkflowCompletionRefused(
+        workflow_id="access_flow_1", task_id=run.task.task_id, title="Check domain prices", attempted_answer=reply,
+    )
+
+    asyncio.run(fail_task_after_turn_error(
+        worker, run.task.task_id, world.tasks.get_task_info(run.task.task_id), refusal,
+    ))
+
+    assert reply in worker._send_task_error_response.await_args.args[3]  # the run's own requester
+    messages = report(world)
+    sent_notices = notices(world, "usr_admin", roles=("admin",)) if work == "team" else notices(world)
+    assert len(messages) == (1 if work == "person" else 0) and len(sent_notices) == 1
+    for text in [message.model_dump_json() for message in messages] + [sent_notices[0].model_dump_json()]:
+        assert "registrar" not in text and "unfinished steps" not in text
 
 def test_a_chat_message_that_fails_is_retried_with_the_same_key_and_no_second_inbox_notice(world, caplog):
     run = start_final_run(world, interval=DAILY, count=None)

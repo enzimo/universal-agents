@@ -1955,17 +1955,21 @@ its history. Steps with linked requests cannot use this correction.
   Dismiss or refresh removes the link. Authentication status remains available
   through `/auth status`.
 - Credential collection, deletion, manual-signup collection, and tool setup
-  pages a task asks for (kind `tool_setup`: a sign-in, an account link form, or
-  the team's sign-in app) use the same memory-only layer. A setup card's copy is
+  pages a task asks for (kind `tool_setup`: a sign-in, an account link form,
+  the team's sign-in app, or a step done outside Universal Agents) use the
+  same memory-only layer. A setup card's copy is
   the task's own one-sentence reason plus one short note (what you enter goes to
   the secure broker, or that linking gives nobody access), and its action label
   names the step, such as **Sign in to GitHub** or **Choose your account for
   Portainer**. A setup card closes as soon as its own page ends: the gateway
-  posts one short System line under the page's own id ("The GitHub sign-in is
-  done (account exampleuser).", "The page for the GitHub sign-in expired before it
-  was finished.", or, after the person's own `/link`, "You finished ... yourself,
-  so this page is no longer needed."); a page offered again gets a new card
-  that this line never closes. Show an explicit frosted **Open**
+  posts one short System line under the page's own id. The line names the page
+  by kind and the tool by the name the page showed, never its raw id: "The
+  GitHub sign-in is done (account exampleuser).", "The page for the GitHub
+  sign-in expired before it was finished.", after the person's own `/link`
+  "You finished the account link for Portainer yourself, so this page is no
+  longer needed.", or after **Mark Done** "You marked the Gitea setup step
+  'Create a Gitea token' done." A page offered again gets a new card that this
+  line never closes. Show an explicit frosted **Open**
   action in the same ordered chat timeline as durable messages. Use the
   gateway-owned `session_sequence` plus an in-memory subsequence so the action
   follows the safe System receipt created with it and remains before every

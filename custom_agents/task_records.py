@@ -8,9 +8,20 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry
+from custom_messages.contracts.task_v1 import Task, TaskAnswer, TaskHistoryEntry
 from custom_messages.enums import ProgressState
 from custom_messages.records.reviews import AfterActionReportReviewBatchRecord, AfterActionReportReviewRecord
+
+
+
+def task_answer_text(answer: TaskAnswer | str | None) -> str:
+    """The text of a task's answer, given as a structured TaskAnswer or as a string."""
+
+    if isinstance(answer, TaskAnswer):
+        return str(answer.answer or "")
+    if answer is None:
+        return ""
+    return str(answer)
 
 
 class TaskInfo:

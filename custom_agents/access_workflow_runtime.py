@@ -2,10 +2,30 @@
 
 Runs in the TaskManager operations lane when a top-level task gives a final
 answer (``turn_action_outbox_runtime``). A task whose open workflow still has
-unfinished steps is not allowed to report success: it gets one continuation
-turn per distinct saved state to finish or report the steps, and a repeated
-final answer without progress becomes an explicit failure instead of an
-endless loop or a false success.
+unfinished steps is not allowed to report success:
+
+- The first final answer for each distinct saved state (steps and request
+  outcomes) is held back and not sent. The task is queued at the front and
+  runs again at once with a continuation note (``WORKFLOW_CONTINUATION_NOTE``)
+  to finish or report the steps; guidance the person sends meanwhile is read
+  on that turn. The end-of-turn handling keeps the queued state
+  (``task_message_runtime._keep_held_answer_state``). It used to mark the
+  task WAITING instead; on 2026-11-14 that dropped a held task from the
+  queue, so the task stopped for good and nothing told the person.
+- A repeated final answer without progress raises
+  ``WorkflowCompletionRefused``, a ``TurnActionRefused``: the outbox does not
+  ask the model to recover (that ran a new model turn on every repeat), the
+  task fails, and the person is told in plain words, followed by the agent's
+  last reply, labelled as given before the open steps were finished so it is
+  never read as a completed result. Administrators' notices never quote it.
+- The same held answer run again by the outbox (an automatic retry after a
+  failure before it saved the action as held back, or a restart in that
+  window) is held again, not refused: the hold records its outbox action id,
+  and no turn has read the continuation note yet.
+- An answer given as a structured TaskAnswer is handled as its text.
+
+A short preview of each held answer stays in the task's history
+(``attempted_answer_preview``), so a held answer can be recovered.
 
 Waiting for people is not handled here. Every access or change request pauses
 its own task with a local Strands interrupt until a person decides
@@ -21,13 +41,53 @@ import logging
 from typing import Any
 
 from custom_agents.access_workflows import AccessWorkflowService
+from custom_agents.task_records import task_answer_text
+from custom_agents.tool_call_limits import compact_debug_preview
+from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_messages.contracts.access_v2 import contract_digest
 from custom_messages.contracts.access_workflow_v2 import CLOSED_STEP_STATES, WorkflowEventV2, utc_now
+from custom_messages.contracts.task_v1 import TaskAnswer
 from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType
 from storage.access_workflow_repository import AccessWorkflowRepository
 
 logger = logging.getLogger(__name__)
 CLOSED_STATE_VALUES = frozenset(state.value for state in CLOSED_STEP_STATES)
+# How the note a held task's next turn reads begins (``_continue``).
+WORKFLOW_CONTINUATION_NOTE = "Continue the published access workflow in this same task."
+# The agent's last reply follows this label in the refused task's message (lead's decision, 2026-11-16).
+LAST_REPLY_LABEL = (
+    "The agent's last reply is below. It was given before the plan's open steps were finished, "
+    "so it is not a completed result:"
+)
+# Characters of a held answer kept in the task's history.
+ANSWER_PREVIEW_CHARS = 600
+
+
+class WorkflowCompletionRefused(TurnActionRefused):
+    """A task tried to finish again without progress on its workflow's unfinished steps."""
+
+    def __init__(
+        self, *, workflow_id: str, task_id: str, title: str, attempted_answer: TaskAnswer | str | None = ""
+    ) -> None:
+        self.workflow_id = workflow_id
+        self.task_id = task_id
+        # An answer may be a structured TaskAnswer; the message quotes its text.
+        self.attempted_answer = task_answer_text(attempted_answer)
+        super().__init__(
+            f'This task was stopped because its plan "{title}" still has unfinished steps and it tried to '
+            "finish again without making progress on them. Results it already finished are kept. Reply here "
+            "to go over the remaining work with the team lead, and check uncertain results before trying again."
+        )
+
+    @property
+    def requester_message(self) -> str:
+        """The plain statement, then the agent's last reply, quoted and labelled (module docstring)."""
+
+        reply = self.attempted_answer.strip()
+        if not reply:
+            return str(self)
+        quoted = "\n".join(f"> {line}" if line else ">" for line in reply.splitlines())
+        return f"{self}\n\n{LAST_REPLY_LABEL}\n\n{quoted}"
 
 
 def _service(manager: Any) -> AccessWorkflowService:
@@ -41,7 +101,7 @@ def _continue(manager: Any, record: Any, evidence: list[dict[str, Any]]) -> None
     # (``access_request_runtime`` does the same when a request is decided).
     manager.append_runtime_resume_directive(
         record.source_task_id,
-        "Continue the published access workflow in this same task. Keep finished results. Read "
+        f"{WORKFLOW_CONTINUATION_NOTE} Keep finished results. Read "
         "get_access_workflow, check each request's current status, then do only what is allowed now and "
         "report each step. An approval is not completion: apply approved changes with apply_change and check "
         "the work. Never ask again for anything the person denied. If work cannot continue, report the step "
@@ -63,31 +123,85 @@ def _continue(manager: Any, record: Any, evidence: list[dict[str, Any]]) -> None
         )
 
 
+def _refuse_completion(
+    manager: Any, service: AccessWorkflowService, record: Any, evidence: list[dict[str, Any]], attempted_answer: str
+) -> WorkflowCompletionRefused:
+    """Record a repeated final answer without progress, and the refusal that ends its task."""
+
+    unfinished = [item["step_id"] for item in evidence if item["state"] not in CLOSED_STATE_VALUES]
+    service.repository.append_event(
+        WorkflowEventV2(
+            workflow_id=record.workflow_id,
+            kind="error",
+            code="source_task_completion_rejected",
+            message="The agent tried to finish again without resolving the open workflow steps.",
+        )
+    )
+    manager.append_history_entry(
+        record.source_task_id,
+        "The task tried to finish again without progress on its workflow's unfinished steps; it is stopped.",
+        entry_type=TaskHistoryType.ERROR_EVENT,
+        importance=TaskHistoryImportance.HIGH,
+        details={
+            "event": "workflow_completion_refused",
+            "workflow_id": record.workflow_id,
+            "unfinished_step_ids": unfinished,
+            "attempted_answer_preview": compact_debug_preview(attempted_answer, max_chars=ANSWER_PREVIEW_CHARS),
+        },
+    )
+    logger.warning(
+        "A task tried to finish again without progress on its workflow; it is stopped. "
+        "event=workflow_completion_refused workflow_id=%s task_id=%s unfinished_step_ids=%s",
+        record.workflow_id,
+        record.source_task_id,
+        unfinished,
+    )
+    return WorkflowCompletionRefused(
+        workflow_id=record.workflow_id,
+        task_id=record.source_task_id,
+        title=record.title,
+        attempted_answer=attempted_answer,
+    )
+
+
 def _reconcile_open_work(
-    manager: Any, service: AccessWorkflowService, record: Any, evidence: list[dict[str, Any]]
-) -> None:
+    manager: Any,
+    service: AccessWorkflowService,
+    record: Any,
+    evidence: list[dict[str, Any]],
+    attempted_answer: str,
+    action_id: str | None,
+) -> bool:
+    """Hold the answer back and queue the task to run again; False when it was already held.
+
+    The outbox can run the same held answer again: an automatic retry after a
+    failure before it saved the action as held back, or a restart in that
+    window. That answer is held again, not refused: no turn has read the
+    continuation note yet, so it is not a second answer.
+    """
+
     task_id = record.source_task_id
     signature = contract_digest(
         {"steps": [{"step_id": item["step_id"], "state": item["state"], "requests": item["requests"]} for item in evidence]}
     )
     info = manager.get_task_info(task_id)
-    repeated = any(
-        (entry.details or {}).get("workflow_reconciliation_signature") == signature
+    earlier = [
+        details
         for entry in info.task.execution_history or []
-    )
-    if repeated:
-        service.repository.append_event(
-            WorkflowEventV2(
-                workflow_id=record.workflow_id,
-                kind="error",
-                code="source_task_completion_rejected",
-                message="The agent tried to finish again without resolving the open workflow steps.",
-            )
+        if (details := entry.details or {}).get("workflow_reconciliation_signature") == signature
+    ]
+    if action_id is not None and any(details.get("outbox_action_id") == action_id for details in earlier):
+        logger.warning(
+            "The outbox ran a held answer again after a failure; it is held again and the task queued. "
+            "event=workflow_completion_hold_replayed workflow_id=%s task_id=%s action_id=%s",
+            record.workflow_id,
+            task_id,
+            action_id,
         )
-        raise RuntimeError(
-            f"Workflow {record.workflow_id} still has unfinished steps after reconciliation. "
-            "The task cannot report success. Check the saved steps and request outcomes before retrying."
-        )
+        _continue(manager, record, evidence)  # an identical continuation note is not added twice
+        return False
+    if earlier:
+        raise _refuse_completion(manager, service, record, evidence, attempted_answer)
     manager.append_history_entry(
         task_id,
         "The published workflow has unfinished steps; continue it before finishing the task.",
@@ -97,13 +211,30 @@ def _reconcile_open_work(
             "event": "workflow_completion_deferred",
             "workflow_id": record.workflow_id,
             "workflow_reconciliation_signature": signature,
+            "outbox_action_id": action_id,
+            "attempted_answer_preview": compact_debug_preview(attempted_answer, max_chars=ANSWER_PREVIEW_CHARS),
         },
     )
     _continue(manager, record, evidence)
+    return True
 
 
-def defer_workflow_completion(manager: Any, *, task_id: str, team_id: str) -> bool:
-    """Return true when a premature final answer must be held back (see the module docstring)."""
+def defer_workflow_completion(
+    manager: Any,
+    *,
+    task_id: str,
+    team_id: str,
+    attempted_answer: TaskAnswer | str | None = "",
+    action_id: str | None = None,
+) -> bool:
+    """Return true when a premature final answer must be held back (see the module docstring).
+
+    ``action_id`` is the outbox action of the answer: the same action run again
+    is held again. Raises ``WorkflowCompletionRefused`` for a repeated answer
+    without progress.
+    """
+
+    answer = task_answer_text(attempted_answer)
 
     service = _service(manager)
     for record in service.repository.for_task(task_id=task_id, team_id=team_id):
@@ -119,13 +250,14 @@ def defer_workflow_completion(manager: Any, *, task_id: str, team_id: str) -> bo
                 task_id,
                 ",".join(waiting),
             )
-        _reconcile_open_work(manager, service, record, evidence)
+        if not _reconcile_open_work(manager, service, record, evidence, answer, action_id):
+            return True  # held again; its event and log were recorded the first time
         service.repository.append_event(
             WorkflowEventV2(
                 workflow_id=record.workflow_id,
                 kind="progress",
                 code="source_task_reconciliation_requested",
-                message="The task tried to finish with unfinished steps. It was kept open to finish or report them.",
+                message="The task tried to finish with unfinished steps. It runs again at once to finish or report them.",
             )
         )
         logger.warning(
@@ -139,4 +271,9 @@ def defer_workflow_completion(manager: Any, *, task_id: str, team_id: str) -> bo
     return False
 
 
-__all__ = ["defer_workflow_completion"]
+__all__ = [
+    "LAST_REPLY_LABEL",
+    "WORKFLOW_CONTINUATION_NOTE",
+    "WorkflowCompletionRefused",
+    "defer_workflow_completion",
+]

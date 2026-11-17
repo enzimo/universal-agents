@@ -577,7 +577,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "agent.schedule_maintenance.stuck_tasks.enabled": "Tell people about stuck tasks.",
     "agent.schedule_maintenance.stuck_tasks.owner_gone_after_seconds": "Seconds after the agent holding a task stopped reporting in, with nobody taking it over, before the person is told. An agent without a worker start record that reports no process, or whose process the runtime cannot check, also counts as stopped after this long, so another agent may take its work over.",
     "agent.schedule_maintenance.stuck_tasks.waiting_on_person_after_seconds": "Seconds a task may wait on an access decision or the person's answer before they are reminded.",
-    "agent.schedule_maintenance.stuck_tasks.no_progress_after_seconds": "Seconds an in-progress task may show no new history before the person is told.",
+    "agent.schedule_maintenance.stuck_tasks.no_progress_after_seconds": "Seconds a task may stop moving before the person is told: in progress with no new history, or not running with nothing left that could continue it.",
     "agent.schedule_maintenance.stuck_tasks.handback_unclaimed_after_seconds": "Seconds a task handed back by a stopped worker may wait for another agent before the person and administrators are told.",
     "agent.schedule_workers": "Automatic scheduled-worker eligibility, timing ceilings and editable defaults; saved default or TeamLead policies authorize individual schedules. How many workers may run is agent.worker_pools.",
     "agent.schedule_workers.eligible_agent_types": "TeamLead-managed automatic-start candidates; registered custom specialists may be added through runtime settings. Operator denies still win.",
