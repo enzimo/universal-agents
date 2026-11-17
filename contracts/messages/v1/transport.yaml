@@ -321,22 +321,27 @@ key_value:
 
 # Every object store's stream (OBJ_<bucket>, subjects $O.<bucket>.C.> for chunks and
 # $O.<bucket>.M.> for each object's metadata); the topology owner creates it with these
-# settings (README, "Blobs").
+# settings (README, "Blobs"). NATS checks a publish against its subject, not its headers, so
+# with rollup headers allowed any writer could erase the whole bucket with Nats-Rollup: all.
+# They are off: writers and deleters write metadata without a rollup (the NATS object store
+# client's put and delete send one and are refused), and readers take an object's last metadata.
 object_store_stream:
-  allow_rollup_hdrs: true     # an object's metadata is written with a rollup over its earlier versions
+  allow_rollup_hdrs: false
   deny_delete: true           # no message deletes through the stream API
   deny_purge: false           # deleting an object purges its chunks; only deleters hold the purge grant
   storage: file
 
-# Object stores. An object is named by its content's SHA-256 (blob_ref.sha256); its
-# metadata's headers name its owner (common.schema.json types; presence: always, owner =
+# Object stores. object_name is the template an object is named by: {team} is the team of
+# the frame that carries the reference (its issuer team), the other placeholder a blob_ref
+# field, joined by ~, which neither holds; so each team's copies are its own. Its metadata's
+# headers name the owner that stored it (common.schema.json types; presence: always, owner =
 # exactly one of the owner headers, person = when a person's work stored it). readers are
 # exactly the roles that receive a kind or reply whose schema can carry a blob_ref; writers
 # also read, to find whether an object already exists; deleters also write (README, "Blobs").
 object_store:
   UA1_BLOBS:
-    description: files and long text, named by SHA-256; the team services delete them when their owner's retention ends
-    object_name: sha256
+    description: files and long text, named by their team and SHA-256; the team services keep every owner of an object and delete it when the last owner's retention ends or the last owner departs
+    object_name: "{team}~{sha256}"
     headers:
       UA-Blob-SHA256: {value: sha256_digest, presence: always}
       UA-Blob-Team: {value: team_id, presence: always}

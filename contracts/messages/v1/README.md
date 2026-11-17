@@ -1489,55 +1489,84 @@ size, media type, optional name) to an object in `UA1_BLOBS`: a person's attachm
 request or answer over `long_text`, the files a result or notice carries, Knowledge text over
 32,768 characters, and change-review briefs.
 
-- **Names.** An object's name is its content's SHA-256 as the reference writes it
-  (`object_name: sha256`, unpadded base64url). Two objects with one name hold the same
-  bytes, so a writer looks the object up first and puts it only when it is missing or
-  deleted; replacing an existing object would purge the other's chunks, which only a
-  deleter may do. A reader checks the bytes it read against the name and the reference and
-  refuses a blob that does not match.
+- **Names.** An object's name is its team and its content's SHA-256, joined by `~`
+  (`object_name: "{team}~{sha256}"`; the digest as the reference writes it, unpadded
+  base64url; neither part can hold `~`). A reader forms the name from the issuer team of
+  the frame that carries the reference and the reference's `sha256`. So each team's copies
+  are its own, and one team's services never delete another team's copy of the same bytes.
+  Within a team, two objects with one name hold the same bytes. A reader checks the bytes
+  it read against the name and the reference and refuses a blob that does not match.
 - **Owner headers.** Each object's metadata carries these headers (`transport.yaml`
   `object_store.UA1_BLOBS.headers`, each value of the named `common.schema.json` type):
-  - `UA-Blob-SHA256` (`sha256_digest`) and `UA-Blob-Team` (`team_id`), always;
+  - `UA-Blob-SHA256` (`sha256_digest`) and `UA-Blob-Team` (`team_id`, the name's team),
+    always;
   - the owner, exactly one of `UA-Blob-Request` (`record_id`: the person's request, the
     request id a root-task token names) and `UA-Blob-Agent` (`agent_id`: the agent, for
     system work);
   - `UA-Blob-Person` (`person_ref`) when a person's work stored it, by reference only.
 
-  The headers say whose retention a blob follows: the team services delete a blob when its
-  owner's retention ends, and at once when its person departs. No one decides who may read a
-  blob from them.
+  The headers name the owner that stored the copy, the first one. Two requests of a team can
+  carry the same bytes, and the second writer finds the object and does not store it again,
+  so the headers alone do not know every owner. The team services keep every owner of an
+  object and delete it only when no owner remains: when the last owner's retention ends, or
+  at once when the last owner departs (a departing person's ownership ends at once). How the
+  team services learn of later owners is for the step that builds blob storage. No one
+  decides who may read a blob from the headers.
+- **Writing, reading and deleting.** The bucket's stream allows no rollup headers ("Stream
+  settings"), so the NATS object store client's `put` and `delete`, which send
+  `Nats-Rollup: sub`, are refused, and its `get`, which asks the server which stream holds
+  the chunks (`$JS.API.STREAM.NAMES`, a list of every team's streams), has no grant. The
+  product does these steps itself:
+  - a writer looks the name up (the last message on its metadata subject,
+    `$O.UA1_BLOBS.M.<name in base64url>`, through `$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`)
+    and stops when a live object is there; otherwise it publishes the chunks
+    (`$O.UA1_BLOBS.C.<new id>`), then one metadata message with no rollup header. It purges
+    nothing, even when it stops partway;
+  - a reader takes the last metadata message for the name and reads the chunks through an
+    ordered consumer it opens naming the stream (`OBJ_UA1_BLOBS`), as the key-value watches
+    do;
+  - a deleter (the team services) writes a deleted metadata message with no rollup header,
+    then purges the object's chunks by their subject and the name's earlier metadata
+    messages (a purge of the metadata subject that keeps the last one). The team services
+    also purge chunks that no metadata names, which a writer leaves when it stops partway or
+    when two writers put the same blob at once.
 - **Grants.** These take effect where each host has its own NATS credential, as for the
   buckets ("Key-value grants"):
   - readers are exactly the roles that receive a kind, a copy or a reply whose schema can
     carry a blob reference: the gateway, the lead and worker hosts, the team services and
     the edge adapter. A reader gets the bucket's stream information, the message get that
-    finds an object's metadata (`$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`, as the NATS object
-    store client asks), and what reading the chunks needs: an unnamed ordered consumer on
-    its own inbox, its information and its flow control;
+    finds an object's last metadata (`$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`), and what
+    reading the chunks needs: an unnamed ordered consumer on its own inbox, its information
+    and its flow control. It gets no stream-name lookup;
   - writers are the gateway, the lead and worker hosts and the team services: they publish
     chunks (`$O.UA1_BLOBS.C.>`) and metadata (`$O.UA1_BLOBS.M.>`), and read, to look an
-    object up before putting it. The edge adapter only passes on references to blobs a
-    writer stored;
-  - only the team services delete: a deletion marks the object deleted and purges its
-    chunks (`$JS.API.STREAM.PURGE.OBJ_UA1_BLOBS`). The team services also purge chunks that
-    no object's metadata names, which a writer leaves when it stops partway or when two
-    writers put the same blob at once;
+    object up before putting it;
+  - the edge adapter only reads, and passes on references to blobs a writer stored. An
+    outside agent's text over 32,768 characters therefore cannot travel until a later phase
+    decides how outside agents put blobs (a grant of their own, or the team services
+    storing it for them); letting an outside party write into the installation's store is a
+    trust and storage question of its own;
+  - only the team services delete: `$JS.API.STREAM.PURGE.OBJ_UA1_BLOBS`;
   - the topology owner creates the bucket's stream.
-- **What NATS cannot narrow.** A reader can read every blob of the installation, and a writer
-  can publish chunks or metadata for any object, so it could spoil (not forge) a blob or mark
-  one deleted: readers' digest checks refuse a changed blob. This is accepted while every
-  host runs on the main machine, and revisited before hosts run elsewhere (per-team
-  buckets, or reads through the team services).
+- **What NATS cannot narrow.** A reader can read every blob of the installation. A writer
+  can publish chunks or metadata under any object's name, so it could make another object
+  unreadable (a changed blob fails the readers' digest checks, so it is never forged) or
+  mark one deleted; it cannot erase objects, since rollups are refused and it holds no
+  purge. The purge grant names no subject, so any team's services could purge the whole
+  installation's bucket. Both are accepted while every host and every team's services run
+  on the main machine, and revisited before hosts run elsewhere (per-team buckets, or reads
+  through the team services).
 - **Stream settings.** The bucket's stream, `OBJ_UA1_BLOBS` with subjects
-  `$O.UA1_BLOBS.C.>` and `$O.UA1_BLOBS.M.>`, has the settings of `object_store_stream`:
-  rollup headers allowed (an object's metadata is written with a rollup over its earlier
-  versions), no message deletes through the stream API, and purges allowed (deleting an
-  object purges its chunks; only deleters hold the grant).
+  `$O.UA1_BLOBS.C.>` and `$O.UA1_BLOBS.M.>`, has the settings of `object_store_stream`: no
+  rollup headers (NATS checks a publish against its subject, not its headers, so with
+  rollups allowed one writer's `Nats-Rollup: all` would erase every object), no message
+  deletes through the stream API, and purges allowed (only deleters hold the grant).
 
 The generator checks that the readers are exactly the roles that receive something that can
 carry a blob reference (none lacks the grant and none has it without need), that writers
-also read and deleters also write, that each header names a shared type and when it is
-present, and the stream settings.
+also read and deleters also write, that an object's name is its team and a `blob_ref` field
+joined by a separator neither can hold, that each header names a shared type and when it is
+present, and the stream settings, rollups off among them.
 
 ## Dead letters
 

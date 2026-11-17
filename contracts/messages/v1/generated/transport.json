@@ -323,7 +323,7 @@
       "deleters": [
         "team_services"
       ],
-      "description": "files and long text, named by SHA-256; the team services delete them when their owner's retention ends",
+      "description": "files and long text, named by their team and SHA-256; the team services keep every owner of an object and delete it when the last owner's retention ends or the last owner departs",
       "headers": {
         "UA-Blob-Agent": {
           "presence": "owner",
@@ -346,7 +346,7 @@
           "value": "team_id"
         }
       },
-      "object_name": "sha256",
+      "object_name": "{team}~{sha256}",
       "readers": [
         "gateway",
         "lead_host",
@@ -363,7 +363,7 @@
     }
   },
   "object_store_stream": {
-    "allow_rollup_hdrs": true,
+    "allow_rollup_hdrs": false,
     "deny_delete": true,
     "deny_purge": false,
     "storage": "file"

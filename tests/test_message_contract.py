@@ -1494,6 +1494,11 @@ def test_blob_grants_follow_who_receives_writes_and_deletes_blobs() -> None:
         # Only the topology owner creates the bucket's stream; no role names a consumer on it.
         assert ("$JS.API.STREAM.CREATE.OBJ_UA1_BLOBS" in publish) == (role == TRANSPORT["topology_owner"]), role
         assert not {subject for subject in publish if subject.startswith("$JS.API.CONSUMER.DURABLE.CREATE.OBJ_")}, role
+    # Each team's copies are its own; rollups are off so no writer can erase the bucket.
+    assert blobs["object_name"] == "{team}~{sha256}"
+    assert TRANSPORT["object_store_stream"]["allow_rollup_hdrs"] is False
+    assert not any("$JS.API.STREAM.NAMES" in subject for role in REGISTRY["host_roles"]
+                   for subject in role_permissions(role)["publish"])
     # The headers name the owner, the team, the person by reference and the digest, each of a shared type.
     assert {name: header["value"] for name, header in blobs["headers"].items()} == {
         "UA-Blob-SHA256": "sha256_digest", "UA-Blob-Team": "team_id", "UA-Blob-Request": "record_id",
@@ -1511,7 +1516,12 @@ def test_blob_grants_follow_who_receives_writes_and_deletes_blobs() -> None:
     (lambda t: t["object_store"]["UA1_BLOBS"]["writers"].append("scheduler"), "writers also read"),
     (lambda t: t["object_store"]["UA1_BLOBS"]["deleters"].append("edge_adapter"), "deleters also write"),
     (lambda t: t["object_store"]["UA1_BLOBS"]["deleters"].clear(), "deleters are distinct host roles"),
-    (lambda t: t["object_store"]["UA1_BLOBS"].update(object_name="digest"), "object_name names"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(object_name="{sha256}"), "object_name is"),  # no team
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(object_name="{team}~{digest}"), "object_name is"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(object_name="{sha256}~{team}"), "object_name is"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(object_name="{team}{sha256}"), "object_name is"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(object_name="{team}~sha256"), "object_name is"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(object_name="{team}~{name}"), "patterns without '~'"),
     (lambda t: t["object_store"]["UA1_BLOBS"]["headers"]["UA-Blob-Team"].update(value="team"), "names a common.schema.json type"),
     (lambda t: t["object_store"]["UA1_BLOBS"]["headers"]["UA-Blob-Team"].update(presence="sometimes"), "when it is present"),
     (lambda t: t["object_store"]["UA1_BLOBS"]["headers"].update({"X-Owner": {"value": "agent_id", "presence": "owner"}}),
@@ -1519,7 +1529,8 @@ def test_blob_grants_follow_who_receives_writes_and_deletes_blobs() -> None:
     (lambda t: t["object_store"]["UA1_BLOBS"]["headers"].pop("UA-Blob-Agent"), "at least two kinds of owner"),
     (lambda t: t["object_store"].update({"UA1_BLOBS_{team}": t["object_store"].pop("UA1_BLOBS")}), "installation-wide"),
     (lambda t: t["object_store_stream"].update(deny_purge=True), "deny_purge is False"),
-    (lambda t: t["object_store_stream"].update(allow_rollup_hdrs=False), "allow_rollup_hdrs is True"),
+    # With rollups allowed, any writer could erase every object with Nats-Rollup: all.
+    (lambda t: t["object_store_stream"].update(allow_rollup_hdrs=True), "allow_rollup_hdrs is False"),
     (lambda t: t["object_store_stream"].update(storage="disk"), "storage is file or memory"),
     (lambda t: t["object_store_stream"].pop("deny_delete"), "fields are"),
 ])

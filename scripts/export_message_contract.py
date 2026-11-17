@@ -1360,15 +1360,18 @@ def check_key_value(registry: dict[str, Any], transport: dict[str, Any]) -> None
                                 f"have no key template in transport.yaml key_value.{entry['bucket']}")
 
 
-# The stream settings every object store has (transport.yaml object_store_stream): an object's
-# metadata is written with a rollup, and deleting an object purges its chunks (the deleters' grant
-# alone); no message is deleted one by one. Only the storage is a choice.
-OBJECT_STORE_STREAM = {"allow_rollup_hdrs": True, "deny_delete": True, "deny_purge": False}
+# The stream settings every object store has (transport.yaml object_store_stream): no rollup
+# headers, since NATS checks a publish against its subject only and a writer's Nats-Rollup: all
+# would erase every object of the bucket; deleting an object purges its chunks (the deleters'
+# grant alone); no message is deleted one by one. Only the storage is a choice.
+OBJECT_STORE_STREAM = {"allow_rollup_hdrs": False, "deny_delete": True, "deny_purge": False}
 OBJECT_STORE_FIELDS = {"description", "object_name", "headers", "readers", "writers", "deleters"}
 # When an object's metadata carries a header: always, as one of the owner headers (exactly one
 # of them), or when a person's work stored the object.
 BLOB_HEADER_PRESENCE = {"always", "owner", "person"}
 BLOB_REF = ("common.schema.json", "/$defs/blob_ref")
+# Joins an object name's parts; neither a team id nor a base64url digest holds it.
+BLOB_NAME_SEPARATOR = "~"
 
 
 def check_object_store(registry: dict[str, Any], transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
@@ -1377,10 +1380,11 @@ def check_object_store(registry: dict[str, Any], transport: dict[str, Any], sche
     NATS cannot limit a reader to some objects of a bucket, so the readers are exactly
     the roles that receive a kind or reply that can carry a blob reference: a role
     that receives one could not read it without the grant, and any other role gets
-    no grant it does not need. A writer looks the object up before it puts it, since
-    an object named by its content that exists already holds the same bytes and
-    replacing it would purge the other's chunks, which only deleters may; a deleter
-    marks the object deleted as a writer does, then purges its chunks.
+    no grant it does not need. An object's name holds its team, so one team's
+    services never delete another team's copy of the same bytes. A writer looks the
+    object up before it puts it, since an object that exists already holds the same
+    bytes and replacing it would purge the other's chunks, which only deleters may;
+    a deleter marks the object deleted as a writer does, then purges its chunks.
     """
 
     where = "transport.yaml object_store_stream"
@@ -1398,8 +1402,7 @@ def check_object_store(registry: dict[str, Any], transport: dict[str, Any], sche
         where = f"transport.yaml object_store.{bucket}"
         if not isinstance(spec, dict) or set(spec) != OBJECT_STORE_FIELDS or "{" in bucket:
             raise ContractError(f"{where}: an installation-wide bucket with fields {sorted(OBJECT_STORE_FIELDS)}")
-        if spec["object_name"] not in schemas[BLOB_REF[0]]["$defs"]["blob_ref"]["properties"]:
-            raise ContractError(f"{where}: object_name names the blob_ref field an object is named by")
+        check_blob_name(where, spec["object_name"], schemas)
         for field_name in ("readers", "writers", "deleters"):
             listed = spec[field_name]
             if not isinstance(listed, list) or not listed or not set(listed) <= roles or len(set(listed)) != len(listed):
@@ -1410,6 +1413,25 @@ def check_object_store(registry: dict[str, Any], transport: dict[str, Any], sche
         if not set(spec["writers"]) <= set(spec["readers"]) or not set(spec["deleters"]) <= set(spec["writers"]):
             raise ContractError(f"{where}: writers also read (to find an object before putting it) and deleters also write")
         check_blob_headers(where, spec["headers"], schemas)
+
+
+def check_blob_name(where: str, template: Any, schemas: dict[str, dict[str, Any]]) -> None:
+    """An object's name is its team and one blob_ref field, joined by the separator (README, "Blobs")."""
+
+    fields = schemas[BLOB_REF[0]]["$defs"]["blob_ref"]["properties"]
+    parts = template.split(BLOB_NAME_SEPARATOR) if isinstance(template, str) else []
+    placeholders = [part[1:-1] for part in parts if re.fullmatch(r"\{[a-z0-9_]+\}", part)]
+    if len(parts) != 2 or placeholders != [part[1:-1] for part in parts] or placeholders[0] != "team" \
+            or placeholders[1] not in fields:
+        raise ContractError(f"{where}: object_name is {{team}}{BLOB_NAME_SEPARATOR}{{<blob_ref field>}}: the team of the "
+                            f"frame that carries the reference, then the field the object is named by")
+    # The name splits one way only if neither part's pattern allows the separator.
+    shared = schemas[BLOB_REF[0]]["$defs"]
+    field = fields[placeholders[1]]
+    types = [shared["team_id"], shared[field["$ref"].rsplit("/", 1)[1]] if "$ref" in field else field]
+    if any(BLOB_NAME_SEPARATOR in kind.get("pattern", BLOB_NAME_SEPARATOR) for kind in types):
+        raise ContractError(f"{where}: object_name's parts have patterns without {BLOB_NAME_SEPARATOR!r}, so a name "
+                            f"splits one way")
 
 
 def check_blob_headers(where: str, headers: Any, schemas: dict[str, dict[str, Any]]) -> None:
@@ -1728,14 +1750,17 @@ def object_stream(bucket: str) -> str:
 def object_store_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     """Per role: the subjects that read, write and delete objects (README, "Blobs").
 
-    The subjects are the ones the NATS object store client uses. A reader gets the
-    bucket's stream information, the message get that finds an object's metadata
-    by its subject, and what reading the chunks needs: an unnamed ordered consumer
-    on its own inbox, that consumer's information and its flow control, as for a
-    key-value watch. A writer publishes chunks and metadata; NATS cannot tie a
-    publish to one object, so readers check every blob's SHA-256 against its name.
-    A deleter purges the object's chunks after marking it deleted; the purge grant
-    covers the whole bucket, so only the team services hold it.
+    A reader gets the bucket's stream information, the message get that finds an
+    object's last metadata by its subject, and what reading the chunks needs: an
+    unnamed ordered consumer on its own inbox, that consumer's information and its
+    flow control, as for a key-value watch. Like the watches, a reader names the
+    stream when it opens the consumer, so it needs no stream-name lookup, which
+    would list every team's streams (the NATS object store client's get does not,
+    and is refused). A writer publishes chunks and metadata without a rollup
+    header; NATS cannot tie a publish to one object, so readers check every blob's
+    SHA-256 against its name. A deleter purges the object's chunks after marking it
+    deleted; the purge grant covers the whole bucket, so only the team services
+    hold it.
     """
 
     grants: dict[str, set[str]] = {}
