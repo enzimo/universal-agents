@@ -4745,8 +4745,9 @@ the desktop app never offers an older version.
   several links, another sha256, a destination already taken, a copy, sync,
   rename or removal of that file that fails) refuses only that record, keeps
   its records and the file as they are, is logged
-  (`event=adapter_host_file_not_moved` with the folder, the file, the
-  attachment id, `records=kept` and the reason) and never stops startup; the
+  (`event=adapter_host_file_not_moved` with the transfer-folder files its
+  records name (`sources`), the folder, the file, the attachment id,
+  `records=kept` and the reason) and never stops startup; the
   file tools refuse such a record as outside `state/uploads`, and after the
   operator fixes the file, deleting the marker and restarting tries the kept
   records again (moved files are no longer found there, so nothing moves
@@ -4795,7 +4796,9 @@ the desktop app never offers an older version.
   (`event=adapter_host_files_without_records`) with the folder, the count and
   what to do, and no file names, which are people's text: an administrator
   may delete those files while the instance is stopped, keeping the files
-  not-moved warnings name. Stopped, because the running 0.10 adapter host
+  in the `sources` field of not-moved warnings (their `file` field may name
+  the `state/uploads` side, such as a destination already taken, so it cannot
+  carry that advice). Stopped, because the running 0.10 adapter host
   passes new files through the same folder under the same prefix until the
   gateway handles them, so a count beside a running team (`--files-gone`) may
   include those. If the folder was at another path under 0.9.13, its records

@@ -135,8 +135,9 @@ which of three cases it is.
    several links, carries another sha256 or finds its destination taken, and
    a copy, sync, rename or removal of that file that fails. Its records stay
    as they are and the file stays where it is; one warning
-   (``event=adapter_host_file_not_moved`` with the folder, the file, the
-   attachment id, ``records=kept`` and the reason) reports it, and it never
+   (``event=adapter_host_file_not_moved`` with the transfer-folder files its
+   records name (``sources``), the folder, the file, the attachment id,
+   ``records=kept`` and the reason) reports it, and it never
    stops startup. The file tools refuse a record outside ``state/uploads``
    (``outside_upload_folders``), so the file cannot be opened until it moves:
    fix the file, delete the marker and restart, and the step tries the
@@ -240,7 +241,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from pydantic import ValidationError
 
@@ -429,6 +430,10 @@ class _NotMoved:
     kept_record: bool
     # Held guidance naming the file: never changed or dropped, only named in the warning.
     held: list[_HeldEntry] = field(default_factory=list)
+    # The transfer-folder files these records name, for the warning's ``sources`` field. ``file`` may
+    # name the state/uploads side (a destination taken, a temporary copy), and the delete advice of
+    # the files-without-records warning must point at the transfer file the records keep (C05).
+    sources: list[Path] = field(default_factory=list)
 
 
 class FolderProblem(Exception):
@@ -560,7 +565,7 @@ def _report_files_without_records(transfer: Path, marker: Path, count: int) -> N
         "%s file(s) are left in the adapter host's transfer folder that no record names: files of people removed "
         "on 0.9, files whose records were deleted, or files of messages the gateway never handled. 0.10 never "
         "opens them. An administrator may delete the files there whose names start with %s while the instance "
-        "is stopped, keeping every file named in the file= field of an adapter_host_file_not_moved warning (see "
+        "is stopped, keeping every file named in the sources= field of an adapter_host_file_not_moved warning (see "
         "upgrading.md). If this folder was at another path under 0.9.13 (moved, mounted elsewhere or reached "
         "through another link), their records may name that path: do not delete them; put the folder back at that "
         "path or set upload_dir to it, delete %s and restart. event=adapter_host_files_without_records folder=%s "
@@ -1314,8 +1319,10 @@ class _Step:
             (drop_entries if absent(entry.path) else kept_entries).append(entry)
         has_record = counted and item.record is not None
         drop_record = has_record and absent(record_path)
+        named = [record_path, *(entry.path for entry in entries), *(copy.path for copy in held)]
+        sources = sorted({path for path in named if path is not None})
         self._not_moved.append(
-            _NotMoved(item, unmovable, drop_entries, kept_entries, drop_record, has_record and not drop_record, held)
+            _NotMoved(item, unmovable, drop_entries, kept_entries, drop_record, has_record and not drop_record, held, sources)
         )
         if counted:
             setattr(self.counts, unmovable.outcome, getattr(self.counts, unmovable.outcome) + 1)
@@ -1372,14 +1379,15 @@ class _Step:
             )
         logger.warning(
             "A file of a chat app the adapter host ran was not moved into state/uploads; %s%s.%s "
-            "event=adapter_host_file_not_moved attachment_id=%s conversation_ids=%s held_guidance_ids=%s folder=%s "
-            "file=%s records=%s reason=%s",
+            "event=adapter_host_file_not_moved attachment_id=%s conversation_ids=%s held_guidance_ids=%s sources=%s "
+            "folder=%s file=%s records=%s reason=%s",
             advice,
             f" ({unmovable.detail})" if unmovable.detail else "",
             _HELD_GUIDANCE_NOTE if held else "",
             item.attachment_id,
-            ",".join(sorted({entry.conversation_id for entry in entries})) or "-",
-            ",".join(held) or "-",
+            _listed(sorted({entry.conversation_id for entry in entries})),
+            _listed(held),
+            _listed(str(path) for path in not_moved.sources),
             unmovable.folder or self._transfer,
             file or "-",
             records,
@@ -1392,6 +1400,12 @@ class _Step:
             self.counts.turns_marked_unrecorded = len(self._unrecorded_turns)
         if not_moved.drop_record and self._gateway.delete_attachment(item.attachment_id):
             self.counts.gateway_rows_removed += 1
+
+
+def _listed(values: Iterable[str]) -> str:
+    """``values`` as one log field: comma-separated, or ``-`` when there are none."""
+
+    return ",".join(values) or "-"
 
 
 def _plain_name(attachment_id: str) -> bool:

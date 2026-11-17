@@ -49,7 +49,8 @@ supported, because it may not read what a newer one saved.
   - **A file it refuses** (a link, contents that differ from what was
     received, a file it cannot read) stays where it is and keeps its
     records, but the team cannot open it. The log names it
-    (`event=adapter_host_file_not_moved`). Fix the file, delete
+    (`event=adapter_host_file_not_moved`; its `sources=` field names the
+    file in the transfer folder). Fix the file, delete
     `state/upgrades/adapter-host-files.json` and restart to try again.
   - **A file with no record of the chat that sent it** (its gateway record
     was removed, for example by a restore on 0.9) cannot be moved, and
@@ -62,9 +63,10 @@ supported, because it may not read what a newer one saved.
     them once, when it finishes, and a warning gives the folder and the
     number (`event=adapter_host_files_without_records`). You may delete the
     files there whose names start with `adapter_upload_` while the instance
-    is stopped, keeping every file named in the `file=` field of an
+    is stopped, keeping every file named in the `sources=` field of an
     `adapter_host_file_not_moved` warning: those can still be moved once
-    you fix them, as above. If the folder was at another path under 0.9
+    you fix them, as above. (Its `file=` field may name the copy in
+    `state/uploads` that stood in the way instead.) If the folder was at another path under 0.9
     (moved, mounted elsewhere or reached through another link), their
     records may name that path: do not delete them; put the folder back at
     that path or set `upload_dir` to it, delete

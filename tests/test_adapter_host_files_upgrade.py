@@ -468,11 +468,17 @@ def test_a_file_it_refuses_keeps_its_records_and_is_not_opened(instance: _Instan
     assert instance.gateway().get_attachment(attachment_id).local_path == str(instance.photo_source)
     (entry,) = [item for item in instance.conversations().list_turn_attachments(CONVERSATION) if item.attachment.attachment_id == attachment_id][:1]
     _assert_not_opened(instance, entry.attachment)
-    assert any(
-        f"attachment_id={attachment_id} conversation_ids={CONVERSATION} " in message
-        and message.endswith(f"records=kept reason={reason}")
+    (warning,) = [
+        message
         for message in _events(caplog, "adapter_host_file_not_moved")
-    )
+        if f"attachment_id={attachment_id} conversation_ids={CONVERSATION} " in message
+    ]
+    assert warning.endswith(f"records=kept reason={reason}")
+    # C05: the delete advice keeps the files in sources=, so the transfer file is named there,
+    # also when file= names the state/uploads copy that stood in the way.
+    assert f" sources={instance.photo_source} folder=" in warning
+    if reason == "destination_taken":
+        assert f" file={instance.photo_destination} " in warning, "file= names the state/uploads side here"
     assert os.path.lexists(instance.photo_source), "a refused file is left where it is"
     after = {path: path.read_bytes() for path in instance.root.rglob("*") if path.is_file() and not path.is_symlink() and "uploads" in path.parts}
     assert after == before, "nothing in state/uploads was written or replaced"
@@ -594,7 +600,7 @@ def _assert_reported(caplog: pytest.LogCaptureFixture, instance: _Instance, coun
     assert warning.endswith(f"folder={instance.transfer} files_without_records={count}")
     assert "may delete" in warning and "while the instance is stopped" in warning
     assert "another path under 0.9.13" in warning and "do not delete them" in warning, "C02"
-    assert "keeping every file named in the file= field of an adapter_host_file_not_moved warning" in warning, "C03"
+    assert "keeping every file named in the sources= field of an adapter_host_file_not_moved warning" in warning, "C03, C05"
     assert "adapter_upload_stray" not in warning and STRAY.decode() not in warning, "no names, no contents"
 
 
@@ -2011,7 +2017,8 @@ def test_a_copy_that_reads_back_differently_keeps_the_original_and_its_records(i
     assert result.finished and result.counts.refused == 1
     _assert_photo_kept(instance)
     assert not instance.photo_destination.exists() and not list(instance.photo_destination.parent.glob(".*"))
-    assert any(message.endswith("records=kept reason=copy_mismatch") for message in _events(caplog, "adapter_host_file_not_moved"))
+    (warning,) = [message for message in _events(caplog, "adapter_host_file_not_moved") if message.endswith("records=kept reason=copy_mismatch")]
+    assert f" sources={instance.photo_source} folder=" in warning, "C05: file= names the temporary copy, sources= the original"
     monkeypatch.undo()
     assert _rerun_after_fix(instance).moved == 1
 
