@@ -18,6 +18,8 @@ import pytest
 from tests.task_work_support import bind_turn
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import (
+    INTERRUPT_REQUEST_EVENT,
+    INTERRUPT_WAITS_ON_REQUESTER_KEY,
     WORKER_INTERRUPT_REFUSED,
     handle_task_steering_message,
     send_interrupt_request_for_result,
@@ -91,6 +93,12 @@ async def test_parent_refuses_a_worker_input_request_and_the_worker_fails_its_ta
     assert sent["routing_key"] == PARENT_ID
     assert steering.steering_type == TaskSteeringType.INTERRUPT_REQUEST
     assert worker.task_manager.get_task_info("child_task").state == ProgressState.WAITING
+    # Saved as a wait for the requester's answer (custom_agents.task_wait_reasons).
+    (paused,) = [
+        entry.details for entry in worker.task_manager.get_task_info("child_task").task.execution_history
+        if entry.details.get("event") == INTERRUPT_REQUEST_EVENT
+    ]
+    assert paused[INTERRUPT_WAITS_ON_REQUESTER_KEY] is True
 
     # The parent refuses it instead of passing it on.
     caplog.set_level(logging.WARNING)

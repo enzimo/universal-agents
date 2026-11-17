@@ -56,6 +56,7 @@ from custom_messages.contracts.access_workflow_v2 import (
     utc_now,
 )
 from custom_messages.contracts.credentials_v1 import (
+    TOOL_SETUP_EXTERNAL_STEP,
     TOOL_SETUP_OFFER_LIMIT,
     TOOL_SETUP_SOURCE_PERSON,
     ToolSetupRequestV1,
@@ -434,9 +435,18 @@ def _result_event(record: AccessWorkflowV2, step: WorkflowStepV2 | None, result:
         step_id=step.step_id if step else None,
         kind="decision" if result.status == SETUP_DECLINED else "progress",
         code=f"setup_{result.status}",
-        message=f"A setup page ended: {result.status}"
-        + (" (the person did it on their own)." if result.source == TOOL_SETUP_SOURCE_PERSON else "."),
+        message=f"A setup page ended: {result.status}{_how_the_person_ended_it(result)}",
     )
+
+
+def _how_the_person_ended_it(result: ToolSetupResultV1) -> str:
+    """The event's ending: a ``person_action`` result is either Mark Done or the person's own ``/link``."""
+
+    if result.source != TOOL_SETUP_SOURCE_PERSON:
+        return "."
+    if result.kind == TOOL_SETUP_EXTERNAL_STEP:
+        return " (the person marked it done)."
+    return " (the person did it on their own)."
 
 
 __all__ = [

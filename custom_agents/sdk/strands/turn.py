@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError
 from custom_agents.task_wait_limit import TaskWaitLimitReached
+from custom_agents.turn_action_refusal import TurnActionRefused
+from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 
 import asyncio
 import hashlib
@@ -120,6 +122,7 @@ from custom_messages.enums import (
 )
 from reply_routing_trace import is_reply_routing_trace_enabled
 from custom_agents.turn_work_notes import (
+    ENDED_BY_ANSWER_HELD,
     ENDED_BY_OPEN,
     ENDED_BY_TOOL_LIMIT,
     ENDED_BY_WAIT,
@@ -355,6 +358,21 @@ def _remember_context_assembly(assembly: AssembledContext) -> None:
     work = current_task_work()
     if work is not None:
         work.context_assembly = assembly
+
+
+def late_guidance_instruction(guidance: str) -> str:
+    """What the model reads for guidance that arrived after a call to the agent, before its decision was carried out.
+
+    A fresh turn appends it to its prompt and calls the model again (below); a
+    resumed turn sends it as the next prompt of the same conversation
+    (``task_steering_runtime._run_resumed_turn``).
+    """
+
+    return (
+        "Runtime mid-turn requester steering:\n"
+        + guidance
+        + "\n\nThis steering arrived before the task result was committed. Treat it as authoritative and regenerate the task result accordingly."
+    )
 
 
 def _turn_decision_initial_guidance(tool_name: str) -> str:
@@ -2158,7 +2176,9 @@ class LLMTurnExecutor:
                 after_action_report=turn.after_action_report,
                 error=e,
             )
-            if isinstance(e, (ProviderTimeoutError, UnroutableTaskInterruptError, TaskWaitLimitReached)):
+            if isinstance(
+                e, (ProviderTimeoutError, UnroutableTaskInterruptError, TaskWaitLimitReached, TurnActionRefused)
+            ):
                 # The task owner records and reports this classified failure once.
                 raise
             if self._is_provider_connectivity_error(e):
@@ -2590,14 +2610,9 @@ class LLMTurnExecutor:
                             self.settings.id,
                             turn.active_task_id or "unknown",
                         )
-                        late_guidance_instruction = (
-                            "Runtime mid-turn requester steering:\n"
-                            + late_guidance
-                            + "\n\nThis steering arrived before the task result was committed. Treat it as authoritative and regenerate the task result accordingly."
-                        )
                         turn.assembly = self._append_provider_prompt_suffix(
                             turn.assembly,
-                            text=late_guidance_instruction,
+                            text=late_guidance_instruction(late_guidance),
                             name="late_requester_steering",
                             source="task_steering_runtime.consume_pending_proactive_guidance_message",
                         )
@@ -2867,16 +2882,81 @@ class LLMTurnExecutor:
         await self._stop_at_wait_limit(turn, decision)
         await self._record_turn_work(turn, decision=decision, strands_agent=strands_agent)
 
+    async def record_held_answer_work(
+        self, *, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta,
+        task_id: Optional[str], decision: Any, content: Any, strands_agent: Any, decision_tool_name: str = "",
+    ) -> None:
+        """Save what a turn did when the outbox held its final answer back (``turn_work_notes``).
+
+        ``prepare_turn_decision`` saves no note for a decision that finishes
+        the task. A hold (an access workflow's unfinished steps, pending
+        delegated work, a question or a runtime plan) leaves the task open
+        after all and returns a request naming the turn's own task, and the
+        turn that runs the task again needs what this one did and answered.
+        Both paths that run a turn's decision call this after the outbox: a
+        fresh turn and a turn resumed after a person's decision.
+        """
+
+        if not (
+            isinstance(content, Task)
+            and content.task_type == MessageMetaType.REQUEST
+            and content.task_id == task_id
+        ):
+            return
+        await self._record_unsent_answer(
+            msg_content=msg_content, msg_header=msg_header, msg_meta=msg_meta, task_id=task_id,
+            decision=decision, strands_agent=strands_agent, decision_tool_name=decision_tool_name,
+        )
+
+    async def record_unsent_answer_work(
+        self, *, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta,
+        task_id: Optional[str], decision: Any, strands_agent: Any, decision_tool_name: str = "",
+    ) -> None:
+        """Save what a turn did when the outbox stopped before its final answer went out.
+
+        The outbox raised ``TurnActionRecoveryScheduled``: it retries an
+        action or runs the task again with a recovery note, and the answer was
+        not delivered. A fault right after a workflow hold ends here too; the
+        retry holds the same answer again (``access_workflow_runtime``) and the
+        task runs again, so its next turn needs this note. When a retry later
+        delivers the answer, the task ends and no turn reads the note.
+        """
+
+        await self._record_unsent_answer(
+            msg_content=msg_content, msg_header=msg_header, msg_meta=msg_meta, task_id=task_id,
+            decision=decision, strands_agent=strands_agent, decision_tool_name=decision_tool_name,
+        )
+
+    async def _record_unsent_answer(
+        self, *, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta,
+        task_id: Optional[str], decision: Any, strands_agent: Any, decision_tool_name: str,
+    ) -> None:
+        if decision is None or leaves_task_open(decision):
+            return  # nothing decided, or saved before the outbox ran
+        turn = _TurnState(msg_content=msg_content, msg_header=msg_header, msg_meta=msg_meta)
+        turn.active_task_id = task_id
+        turn.turn_decision_tool_name = decision_tool_name
+        await self._record_turn_work(
+            turn, decision=decision, ended_by=ENDED_BY_ANSWER_HELD, strands_agent=strands_agent, answer_held=True
+        )
+
     async def _record_turn_work(
-        self, turn: _TurnState, *, decision: Any, ended_by: Optional[str] = None, strands_agent: Any = None
+        self,
+        turn: _TurnState,
+        *,
+        decision: Any,
+        ended_by: Optional[str] = None,
+        strands_agent: Any = None,
+        answer_held: bool = False,
     ) -> None:
         """Save what this turn did when it leaves its task open (``turn_work_notes``).
 
         Only a task request's own turn: answering a question about another
         task, or a protocol message, has no later turn that continues it. A
-        decision that finishes the task saves nothing, and neither does a turn
-        that called no tools and sent nothing (for example a check-back wake
-        that only keeps waiting).
+        decision that finishes the task saves nothing, unless the outbox held
+        its answer back (``answer_held``, ``record_held_answer_work``), and
+        neither does a turn that called no tools and sent nothing (for example
+        a check-back wake that only keeps waiting).
         """
 
         content = turn.msg_content
@@ -2887,7 +2967,7 @@ class LLMTurnExecutor:
             and content.task_type == MessageMetaType.REQUEST
         ):
             return
-        if decision is not None and not leaves_task_open(decision):
+        if decision is not None and not answer_held and not leaves_task_open(decision):
             return
         started_wait = decision is not None and decision_starts_wait(decision)
         model = self.model() if strands_agent is None else strands_agent
@@ -3003,13 +3083,26 @@ class LLMTurnExecutor:
         # The outbox releases what this turn read when it records the batch;
         # a failure before that keeps it for the task's next turn.
         turn.start_notes_handed_over = True
-        turn.content = await self.effects.execute_turn_decision_outbox(
-            decision=outcome.decision,
-            incoming_content=turn.msg_content,
-            incoming_header=turn.msg_header,
-            incoming_meta=turn.msg_meta,
-            structured_output_details=outcome.structured_output_details,
-            start_notes=turn.start_notes,
+        try:
+            turn.content = await self.effects.execute_turn_decision_outbox(
+                decision=outcome.decision,
+                incoming_content=turn.msg_content,
+                incoming_header=turn.msg_header,
+                incoming_meta=turn.msg_meta,
+                structured_output_details=outcome.structured_output_details,
+                start_notes=turn.start_notes,
+            )
+        except TurnActionRecoveryScheduled:
+            await self.record_unsent_answer_work(
+                msg_content=turn.msg_content, msg_header=turn.msg_header, msg_meta=turn.msg_meta,
+                task_id=turn.active_task_id, decision=outcome.decision,
+                strands_agent=self.model(), decision_tool_name=turn.turn_decision_tool_name,
+            )
+            raise
+        await self.record_held_answer_work(
+            msg_content=turn.msg_content, msg_header=turn.msg_header, msg_meta=turn.msg_meta,
+            task_id=turn.active_task_id, decision=outcome.decision, content=turn.content,
+            strands_agent=self.model(), decision_tool_name=turn.turn_decision_tool_name,
         )
         await self._write_context_debug_post_turn(
             request=turn.context_request,

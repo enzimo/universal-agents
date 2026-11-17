@@ -52,6 +52,7 @@ from custom_agents.provider_limits import ProviderLimitExhausted
 from custom_agents.runtime_recovery import fail_recovered_executing_task
 from custom_agents.task_wait_limit import TaskWaitLimitReached
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_messages.enums import ProgressState
 from custom_agents.execution_lanes import executing_parallel_task_ids, lane_for_task
 from runtime_hosting.agent_execution import MAIN_LANE
@@ -85,6 +86,8 @@ def task_runtime_error_message(error: Exception) -> str:
     key_error = _model_key_error(error)
     if key_error is not None:
         return str(key_error)
+    if isinstance(error, TurnActionRefused):
+        return error.requester_message
     if isinstance(error, (ProviderTimeoutError, ObjectiveWorkCompletionError, ProviderLimitExhausted, TaskWaitLimitReached)):
         return str(error)
     if isinstance(error, MaxTokensReachedException):
@@ -111,6 +114,12 @@ def _log_turn_failure(agent: Any, task_id: str, error: Exception) -> None:
         logger.warning(
             "[%s] event=task_wait_limit_failed task_id=%s waits=%s limit=%s outcome=failed",
             agent.id, task_id, error.waits, error.limit,
+        )
+    elif isinstance(error, TurnActionRefused):
+        # The refusing code logged its own event with its ids (custom_agents.turn_action_refusal).
+        logger.warning(
+            "[%s] A refused action ended its task. event=turn_action_refused task_id=%s error_type=%s outcome=failed",
+            agent.id, task_id, type(error).__name__,
         )
     elif isinstance(error, UnroutableTaskInterruptError):
         logger.warning("event=task_input_unroutable task_id=%s outcome=failed message=%s", task_id, error)
