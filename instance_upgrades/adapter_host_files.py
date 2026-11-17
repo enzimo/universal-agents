@@ -746,22 +746,27 @@ class _Step:
             self._log_uncounted(exc)
             return None
         try:
-            count = 0
-            for name in os.listdir(directory):
-                if not name.startswith(TRANSFER_FILE_PREFIX) or name in self._named:
-                    continue
-                try:
-                    info = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                except FileNotFoundError:
-                    continue  # removed since the listing
-                if stat.S_ISREG(info.st_mode):
-                    count += 1
-            return count
+            return self._count_unnamed_files(directory)
         except (OSError, ValueError) as exc:
             self._log_uncounted(exc)
             return None
         finally:
             os.close(directory)
+
+    def _count_unnamed_files(self, directory: int) -> int:
+        """Regular ``adapter_upload_*`` files in the open folder no found record names; raises on a listing error."""
+
+        count = 0
+        for name in os.listdir(directory):
+            if not name.startswith(TRANSFER_FILE_PREFIX) or name in self._named:
+                continue
+            try:
+                info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                continue  # removed since the listing
+            if stat.S_ISREG(info.st_mode):
+                count += 1
+        return count
 
     def _log_uncounted(self, exc: BaseException) -> None:
         logger.warning(
