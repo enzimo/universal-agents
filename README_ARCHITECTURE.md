@@ -697,7 +697,8 @@ Stuck tasks are reported the same way (`custom_agents.stuck_tasks`). The team
 lead reads every agent's saved work in its team (read-only) and reports one
 incident per request and condition: the agent holding the work stopped reporting
 in, a handed-back task nobody picked up, an access decision or a question to the
-person still waiting (reminders after a day), or no progress while in progress.
+person still waiting (reminders after a day), no progress while in progress, or
+a task waiting on nothing (`task_waiting_on_nothing`).
 Thresholds live in `agent.schedule_maintenance.stuck_tasks`. One more
 condition, `task_files_sent_before_upgrade`, is an upgrade step told at once
 and closed with no message ("Upgrading an instance in place"). The person comes
@@ -718,6 +719,29 @@ reports that the condition ended, without claiming new task progress.
 The same pass also frees a work slot held by a task whose turn is gone
 (`turn_failure_runtime.release_orphaned_slot_when_idle`), which previously
 waited for new work to arrive.
+
+A task waiting on nothing is not running (waiting, paused or ready), is not in
+its agent's queue, and has no reason to wait. Every legitimate reason is listed
+in one place, `custom_agents.task_wait_reasons`, each read from the record the
+runtime saves for it: from the agent's saved work (queue, delegated work, a
+question, a recoverable pause, a person's decision on an access request or a
+`set_up_tools` run, an outside result such as a credential form, an interrupt
+sent to the requester, a running action batch or held reply, an isolated
+recovery, a queue pause), and from team stores, read only when saved work
+explains nothing (a waiting access request, a running plan, a waiting setup run,
+a provider retry timer). A new kind of wait must save a record one of these
+rules can find. No saved record says when the last reason ended, and accepted
+guidance adds history to such a task without moving it, so the wait counts from
+the first pass that sees it: the stuck-work engine takes a per-finding wait
+(`StuckFinding.notice_after`, here `no_progress_after_seconds`), and a pass that
+no longer sees it closes the untold incident. Its person is told to stop it and
+ask again; administrators hear only when no person is verified. A store row
+about one task that cannot be read leaves that task's incident as it is
+(`StuckFinding.undetermined`, `event=stuck_task_wait_reason_unreadable`) so the
+other conditions go on. The check was added after a request sat waiting for
+about 16 hours (2026-11-14) with no condition noticing: its saved workflow had
+queued it to continue, and its turn's result then set it waiting, which removed
+the queue entry.
 
 Four repairs keep work from getting stuck in the first place:
 
@@ -789,7 +813,8 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    only before a real final answer) and the outbox shows that response
    dispatched or completed, or it reached the post-publish step. The outbox
    records an answer it held back (final review, pending delegated work, a
-   manager escalation) with its own status, `held_back`, so such a task is
+   manager escalation, an access workflow's unfinished steps) with its own
+   status, `held_back`, so such a task is
    handed back, and the next worker is not told the held-back answer was sent.
 3. It keeps tasks that already started and now wait on a person or subtask,
    because replies are addressed to this worker's id. They may finish until
@@ -1470,7 +1495,14 @@ A main-lane task claims the task manager's main slot
 parallel request moves to IN_PROGRESS in its own lane without taking that
 slot. Every path that runs a turn (the queue, a turn resumed after a sign-in or
 access decision, a resume with a directive) therefore ends a failed turn
-through `custom_agents.turn_failure_runtime`. As a safety net,
+through `custom_agents.turn_failure_runtime`, and so does the outbox's retry
+of an interrupted batch when an action is refused for good
+(`custom_agents.turn_action_refusal`). A turn whose final answer the runtime
+held back returns a request naming its own task; the end-of-turn handling
+(`task_message_runtime._keep_held_answer_state`) leaves the task in the state
+its hold saved (waiting for delegated work, a question or a runtime plan;
+queued to run again for an access workflow), and only a delegated subtask
+makes the task wait there. As a safety net,
 `event=execution_slot_orphaned` is logged and an IN_PROGRESS task with no turn
 running is ended: the main slot's holder when the next task is chosen and in
 the scheduler pass, and a parallel request's task whose lane nobody holds in
@@ -1521,7 +1553,10 @@ task knows only the task's saved history. When a turn ends with its task still
 open (it delegated, escalated, asked a question, sent a credential form, or
 paused at its tool-call budget), trusted code saves what the turn did before
 anything is sent: the tools it called with short input previews and their
-results, and what it sent (`custom_agents/turn_work_notes.py`). Every later
+results, and what it sent (`custom_agents/turn_work_notes.py`). A final answer
+the runtime holds back after the turn decided (for example for an access
+workflow's unfinished steps) leaves the task open too; its note, with the held
+answer, is saved once the outbox returns. Every later
 turn of the task shows this as "Work already done in this task", says the
 task is continuing and labels its request accordingly. Rationale: without it a
 resumed turn saw only the original request and did the work again; a scheduled
@@ -3052,8 +3087,44 @@ person which command to run or asking whether to start:
    a conditional update so exactly one result reaches the task whether the
    page's watcher, the person's own `/link` or `/auth ... team_client`
    (`link_results`), the Mark Done button, or start-up recovery ends it. After
-   a gateway restart, pages still waiting are reported as unwatched (and
-   offered again); page addresses are never stored.
+   a gateway restart, broker pages still waiting are reported as unwatched
+   (and offered again); an outside step keeps waiting, because nothing
+   watches it. Page addresses are never stored.
+   The way that ends a page writes the one chat line that closes its card
+   (`PageEnding.closing`, else the task's message). The line names the page by kind and the tool by the
+   name its page showed: the sign-in name for sign-ins, the catalog's display
+   name for account links and outside steps. Mark Done uses the step title
+   stored on the workflow page, never words from the browser. Rationale (an
+   incident on 2026-11-14): the gateway rebuilt the line from the result's
+   source alone, which covers both the person's own `/link` and Mark Done,
+   so Mark Done read as an account link with the raw tool id.
+   A page that opens after the chat reply closed (usually every page of a run
+   but the first) is listed for Web Chat and the workflow page by
+   `credential_handoff.ToolSetupHandoffs`. A page shown in the live reply is
+   not listed again: its address goes only into that first no-store response,
+   so after a refresh only its history line remains. A listed card stays
+   until that page's own `ToolSetupRecord` ends
+   (`GatewayToolSetups.page_status`), its expiry
+   passes, or the task ends (the chat request has a terminal status or a
+   finished run state). Cards live only in gateway memory, so a gateway
+   restart drops them: a broker page is offered again with a new card, while
+   an outside step keeps only its history line and its Mark Done button on
+   the workflow page. Each removal is logged once
+   (`event=gateway_credential_handoff_card_closed` with a `reason`; a missing
+   request or page record is a warning). A card holding a sign-in or account
+   link page's bearer link stays in memory at most 31 minutes
+   (`BEARER_CARD_MAX_LIFETIME`); an outside step's card holds none and keeps
+   its 48-hour expiry. Chat history keeps each page's own secret-free receipt
+   on both paths (`GatewayTranscriptService.history_text`: a reply's
+   `transcript_text`, otherwise the fixed safe text for reply types that can
+   carry a page address); an outside step's line also keeps its catalog
+   title, instructions and link and the workflow page link, never the task's
+   own reason. Rationale (incident 2026-11-14): a task's pages share one chat
+   request, and every page's result sets it to
+   `waiting_for_credential_result`; the card list followed that status, so
+   finishing one page removed the other open pages' cards, and the handoff's
+   history line was the generic "A setup page is ready" text, so a reload lost
+   which page was open.
 
 5. Last known states instead of model re-checks (owner's decision 2026-09-28).
    Trusted code keeps one `ToolSetupStateV1` per team, person and account tool
@@ -3307,6 +3378,31 @@ question to a person uses the preserved gateway reply route. Steering that
 names a task applies only to that task. Accepted guidance and duplicate keys
 are saved with its history, and guidance survives a restart until the model
 turn records its decision.
+The model reads accepted guidance at the start of its turn and, mid-turn, at
+its next new tool call, which is cancelled with the guidance text
+(`task_steering_runtime.RuntimeSteeringPlugin`). After each call to the agent
+that did not pause, the turn checks again before carrying out its decision: a
+fresh turn calls the model again with the guidance
+(`custom_agents.sdk.strands.turn`), and a resumed turn sends it as the next
+prompt of the same conversation (`task_steering_runtime._call_until_guidance_read`).
+That check is needed because the turn decision is not always a tool call:
+providers that enforce structured output themselves (Anthropic, Bedrock) can
+answer Strands' forced decision as JSON text. Guidance that arrives after the
+check is found only when the task's result is applied
+(`_apply_task_processing_result`), after the decision's actions, a final
+answer included, were carried out; the task then runs again with it. A tool
+call that resumes after its pause (`set_up_tools` waiting for setup pages,
+`request_access` or `apply_change` waiting for a decision, any local Strands
+interrupt) is not a new call: it runs with its answer, and the guidance waits
+for the next new call or the check after the call.
+Why: cancelling the resumed call threw away the answer the task had waited
+for, and the model then repeated setup that was already done. Strands gives
+no sign in the event that a call resumes, so
+`custom_agents.sdk.strands.paused_tool_calls` recognises one with public hooks
+only: its tool use id started in a call to the agent that paused and has not
+finished since. One consequence: a change approved in the Inbox while guidance
+waits is applied before the model reads that guidance. To stop such a change,
+decline it in the Inbox or stop the request.
 An explicitly addressed receiver answers `STALE` for a missing task. The gateway
 holds guidance for that request until the lead admits its task, and retries
 with the same idempotency key. Guidance never becomes another root request.
@@ -6089,6 +6185,20 @@ closes its step, and a new request that only that step covers is refused.
 `request_access_workflow_approvals` submits one change request per staged
 change and pauses once; `apply_change` finds each approval by its change id.
 The graph neither executes commands nor grants access.
+
+A task cannot finish while its workflow has unfinished steps
+(`custom_agents.access_workflow_runtime`). Its first final answer for each
+saved state of the steps is held back, and the task is queued at the front
+with a continuation note, so it runs again at once. A repeated answer without
+progress raises `WorkflowCompletionRefused`, a `TurnActionRefused`: the outbox
+records the action failed without model recovery (each recovery turn records a
+new batch, so the per-batch recovery limit never ended such a loop), and the
+failed-turn path fails the task and sends the person a plain statement
+followed by the agent's last reply, labelled as given before the open steps
+were finished. Notices never quote that reply; a short preview of each held
+answer stays in the task's history. Rationale: on 2026-11-14 the end-of-turn
+handling marked such a held task WAITING, which removed it from the queue, so
+it stopped for good and the person's later messages were never read.
 
 Local scheduled tasks use database claims and durable run records. A separate
 runtime loop starts needed local workers without a TeamArchitect model turn.

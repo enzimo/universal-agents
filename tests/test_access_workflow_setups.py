@@ -19,11 +19,13 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import create_autospec
 
 import pytest
 
 from assistant_gateway.access_workflows_page import GatewayAccessWorkflowPage
 from assistant_gateway.application.access_workflows import WorkflowPageRefused
+from assistant_gateway.application.tool_setup import GatewayToolSetups
 from custom_agents import access_runtime
 from custom_agents.access_workflow_setup_hooks import link_setup_request, record_setup_result
 from access_catalog.catalog import CatalogSource
@@ -350,18 +352,18 @@ async def test_the_person_marks_a_step_done_on_the_workflow_page(tmp_path: Path)
     lead = make_agent(tmp_path)
     workflow_id = _publish(lead)
     github = _ask(lead, GITHUB)
-    marked: list[tuple[str, str]] = []
+    # The real service's signature (autospec), so the page and the service cannot drift apart unnoticed.
+    setups = create_autospec(GatewayToolSetups, instance=True)
+    setups.external_step_done.return_value = True
 
-    async def external_step_done(setup_request_id: str, *, person_id: str) -> bool:
-        marked.append((setup_request_id, person_id))
-        return True
-
-    inbox = SimpleNamespace(review_url=lambda request_id: "", tool_setups=SimpleNamespace(external_step_done=external_step_done))
+    inbox = SimpleNamespace(review_url=lambda request_id: "", tool_setups=setups)
     page = GatewayAccessWorkflowPage(service=workflow_service_for(lead), access_inbox=inbox, team_id=TEAM)
     service = workflow_service_for(lead)
     record = service.repository.get(workflow_id)
     step = record.step("sign_in_github")
-    external = step.setups[0].model_copy(update={"kind": "external_step", "step_id": "create_token"})
+    external = step.setups[0].model_copy(
+        update={"kind": "external_step", "step_id": "create_token", "step_title": "Create a GitHub token"}
+    )
     service._save(
         record,
         steps=tuple(item.model_copy(update={"setups": (external,)}) if item.step_id == step.step_id else item for item in record.steps),
@@ -375,4 +377,7 @@ async def test_the_person_marks_a_step_done_on_the_workflow_page(tmp_path: Path)
     result = await page.mark_setup_done(workflow_id, owner_id=OWNER.person_id, setup_request_id=github.setup_request_id)
 
     assert result == {"marked_done": github.setup_request_id}
-    assert marked == [(github.setup_request_id, OWNER.person_id)]
+    # The stored title of the row the person clicked, never words from the browser.
+    setups.external_step_done.assert_awaited_once_with(
+        github.setup_request_id, person_id=OWNER.person_id, step_title="Create a GitHub token"
+    )

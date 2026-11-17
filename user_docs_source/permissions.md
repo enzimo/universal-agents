@@ -1584,10 +1584,23 @@ which is decided at every call.
 The gateway records each waiting page, so if it restarts while a page is open,
 the task is told that nobody could see how the page ended, and a fresh page
 opens (it counts toward the three). A step done outside Universal Agents does
-not expire and still waits after a restart. The agents' side keeps the setup
-run too, so an agent restart during the wait resumes the task once the pages
-end. Refreshing chat can recover a live page while the gateway is running; a
-restart does not recover an already-issued page.
+not expire and still waits after a restart; its card is gone, but its line in
+chat history and its **Mark Done** button on the workflow page remain. The
+agents' side keeps the setup run too, so an agent restart during the wait
+resumes the task once the pages end. Refreshing chat can recover a live page
+while the gateway is running; a restart does not recover an already-issued
+page.
+
+Each page's card stays until that page itself ends (finished, closed,
+expired), the task ends or the gateway restarts, however the task's other
+pages end. Pages that open after the chat's first reply (usually every page
+but the first) also show on the workflow page and come back after a refresh.
+A page shown in the chat's first reply keeps its card in that chat until the
+page ends, but a refresh removes the card and the workflow page does not list
+it; a step done outside Universal Agents can still be marked done on the
+workflow page. Chat history keeps one line per page and never a page's
+address: for example "X sign-in page opened."; for a step done outside
+Universal Agents, the step's title, instructions and link.
 
 ## Complete workflow reviews
 
@@ -1616,8 +1629,8 @@ or closed without finishing (the step is blocked, like a denied request).
 Finishing the setup yourself with `/link` while the task waits counts the same.
 A step you do outside Universal Agents (for example, creating a token on the
 service's website) shows its instructions and a **Mark Done** button; only
-you, the person the workflow belongs to, can mark it done, and the waiting
-task continues. A setup page that matched no single step is listed with the
+you, the person the workflow belongs to, can mark it done. Chat then names
+the step you marked done, and the waiting task continues. A setup page that matched no single step is listed with the
 other requests not on a step.
 
 **Review Ready Requests** shows the plan's waiting requests as the same review
@@ -1638,8 +1651,11 @@ broker form and grant no access by themselves.
 The page separates **Agent reported** progress from request status. An approval
 means the exact request was approved; the agent still has to do and check the
 work, and it reports a step complete only after its changes are applied. A task
-cannot finish while its plan has unfinished steps; a repeated attempt without
-progress becomes an explicit error.
+cannot finish while its plan has unfinished steps: the agent's answer is held
+back, and the task keeps working at once to finish or report them. If it
+answers again without progress, the task stops as failed and you get a message
+saying so, followed by its last reply, marked as given before the open steps
+were finished. Reply in the chat to go over the remaining work.
 
 Workflows saved by earlier releases are no longer shown and cannot be continued.
 Ask the team lead to publish a new plan for any unfinished work; completed results

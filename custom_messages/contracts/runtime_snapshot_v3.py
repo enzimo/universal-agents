@@ -160,6 +160,12 @@ class TaskStateProjectionRecord(SnapshotRecord):
     created_at: str = ""
 
 
+# A batch stopped after an action that waits for an outside result (a secure
+# credential form or signup automation); later actions of the turn stay
+# blocked until it arrives (``turn_action_outbox_runtime``).
+BATCH_WAITING_EXTERNAL_RESULT = "waiting_external_result"
+
+
 class TurnActionBatchRecord(SnapshotRecord):
     """Runtime-owned durable state for one ordered set of LLM-requested actions."""
 

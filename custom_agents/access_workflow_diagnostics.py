@@ -24,8 +24,8 @@ EVENT_EXPLANATIONS = {
     "access_requested": "Trusted code asked for the access this step needs, when a tool was being set up.",
     "access_approved": "Trusted code closed this step: every access it needed was approved or handed on.",
     "agent_reported_outcome_unknown": "The agent reported that the step's external result is uncertain; it must be checked before retrying.",
-    "source_task_reconciliation_requested": "The task tried to finish with unfinished steps. It was kept open to finish or report them.",
-    "source_task_completion_rejected": "The task tried to finish again without changing the unfinished steps. The runtime's action recovery handles the failure.",
+    "source_task_reconciliation_requested": "The task tried to finish with unfinished steps. Its answer was held back, and the task ran again at once to finish or report them.",
+    "source_task_completion_rejected": "The task tried to finish again without changing the unfinished steps. It was stopped as failed, and the person was told.",
     "step_denied": "The person denied a request for this step. The step is closed and will not be asked for again.",
     "decision_recorded": "A person decided a request from the workflow page.",
     "decision_not_confirmed": "A decision from the workflow page could not be confirmed; its request keeps its current status.",
@@ -59,7 +59,8 @@ def _lifecycle_event(entry: dict[str, Any]) -> dict[str, Any] | None:
         "enter_finalizing_plan": "A terminal task response was generated and local plan finalization began.",
         "complete_finalizing_plan": "The local task plan finished finalization. Its item counts do not describe the separately saved workflow steps.",
         "tool_result_budget_exceeded": "Oversized tool results were offloaded to protect model context. This event does not establish that an external operation failed.",
-        "workflow_completion_deferred": "The task attempted to finish while workflow steps remained open.",
+        "workflow_completion_deferred": "The task attempted to finish while workflow steps remained open; its answer was held back and the task ran again.",
+        "workflow_completion_refused": "The task attempted to finish again without progress on the open workflow steps and was stopped as failed.",
         "terminal_task_response_deferred": "The task attempted to finish with outstanding delegated work or a clarification question.",
     }.get(code)
     if explanation is None:

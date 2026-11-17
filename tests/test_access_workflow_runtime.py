@@ -25,7 +25,7 @@ from access_control.inbox import StoredAccessInbox
 from access_control.requests import AccessRequests
 from tests.task_work_support import bind_turn
 from custom_agents import access_request_runtime, access_runtime, task_steering_runtime
-from custom_agents.access_workflow_runtime import defer_workflow_completion
+from custom_agents.access_workflow_runtime import WorkflowCompletionRefused, defer_workflow_completion
 from custom_agents.access_workflows import workflow_service_for
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
@@ -276,7 +276,7 @@ def test_a_task_cannot_finish_while_its_workflow_has_unfinished_steps(lead, chan
 
     assert manager.get_task_info("task-lead").state == ProgressState.ACCEPTED
     assert "get_access_workflow" in json.dumps(manager.task_state.runtime_resume_directives["task-lead"])
-    with pytest.raises(RuntimeError, match="still has unfinished steps"):
+    with pytest.raises(WorkflowCompletionRefused, match="still has unfinished steps"):
         defer_workflow_completion(manager, task_id="task-lead", team_id=TEAM)
     codes = [event.code for event in workflow_service_for(lead).repository.events(workflow_id, limit=50)]
     assert "source_task_reconciliation_requested" in codes and "source_task_completion_rejected" in codes

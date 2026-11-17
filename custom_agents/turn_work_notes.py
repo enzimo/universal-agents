@@ -19,6 +19,14 @@ What trusted code does instead:
   tools the turn called (name, a short input preview, whether the call
   worked) and what it sent out (delegations, escalations, questions, a
   held-back final answer).
+- A final answer the runtime holds back after the turn decided (an access
+  workflow's unfinished steps, pending delegated work, a question or a
+  runtime plan) also leaves the task open: the turn executor saves the note
+  once the outbox returns the held answer (``ENDED_BY_ANSWER_HELD``), or when
+  the outbox stops before the answer went out (it retries an action, or runs
+  the task again for recovery; a fault right after a hold ends here). Without
+  it the turn that runs again knew neither what was done nor what was
+  answered, and could repeat outside operations (project review, 2026-11-16).
 - Every later turn of the task shows these entries under "Work already done in
   this task" (context section ``earlier_turn_work``), says the task is
   continuing, and labels the request as started earlier
@@ -46,6 +54,7 @@ TURN_WORK_EVENT = "turn_work_before_wait"
 ENDED_BY_WAIT = "waiting"
 ENDED_BY_OPEN = "task_still_open"
 ENDED_BY_TOOL_LIMIT = "tool_call_limit"
+ENDED_BY_ANSWER_HELD = "answer_held"
 
 # Bounds that keep notes and their prompt section small.
 MAX_TOOL_CALLS_PER_NOTE = 40
@@ -191,7 +200,9 @@ def leaves_task_open(decision: Any) -> bool:
 
     A final answer sent with a wait is held back until the wait ends
     (``turn_action_outbox_runtime._defer_terminal_task_response_for_pending_parent_work``),
-    so such a turn leaves the task open as well.
+    so such a turn leaves the task open as well. A final answer alone can
+    still be held back by the outbox; that is known only after it ran
+    (``ENDED_BY_ANSWER_HELD``).
     """
 
     return decision_starts_wait(decision) or not decision_finishes_task(decision)
@@ -211,7 +222,7 @@ def _describe_sent(action: Any) -> Optional[str]:
     if action_type == "task_response":
         answer = getattr(getattr(action, "task", None), "answer", None)
         answer_text = getattr(answer, "answer", answer) if answer is not None else ""
-        return "final answer, held back until the wait ended: " + _preview(answer_text or "", MAX_SENT_PREVIEW_CHARS)
+        return "final answer, held back and not sent: " + _preview(answer_text or "", MAX_SENT_PREVIEW_CHARS)
     content = _action_content(action)
     if isinstance(content, TaskQuery) and content.query_type == MessageMetaType.REQUEST:
         return f"question to the requester: {_preview(content.message, MAX_SENT_PREVIEW_CHARS)}"
@@ -261,6 +272,7 @@ def note_summary(details: Mapping[str, Any]) -> str:
     ending = {
         ENDED_BY_WAIT: "then waited",
         ENDED_BY_TOOL_LIMIT: "then paused at its tool-call budget",
+        ENDED_BY_ANSWER_HELD: "then gave a final answer that was held back",
     }.get(str(details.get("ended_by")), "and left the task open")
     return f"Turn called {count} tool(s), sent {len(sent)} message(s), {ending}."
 
@@ -321,6 +333,7 @@ def _render_note(number: int, entry: TaskHistoryEntry) -> str:
 __all__ = [
     "CONTINUATION_NOTE",
     "EARLIER_TURN_WORK_HEADING",
+    "ENDED_BY_ANSWER_HELD",
     "ENDED_BY_OPEN",
     "ENDED_BY_TOOL_LIMIT",
     "ENDED_BY_WAIT",
