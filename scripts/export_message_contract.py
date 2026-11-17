@@ -1377,6 +1377,28 @@ def check_message_sizes(transport: dict[str, Any], schemas: dict[str, dict[str, 
                             "common.schema.json")
 
 
+def check_withdrawal_spares_own_inbox(transport: dict[str, Any]) -> None:
+    """Withdrawal searches no stream that holds its own role's inbox.
+
+    Withdrawal deletes every task.request whose body names the task, and a task's copy to the
+    team services carries the same body, so a search of the stream that holds their inbox
+    (work.team, in UA1_WORK_{team}) would delete the copies too (README, "Withdrawing queued
+    work"). That stream also holds the team's edge deliveries, which are stopped with task.stop.
+    """
+
+    role = transport["withdrawal"]["role"]
+    patterns = [(stream, subject) for stream in transport["withdrawal"]["streams"]
+                for subject in transport["streams"][stream]["subjects"]]
+    for address in transport["classes"]["durable"]["addresses"]:
+        if role not in transport["audience_targets"].get(audience_target(address), []):
+            continue
+        subject = stored_subject(address, "*", transport)
+        for stream, pattern in patterns:
+            if subjects_overlap(pattern, subject):
+                raise ContractError(f"transport.yaml: withdrawal searches {stream}, which holds the {role} role's own inbox "
+                                    f"({address}), where the copies of the tasks it withdraws wait")
+
+
 def check_stream_management(registry: dict[str, Any], transport: dict[str, Any]) -> None:
     """The topology owner and the withdrawal role are host roles; withdrawal deletes only from durable work streams."""
 
@@ -1392,6 +1414,7 @@ def check_stream_management(registry: dict[str, Any], transport: dict[str, Any])
         if not all("{team}" in stream for stream in custody["streams"]):
             raise ContractError(f"transport.yaml: {key} reads and deletes only in per-team streams ({{team}}), so it never "
                                 "reaches another team's messages")
+    check_withdrawal_spares_own_inbox(transport)
     for stream in transport["dead_letter_custody"]["streams"]:
         # A raw copy is found by its subject and deleted by the sequence that read returns; a second
         # copy under the same subject, from a retried publish, would survive that delete.
@@ -1578,9 +1601,77 @@ def check_object_store(registry: dict[str, Any], transport: dict[str, Any], sche
 # Knowledge text over long_text's length travels as a blob (README, "Knowledge"; decision 77).
 KNOWLEDGE_PREFIX = "knowledge."
 LONG_TEXT = ("common.schema.json", "/$defs/long_text")
-# A pattern quantifier that allows any length: *, + or {n,}, outside a character class.
-UNBOUNDED_QUANTIFIER = re.compile(r"(?<!\\)[*+]|\{\d+,\}")
-CHARACTER_CLASS = re.compile(r"\[(?:\\.|[^\]\\])*\]")
+# A bounded repetition: {n}, {n,} or {n,m}.
+REPETITION = re.compile(r"\{(\d+)(,(\d*))?\}")
+
+
+def pattern_longest_match(pattern: str) -> int | None:
+    """The most characters a value matching ``pattern`` can hold, or None when it has no bound.
+
+    Patterns are anchored and portable (``pattern_problem``): literals, escapes, character
+    classes, groups with alternatives, and the quantifiers ?, *, +, {n}, {n,} and {n,m}, each
+    optionally lazy. Every atom matches one character, a group the longest of its
+    alternatives, and a quantifier multiplies by its upper bound, so nested repetitions such
+    as (?:[a-z]{0,200}){0,200} count 40,000.
+    """
+
+    longest, end = _sequence_longest(pattern[1:-1], 0)
+    if end != len(pattern) - 2:
+        raise ContractError(f"pattern {pattern!r}: an unmatched )")
+    return longest
+
+
+def _sequence_longest(body: str, index: int) -> tuple[int | None, int]:
+    """The longest match of the alternatives from ``index`` to the closing ) or the end, and where they stop."""
+
+    best: int | None = 0
+    total: int | None = 0
+    while index < len(body) and body[index] != ")":
+        if body[index] == "|":
+            best = None if best is None or total is None else max(best, total)
+            total, index = 0, index + 1
+            continue
+        atom, index = _atom_longest(body, index)
+        upper, index = _quantifier_upper(body, index)
+        total = None if total is None or atom is None or upper is None else total + atom * upper
+    return (None if best is None or total is None else max(best, total)), index
+
+
+def _atom_longest(body: str, index: int) -> tuple[int | None, int]:
+    """The longest match of the atom at ``index`` (one character, or a group), and where it ends."""
+
+    character = body[index]
+    if character == "\\":
+        return 1, index + 2
+    if character == "[":
+        index += 1
+        while body[index] != "]":
+            index += 2 if body[index] == "\\" else 1
+        return 1, index + 1
+    if character == "(":
+        index += 3 if body.startswith("(?:", index) else 1
+        longest, index = _sequence_longest(body, index)
+        if index >= len(body):
+            raise ContractError(f"pattern body {body!r}: an unclosed (")
+        return longest, index + 1
+    return 1, index + 1
+
+
+def _quantifier_upper(body: str, index: int) -> tuple[int | None, int]:
+    """How many times the quantifier at ``index`` lets its atom repeat at most (1 without one), and where it ends."""
+
+    upper: int | None = 1
+    repetition = REPETITION.match(body, index)
+    if repetition:
+        low, comma, high = repetition.groups()
+        upper = int(low) if comma is None else (int(high) if high else None)
+        index = repetition.end()
+    elif index < len(body) and body[index] in "?*+":
+        upper = 1 if body[index] == "?" else None
+        index += 1
+    else:
+        return upper, index
+    return upper, index + 1 if body.startswith("?", index) else index
 
 
 def unbounded_text(resolver: "ModelWriter", file: str, node: Any, at: str, limit: int,
@@ -1588,8 +1679,9 @@ def unbounded_text(resolver: "ModelWriter", file: str, node: Any, at: str, limit
     """Collect the string fields under a schema that may hold more than ``limit`` characters inline.
 
     A blob reference is the long form and is not walked. A string (a type of "string", or a
-    type list that holds it) is bounded by its maxLength, a const or enum, a format, or a
-    pattern whose every quantifier has an upper bound. The walk follows every keyword that can
+    type list that holds it) is bounded by its maxLength, a const or enum, a format, or, without
+    a maxLength, by the longest match of its pattern (``pattern_longest_match``); a bound above
+    ``limit`` counts as unbounded. The walk follows every keyword that can
     hold a string, including those the contract's schemas do not use yet, so a new schema
     form fails closed rather than passing unexamined.
     """
@@ -1609,8 +1701,9 @@ def unbounded_text(resolver: "ModelWriter", file: str, node: Any, at: str, limit
     text = kind == "string" or (isinstance(kind, list) and "string" in kind)
     if text and "const" not in node and "enum" not in node and "format" not in node:
         length = node.get("maxLength")
-        pattern = CHARACTER_CLASS.sub("", node.get("pattern", "*"))
-        if (length is None and UNBOUNDED_QUANTIFIER.search(pattern)) or (length is not None and length > limit):
+        if length is None and "pattern" in node:
+            length = pattern_longest_match(node["pattern"])
+        if length is None or length > limit:
             found.append(at or "/")
     for key, value in node.items():
         if key in SCHEMA_NAMED_CHILDREN:

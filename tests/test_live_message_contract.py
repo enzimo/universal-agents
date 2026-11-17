@@ -68,6 +68,9 @@ TEAM = "team_example"
 COUNT = DEFAULT_PARTITION_COUNT
 PARTITION_STREAM = TRANSPORT["consumers"]["agent_inbox"]["stream"]
 POOL_STREAM = TRANSPORT["consumers"]["pool"]["stream"]
+# Each team's edge deliveries and team services' inbox, and TEAM's copy of it.
+WORK_STREAM = TRANSPORT["consumers"]["edge"]["stream"]
+WORK = WORK_STREAM.format(team=TEAM)
 RETENTION = {"workqueue": RetentionPolicy.WORK_QUEUE, "limits": RetentionPolicy.LIMITS}
 STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
 DISCARD = {"new": DiscardPolicy.NEW, "old": DiscardPolicy.OLD}
@@ -310,7 +313,7 @@ async def create_topology(admin: Client, agents: Iterable[str] = (), teams: Iter
     js = admin.nc.jetstream()
     agents = list(agents)
     partitions = range(COUNT) if all_partitions else sorted({part(agent) for agent in agents})
-    expected = ([stream_config("UA1_WORK")] + [stream_config(POOL_STREAM, team) for team in teams]
+    expected = ([stream_config(name, team) for team in teams for name in (WORK_STREAM, POOL_STREAM)]
                 + [stream_config(PARTITION_STREAM, TEAM, partition) for partition in partitions])
     for config in expected:
         info = await js.add_stream(config=config)
@@ -337,7 +340,7 @@ async def test_a_host_reads_only_the_queues_of_its_own_partitions(isolated_broke
         worker = await connect(stack, isolated_broker, "worker")
         assert len({part("lead"), part("researcher-2"), part("researcher-3")}) == 3
         await create_topology(admin, ["lead", "researcher-2", "researcher-3"], teams=(TEAM, "team_other"))
-        await admin.nc.jetstream().add_consumer("UA1_WORK", config=consumer_config("team_services"))
+        await admin.nc.jetstream().add_consumer(WORK, config=consumer_config("team_services"))
         worker_js = worker.nc.jetstream()
 
         # A stop waits in the holder's control queue, in the holder's partition.
@@ -378,12 +381,12 @@ async def test_a_host_reads_only_the_queues_of_its_own_partitions(isolated_broke
         await worker.publish_refused(f"$JS.API.CONSUMER.MSG.NEXT.{other_team}.agent~researcher-2")
         await worker.publish_refused(f"$JS.API.CONSUMER.MSG.NEXT.{other_team}.control~researcher-2")
         services = consumer_name("team_services")
-        await worker.publish_refused(f"$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.{services}")
+        await worker.publish_refused(f"$JS.API.CONSUMER.MSG.NEXT.{WORK}.{services}")
         await admin.nc.jetstream().publish(f"ua.v1.{TEAM}.lead-host-1.work.team", b"the team services' work")
-        services_sub = await admin.nc.jetstream().pull_subscribe_bind(stream="UA1_WORK", consumer=services)
+        services_sub = await admin.nc.jetstream().pull_subscribe_bind(stream=WORK, consumer=services)
         services_delivery, = await services_sub.fetch(1, timeout=2)
         await worker.publish_refused(services_delivery.reply, b"+ACK")
-        assert (await admin.nc.jetstream().consumer_info("UA1_WORK", services)).num_ack_pending == 1
+        assert (await admin.nc.jetstream().consumer_info(WORK, services)).num_ack_pending == 1
         await services_delivery.ack_sync(timeout=2)
         assert worker.errors.empty() and lead.errors.empty() and after_move.errors.empty()
 
@@ -470,7 +473,7 @@ async def test_workers_cannot_manage_streams_speak_for_others_or_read_others_tra
             f"$JS.API.CONSUMER.DELETE.{stream}.{control}",
             f"$JS.API.STREAM.INFO.{stream}",
             f"$JS.API.STREAM.MSG.GET.{stream}",
-            "$JS.API.STREAM.INFO.UA1_WORK",
+            f"$JS.API.STREAM.INFO.{WORK}",
             "ua.v1.team_example.lead-host-1.work.agent.researcher-2",
             "ua.v1.team_example.lead-host-1.work.control.researcher-2",
             "ua.v1.team_example.lead-host-1.ctl.agent.researcher-2",
@@ -505,7 +508,7 @@ async def test_the_topology_owner_sets_up_streams_and_the_team_services_withdraw
         # The topology owner's grants are account-wide: every partition stream of every team.
         await create_topology(authority, ["researcher-2"], all_partitions=True)
         owner = authority.nc.jetstream()
-        await owner.update_stream(config=stream_config("UA1_WORK"))
+        await owner.update_stream(config=stream_config(WORK_STREAM))
         assert await owner.delete_stream(consumer_stream("agent_inbox", TEAM, part("lead")))
         await owner.add_stream(config=stream_config(PARTITION_STREAM, TEAM, part("lead")))
         await owner.add_consumer(consumer_stream("pool"), config=consumer_config("pool", pool="researcher"))
@@ -546,9 +549,10 @@ async def test_the_topology_owner_sets_up_streams_and_the_team_services_withdraw
         inbox = consumer_name("agent_inbox", agent="researcher-2")
         assert (await owner.consumer_info(stream, inbox)).num_pending == 1
         assert (await owner.stream_info(consumer_stream("pool"))).state.messages == 1
-        # The shared UA1_WORK, which holds other teams' messages, and another team's partitions stay out of their reach.
-        await services.publish_refused("$JS.API.STREAM.MSG.DELETE.UA1_WORK", json.dumps({"seq": 1}).encode())
-        await services.publish_refused("$JS.API.STREAM.MSG.GET.UA1_WORK", json.dumps({"seq": 1}).encode())
+        # Their own inbox's stream, where withdrawal would delete the tasks' copies, and another team's
+        # partitions stay out of their reach.
+        await services.publish_refused(f"$JS.API.STREAM.MSG.DELETE.{WORK}", json.dumps({"seq": 1}).encode())
+        await services.publish_refused(f"$JS.API.STREAM.MSG.GET.{WORK}", json.dumps({"seq": 1}).encode())
         await services.publish_refused(f"$JS.API.STREAM.MSG.GET.{consumer_stream('agent_inbox', 'team_other', 0)}")
         assert await owner.delete_consumer(consumer_stream("pool"), consumer_name("pool", pool="researcher"))
         assert authority.errors.empty() and services.errors.empty() and lead.errors.empty() and worker.errors.empty()
@@ -711,21 +715,27 @@ async def test_a_host_may_hear_its_partitions_agents_and_answers_each_request_on
 
 @pytest.mark.asyncio
 async def test_ids_that_once_shared_a_consumer_name_get_separate_consumers(isolated_broker) -> None:
-    """team_example/web and team/example_web joined with _ named one consumer."""
+    """team_example/web and team/example_web joined with _ named one consumer.
+
+    Each team's edges now wait in the team's own stream, so the two never meet in one stream;
+    the names still differ, and each consumer keeps its own filter.
+    """
 
     async with AsyncExitStack() as stack:
         admin = await connect(stack, isolated_broker, "admin")
         js = admin.nc.jetstream()
-        await js.add_stream(config=stream_config("UA1_WORK"))
         pairs = [("team_example", "web"), ("team", "example_web")]
         spec = TRANSPORT["consumers"]["edge"]
+        names = {spec["name"].format(team=team, edge=edge) for team, edge in pairs}
+        assert len(names) == len(pairs)
         for team, edge in pairs:
-            await js.add_consumer("UA1_WORK", config=ConsumerConfig(
+            await js.add_stream(config=stream_config(WORK_STREAM, team))
+            await js.add_consumer(WORK_STREAM.format(team=team), config=ConsumerConfig(
                 durable_name=spec["name"].format(team=team, edge=edge),
                 filter_subject=spec["filter"].format(team=team, edge=edge), ack_policy=AckPolicy.EXPLICIT,
             ))
         for team, edge in pairs:
-            info = await js.consumer_info("UA1_WORK", spec["name"].format(team=team, edge=edge))
+            info = await js.consumer_info(WORK_STREAM.format(team=team), spec["name"].format(team=team, edge=edge))
             assert info.config.filter_subject == spec["filter"].format(team=team, edge=edge)
 
 
@@ -868,19 +878,19 @@ async def test_a_receiver_answers_only_the_requesters_inbox(isolated_broker) -> 
             await services.nc.publish(message.reply, b"", headers=refusal)
 
         # Without the rule, the answer to a request deletes a stream the worker may not touch.
-        await js.add_stream(config=stream_config("UA1_WORK"))
+        await js.add_stream(config=stream_config(WORK_STREAM))
         blind = await services.nc.subscribe(f"ua.v1.{TEAM}.*.svc.team", cb=blindly)
         await flush_fully(services.nc)
-        await worker.nc.publish(address, b"{}", reply="$JS.API.STREAM.DELETE.UA1_WORK")
+        await worker.nc.publish(address, b"{}", reply=f"$JS.API.STREAM.DELETE.{WORK}")
         await worker.nc.flush()
 
         async def stream_names() -> list[str]:
             return [info.config.name for info in await js.streams_info()]
 
         deadline = time.monotonic() + 2
-        while "UA1_WORK" in await stream_names() and time.monotonic() < deadline:
+        while WORK in await stream_names() and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
-        assert "UA1_WORK" not in await stream_names()
+        assert WORK not in await stream_names()
         await blind.unsubscribe()
 
         dropped: list[tuple[str, str]] = []
@@ -892,15 +902,15 @@ async def test_a_receiver_answers_only_the_requesters_inbox(isolated_broker) -> 
                 return
             await services.nc.publish(subject, b"", headers=refusal)
 
-        await js.add_stream(config=stream_config("UA1_WORK"))
+        await js.add_stream(config=stream_config(WORK_STREAM))
         await subscribe_ready(services, f"ua.v1.{TEAM}.*.svc.team", answer)
-        for reply in ("$JS.API.STREAM.DELETE.UA1_WORK", f"$KV.UA1_LOCKS.team_services.{TEAM}", "_INBOX.lead-host-1.x"):
+        for reply in (f"$JS.API.STREAM.DELETE.{WORK}", f"$KV.UA1_LOCKS.team_services.{TEAM}", "_INBOX.lead-host-1.x"):
             await worker.nc.publish(address, b"{}", reply=reply)
         await worker.nc.flush()
         answered = await worker.nc.request(address, b"{}", timeout=2)
         assert answered.headers == refusal and answered.data == b""
         assert [subject for subject, _reply in dropped] == [address] * 3
-        assert (await js.stream_info("UA1_WORK")).config.name == "UA1_WORK"
+        assert (await js.stream_info(WORK)).config.name == WORK
         assert services.errors.empty() and worker.errors.empty()
 
 
@@ -1126,7 +1136,7 @@ async def test_a_result_and_its_team_services_copy_both_arrive_and_retries_of_ea
         lead = await connect(stack, isolated_broker, "lead")
         services = await connect(stack, isolated_broker, "services")
         await create_topology(admin, ["lead"])
-        await admin.nc.jetstream().add_consumer("UA1_WORK", config=consumer_config("team_services"))
+        await admin.nc.jetstream().add_consumer(WORK, config=consumer_config("team_services"))
         original = fixtures.example_frame("task.result", "completed")
         copy_frame = fixtures.example_frame("task.result", "copy-to-team-services")
 
@@ -1138,13 +1148,13 @@ async def test_a_result_and_its_team_services_copy_both_arrive_and_retries_of_ea
         assert not any(ack.duplicate for ack in sent) and all(ack.duplicate for ack in retries)
         for client, stream, consumer, frame in (
                 (lead, agent_stream("lead"), consumer_name("agent_inbox", agent="lead"), original),
-                (services, "UA1_WORK", consumer_name("team_services"), copy_frame)):
+                (services, WORK, consumer_name("team_services"), copy_frame)):
             inbox = await client.nc.jetstream().pull_subscribe_bind(stream=stream, consumer=consumer)
             received, = await inbox.fetch(1, timeout=2)
             verified = fixtures.verify(received.data, frame, arrived(frame, received))
             assert verified.frame.audience.target == frame["audience"]["target"]
             await received.ack_sync(timeout=2)
-        for stream in (agent_stream("lead"), "UA1_WORK"):
+        for stream in (agent_stream("lead"), WORK):
             assert (await admin.nc.jetstream().stream_info(stream)).state.messages == 0
         assert worker.errors.empty() and lead.errors.empty() and services.errors.empty()
 
@@ -1171,7 +1181,7 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
         await create_topology(admin, ["researcher-2"])
         pools = consumer_stream("pool")
         await js.add_consumer(pools, config=consumer_config("pool", pool="researcher"))
-        await js.add_consumer("UA1_WORK", config=consumer_config("edge", edge="web"))
+        await js.add_consumer(WORK, config=consumer_config("edge", edge="web"))
         run = fixtures.example_frame("task.request", "scheduled-run")
         result = fixtures.example_frame("task.result", "scheduled-run-to-person")
         await scheduler.nc.jetstream().publish(run["subject"], json.dumps(run).encode(), headers=headers(run))
@@ -1189,8 +1199,8 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
         claim = fixtures.example_frame("task.claimed", "scheduled-run-copy-to-team-services")
         assert claim["body"]["task_id"] == task.body.task_id
         await worker.nc.jetstream().publish(claim["subject"], json.dumps(claim).encode(), headers=headers(claim))
-        await js.add_consumer("UA1_WORK", config=consumer_config("team_services"))
-        team_inbox = await services.nc.jetstream().pull_subscribe_bind(stream="UA1_WORK",
+        await js.add_consumer(WORK, config=consumer_config("team_services"))
+        team_inbox = await services.nc.jetstream().pull_subscribe_bind(stream=WORK,
                                                                        consumer=consumer_name("team_services"))
         delivered_claim, = await team_inbox.fetch(1, timeout=2)
         claimed = fixtures.verify(delivered_claim.data, claim, arrived(claim, delivered_claim))
@@ -1208,7 +1218,7 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
         reply_to = task.body.work.reply_to
         assert (reply_to.target, reply_to.id) == ("edge", "web") and result["audience"]["id"] == reply_to.id
         await worker.nc.jetstream().publish(result["subject"], json.dumps(result).encode(), headers=headers(result))
-        inbox = await gateway.nc.jetstream().pull_subscribe_bind(stream="UA1_WORK", consumer=consumer_name("edge", edge="web"))
+        inbox = await gateway.nc.jetstream().pull_subscribe_bind(stream=WORK, consumer=consumer_name("edge", edge="web"))
         delivered, = await inbox.fetch(1, timeout=2)
         answer = fixtures.verify(delivered.data, result, arrived(result, delivered))
         assert answer.body.delivery_ref == task.body.work.delivery_ref

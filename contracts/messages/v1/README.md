@@ -731,8 +731,9 @@ without a list runs no tools.
 Work, requests and events use `ua.v1.<audience team>.<sender slot>.<address>`. The third
 token is the destination team. The sender slot is the issuer's runtime, or
 `x-<issuer installation>` for a frame from another installation; runtime ids starting with
-`x-` or `_` are reserved. Team ids and agent types are at most 24 characters and agent
-ids at most 32, which keeps a host's credential small ("Credential size"). The address
+`x-` or `_` are reserved. Team ids and agent types are at most 24 characters, which keeps
+a host's credential small, since it names them in the grants of its partitions and pools
+("Credential size"); agent ids are at most 32 (decision 98), and no credential names them. The address
 decides the audience target: `{agent}`, `{pool}` and `{edge}` addresses deliver to that
 target with the audience id in the address, `work.team`, `svc.team` and `svc.scheduler` to
 `team_services`, and `evt.*` events to the whole `team`. For the last two the audience id is
@@ -835,8 +836,8 @@ requests and queued work only for the agents of its own partitions and the pools
 A broken-into host therefore cannot read, take or acknowledge work queued for agents on
 other hosts, or hear their control requests, and it cannot sign as them either, since every
 frame names its agent's session ("Who sent it"). Edge deliveries and the team services'
-inbox stay in `UA1_WORK`, read through grants on their exact consumers, so agent hosts reach
-neither.
+inbox stay in the team's `UA1_WORK_<team>`, read through grants on their exact consumers, so
+agent hosts reach neither.
 
 The worker pool controller (`custom_agents.worker_pool_controller`) runs with the team lead
 and starts workers from how much work waits for each pool, so the lead host also reads the
@@ -1038,7 +1039,8 @@ keys. The live conformance tests prove both allowed and refused operations.
 the installation authority. It already decides which hosts serve which teams, partitions
 and pools, since it issues their certificates and credentials, so it knows when a team,
 agent or pool appears or leaves, and it runs no model. It creates a team's streams with the
-team (a stream per partition, its pool stream and its dead-letter stream), each agent's two
+team (a stream per partition, its pool stream, its stream for edge deliveries and the team
+services' inbox, and its dead-letter stream), each agent's two
 consumers in its partition's stream when the agent is placed, each pool's consumer with the
 pool, and the key-value buckets and the object store. Its generated grants name every stream
 of the account rather than a line per team and partition, which would grow with both: it
@@ -1073,8 +1075,10 @@ for this one rare path.
 
 These streams hold only their team's messages, so neither grant reaches another team, and
 the generator allows withdrawal only from per-team streams. Work queued for an outside
-agent or a gateway route waits in the shared `UA1_WORK`, where they have neither grant:
-they stop it with `task.stop` to that edge instead.
+agent or a gateway route waits in the team's `UA1_WORK_<team>`, beside the team services'
+own inbox, where the tasks' copies wait: withdrawal there would delete those copies with
+the task, so the team services have no withdrawal grant on that stream (the generator
+refuses one) and stop edge work with `task.stop` to that edge instead.
 
 A delete can come too late. A host may already have pulled the message without
 acknowledging it: NATS still deletes it, and the host starts the task. A holder claims a
@@ -1098,9 +1102,10 @@ reads the limits from the instance's settings when it creates or updates a strea
 `transport.queues.max_bytes` holds one limit per size kind, and each stream names its kind
 (`size_kind` in `transport.yaml`: `partition`, `pool`, `work` or `dead_letter`). A kind's
 limit applies to each stream of that kind: each of every team's `UA1_PART_{team}~{partition}`
-streams, and every team's `UA1_POOL_WORK_{team}` and `UA1_DLQ_{team}`, has the limit of its
-kind (so a team's partitions together hold the partition count times the `partition` limit), and `UA1_WORK`, which every team shares, has its
-limit once for all teams. These settings enter the `config.yaml` and
+streams, and every team's `UA1_POOL_WORK_{team}`, `UA1_WORK_{team}` and `UA1_DLQ_{team}`, has
+the limit of its kind (so a team's partitions together hold the partition count times the
+`partition` limit). No stream holds two teams' work, so one team whose hosts, edges or team
+services stop reading fills only its own streams and never refuses another team's messages. These settings enter the `config.yaml` and
 `instance_config.yaml` schemas, with their measured defaults, in the step whose code first
 reads them; `transport.yaml` names them so that step builds on a fixed contract.
 
@@ -1110,7 +1115,7 @@ reads them; `transport.yaml` names them so that step builds on a fixed contract.
   storage limit, when it creates the stream, not as the stream fills. A stream whose limit
   does not fit what is left is refused with JetStream error code 10047 ("insufficient
   storage resources"). The installation therefore sets aside the limits of every team's
-  streams, plus `UA1_WORK`'s once: teams times each team's streams' limits. The account
+  streams: teams times each team's streams' limits. The account
   information reports what is set aside (`reserved_storage`) and the account's limit
   (`limits.max_storage`, -1 when only the server's own limit applies). Before it creates
   or enlarges any stream, the authority checks that the new limits fit the account's
@@ -1156,7 +1161,7 @@ yet, without anyone being told:
   `person.notify`. Open for the step that builds the senders' outboxes: what the scheduler
   records for a run whose task expired unsent, and what a task's holder does when a
   result, question or progress report it sends up expires unsent (a result's copy to the
-  team services travels through `UA1_WORK`, another stream).
+  team services travels through `UA1_WORK_<team>`, another stream).
 - **Control messages share their stream's room.** An agent's control queue is stored in
   the same stream as its inbox ("An agent's two queues"), so a stream that new tasks have
   filled also refuses stops, steers, custody confirmations, access decisions and results
@@ -1268,7 +1273,7 @@ cannot read the requester's inbox; a kind's `copy_to` addresses get a second fra
   of a person");
 - its own `message_id`, and its own key: the kind's parts plus the audience target. A
   stream drops a repeated `Nats-Msg-Id` on any of its subjects within its duplicate
-  window, and an edge delivery and its copy share `UA1_WORK`, so a copy with its
+  window, and an edge delivery and its copy share `UA1_WORK_<team>`, so a copy with its
   original's key would be lost;
 - saved before publishing and retried unchanged, like any durable frame;
 - published before the frame for the agent, pool or edge, which the sender publishes only
@@ -1367,7 +1372,7 @@ keys (`tests/nats_operator_support.py`) and uses public fixture signing keys for
     stream by its task id and withdrawing it;
   - a full-size frame stored with the largest headers senders may set;
   - refusals of: another host reading or deleting in the team's stream, and the team
-    services deleting in the shared `UA1_WORK`; an outside agent's adapter publishing into a
+    services deleting in their own inbox's stream, `UA1_WORK_<team>`; an outside agent's adapter publishing into a
     worker pool; fetches and acknowledgements on another host's agent consumer, another
     team's stream or the team services' consumer; consumer creation and deletion; stream reads; publishing under
     another runtime's id, dead-letter copies included; subscribing to another runtime's
@@ -2052,8 +2057,10 @@ the text. Senders use blobs when a field exceeds the 32,768-character inline
 limit or when all the inline content together would exceed the frame budget.
 Every Knowledge text that may be longer, a page's content, a note, a revision or a
 proposal, is `text_content`, so it has a blob form; every other text field of a
-Knowledge request or reply is bounded at or below 32,768 characters. The generator
-checks both (`check_knowledge_text`). Web Chat's own limit on what a person types is
+Knowledge request or reply is bounded at or below 32,768 characters, by its `maxLength` or,
+without one, by the longest value its pattern can match, each repetition's upper bound
+counted (so `{0,40000}`, or `{0,200}` inside a group repeated `{0,200}`, is over the limit).
+The generator checks both (`check_knowledge_text`). Web Chat's own limit on what a person types is
 lifted in the step that moves Web Chat to protocol 1, not by the contract.
 Each returned note has its server-assigned id, content, creation time and editor.
 Resolving a note needs only its `note_id` and `merged`, true after incorporating

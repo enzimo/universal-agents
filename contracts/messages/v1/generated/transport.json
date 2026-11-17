@@ -69,7 +69,7 @@
       "streams": [
         "UA1_PART_{team}~{partition}",
         "UA1_POOL_WORK_{team}",
-        "UA1_WORK"
+        "UA1_WORK_{team}"
       ]
     },
     "event": {
@@ -130,7 +130,7 @@
       "max_deliveries": 20,
       "mode": "pull",
       "name": "edge~{team}~{edge}",
-      "stream": "UA1_WORK"
+      "stream": "UA1_WORK_{team}"
     },
     "pool": {
       "ack": "explicit",
@@ -148,7 +148,7 @@
       "max_deliveries": 20,
       "mode": "pull",
       "name": "team~{team}",
-      "stream": "UA1_WORK"
+      "stream": "UA1_WORK_{team}"
     }
   },
   "dead_letter_custody": {
@@ -481,18 +481,18 @@
         "ua.v1.{team}.*.work.pool.*"
       ]
     },
-    "UA1_WORK": {
+    "UA1_WORK_{team}": {
       "discard": "new",
       "duplicate_window_seconds": 120,
       "max_age_seconds": 604860,
-      "max_consumers": 4096,
+      "max_consumers": 1024,
       "max_message_bytes": 263168,
       "retention": "workqueue",
       "size_kind": "work",
       "storage": "file",
       "subjects": [
-        "ua.v1.*.*.work.edge.*",
-        "ua.v1.*.*.work.team"
+        "ua.v1.{team}.*.work.edge.*",
+        "ua.v1.{team}.*.work.team"
       ]
     }
   },

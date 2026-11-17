@@ -105,7 +105,7 @@ async def serving(receiver_host: LiveHost, handler: Any, **options: Any) -> Any:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reply", [
-    "$JS.API.STREAM.DELETE.UA1_WORK",
+    "$JS.API.STREAM.DELETE.UA1_WORK_team_example",
     "$KV.UA1_CERTS.revocations.install_example",
     "_INBOX.lead-host-1.r1",  # another host's inbox
     "_INBOX.worker-host-1",  # no token after the slot

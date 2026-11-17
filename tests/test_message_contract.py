@@ -380,9 +380,9 @@ def test_outcomes_that_ask_for_a_retry_are_not_stored() -> None:
 @pytest.mark.parametrize(
     ("change", "problem"),
     [
-        (lambda t: t["streams"]["UA1_WORK"].update(max_age_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
+        (lambda t: t["streams"]["UA1_WORK_{team}"].update(max_age_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
          "must keep messages"),
-        (lambda t: t["streams"]["UA1_WORK"].pop("max_age_seconds"), "must keep messages"),
+        (lambda t: t["streams"]["UA1_WORK_{team}"].pop("max_age_seconds"), "must keep messages"),
         (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].pop("max_age_seconds"), "must keep messages"),
         (lambda t: t["classes"]["durable"].update(streams=["UA1_MISSING"]), "unknown stream"),
         (lambda t: t.update(replay_ledger_retention_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
@@ -400,7 +400,7 @@ def test_transport_settings_that_would_lose_or_replay_messages_are_refused(chang
     ("change", "problem"),
     [
         # NATS refuses a stream whose subjects overlap another's.
-        (lambda t: t["streams"]["UA1_WORK"].update(subjects=["ua.v1.*.*.work.>"]), "overlap"),
+        (lambda t: t["streams"]["UA1_WORK_{team}"].update(subjects=["ua.v1.{team}.*.work.>"]), "overlap"),
         # Agent work left out of every stream would never be stored.
         (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].update(subjects=["ua.v1.{team}.*.work.control.*.{partition}"]),
          "work.agent.{agent} is stored in exactly one"),
@@ -412,7 +412,7 @@ def test_transport_settings_that_would_lose_or_replay_messages_are_refused(chang
         (lambda t: t["streams"].update({"UA1_PART_{partition}_{team}": t["streams"]["UA1_PART_{team}~{partition}"]}),
          "{partition} as {team}~{partition}"),
         # Requests are answered at once; a stream holding them would keep every request.
-        (lambda t: t["streams"]["UA1_WORK"]["subjects"].append("ua.v1.*.*.svc.team"), "stores request_reply traffic"),
+        (lambda t: t["streams"]["UA1_WORK_{team}"]["subjects"].append("ua.v1.{team}.*.svc.team"), "stores request_reply traffic"),
         # A team's stream holds only that team's work.
         (lambda t: t["streams"]["UA1_POOL_WORK_{team}"]["subjects"].append("ua.v1.*.*.work.edge.extra"),
          "starts ua.v1.{team}."),
@@ -443,10 +443,10 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
     assert (queues["max_bytes_setting"], queues["warn_at_percent_setting"], queues["warn_at_percent_default"]) == (
         "transport.queues.max_bytes", "transport.queues.warn_at_percent", 80)
     queued = {stream for spec in TRANSPORT["classes"].values() for stream in spec.get("streams", [])}
-    assert queued == {"UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_WORK", "UA1_DLQ_{team}"}
+    assert queued == {"UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_WORK_{team}", "UA1_DLQ_{team}"}
     assert {name: (TRANSPORT["streams"][name]["size_kind"], TRANSPORT["streams"][name]["discard"]) for name in queued} == {
         "UA1_PART_{team}~{partition}": ("partition", "new"), "UA1_POOL_WORK_{team}": ("pool", "new"),
-        "UA1_WORK": ("work", "new"), "UA1_DLQ_{team}": ("dead_letter", "new")}
+        "UA1_WORK_{team}": ("work", "new"), "UA1_DLQ_{team}": ("dead_letter", "new")}
     readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
     for text in ("**Stream sizes.**", "`transport.queues.max_bytes`", "`transport.queues.warn_at_percent`",
                  "(80 by default)", "**When the stream is full.**"):
@@ -458,9 +458,9 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
     [
         # Dropping the oldest messages would lose unread set-aside copies and notices.
         (lambda t: t["streams"]["UA1_DLQ_{team}"].update(discard="old"), "UA1_DLQ_{team} refuses new messages"),
-        (lambda t: t["streams"]["UA1_WORK"].pop("discard"), "UA1_WORK refuses new messages"),
+        (lambda t: t["streams"]["UA1_WORK_{team}"].pop("discard"), "UA1_WORK_{team} refuses new messages"),
         (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].pop("size_kind"), "names its byte limit's size kind"),
-        (lambda t: t["streams"]["UA1_WORK"].update(size_kind="agent_work"), "names its byte limit's size kind"),
+        (lambda t: t["streams"]["UA1_WORK_{team}"].update(size_kind="agent_work"), "names its byte limit's size kind"),
         (lambda t: t["queues"]["size_kinds"].append("agent_work"), "unused ['agent_work']"),
         (lambda t: t["queues"]["size_kinds"].append("work"), "distinct snake_case"),
         (lambda t: t["queues"].update(max_bytes_setting="queues.max_bytes"), "names the settings"),
@@ -527,7 +527,7 @@ def test_streams_store_a_full_size_frame_with_the_largest_headers_senders_may_se
     assert "is 891 bytes" in readme and "is 1,024" in readme
     for change, problem in (
             (lambda t: t["limits"].update(max_header_bytes=890), "max_header_bytes holds the largest header block"),
-            (lambda t: t["streams"]["UA1_WORK"].update(max_message_bytes=262144), "UA1_WORK's max_message_bytes"),
+            (lambda t: t["streams"]["UA1_WORK_{team}"].update(max_message_bytes=262144), "UA1_WORK_{team}'s max_message_bytes"),
             (lambda t: t["limits"].update(nats_max_payload_bytes=262144), "fit nats_max_payload_bytes")):
         transport = copy.deepcopy(TRANSPORT)
         change(transport)
@@ -945,7 +945,7 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
                     "$JS.API.STREAM.MSG.DELETE.*"} <= set(publish)
             assert not {subject for subject in publish if "{team}" in subject and subject.startswith("$JS.")}
         elif role == "team_services":
-            # Their own team's streams only: no grant reaches the shared UA1_WORK or another team's dead letters.
+            # Their own team's streams only: no grant reaches another team's streams, or their own inbox's stream.
             streams = ("UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_DLQ_{team}")
             assert deletes == creates == {f"$JS.API.STREAM.MSG.DELETE.{stream}" for stream in streams}
             assert reads == {f"$JS.API.STREAM.MSG.GET.{stream}" for stream in streams}
@@ -953,7 +953,9 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
             assert not creates and not reads, role
     for change, problem in ((lambda t: t.update(topology_owner="nobody"), "name host roles"),
                             (lambda t: t["withdrawal"].update(streams=["UA1_DLQ_{team}"]), "only from the durable class's streams"),
-                            (lambda t: t["withdrawal"].update(streams=["UA1_WORK"]), "only in per-team streams"),
+                            (lambda t: t["withdrawal"].update(streams=["UA1_WORK_{team}"]), "holds the team_services role's own inbox"),
+                            (lambda t: (t["classes"]["durable"]["streams"].append("UA1_SHARED"),
+                                        t["withdrawal"].update(streams=["UA1_SHARED"])), "only in per-team streams"),
                             (lambda t: t.pop("pool_controller"), "names a host role that serves pools"),
                             (lambda t: t["pool_controller"].update(role="team_services"), "names a host role that serves pools"),
                             (lambda t: t["pool_controller"].update(stream="UA1_PART_{team}~{partition}"),
@@ -1583,7 +1585,7 @@ def test_a_receiver_answers_on_the_requesters_own_inbox(request_subject: str, re
 @pytest.mark.parametrize(("request_subject", "reply_subject"), [
     # Where the answer would be written with the receiver's rights.
     ("ua.v1.team_example.worker-host-1.svc.team", "$JS.API.STREAM.DELETE.KV_UA1_CERTS"),
-    ("ua.v1._install.new-host-1.svc", "$JS.API.STREAM.DELETE.UA1_WORK"),
+    ("ua.v1._install.new-host-1.svc", "$JS.API.STREAM.DELETE.UA1_WORK_team_example"),
     ("ua.v1.team_example.worker-host-1.svc.team", "$KV.UA1_LOCKS.team_services.team_example"),
     ("ua.v1.team_example.gateway-1.ctl.agent.lead", "ua.v1.team_example.gateway-1.work.agent.lead"),
     # Another runtime's inbox, or an inbox prefix that only starts like the requester's.
@@ -1715,7 +1717,7 @@ def test_a_buckets_stream_refuses_rollups_and_serves_direct_reads() -> None:
     (lambda t: t["key_value"]["UA1_AGENTS"]["writers"].update(worker_host=[">"]), "starts with a fixed word"),
     (lambda t: t["key_value"]["UA1_HOSTS"]["writers"].update(worker_host=["*"]), "starts with a fixed word"),
     (lambda t: t["key_value"]["UA1_CERTS"]["writers"].update(edge_adapter=["host.>.x"]), "ends with >"),
-    (lambda t: t["dead_letter_custody"].update(streams=["UA1_WORK"]), "dead_letter class's streams"),
+    (lambda t: t["dead_letter_custody"].update(streams=["UA1_WORK_{team}"]), "dead_letter class's streams"),
     (lambda t: t["streams"]["UA1_DLQ_{team}"].pop("max_msgs_per_subject"), "one message per subject"),
 ])
 def test_the_generator_refuses_buckets_and_custody_it_cannot_grant(change, problem: str) -> None:
@@ -2877,6 +2879,10 @@ def test_knowledge_text_that_may_be_long_has_a_blob_form_and_examples_show_both(
         ("summary", {"type": "string"}),
         ("summary", {"type": "string", "pattern": "^[a-z ]+$"}),
         ("summary", {"type": "string", "pattern": "^[a-z]{1,}$"}),
+        # A pattern bounded above long_text's length, alone or by nested repetitions.
+        ("summary", {"type": "string", "pattern": "^[a-z]{0,40000}$"}),
+        ("summary", {"type": "string", "pattern": "^(?:[a-z]{0,200}){0,200}$"}),
+        ("summary", {"type": "string", "pattern": "^(?:ab|c*)$"}),
         # Schema forms the contract's Knowledge schemas do not use yet are walked too.
         ("summary", {"type": ["string", "null"]}),
         ("summary", {"anyOf": [{"type": "string"}, {"type": "null"}]}),
@@ -2899,6 +2905,25 @@ def test_bounded_knowledge_text_patterns_pass() -> None:
     # A + inside a character class is a literal, and {1,80} has an upper bound.
     schemas[file]["properties"]["summary"] = {"type": "string", "pattern": "^[a-z+*]{1,80}$"}
     EXPORT.check_knowledge_text(REGISTRY, schemas)
+    # Exactly long_text's length, by nested repetitions; a maxLength under the limit decides over a pattern.
+    schemas[file]["properties"]["summary"] = {"type": "string", "pattern": "^(?:[a-z]{0,128}){0,256}$"}
+    EXPORT.check_knowledge_text(REGISTRY, schemas)
+    schemas[file]["properties"]["summary"] = {"type": "string", "maxLength": 80, "pattern": "^[a-z]+$"}
+    EXPORT.check_knowledge_text(REGISTRY, schemas)
+
+
+@pytest.mark.parametrize(("pattern", "longest"), [
+    ("^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$", 24),
+    ("^a(?:b|cd{2,5})?e$", 8),
+    ("^x{3}?$", 3),
+    ("^\\{[a-z]{2}\\}$", 4),
+    ("^[a-z+*]{1,80}$", 80),
+    ("^(?:[a-z]{0,200}){0,200}$", 40000),
+    ("^[a-z]{1,}$", None),
+    ("^(?:ab|c+)$", None),
+])
+def test_a_patterns_longest_match_counts_every_repetition(pattern: str, longest: int | None) -> None:
+    assert EXPORT.pattern_longest_match(pattern) == longest
 
 
 def renewed_lead_certificate(*, issued_at: str = "2026-10-22T04:30:00.000Z", epoch: int = 4,

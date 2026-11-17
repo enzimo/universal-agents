@@ -116,8 +116,8 @@ nats_account:
 # limits from the instance's settings named here (config.yaml and instance_config.yaml); their
 # schema entries and default values come with the code that first reads them (13C.10 step 2),
 # so the contract names the settings, not numbers. Each stream names its entry in the byte
-# limits as its size_kind, and a kind's limit applies to each stream of that kind (UA1_WORK's
-# once for all teams). NATS sets aside every stream's whole limit from the server's and the
+# limits as its size_kind, and a kind's limit applies to each stream of that kind, each
+# team's apart. NATS sets aside every stream's whole limit from the server's and the
 # account's storage when it creates the stream (error 10047 when it does not fit), so the
 # authority checks the limits fit before it creates any. The size check's role (size_check
 # below) warns administrators once a stream holds more than warn_at_percent of its limit, with
@@ -136,7 +136,7 @@ classes:
   durable:
     description: at least once; the sender records before publishing, the receiver admits durably before acknowledging
     between_installations: true   # the only class another installation may send: NATS forgets reply routes between accounts
-    streams: ["UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", UA1_WORK]
+    streams: ["UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_WORK_{team}"]
     addresses:
       - work.agent.{agent}
       - work.control.{agent}
@@ -208,14 +208,16 @@ streams:
     max_message_bytes: 263168   # as UA1_PART_{team}~{partition}
     size_kind: pool
     discard: new                # as UA1_PART_{team}~{partition}
-  UA1_WORK:
-    # Edge deliveries and the team services' inbox, read through exact consumer grants.
-    subjects: [ua.v1.*.*.work.edge.*, ua.v1.*.*.work.team]
+  UA1_WORK_{team}:
+    # One team's edge deliveries and its team services' inbox, read through exact consumer
+    # grants. One stream per team, so a team whose edge or team services stop reading fills
+    # only its own stream's byte limit, never another team's.
+    subjects: ["ua.v1.{team}.*.work.edge.*", "ua.v1.{team}.*.work.team"]
     retention: workqueue
     storage: file
     max_age_seconds: 604860     # as UA1_PART_{team}~{partition}
     duplicate_window_seconds: 120
-    max_consumers: 4096         # NATS 2.15 defaults to 1,000 per stream
+    max_consumers: 1024         # one per edge of the team, and the team services' inbox
     max_message_bytes: 263168   # as UA1_PART_{team}~{partition}
     size_kind: work
     discard: new                # as UA1_PART_{team}~{partition}
@@ -268,7 +270,7 @@ consumers:
     ack_wait_seconds: 60
     max_deliveries: 20
   team_services:
-    stream: UA1_WORK
+    stream: UA1_WORK_{team}
     name: team~{team}
     filter: ua.v1.{team}.*.work.team
     mode: pull
@@ -276,7 +278,7 @@ consumers:
     ack_wait_seconds: 60
     max_deliveries: 20
   edge:
-    stream: UA1_WORK
+    stream: UA1_WORK_{team}
     name: edge~{team}~{edge}
     filter: ua.v1.{team}.*.work.edge.{edge}
     mode: pull
