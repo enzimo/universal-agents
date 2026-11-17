@@ -4815,11 +4815,10 @@ the desktop app never offers an older version.
   beside a running team (`--files-gone`) or at a re-run after the marker was
   deleted may include its copies, all written before that marker; once the
   gateway has run, the copies of messages it had taken in are gone, and the
-  rest (messages it marked `outcome_unknown`, uploads whose message never
-  came) are never read again, because each registration gets a new epoch.
-  An earlier version of this warning said 0.10 never opens these files;
-  that was wrong for messages taken in but not handled (review of PR #150).
-  If the folder was at another path under 0.9.13, its records name that
+  rest are never read again: a message it marked `outcome_unknown` because
+  its start recovers only `accepted` messages, and an upload whose message
+  never came because each registration gets a new epoch, so the upload no
+  longer resolves. If the folder was at another path under 0.9.13, its records name that
   path and every file here looks unrecorded, so the warning says not to
   delete them then; putting the folder back is not enough, because the step
   reads only `upload_dir` (resolved through links), so it says to move or

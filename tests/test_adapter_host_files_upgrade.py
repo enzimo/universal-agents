@@ -684,6 +684,42 @@ def test_files_whose_records_were_deleted_while_the_step_waited_are_counted(inst
     assert warning.endswith(f"folder={instance.transfer} files_without_records=1")
 
 
+def test_a_database_error_reading_the_adapter_hosts_records_leaves_the_count_unset(
+    instance: _Instance, monkeypatch, caplog
+) -> None:
+    """A2: the count only reports, so a database error leaves it unset and the step still finishes (C07)."""
+
+    _write(instance.transfer / "adapter_upload_stray", STRAY)
+
+    def locked(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(upgrade_module, "create_adapter_host_repository", locked)
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.finished and result.counts.moved == 1 and result.counts.files_without_records is None
+    assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())["files_without_records"] is None
+    (uncounted,) = _events(caplog, "adapter_host_files_without_records_uncounted")
+    assert uncounted.endswith(f"folder={instance.transfer} reason=RuntimeError: database is locked")
+    assert not _events(caplog, "adapter_host_files_without_records")
+
+
+def test_the_adapter_hosts_records_are_not_opened_when_no_file_is_left_to_check(instance: _Instance) -> None:
+    """Opening the adapter host's records creates its tables, so it waits for a file no record names (C07)."""
+
+    if instance.gateway_settings.backend == "postgres":
+        query = "SELECT count(*) FROM information_schema.tables WHERE table_name = 'gateway_adapter_inbox' AND table_schema = current_schema()"
+    else:
+        query = "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'gateway_adapter_inbox'"
+
+    result = instance.run()
+
+    assert result.finished and result.counts.files_without_records == 0
+    with instance.gateway_connection() as conn:
+        assert conn.execute(query).fetchone()[0] == 0, "the adapter host's tables are not created"
+
+
 def test_a_link_in_the_transfer_folder_is_not_followed_or_counted(instance: _Instance, monkeypatch, tmp_path) -> None:
     """A2: links, and folders, named as 0.9.13 named files are neither followed nor counted."""
 
