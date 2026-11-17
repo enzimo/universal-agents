@@ -281,6 +281,10 @@ def test_the_schema_subset_refuses_what_other_implementations_read_differently(s
     "^.+$", "^[[:alpha:]]$", "^a++$", "^\\Aa$", "^a\\b$", "^\\p{L}$", "^[a$", "^a$b$",
     # Braces that are not {n}, {n,} or {n,m}: Python reads {,n} as 0 to n, ECMAScript as text.
     "^[a-z]{,40000}$", "^a{}$", "^a{x}$", "^a{2,1}$", "^a}$", "^a{2}+$", "^{$",
+    # A quantifier directly after another: Python refuses it, Pydantic's engine repeats the repetition.
+    "^[a-z]{100}{1000}$", "^a{2}{3}$", "^a?{2}$", "^a**$", "^a+?{3}$", "^a{1,3}??$",
+    # A quantifier with nothing to repeat.
+    "^*a$", "^(?:a|+)$", "^(?:*)$",
 ])
 def test_patterns_that_engines_read_differently_are_refused(pattern: str) -> None:
     assert EXPORT.pattern_problem(pattern), pattern
@@ -288,7 +292,7 @@ def test_patterns_that_engines_read_differently_are_refused(pattern: str) -> Non
 
 @pytest.mark.parametrize("pattern", [
     "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$", "^1\\.(0|[1-9][0-9]{0,3})-pre$", "^(?:a|b)$", "^[a$^.-]+$", "^a{1,3}?$",
-    "^\\{[a-z{}]{2}\\}$", "^a{2}$", "^a{2,}$", "^a{2,2}$",
+    "^\\{[a-z{}]{2}\\}$", "^a{2}$", "^a{2,}$", "^a{2,2}$", "^a+?$", "^(?:ab)*?b$", "^[*+?]{2}$", "^a\\*+$",
 ])
 def test_portable_patterns_are_allowed(pattern: str) -> None:
     assert EXPORT.pattern_problem(pattern) is None
@@ -834,7 +838,8 @@ def test_a_runtime_that_owns_or_withdraws_partitions_serves_one_team() -> None:
 
     default = TRANSPORT["partitions"]["default_count"]
     readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
-    assert TRANSPORT["single_team_roles"] == list(kinds.SINGLE_TEAM_ROLES) == ["lead_host", "worker_host", "team_services"]
+    assert TRANSPORT["single_team_roles"] == list(kinds.SINGLE_TEAM_ROLES) == ["lead_host", "worker_host", "team_services",
+                                                                               "edge_adapter", "scheduler"]
     partitioned = {role for role in REGISTRY["host_roles"]
                    if any("{partition}" in template for template in role_templates(role))}
     assert partitioned <= set(kinds.SINGLE_TEAM_ROLES)
@@ -843,12 +848,44 @@ def test_a_runtime_that_owns_or_withdraws_partitions_serves_one_team() -> None:
     for gone in ("partition-team pairs", "each further team", "serves two teams"):
         assert gone not in readme
     for change, problem in ((lambda t: t["single_team_roles"].remove("team_services"), "missing ['team_services']"),
-                            (lambda t: t["single_team_roles"].append("installation_authority"), "whole installation"),
+                            (lambda t: t["single_team_roles"].remove("scheduler"), "missing ['scheduler']"),
+                            (lambda t: t["single_team_roles"].append("installation_authority"),
+                             "installation-wide ['installation_authority']"),
+                            (lambda t: t["single_team_roles"].append("gateway"), "installation-wide ['gateway']"),
                             (lambda t: t["single_team_roles"].append("nobody"), "distinct host roles")):
         transport = copy.deepcopy(EXPORT.load_yaml("transport.yaml"))
         change(transport)
         with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
             EXPORT.check_single_team_roles(REGISTRY, transport)
+
+
+def gateway_credential_json(teams: int, routes: int) -> int:
+    """Permission JSON of a gateway that serves ``teams`` teams with ``routes`` routes (edges) each."""
+
+    templates = role_templates("gateway")
+    fixed = permission_bytes([template for template in templates if "{team}" not in template and "{edge}" not in template])
+    return fixed + teams * gateway_growth("team") + teams * routes * gateway_growth("edge")
+
+
+def gateway_growth(placeholder: str) -> int:
+    """Bytes of permission JSON one more team (its subjects that name no edge) or one more route adds to a gateway."""
+
+    return permission_bytes([template for template in role_templates("gateway") if "{" + placeholder + "}" in template
+                             and (placeholder == "edge" or "{edge}" not in template)])
+
+
+@pytest.mark.parametrize("routes", [1, 3])
+def test_the_installation_wide_gateways_credential_bounds_its_teams(routes: int) -> None:
+    """README, "Credential size" (C42): the gateway's credential grows with its teams and their routes."""
+
+    readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
+    assert f"{gateway_growth('team'):,} bytes of permission JSON for each team and {gateway_growth('edge')} more" in readme
+    most = max(teams for teams in range(1, 65) if fits(gateway_credential_json(teams, routes)))
+    assert not fits(gateway_credential_json(most + 1, routes))
+    stated = {1: f"At most {most} teams fit with one route each", 3: f"and {most} with three"}[routes]
+    assert stated in readme
+    # The join schema still allows 64 teams; the credential, not the schema, limits the gateway's.
+    assert most < 64 and "gateway" not in kinds.SINGLE_TEAM_ROLES
 
 
 def test_the_team_services_withdraw_from_every_partition_of_each_team_they_serve() -> None:
@@ -2906,6 +2943,9 @@ def test_knowledge_text_that_may_be_long_has_a_blob_form_and_examples_show_both(
         # {,n}: Python reads it as 0 to n, so it is no literal; a pattern the count cannot read is unbounded.
         ("summary", {"type": "string", "pattern": "^[a-z ]{,40000}$"}),
         ("summary", {"type": "string", "pattern": "^(?:[a-z ]{,200}){0,200}$"}),
+        # Stacked repetitions: counted as text before, matched as 100,000 and 40,000 characters by Pydantic.
+        ("summary", {"type": "string", "pattern": "^[a-z]{100}{1000}$"}),
+        ("summary", {"type": "string", "pattern": "^[a-z]{0,200}{0,200}$"}),
         # Schema forms the contract's Knowledge schemas do not use yet are walked too.
         ("summary", {"type": ["string", "null"]}),
         ("summary", {"anyOf": [{"type": "string"}, {"type": "null"}]}),
@@ -2945,6 +2985,7 @@ def test_bounded_knowledge_text_patterns_pass() -> None:
     ("^[a-z]{1,}$", None),
     ("^(?:ab|c+)$", None),
     ("^[a-z ]{,40000}$", None),
+    ("^[a-z]{100}{1000}$", None),
 ])
 def test_a_patterns_longest_match_counts_every_repetition(pattern: str, longest: int | None) -> None:
     assert EXPORT.pattern_longest_match(pattern) == longest
@@ -3017,6 +3058,32 @@ def test_a_new_host_verifies_its_join_reply_from_the_bootstrap_records_alone() -
     verified = fixtures.verify(json.dumps(reply).encode(), reply, trust=bootstrap)
     bootstrap.add(json.dumps(verified.raw["body"]["certificate"]).encode(), now=fixtures.NOW)
     assert bootstrap.host_certificate("install_example", "new-host-1", 1) is not None
+
+
+@pytest.mark.parametrize("operation", ["join", "renew"])
+def test_a_reply_certificate_that_names_two_teams_for_a_one_team_role_is_refused(operation: str) -> None:
+    """README "Replies" (C41): even a join that asked for both teams gets no such certificate."""
+
+    reply = fixtures.example_frame(f"host.{operation}.reply", "ok")
+    request = copy.deepcopy(next(frame for frame in fixtures.valid_frames().values()
+                                 if frame["message_id"] == reply["causation_id"]))
+    if operation == "join":
+        request["body"]["teams"] = ["team_example", "team_two"]
+    certificate = reply["body"]["certificate"]
+    assert set(certificate["body"]["roles"]) <= set(kinds.SINGLE_TEAM_ROLES)
+    certificate["body"]["teams"] = ["team_example", "team_two"]
+    reply["body"]["certificate"] = sign_state(certificate, fixtures.private_key(certificate["writer"]["key_id"]))
+    with pytest.raises(FrameRefused) as refused:
+        wire_frame.verify_frame(fixtures.resign(reply), trust=fixtures.trust_store(), receiver=fixtures.default_receiver(reply),
+                                arrived_on=reply["subject"], now=fixtures.NOW, replay=fixtures.replay_holding(),
+                                answering=models.Frame.model_validate(request))
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/certificate/body/teams")
+    # The same certificate with one team verifies.
+    reply["body"]["certificate"]["body"]["teams"] = ["team_example"]
+    reply["body"]["certificate"] = sign_state(reply["body"]["certificate"], fixtures.private_key(certificate["writer"]["key_id"]))
+    wire_frame.verify_frame(fixtures.resign(reply), trust=fixtures.trust_store(), receiver=fixtures.default_receiver(reply),
+                            arrived_on=reply["subject"], now=fixtures.NOW, replay=fixtures.replay_holding(),
+                            answering=models.Frame.model_validate(request))
 
 
 @pytest.mark.parametrize("operation", ["join", "renew"])

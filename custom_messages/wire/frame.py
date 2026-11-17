@@ -50,6 +50,7 @@ from custom_messages.wire.kinds import (
     RENEW_KEY_PROOF_DOMAIN,
     REPLY_INBOX_PREFIX,
     SIGNING_DOMAIN,
+    SINGLE_TEAM_ROLES,
     SUBJECT_PREFIX,
 )
 from custom_messages.wire.models import AuthorityToken, Frame
@@ -1018,8 +1019,10 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
     asked: its runtime, and the key and NATS key it presented or kept. A join's
     certificate grants at most the teams, roles, agent types, sessions and tools it asked
     for, with the connection class it asked for. A renewal's has a higher membership
-    epoch than the certificate it replaces and keeps its connection class and tools.
-    The connection credential that comes with it ends no later than it does.
+    epoch than the certificate it replaces and keeps its connection class and tools. Either
+    names one team when it holds a role that serves one team (transport.yaml
+    ``single_team_roles``). The connection credential that comes with it ends no later than
+    it does.
     """
 
     document = _pointed(raw, ISSUED_CERTIFICATE_AT)
@@ -1043,6 +1046,8 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
         _verify_renewed_certificate(issued, answering, asked, trust, refuse)
     else:
         _verify_joined_certificate(issued, asked, refuse)
+    if issued.roles & set(SINGLE_TEAM_ROLES) and len(issued.teams) > 1:
+        raise refuse("teams", "the certificate names more than one team for a role that serves one team")
     # NATS checks a credential only when the host connects, so it must not outlive the
     # certificate that says the host may serve (README, "Grants for the agents a host runs").
     connection = raw["body"].get("connection")

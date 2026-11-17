@@ -445,7 +445,9 @@
   "single_team_roles": [
     "lead_host",
     "worker_host",
-    "team_services"
+    "team_services",
+    "edge_adapter",
+    "scheduler"
   ],
   "size_check": {
     "role": "gateway"

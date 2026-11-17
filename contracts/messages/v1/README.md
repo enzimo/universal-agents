@@ -277,7 +277,10 @@ refuses anything else.
   (Python as 0 to n, ECMAScript as text, and Pydantic's engine refuses it). They start with `^` and end with `$`, and
   `$` means the end of the value. Shorthand classes (`\d`, `\w`, `\s`), an unescaped `.`,
   other group forms (lookaround, named groups, inline flags), backreferences, word
-  boundaries and possessive quantifiers are refused. Python's `re` also lets `$` match
+  boundaries and possessive quantifiers are refused, and so is a quantifier directly after
+  another (only one lazy `?` may follow one) or with nothing before it to repeat: Python
+  refuses `[a-z]{100}{1000}`, while Pydantic's engine reads it as 100,000 characters. A
+  pattern Python's `re` cannot compile is refused too. Python's `re` also lets `$` match
   before a final newline, so a Python validator must refuse a value that ends with one
   (the tests replace a final `$` with `\Z`).
 - **Alternatives** (`oneOf`) are objects told apart by a string `const` property that
@@ -925,7 +928,11 @@ connected host hands a partition over in this order:
    credential it issues, a renewal by the old host needs a new NATS key, and no new agent is
    placed in the partition (`partition_not_owned`). The old host starts the handover only
    once it reads the `released` record, and asks for no other renewal until step 3, which
-   also takes up any partition it gained meanwhile.
+   also takes up any partition it gained meanwhile. The team services release no other
+   partition of the same host until they write this handover's step 4: a second release
+   during step 2 would have to be left out of step 3's renewal, whose new key ends the
+   connection that its own step 2 still needs. A host that is cut off or retired is the
+   exception: all its partitions are released at once (below).
 2. The old host stops pulling the inboxes and answering the control addresses of the
    partition's agents. It keeps reading their control queues while it finishes, or hands
    back with `task.handback`, every task they admitted, and acknowledges their messages
@@ -985,24 +992,33 @@ and the keys of its agents' records), 278 bytes of permission JSON with the long
 (24 characters) and partition numbers of two digits, which a NATS user JWT's base64url
 encoding turns into about 371 bytes. Each worker pool adds three subjects, 346 bytes with a
 24-character agent type. A credential is at most `max_credential_bytes` (65,536 bytes,
-`transport.yaml`), the `jwt` field's limit. Every lead or worker host and every team
-services runtime serves exactly one team (`single_team_roles` in `transport.yaml`, owner
-decision of 2026-11-17): the authority grants those roles only with one team, and a machine
-that works for several teams runs one runtime per team. A host that owns all 96 partitions
+`transport.yaml`), the `jwt` field's limit. Every runtime but the gateway and the
+installation authority serves exactly one team (`single_team_roles` in `transport.yaml`,
+owner decision of 2026-11-17): the authority grants those roles only with one team, and a
+machine that works for several teams runs one runtime per team. A host that owns all 96 partitions
 of its team beside 10 worker pools needs about 46 KB with the longest ids. The team services
 own no partitions, but they read and delete in every partition stream of their team
 ("Filling the templates"): about 23 KB at 96 partitions. That sets the largest partition
 count an installation may choose (`partitions.max_count`): the largest multiple of 32 at
-which both still fit, at most 128 partitions. `tests/test_message_contract.py` recomputes these
-figures from the generated templates and checks that one step more does not fit.
+which both still fit, at most 128 partitions.
+
+The gateway stays installation-wide, so its credential grows with the teams it serves and
+their routes (its edges): 1,265 bytes of permission JSON for each team and 466 more for each
+route of that team, with the longest ids. At most 27 teams fit with one route each, and 17
+with three. An installation with more teams than its gateway's credential holds gets
+`credential_too_large` for that gateway once hosts have their own NATS users; whether
+several gateway runtimes may then each serve some of the teams is not settled yet (an open
+point for step 2). `tests/test_message_contract.py` recomputes these figures from the
+generated templates and checks that one step more does not fit.
 
 The installation authority, which issues every certificate and its credential, keeps
 credentials within the bound: it refuses a certificate whose credential would be larger
 than `max_credential_bytes`, computing the size from the same generated templates that fill
-it, so the bound and the check cannot disagree. Only a host with more worker pools than the
-figure above can reach it. A join is refused with `credential_too_large` (`host.join.reply`,
+it, so the bound and the check cannot disagree. A lead or worker host reaches it only with
+more worker pools than the figure above, and the gateway with more teams or routes than the
+figures above. A join is refused with `credential_too_large` (`host.join.reply`,
 `denied`), and a renewal with `not_allowed` and a message naming the limit; both say what to
-do: give the host fewer pools or partitions. A host may run any number of agents in its
+do: give the host fewer pools or partitions, or the gateway fewer teams. A host may run any number of agents in its
 partitions; a certificate's `session_limit` is what limits them. A host writes the records
 of its partitions' agents only, rather than any agent record of its team: readers would
 refuse another host's record, but agent records are written only when they change, so an
@@ -1039,9 +1055,9 @@ each role's templates for the host (`custom_messages.wire.permissions.host_permi
   `{partition}` is every partition of their team, 0 to the installation's count minus 1
   (`custom_messages.wire.partitions.every_partition`), because they withdraw queued work from
   every partition stream ("Withdrawing queued work");
-- any other subject with `{team}` is repeated for each team the host serves: one for a lead
-  or worker host and for the team services (`single_team_roles`), and every team it serves
-  for the other roles;
+- any other subject with `{team}` is repeated for each team the host serves: one for every
+  role in `single_team_roles`, and every team its certificate names for the gateway and the
+  installation authority;
 - `{installation}` becomes the host's own installation, and a subject that names `{peer}` is
   repeated for each installation the installation's agreements name ("Key-value grants").
 
@@ -1475,7 +1491,7 @@ These comparisons, and a renewal's comparison with its certificate, read the bod
 
 The authority does not answer a join with a fresh challenge to sign. A join frame lasts 30 seconds, the receiver's replay record refuses other content under its message id, and its retry key names the runtime, key and join id. A copied join can therefore only repeat the same request within its lifetime, and the certificate it gets back is useless without the private key.
 
-**What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again, and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for, and a lead host, worker host or team services runtime exactly one team (`single_team_roles`; a join that asks for more is `denied` with `team_not_allowed`). It issues no certificate whose NATS credential would be larger than `max_credential_bytes` (`credential_too_large`, "Credential size"), and no credential for a NATS key it revoked or a bootstrap bundle's key (`invalid_body` at `/body/nats_public_key`, or at `/body/new_nats_public_key` for a renewal).
+**What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again, and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for, and every role but the gateway and the authority exactly one team (`single_team_roles`; a join that asks for more is `denied` with `team_not_allowed`, and a renewal of a certificate that names more, such as one issued before this rule, is `not_allowed`: the host joins again, once for each team). It issues no certificate whose NATS credential would be larger than `max_credential_bytes` (`credential_too_large`, "Credential size"), and no credential for a NATS key it revoked or a bootstrap bundle's key (`invalid_body` at `/body/nats_public_key`, or at `/body/new_nats_public_key` for a renewal).
 
 **Connection class and tools.** A join states the host's `connection_class` (`connected` or `intermittent`, "Custody windows") and, for a host that decides tool calls from signed lists, the `tools` it can run ("Access on remote hosts"). Tool ids the catalog lacks, such as a local device's, are the host's proposal: the administrator reviews them with the join. The catalog's entries are records of the access store, not messages, so approving a proposal adds the entry there. The certificate names the connection class the join asked for and at most the tools it asked for, each once. A host whose connection class or tool list must change sends a new join under the key it holds, which an administrator approves like a lost-key recovery: its certificate gets a higher membership epoch and `replaces` the old one.
 
@@ -1485,7 +1501,7 @@ The authority does not answer a join with a fresh challenge to sign. A join fram
 - it does not verify against the installation's own authority keys, or its record's `expires_at` differs from its body's;
 - it is for another installation or another runtime than the host that asked;
 - a join's certificate names another application or NATS key than the join presented, grants more teams, roles, agent types or sessions than it asked for, names another connection class, or names tools the join did not ask for;
-- a lead host's, worker host's or team services runtime's certificate names more than one team (`single_team_roles`);
+- a join's or renewal's certificate holds a role in `single_team_roles` and names more than one team (at `/body/certificate/body/teams`);
 - a renewal's certificate does not replace the certificate that signed the renewal, does not have a higher membership epoch, names another key than the rotated one (or, without a rotation, the kept one), or another NATS key than the new one asked for (or the kept one), or changes the connection class or tools of the certificate it replaces;
 - the certificate names a tool twice.
 
@@ -1540,7 +1556,7 @@ session record:
   `already_placed`, naming that host: agents stay on their host and move only with their partition, by a
   handover ("Custody windows"). A host that already runs as many agents as its certificate allows
   gets `limit_reached`. Its NATS credential names partitions, not agents, so more agents
-  never make it larger; the partitions it owns across its teams do ("Credential size"). An
+  never make it larger; the partitions it owns in its team do ("Credential size"). An
   agent whose partition the asking host does not own, or a new agent in a partition that is
   being moved away from it (a `released` record), is refused with `partition_not_owned`,
   naming the partition: a host draws new agent ids until one falls in a partition it owns
@@ -1880,10 +1896,10 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
   Holding keeps a message only while its receiver runs. A receiver that stops while holding
   one gives the delivery back, and NATS delivers it again with one more delivery counted; a
   message whose consumer's `max_deliveries` runs out this way is delivered no more. It then
-  stays in its own stream below its consumer's acknowledgement floor, unread, until that
-  stream's age limit removes it with no notice. Finding such messages, and a final delivery
-  the receiver could not finish for another reason, with a sweep of the messages below each
-  consumer's acknowledgement floor is step 4's work.
+  stays in its own stream, delivered but neither acknowledged nor pending, unread, until
+  that stream's age limit removes it with no notice; the consumer's acknowledgement floor
+  passes it only once a later message is acknowledged. Finding such messages, and a final
+  delivery the receiver could not finish for another reason, is step 4's work.
 - **Two upgrade reasons.** `upgrade_drain` and `upgrade_old_format` both come from upgrades
   but name different messages:
   - `upgrade_drain`: a protocol 1 frame that waited in a queue while the installation moved

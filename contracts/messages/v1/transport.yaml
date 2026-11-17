@@ -32,13 +32,15 @@ installation_scope: _install
 # loses a partition or a pool, never an agent, after its old one stops working (README,
 # "Grants for the agents a host runs").
 
-# Roles whose every runtime serves exactly one team (owner decision 2026-11-17): a lead or worker
-# host and a team services runtime belong to one team, and a machine that works for several teams
-# runs one runtime per team. The authority grants these roles in a certificate only with one
-# team (a join for more is denied, team_not_allowed), so a credential holds at most one team's
-# partitions and pools (README, "Credential size"). The gateway and the installation authority
-# stay installation-wide. Every role whose grants name {partition} is listed here.
-single_team_roles: [lead_host, worker_host, team_services]
+# Roles whose every runtime serves exactly one team (owner decision 2026-11-17): every host role
+# but the gateway and the installation authority, which stay installation-wide. A machine that
+# works for several teams runs one runtime per team. The authority grants these roles in a
+# certificate only with one team (a join for more is denied, team_not_allowed; a renewal of a
+# certificate that names more is not_allowed), and hosts refuse a reply whose certificate names
+# more, so a credential holds at most one team's partitions, pools and edges (README,
+# "Credential size"). One team also bounds what a compromised scheduler can sign: authority
+# tokens, system work among them, for its own team only.
+single_team_roles: [lead_host, worker_host, team_services, edge_adapter, scheduler]
 
 # Which host roles serve each audience target. A role receives a kind's address, and
 # gets its subscription or consumer grants, only when it is one of the kind's receivers

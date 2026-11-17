@@ -77,11 +77,12 @@ def partition_owner_key(team: str, partition: int, count: int = DEFAULT_PARTITIO
 
 
 def every_partition(teams: Iterable[str], count: int = DEFAULT_PARTITION_COUNT) -> dict[str, tuple[int, ...]]:
-    """Every partition of each team, for a role whose grants name a team's whole set of partitions.
+    """Every partition of each team given, for a role whose grants name a team's whole set of partitions.
 
     The team services own no partitions, but they withdraw queued work from every partition
-    stream of each team they serve, so membership code fills their ``{partition}`` grants with
-    this, not with ownership records (README, "Filling the templates").
+    stream of the one team they serve (transport.yaml ``single_team_roles``), so membership
+    code fills their ``{partition}`` grants with this, not with ownership records (README,
+    "Filling the templates").
     """
 
     numbers = tuple(range(check_partition_count(count)))
@@ -89,7 +90,8 @@ def every_partition(teams: Iterable[str], count: int = DEFAULT_PARTITION_COUNT) 
 
 
 def owned_partitions(records: Iterable[PartitionOwnerState], host: str) -> dict[str, tuple[int, ...]]:
-    """Per team, the partitions that ``host`` owns: what its credential's ``{partition}`` grants name.
+    """Per team, the partitions that ``host`` owns: its credential's ``{partition}`` grants name those among them
+    that its renewal's ``partitions`` asks for.
 
     ``records`` are verified partition ownership record bodies. Only an ``owned`` record that
     names the host counts. A ``released`` one still names the host that is giving the

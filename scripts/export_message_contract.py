@@ -184,31 +184,44 @@ def pattern_problem(pattern: str) -> str | None:
     """Why ``pattern`` could match differently in Python, ECMAScript or Pydantic's engine, if it could.
 
     Allowed: literal characters, character classes, escaped punctuation, groups,
-    ``(?:``, alternatives inside a group, and quantifiers. ``$`` means the end of
-    the value; Python's ``re`` also matches it before a final newline, which the
-    README tells Python validators to refuse.
+    ``(?:``, alternatives inside a group, and one quantifier per atom (?, *, +, {n},
+    {n,} or {n,m}), optionally lazy. ``$`` means the end of the value; Python's ``re``
+    also matches it before a final newline, which the README tells Python validators to
+    refuse. A pattern Python's ``re`` cannot compile is refused too, as a backstop.
     """
 
     if len(pattern) < 2 or not (pattern.startswith("^") and pattern.endswith("$")) or pattern.endswith("\\$"):
         return "anchor the whole pattern with ^ and $"
     body, depth, in_class, index = pattern[1:-1], 0, False, 0
+    # What the previous token was, for the quantifier that may follow it: "atom", "quantifier"
+    # (a complete repetition, which only a lazy ? may follow) or "lazy" (nothing may follow).
+    previous = "start"
     while index < len(body):
         character, following = body[index], body[index + 1:index + 2]
         if character == "\\":
             if following not in PORTABLE_ESCAPES:
                 return f"\\{following} reads differently between engines; list the characters instead"
-            index += 2
+            index, previous = index + 2, "atom"
             continue
         if in_class:
             if character == "[":
                 return "a [ inside a character class, such as [[:alpha:]], reads differently between engines"
             in_class = character != "]"
-        elif character == "[":
+            index, previous = index + 1, "atom"
+            continue
+        if character in "*+?{":
+            problem, index = _quantifier_problem(body, index, previous)
+            if problem:
+                return problem
+            previous = "lazy" if previous == "quantifier" else "quantifier"
+            continue
+        if character == "[":
             in_class = True
         elif character == "(":
             if following == "?" and body[index + 2:index + 3] != ":":
                 return "group extensions other than (?: differ between engines"
             depth += 1
+            index += 2 if following == "?" else 0  # step over ?: so it is not read as a quantifier
         elif character == ")":
             depth -= 1
         elif character == "|" and depth == 0:
@@ -217,25 +230,48 @@ def pattern_problem(pattern: str) -> str | None:
             return "an unescaped . matches different characters in different engines"
         elif character in "^$":
             return "anchors belong only at the two ends"
-        elif character == "{":
-            # Engines read a malformed brace differently: Python reads {,n} as 0 to n, ECMAScript
-            # without the u flag reads it as literal text, and Pydantic's engine refuses it. So a
-            # brace must start {n}, {n,} or {n,m}, the forms pattern_longest_match counts.
-            repetition = REPETITION.match(body, index)
-            if repetition is None:
-                return "a { starts only {n}, {n,} or {n,m}; escape a literal brace as \\{"
-            low, high = repetition.group(1), repetition.group(3)
-            if high and int(high) < int(low):
-                return f"the repetition {repetition.group(0)} has its upper bound below its lower one"
-            index = repetition.end() - 1
-            if body[index + 1:index + 2] == "+":
-                return "possessive quantifiers are not portable"
         elif character == "}":
             return "a } closes only {n}, {n,} or {n,m}; escape a literal brace as \\}"
-        elif character in "*+?" and following == "+":
-            return "possessive quantifiers are not portable"
+        previous = "atom" if character not in "(|" else "start"
         index += 1
-    return "a character class is not closed" if in_class else None
+    if in_class:
+        return "a character class is not closed"
+    try:
+        re.compile(pattern)
+    except re.error as error:
+        return f"Python's re refuses it ({error})"
+    return None
+
+
+def _quantifier_problem(body: str, index: int, previous: str) -> tuple[str | None, int]:
+    """Why the quantifier at ``body[index]`` is not portable, if it is not, and the index after it.
+
+    One quantifier per atom, optionally followed by one lazy ``?``: engines disagree on a
+    quantifier after another (Python refuses ``a{2}{3}``, Pydantic's engine repeats the
+    repetition, so ``[a-z]{100}{1000}`` matches 100,000 characters there), on a possessive
+    ``+`` and on a quantifier with nothing to repeat. A brace must start {n}, {n,} or {n,m}:
+    Python reads {,n} as 0 to n, ECMAScript without the u flag reads it as literal text, and
+    Pydantic's engine refuses it; these are the forms pattern_longest_match counts.
+    """
+
+    character = body[index]
+    if previous == "quantifier" and character == "+":
+        return "possessive quantifiers are not portable", index
+    if previous == "quantifier" and character == "?":
+        return None, index + 1
+    if previous in ("quantifier", "lazy"):
+        return "a quantifier directly after another reads differently between engines", index
+    if previous == "start":
+        return "a quantifier needs something before it to repeat", index
+    if character != "{":
+        return None, index + 1
+    repetition = REPETITION.match(body, index)
+    if repetition is None:
+        return "a { starts only {n}, {n,} or {n,m}; escape a literal brace as \\{", index
+    low, high = repetition.group(1), repetition.group(3)
+    if high and int(high) < int(low):
+        return f"the repetition {repetition.group(0)} has its upper bound below its lower one", index
+    return None, repetition.end()
 
 
 def _of_type(value: Any, kind: str) -> bool:
@@ -1348,7 +1384,7 @@ def check_stream_sizes(transport: dict[str, Any]) -> None:
                                 "queues.size_kinds)")
         if stream.get("discard") != "new":
             raise ContractError(f"transport.yaml: stream {name} refuses new messages when full (discard: new), so "
-                                "nothing queued or set aside is dropped unread")
+                                "nothing set aside is dropped to make room")
         used.add(stream["size_kind"])
     if used != set(kinds):
         raise ContractError(f"transport.yaml: queues.size_kinds names only kinds a stream uses; unused "
@@ -1400,25 +1436,35 @@ def check_message_sizes(transport: dict[str, Any], schemas: dict[str, dict[str, 
                             "common.schema.json")
 
 
-def check_single_team_roles(registry: dict[str, Any], transport: dict[str, Any]) -> None:
-    """Every role whose grants name {partition} serves one team per runtime (transport.yaml single_team_roles).
+# Host roles that, beside the topology owner, serve the whole installation (owner decision of
+# 2026-11-17): the gateway routes every team's people and edges.
+INSTALLATION_WIDE_ROLES = ("gateway",)
 
-    Partitions belong to a team, and the credential bound (README, "Credential size") counts
-    one team's partitions and pools for each such runtime; the authority grants these roles
-    only with one team. The topology owner and the gateway stay installation-wide.
+
+def check_single_team_roles(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """Every host role but the gateway and the topology owner serves one team per runtime (single_team_roles).
+
+    Owner decision of 2026-11-17: each runtime serves exactly one team, and only the gateway and
+    the installation authority (the topology owner) stay installation-wide. Partitions, pools and
+    edges belong to a team, so a one-team credential is what the bound in README "Credential
+    size" counts; and a scheduler signs authority tokens, system work among them, only for its
+    own team. No role whose grants name {partition} may serve the whole installation.
     """
 
     roles = transport.get("single_team_roles")
-    if not isinstance(roles, list) or not roles or len(set(roles)) != len(roles) \
-            or not set(roles) <= set(registry["host_roles"]):
+    if not isinstance(roles, list) or len(set(roles)) != len(roles) or not set(roles) <= set(registry["host_roles"]):
         raise ContractError("transport.yaml: single_team_roles lists distinct host roles")
-    if transport["topology_owner"] in roles:
-        raise ContractError("transport.yaml: the topology owner serves the whole installation, not one team")
+    wide = {transport["topology_owner"], *INSTALLATION_WIDE_ROLES}
+    expected = set(registry["host_roles"]) - wide
+    if set(roles) != expected:
+        raise ContractError(f"transport.yaml: single_team_roles lists every host role but the gateway and the topology "
+                            f"owner, which serve the whole installation; missing {sorted(expected - set(roles))}, "
+                            f"installation-wide {sorted(set(roles) & wide)}")
     partitioned = sorted(role for role, document in permissions(registry, transport).items()
-                         if any("{partition}" in subject for subject in document["publish"] + document["subscribe"]))
-    missing = sorted(set(partitioned) - set(roles))
-    if missing:
-        raise ContractError(f"transport.yaml: single_team_roles lists every role whose grants name partitions; missing {missing}")
+                         if role in wide and any("{partition}" in subject
+                                                 for subject in document["publish"] + document["subscribe"]))
+    if partitioned:
+        raise ContractError(f"transport.yaml: an installation-wide role's grants name partitions: {partitioned}")
 
 
 def check_withdrawal_spares_own_inbox(transport: dict[str, Any]) -> None:
