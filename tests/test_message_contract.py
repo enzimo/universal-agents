@@ -2780,9 +2780,10 @@ def test_every_process_has_a_nats_user_and_the_account_carries_the_partition_map
     assert account["account_settings"] == {"jetstream": True, "mappings": "partitions.account_mappings"}
     assert TRANSPORT["partitions"]["account_mappings"]
     users = account["users"]
-    # The authority's own user and the bootstrap user exist before any certificate does.
+    # The authority's own user and the bootstrap user exist before any certificate does; a remote
+    # host's bootstrap user comes from the authority, after the installation started.
     assert users[owner] == {"permissions": owner, "issued_by": "launcher", "carried_in": "trust_folder"}
-    assert users[EXPORT.JOINING] == {"permissions": EXPORT.JOINING, "issued_by": "launcher",
+    assert users[EXPORT.JOINING] == {"permissions": EXPORT.JOINING, "issued_by": ["launcher", owner],
                                      "carried_in": "bootstrap_bundle"}
     assert users["host"] == {"permissions": "certificate_roles", "issued_by": owner,
                              "carried_in": ["host.join.reply", "host.renew.reply"]}
@@ -2804,6 +2805,7 @@ def test_every_process_has_a_nats_user_and_the_account_carries_the_partition_map
         (lambda t: t["nats_account"]["users"].pop("joining_host"), "users are"),
         (lambda t: t["nats_account"]["users"]["joining_host"].pop("carried_in"), "users are"),
         (lambda t: t["nats_account"]["users"]["joining_host"].update(permissions="worker_host"), "users.joining_host is"),
+        (lambda t: t["nats_account"]["users"]["joining_host"].update(issued_by="launcher"), "users.joining_host is"),
         (lambda t: t["nats_account"]["users"]["host"].update(issued_by="launcher"), "users.host is"),
         (lambda t: t["nats_account"]["users"]["host"].update(carried_in=["host.join.reply"]), "users.host is"),
     ],
@@ -2858,13 +2860,19 @@ def test_knowledge_text_that_may_be_long_has_a_blob_form_and_examples_show_both(
         ("summary", {"type": "string"}),
         ("summary", {"type": "string", "pattern": "^[a-z ]+$"}),
         ("summary", {"type": "string", "pattern": "^[a-z]{1,}$"}),
+        # Schema forms the contract's Knowledge schemas do not use yet are walked too.
+        ("summary", {"type": ["string", "null"]}),
+        ("summary", {"anyOf": [{"type": "string"}, {"type": "null"}]}),
+        ("summary", {"allOf": [{"type": "string"}]}),
+        ("summary", {"type": "array", "prefixItems": [{"type": "string"}]}),
+        ("summary", {"type": "object", "patternProperties": {"^x": {"type": "string"}}}),
     ],
 )
 def test_a_knowledge_text_that_could_exceed_long_text_inline_is_refused(field: str, change: dict) -> None:
     schemas = copy.deepcopy(EXPORT.load_schemas())
     file = REGISTRY["kinds"]["knowledge.write"]["body"]
     schemas[file]["properties"][field] = change
-    with pytest.raises(EXPORT.ContractError, match=re.escape(f"knowledge.write text at ['/{field}']")):
+    with pytest.raises(EXPORT.ContractError, match=re.escape(f"knowledge.write text at ['/{field}")):
         EXPORT.check_knowledge_text(REGISTRY, schemas)
 
 

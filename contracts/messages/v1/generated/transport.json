@@ -343,7 +343,10 @@
       },
       "joining_host": {
         "carried_in": "bootstrap_bundle",
-        "issued_by": "launcher",
+        "issued_by": [
+          "launcher",
+          "installation_authority"
+        ],
         "permissions": "joining_host"
       }
     }

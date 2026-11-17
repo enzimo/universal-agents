@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = '02b4db99f6a94f5463fe77a2614a22b14e12b196187ee4384f4fda6f40e94d52'
+CONTRACT_SHA256 = 'cf9bbc56f3753a3fbc189f989ed05643b8e84734aa893bd97baa4f8b2409a2b2'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'

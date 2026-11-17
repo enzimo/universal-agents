@@ -1587,8 +1587,11 @@ def unbounded_text(resolver: "ModelWriter", file: str, node: Any, at: str, limit
                    seen: frozenset[tuple[str, str]], found: list[str]) -> None:
     """Collect the string fields under a schema that may hold more than ``limit`` characters inline.
 
-    A blob reference is the long form and is not walked. A string is bounded by its maxLength,
-    a const or enum, a format, or a pattern whose every quantifier has an upper bound.
+    A blob reference is the long form and is not walked. A string (a type of "string", or a
+    type list that holds it) is bounded by its maxLength, a const or enum, a format, or a
+    pattern whose every quantifier has an upper bound. The walk follows every keyword that can
+    hold a string, including those the contract's schemas do not use yet, so a new schema
+    form fails closed rather than passing unexamined.
     """
 
     if isinstance(node, list):
@@ -1602,17 +1605,25 @@ def unbounded_text(resolver: "ModelWriter", file: str, node: Any, at: str, limit
         if target != BLOB_REF and target not in seen:
             unbounded_text(resolver, target[0], resolver.node(*target), at, limit, seen | {target}, found)
         return
-    if node.get("type") == "string" and "const" not in node and "enum" not in node and "format" not in node:
+    kind = node.get("type")
+    text = kind == "string" or (isinstance(kind, list) and "string" in kind)
+    if text and "const" not in node and "enum" not in node and "format" not in node:
         length = node.get("maxLength")
         pattern = CHARACTER_CLASS.sub("", node.get("pattern", "*"))
         if (length is None and UNBOUNDED_QUANTIFIER.search(pattern)) or (length is not None and length > limit):
             found.append(at or "/")
     for key, value in node.items():
-        if key == "properties":
+        if key in SCHEMA_NAMED_CHILDREN:
             for name, child in value.items():
                 unbounded_text(resolver, file, child, f"{at}/{name}", limit, seen, found)
-        elif key in {"items", "oneOf", "additionalProperties"}:
+        elif key in SCHEMA_CHILDREN:
             unbounded_text(resolver, file, value, at, limit, seen, found)
+
+
+# The JSON Schema keywords whose values are schemas a value of the node must (or may) match:
+# named children (by property name or pattern) and unnamed ones.
+SCHEMA_NAMED_CHILDREN = {"properties", "patternProperties"}
+SCHEMA_CHILDREN = {"items", "prefixItems", "additionalProperties", "oneOf", "anyOf", "allOf"}
 
 
 def check_knowledge_text(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
@@ -1641,8 +1652,8 @@ def check_knowledge_text(registry: dict[str, Any], schemas: dict[str, dict[str, 
 # The installation's NATS account (transport.yaml nats_account; README, "NATS users and the
 # account"): the settings the launcher or an external server's operator puts in the account,
 # and the user every process logs in with. The installation authority's and a joining host's
-# users exist before any certificate does, so the launcher writes them; every other process's
-# user comes with its certificate.
+# users exist before any certificate does, so the launcher writes them (the authority writes a
+# remote host's bootstrap user); every other process's user comes with its certificate.
 NATS_ACCOUNT_FIELDS = {"mode", "signing_key_holder", "account_settings", "users"}
 NATS_ACCOUNT_SETTINGS = {"jetstream": True, "mappings": "partitions.account_mappings"}
 NATS_USER_FIELDS = {"permissions", "issued_by", "carried_in"}
@@ -1662,10 +1673,13 @@ def check_nats_account(registry: dict[str, Any], transport: dict[str, Any], sche
     """Operator mode, one account whose signing key the topology owner holds, its settings, and every process's user.
 
     Decisions 88 and 89: every process logs in with its own user JWT, and an external server's
-    operator includes the settings in the installation's account. The authority issues and
-    revokes the hosts' users, so it is the one that holds the account's signing key, and it
-    already creates every stream; the settings carry the partition mappings, without which no
-    agent's queue reaches its partition stream.
+    operator includes the settings in the installation's account. The authority issues the
+    hosts' users, so it is the one that holds the account's signing key, and it already
+    creates every stream; the settings carry the partition mappings, without which no agent's
+    queue reaches its partition stream. The launcher signs only the first users, before any
+    process starts; a remote host's bootstrap user comes from the authority. Revoking a user
+    needs an operator signature (README, "NATS users and the account"), whose holder the owner
+    decides with step 2, so the contract names none yet.
     """
 
     where = "transport.yaml nats_account"
@@ -1678,7 +1692,7 @@ def check_nats_account(registry: dict[str, Any], transport: dict[str, Any], sche
         raise ContractError(f"{where}: account_settings are {NATS_ACCOUNT_SETTINGS}")
     expected = {
         owner: {"permissions": owner, "issued_by": "launcher", "carried_in": "trust_folder"},
-        JOINING: {"permissions": JOINING, "issued_by": "launcher", "carried_in": "bootstrap_bundle"},
+        JOINING: {"permissions": JOINING, "issued_by": ["launcher", owner], "carried_in": "bootstrap_bundle"},
         HOST_USER: {"permissions": CERTIFICATE_ROLES, "issued_by": owner,
                     "carried_in": [f"{kind}.reply" for kind in credential_replies(registry, schemas)]},
     }

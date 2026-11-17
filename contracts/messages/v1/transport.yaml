@@ -93,7 +93,7 @@ partitions:
 # (generated/permissions/<role>.json) it holds.
 nats_account:
   mode: operator
-  signing_key_holder: installation_authority   # the topology owner: it issues the hosts' users and revokes them
+  signing_key_holder: installation_authority   # the topology owner: it issues the hosts' users; revoking needs an operator signature, whose holder is open (README)
   account_settings:
     jetstream: true               # with no storage limit, or one that fits every stream's limit (README, "Stream sizes")
     mappings: partitions.account_mappings   # COUNT replaced by the installation's partition count
@@ -104,8 +104,8 @@ nats_account:
       carried_in: trust_folder
     joining_host:                 # a host that holds no certificate yet; {self} filled with its runtime
       permissions: joining_host
-      issued_by: launcher
-      carried_in: bootstrap_bundle
+      issued_by: [launcher, installation_authority]   # the launcher for the installation's own processes; the authority for a remote host's bundle
+      carried_in: bootstrap_bundle  # with the user's private NATS key, so a bundle is a secret
     host:                         # every other process: its certificate's roles, filled from their templates
       permissions: certificate_roles
       issued_by: installation_authority

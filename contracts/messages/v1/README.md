@@ -906,11 +906,15 @@ in this order:
    while its credential still names the partition; then it stops reading those control
    queues too. The handover sends each agent's ledger to the team services ("Custody
    windows").
-2. The old host renews (`host.renew`) and connects with the credential of the reply, which
-   no longer names the partition. The installation authority then revokes every credential
-   for the host's NATS key issued before that one: the NATS account's revocation list names
-   the key with the new credential's issue time, which also closes any connection still
-   using an old credential.
+2. The old host renews (`host.renew`) with a new NATS key (`new_nats_public_key`) and
+   connects with the credential of the reply, which no longer names the partition. The
+   authority refuses a renewal that gives up a partition or pool without a new NATS key
+   (`invalid_body` at `/body/new_nats_public_key`). The host's old NATS key is then revoked
+   ("NATS users and the account"), which refuses every credential issued for that key and
+   closes any connection still using one. Revoking the old key rather than a time on the
+   same key matters: NATS revokes every credential of a key issued at or before the
+   revocation's time, in whole seconds, so a new credential for the same key issued in that
+   second would be revoked with the old ones.
 3. Only then do the team services write the partition's new ownership record and its
    agents' new placements, and the new host gets a credential that names the partition.
    Queued messages never move: they stay in the agents' consumers in the partition's stream
@@ -922,8 +926,8 @@ reads the gone agent's consumers with the grant it holds; on another host, the g
 partition moves to the replacement's host as above. The topology owner deletes the gone
 agent's consumers once both are empty.
 
-A host that is cut off or retired cannot take step 1. The authority revokes its credential
-first (with its certificate, when an administrator retires it), its partitions move to other
+A host that is cut off or retired cannot take step 1. Its NATS key is revoked first (with its
+certificate, when an administrator retires it), its partitions move to other
 hosts, and the work it admitted without acknowledging comes back to the agents' queues after
 `ack_wait_seconds`, where the new owner takes it; its custody moves by the rules of "Custody windows". A credential never
 outlives the certificate it comes with: a join or renewal reply whose `connection` ends
@@ -1372,17 +1376,23 @@ A queued message can wait days, for example while a host is cut off.
 
 Joining an installation and renewing a certificate use the address `ua.v1._install.<sender>.svc`. Their frames name the scope `_install` (`transport.yaml` `installation_scope`) as both the issuer's and the audience's team, and never an agent.
 
-**NATS users and the account.** Every process of an installation logs in to NATS with its own user JWT, in NATS operator mode, on the bundled server as on an external one (`nats_account` in `transport.yaml`). The installation has one NATS account, and only the installation authority holds its signing key: it issues and revokes every host's user, as it already creates every stream ("Who sets up the streams"). Today's processes still share one NATS login; the release that installs operator mode moves them to these users.
-- **The account's settings** are JetStream, with no storage limit or one that fits every stream's limit ("Stream sizes"), and the partition mappings (`partitions.account_mappings`, with `COUNT` the installation's partition count, "Partitions"). For the bundled server the launcher creates the operator and account keys in the installation's trust folder and writes these settings into the account before any process starts. For an external server UA writes them for the server's operator, who includes them in the installation's account. Without the mappings no agent's inbox, control queue or control address reaches its partition, so a server without them delivers no agent work.
+**NATS users and the account.** Every process of an installation logs in to NATS with its own user JWT, in NATS operator mode, on the bundled server as on an external one (`nats_account` in `transport.yaml`). The installation has one NATS account. Its signing key signs every user JWT: the launcher uses it for the first two users before any process starts, and after that only the installation authority does, as it already creates every stream ("Who sets up the streams"). Today's processes still share one NATS login; the release that installs operator mode moves them to these users.
+- **The keys.** For the bundled server the launcher creates the operator key, the account key and the account's signing key in the installation's trust folder, signs the account JWT (with the operator key) and the first two users (with the signing key) before any process starts, and holds none of them once it has. The signing key stays in the trust folder for the authority. Who signs revocations with the operator key is still open (below).
+- **The account's settings** are JetStream, with no storage limit or one that fits every stream's limit ("Stream sizes"), and the partition mappings (`partitions.account_mappings`, with `COUNT` the installation's partition count, "Partitions"). For the bundled server the launcher writes them into the account JWT. For an external server UA writes them for the server's operator, who includes them in the installation's account. Without the mappings no agent's inbox, control queue or control address reaches its partition, so a server without them delivers no agent work.
 - **The authority's own user** (`generated/permissions/installation_authority.json`) is written by the launcher into the trust folder before any process starts, since there is no certificate yet to issue it with.
-- **The bootstrap user** (`generated/permissions/joining_host.json`, `{self}` the new host's runtime) is written by the launcher, for a remote host into the bootstrap bundle it starts from ("Starting a host"). It can only send the host's own installation requests and read its own reply inbox.
+- **The bootstrap user** (`generated/permissions/joining_host.json`, `{self}` the new host's runtime) can only send the host's own installation requests and read its own reply inbox. The launcher writes it for the installation's own processes before they start; for a remote host the authority issues it into the bootstrap bundle an administrator makes, which names the new host's runtime ("Starting a host"). A user JWT logs in only with its private NATS key, which signs the server's challenge, so the bundle carries that key too.
 - **Every other process's user** comes in the `connection` of its join or renewal reply, filled from the templates of its certificate's roles ("Filling the templates") and ending no later than the certificate.
-- **Revocation.** The authority revokes a host's earlier users when the host renews to give up a partition or pool ("Credentials follow ownership") and when the host is retired. NATS keeps an account's revoked users in the account's own JWT, which an operator key signs, not the account's signing key. How the authority's revocations reach the server, on the bundled server and on an external one, is still open: step 2 measures the revocation path (plan 13C.3).
+- **Revocation.** A host's old NATS key is revoked when the host renews to give up a partition or pool ("Credentials follow ownership"), and its key when the host is retired. Measured on nats-server 2.15.1 in operator mode:
+  - NATS revokes a user only through the account JWT, which lists the user's public key with a time: every user JWT of that key issued at or before the time (in whole seconds) is refused, and the server closes the key's open connections at once (`User Authentication Revoked`);
+  - the server accepts that account JWT only when the operator key or an operator signing key signs it. Signed with the account's signing key, or with the account's own key, it is refused (`account validation failed`) and the user stays connected;
+  - the signed account JWT reaches a running server as a claims update (`$SYS.REQ.CLAIMS.UPDATE`), which only a user of the server's system account can send (a user of the installation's account gets no responders), or, with the server's memory resolver, by rewriting the server's configuration and reloading it.
+
+  So the account signing key the authority holds issues users but cannot revoke them. Who signs revocations and how they reach the server is an open decision for the owner, which step 2 settles before any process logs in with its own user: on the bundled server the launcher creates the operator key in the trust folder; on an external server the operator key is the server operator's, and under decision 89 the authority holds only the account signing key. Until then, the handover steps say what must happen, not who does it.
 
 **Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it. The bundle holds:
 - the installation's authority keys;
 - the certificates of the installation authority's hosts, so the host can check the authority's replies before it has a certificate of its own, and the installation's revocations record. The authority's replies need no current record, so a bundle older than a day still lets the host join; the host reads the current record before it accepts other hosts' frames;
-- the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`. With it the host can publish its own installation requests and read its own reply inbox, and nothing else. Of those requests only a join can succeed: a renewal needs a certificate the host does not have yet (`unknown_key`).
+- the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`, with its private NATS key, so a bundle is a secret and reaches the host privately. With it the host can publish its own installation requests and read its own reply inbox, and nothing else. Of those requests only a join can succeed: a renewal needs a certificate the host does not have yet (`unknown_key`).
 
 **Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only. A receiver checks:
 - the join comes from the receiver's own installation and names, as its issuer's key, the key its body presents, which is not an authority key (`unknown_key`);
