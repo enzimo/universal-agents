@@ -1092,26 +1092,35 @@ async def test_a_new_host_joins_with_only_its_pre_join_permissions_and_bootstrap
 
 @pytest.mark.asyncio
 async def test_a_host_owning_every_partition_beside_ten_pools_logs_in_with_the_longest_ids(isolated_broker) -> None:
-    """README, "Credential size" (C25): the largest credentials the authority issues at the default count work.
+    """README, "Credential size" (C25, C42): the largest credentials the authority issues at the default count work.
 
-    A lead host owning all 96 partitions of a team beside 10 worker pools, and a team services
-    runtime serving 3 teams, every id as long as the contract allows, fit max_credential_bytes,
-    log in through the server's max_control_line and are allowed what their grants name.
+    A lead host owning all 96 partitions of its team beside 10 worker pools, the team services
+    of one team, and the installation-wide gateway with the most teams that fit at three routes
+    each, every id as long as the contract allows, fit max_credential_bytes, log in through the
+    server's max_control_line and are allowed what their grants name.
     """
 
-    longest = {name: fixtures.longest_id(name) for name in ("team_id", "agent_type", "runtime_id", "installation_id")}
-    teams = tuple(f"t{index}".ljust(longest["team_id"], "x") for index in range(3))
+    from tests.test_message_contract import fits, gateway_credential_json
+
+    longest = {name: fixtures.longest_id(name)
+               for name in ("team_id", "agent_type", "runtime_id", "installation_id", "token_id")}
+    gateway_teams = max(count for count in range(1, 65) if fits(gateway_credential_json(count, 3)))
+    teams = tuple(f"t{index}".ljust(longest["team_id"], "x") for index in range(gateway_teams))
     pools = tuple(f"p{index}".ljust(longest["agent_type"], "y") for index in range(10))
+    routes = tuple(f"e{index}".ljust(longest["token_id"], "z") for index in range(3))
     runtime, installation = "r" * longest["runtime_id"], "i" * longest["installation_id"]
     lead_host = HostPlacement(runtime, teams[:1], partitions=every_partition(teams[:1], COUNT), pools={teams[0]: pools},
                               installation=installation)
-    team_services = HostPlacement(runtime, teams, partitions=every_partition(teams, COUNT), installation=installation)
+    team_services = HostPlacement(runtime, teams[:1], partitions=every_partition(teams[:1], COUNT),
+                                  installation=installation)
+    gateway = HostPlacement(runtime, teams, edges={team: routes for team in teams}, installation=installation)
     account: OperatorAccount = isolated_broker.account
     logins = {"lead": account.user("lead", host_permissions(role_document("lead_host"), lead_host)),
-              "services": account.user("services", host_permissions(role_document("team_services"), team_services))}
+              "services": account.user("services", host_permissions(role_document("team_services"), team_services)),
+              "gateway": account.user("gateway", host_permissions(role_document("gateway"), gateway))}
     limit = TRANSPORT["limits"]["max_credential_bytes"]
-    for login in logins.values():
-        assert 40_000 < len(login.jwt) <= limit, len(login.jwt)
+    for name, floor in (("lead", 40_000), ("services", 20_000), ("gateway", 55_000)):
+        assert floor < len(logins[name].jwt) <= limit, (name, len(logins[name].jwt))
 
     async with AsyncExitStack() as stack:
         admin = await connect(stack, isolated_broker, "admin")
@@ -1129,11 +1138,17 @@ async def test_a_host_owning_every_partition_beside_ten_pools_logs_in_with_the_l
         assert (await lead_js.consumer_info(consumer_stream("agent_inbox", team, last),
                                             consumer_name("agent_inbox", team, agent=agent))).num_pending == 0
         services = await connect(stack, isolated_broker, runtime, login=logins["services"])
-        # The last partition of the last team: a stream that does not exist answers, which a refused request would not.
-        answer = json.loads((await services.nc.request(f"$JS.API.STREAM.MSG.GET.{consumer_stream('agent_inbox', teams[-1], last)}",
-                                                       json.dumps({"last_by_subj": "x"}).encode(), timeout=2)).data)
-        assert answer["error"]["err_code"] == 10059, answer  # stream not found
-        assert lead.errors.empty() and services.errors.empty()
+        gateway_login = await connect(stack, isolated_broker, runtime, login=logins["gateway"])
+        # A stream that does not exist answers, which a refused request would not: the services'
+        # next-to-last partition, and the gateway's last route of its last team.
+        for client, subject, payload in (
+                (services, f"$JS.API.STREAM.MSG.GET.{consumer_stream('agent_inbox', team, last - 1)}",
+                 json.dumps({"last_by_subj": "x"}).encode()),
+                (gateway_login, f"$JS.API.CONSUMER.INFO.{consumer_stream('edge', teams[-1])}."
+                                f"{consumer_name('edge', teams[-1], edge=routes[-1])}", b"")):
+            answer = json.loads((await client.nc.request(subject, payload, timeout=2)).data)
+            assert answer["error"]["err_code"] == 10059, (subject, answer)  # stream not found
+        assert lead.errors.empty() and services.errors.empty() and gateway_login.errors.empty()
 
 
 @pytest.mark.asyncio
