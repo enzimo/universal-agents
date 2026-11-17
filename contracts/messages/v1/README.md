@@ -136,13 +136,15 @@ topology checks either.
 ## What bodies carry
 
 **Body rules.** A schema cannot say that a list holds no value twice, that one field is
-required when others have given values, that a body needs at least one of several
-fields, which values a field may hold when others have given values, or that a time ends
-within a span of another time. A kind's `body_rules` say it, and receivers check them
+required, or ruled out, when others have given values, that a body needs at least one of
+several fields, which values a field may hold when others have given values, or that a
+time ends within a span of another time. A kind's `body_rules` say it, and receivers check them
 right after the schema, refusing as `invalid_body` at the rule's field:
 - `{unique: <list>, by: <member>}`: no two items are equal; for object items, no two
   values of the member every item carries, while plain values compare whole;
 - `{requires: <field>, when: [{at: <field>, is: <value>}, ...]}`: the field is present
+  whenever every condition holds;
+- `{forbids: <field>, when: [{at: <field>, is: <value>}, ...]}`: the field is absent
   whenever every condition holds;
 - `{any_of: [<field>, ...]}`: at least one is present;
 - `{allowed: <field>, values: [...], when: [{at: <field>, is: <value>}, ...]}`: whenever
@@ -930,19 +932,65 @@ generator refuses settings that break these rules.
 limit, so a growing backlog cannot fill the server's disk. The installation authority
 reads the limits from the instance's settings when it creates or updates a stream:
 `transport.queues.max_bytes` holds one limit per size kind, and each stream names its kind
-(`size_kind` in `transport.yaml`: `agent_work`, `work` or `dead_letter`). The team services
-check their streams' sizes every minute and warn administrators, as a Status page problem
-and an Inbox notice, while a stream holds more than `transport.queues.warn_at_percent` of
-its limit (80 by default); the warning clears when the stream falls below that level
-again. These settings enter the `config.yaml` and `instance_config.yaml` schemas, with
-their measured defaults, in the step whose code first reads them; `transport.yaml` names
-them so that step builds on a fixed contract.
+(`size_kind` in `transport.yaml`: `agent_work`, `work` or `dead_letter`). A kind's limit
+applies to each stream of that kind: every team's `UA1_AGENT_WORK_{team}` and
+`UA1_DLQ_{team}` has the limit of its kind, and `UA1_WORK`, which every team shares, has its
+limit once for all teams. These settings enter the `config.yaml` and
+`instance_config.yaml` schemas, with their measured defaults, in the step whose code first
+reads them; `transport.yaml` names them so that step builds on a fixed contract.
+
+- **Limits are set aside when a stream is created.** NATS reserves a stream's whole byte
+  limit from the server's JetStream file storage (`max_file_store`, which a server that
+  does not set it derives from the free disk) and, in operator mode, from the account's
+  storage limit, when it creates the stream, not as the stream fills. A stream whose limit
+  does not fit what is left is refused with JetStream error code 10047 ("insufficient
+  storage resources"). The installation therefore sets aside the limits of every team's
+  streams, plus `UA1_WORK`'s once: teams times each team's streams' limits. The account
+  information reports what is set aside (`reserved_storage`) and the account's limit
+  (`limits.max_storage`, -1 when only the server's own limit applies). Before it creates
+  or enlarges any stream, the authority checks that the new limits fit the account's
+  limit, and stops with a message naming the `transport.queues.max_bytes` entry to lower
+  when they do not. An account without a limit of its own reports none to check against,
+  so there the server's 10047 refusal is the check, and it stops the authority the same
+  way. Defaults are
+  measured against what they set aside, not only against the expected backlog.
+- **Lowering a limit drops nothing.** A stream that holds more than a lowered limit keeps
+  every message and refuses new ones until it falls below the limit.
+- **The size warning** follows the rules of the existing storage warnings
+  (`assistant_gateway.storage_capacity`): the team services check their streams' sizes
+  every minute, and when a stream first holds more than `transport.queues.warn_at_percent`
+  of its limit (80 by default), administrators get one Inbox notice and the Status page
+  shows a problem; the warning ends only once the stream falls a release margin below that
+  level, so a stream hovering at the level does not send a notice on every crossing. The
+  setting is a transport setting, not a level of `gateway.storage_warnings`, because it
+  measures a stream against its own limit rather than a disk or the server's storage.
 
 A full stream refuses new messages (`discard: new`) instead of dropping its oldest ones,
 because dropping would lose queued work, or set-aside copies and notices nobody has read
 yet, without anyone being told:
-- **A full work stream** refuses the publish, and the sender keeps the work in its outbox
-  and sends it again later.
+- **A full work stream** refuses the publish with JetStream error code 10077 (the code
+  NATS gives when a stream's byte, message or per-subject limit is reached; work streams
+  set only the byte limit). This refusal is the retryable "full" case. The sender keeps
+  the saved frame in its outbox and publishes it again with growing pauses while the frame
+  is still valid (until its `expires_at`); retries are the same frame ("Task dispatch and
+  retries"). When the frame expires unsent, the sender records the dispatch as failed,
+  logs it with the frame's message id, kind, task id and stream, and tells whoever waits
+  for it as it reports other work that could not start: the gateway tells the person in
+  their conversation; a lead or worker host ends the delegating agent's delegation as
+  failed in that agent's task; the team services tell the person the work was for with
+  `person.notify`. Open for the step that builds the senders' outboxes: what the scheduler
+  records for a run whose task expired unsent, and what a task's holder does when a
+  result, question or progress report it sends up expires unsent (a result's copy to the
+  team services travels through `UA1_WORK`, another stream).
+- **Control messages share their stream's room.** An agent's control queue is stored in
+  the same stream as its inbox ("An agent's two queues"), so a stream that new tasks have
+  filled also refuses stops, steers, custody confirmations, access decisions and results
+  for every agent in it until room returns; their senders retry them as above, and each
+  one that expires unsent has the effect a lost message of its kind has. Room returns when
+  hosts take work, when the team services withdraw queued work, or when an administrator
+  raises the limit. The size warning reaches administrators before the stream is full,
+  and defaults are measured so that it leaves time to act. The two queues keep control
+  messages from waiting behind new work; they do not reserve room for them.
 - **A full dead-letter stream** refuses a set-aside: see "Dead letters".
 
 The generator refuses a work or dead-letter stream without a size kind or with any other
@@ -1456,14 +1504,16 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
     "The host on another contract"). The notice names the frame's own claims.
   - `upgrade_old_format`: a message in the format used before protocol 1, still queued in the
     old work stream when an instance first starts 0.10. It is no frame, so the notice claims
-    nothing about it (no `claimed`, no `pointer`); `original` names the old stream and
-    subject, and the raw copy keeps its bytes, from which the team services name the task
-    and the person's request it belonged to in their notice to administrators, with what to
-    do (send it again). As for any set-aside, a raw copy is kept only up to
-    `max_frame_bytes`; for a larger old message the administrators' notice can say only
-    where it sat. Before it sets aside the old messages, the upgrade checks that the
-    dead-letter stream has room for all of them, and stops with a message saying so if they
-    do not fit.
+    nothing about it: registry body rules refuse a `claimed` or a `pointer` with this
+    reason. `original` names the old stream and subject; the old stream's name comes from
+    the operator's subject prefix, so `original.stream` allows up to 255 characters, more
+    than an id's 64. The raw copy keeps the message's bytes, from which the team services
+    name the task and the person's request it belonged to in their notice to
+    administrators, with what to do (send it again). As for any set-aside, a raw copy is
+    kept only up to `max_frame_bytes`; for a larger old message the administrators' notice
+    can say only where it sat. Before it sets aside the old messages, the upgrade checks
+    that the dead-letter stream has room for all of them, and stops with a message saying
+    so if they do not fit.
 
 ## Versions
 

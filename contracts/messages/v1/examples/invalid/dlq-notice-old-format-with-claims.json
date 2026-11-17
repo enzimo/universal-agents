@@ -1,0 +1,17 @@
+{
+  "description": "A notice for a message in the format before protocol 1 claims nothing for it: the message is no frame.",
+  "refusal": "invalid_body",
+  "at": "/body/claimed",
+  "base": "dlq.notice/upgrade-old-format.json",
+  "changes": [
+    {
+      "set": "/body/claimed",
+      "to": {
+        "kind": "task.request",
+        "issuer_team": "team_example"
+      }
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"dlq.notice\", \"message_id\": \"01928f3a-7b2c-7707-8000-000000000708\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.worker-host-1.dlq.notice.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"copy_id\": \"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\", \"reason\": \"upgrade_old_format\", \"original\": {\"subject\": \"ua.team_example.agent.researcher-2.work\", \"stream\": \"UA_TEAM_EXAMPLE_WORK\", \"stream_sequence\": 812, \"deliveries\": 0}, \"raw\": {\"stored\": true, \"size\": 3172, \"sha256\": \"DQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0\"}, \"release\": \"0.10.0\", \"claimed\": {\"kind\": \"task.request\", \"issuer_team\": \"team_example\"}}, \"idempotency_key\": \"dlq.notice:a3edyd3aWbD38slTX8CebdxyIOe7RRNm81iyl2XU0h4\", \"body_digest\": \"mqy2dOGkzzm8Wc8MVhBarjpLW-J0FhuHuiFivgbi3Ro\", \"signature\": \"xgFCVSJQLNIijU9XS--HPl1d1x3pFWY7ziv2mea9Qn2F1H8IOFJzAhoYezDX5x2Yi8BPOp7x-jBMvnOkad22CQ\"}"
+}

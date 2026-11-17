@@ -1685,7 +1685,7 @@ class DeliveryRefusedBody(WireModel):
 
 class DlqNoticeBodyOriginal(WireModel):
     subject: Annotated[str, StringConstraints(min_length=1, max_length=512)]
-    stream: TokenId
+    stream: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,255}$')]
     stream_sequence: Count
     deliveries: Count
 

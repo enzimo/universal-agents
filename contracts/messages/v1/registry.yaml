@@ -3103,6 +3103,10 @@ kinds:
     class: dead_letter
     address: dlq.notice.{copy}
     body: bodies/dlq.notice.schema.json
+    # A message in the format before protocol 1 is no frame: its notice claims nothing for it.
+    body_rules:
+      - {forbids: /body/claimed, when: [{at: /body/reason, is: upgrade_old_format}]}
+      - {forbids: /body/pointer, when: [{at: /body/reason, is: upgrade_old_format}]}
     senders: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     receivers: [team_services]
     expiry_seconds: 2592000

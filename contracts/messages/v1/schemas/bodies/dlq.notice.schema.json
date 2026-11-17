@@ -53,7 +53,9 @@
           "maxLength": 512
         },
         "stream": {
-          "$ref": "../common.schema.json#/$defs/token_id"
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,255}$",
+          "description": "The stream the message sat in: a protocol 1 stream, or for upgrade_old_format the old work stream, whose name the operator's subject prefix makes and may be longer than an id (README, \"Dead letters\")."
         },
         "stream_sequence": {
           "$ref": "../common.schema.json#/$defs/count"

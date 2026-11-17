@@ -917,6 +917,12 @@ def allowed_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
         and all(fields.holds(rule["allowed"], value) for value in values) and conditions_valid(rule["when"], fields)
 
 
+def forbids_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
+    """``{forbids, when}``: a field the body defines that must be absent whenever every condition holds."""
+
+    return set(rule) == {"forbids", "when"} and fields.defined(rule["forbids"]) and conditions_valid(rule["when"], fields)
+
+
 def any_of_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
     return set(rule) == {"any_of"} and len(rule["any_of"]) > 1 and all(fields.defined(p) for p in rule["any_of"])
 
@@ -931,14 +937,15 @@ def ends_within_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
 
 
 def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]], frame_schema: str) -> None:
-    """Each rule is one of the five README shapes and names fields its body defines, with values they can hold."""
+    """Each rule is one of the six README shapes and names fields its body defines, with values they can hold."""
 
     fields = BodyFields(entry, schemas, frame_schema)
     for rule in entry.get("body_rules", []):
-        if not (unique_rule_valid(rule, fields) or requires_rule_valid(rule, fields) or any_of_rule_valid(rule, fields)
-                or allowed_rule_valid(rule, fields) or ends_within_rule_valid(rule, fields)):
-            raise ContractError(f"{where}: body rule {rule} is not a unique, requires, any_of, allowed or ends_within rule "
-                                "over its body's fields")
+        if not (unique_rule_valid(rule, fields) or requires_rule_valid(rule, fields) or forbids_rule_valid(rule, fields)
+                or any_of_rule_valid(rule, fields) or allowed_rule_valid(rule, fields)
+                or ends_within_rule_valid(rule, fields)):
+            raise ContractError(f"{where}: body rule {rule} is not a unique, requires, forbids, any_of, allowed or "
+                                "ends_within rule over its body's fields")
 
 
 def value_fits(resolver: "ModelWriter", file: str, node: dict[str, Any], value: Any) -> bool:

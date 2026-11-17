@@ -865,9 +865,11 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
     ({"copy_to": ["work.agent.{agent}"]}, "two of its addresses deliver to one audience target"),
     ({"copy_to": ["work.pool.{pool}"]}, "copies go only to"),
     ({"receivers": ["lead_host", "gateway", "edge_adapter", "scheduler"]}, "serve none of its addresses"),
-    ({"body_rules": [{"unique": "/body/summary"}]}, "is not a unique, requires, any_of, allowed or ends_within rule"),
+    ({"body_rules": [{"unique": "/body/summary"}]}, "is not a unique, requires, forbids, any_of, allowed or ends_within rule"),
     ({"body_rules": [{"requires": "/body/no_such_field", "when": [{"at": "/body/sequence", "is": 1}]}]}, "is not a unique"),
     ({"body_rules": [{"any_of": ["/body/summary"]}]}, "is not a unique"),
+    ({"body_rules": [{"forbids": "/body/no_such_field", "when": [{"at": "/body/sequence", "is": 1}]}]}, "is not a unique"),
+    ({"body_rules": [{"forbids": "/body/summary", "when": []}]}, "is not a unique"),
     ({"authority": "optional"}, "state authority_binding"),
     ({"senders_by_address": {"work.pool.{pool}": ["lead_host"]}}, "narrows the senders of one of its own addresses"),
     ({"topology_edge": ["up", "none"]}, "or none alone"),
@@ -917,7 +919,7 @@ def test_the_generator_accepts_an_ends_within_rule_between_timestamps(rule: dict
 def test_the_generator_refuses_a_broken_ends_within_rule(rule: dict) -> None:
     registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
     registry["kinds"]["custody.confirmed"]["body_rules"] = [rule]
-    with pytest.raises(EXPORT.ContractError, match="is not a unique, requires, any_of, allowed or ends_within rule"):
+    with pytest.raises(EXPORT.ContractError, match="is not a unique, requires, forbids, any_of, allowed or ends_within rule"):
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
@@ -937,6 +939,20 @@ def test_an_allowed_rule_checks_a_single_value_and_each_item_of_a_list() -> None
         with pytest.raises(FrameRefused) as refused:
             check({"body": body}, spec)
         assert (refused.value.code, refused.value.at) == ("invalid_body", at)
+
+
+def test_a_forbids_rule_refuses_the_field_only_while_its_conditions_hold() -> None:
+    """README, "What bodies carry": an old-format set-aside's notice claims nothing for the message."""
+
+    spec = kinds.KINDS["dlq.notice"]
+    check = wire_frame._check_body_rules  # noqa: SLF001 - the rule check itself, without a signed frame
+    claimed = {"kind": "task.request"}
+    check({"body": {"reason": "malformed", "claimed": claimed, "pointer": "/body"}}, spec)
+    check({"body": {"reason": "upgrade_old_format"}}, spec)
+    for field, value in (("claimed", claimed), ("pointer", "/body")):
+        with pytest.raises(FrameRefused) as refused:
+            check({"body": {"reason": "upgrade_old_format", field: value}}, spec)
+        assert (refused.value.code, refused.value.at) == ("invalid_body", f"/body/{field}")
 
 
 def test_an_ends_within_rule_allows_the_whole_span_and_not_a_millisecond_more() -> None:
@@ -2578,7 +2594,7 @@ def receiver_only(case: dict) -> bool:
 
     kind = json.loads(case["frame_text"])["kind"]
     rules = REGISTRY["kinds"].get(kind, {}).get("body_rules", [])
-    places = {rule.get("unique") or rule.get("requires") or rule.get("allowed") or rule.get("ends_within")
+    places = {rule.get("unique") or rule.get("requires") or rule.get("forbids") or rule.get("allowed") or rule.get("ends_within")
               or rule["any_of"][0].rsplit("/", 1)[0] for rule in rules}
     return case["at"] == "/idempotency_key" or case["at"] in places or receiver_compares_body(case)
 
@@ -2852,13 +2868,17 @@ def test_an_old_format_message_found_at_the_upgrade_has_its_own_dead_letter_reas
     reasons = json.loads((CONTRACT / "schemas/bodies/dlq.notice.schema.json").read_text())["properties"]["reason"]
     assert {"upgrade_drain", "upgrade_old_format"} <= set(reasons["enum"])
     assert "upgrade_old_format (a message in the format before protocol 1" in reasons["description"]
-    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
     for text in ("**Two upgrade reasons.**", "- `upgrade_drain`: a protocol 1 frame",
                  "- `upgrade_old_format`: a message in the format used before protocol 1",
-                 "the upgrade checks that the\n    dead-letter stream has room"):
+                 "the upgrade checks that the dead-letter stream has room",
+                 "registry body rules refuse a `claimed` or a `pointer` with this reason"):
         assert text in readme
     with pytest.raises(ValidationError):
         models.DlqNoticeBody.model_validate(dict(notice["body"], reason="upgrade_old"))
+    # The old work stream's name comes from the operator's subject prefix, which has no length cap.
+    long_name = "TEAM_" + "A" * 245 + "_WORK"
+    models.DlqNoticeBody.model_validate(dict(notice["body"], original=dict(notice["body"]["original"], stream=long_name)))
 
 
 def test_the_revocations_record_is_never_forgotten() -> None:

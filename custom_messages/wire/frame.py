@@ -953,6 +953,11 @@ def _lacks_required(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
     return applies and _pointed(raw, rule["requires"]) is None
 
 
+def _holds_forbidden(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
+    applies = all(_pointed(raw, condition["at"]) == condition["is"] for condition in rule["when"])
+    return applies and _pointed(raw, rule["forbids"]) is not None
+
+
 def _says_nothing(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
     return all(_pointed(raw, pointer) is None for pointer in rule["any_of"])
 
@@ -987,6 +992,8 @@ _BodyRuleForm = tuple[str, Callable[[Mapping[str, Any], Mapping[str, Any]], bool
 _BODY_RULE_FORMS: tuple[_BodyRuleForm, ...] = (
     ("unique", _repeats, lambda rule: "a list holds the same value twice", lambda rule: rule["unique"]),
     ("requires", _lacks_required, lambda rule: "a field its other fields need is missing", lambda rule: rule["requires"]),
+    ("forbids", _holds_forbidden, lambda rule: "a field its other fields rule out is present",
+     lambda rule: rule["forbids"]),
     ("any_of", _says_nothing, lambda rule: "the body needs one of " + ", ".join(rule["any_of"]),
      lambda rule: rule["any_of"][0].rsplit("/", 1)[0]),
     ("allowed", _holds_other, lambda rule: "a value its other fields do not allow here", lambda rule: rule["allowed"]),

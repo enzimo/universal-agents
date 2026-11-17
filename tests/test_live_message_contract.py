@@ -448,6 +448,44 @@ async def test_a_full_stream_refuses_new_messages_and_keeps_what_it_holds(isolat
 
 
 @pytest.mark.asyncio
+async def test_every_streams_limit_is_set_aside_at_creation_and_lowering_it_drops_nothing(tmp_path: Path) -> None:
+    """README, "Stream sizes": limits are reserved when a stream is created; a lowered one keeps what it holds."""
+
+    mib = 1024 * 1024
+    settings = {"jetstream": {**TRANSPORT["server"]["jetstream"], "max_file_store": 8 * mib}}
+    config = tmp_path / "nats.json"
+    config.write_text(json.dumps(settings))
+    with own_nats_server(nats_server(), tmp_path, "-c", str(config)) as url:
+        connection = await nats.connect(url, allow_reconnect=False)
+        try:
+            js = connection.jetstream()
+            first = stream_config("UA1_AGENT_WORK_{team}")
+            first.max_bytes = 5 * mib
+            await js.add_stream(config=first)
+            info = json.loads((await connection.request("$JS.API.INFO", b"", timeout=5)).data)
+            assert info["reserved_storage"] == 5 * mib and info["storage"] == 0  # set aside, not yet used
+            second = stream_config("UA1_AGENT_WORK_{team}", team="team_other")
+            second.max_bytes = 5 * mib
+            with pytest.raises(nats.js.errors.APIError) as refused:
+                await js.add_stream(config=second)
+            assert refused.value.err_code == 10047, refused.value  # insufficient storage resources
+
+            subject = f"ua.v1.{TEAM}.lead-host-1.work.agent.researcher-2"
+            for index in range(3):
+                await js.publish(subject, bytes([65 + index]) * 600)
+            first.max_bytes = 1024  # below the three messages it holds
+            await js.update_stream(config=first)
+            kept = await js.stream_info(first.name)
+            assert (kept.config.max_bytes, kept.state.messages) == (1024, 3)
+            with pytest.raises(nats.js.errors.APIError) as full:
+                await js.publish(subject, b"D" * 600)
+            assert full.value.err_code == 10077, full.value
+            assert (await js.get_msg(first.name, 1)).data == b"A" * 600
+        finally:
+            await connection.close()
+
+
+@pytest.mark.asyncio
 async def test_a_host_may_hear_its_teams_agents_and_answers_each_request_once(isolated_broker) -> None:
     async with AsyncExitStack() as stack:
         lead = await connect(stack, isolated_broker, "lead")

@@ -845,6 +845,26 @@
       },
       "authority": "none",
       "body": "bodies/dlq.notice.schema.json",
+      "body_rules": [
+        {
+          "forbids": "/body/claimed",
+          "when": [
+            {
+              "at": "/body/reason",
+              "is": "upgrade_old_format"
+            }
+          ]
+        },
+        {
+          "forbids": "/body/pointer",
+          "when": [
+            {
+              "at": "/body/reason",
+              "is": "upgrade_old_format"
+            }
+          ]
+        }
+      ],
       "class": "dead_letter",
       "description": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only. The team services tell administrators.",
       "expiry_seconds": 2592000,
