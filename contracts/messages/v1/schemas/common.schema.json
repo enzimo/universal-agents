@@ -14,7 +14,7 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,61}$"
     },
     "team_id": {
-      "description": "A team: one NATS subject token of at most 24 characters. A host's credential names its teams' streams and consumers once per agent it runs, so short team ids keep it within max_credential_bytes (README, \"Credential size\"). Ids starting with an underscore are reserved.",
+      "description": "A team: one NATS subject token of at most 24 characters. A host's credential names its team in the grants of every partition it owns and every pool it runs, so short team ids keep it within max_credential_bytes (README, \"Credential size\"). Ids starting with an underscore are reserved.",
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$"
     },
@@ -23,7 +23,7 @@
       "$ref": "#/$defs/token_id"
     },
     "agent_id": {
-      "description": "An agent's id: one NATS subject token of at most 32 characters, which a host's credential names in each of the agent's grants (README, \"Credential size\"). A session binds it to a host. A runtime may explicitly restore an id, but this implementation gives a new process's agents fresh ids; an id alone proves no continuity across restarts.",
+      "description": "An agent's id: one NATS subject token of at most 32 characters (decision 98 keeps this cap). Credentials name partitions and pools, never agents, so the cap no longer bounds a credential; it bounds the subjects, consumer names and record keys that hold the id (README, \"Partitions\"). A session binds it to a host. A runtime may explicitly restore an id, but this implementation gives a new process's agents fresh ids; an id alone proves no continuity across restarts.",
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
     },
@@ -265,25 +265,62 @@
           "$ref": "#/$defs/person_ref"
         },
         "bound_to": {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "enum": [
-                "root_task",
-                "command",
-                "access_request"
-              ]
+          "description": "The one record the token is for. Only a root task's binding carries a request id (README, \"On behalf of a person\").",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "root_task"
+                },
+                "id": {
+                  "$ref": "#/$defs/record_id"
+                },
+                "request_id": {
+                  "description": "The person's request the root task belongs to: the id that grants for one request, the change ledger's request rows and the coordination registry are keyed by. It is the id of today's signed task context in the form its issuer makes: message_context_<sha256> for a gateway message that can bring files (access_control.ownership), schedule_run_<hex> for a run started from a schedule permit (custom_agents.schedule_permits), task_context_<hex> for other contexts (access_control.identity.ContextSigner.issue); a stored context converted at the upgrade keeps its id.",
+                  "$ref": "#/$defs/record_id"
+                }
+              },
+              "required": [
+                "type",
+                "id",
+                "request_id"
+              ],
+              "additionalProperties": false
             },
-            "id": {
-              "$ref": "#/$defs/record_id"
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "command"
+                },
+                "id": {
+                  "$ref": "#/$defs/record_id"
+                }
+              },
+              "required": [
+                "type",
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "access_request"
+                },
+                "id": {
+                  "$ref": "#/$defs/record_id"
+                }
+              },
+              "required": [
+                "type",
+                "id"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "type",
-            "id"
-          ],
-          "additionalProperties": false
+          ]
         },
         "schedule_id": {
           "description": "The schedule a scheduled job's run belongs to. Only a scheduler certificate signs it, and a run's schedule comes only from here (README, \"On behalf of a person\").",
@@ -2300,7 +2337,7 @@
     },
     "connection_credential": {
       "type": "object",
-      "description": "The credential a host connects to NATS with, naming the agents and pools it runs; it ends no later than the certificate it comes with. Never logged.",
+      "description": "The credential a host connects to NATS with, naming the partitions it owns and the pools it runs, never its agents; it ends no later than the certificate it comes with. Never logged.",
       "properties": {
         "type": {
           "const": "nats_user_jwt"
@@ -2449,6 +2486,12 @@
         "notes_total"
       ],
       "additionalProperties": false
+    },
+    "partition": {
+      "description": "One partition of a team's queued agent work: FNV-1a (32 bits) over the team id followed by the agent id, modulo the installation's partition count, which is at most transport.yaml partitions.max_count (README, \"Partitions\").",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 127
     }
   }
 }

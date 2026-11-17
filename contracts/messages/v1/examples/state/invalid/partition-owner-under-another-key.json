@@ -1,0 +1,14 @@
+{
+  "description": "A partition ownership record stored under another partition's key.",
+  "refusal": "invalid_body",
+  "at": "/key",
+  "base": "partition_owner/lead-host-55.json",
+  "changes": [
+    {
+      "set": "/key",
+      "to": "team_example.partition.7"
+    }
+  ],
+  "context": {},
+  "document_text": "{\"record\": \"partition_owner\", \"protocol\": \"1.0-pre\", \"key\": \"team_example.partition.7\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 1, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"partition\": 55, \"state\": \"owned\", \"host\": \"lead-host-1\", \"host_epoch\": 3, \"assigned_at\": \"2026-10-22T04:00:00.000Z\", \"reason\": \"rebalanced\", \"previous_host\": \"lead-host-0\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"rWPS9m9tOcNZd9Ra--roNv14jIOR2bn-0ro-7_PM9xA\", \"signature\": \"9TP8TEd2RURIvINNNlD9jqovPAofBrEbu3OSwE548lHKlDBBbcfaaDokYJOYbXQFGU6Gnedqwu6YbeomoKWzAg\"}"
+}

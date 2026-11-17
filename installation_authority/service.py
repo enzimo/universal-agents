@@ -79,7 +79,7 @@ from pydantic import ValidationError
 from custom_messages.wire.buckets import TEAM_PLACEHOLDER, bucket_name, bucket_stream
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.frame import Receiver, VerifiedFrame, body_model, expected_idempotency_key
-from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, KINDS, PROTOCOL
+from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, KINDS, PROTOCOL, SINGLE_TEAM_ROLES
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import CERTIFICATE, AuthorityKey, HostCertificate, TrustStore, kept_for, sign_state
 from custom_messages.wire.values import parse_timestamp
@@ -844,16 +844,20 @@ class InstallationAuthority:
                 return {"outcome": "ok", "certificate": issued}
         key = rotation["key"] if rotation else {"key_id": certificate.key_id, "public_key": _public_text(certificate)}
         expected = read_expected_hosts(self.layout.trust_expected_hosts_path).get(certificate.runtime)
-        if not give_up:
+        if give_up:
+            # A renewal that gives its agents up keeps its teams, so it too is refused for a
+            # certificate that breaks the one-team rule: the host would refuse the reply.
+            refusal = _MULTI_TEAM_RENEWAL if _serves_too_many_teams(certificate.roles, certificate.teams) else None
+        else:
             refusal = _renewal_refusal(expected, certificate, key,
                                        self._allowed_agent_types(expected) | (
                                            certificate.agent_types if expected is not None and expected.agent_types_from_catalog
                                            else frozenset()))
-            if refusal is not None:
-                self.logger.warning("A renewal was refused: the launcher's list does not cover it. "
-                                    "event=host_renewal_not_allowed runtime=%s membership_epoch=%s reason=%s",
-                                    certificate.runtime, certificate.membership_epoch, refusal)
-                return {"outcome": "not_allowed", "message": refusal}
+        if refusal is not None:
+            self.logger.warning("A renewal was refused: the launcher's list or the one-team rule does not cover it. "
+                                "event=host_renewal_not_allowed runtime=%s membership_epoch=%s teams=%s reason=%s",
+                                certificate.runtime, certificate.membership_epoch, sorted(certificate.teams), refusal)
+            return {"outcome": "not_allowed", "message": refusal}
         agent_types = () if give_up else tuple(sorted(certificate.agent_types))
         request = CertificateRequest(runtime=certificate.runtime, teams=tuple(sorted(certificate.teams)),
                                      roles=tuple(sorted(certificate.roles)), agent_types=agent_types,
@@ -933,6 +937,22 @@ def _held_agent_types(stored: Optional[Mapping[str, Any]], key: Mapping[str, Any
     return frozenset(body["agent_types"])
 
 
+_MULTI_TEAM_RENEWAL = ("This certificate names more than one team for a role that serves one team; the host must "
+                       "join again, once for each team.")
+
+
+def _serves_too_many_teams(roles: Iterable[str], teams: Iterable[str]) -> bool:
+    """Whether a certificate with these roles and teams breaks the one-team rule (transport.yaml single_team_roles).
+
+    Every role but the gateway and the authority serves one team per runtime (owner decision of
+    2026-11-17). The authority grants such a role only with one team at join, and refuses to renew
+    a certificate that names more, such as one issued before the rule or from a hand-edited
+    expected-hosts entry; hosts refuse a reply that carries one.
+    """
+
+    return bool(set(roles) & set(SINGLE_TEAM_ROLES)) and len(set(teams)) > 1
+
+
 def _denial(expected: Any, body: Mapping[str, Any], agent_types: frozenset[str]) -> Optional[str]:
     """Why a join is refused, as the reply's reason, or ``None`` when the launcher listed exactly this host.
 
@@ -946,6 +966,8 @@ def _denial(expected: Any, body: Mapping[str, Any], agent_types: frozenset[str])
     if (expected.key_id, expected.public_key) != (key["key_id"], key["public_key"]):
         return "key_mismatch"
     if not set(body["teams"]) <= expected.teams:
+        return "team_not_allowed"
+    if _serves_too_many_teams(body["roles"], body["teams"]):
         return "team_not_allowed"
     if not set(body["roles"]) <= expected.roles or not set(body["agent_types"]) <= agent_types:
         return "role_not_allowed"
@@ -964,9 +986,12 @@ def _renewal_refusal(expected: Optional[ExpectedHost], certificate: HostCertific
 
     A renewal keeps the grants of the certificate it replaces (README "Renewing"), so they
     are checked against the list as a join's are: a host the list no longer covers must
-    join again, for what the list now allows.
+    join again, for what the list now allows. So must a host whose certificate names more
+    than one team for a role that serves one team (``_serves_too_many_teams``).
     """
 
+    if _serves_too_many_teams(certificate.roles, certificate.teams):
+        return _MULTI_TEAM_RENEWAL
     if expected is None:
         return "The launcher no longer lists this host; it must join again."
     if (expected.key_id, expected.public_key) != (key.get("key_id"), key.get("public_key")):

@@ -172,11 +172,21 @@ class SessionService:
                                 "event=team_services_record_refused record=placement key=%s code=empty", key)
         return revision, None
 
+    async def _placement_keys(self, team: str) -> list[str]:
+        """The keys of ``team``'s agent placements, ``<team>.<agent>``.
+
+        UA1_PLACEMENT also holds the team's partition ownership records under
+        ``<team>.partition.<partition>`` (contract README, "Partition ownership"); they are
+        not placements, so a three-part key is left out here rather than read and refused.
+        """
+
+        return [key for key in await self.records.keys(PLACEMENT, f"{team}.", team=team) if key.count(".") == 1]
+
     async def _host_placements(self, team: str, runtime: str) -> list[str]:
         """The agents of ``team`` placed on ``runtime``."""
 
         agents = []
-        for key in await self.records.keys(PLACEMENT, f"{team}.", team=team):
+        for key in await self._placement_keys(team):
             _revision, placement = await self._placement(key)
             if placement is not None and placement.body.host == runtime:
                 agents.append(key.split(".", 1)[1])
@@ -448,7 +458,7 @@ class SessionService:
         evidence that a session is missing. The placement CAS protects newer work.
         """
         candidates = []
-        for key in await self.records.keys(PLACEMENT, f"{team}.", team=team):
+        for key in await self._placement_keys(team):
             revision, placement = await self._placement(key)
             if placement is not None and placement.body.handed_over is not True and (
                 runtime is None or placement.body.host == runtime
@@ -472,7 +482,7 @@ class SessionService:
 
     async def _sign_placements_again(self, team: str) -> None:
         epoch = self.records.writer().certificate.membership_epoch
-        for key in await self.records.keys(PLACEMENT, f"{team}.", team=team):
+        for key in await self._placement_keys(team):
             revision, placement = await self._placement(key)
             if placement is None or placement.signer is None or placement.signer.membership_epoch == epoch:
                 continue

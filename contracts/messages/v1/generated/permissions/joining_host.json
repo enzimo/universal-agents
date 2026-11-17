@@ -4,6 +4,6 @@
   ],
   "role": "joining_host",
   "subscribe": [
-    "_INBOX.{self}.>"
+    "_INBOX.{self}.join.>"
   ]
 }

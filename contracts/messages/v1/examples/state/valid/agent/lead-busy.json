@@ -1,7 +1,7 @@
 {
   "record": "agent",
   "protocol": "1.0-pre",
-  "key": "team_example.lead",
+  "key": "team_example.55.lead",
   "writer": {
     "type": "host",
     "installation": "install_example",
@@ -24,5 +24,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "IQJqKPFGQB77Uww1ycfU4NoiE_ccFRQjJ20BDNuoyS0",
-  "signature": "E0sWhvcSXl9k7qauVLzohm2X38Xt-kJgp0_jZ3995QVEqHV5fEQi2WRx_gIcGpYE7IMydCmaTZ7c8x_145A_BA"
+  "signature": "zWno98XwsqmBW4J2B5sICKgtY6DCurKbWbuE4HCeFF7pubIvEhaKyn0mJvR-pL272y5KXYYGVYK85TeqVGtsDg"
 }

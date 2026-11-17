@@ -5672,7 +5672,9 @@ has no address, so nothing can ask it anything and its exit goes unseen. So:
   repeating an open replaces its placement and session. A refused renewal opens a new session.
 
 **Agent records and who is live** (step 7a): each agent's host signs the agent's state into
-`UA1_AGENTS` (key `<team>.<agent>`: starting, idle, busy, paused or exiting, whether it
+`UA1_AGENTS` (key `<team>.<partition>.<agent>`, the partition computed with the contract's
+default count by `custom_messages.wire.partitions.agent_record_key`, so a host's grant can
+name the partitions it owns: starting, idle, busy, paused or exiting, whether it
 accepts work, and its `display_name`, plan decision 69) when the agent reports a change
 (`custom_agents.agent_host.report_agent_state`, called wherever the agent refreshes its own
 state row, when a worker starts winding down after losing its launch lease, and when an

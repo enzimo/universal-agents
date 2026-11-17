@@ -845,6 +845,26 @@
       },
       "authority": "none",
       "body": "bodies/dlq.notice.schema.json",
+      "body_rules": [
+        {
+          "forbids": "/body/claimed",
+          "when": [
+            {
+              "at": "/body/reason",
+              "is": "upgrade_old_format"
+            }
+          ]
+        },
+        {
+          "forbids": "/body/pointer",
+          "when": [
+            {
+              "at": "/body/reason",
+              "is": "upgrade_old_format"
+            }
+          ]
+        }
+      ],
       "class": "dead_letter",
       "description": "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only. The team services tell administrators.",
       "expiry_seconds": 2592000,
@@ -1198,6 +1218,11 @@
       },
       "authority": "none",
       "body": "bodies/host.renew.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/partitions"
+        }
+      ],
       "class": "request_reply",
       "description": "A host renews its certificate and connection credential, or rotates its keys.",
       "expiry_seconds": 30,
@@ -4535,6 +4560,7 @@
           "not_allowed",
           "already_placed",
           "limit_reached",
+          "partition_not_owned",
           "runtime_error"
         ]
       },
@@ -6231,7 +6257,7 @@
       "body": "state/agent.schema.json",
       "bucket": "UA1_AGENTS",
       "description": "An agent's state, written on change and refreshed by the host it is placed on.",
-      "key": "<team>.<agent>",
+      "key": "<team>.<partition>.<agent>",
       "signer": "host",
       "signer_roles": [
         "lead_host",
@@ -6326,6 +6352,20 @@
         "edge_adapter",
         "installation_authority",
         "scheduler"
+      ]
+    },
+    "partition_owner": {
+      "body": "state/partition_owner.schema.json",
+      "bucket": "UA1_PLACEMENT",
+      "description": "Which host owns one partition of a team, or is giving it up, and that host's epoch; a host serves the agents of the partitions it owns, and its NATS credential names the owned ones only (README, \"Partitions\").",
+      "key": "<team>.partition.<partition>",
+      "signer": "host",
+      "signer_roles": [
+        "team_services"
+      ],
+      "write_rule": "compare-and-set on the last key-value revision, with the next sequence, like a placement; written owned when the team services give a host a partition that holds no placed agent; a move (a group move, with all the partition's agents) is two writes, released naming the old host before the old host gives the partition up, then owned naming the new host only after the old host's renewal without it; the authority names in a credential only the owned partitions of the host, and a renewal by a host a released record names needs a new NATS key; a partition without a record has no owner, and the team services place no agent in it or in a released one",
+      "writers": [
+        "team_services"
       ]
     },
     "placement": {

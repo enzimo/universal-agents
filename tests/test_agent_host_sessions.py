@@ -26,7 +26,9 @@ from custom_agents.agent_host import (
     refused_session_component,
     session_renewal_id,
 )
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
 from custom_messages.wire.models import HostStateComponentsItem
+from custom_messages.wire.partitions import agent_partition, agent_record_key
 from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.host_runtime import Rejoined
 from custom_transport.protocol1.joining import HostProfile
@@ -57,7 +59,8 @@ class _Trust:
     def __init__(self) -> None:
         self.added: list[bytes] = []
         self.sequence = 1
-        self.store = SimpleNamespace(held_record=lambda record, key: (self.sequence, "digest"))
+        self.store = SimpleNamespace(held_record=lambda record, key: (self.sequence, "digest"),
+                                     partition_count=DEFAULT_PARTITION_COUNT)
 
     def add(self, data: bytes, *, now: datetime) -> bool:
         self.added.append(data)
@@ -546,16 +549,19 @@ async def test_a_start_removes_only_the_earlier_agent_records_that_verify_as_its
     mine = SimpleNamespace(signer=SimpleNamespace(runtime="lead"))
     theirs = SimpleNamespace(signer=SimpleNamespace(runtime="agent-Researcher"))
     stored: dict[str, Any] = {
-        f"{TEAM}.forged": FrameRefused("bad_signature", at="/signature"),
-        f"{TEAM}.removed": None,
-        f"{TEAM}.broken": RuntimeError("nats: timeout"),
-        f"{TEAM}.old_1": StoredRecord(4, mine),  # type: ignore[arg-type]
-        f"{TEAM}.other_host": StoredRecord(2, theirs),  # type: ignore[arg-type]
+        agent_record_key(TEAM, "forged"): FrameRefused("bad_signature", at="/signature"),
+        agent_record_key(TEAM, "removed"): None,
+        agent_record_key(TEAM, "broken"): RuntimeError("nats: timeout"),
+        agent_record_key(TEAM, "old_1"): StoredRecord(4, mine),  # type: ignore[arg-type]
+        agent_record_key(TEAM, "other_host"): StoredRecord(2, theirs),  # type: ignore[arg-type]
     }
     records = process.host.records  # type: ignore[union-attr]
 
     async def keys(record: str, prefix: str) -> list[str]:
-        return [*stored, "other_team.z"]
+        # Another team's key, an earlier release's two-part key and a key under another partition
+        # are no records of this host's agents: they are never read, and expire on their own.
+        wrong_partition = f"{TEAM}.{(agent_partition(TEAM, 'old_2') + 1) % DEFAULT_PARTITION_COUNT}.old_2"
+        return [*stored, "other_team.z", f"{TEAM}.old_1", wrong_partition]
 
     async def read_report(record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
         assert record == "agent"
@@ -567,6 +573,6 @@ async def test_a_start_removes_only_the_earlier_agent_records_that_verify_as_its
     records.keys, records.read_report = keys, read_report
     with caplog.at_level(logging.WARNING, logger=agent_host.__name__):
         await process._remove_earlier_records()
-    assert records.removed == [f"{TEAM}.old_1"]
-    assert "event=agent_host_record_refused" in caplog.text and f"key={TEAM}.forged" in caplog.text
+    assert records.removed == [agent_record_key(TEAM, "old_1")]
+    assert "event=agent_host_record_refused" in caplog.text and f"key={agent_record_key(TEAM, 'forged')}" in caplog.text
     assert "event=agent_record_stale_remove_failed" in caplog.text

@@ -86,6 +86,8 @@ ANNOTATIONS = {"title", "description", "examples"}
 MAX_SAFE_INTEGER = 2**53 - 1
 # Escaped characters that every common engine reads as the character itself.
 PORTABLE_ESCAPES = set(".-\\[](){}*+?|^$/")
+# A bounded repetition: {n}, {n,} or {n,m}, the only forms a pattern's braces may take.
+REPETITION = re.compile(r"\{(\d+)(,(\d*))?\}")
 # Characters an id may hold (common.schema.json token_id). Consumer names join ids
 # with a character outside this set.
 ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
@@ -182,31 +184,50 @@ def pattern_problem(pattern: str) -> str | None:
     """Why ``pattern`` could match differently in Python, ECMAScript or Pydantic's engine, if it could.
 
     Allowed: literal characters, character classes, escaped punctuation, groups,
-    ``(?:``, alternatives inside a group, and quantifiers. ``$`` means the end of
-    the value; Python's ``re`` also matches it before a final newline, which the
-    README tells Python validators to refuse.
+    ``(?:``, alternatives inside a group, and one quantifier per atom (?, *, +, {n},
+    {n,} or {n,m}), optionally lazy. ``$`` means the end of the value; Python's ``re``
+    also matches it before a final newline, which the README tells Python validators to
+    refuse. A ``]`` directly after ``[`` or ``[^`` is refused: Python reads it as a literal,
+    ECMAScript as the end of an empty class (``[]`` never matches, ``[^]`` matches anything).
+    So is a ``]`` outside a class, which ECMAScript's Unicode mode refuses, like a lone ``}``.
+    A pattern Python's ``re`` cannot compile, or whose repetition count is past its limit
+    (``re`` raises OverflowError, not re.error), is refused too, as a backstop.
     """
 
     if len(pattern) < 2 or not (pattern.startswith("^") and pattern.endswith("$")) or pattern.endswith("\\$"):
         return "anchor the whole pattern with ^ and $"
     body, depth, in_class, index = pattern[1:-1], 0, False, 0
+    # What the previous token was, for the quantifier that may follow it: "atom", "quantifier"
+    # (a complete repetition, which only a lazy ? may follow) or "lazy" (nothing may follow).
+    previous = "start"
     while index < len(body):
         character, following = body[index], body[index + 1:index + 2]
         if character == "\\":
             if following not in PORTABLE_ESCAPES:
                 return f"\\{following} reads differently between engines; list the characters instead"
-            index += 2
+            index, previous = index + 2, "atom"
             continue
         if in_class:
             if character == "[":
                 return "a [ inside a character class, such as [[:alpha:]], reads differently between engines"
             in_class = character != "]"
-        elif character == "[":
+            index, previous = index + 1, "atom"
+            continue
+        if character in "*+?{":
+            problem, index = _quantifier_problem(body, index, previous)
+            if problem:
+                return problem
+            previous = "lazy" if previous == "quantifier" else "quantifier"
+            continue
+        if character == "[":
+            if body.startswith("]", index + 1) or body.startswith("^]", index + 1):
+                return "a ] directly after [ or [^ reads differently between engines; escape a literal ] as \\]"
             in_class = True
         elif character == "(":
             if following == "?" and body[index + 2:index + 3] != ":":
                 return "group extensions other than (?: differ between engines"
             depth += 1
+            index += 2 if following == "?" else 0  # step over ?: so it is not read as a quantifier
         elif character == ")":
             depth -= 1
         elif character == "|" and depth == 0:
@@ -215,10 +236,50 @@ def pattern_problem(pattern: str) -> str | None:
             return "an unescaped . matches different characters in different engines"
         elif character in "^$":
             return "anchors belong only at the two ends"
-        elif character in "*+?}" and following == "+":
-            return "possessive quantifiers are not portable"
+        elif character == "}":
+            return "a } closes only {n}, {n,} or {n,m}; escape a literal brace as \\}"
+        elif character == "]":
+            return "a ] outside a character class is an error in ECMAScript's Unicode mode; escape it as \\]"
+        previous = "atom" if character not in "(|" else "start"
         index += 1
-    return "a character class is not closed" if in_class else None
+    if in_class:
+        return "a character class is not closed"
+    try:
+        re.compile(pattern)
+    except (re.error, OverflowError) as error:
+        return f"Python's re refuses it ({error})"
+    return None
+
+
+def _quantifier_problem(body: str, index: int, previous: str) -> tuple[str | None, int]:
+    """Why the quantifier at ``body[index]`` is not portable, if it is not, and the index after it.
+
+    One quantifier per atom, optionally followed by one lazy ``?``: engines disagree on a
+    quantifier after another (Python refuses ``a{2}{3}``, Pydantic's engine repeats the
+    repetition, so ``[a-z]{100}{1000}`` matches 100,000 characters there), on a possessive
+    ``+`` and on a quantifier with nothing to repeat. A brace must start {n}, {n,} or {n,m}:
+    Python reads {,n} as 0 to n, ECMAScript without the u flag reads it as literal text, and
+    Pydantic's engine refuses it; these are the forms pattern_longest_match counts.
+    """
+
+    character = body[index]
+    if previous == "quantifier" and character == "+":
+        return "possessive quantifiers are not portable", index
+    if previous == "quantifier" and character == "?":
+        return None, index + 1
+    if previous in ("quantifier", "lazy"):
+        return "a quantifier directly after another reads differently between engines", index
+    if previous == "start":
+        return "a quantifier needs something before it to repeat", index
+    if character != "{":
+        return None, index + 1
+    repetition = REPETITION.match(body, index)
+    if repetition is None:
+        return "a { starts only {n}, {n,} or {n,m}; escape a literal brace as \\{", index
+    low, high = repetition.group(1), repetition.group(3)
+    if high and int(high) < int(low):
+        return f"the repetition {repetition.group(0)} has its upper bound below its lower one", index
+    return None, repetition.end()
 
 
 def _of_type(value: Any, kind: str) -> bool:
@@ -365,6 +426,9 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         if entry is None or "down" not in topology_edges(entry):
             raise ContractError(f"team-topologies.yaml: requester_kinds names {kind}, which is not a kind sent down")
     check_shared_addresses(registry, transport)
+    check_object_store(registry, transport, schemas)
+    check_nats_account(registry, transport, schemas)
+    check_knowledge_text(registry, schemas)
     check_ledger_waits(registry)
     names: dict[str, str] = {}
     for name in registry["kinds"]:
@@ -527,6 +591,23 @@ def check_pool_tokens(where: str, entry: dict[str, Any]) -> None:
                                 "token: set its authority_by_address to none")
 
 
+def token_binding_types(schemas: dict[str, dict[str, Any]]) -> list[str]:
+    """The record types a token is bound to: the ``type`` constants of ``bound_to``'s alternatives.
+
+    Only the root task's alternative carries the person's request id, and it must
+    (13C.5): grants, change-ledger rows and the coordination registry are keyed by it.
+    """
+
+    bound_to = schemas["common.schema.json"]["$defs"]["authority_token"]["properties"]["bound_to"]
+    variants = {variant["properties"]["type"]["const"]: variant for variant in bound_to["oneOf"]}
+    for name, variant in variants.items():
+        if ("request_id" in variant["required"]) != (name == "root_task") or \
+                ("request_id" in variant["properties"]) != (name == "root_task"):
+            raise ContractError("common.schema.json: authority_token.bound_to: the root_task binding, and only it, "
+                                "carries and requires request_id")
+    return list(variants)
+
+
 def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
     """A kind that takes a token lists each token type it takes, where the body names its record, and who presents it.
 
@@ -540,7 +621,7 @@ def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str
     bindings = token_bindings(entry)
     if bool(bindings) != (entry["authority"] != "none"):
         raise ContractError(f"{where}: kinds that take an authority token, and only they, state authority_binding")
-    types = schemas["common.schema.json"]["$defs"]["authority_token"]["properties"]["bound_to"]["properties"]["type"]["enum"]
+    types = token_binding_types(schemas)
     named = [binding.get("type") if isinstance(binding, dict) else None for binding in bindings]
     if not all(isinstance(binding, dict) and not set(binding) - {"type", "at", "senders"} for binding in bindings) \
             or not all(isinstance(kind, str) and kind in types for kind in named) or len(set(named)) != len(named):
@@ -917,6 +998,12 @@ def allowed_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
         and all(fields.holds(rule["allowed"], value) for value in values) and conditions_valid(rule["when"], fields)
 
 
+def forbids_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
+    """``{forbids, when}``: a field the body defines that must be absent whenever every condition holds."""
+
+    return set(rule) == {"forbids", "when"} and fields.defined(rule["forbids"]) and conditions_valid(rule["when"], fields)
+
+
 def any_of_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
     return set(rule) == {"any_of"} and len(rule["any_of"]) > 1 and all(fields.defined(p) for p in rule["any_of"])
 
@@ -931,14 +1018,15 @@ def ends_within_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
 
 
 def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]], frame_schema: str) -> None:
-    """Each rule is one of the five README shapes and names fields its body defines, with values they can hold."""
+    """Each rule is one of the six README shapes and names fields its body defines, with values they can hold."""
 
     fields = BodyFields(entry, schemas, frame_schema)
     for rule in entry.get("body_rules", []):
-        if not (unique_rule_valid(rule, fields) or requires_rule_valid(rule, fields) or any_of_rule_valid(rule, fields)
-                or allowed_rule_valid(rule, fields) or ends_within_rule_valid(rule, fields)):
-            raise ContractError(f"{where}: body rule {rule} is not a unique, requires, any_of, allowed or ends_within rule "
-                                "over its body's fields")
+        if not (unique_rule_valid(rule, fields) or requires_rule_valid(rule, fields) or forbids_rule_valid(rule, fields)
+                or any_of_rule_valid(rule, fields) or allowed_rule_valid(rule, fields)
+                or ends_within_rule_valid(rule, fields)):
+            raise ContractError(f"{where}: body rule {rule} is not a unique, requires, forbids, any_of, allowed or "
+                                "ends_within rule over its body's fields")
 
 
 def value_fits(resolver: "ModelWriter", file: str, node: dict[str, Any], value: Any) -> bool:
@@ -1026,6 +1114,11 @@ def check_state_records(registry: dict[str, Any], transport: dict[str, Any], sch
     """Each signed record names its bucket, key form, signer, writer roles and body schema."""
 
     roles = set(registry["host_roles"])
+    partition = schemas["common.schema.json"]["$defs"].get("partition", {})
+    if partition.get("type") != "integer" or partition.get("minimum") != 0 \
+            or partition.get("maximum") != transport["partitions"]["max_count"] - 1:
+        raise ContractError("common.schema.json $defs.partition is a whole number from 0 to transport.yaml "
+                            "partitions.max_count minus 1")
     names = set(schemas[registry["state_schema"]]["properties"]["record"]["enum"])
     if set(registry["state_records"]) != names:
         raise ContractError(f"registry.yaml state_records and {registry['state_schema']} record names differ")
@@ -1130,7 +1223,8 @@ def check_consumer_names(transport: dict[str, Any]) -> None:
     NATS silently updates an existing consumer's filter when a consumer with the
     same name is created, so one team could take another's work. Each name starts
     with a fixed word that ends in a character ids cannot contain, separates its
-    ids the same way, and uses exactly its filter's placeholders.
+    ids the same way, and holds every id of its filter that its stream's name does not
+    (a name is unique within its stream only), and no other.
     """
 
     prefixes = []
@@ -1138,8 +1232,11 @@ def check_consumer_names(transport: dict[str, Any]) -> None:
         where = f"transport.yaml consumers.{key}"
         parts = re.split(r"(\{[a-z_]+\})", consumer["name"])
         literals, placeholders = parts[::2], parts[1::2]
-        if sorted(placeholders) != sorted(re.findall(r"\{[a-z_]+\}", consumer["filter"])):
-            raise ContractError(f"{where}: the name must use exactly the filter's placeholders")
+        filter_ids = set(re.findall(r"\{[a-z_]+\}", consumer["filter"]))
+        stream_ids = set(re.findall(r"\{[a-z_]+\}", consumer["stream"]))
+        if not filter_ids - stream_ids <= set(placeholders) <= filter_ids or len(set(placeholders)) != len(placeholders):
+            raise ContractError(f"{where}: the name holds each of its filter's ids that its stream's name does not, "
+                                "once, and no other")
         if not literals[0] or ID_CHARACTER.fullmatch(literals[0][-1]):
             raise ContractError(f"{where}: start the name with a fixed word ending in a character ids cannot contain")
         if any(all(ID_CHARACTER.fullmatch(character) for character in literal) for literal in literals[1:-1]):
@@ -1174,8 +1271,132 @@ def check_transport(transport: dict[str, Any]) -> None:
         if not isinstance(spec.get("between_installations"), bool):
             raise ContractError(f"transport.yaml: class {name} states between_installations")
         check_class_streams(name, spec, transport, skew)
+    check_partitions(transport)
     check_stream_subjects(transport)
     check_agent_queues(transport)
+    check_stream_sizes(transport)
+
+
+# The installation setting that holds the partition count (transport.yaml partitions), what
+# the account mapping's last token computes, and the step max_count is a multiple of.
+PARTITION_SETTING = "transport.queues.partitions"
+PARTITION_PLACEHOLDER = "partition"
+PARTITION_FUNCTION = "{{partition(COUNT,1,3)}}"
+PARTITION_COUNT_STEP = 32
+# A stream name that holds a partition joins it to its team with ~, which ids cannot hold.
+PARTITION_STREAM_PART = "{team}~{partition}"
+
+
+def partitioned_addresses(transport: dict[str, Any]) -> list[str]:
+    """The addresses the account maps to the agent's partition: every address delivered to an agent (README, "Partitions")."""
+
+    return [address for spec in transport["classes"].values() for address in spec["addresses"]
+            if audience_target(address) == "agent"]
+
+
+def partition_mapping(address: str) -> tuple[str, str]:
+    """The account mapping for one agent address: any team, sender and agent, to the same subject plus the partition.
+
+    nats-server's mapping functions must fill a whole token, and partition(COUNT,1,3) hashes the
+    first and third wildcards, the team and the agent, in that order.
+    """
+
+    source = SUBJECT_ROOT + "*.*." + address.replace("{agent}", "*")
+    target = (SUBJECT_ROOT + "{{wildcard(1)}}.{{wildcard(2)}}." + address.replace("{agent}", "{{wildcard(3)}}")
+              + "." + PARTITION_FUNCTION)
+    return source, target
+
+
+def stored_subject(address: str, owner: str, transport: dict[str, Any]) -> str:
+    """The subject NATS stores and delivers an address under: the signed subject, plus {partition} where the account maps it."""
+
+    subject = full_subject(address, owner)
+    return subject + ".{" + PARTITION_PLACEHOLDER + "}" if address in partitioned_addresses(transport) else subject
+
+
+def publish_subject(address: str, transport: dict[str, Any]) -> str:
+    """A sender's publish grant for an address under its own id; NATS checks it against the mapped subject (any partition)."""
+
+    subject = full_subject(send_pattern(address), "{self}")
+    return subject + ".*" if address in partitioned_addresses(transport) else subject
+
+
+def subscribe_subject(address: str, transport: dict[str, Any]) -> str:
+    """A receiver's subscription for a request or event address: per partition it owns, any agent there; otherwise per id."""
+
+    subject = stored_subject(address, "*", transport)
+    return subject.replace("{agent}", "*") if address in partitioned_addresses(transport) else subject
+
+
+def check_partitions(transport: dict[str, Any]) -> None:
+    """The partition count's setting and limits, and the account mappings that put each agent's addresses in its partition.
+
+    The mappings must be exactly the ones the contract derives from the agent addresses: a
+    mapping that missed one would leave its subjects unmapped, stored in no partition stream,
+    and one that hashed other tokens would put an agent's queues where its host does not read.
+    """
+
+    where = "transport.yaml partitions"
+    spec = transport.get("partitions")
+    if not isinstance(spec, dict) \
+            or set(spec) != {"count_setting", "default_count", "max_count", "handover_seconds", "account_mappings"} \
+            or spec["count_setting"] != PARTITION_SETTING:
+        raise ContractError(f"{where}: names the setting {PARTITION_SETTING}, the default and largest counts, the "
+                            "handover deadline and the account mappings")
+    handover = spec["handover_seconds"]
+    if type(handover) is not int or not 2 * transport["clock_skew_seconds"] < handover <= 3600:
+        # Bounded so a host never holds back a renewal its credential or certificate needs for long.
+        raise ContractError(f"{where}: handover_seconds is a whole number of seconds above twice the clock tolerance "
+                            "and at most 3600")
+    largest, default = spec["max_count"], spec["default_count"]
+    if type(largest) is not int or largest < PARTITION_COUNT_STEP or largest % PARTITION_COUNT_STEP:
+        raise ContractError(f"{where}: max_count is a positive multiple of {PARTITION_COUNT_STEP}")
+    if type(default) is not int or not 1 <= default <= largest:
+        raise ContractError(f"{where}: default_count is a whole number from 1 to max_count")
+    expected = dict(partition_mapping(address) for address in partitioned_addresses(transport))
+    if spec["account_mappings"] != expected:
+        raise ContractError(f"{where}: account_mappings map exactly the agent addresses to their partition: {expected}")
+
+
+# The instance settings that size the streams (transport.yaml queues).
+QUEUE_SETTINGS = {"max_bytes_setting": "transport.queues.max_bytes",
+                  "warn_at_percent_setting": "transport.queues.warn_at_percent"}
+
+
+def check_stream_sizes(transport: dict[str, Any]) -> None:
+    """Every queued stream has a byte limit from the instance's settings and refuses new messages when full.
+
+    A stream that dropped its oldest messages when full (discard: old) would lose queued work
+    or unread set-aside copies and notices without anyone being told (README, "Stream sizes").
+    """
+
+    queues = transport.get("queues")
+    if not isinstance(queues, dict) or set(queues) != {*QUEUE_SETTINGS, "size_kinds", "warn_at_percent_default"} \
+            or any(queues[key] != name for key, name in QUEUE_SETTINGS.items()):
+        raise ContractError("transport.yaml: queues names the settings transport.queues.max_bytes and "
+                            "transport.queues.warn_at_percent, the size kinds and the warning's default")
+    kinds = queues["size_kinds"]
+    if not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) \
+            or not all(isinstance(kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", kind) for kind in kinds):
+        raise ContractError("transport.yaml: queues.size_kinds lists distinct snake_case names")
+    warn = queues["warn_at_percent_default"]
+    if type(warn) is not int or not 1 <= warn <= 99:
+        raise ContractError("transport.yaml: queues.warn_at_percent_default is a whole percentage from 1 to 99")
+    queued = {stream for spec in transport["classes"].values() for stream in spec.get("streams", [])}
+    used = set()
+    for name, stream in transport["streams"].items():
+        if name not in queued:
+            continue
+        if stream.get("size_kind") not in kinds:
+            raise ContractError(f"transport.yaml: stream {name} names its byte limit's size kind (size_kind, one of "
+                                "queues.size_kinds)")
+        if stream.get("discard") != "new":
+            raise ContractError(f"transport.yaml: stream {name} refuses new messages when full (discard: new), so "
+                                "nothing set aside is dropped to make room")
+        used.add(stream["size_kind"])
+    if used != set(kinds):
+        raise ContractError(f"transport.yaml: queues.size_kinds names only kinds a stream uses; unused "
+                            f"{sorted(set(kinds) - used)}")
 
 
 def check_agent_queues(transport: dict[str, Any]) -> None:
@@ -1187,10 +1408,9 @@ def check_agent_queues(transport: dict[str, Any]) -> None:
             or len(durable) != 2:
         raise ContractError("transport.yaml: agent_queues names the inbox and the control queue, the durable class's "
                             "two agent addresses")
-    prefix = transport["subject_prefix"].replace("{sender}", "*") + "."
     filters = [consumer["filter"] for consumer in transport["consumers"].values()]
     for queue, address in queues.items():
-        if filters.count(prefix + address) != 1:
+        if filters.count(stored_subject(address, "*", transport)) != 1:
             name = "control queue" if queue == "control" else queue
             raise ContractError(f"transport.yaml: the agent's {name} ({address}) has exactly one consumer, so the host "
                                 "reads it on its own")
@@ -1224,6 +1444,79 @@ def check_message_sizes(transport: dict[str, Any], schemas: dict[str, dict[str, 
                             "common.schema.json")
 
 
+# Host roles that, beside the topology owner, serve the whole installation (owner decision of
+# 2026-11-17): the gateway routes every team's people and edges.
+INSTALLATION_WIDE_ROLES = ("gateway",)
+
+
+def check_single_team_roles(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """Every host role but the gateway and the topology owner serves one team per runtime (single_team_roles).
+
+    Owner decision of 2026-11-17: each runtime serves exactly one team, and only the gateway and
+    the installation authority (the topology owner) stay installation-wide. Partitions, pools and
+    edges belong to a team, so a one-team credential is what the bound in README "Credential
+    size" counts; and a scheduler signs authority tokens, system work among them, only for its
+    own team. No role whose grants name {partition} may serve the whole installation.
+    """
+
+    roles = transport.get("single_team_roles")
+    if not isinstance(roles, list) or len(set(roles)) != len(roles) or not set(roles) <= set(registry["host_roles"]):
+        raise ContractError("transport.yaml: single_team_roles lists distinct host roles")
+    wide = {transport["topology_owner"], *INSTALLATION_WIDE_ROLES}
+    expected = set(registry["host_roles"]) - wide
+    if set(roles) != expected:
+        raise ContractError(f"transport.yaml: single_team_roles lists every host role but the gateway and the topology "
+                            f"owner, which serve the whole installation; missing {sorted(expected - set(roles))}, "
+                            f"installation-wide {sorted(set(roles) & wide)}")
+    partitioned = sorted(role for role, document in permissions(registry, transport).items()
+                         if role in wide and any("{partition}" in subject
+                                                 for subject in document["publish"] + document["subscribe"]))
+    if partitioned:
+        raise ContractError(f"transport.yaml: an installation-wide role's grants name partitions: {partitioned}")
+
+
+def check_withdrawal_spares_own_inbox(transport: dict[str, Any]) -> None:
+    """Withdrawal searches no stream that holds its own role's inbox.
+
+    Withdrawal deletes every task.request whose body names the task, and a task's copy to the
+    team services carries the same body, so a search of the stream that holds their inbox
+    (work.team, in UA1_TEAM_WORK_{team}) would delete the copies too (README, "Withdrawing
+    queued work").
+    """
+
+    role = transport["withdrawal"]["role"]
+    patterns = [(stream, subject) for stream in transport["withdrawal"]["streams"]
+                for subject in transport["streams"][stream]["subjects"]]
+    for address in transport["classes"]["durable"]["addresses"]:
+        if role not in transport["audience_targets"].get(audience_target(address), []):
+            continue
+        subject = stored_subject(address, "*", transport)
+        for stream, pattern in patterns:
+            if subjects_overlap(pattern, subject):
+                raise ContractError(f"transport.yaml: withdrawal searches {stream}, which holds the {role} role's own inbox "
+                                    f"({address}), where the copies of the tasks it withdraws wait")
+
+
+def check_copy_inbox_alone(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """A stream that stores a copy address (registry copy_to) stores no other durable address.
+
+    A copied kind is stored at its copy address before its frame is published, so every
+    task, result, progress report, account, claim and handback of a team waits on room in
+    that stream. Another reader's backlog sharing its byte limit (an edge offline for a day)
+    would refuse them all; on its own, the stream fills only when its own reader stops
+    (README, "Stream sizes").
+    """
+
+    copies = {address for entry in registry["kinds"].values() for address in entry.get("copy_to", [])}
+    durable = transport["classes"]["durable"]["addresses"]
+    for name, stream in transport["streams"].items():
+        stored = {address for address in durable
+                  if any(subjects_overlap(pattern, stored_subject(address, "*", transport)) for pattern in stream["subjects"])}
+        if stored & copies and stored - copies:
+            raise ContractError(f"transport.yaml: stream {name} stores the copy address {sorted(stored & copies)} beside "
+                                f"{sorted(stored - copies)}; a backlog there would refuse every copied kind")
+
+
 def check_stream_management(registry: dict[str, Any], transport: dict[str, Any]) -> None:
     """The topology owner and the withdrawal role are host roles; withdrawal deletes only from durable work streams."""
 
@@ -1239,17 +1532,56 @@ def check_stream_management(registry: dict[str, Any], transport: dict[str, Any])
         if not all("{team}" in stream for stream in custody["streams"]):
             raise ContractError(f"transport.yaml: {key} reads and deletes only in per-team streams ({{team}}), so it never "
                                 "reaches another team's messages")
+    check_withdrawal_spares_own_inbox(transport)
+    check_copy_inbox_alone(registry, transport)
     for stream in transport["dead_letter_custody"]["streams"]:
         # A raw copy is found by its subject and deleted by the sequence that read returns; a second
         # copy under the same subject, from a retried publish, would survive that delete.
         if transport["streams"][stream].get("max_msgs_per_subject") != 1:
             raise ContractError(f"transport.yaml: stream {stream} keeps one message per subject (max_msgs_per_subject: 1)")
+    check_pool_controller(registry, transport)
+    check_size_check(registry, transport)
     check_key_value(registry, transport)
 
 
-# What a key template may name: the host itself, each team it serves, each agent it runs, its own
-# installation and each installation an agreement names.
-KEY_PLACEHOLDERS = {"self", "team", "agent", "installation", "peer"}
+def check_pool_controller(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """The worker pool controller's host reads every pool consumer's information, and that stream holds nothing else (A3).
+
+    The grant names any consumer of the stream, so the stream must hold only pool
+    consumers: an agent's consumer there would show another host's agent to it.
+    """
+
+    where = "transport.yaml pool_controller"
+    spec = transport.get("pool_controller")
+    if not isinstance(spec, dict) or set(spec) != {"role", "stream"} or spec["role"] not in registry["host_roles"] \
+            or spec["role"] not in transport["audience_targets"]["pool"]:
+        raise ContractError(f"{where}: names a host role that serves pools and the stream of its team's pools")
+    pool = stored_subject(next(address for address in transport["classes"]["durable"]["addresses"]
+                               if audience_target(address) == "pool"), "*", transport)
+    stream = transport["streams"].get(spec["stream"])
+    readers = [consumer for consumer in transport["consumers"].values() if consumer["stream"] == spec["stream"]]
+    if stream is None or "{team}" not in spec["stream"] or [consumer["filter"] for consumer in readers] != [pool] \
+            or not all(subject_covers(subject, pool) for subject in stream["subjects"]):
+        raise ContractError(f"{where}: stream is a per-team stream that holds only the pool queues and their consumers")
+
+
+def check_size_check(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """The stream size check runs in one host role other than the topology owner, which holds its grants anyway.
+
+    Its grants read the account's information and every stream's limits and size, never a
+    message (README, "Stream sizes").
+    """
+
+    spec = transport.get("size_check")
+    if not isinstance(spec, dict) or set(spec) != {"role"} or spec["role"] not in registry["host_roles"] \
+            or spec["role"] == transport["topology_owner"]:
+        raise ContractError("transport.yaml size_check: names the one host role, other than the topology owner, "
+                            "that checks the streams' sizes")
+
+
+# What a key template may name: the host itself, each team it serves, each partition it owns, its
+# own installation and each installation an agreement names.
+KEY_PLACEHOLDERS = {"self", "team", PARTITION_PLACEHOLDER, "installation", "peer"}
 # What a bucket name may name: a bucket per team holds that team's records only.
 BUCKET_PLACEHOLDERS = {"team"}
 # The stream settings every bucket has (transport.yaml key_value_stream): only the consumer
@@ -1287,10 +1619,403 @@ def check_key_value(registry: dict[str, Any], transport: dict[str, Any]) -> None
             for key in keys:
                 check_key_template(where, key)
     for name, entry in registry["state_records"].items():
-        writers = set(transport["key_value"][entry["bucket"]]["writers"])
-        if not set(entry["writers"]) <= writers:
-            raise ContractError(f"registry.yaml state_records.{name}: its writers {sorted(set(entry['writers']) - writers)} "
+        writers = transport["key_value"][entry["bucket"]]["writers"]
+        if not set(entry["writers"]) <= set(writers):
+            raise ContractError(f"registry.yaml state_records.{name}: its writers {sorted(set(entry['writers']) - set(writers))} "
                                 f"have no key template in transport.yaml key_value.{entry['bucket']}")
+        for role in entry["writers"]:
+            if not any(key_form_covered(entry["key"], template) for template in writers[role]):
+                raise ContractError(f"registry.yaml state_records.{name}: its key {entry['key']!r} fits none of {role}'s key "
+                                    f"templates in transport.yaml key_value.{entry['bucket']} {writers[role]}")
+
+
+# Which parts of a record's key form (registry.yaml state_records, <name>) a key template's
+# placeholder may stand for: membership code fills {self} with the host's runtime, {peer} with
+# another installation's id, and the others with the value of the same name.
+KEY_FORM_FILLERS = {"self": {"runtime"}, "team": {"team"}, PARTITION_PLACEHOLDER: {"partition"},
+                    "installation": {"installation"}, "peer": {"installation", "peer"}}
+
+
+def key_form_covered(form: str, template: str) -> bool:
+    """Whether a writer holding ``template`` may write every key of the record's key ``form``.
+
+    Token by token: a word is itself, a placeholder only the parts of the form it fills
+    (KEY_FORM_FILLERS), ``*`` any one part and a final ``>`` one part or more. So a record's
+    key and its writers' grants cannot drift apart unnoticed (an agent record's key gained
+    the partition, which its writers' templates name).
+    """
+
+    parts, tokens = form.split("."), template.split(".")
+    for index, token in enumerate(tokens):
+        if token == ">":
+            return len(parts) > index
+        if index >= len(parts):
+            return False
+        placeholder, part = re.fullmatch(r"\{([a-z_]+)\}", token), re.fullmatch(r"<([a-z_]+)>", parts[index])
+        if placeholder is not None:
+            if part is None or part.group(1) not in KEY_FORM_FILLERS.get(placeholder.group(1), set()):
+                return False
+        elif token != "*" and token != parts[index]:
+            return False
+    return len(parts) == len(tokens)
+
+
+# The stream settings every object store has (transport.yaml object_store_stream): no rollup
+# headers, since NATS checks a publish against its subject only and a writer's Nats-Rollup: all
+# would erase every object of the bucket; deleting an object purges its chunks (the deleters'
+# grant alone); no message is deleted one by one. Only the storage is a choice.
+OBJECT_STORE_STREAM = {"allow_rollup_hdrs": False, "deny_delete": True, "deny_purge": False}
+OBJECT_STORE_FIELDS = {"description", "object_name", "headers", "readers", "writers", "deleters", "chunk_bytes",
+                       "orphan_chunk_grace_seconds"}
+# When an object's metadata carries a header: always, as one of the owner headers (exactly one
+# of them), or when a person's work stored the object.
+BLOB_HEADER_PRESENCE = {"always", "owner", "person"}
+BLOB_REF = ("common.schema.json", "/$defs/blob_ref")
+# Joins an object name's parts; neither a team id nor a base64url digest holds it.
+BLOB_NAME_SEPARATOR = "~"
+
+
+def check_object_store(registry: dict[str, Any], transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Who reads, writes and deletes blobs, and the headers that name a blob's owner (README, "Blobs").
+
+    NATS cannot limit a reader to some objects of a bucket, so the readers are exactly
+    the roles that receive a kind or reply that can carry a blob reference: a role
+    that receives one could not read it without the grant, and any other role gets
+    no grant it does not need. An object's name holds its team, so one team's
+    services never delete another team's copy of the same bytes. A writer looks the
+    object up before it puts it, since an object that exists already holds the same
+    bytes and replacing it would purge the other's chunks, which only deleters may;
+    a deleter marks the object deleted as a writer does, then purges its chunks.
+    """
+
+    where = "transport.yaml object_store_stream"
+    settings = transport.get("object_store_stream")
+    if not isinstance(settings, dict) or set(settings) != {*OBJECT_STORE_STREAM, "storage"}:
+        raise ContractError(f"{where}: fields are {sorted({*OBJECT_STORE_STREAM, 'storage'})}")
+    for field_name, value in OBJECT_STORE_STREAM.items():
+        if type(settings[field_name]) is not type(value) or settings[field_name] != value:
+            raise ContractError(f"{where}: {field_name} is {value} (README, \"Blobs\")")
+    if settings["storage"] not in {"file", "memory"}:
+        raise ContractError(f"{where}: storage is file or memory")
+    roles = set(registry["host_roles"])
+    receivers = blob_receivers(registry, transport, schemas)
+    for bucket, spec in transport["object_store"].items():
+        where = f"transport.yaml object_store.{bucket}"
+        if not isinstance(spec, dict) or set(spec) != OBJECT_STORE_FIELDS or "{" in bucket:
+            raise ContractError(f"{where}: an installation-wide bucket with fields {sorted(OBJECT_STORE_FIELDS)}")
+        check_blob_name(where, spec["object_name"], schemas)
+        for field_name in ("readers", "writers", "deleters"):
+            listed = spec[field_name]
+            if not isinstance(listed, list) or not listed or not set(listed) <= roles or len(set(listed)) != len(listed):
+                raise ContractError(f"{where}: {field_name} are distinct host roles")
+        if set(spec["readers"]) != receivers:
+            raise ContractError(f"{where}: readers are exactly the roles that receive a kind or reply that can carry a "
+                                f"blob reference: {sorted(receivers)}")
+        if not set(spec["writers"]) <= set(spec["readers"]) or not set(spec["deleters"]) <= set(spec["writers"]):
+            raise ContractError(f"{where}: writers also read (to find an object before putting it) and deleters also write")
+        check_blob_headers(where, spec["headers"], schemas)
+        check_blob_timing(where, spec, transport)
+
+
+# Knowledge text over long_text's length travels as a blob (README, "Knowledge"; decision 77).
+KNOWLEDGE_PREFIX = "knowledge."
+LONG_TEXT = ("common.schema.json", "/$defs/long_text")
+
+
+def pattern_longest_match(pattern: str) -> int | None:
+    """The most characters a value matching ``pattern`` can hold, or None when it has no bound.
+
+    Patterns are anchored and portable (``pattern_problem``): literals, escapes, character
+    classes, groups with alternatives, and the quantifiers ?, *, +, {n}, {n,} and {n,m}, each
+    optionally lazy. Every atom matches one character, a group the longest of its
+    alternatives, and a quantifier multiplies by its upper bound, so nested repetitions such
+    as (?:[a-z]{0,200}){0,200} count 40,000. A pattern that is not portable, such as one with
+    {,n} (Python reads it as 0 to n, ECMAScript as literal text), counts as unbounded, so a
+    check that relies on this count fails closed.
+    """
+
+    if pattern_problem(pattern):
+        return None
+    longest, end = _sequence_longest(pattern[1:-1], 0)
+    if end != len(pattern) - 2:
+        raise ContractError(f"pattern {pattern!r}: an unmatched )")
+    return longest
+
+
+def _sequence_longest(body: str, index: int) -> tuple[int | None, int]:
+    """The longest match of the alternatives from ``index`` to the closing ) or the end, and where they stop."""
+
+    best: int | None = 0
+    total: int | None = 0
+    while index < len(body) and body[index] != ")":
+        if body[index] == "|":
+            best = None if best is None or total is None else max(best, total)
+            total, index = 0, index + 1
+            continue
+        atom, index = _atom_longest(body, index)
+        upper, index = _quantifier_upper(body, index)
+        total = None if total is None or atom is None or upper is None else total + atom * upper
+    return (None if best is None or total is None else max(best, total)), index
+
+
+def _atom_longest(body: str, index: int) -> tuple[int | None, int]:
+    """The longest match of the atom at ``index`` (one character, or a group), and where it ends."""
+
+    character = body[index]
+    if character == "\\":
+        return 1, index + 2
+    if character == "[":
+        index += 1
+        while body[index] != "]":
+            index += 2 if body[index] == "\\" else 1
+        return 1, index + 1
+    if character == "(":
+        index += 3 if body.startswith("(?:", index) else 1
+        longest, index = _sequence_longest(body, index)
+        if index >= len(body):
+            raise ContractError(f"pattern body {body!r}: an unclosed (")
+        return longest, index + 1
+    return 1, index + 1
+
+
+def _quantifier_upper(body: str, index: int) -> tuple[int | None, int]:
+    """How many times the quantifier at ``index`` lets its atom repeat at most (1 without one), and where it ends."""
+
+    upper: int | None = 1
+    repetition = REPETITION.match(body, index)
+    if repetition:
+        low, comma, high = repetition.groups()
+        upper = int(low) if comma is None else (int(high) if high else None)
+        index = repetition.end()
+    elif index < len(body) and body[index] in "?*+":
+        upper = 1 if body[index] == "?" else None
+        index += 1
+    else:
+        return upper, index
+    return upper, index + 1 if body.startswith("?", index) else index
+
+
+def unbounded_text(resolver: "ModelWriter", file: str, node: Any, at: str, limit: int,
+                   seen: frozenset[tuple[str, str]], found: list[str]) -> None:
+    """Collect the string fields under a schema that may hold more than ``limit`` characters inline.
+
+    A blob reference is the long form and is not walked. A string (a type of "string", or a
+    type list that holds it) is bounded by its maxLength, a const or enum, a format, or, without
+    a maxLength, by the longest match of its pattern (``pattern_longest_match``); a bound above
+    ``limit`` counts as unbounded. The walk follows every keyword that can
+    hold a string, including those the contract's schemas do not use yet, so a new schema
+    form fails closed rather than passing unexamined.
+    """
+
+    if isinstance(node, list):
+        for item in node:
+            unbounded_text(resolver, file, item, at, limit, seen, found)
+        return
+    if not isinstance(node, dict):
+        return
+    if "$ref" in node:
+        target = resolver.resolve(file, node["$ref"])
+        if target != BLOB_REF and target not in seen:
+            unbounded_text(resolver, target[0], resolver.node(*target), at, limit, seen | {target}, found)
+        return
+    kind = node.get("type")
+    text = kind == "string" or (isinstance(kind, list) and "string" in kind)
+    if text and "const" not in node and "enum" not in node and "format" not in node:
+        length = node.get("maxLength")
+        if length is None and "pattern" in node:
+            length = pattern_longest_match(node["pattern"])
+        if length is None or length > limit:
+            found.append(at or "/")
+    for key, value in node.items():
+        if key in SCHEMA_NAMED_CHILDREN:
+            for name, child in value.items():
+                unbounded_text(resolver, file, child, f"{at}/{name}", limit, seen, found)
+        elif key in SCHEMA_CHILDREN:
+            unbounded_text(resolver, file, value, at, limit, seen, found)
+
+
+# The JSON Schema keywords whose values are schemas a value of the node must (or may) match:
+# named children (by property name or pattern) and unnamed ones.
+SCHEMA_NAMED_CHILDREN = {"properties", "patternProperties"}
+SCHEMA_CHILDREN = {"items", "prefixItems", "additionalProperties", "oneOf", "anyOf", "allOf"}
+
+
+def check_knowledge_text(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Every Knowledge field that may exceed long_text's length has a blob form (A6, decision 77).
+
+    Pages, notes, revisions and proposals have no length limit in the knowledge service, so
+    a request or reply field that held them as a plain string would either cut them or fail
+    for a long page. Fields that are text_content (inline up to long_text, or a blob) are
+    fine; any other string must be bounded at or below long_text's length.
+    """
+
+    resolver = ModelWriter(schemas)
+    limit = resolver.node(*LONG_TEXT)["maxLength"]
+    for name, entry in registry["kinds"].items():
+        if not name.startswith(KNOWLEDGE_PREFIX):
+            continue
+        for label, file in ((name, entry["body"]), (f"{name}.reply", entry.get("reply", {}).get("body"))):
+            found: list[str] = []
+            if file:
+                unbounded_text(resolver, file, schemas[file], "", limit, frozenset(), found)
+            if found:
+                raise ContractError(f"{file}: {label} text at {sorted(set(found))} may exceed {limit} characters "
+                                    "inline; use text_content, whose long form is a blob (README, \"Knowledge\")")
+
+
+# The installation's NATS account (transport.yaml nats_account; README, "NATS users and the
+# account"): the settings the launcher or an external server's operator puts in the account,
+# and the user every process logs in with. The installation authority's and a joining host's
+# users exist before any certificate does, so the launcher writes them (the authority writes a
+# remote host's bootstrap user); every other process's user comes with its certificate.
+NATS_ACCOUNT_FIELDS = {"mode", "signing_key_holder", "operator_signing_key_holder", "credential_lifetime_setting",
+                       "account_settings", "users"}
+# Every user JWT ends after this instance setting's lifetime (owner decision 2026-11-17, README "NATS users and the account").
+CREDENTIAL_LIFETIME_SETTING = "transport.nats.credential_lifetime_seconds"
+# A bootstrap user reads only replies under this token of its runtime's inbox: its join's ("Starting a host").
+JOIN_INBOX_TOKEN = "join"
+NATS_ACCOUNT_SETTINGS = {"jetstream": True, "mappings": "partitions.account_mappings"}
+NATS_USER_FIELDS = {"permissions", "issued_by", "carried_in"}
+HOST_USER = "host"
+CERTIFICATE_ROLES = "certificate_roles"
+CONNECTION_CREDENTIAL_REF = "common.schema.json#/$defs/connection_credential"
+
+
+def credential_replies(registry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> list[str]:
+    """The kinds whose reply carries a host's NATS connection credential (host.join, host.renew)."""
+
+    return sorted(name for name, entry in registry["kinds"].items()
+                  if "reply" in entry and CONNECTION_CREDENTIAL_REF in json.dumps(schemas[entry["reply"]["body"]]))
+
+
+def check_nats_account(registry: dict[str, Any], transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Operator mode, one account whose signing key the topology owner holds, its settings, and every process's user.
+
+    Decisions 88 and 89: every process logs in with its own user JWT, and an external server's
+    operator includes the settings in the installation's account. The authority issues the
+    hosts' users, so it is the one that holds the account's signing key, and it already
+    creates every stream; the settings carry the partition mappings, without which no agent's
+    queue reaches its partition stream. The launcher signs only the first users, before any
+    process starts; a remote host's bootstrap user comes from the authority. Revoking a user
+    needs an operator signature (README, "NATS users and the account"): on the bundled server
+    the topology owner also holds an operator signing key; on any server every user JWT ends
+    after the lifetime the named setting holds, so it stops without one (owner decision
+    2026-11-17).
+    """
+
+    where = "transport.yaml nats_account"
+    spec = transport.get("nats_account")
+    owner = transport["topology_owner"]
+    if not isinstance(spec, dict) or set(spec) != NATS_ACCOUNT_FIELDS or spec["mode"] != "operator" \
+            or spec["signing_key_holder"] != owner or spec["operator_signing_key_holder"] != owner:
+        raise ContractError(f"{where}: operator mode, and the topology owner ({owner}) holds the account's signing key "
+                            "and, on the bundled server, an operator signing key")
+    if spec["credential_lifetime_setting"] != CREDENTIAL_LIFETIME_SETTING:
+        raise ContractError(f"{where}: credential_lifetime_setting names {CREDENTIAL_LIFETIME_SETTING}")
+    if spec["account_settings"] != NATS_ACCOUNT_SETTINGS:
+        raise ContractError(f"{where}: account_settings are {NATS_ACCOUNT_SETTINGS}")
+    expected = {
+        owner: {"permissions": owner, "issued_by": "launcher", "carried_in": "trust_folder"},
+        JOINING: {"permissions": JOINING, "issued_by": ["launcher", owner], "carried_in": "bootstrap_bundle"},
+        HOST_USER: {"permissions": CERTIFICATE_ROLES, "issued_by": owner,
+                    "carried_in": [f"{kind}.reply" for kind in credential_replies(registry, schemas)]},
+    }
+    users = spec["users"]
+    if not isinstance(users, dict) or set(users) != set(expected) \
+            or any(not isinstance(user, dict) or set(user) != NATS_USER_FIELDS for user in users.values()):
+        raise ContractError(f"{where}: users are {sorted(expected)}, each with {sorted(NATS_USER_FIELDS)}")
+    for name, user in expected.items():
+        if users[name] != user:
+            raise ContractError(f"{where}: users.{name} is {user}")
+    for kind in credential_replies(registry, schemas):
+        if registry["kinds"][kind]["receivers"] != [owner]:
+            raise ContractError(f"{where}: only {owner} answers {kind}, whose reply carries a credential")
+
+
+def check_blob_timing(where: str, spec: dict[str, Any], transport: dict[str, Any]) -> None:
+    """A chunk fits one NATS message, and the orphan sweep's grace leaves a writer time to finish.
+
+    A writer gives a write up when its metadata would come later than half the grace after
+    it began, and the sweep waits the whole grace plus the clock tolerance after a chunk
+    subject's newest message, so the grace must be more than twice the clock tolerance for
+    a writer to have any time at all (README, "Blobs").
+    """
+
+    chunk, grace = spec["chunk_bytes"], spec["orphan_chunk_grace_seconds"]
+    if type(chunk) is not int or not 0 < chunk <= transport["limits"]["nats_max_payload_bytes"]:
+        raise ContractError(f"{where}: chunk_bytes is a whole number of bytes that fits nats_max_payload_bytes")
+    if type(grace) is not int or grace <= 2 * transport["clock_skew_seconds"]:
+        raise ContractError(f"{where}: orphan_chunk_grace_seconds is a whole number of seconds over twice "
+                            f"clock_skew_seconds")
+
+
+def check_blob_name(where: str, template: Any, schemas: dict[str, dict[str, Any]]) -> None:
+    """An object's name is its team and one blob_ref field, joined by the separator (README, "Blobs")."""
+
+    fields = schemas[BLOB_REF[0]]["$defs"]["blob_ref"]["properties"]
+    parts = template.split(BLOB_NAME_SEPARATOR) if isinstance(template, str) else []
+    placeholders = [part[1:-1] for part in parts if re.fullmatch(r"\{[a-z0-9_]+\}", part)]
+    if len(parts) != 2 or placeholders != [part[1:-1] for part in parts] or placeholders[0] != "team" \
+            or placeholders[1] not in fields:
+        raise ContractError(f"{where}: object_name is {{team}}{BLOB_NAME_SEPARATOR}{{<blob_ref field>}}: the team of the "
+                            f"frame that carries the reference, then the field the object is named by")
+    # The name splits one way only if neither part's pattern allows the separator.
+    shared = schemas[BLOB_REF[0]]["$defs"]
+    field = fields[placeholders[1]]
+    types = [shared["team_id"], shared[field["$ref"].rsplit("/", 1)[1]] if "$ref" in field else field]
+    if any(BLOB_NAME_SEPARATOR in kind.get("pattern", BLOB_NAME_SEPARATOR) for kind in types):
+        raise ContractError(f"{where}: object_name's parts have patterns without {BLOB_NAME_SEPARATOR!r}, so a name "
+                            f"splits one way")
+
+
+def check_blob_headers(where: str, headers: Any, schemas: dict[str, dict[str, Any]]) -> None:
+    """Each header holds a value of a named shared type, and the owner headers name one owner each."""
+
+    shared = schemas["common.schema.json"]["$defs"]
+    if not isinstance(headers, dict) or not headers:
+        raise ContractError(f"{where}: headers name the metadata headers of every object")
+    for name, header in headers.items():
+        if not re.fullmatch(r"UA-Blob-[A-Za-z0-9]+(-[A-Za-z0-9]+)*", name):
+            raise ContractError(f"{where}: header {name!r} is UA-Blob- followed by words joined by -")
+        if not isinstance(header, dict) or set(header) != {"value", "presence"} or header["value"] not in shared \
+                or header["presence"] not in BLOB_HEADER_PRESENCE:
+            raise ContractError(f"{where}: header {name} names a common.schema.json type (value) and when it is "
+                                f"present ({sorted(BLOB_HEADER_PRESENCE)})")
+    if sum(header["presence"] == "owner" for header in headers.values()) < 2:
+        raise ContractError(f"{where}: the owner headers name at least two kinds of owner (a request, an agent)")
+
+
+def reaches_blob(resolver: "ModelWriter", file: str, node: Any, seen: set[tuple[str, str]]) -> bool:
+    """Whether a schema can hold a blob reference anywhere, through any reference."""
+
+    if isinstance(node, list):
+        return any(reaches_blob(resolver, file, item, seen) for item in node)
+    if not isinstance(node, dict):
+        return False
+    if "$ref" in node:
+        target = resolver.resolve(file, node["$ref"])
+        if target == BLOB_REF:
+            return True
+        if target in seen:
+            return False
+        seen.add(target)
+        return reaches_blob(resolver, target[0], resolver.node(*target), seen)
+    return any(reaches_blob(resolver, file, item, seen) for item in node.values())
+
+
+def blob_receivers(registry: dict[str, Any], transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> set[str]:
+    """The roles that receive a kind, a copy of it, or a reply whose schema can carry a blob reference."""
+
+    resolver = ModelWriter(schemas)
+    roles: set[str] = set()
+    for entry in registry["kinds"].values():
+        if reaches_blob(resolver, entry["body"], schemas[entry["body"]], set()):
+            roles.update(role for address in entry_addresses(entry) for role in receiving_roles(entry, address, transport))
+        reply = entry.get("reply", {}).get("body")
+        if reply and reaches_blob(resolver, reply, schemas[reply], set()):
+            # A reply goes back to whoever sent the request.
+            roles.update(role for address in own_addresses(entry) for role in address_senders(entry, address))
+    return roles
 
 
 def check_key_value_stream(settings: Any) -> None:
@@ -1380,7 +2105,7 @@ def check_stream_subjects(transport: dict[str, Any]) -> None:
     check_streams_disjoint(patterns)
     for class_name, spec in transport["classes"].items():
         for address in class_addresses(transport, class_name):
-            check_address_storage(class_name, spec.get("streams"), address, patterns)
+            check_address_storage(class_name, spec.get("streams"), address, stored_subject(address, "*", transport), patterns)
     for key, consumer in transport["consumers"].items():
         stream = transport["streams"].get(consumer["stream"])
         if stream is None or not any(subject_covers(pattern, consumer["filter"]) for pattern in stream["subjects"]):
@@ -1401,22 +2126,28 @@ def check_streams_disjoint(patterns: list[tuple[str, str]]) -> None:
 
 
 def check_stream_name(name: str, spec: dict[str, Any]) -> None:
-    """A stream name may hold {team}; that stream exists once per team and stores only that team's subjects."""
+    """A stream name may hold {team}, and {partition} joined to it; it stores only that team's (and partition's) subjects."""
 
     placeholders = set(re.findall(r"\{([a-z_]+)\}", name))
-    if placeholders - {"team"}:
-        raise ContractError(f"transport.yaml: stream {name} may name only {{team}}")
+    if placeholders - {"team", PARTITION_PLACEHOLDER} or (
+            PARTITION_PLACEHOLDER in placeholders and PARTITION_STREAM_PART not in name):
+        raise ContractError(f"transport.yaml: stream {name} may name only {{team}}, and {{partition}} as "
+                            f"{PARTITION_STREAM_PART}")
     team_token = f"{SUBJECT_ROOT}{{team}}."
     if placeholders and not all(subject.startswith(team_token) for subject in spec["subjects"]):
         raise ContractError(f"transport.yaml: each subject of stream {name} starts {team_token}")
-    if re.search(r"[\s.*>/\\]", name.replace("{team}", "")):
+    partition_token = ".{" + PARTITION_PLACEHOLDER + "}"
+    if (PARTITION_PLACEHOLDER in placeholders) != all(subject.endswith(partition_token) for subject in spec["subjects"]) \
+            or any(partition_token in subject[:-len(partition_token)] for subject in spec["subjects"]):
+        raise ContractError(f"transport.yaml: stream {name}'s subjects end with {{partition}} exactly when its name holds it")
+    if re.search(r"[\s.*>/\\]", name.replace("{team}", "").replace("{" + PARTITION_PLACEHOLDER + "}", "")):
         raise ContractError(f"transport.yaml: stream {name}: NATS stream names cannot hold whitespace, ., *, >, / or \\")
 
 
-def check_address_storage(class_name: str, streams: list[str] | None, address: str, patterns: list[tuple[str, str]]) -> None:
-    """A queued class's address is stored in exactly one of its streams; any other class's in none."""
+def check_address_storage(class_name: str, streams: list[str] | None, address: str, subject: str,
+                          patterns: list[tuple[str, str]]) -> None:
+    """A queued class's address, stored under ``subject``, is in exactly one of its streams; any other class's in none."""
 
-    subject = full_subject(address, "*")
     storing = [stream for stream, pattern in patterns if subjects_overlap(pattern, subject)]
     if streams is None:
         if storing:
@@ -1462,20 +2193,23 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
     """Pull, inspect and acknowledge the consumers for this delivery address.
 
     Consumer names keep their {team} and receiver placeholders; membership code fills
-    them with the host's own teams and each id it runs or serves, never with wildcards,
-    so a host reads no other host's agents' queues. Creating consumers stays with the
-    topology owner.
+    them with the host's own teams and each pool and edge it runs or serves, never with
+    wildcards, so a host reads no other host's pools. In a partition stream the grant
+    names the stream and any consumer: the topology owner creates consumers there only
+    for agents placed in the partition, and they all run on the host that owns it, so
+    the host's credential changes with its partitions, never its agents. Creating
+    consumers stays with the topology owner.
     """
 
     # A dead-letter address names the copy id, which no consumer filters on.
-    expected_filter = transport["subject_prefix"].replace("{sender}", "*") + "." + address.replace("{copy}", "*")
+    expected_filter = stored_subject(address.replace("{copy}", "*"), "*", transport)
     matches = [consumer for consumer in transport["consumers"].values() if consumer["filter"] == expected_filter]
     if not matches:
         raise ContractError(f"no pull consumer for {address}")
     subjects = set()
     for consumer in matches:
         stream = consumer["stream"]
-        name = consumer["name"]
+        name = "*" if "{" + PARTITION_PLACEHOLDER + "}" in stream else consumer["name"]
         subjects.update({
             f"$JS.API.CONSUMER.INFO.{stream}.{name}",
             f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
@@ -1484,31 +2218,39 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
     return subjects
 
 
-def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
-    """The JetStream API subjects of the topology owner and of the role that withdraws queued work.
+# The topology owner's JetStream grants, on every stream of the account (README, "Who sets up
+# the streams"): the account's information (its storage and what the streams set aside, checked
+# before it creates any), streams, their consumers (bucket watches that readers left behind
+# among them) and single messages (a team's removal and the old streams at an upgrade).
+TOPOLOGY_OWNER_GRANTS = frozenset({
+    "$JS.API.INFO",
+    *(f"$JS.API.STREAM.{action}.*" for action in ("CREATE", "UPDATE", "INFO", "DELETE", "MSG.GET", "MSG.DELETE")),
+    *(f"$JS.API.CONSUMER.{action}.*.*" for action in ("CREATE", "DURABLE.CREATE", "INFO", "DELETE")),
+    "$JS.API.CONSUMER.CREATE.*.*.>", "$JS.API.CONSUMER.NAMES.*", "$JS.API.CONSUMER.LIST.*",
+})
+# The stream size check's grants (README, "Stream sizes"): the account's information, and every
+# stream's settings and state in one paged list, two lines whatever the number of teams and
+# partitions. Metadata only: neither reads a message.
+SIZE_CHECK_GRANTS = frozenset({"$JS.API.INFO", "$JS.API.STREAM.LIST"})
 
-    The topology owner creates, updates and inspects every stream, and creates, inspects
-    and deletes every consumer of them. Consumer names are a wildcard for it: it serves
-    every agent, pool and edge, and membership code fills {team} with every team of the
-    installation. The withdrawal role reads its own team's stream to find a queued
-    message and deletes it by its stream sequence; NATS cannot narrow either to some
-    subjects of a stream, so withdrawal uses per-team streams only.
+
+def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
+    """The JetStream API subjects of the topology owner, the role that withdraws queued work and the pool controller.
+
+    The topology owner creates, updates, inspects and deletes every stream and consumer of
+    the account: it already decides which hosts serve which teams, partitions and pools and
+    holds the account's signing key, so wider grants add no power, and lines per team and
+    partition would grow with both. The withdrawal role reads its own team's streams to
+    find a queued message and deletes it by its stream sequence; NATS cannot narrow either
+    to some subjects of a stream, so withdrawal uses per-team streams only. The pool
+    controller's host reads the information of every consumer of its team's pool stream, and
+    the size check's role the account's information and every stream's size.
     """
 
-    owner: set[str] = set()
-    buckets = [bucket_stream(bucket) for bucket in transport["key_value"]]
-    for stream in [*transport["streams"], *buckets]:
-        owner |= {f"$JS.API.STREAM.{action}.{stream}" for action in ("CREATE", "UPDATE", "INFO")}
-    for stream in {consumer["stream"] for consumer in transport["consumers"].values()}:
-        owner |= {f"$JS.API.CONSUMER.CREATE.{stream}.*", f"$JS.API.CONSUMER.CREATE.{stream}.*.>",
-                  f"$JS.API.CONSUMER.DURABLE.CREATE.{stream}.*", f"$JS.API.CONSUMER.INFO.{stream}.*",
-                  f"$JS.API.CONSUMER.DELETE.{stream}.*"}
-    # Readers create the buckets' watch consumers; the owner finds and deletes them when a
-    # host left too many behind and filled a bucket's consumer limit.
-    for stream in buckets:
-        owner |= {f"$JS.API.CONSUMER.NAMES.{stream}", f"$JS.API.CONSUMER.LIST.{stream}",
-                  f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.API.CONSUMER.DELETE.{stream}.*"}
-    grants = {transport["topology_owner"]: owner}
+    grants = {transport["topology_owner"]: set(TOPOLOGY_OWNER_GRANTS)}
+    grants.setdefault(transport["size_check"]["role"], set()).update(SIZE_CHECK_GRANTS)
+    controller = transport["pool_controller"]
+    grants.setdefault(controller["role"], set()).add(f"$JS.API.CONSUMER.INFO.{controller['stream']}.*")
     # Withdrawal and dead-letter custody read a message by its sequence and delete it there.
     for key in ("withdrawal", "dead_letter_custody"):
         custody = transport[key]
@@ -1549,14 +2291,51 @@ def key_value_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     return grants
 
 
+def object_stream(bucket: str) -> str:
+    """The JetStream stream behind an object store."""
+
+    return f"OBJ_{bucket}"
+
+
+def object_store_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
+    """Per role: the subjects that read, write and delete objects (README, "Blobs").
+
+    A reader gets the bucket's stream information, the message get that finds an
+    object's last metadata by its subject, and what reading the chunks needs: an
+    unnamed ordered consumer on its own inbox, that consumer's information and its
+    flow control, as for a key-value watch. Like the watches, a reader names the
+    stream when it opens the consumer, so it needs no stream-name lookup, which
+    would list every team's streams (the NATS object store client's get does not,
+    and is refused). A writer publishes chunks and metadata without a rollup
+    header; NATS cannot tie a publish to one object, so readers check every blob's
+    SHA-256 against its name. A deleter purges the object's chunks after marking it
+    deleted; the purge grant covers the whole bucket, so only the team services
+    hold it.
+    """
+
+    grants: dict[str, set[str]] = {}
+    for bucket, spec in transport["object_store"].items():
+        stream = object_stream(bucket)
+        reads = {f"$JS.API.STREAM.INFO.{stream}", f"$JS.API.STREAM.MSG.GET.{stream}",
+                 f"$JS.API.CONSUMER.CREATE.{stream}", f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.FC.{stream}.>"}
+        for role in spec["readers"]:
+            grants.setdefault(role, set()).update(reads)
+        for role in spec["writers"]:
+            grants.setdefault(role, set()).update({f"$O.{bucket}.C.>", f"$O.{bucket}.M.>"})
+        for role in spec["deleters"]:
+            grants.setdefault(role, set()).add(f"$JS.API.STREAM.PURGE.{stream}")
+    return grants
+
+
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Per host role: the NATS permissions it gets, as templates.
 
-    {team} is each team the host serves and {self} its runtime id. {agent}, {pool} and
-    {edge} are each agent and pool the host runs and each edge it serves: membership
-    code repeats a subject once per id and never turns one into a wildcard, so a host
-    receives requests and queued work only for its own agents and pools, and its
-    credential changes when it gains or loses one. A host publishes only under its own id.
+    {team} is each team the host serves and {self} its runtime id. {partition}, {pool} and
+    {edge} are each partition the host owns, each pool it runs and each edge it serves:
+    membership code repeats a subject once per id and never turns one into a wildcard, so
+    a host receives requests and queued work only for the agents of its own partitions and
+    its own pools, and its credential changes when it gains or loses a partition or a
+    pool, never an agent. No template names an agent. A host publishes only under its own id.
     A receiver of requests answers each one once, within the class's expiry, through
     NATS allow_responses; it holds no grant on other runtimes' inboxes.
     """
@@ -1564,13 +2343,14 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
     reply_window = transport["classes"]["request_reply"]["max_expiry_seconds"] + transport["clock_skew_seconds"]
     management = stream_management_grants(transport)
     buckets = key_value_grants(transport)
+    blobs = object_store_grants(transport)
     result = {}
     for role in registry["host_roles"]:
-        publish: set[str] = set(management.get(role, set())) | buckets.get(role, set())
+        publish: set[str] = set(management.get(role, set())) | buckets.get(role, set()) | blobs.get(role, set())
         subscribe = {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         answers_requests = False
         for entry in registry["kinds"].values():
-            publish.update(full_subject(send_pattern(address), "{self}") for address in publication_addresses(entry, transport)
+            publish.update(publish_subject(address, transport) for address in publication_addresses(entry, transport)
                            if role in address_senders(entry, address))
             for address in entry_addresses(entry):
                 if role not in receiving_roles(entry, address, transport):
@@ -1579,8 +2359,10 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                     # Queued work and dead-letter notices are pulled from their consumers.
                     publish.update(consumer_permissions(address, transport))
                 else:
-                    subscribe.add(full_subject(address, "*"))
+                    subscribe.add(subscribe_subject(address, transport))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
+        if any("{agent}" in subject for subject in publish | subscribe):
+            raise ContractError(f"{role}: generated grants name partitions, not agents (README, \"Partitions\")")
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
         if answers_requests:
             document["allow_responses"] = {"max": 1, "expires": f"{reply_window}s"}
@@ -1590,7 +2372,7 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
     joins = [address for entry in registry["kinds"].values() if entry.get("verification") == "proof_of_possession"
              for address in own_addresses(entry)]
     result[JOINING] = {"role": JOINING, "publish": sorted(full_subject(send_pattern(address), "{self}") for address in joins),
-                       "subscribe": [f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"]}
+                       "subscribe": [f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.{JOIN_INBOX_TOKEN}.>"]}
     return result
 
 
@@ -1991,6 +2773,10 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"MAX_HEADER_BYTES = {transport['limits']['max_header_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
+        f"DEFAULT_PARTITION_COUNT = {transport['partitions']['default_count']!r}\n"
+        f"MAX_PARTITION_COUNT = {transport['partitions']['max_count']!r}\n"
+        f"SINGLE_TEAM_ROLES = {tuple(transport['single_team_roles'])!r}\n"
+        f"PARTITIONED_ADDRESSES = {tuple(sorted(partitioned_addresses(transport)))!r}\n"
         f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
         f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"
         f"PEER_SENDER_SLOT = {transport['peer_sender_slot']!r}\n"
@@ -2024,6 +2810,8 @@ def render() -> dict[Path, str]:
     check_consumer_names(transport)
     check_registry(registry, transport, topologies, schemas)
     check_stream_management(registry, transport)
+    # After every other check: it builds each role's permissions, which needs a whole transport.
+    check_single_team_roles(registry, transport)
     files: dict[Path, str] = {
         GENERATED / "registry.json": json_text(registry),
         GENERATED / "transport.json": json_text(transport),

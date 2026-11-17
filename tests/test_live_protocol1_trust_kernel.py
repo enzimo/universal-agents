@@ -23,6 +23,7 @@ from nats.js.errors import KeyWrongLastSequenceError
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import Receiver, VerifiedFrame
+from custom_messages.wire.partitions import agent_record_key
 from custom_messages.wire.refusals import REFUSAL_AT_HEADER, REFUSAL_HEADER
 from custom_transport.protocol1.host_keys import HostKeys
 from custom_transport.protocol1.identity import HostIdentity
@@ -32,7 +33,7 @@ from custom_transport.protocol1.trust_state import PersistentTrustStore
 from tests import message_contract_support as fixtures
 from tests.live_nats_support import flush_fully
 from tests.own_nats_server import own_nats_server
-from tests.test_live_message_contract import connect, create_buckets, nats_server, stream_config
+from tests.test_live_message_contract import TEAM_STREAM, TEAM_WORK, connect, create_buckets, nats_server, stream_config
 from tests.test_live_message_contract import isolated_broker  # noqa: F401  (the per-role broker fixture)
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
@@ -211,11 +212,14 @@ async def test_signed_records_are_written_with_compare_and_set_and_verified_when
         agents = StateRecords(worker.nc.jetstream(), lambda: worker.identity, worker.trust)
         state = {"team": TEAM, "agent": "researcher-2", "agent_type": "researcher", "session": "s-researcher-2-1",
                  "state": "idle", "accepting_work": True, "since": format_timestamp(fixtures.NOW)}
-        await agents.put("agent", key, agents.signed("agent", key, state, sequence=1, issued_at=fixtures.NOW,
-                                                   expires_at=fixtures.NOW + timedelta(seconds=180)))
-        read = await StateRecords(js, lambda: services.identity, services.trust).read_report("agent", key, now=fixtures.NOW)
+        # Its key names the agent's partition, which the worker host owns.
+        agent_key = agent_record_key(TEAM, "researcher-2")
+        await agents.put("agent", agent_key, agents.signed("agent", agent_key, state, sequence=1, issued_at=fixtures.NOW,
+                                                         expires_at=fixtures.NOW + timedelta(seconds=180)))
+        read = await StateRecords(js, lambda: services.identity, services.trust).read_report("agent", agent_key,
+                                                                                            now=fixtures.NOW)
         assert read is not None and read.record.signer.runtime == "worker-host-1"
-        assert await reader.read_report("agent", f"{TEAM}.nobody", now=fixtures.NOW) is None
+        assert await reader.read_report("agent", agent_record_key(TEAM, "nobody"), now=fixtures.NOW) is None
         changes: list[tuple[str, bool]] = []
 
         async def first_change() -> None:
@@ -224,7 +228,7 @@ async def test_signed_records_are_written_with_compare_and_set_and_verified_when
                 return
 
         await asyncio.wait_for(first_change(), timeout=5)
-        assert changes == [(key, True)]
+        assert changes == [(agent_key, True)]
 
 
 @pytest.mark.asyncio
@@ -262,7 +266,7 @@ async def test_a_served_address_answers_only_the_requesters_inbox_under_per_role
         services_client = await connect(stack, isolated_broker, "services")
         worker_client = await connect(stack, isolated_broker, "worker")
         js = admin.nc.jetstream()
-        await js.add_stream(config=stream_config("UA1_WORK"))
+        await js.add_stream(config=stream_config(TEAM_STREAM))
         await create_buckets(admin)
         revocations = (fixtures.TRUST / "revocations" / "install_example.json").read_bytes()
         certificates = await js.key_value("UA1_CERTS")
@@ -281,7 +285,7 @@ async def test_a_served_address_answers_only_the_requesters_inbox_under_per_role
         await services.serve("svc.team", SERVICES_RECEIVER, close)
         await flush_fully(services_client.nc)
         body = {"session": "s-researcher-2-1", "reason": "exited"}
-        for number, reply in enumerate(("$JS.API.STREAM.DELETE.UA1_WORK", "$KV.UA1_CERTS.revocations.install_example",
+        for number, reply in enumerate((f"$JS.API.STREAM.DELETE.{TEAM_WORK}", "$KV.UA1_CERTS.revocations.install_example",
                                         "_INBOX.lead-host-1.x")):
             frame = worker.sign("sessions.close", {**body, "request_id": f"close_{number}"}, TO_SERVICES, team=TEAM)
             data, headers = worker.encode(frame)
@@ -290,7 +294,7 @@ async def test_a_served_address_answers_only_the_requesters_inbox_under_per_role
         await worker_client.nc.flush()
         answered = await worker.request("sessions.close", {**body, "request_id": "close_own"}, TO_SERVICES, team=TEAM)
         assert answered.body.outcome == "ok" and handled == ["close_own"]
-        assert (await js.stream_info("UA1_WORK")).config.name == "UA1_WORK"
+        assert (await js.stream_info(TEAM_WORK)).config.name == TEAM_WORK
         assert (await certificates.get("revocations.install_example")).value == revocations
         assert services_client.errors.empty() and worker_client.errors.empty()
 

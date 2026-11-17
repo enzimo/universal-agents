@@ -25,7 +25,16 @@
       "$ref": "../common.schema.json#/$defs/software"
     },
     "new_nats_public_key": {
+      "description": "A new NATS user key for the credential of the reply. Required when the renewal gives up a partition (a released partition ownership record names the host) or a pool (the profile drops one): the authority refuses such a renewal without it (invalid_body at /body/new_nats_public_key), and the old key is revoked.",
       "$ref": "../common.schema.json#/$defs/nats_user_key"
+    },
+    "partitions": {
+      "description": "The partitions of the host's one team that the reply's credential is to name, for a lead or worker host: each must have a partition ownership record owned by this host. The authority issues exactly these, never a partition a released record names, so a partition the host is not ready to take up, or one that would not fit, never blocks its other renewals; a credential that does not fit is refused as not_allowed, and the host renews again without the new ones. Absent means none: the team services, which read every partition of their team, and the other roles own none (README, \"Credentials follow ownership\").",
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/partition"
+      },
+      "maxItems": 128
     },
     "application_key_rotation": {
       "description": "Both the new application key and its proof are required when rotating. The proof signs the renewal frame as specified in README.md, using the new private key.",

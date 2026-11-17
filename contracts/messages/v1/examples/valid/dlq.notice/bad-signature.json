@@ -26,8 +26,8 @@
     "reason": "bad_signature",
     "pointer": "/signature",
     "original": {
-      "subject": "ua.v1.team_example.lead-host-1.work.agent.researcher-2",
-      "stream": "UA1_WORK",
+      "subject": "ua.v1.team_example.lead-host-1.work.agent.researcher-2.8",
+      "stream": "UA1_PART_team_example~8",
       "stream_sequence": 4411,
       "deliveries": 1
     },
@@ -45,6 +45,6 @@
     },
     "release": "0.9.8"
   },
-  "body_digest": "SXw6TUHIt1tQXS8AHK1HkdJwa5B91M_Uzlax2oAtN8k",
-  "signature": "rvN2A3wN4wT-v1wqSIS7P7HP6lKcOPSg-xCsqnRJJ27Wisl1pK8H889oUL1CVtn_aA951i1z3FX_ZBFdwV39BQ"
+  "body_digest": "0uH-DsC898A7nW4uVCB7tpgFrvrmDKTAw1VW44MH6rY",
+  "signature": "CZ7K3-bhXfgLLgYzEBSKgyYoxxgapXEPDgxorZsd9QKIEDzM2ikt1bl9qpiJeRk-iWNxyoL53LutXWUlNtRvCg"
 }

@@ -2,11 +2,13 @@
 
 contracts/messages/v1/README.md ("Grants for the agents a host runs"): trusted
 membership code fills ``generated/permissions/<role>.json`` before it installs a
-host's credential. ``{self}`` becomes the host's runtime id. A subject that names an
-agent, pool or edge is repeated for each one the host runs or serves, with ``{team}``
-set to that agent's, pool's or edge's own team, so a host that serves two teams gets no
-grant on the other team's agent with the same id. Any other subject is repeated for
-each team the host serves. ``{installation}`` becomes the host's own installation and a
+host's credential. ``{self}`` becomes the host's runtime id. A subject that names a
+partition, pool or edge is repeated for each partition the host owns, pool it runs or
+edge it serves, with ``{team}`` set to that partition's, pool's or edge's own team, so a
+host that owns partition 7 of one team gets no grant on partition 7 of another. No
+template names an agent: a host's grants follow its partitions, and its credential
+changes when it gains or loses a partition, never an agent (README, "Partitions"). Any
+other subject is repeated for each team the host serves. ``{installation}`` becomes the host's own installation and a
 subject that names ``{peer}`` is repeated for each installation an agreement names (key
 templates of ``UA1_CERTS``: the edge adapter keeps peers' records, never its own
 installation's). No placeholder ever becomes a wildcard.
@@ -18,8 +20,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-# Placeholders that name one receiver; each belongs to one team (transport.yaml audience targets).
-RECEIVER_PLACEHOLDERS = ("agent", "pool", "edge")
+from custom_messages.wire.kinds import MAX_PARTITION_COUNT
+
+# Placeholders that name one partition, pool or edge; each belongs to one team.
+RECEIVER_PLACEHOLDERS = ("partition", "pool", "edge")
 TEAM_PLACEHOLDER, SELF_PLACEHOLDER = "team", "self"
 INSTALLATION_PLACEHOLDER, PEER_PLACEHOLDER = "installation", "peer"
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
@@ -27,12 +31,19 @@ _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 
 @dataclass(frozen=True)
 class HostPlacement:
-    """What one host serves: its runtime, its certificate's teams, per team the agents, pools and edges it runs,
-    its own installation and the peer installations its installation's agreements name."""
+    """What one host serves: its runtime, its certificate's teams, per team the partitions its grants name, the
+    pools and edges it runs, its own installation and the peer installations its installation's agreements name.
+
+    A lead or worker host's partitions are those it owns (the team services' partition
+    ownership records). The team services own none but withdraw queued work from every
+    partition stream of their one team (transport.yaml single_team_roles), so theirs are
+    ``custom_messages.wire.partitions.every_partition(teams, count)`` (README, "Filling the
+    templates").
+    """
 
     runtime: str
     teams: tuple[str, ...]
-    agents: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    partitions: Mapping[str, tuple[int, ...]] = field(default_factory=dict)
     pools: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     edges: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     installation: str = ""
@@ -43,14 +54,18 @@ class HostPlacement:
             outside = set(getattr(self, f"{name}s")) - set(self.teams)
             if outside:
                 raise ValueError(f"{name}s of teams the host does not serve: {sorted(outside)}")
+        for team, numbers in self.partitions.items():
+            if len(set(numbers)) != len(numbers) or not all(
+                    type(number) is int and 0 <= number < MAX_PARTITION_COUNT for number in numbers):
+                raise ValueError(f"partitions of team {team} are distinct numbers from 0 to {MAX_PARTITION_COUNT - 1}")
         if self.installation and self.installation in self.peers:
             # {peer} grants keep other installations' records; the host's own installation is never one.
             raise ValueError(f"the host's own installation {self.installation} is not a peer")
 
     def receivers(self, placeholder: str) -> list[tuple[str, str]]:
-        """(team, id) for every agent, pool or edge of the host."""
+        """(team, id) for every partition, pool or edge of the host; a partition's id is its number."""
 
-        return [(team, receiver) for team, ids in getattr(self, f"{placeholder}s").items() for receiver in ids]
+        return [(team, str(receiver)) for team, ids in getattr(self, f"{placeholder}s").items() for receiver in ids]
 
 
 def host_subjects(template: str, placement: HostPlacement) -> list[str]:

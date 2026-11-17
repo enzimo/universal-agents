@@ -67,6 +67,7 @@ from custom_messages.wire.kinds import (
     CERTIFICATE_OVERLAP_SECONDS,
     CLOCK_SKEW_SECONDS,
     CONTRACT_SHA256,
+    DEFAULT_PARTITION_COUNT,
     INSTALLATION_SCOPE,
     KINDS,
     MAX_FRAME_BYTES,
@@ -78,6 +79,7 @@ from custom_messages.wire.kinds import (
     STATE_SIGNING_DOMAIN,
 )
 from custom_messages.wire.models import State, StateWriterAuthority, StateWriterHost
+from custom_messages.wire.partitions import agent_record_key, check_partition_count, partition_owner_key
 from custom_messages.wire.refusals import FrameRefused, refused_by
 from custom_messages.wire.spec import StateSpec, newer_minor, prune
 from custom_messages.wire.values import parse_timestamp
@@ -107,6 +109,7 @@ BODY_END = {"certificate": "expires_at", "agent_session": "ends_at", "agreement"
 # kept by the trust store; the others report state and are verified when read.
 CERTIFICATE, REVOCATIONS, AGENT_SESSION, AGREEMENT = "certificate", "revocations", "agent_session", "agreement"
 HOST, AGENT, PLACEMENT, TEAM_VIEW, BLOCK_LIST = "host", "agent", "placement", "team_view", "block_list"
+PARTITION_OWNER = "partition_owner"
 TRUST_RECORDS = frozenset({CERTIFICATE, REVOCATIONS, AGENT_SESSION, AGREEMENT})
 WRITER_AUTHORITY = "authority"
 # The installation authority's host role: it issues certificates and the revocations
@@ -326,11 +329,17 @@ class TrustStore:
     """One receiver's view of who may sign what. Not shared between installations."""
 
     def __init__(self, installation: str, authority_keys: Iterable[AuthorityKey], *,
-                 contract_sha256: str = CONTRACT_SHA256) -> None:
-        """``contract_sha256`` is the contract this receiver runs; by default the one its code was generated from."""
+                 contract_sha256: str = CONTRACT_SHA256, partition_count: int = DEFAULT_PARTITION_COUNT) -> None:
+        """``contract_sha256`` is the contract this receiver runs; by default the one its code was generated from.
+
+        ``partition_count`` is the installation's, which agent records' and partition ownership
+        records' keys follow (README, "Partitions"); the contract's default until the setting
+        that holds it exists.
+        """
 
         self.installation = installation
         self.contract_sha256 = contract_sha256
+        self.partition_count = check_partition_count(partition_count)
         self._anchors: dict[str, Ed25519PublicKey] = {}
         for key in authority_keys:
             if key.installation != installation:
@@ -801,7 +810,8 @@ class TrustStore:
                                at="/body/installation")
 
     def _check_state_report(self, document: State, body: Any, signer: HostCertificate) -> None:
-        """A report's key and body rules: a host's own liveness, an agent's or placement's key, the team view's key form."""
+        """A report's key and body rules: a host's own liveness, the keys of agents, placements and partition owners
+        (README, "State records"), the team view's key form."""
 
         if document.record == HOST:
             self._check_host_record(document, body, signer)
@@ -812,6 +822,14 @@ class TrustStore:
                 raise FrameRefused("invalid_body", "a team view key is <team>.<entry>.<id>", at="/key")
         elif document.record == BLOCK_LIST:
             self._check_block_list(document, body)
+        elif document.record == AGENT:
+            # The key names the agent's partition, so the host that owns it alone may write it.
+            self._expect_key(document, agent_record_key(body.team, body.agent, self.partition_count))
+        elif document.record == PARTITION_OWNER:
+            if body.partition >= self.partition_count:
+                raise FrameRefused("invalid_body", f"the installation has {self.partition_count} partitions",
+                                   at="/body/partition")
+            self._expect_key(document, partition_owner_key(body.team, body.partition, self.partition_count))
         else:
             self._expect_key(document, f"{body.team}.{body.agent}")
 

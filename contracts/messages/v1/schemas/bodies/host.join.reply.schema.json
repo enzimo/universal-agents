@@ -67,7 +67,8 @@
             "key_mismatch",
             "team_not_allowed",
             "role_not_allowed",
-            "over_limit"
+            "over_limit",
+            "credential_too_large"
           ]
         },
         "message": {

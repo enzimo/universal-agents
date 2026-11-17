@@ -65,6 +65,20 @@ def test_a_join_gets_no_more_than_the_launcher_listed(changes: dict[str, Any], r
     assert _denial(LISTED, join_body(**changes), LISTED.agent_types) == reason
 
 
+def test_every_runtime_but_the_gateway_serves_one_team_even_when_listed_for_more() -> None:
+    """transport.yaml single_team_roles: every role but the gateway and the authority serves one team per runtime."""
+
+    teams = frozenset({"team_one", "team_two"})
+    for role in ("worker_host", "lead_host", "team_services", "edge_adapter", "scheduler"):
+        listed = ExpectedHost("host-1", "worker.key1", "PUBLIC1", frozenset({role}), teams, frozenset({"researcher"}), 4)
+        body = join_body(runtime="host-1", roles=[role])
+        assert _denial(listed, dict(body, teams=["team_one", "team_two"]), listed.agent_types) == "team_not_allowed"
+        assert _denial(listed, dict(body, teams=["team_two"]), listed.agent_types) is None
+    gateway = ExpectedHost("gateway-1", "worker.key1", "PUBLIC1", frozenset({"gateway"}), teams, frozenset(), 0)
+    body = join_body(runtime="gateway-1", roles=["gateway"], agent_types=[], session_limit=0)
+    assert _denial(gateway, dict(body, teams=["team_one", "team_two"]), frozenset()) is None
+
+
 def test_a_host_nobody_listed_is_not_approved() -> None:
     assert _denial(None, join_body(), frozenset()) == "not_approved"
 
@@ -90,6 +104,21 @@ def test_a_renewal_is_checked_against_the_launchers_list() -> None:
                   {"teams": frozenset({"team_one", "team_two"})}, {"roles": frozenset({"worker_host", "lead_host"})},
                   {"connection_class": "intermittent"}):
         assert "join again" in str(_renewal_refusal(LISTED, certificate(**wider), KEPT_KEY, LISTED.agent_types)), wider
+
+
+def test_a_certificate_that_names_two_teams_for_a_one_team_role_is_not_renewed() -> None:
+    """A certificate issued before the one-team rule, or from a hand-edited list, must join again (C41)."""
+
+    teams = frozenset({"team_one", "team_two"})
+    for role in ("worker_host", "lead_host", "team_services", "edge_adapter", "scheduler"):
+        listed = ExpectedHost("host-1", "worker.key1", "PUBLIC1", frozenset({role}), teams, frozenset({"researcher"}), 4)
+        refusal = _renewal_refusal(listed, certificate(roles=frozenset({role}), teams=teams), KEPT_KEY,
+                                   listed.agent_types)
+        assert "join again, once for each team" in str(refusal), role
+        assert _renewal_refusal(listed, certificate(roles=frozenset({role})), KEPT_KEY, listed.agent_types) is None
+    gateway = ExpectedHost("gateway-1", "worker.key1", "PUBLIC1", frozenset({"gateway"}), teams, frozenset(), 0)
+    assert _renewal_refusal(gateway, certificate(roles=frozenset({"gateway"}), teams=teams, agent_types=frozenset(),
+                                                 session_limit=0), KEPT_KEY, frozenset()) is None
 
 
 def test_the_list_keeps_connection_class_and_deployment(tmp_path: Path) -> None:

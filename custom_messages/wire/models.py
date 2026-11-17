@@ -129,8 +129,19 @@ class AuthorityTokenAudience(WireModel):
     team: TeamId
 
 
-class AuthorityTokenBoundTo(WireModel):
-    type: Literal['root_task', 'command', 'access_request']
+class AuthorityTokenBoundToRootTask(WireModel):
+    type: Literal['root_task']
+    id: RecordId
+    request_id: RecordId
+
+
+class AuthorityTokenBoundToCommand(WireModel):
+    type: Literal['command']
+    id: RecordId
+
+
+class AuthorityTokenBoundToAccessRequest(WireModel):
+    type: Literal['access_request']
     id: RecordId
 
 
@@ -141,7 +152,7 @@ class AuthorityToken(WireModel):
     issuer: AuthorityTokenIssuer
     audience: AuthorityTokenAudience
     person: Union[PersonRef, MISSING] = Field(default=MISSING)
-    bound_to: AuthorityTokenBoundTo
+    bound_to: Annotated[Union[AuthorityTokenBoundToRootTask, AuthorityTokenBoundToCommand, AuthorityTokenBoundToAccessRequest], Field(discriminator='type')]
     schedule_id: Union[RecordId, MISSING] = Field(default=MISSING)
     issued_at: Timestamp
     expires_at: Timestamp
@@ -756,7 +767,7 @@ class CertificateRef(WireModel):
 
 
 class ConnectionCredential(WireModel):
-    "The credential a host connects to NATS with, naming the agents and pools it runs; it ends no later than the certificate it comes with. Never logged."
+    "The credential a host connects to NATS with, naming the partitions it owns and the pools it runs, never its agents; it ends no later than the certificate it comes with. Never logged."
 
     type: Literal['nats_user_jwt']
     jwt: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$', max_length=65536)]
@@ -804,6 +815,9 @@ class BusyClaim(WireModel):
     notes_total: Count
 
 
+Partition = Annotated[int, Field(ge=0, le=127)]
+
+
 class Frame(WireModel):
     "Every message between processes is one frame. The signature covers the RFC 8785 canonical JSON of the frame without its signature, after the domain prefix universal-agents/message-frame/v1 and a newline. The issuer's host certificate and agent session are looked up in the receiver's trust store. The body is checked against the schema its kind names in the registry."
 
@@ -828,7 +842,7 @@ class Frame(WireModel):
 class State(WireModel):
     "Every key-value record is one state record, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the record without its signature. The registry names, per record, who signs it and the schema its body follows. Readers verify every record they use; where it is stored adds no trust."
 
-    record: Literal['agent', 'agent_session', 'agreement', 'block_list', 'certificate', 'host', 'placement', 'revocations', 'team_view']
+    record: Literal['agent', 'agent_session', 'agreement', 'block_list', 'certificate', 'host', 'partition_owner', 'placement', 'revocations', 'team_view']
     protocol: ProtocolLabel
     key: StateKey
     writer: StateWriter
@@ -983,6 +997,19 @@ class HostState(WireModel):
     started_at: Timestamp
     heartbeat_at: Timestamp
     software: Union[Software, MISSING] = Field(default=MISSING)
+
+
+class PartitionOwnerState(WireModel):
+    "Which host owns one partition of a team, or which host is giving it up. An owned partition's host serves the agents placed in it, and its NATS credential names the partition; a released partition's host is handing it over and gets no credential that names it again. Its signed sequence is the fencing token, as a placement's is."
+
+    team: TeamId
+    partition: Partition
+    state: Literal['owned', 'released']
+    host: RuntimeId
+    host_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
+    assigned_at: Timestamp
+    reason: Literal['initial', 'host_lost', 'rebalanced', 'drained', 'operator']
+    previous_host: Union[RuntimeId, MISSING] = Field(default=MISSING)
 
 
 class PlacementState(WireModel):
@@ -1685,7 +1712,7 @@ class DeliveryRefusedBody(WireModel):
 
 class DlqNoticeBodyOriginal(WireModel):
     subject: Annotated[str, StringConstraints(min_length=1, max_length=512)]
-    stream: TokenId
+    stream: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_~-]{1,255}$')]
     stream_sequence: Count
     deliveries: Count
 
@@ -1712,7 +1739,7 @@ class DlqNoticeBody(WireModel):
     "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only."
 
     copy_id: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
-    reason: Literal['too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_issuer', 'wrong_sender', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'bad_authority', 'access_denied', 'handler_failed', 'delivery_limit', 'upgrade_drain']
+    reason: Literal['too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_issuer', 'wrong_sender', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'bad_authority', 'access_denied', 'handler_failed', 'delivery_limit', 'upgrade_drain', 'upgrade_old_format']
     pointer: Union[Annotated[str, StringConstraints(pattern='^(/[a-z0-9_]{1,64}){0,16}$')], MISSING] = Field(default=MISSING)
     original: DlqNoticeBodyOriginal
     claimed: Union[DlqNoticeBodyClaimed, MISSING] = Field(default=MISSING)
@@ -2155,7 +2182,7 @@ class HostJoinReplyPending(WireModel):
 
 class HostJoinReplyDenied(WireModel):
     outcome: Literal['denied']
-    reason: Literal['not_approved', 'key_mismatch', 'team_not_allowed', 'role_not_allowed', 'over_limit']
+    reason: Literal['not_approved', 'key_mismatch', 'team_not_allowed', 'role_not_allowed', 'over_limit', 'credential_too_large']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -2189,6 +2216,7 @@ class HostRenewBody(WireModel):
     contract_sha256: ContractSha256
     software: Union[Software, MISSING] = Field(default=MISSING)
     new_nats_public_key: Union[NatsUserKey, MISSING] = Field(default=MISSING)
+    partitions: Union[Annotated[list[Partition], Field(max_length=128)], MISSING] = Field(default=MISSING)
     application_key_rotation: Union[HostRenewBodyApplicationKeyRotation, MISSING] = Field(default=MISSING)
 
 
@@ -7454,6 +7482,12 @@ class SessionsOpenReplyLimitReached(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
+class SessionsOpenReplyPartitionNotOwned(WireModel):
+    outcome: Literal['partition_not_owned']
+    partition: Partition
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class SessionsOpenReplyRuntimeError(WireModel):
     outcome: Literal['runtime_error']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
@@ -9136,7 +9170,7 @@ SchedulesUpdateReplyAdapter = TypeAdapter(Annotated[Union[SchedulesUpdateReplyOk
 SessionsCloseBodyAdapter = TypeAdapter(SessionsCloseBody)
 SessionsCloseReplyAdapter = TypeAdapter(Annotated[Union[SessionsCloseReplyOk, SessionsCloseReplyNotFound, SessionsCloseReplyRuntimeError], Field(discriminator='outcome')])
 SessionsOpenBodyAdapter = TypeAdapter(SessionsOpenBody)
-SessionsOpenReplyAdapter = TypeAdapter(Annotated[Union[SessionsOpenReplyOk, SessionsOpenReplyNotAllowed, SessionsOpenReplyAlreadyPlaced, SessionsOpenReplyLimitReached, SessionsOpenReplyRuntimeError], Field(discriminator='outcome')])
+SessionsOpenReplyAdapter = TypeAdapter(Annotated[Union[SessionsOpenReplyOk, SessionsOpenReplyNotAllowed, SessionsOpenReplyAlreadyPlaced, SessionsOpenReplyLimitReached, SessionsOpenReplyPartitionNotOwned, SessionsOpenReplyRuntimeError], Field(discriminator='outcome')])
 SessionsRenewBodyAdapter = TypeAdapter(SessionsRenewBody)
 SessionsRenewReplyAdapter = TypeAdapter(Annotated[Union[SessionsRenewReplyOk, SessionsRenewReplyNotFound, SessionsRenewReplyNotAllowed, SessionsRenewReplyRuntimeError], Field(discriminator='outcome')])
 SharedWorkCheckBodyAdapter = TypeAdapter(SharedWorkCheckBody)
@@ -9206,6 +9240,7 @@ AgreementStateAdapter = TypeAdapter(AgreementState)
 BlockListStateAdapter = TypeAdapter(BlockListState)
 CertificateStateAdapter = TypeAdapter(CertificateState)
 HostStateAdapter = TypeAdapter(HostState)
+PartitionOwnerStateAdapter = TypeAdapter(PartitionOwnerState)
 PlacementStateAdapter = TypeAdapter(PlacementState)
 RevocationsStateAdapter = TypeAdapter(RevocationsState)
 TeamViewStateAdapter = TypeAdapter(Annotated[Union[TeamViewStateRoster, TeamViewStateTask, TeamViewStateRequest, TeamViewStateObjective, TeamViewStateTopologies], Field(discriminator='entry')])

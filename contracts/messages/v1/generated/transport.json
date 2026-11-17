@@ -67,8 +67,10 @@
       "description": "at least once; the sender records before publishing, the receiver admits durably before acknowledging",
       "max_expiry_seconds": 604800,
       "streams": [
-        "UA1_AGENT_WORK_{team}",
-        "UA1_WORK"
+        "UA1_PART_{team}~{partition}",
+        "UA1_POOL_WORK_{team}",
+        "UA1_EDGE_WORK_{team}",
+        "UA1_TEAM_WORK_{team}"
       ]
     },
     "event": {
@@ -98,20 +100,20 @@
     "agent_control": {
       "ack": "explicit",
       "ack_wait_seconds": 60,
-      "filter": "ua.v1.{team}.*.work.control.{agent}",
+      "filter": "ua.v1.{team}.*.work.control.{agent}.{partition}",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "control~{team}~{agent}",
-      "stream": "UA1_AGENT_WORK_{team}"
+      "name": "control~{agent}",
+      "stream": "UA1_PART_{team}~{partition}"
     },
     "agent_inbox": {
       "ack": "explicit",
       "ack_wait_seconds": 60,
-      "filter": "ua.v1.{team}.*.work.agent.{agent}",
+      "filter": "ua.v1.{team}.*.work.agent.{agent}.{partition}",
       "max_deliveries": 20,
       "mode": "pull",
-      "name": "agent~{team}~{agent}",
-      "stream": "UA1_AGENT_WORK_{team}"
+      "name": "agent~{agent}",
+      "stream": "UA1_PART_{team}~{partition}"
     },
     "dead_letters": {
       "ack": "explicit",
@@ -129,7 +131,7 @@
       "max_deliveries": 20,
       "mode": "pull",
       "name": "edge~{team}~{edge}",
-      "stream": "UA1_WORK"
+      "stream": "UA1_EDGE_WORK_{team}"
     },
     "pool": {
       "ack": "explicit",
@@ -138,7 +140,7 @@
       "max_deliveries": 20,
       "mode": "pull",
       "name": "pool~{team}~{pool}",
-      "stream": "UA1_AGENT_WORK_{team}"
+      "stream": "UA1_POOL_WORK_{team}"
     },
     "team_services": {
       "ack": "explicit",
@@ -147,7 +149,7 @@
       "max_deliveries": 20,
       "mode": "pull",
       "name": "team~{team}",
-      "stream": "UA1_WORK"
+      "stream": "UA1_TEAM_WORK_{team}"
     }
   },
   "dead_letter_custody": {
@@ -172,10 +174,10 @@
       ],
       "writers": {
         "lead_host": [
-          "{team}.{agent}"
+          "{team}.{partition}.*"
         ],
         "worker_host": [
-          "{team}.{agent}"
+          "{team}.{partition}.*"
         ]
       }
     },
@@ -283,7 +285,8 @@
       ],
       "writers": {
         "team_services": [
-          "{team}.*"
+          "{team}.*",
+          "{team}.partition.*"
         ]
       }
     },
@@ -318,12 +321,119 @@
     "max_header_bytes": 1024,
     "nats_max_payload_bytes": 1048576
   },
-  "object_store": {
-    "UA1_BLOBS": {
-      "description": "files and long text, named by SHA-256; the owner deletes them"
+  "nats_account": {
+    "account_settings": {
+      "jetstream": true,
+      "mappings": "partitions.account_mappings"
+    },
+    "credential_lifetime_setting": "transport.nats.credential_lifetime_seconds",
+    "mode": "operator",
+    "operator_signing_key_holder": "installation_authority",
+    "signing_key_holder": "installation_authority",
+    "users": {
+      "host": {
+        "carried_in": [
+          "host.join.reply",
+          "host.renew.reply"
+        ],
+        "issued_by": "installation_authority",
+        "permissions": "certificate_roles"
+      },
+      "installation_authority": {
+        "carried_in": "trust_folder",
+        "issued_by": "launcher",
+        "permissions": "installation_authority"
+      },
+      "joining_host": {
+        "carried_in": "bootstrap_bundle",
+        "issued_by": [
+          "launcher",
+          "installation_authority"
+        ],
+        "permissions": "joining_host"
+      }
     }
   },
+  "object_store": {
+    "UA1_BLOBS": {
+      "chunk_bytes": 131072,
+      "deleters": [
+        "team_services"
+      ],
+      "description": "files and long text, named by their team and SHA-256; the team services keep every owner of an object and delete it when the last owner's retention ends or the last owner departs",
+      "headers": {
+        "UA-Blob-Agent": {
+          "presence": "owner",
+          "value": "agent_id"
+        },
+        "UA-Blob-Person": {
+          "presence": "person",
+          "value": "person_ref"
+        },
+        "UA-Blob-Request": {
+          "presence": "owner",
+          "value": "record_id"
+        },
+        "UA-Blob-SHA256": {
+          "presence": "always",
+          "value": "sha256_digest"
+        },
+        "UA-Blob-Team": {
+          "presence": "always",
+          "value": "team_id"
+        }
+      },
+      "object_name": "{team}~{sha256}",
+      "orphan_chunk_grace_seconds": 86400,
+      "readers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter"
+      ],
+      "writers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services"
+      ]
+    }
+  },
+  "object_store_stream": {
+    "allow_rollup_hdrs": false,
+    "deny_delete": true,
+    "deny_purge": false,
+    "storage": "file"
+  },
+  "partitions": {
+    "account_mappings": {
+      "ua.v1.*.*.ctl.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.ctl.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}",
+      "ua.v1.*.*.work.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}",
+      "ua.v1.*.*.work.control.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.control.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
+    },
+    "count_setting": "transport.queues.partitions",
+    "default_count": 96,
+    "handover_seconds": 600,
+    "max_count": 128
+  },
   "peer_sender_slot": "x-{installation}",
+  "pool_controller": {
+    "role": "lead_host",
+    "stream": "UA1_POOL_WORK_{team}"
+  },
+  "queues": {
+    "max_bytes_setting": "transport.queues.max_bytes",
+    "size_kinds": [
+      "partition",
+      "pool",
+      "edge",
+      "team_services",
+      "dead_letter"
+    ],
+    "warn_at_percent_default": 80,
+    "warn_at_percent_setting": "transport.queues.warn_at_percent"
+  },
   "replay_ledger_retention_seconds": 2592060,
   "reply_inbox_prefix": "_INBOX.{runtime}",
   "server": {
@@ -332,41 +442,81 @@
     },
     "minimum_version": "2.15.1"
   },
+  "single_team_roles": [
+    "lead_host",
+    "worker_host",
+    "team_services",
+    "edge_adapter",
+    "scheduler"
+  ],
+  "size_check": {
+    "role": "gateway"
+  },
   "streams": {
-    "UA1_AGENT_WORK_{team}": {
-      "duplicate_window_seconds": 120,
-      "max_age_seconds": 604860,
-      "max_consumers": 4096,
-      "max_message_bytes": 263168,
-      "retention": "workqueue",
-      "storage": "file",
-      "subjects": [
-        "ua.v1.{team}.*.work.agent.*",
-        "ua.v1.{team}.*.work.control.*",
-        "ua.v1.{team}.*.work.pool.*"
-      ]
-    },
     "UA1_DLQ_{team}": {
+      "discard": "new",
       "max_age_seconds": 2592060,
       "max_consumers": 16,
       "max_message_bytes": 263168,
       "max_msgs_per_subject": 1,
       "retention": "limits",
+      "size_kind": "dead_letter",
       "storage": "file",
       "subjects": [
         "ua.v1.{team}.*.dlq.>"
       ]
     },
-    "UA1_WORK": {
+    "UA1_EDGE_WORK_{team}": {
+      "discard": "new",
       "duplicate_window_seconds": 120,
       "max_age_seconds": 604860,
-      "max_consumers": 4096,
+      "max_consumers": 1024,
       "max_message_bytes": 263168,
       "retention": "workqueue",
+      "size_kind": "edge",
       "storage": "file",
       "subjects": [
-        "ua.v1.*.*.work.edge.*",
-        "ua.v1.*.*.work.team"
+        "ua.v1.{team}.*.work.edge.*"
+      ]
+    },
+    "UA1_PART_{team}~{partition}": {
+      "discard": "new",
+      "duplicate_window_seconds": 120,
+      "max_age_seconds": 604860,
+      "max_consumers": 1024,
+      "max_message_bytes": 263168,
+      "retention": "workqueue",
+      "size_kind": "partition",
+      "storage": "file",
+      "subjects": [
+        "ua.v1.{team}.*.work.agent.*.{partition}",
+        "ua.v1.{team}.*.work.control.*.{partition}"
+      ]
+    },
+    "UA1_POOL_WORK_{team}": {
+      "discard": "new",
+      "duplicate_window_seconds": 120,
+      "max_age_seconds": 604860,
+      "max_consumers": 1024,
+      "max_message_bytes": 263168,
+      "retention": "workqueue",
+      "size_kind": "pool",
+      "storage": "file",
+      "subjects": [
+        "ua.v1.{team}.*.work.pool.*"
+      ]
+    },
+    "UA1_TEAM_WORK_{team}": {
+      "discard": "new",
+      "duplicate_window_seconds": 120,
+      "max_age_seconds": 604860,
+      "max_consumers": 16,
+      "max_message_bytes": 263168,
+      "retention": "workqueue",
+      "size_kind": "team_services",
+      "storage": "file",
+      "subjects": [
+        "ua.v1.{team}.*.work.team"
       ]
     }
   },
@@ -375,7 +525,9 @@
   "withdrawal": {
     "role": "team_services",
     "streams": [
-      "UA1_AGENT_WORK_{team}"
+      "UA1_PART_{team}~{partition}",
+      "UA1_POOL_WORK_{team}",
+      "UA1_EDGE_WORK_{team}"
     ]
   }
 }

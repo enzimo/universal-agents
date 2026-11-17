@@ -23,6 +23,7 @@ from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import Receiver, reply_audience, sign_frame, verify_frame
 from custom_messages.wire.kinds import CLOCK_SKEW_SECONDS
 from custom_messages.wire.models import Frame
+from custom_messages.wire.partitions import agent_record_key
 from custom_messages.wire.refusals import REFUSAL_AT_HEADER, REFUSAL_HEADER
 from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1 import live
@@ -104,7 +105,7 @@ async def serving(receiver_host: LiveHost, handler: Any, **options: Any) -> Any:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reply", [
-    "$JS.API.STREAM.DELETE.UA1_WORK",
+    "$JS.API.STREAM.DELETE.UA1_TEAM_WORK_team_example",
     "$KV.UA1_CERTS.revocations.install_example",
     "_INBOX.lead-host-1.r1",  # another host's inbox
     "_INBOX.worker-host-1",  # no token after the slot
@@ -344,15 +345,15 @@ async def test_a_report_is_read_only_under_its_own_key_and_only_as_signed() -> N
     reader = worker()
     js = SimpleNamespace(key_value=AsyncMock(return_value=bucket_holding(record)))
     records = StateRecords(js, lambda: reader.identity, reader.trust)
-    assert (await records.read_report("agent", "team_example.lead", now=fixtures.NOW)).revision == 7
+    assert (await records.read_report("agent", agent_record_key("team_example", "lead"), now=fixtures.NOW)).revision == 7
     with pytest.raises(FrameRefused) as refused:
-        await records.read_report("agent", "team_example.researcher-2", now=fixtures.NOW)
+        await records.read_report("agent", agent_record_key("team_example", "researcher-2"), now=fixtures.NOW)
     assert (refused.value.code, refused.value.at) == ("invalid_body", "/key")
     tampered = json.loads(record)
     tampered["sequence"] += 1
     js.key_value.return_value = bucket_holding(json.dumps(tampered).encode())
     with pytest.raises(FrameRefused) as refused:
-        await records.read_report("agent", "team_example.lead", now=fixtures.NOW)
+        await records.read_report("agent", agent_record_key("team_example", "lead"), now=fixtures.NOW)
     assert refused.value.code == "bad_signature"
 
 
@@ -400,7 +401,7 @@ def test_records_are_signed_with_the_identity_the_host_has_when_it_signs() -> No
     current = {"identity": identities[0]}
     records = StateRecords(None, lambda: current["identity"], PersistentTrustStore(fixtures.trust_store(), Path("/x")))
     body = json.loads((fixtures.EXAMPLES / "state" / "valid" / "agent" / "lead-busy.json").read_text())["body"]
-    first = records.signed("agent", "team_example.lead", body, sequence=1, issued_at=fixtures.NOW)
+    first = records.signed("agent", agent_record_key("team_example", "lead"), body, sequence=1, issued_at=fixtures.NOW)
     current["identity"] = identities[1]
-    second = records.signed("agent", "team_example.lead", body, sequence=2, issued_at=fixtures.NOW)
+    second = records.signed("agent", agent_record_key("team_example", "lead"), body, sequence=2, issued_at=fixtures.NOW)
     assert (first["writer"]["runtime"], second["writer"]["runtime"]) == ("worker-host-1", "team-services-1")

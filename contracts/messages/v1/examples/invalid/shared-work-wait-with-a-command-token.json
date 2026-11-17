@@ -13,6 +13,9 @@
       "to": "cmd_1"
     },
     {
+      "remove": "/authority/bound_to/request_id"
+    },
+    {
       "set": "/authority/expires_at",
       "to": "2026-10-22T04:34:00.000Z"
     }

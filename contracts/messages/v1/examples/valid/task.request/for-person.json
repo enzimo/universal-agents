@@ -35,12 +35,13 @@
     "person": "person_7c1",
     "bound_to": {
       "type": "root_task",
-      "id": "task_root_9c"
+      "id": "task_root_9c",
+      "request_id": "message_context_aed7c50ed538b4b85d1fc0867c3757ce1f9fd787ac3f9154e0aa3440a4909dff"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
     "expires_at": "2026-10-23T04:29:00.000Z",
     "algorithm": "ed25519",
-    "signature": "UlHAAPQphhKI7e_12WEWAHxcjiFSMYwQRQTUCTaafi1K7PoD3-9t0gFSSaLoYlXTCXi4oeaZOTrx0LVEDPtIBQ"
+    "signature": "8P9AZFOekd3bOH8tUWUIGgxf34Jvi0HbWPsx3lHHQsQ_wINMyu1WUTeVF8RkuUFKiMBeJPoMZcIVzNo8mXt5Bg"
   },
   "algorithm": "ed25519",
   "body": {
@@ -61,5 +62,5 @@
     "instructions": "Plan a team lunch for Friday."
   },
   "body_digest": "QhNzhbMxX4PsqY0RcvNkp1fqIdNgESmOP1_yiJ3nDBw",
-  "signature": "XwEnsmNWWIGYUVyK_tqKtyhxr9OI2gR6LbobHHvk9fYQkVEtKkUSTjiWBA0H6ZdZyGWINQqBp7Tye90l1PVIDA"
+  "signature": "dXw-obkj_m4Z871VqxlokY8M42j1XDVeQPTeVKKMxkQ4FDmxBnoId5523NvZvaGOPVjst6u82_1o6iQw_XyCCQ"
 }

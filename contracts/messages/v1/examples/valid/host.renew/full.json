@@ -30,8 +30,11 @@
     "software": {
       "name": "universal-agents",
       "version": "0.9.8"
-    }
+    },
+    "partitions": [
+      55
+    ]
   },
-  "body_digest": "_udfe7ZWJCbh2VIU6SGu4ATZ4K7Y8r2DBvj988JzSno",
-  "signature": "M43mFQZYpjowI4ZHIceSo4Ldz7AhOgJTsgdITW9Uay-99m3X-owH_vqE-z35N13c_Gh4YjtlMjQfgPr7sqUfCw"
+  "body_digest": "BhRb8-qNgUSFGN8Oanh9PZTbFGY2MN3gtfLBvJqwwis",
+  "signature": "e7PBWUtopSiTddpblMi_dRUJE92TnWiWsRkNo3LY0R6J6jea8eAQyX6ioco8OZ6u46Ol0OyT_dxeLafmfb2eCg"
 }

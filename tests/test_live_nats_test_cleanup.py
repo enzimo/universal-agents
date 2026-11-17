@@ -290,7 +290,7 @@ INSTALLATION_WIDE_BUCKETS = {"KV_UA1_AGENTS", "KV_UA1_CERTS", "KV_UA1_HOSTS", "K
 async def test_the_shared_names_are_the_contracts_names_without_a_team_and_the_websites_default() -> None:
     names = shared_stream_names(NatsTransportConfig(servers=["nats://127.0.0.1:4222"]))
 
-    assert names == INSTALLATION_WIDE_BUCKETS | {"UA1_WORK", "OBJ_UA1_BLOBS", "OBJ_ua_attachments"}
+    assert names == INSTALLATION_WIDE_BUCKETS | {"OBJ_UA1_BLOBS", "OBJ_ua_attachments"}
 
 
 async def test_buckets_every_installation_shares_are_neither_marked_nor_deleted(
