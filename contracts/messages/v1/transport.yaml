@@ -319,9 +319,33 @@ key_value:
     writers:
       team_services: ["team_services.{team}"]
 
+# Every object store's stream (OBJ_<bucket>, subjects $O.<bucket>.C.> for chunks and
+# $O.<bucket>.M.> for each object's metadata); the topology owner creates it with these
+# settings (README, "Blobs").
+object_store_stream:
+  allow_rollup_hdrs: true     # an object's metadata is written with a rollup over its earlier versions
+  deny_delete: true           # no message deletes through the stream API
+  deny_purge: false           # deleting an object purges its chunks; only deleters hold the purge grant
+  storage: file
+
+# Object stores. An object is named by its content's SHA-256 (blob_ref.sha256); its
+# metadata's headers name its owner (common.schema.json types; presence: always, owner =
+# exactly one of the owner headers, person = when a person's work stored it). readers are
+# exactly the roles that receive a kind or reply whose schema can carry a blob_ref; writers
+# also read, to find whether an object already exists; deleters also write (README, "Blobs").
 object_store:
   UA1_BLOBS:
-    description: files and long text, named by SHA-256; the owner deletes them
+    description: files and long text, named by SHA-256; the team services delete them when their owner's retention ends
+    object_name: sha256
+    headers:
+      UA-Blob-SHA256: {value: sha256_digest, presence: always}
+      UA-Blob-Team: {value: team_id, presence: always}
+      UA-Blob-Request: {value: record_id, presence: owner}       # the person's request (a root-task token's request_id)
+      UA-Blob-Agent: {value: agent_id, presence: owner}          # system work's agent
+      UA-Blob-Person: {value: person_ref, presence: person}
+    readers: [gateway, lead_host, worker_host, team_services, edge_adapter]
+    writers: [gateway, lead_host, worker_host, team_services]
+    deleters: [team_services]
 
 # How long a receiver keeps replay records: at least the longest expiry of any class plus the clock tolerance.
 replay_ledger_retention_seconds: 2592060   # 30 days plus a minute

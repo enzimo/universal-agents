@@ -532,11 +532,12 @@ def test_permissions_name_exact_receivers_and_publish_only_under_the_senders_own
     assert "team_grants" not in TRANSPORT
     management = EXPORT.stream_management_grants(TRANSPORT)
     buckets = EXPORT.key_value_grants(TRANSPORT)
+    blobs = EXPORT.object_store_grants(TRANSPORT)
     for role in REGISTRY["host_roles"]:
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
-        grants = consumer_grants() | management.get(role, set()) | buckets.get(role, set())
+        grants = consumer_grants() | management.get(role, set()) | buckets.get(role, set()) | blobs.get(role, set())
         for subject in document["publish"]:
-            if subject.startswith(("$JS.", "$KV.")):
+            if subject.startswith(("$JS.", "$KV.", "$O.")):
                 assert subject in grants, (role, subject)
             else:
                 assert subject.startswith(("ua.v1.{team}.{self}.", "ua.v1._install.{self}.")), (role, subject)
@@ -585,8 +586,10 @@ def test_a_host_holds_no_grant_on_another_hosts_agents() -> None:
     assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{own}" in worker
     assert "ua.v1.team_example.*.ctl.agent.researcher-2" in worker
     assert not {subject for subject in worker if lead in subject or subject.endswith(".ctl.agent.lead")}
-    # Bucket watches read their own consumers' information by any name; no queue consumer is a wildcard.
-    assert not {subject for subject in worker if subject.endswith(".*") and "CONSUMER" in subject and ".KV_" not in subject}
+    # Bucket watches and blob reads read their own consumers' information by any name; no queue
+    # consumer is a wildcard.
+    assert not {subject for subject in worker if subject.endswith(".*") and "CONSUMER" in subject
+                and ".KV_" not in subject and ".OBJ_" not in subject}
     # Gaining an agent is a new credential, with that agent's subjects added.
     moved = expanded("worker_host", agent=["researcher-2", "lead"], pool=["researcher"])
     assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{lead}" in moved - worker
@@ -704,10 +707,12 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
     """README, "Who sets up the streams" and "Withdrawing queued work"."""
 
     assert (TRANSPORT["topology_owner"], TRANSPORT["withdrawal"]["role"]) == ("installation_authority", "team_services")
-    buckets = EXPORT.key_value_grants(TRANSPORT)
+    buckets, blobs = EXPORT.key_value_grants(TRANSPORT), EXPORT.object_store_grants(TRANSPORT)
     for role in REGISTRY["host_roles"]:
-        # Bucket reads and watches are key-value grants (README, "Key-value grants"); the queues are what count here.
-        publish = [subject for subject in role_permissions(role)["publish"] if subject not in buckets.get(role, set())]
+        # Bucket and blob reads, watches and blob deletes have their own grants (README, "Key-value grants",
+        # "Blobs"); the queues are what count here.
+        publish = [subject for subject in role_permissions(role)["publish"]
+                   if subject not in buckets.get(role, set()) | blobs.get(role, set())]
         creates = {subject for subject in publish if ".CREATE." in subject or ".UPDATE." in subject or ".DELETE." in subject}
         deletes = {subject for subject in creates if ".MSG.DELETE." in subject}
         reads = {subject for subject in publish if ".MSG.GET." in subject or ".DIRECT.GET." in subject}
@@ -715,6 +720,7 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
             assert "$JS.API.STREAM.CREATE.UA1_AGENT_WORK_{team}" in publish and not deletes and not reads
             assert "$JS.API.CONSUMER.CREATE.UA1_AGENT_WORK_{team}.*.>" in publish
             assert {f"$JS.API.STREAM.CREATE.KV_{bucket}" for bucket in TRANSPORT["key_value"]} <= set(publish)
+            assert "$JS.API.STREAM.CREATE.OBJ_UA1_BLOBS" in publish
         elif role == "team_services":
             # Their own team's streams only: no grant reaches the shared UA1_WORK or another team's dead letters.
             assert deletes == creates == {"$JS.API.STREAM.MSG.DELETE.UA1_AGENT_WORK_{team}",
@@ -810,7 +816,7 @@ def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
     """team services receive task.request's copy on work.team, not the agent and pool inboxes (README, "Durable copies")."""
 
     services = json.loads((CONTRACT / "generated" / "permissions" / "team_services.json").read_text(encoding="utf-8"))
-    buckets = EXPORT.key_value_grants(TRANSPORT)["team_services"]
+    buckets = EXPORT.key_value_grants(TRANSPORT)["team_services"] | EXPORT.object_store_grants(TRANSPORT)["team_services"]
     consumers = {subject.split(".")[-1] if not subject.startswith("$JS.ACK.") else subject.split(".")[3]
                  for subject in services["publish"] if subject.startswith(("$JS.API.CONSUMER.", "$JS.ACK."))
                  and subject not in buckets}
@@ -1465,6 +1471,84 @@ def test_the_generator_refuses_buckets_and_custody_it_cannot_grant(change, probl
     change(transport)
     with pytest.raises(EXPORT.ContractError, match=problem):
         EXPORT.check_stream_management(EXPORT.load_yaml("registry.yaml"), transport)
+
+
+def test_blob_grants_follow_who_receives_writes_and_deletes_blobs() -> None:
+    """README, "Blobs": readers are exactly the roles that receive a blob reference; only the team services delete."""
+
+    blobs = TRANSPORT["object_store"]["UA1_BLOBS"]
+    receivers = EXPORT.blob_receivers(REGISTRY, TRANSPORT, EXPORT.load_schemas())
+    assert set(blobs["readers"]) == receivers == {"gateway", "lead_host", "worker_host", "team_services", "edge_adapter"}
+    assert set(blobs["writers"]) == {"gateway", "lead_host", "worker_host", "team_services"}
+    assert blobs["deleters"] == ["team_services"]
+    reads = {"$JS.API.STREAM.INFO.OBJ_UA1_BLOBS", "$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS",
+             "$JS.API.CONSUMER.CREATE.OBJ_UA1_BLOBS", "$JS.API.CONSUMER.INFO.OBJ_UA1_BLOBS.*", "$JS.FC.OBJ_UA1_BLOBS.>"}
+    writes = {"$O.UA1_BLOBS.C.>", "$O.UA1_BLOBS.M.>"}
+    for role in REGISTRY["host_roles"]:
+        publish = set(role_permissions(role)["publish"])
+        # All of the read grants or none; the topology owner also reads the stream's information.
+        assert (reads <= publish) == (role in receivers), role
+        assert not (reads - publish) or not (reads & publish - {"$JS.API.STREAM.INFO.OBJ_UA1_BLOBS"}), role
+        assert (writes & publish) == (writes if role in blobs["writers"] else set()), role
+        assert ("$JS.API.STREAM.PURGE.OBJ_UA1_BLOBS" in publish) == (role == "team_services"), role
+        # Only the topology owner creates the bucket's stream; no role names a consumer on it.
+        assert ("$JS.API.STREAM.CREATE.OBJ_UA1_BLOBS" in publish) == (role == TRANSPORT["topology_owner"]), role
+        assert not {subject for subject in publish if subject.startswith("$JS.API.CONSUMER.DURABLE.CREATE.OBJ_")}, role
+    # The headers name the owner, the team, the person by reference and the digest, each of a shared type.
+    assert {name: header["value"] for name, header in blobs["headers"].items()} == {
+        "UA-Blob-SHA256": "sha256_digest", "UA-Blob-Team": "team_id", "UA-Blob-Request": "record_id",
+        "UA-Blob-Agent": "agent_id", "UA-Blob-Person": "person_ref"}
+    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    assert all(f"`{name}`" in readme for name in blobs["headers"])
+    assert "Not generated yet" not in readme
+
+
+@pytest.mark.parametrize(("change", "problem"), [
+    (lambda t: t["object_store"]["UA1_BLOBS"]["readers"].remove("edge_adapter"), "readers are exactly the roles"),
+    (lambda t: t["object_store"]["UA1_BLOBS"]["readers"].append("scheduler"), "readers are exactly the roles"),
+    (lambda t: t["object_store"]["UA1_BLOBS"]["readers"].append("gateway"), "distinct host roles"),
+    (lambda t: t["object_store"]["UA1_BLOBS"]["writers"].append("edge_adapter"), None),  # a reader may also write
+    (lambda t: t["object_store"]["UA1_BLOBS"]["writers"].append("scheduler"), "writers also read"),
+    (lambda t: t["object_store"]["UA1_BLOBS"]["deleters"].append("edge_adapter"), "deleters also write"),
+    (lambda t: t["object_store"]["UA1_BLOBS"]["deleters"].clear(), "deleters are distinct host roles"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(object_name="digest"), "object_name names"),
+    (lambda t: t["object_store"]["UA1_BLOBS"]["headers"]["UA-Blob-Team"].update(value="team"), "names a common.schema.json type"),
+    (lambda t: t["object_store"]["UA1_BLOBS"]["headers"]["UA-Blob-Team"].update(presence="sometimes"), "when it is present"),
+    (lambda t: t["object_store"]["UA1_BLOBS"]["headers"].update({"X-Owner": {"value": "agent_id", "presence": "owner"}}),
+     "UA-Blob- followed by words"),
+    (lambda t: t["object_store"]["UA1_BLOBS"]["headers"].pop("UA-Blob-Agent"), "at least two kinds of owner"),
+    (lambda t: t["object_store"].update({"UA1_BLOBS_{team}": t["object_store"].pop("UA1_BLOBS")}), "installation-wide"),
+    (lambda t: t["object_store_stream"].update(deny_purge=True), "deny_purge is False"),
+    (lambda t: t["object_store_stream"].update(allow_rollup_hdrs=False), "allow_rollup_hdrs is True"),
+    (lambda t: t["object_store_stream"].update(storage="disk"), "storage is file or memory"),
+    (lambda t: t["object_store_stream"].pop("deny_delete"), "fields are"),
+])
+def test_the_generator_refuses_blob_grants_it_cannot_justify(change, problem: str | None) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    change(transport)
+    check = lambda: EXPORT.check_object_store(REGISTRY, transport, EXPORT.load_schemas())  # noqa: E731
+    if problem is None:
+        check()
+        return
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        check()
+
+
+def test_a_kind_that_starts_carrying_a_blob_needs_its_receivers_to_read() -> None:
+    """A role that would receive a blob reference without the read grant is refused, through the schema, not a list."""
+
+    schemas = copy.deepcopy(EXPORT.load_schemas())
+    registry = copy.deepcopy(REGISTRY)
+    # The scheduler receives no blob today; give one kind it receives a blob reference.
+    kind = next(name for name, entry in registry["kinds"].items()
+                if "scheduler" in entry["receivers"] and not EXPORT.reaches_blob(
+                    EXPORT.ModelWriter(schemas), entry["body"], schemas[entry["body"]], set()))
+    file = registry["kinds"][kind]["body"]
+    common = Path("common.schema.json").relative_to(Path(file).parent, walk_up=True).as_posix()
+    schemas[file].setdefault("properties", {})["attachment"] = {"$ref": f"{common}#/$defs/blob_ref"}
+    assert "scheduler" in EXPORT.blob_receivers(registry, TRANSPORT, schemas)
+    with pytest.raises(EXPORT.ContractError, match="readers are exactly the roles"):
+        EXPORT.check_object_store(registry, TRANSPORT, schemas)
 
 
 def test_only_the_team_services_read_their_teams_dead_letters() -> None:

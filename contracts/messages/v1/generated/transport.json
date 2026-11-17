@@ -320,8 +320,53 @@
   },
   "object_store": {
     "UA1_BLOBS": {
-      "description": "files and long text, named by SHA-256; the owner deletes them"
+      "deleters": [
+        "team_services"
+      ],
+      "description": "files and long text, named by SHA-256; the team services delete them when their owner's retention ends",
+      "headers": {
+        "UA-Blob-Agent": {
+          "presence": "owner",
+          "value": "agent_id"
+        },
+        "UA-Blob-Person": {
+          "presence": "person",
+          "value": "person_ref"
+        },
+        "UA-Blob-Request": {
+          "presence": "owner",
+          "value": "record_id"
+        },
+        "UA-Blob-SHA256": {
+          "presence": "always",
+          "value": "sha256_digest"
+        },
+        "UA-Blob-Team": {
+          "presence": "always",
+          "value": "team_id"
+        }
+      },
+      "object_name": "sha256",
+      "readers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter"
+      ],
+      "writers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services"
+      ]
     }
+  },
+  "object_store_stream": {
+    "allow_rollup_hdrs": true,
+    "deny_delete": true,
+    "deny_purge": false,
+    "storage": "file"
   },
   "peer_sender_slot": "x-{installation}",
   "queues": {

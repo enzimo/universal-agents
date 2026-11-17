@@ -1482,7 +1482,62 @@ The lock is not signed, unlike the state records: only the team services may wri
 (and the stream settings refuse rollups), and only the compare-and-set on the revision
 proves who holds it. Only the team services read or write this bucket.
 
-**Not generated yet.** The object store's grants come with blob owners and retention.
+## Blobs
+
+Files and text too long to send inline travel as a blob reference (`blob_ref`: SHA-256,
+size, media type, optional name) to an object in `UA1_BLOBS`: a person's attachments, a
+request or answer over `long_text`, the files a result or notice carries, Knowledge text over
+32,768 characters, and change-review briefs.
+
+- **Names.** An object's name is its content's SHA-256 as the reference writes it
+  (`object_name: sha256`, unpadded base64url). Two objects with one name hold the same
+  bytes, so a writer looks the object up first and puts it only when it is missing or
+  deleted; replacing an existing object would purge the other's chunks, which only a
+  deleter may do. A reader checks the bytes it read against the name and the reference and
+  refuses a blob that does not match.
+- **Owner headers.** Each object's metadata carries these headers (`transport.yaml`
+  `object_store.UA1_BLOBS.headers`, each value of the named `common.schema.json` type):
+  - `UA-Blob-SHA256` (`sha256_digest`) and `UA-Blob-Team` (`team_id`), always;
+  - the owner, exactly one of `UA-Blob-Request` (`record_id`: the person's request, the
+    request id a root-task token names) and `UA-Blob-Agent` (`agent_id`: the agent, for
+    system work);
+  - `UA-Blob-Person` (`person_ref`) when a person's work stored it, by reference only.
+
+  The headers say whose retention a blob follows: the team services delete a blob when its
+  owner's retention ends, and at once when its person departs. No one decides who may read a
+  blob from them.
+- **Grants.** These take effect where each host has its own NATS credential, as for the
+  buckets ("Key-value grants"):
+  - readers are exactly the roles that receive a kind, a copy or a reply whose schema can
+    carry a blob reference: the gateway, the lead and worker hosts, the team services and
+    the edge adapter. A reader gets the bucket's stream information, the message get that
+    finds an object's metadata (`$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`, as the NATS object
+    store client asks), and what reading the chunks needs: an unnamed ordered consumer on
+    its own inbox, its information and its flow control;
+  - writers are the gateway, the lead and worker hosts and the team services: they publish
+    chunks (`$O.UA1_BLOBS.C.>`) and metadata (`$O.UA1_BLOBS.M.>`), and read, to look an
+    object up before putting it. The edge adapter only passes on references to blobs a
+    writer stored;
+  - only the team services delete: a deletion marks the object deleted and purges its
+    chunks (`$JS.API.STREAM.PURGE.OBJ_UA1_BLOBS`). The team services also purge chunks that
+    no object's metadata names, which a writer leaves when it stops partway or when two
+    writers put the same blob at once;
+  - the topology owner creates the bucket's stream.
+- **What NATS cannot narrow.** A reader can read every blob of the installation, and a writer
+  can publish chunks or metadata for any object, so it could spoil (not forge) a blob or mark
+  one deleted: readers' digest checks refuse a changed blob. This is accepted while every
+  host runs on the main machine, and revisited before hosts run elsewhere (per-team
+  buckets, or reads through the team services).
+- **Stream settings.** The bucket's stream, `OBJ_UA1_BLOBS` with subjects
+  `$O.UA1_BLOBS.C.>` and `$O.UA1_BLOBS.M.>`, has the settings of `object_store_stream`:
+  rollup headers allowed (an object's metadata is written with a rollup over its earlier
+  versions), no message deletes through the stream API, and purges allowed (deleting an
+  object purges its chunks; only deleters hold the grant).
+
+The generator checks that the readers are exactly the roles that receive something that can
+carry a blob reference (none lacks the grant and none has it without need), that writers
+also read and deleters also write, that each header names a shared type and when it is
+present, and the stream settings.
 
 ## Dead letters
 

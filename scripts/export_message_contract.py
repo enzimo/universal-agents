@@ -365,6 +365,7 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         if entry is None or "down" not in topology_edges(entry):
             raise ContractError(f"team-topologies.yaml: requester_kinds names {kind}, which is not a kind sent down")
     check_shared_addresses(registry, transport)
+    check_object_store(registry, transport, schemas)
     check_ledger_waits(registry)
     names: dict[str, str] = {}
     for name in registry["kinds"]:
@@ -1359,6 +1360,108 @@ def check_key_value(registry: dict[str, Any], transport: dict[str, Any]) -> None
                                 f"have no key template in transport.yaml key_value.{entry['bucket']}")
 
 
+# The stream settings every object store has (transport.yaml object_store_stream): an object's
+# metadata is written with a rollup, and deleting an object purges its chunks (the deleters' grant
+# alone); no message is deleted one by one. Only the storage is a choice.
+OBJECT_STORE_STREAM = {"allow_rollup_hdrs": True, "deny_delete": True, "deny_purge": False}
+OBJECT_STORE_FIELDS = {"description", "object_name", "headers", "readers", "writers", "deleters"}
+# When an object's metadata carries a header: always, as one of the owner headers (exactly one
+# of them), or when a person's work stored the object.
+BLOB_HEADER_PRESENCE = {"always", "owner", "person"}
+BLOB_REF = ("common.schema.json", "/$defs/blob_ref")
+
+
+def check_object_store(registry: dict[str, Any], transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Who reads, writes and deletes blobs, and the headers that name a blob's owner (README, "Blobs").
+
+    NATS cannot limit a reader to some objects of a bucket, so the readers are exactly
+    the roles that receive a kind or reply that can carry a blob reference: a role
+    that receives one could not read it without the grant, and any other role gets
+    no grant it does not need. A writer looks the object up before it puts it, since
+    an object named by its content that exists already holds the same bytes and
+    replacing it would purge the other's chunks, which only deleters may; a deleter
+    marks the object deleted as a writer does, then purges its chunks.
+    """
+
+    where = "transport.yaml object_store_stream"
+    settings = transport.get("object_store_stream")
+    if not isinstance(settings, dict) or set(settings) != {*OBJECT_STORE_STREAM, "storage"}:
+        raise ContractError(f"{where}: fields are {sorted({*OBJECT_STORE_STREAM, 'storage'})}")
+    for field_name, value in OBJECT_STORE_STREAM.items():
+        if type(settings[field_name]) is not type(value) or settings[field_name] != value:
+            raise ContractError(f"{where}: {field_name} is {value} (README, \"Blobs\")")
+    if settings["storage"] not in {"file", "memory"}:
+        raise ContractError(f"{where}: storage is file or memory")
+    roles = set(registry["host_roles"])
+    receivers = blob_receivers(registry, transport, schemas)
+    for bucket, spec in transport["object_store"].items():
+        where = f"transport.yaml object_store.{bucket}"
+        if not isinstance(spec, dict) or set(spec) != OBJECT_STORE_FIELDS or "{" in bucket:
+            raise ContractError(f"{where}: an installation-wide bucket with fields {sorted(OBJECT_STORE_FIELDS)}")
+        if spec["object_name"] not in schemas[BLOB_REF[0]]["$defs"]["blob_ref"]["properties"]:
+            raise ContractError(f"{where}: object_name names the blob_ref field an object is named by")
+        for field_name in ("readers", "writers", "deleters"):
+            listed = spec[field_name]
+            if not isinstance(listed, list) or not listed or not set(listed) <= roles or len(set(listed)) != len(listed):
+                raise ContractError(f"{where}: {field_name} are distinct host roles")
+        if set(spec["readers"]) != receivers:
+            raise ContractError(f"{where}: readers are exactly the roles that receive a kind or reply that can carry a "
+                                f"blob reference: {sorted(receivers)}")
+        if not set(spec["writers"]) <= set(spec["readers"]) or not set(spec["deleters"]) <= set(spec["writers"]):
+            raise ContractError(f"{where}: writers also read (to find an object before putting it) and deleters also write")
+        check_blob_headers(where, spec["headers"], schemas)
+
+
+def check_blob_headers(where: str, headers: Any, schemas: dict[str, dict[str, Any]]) -> None:
+    """Each header holds a value of a named shared type, and the owner headers name one owner each."""
+
+    shared = schemas["common.schema.json"]["$defs"]
+    if not isinstance(headers, dict) or not headers:
+        raise ContractError(f"{where}: headers name the metadata headers of every object")
+    for name, header in headers.items():
+        if not re.fullmatch(r"UA-Blob-[A-Za-z0-9]+(-[A-Za-z0-9]+)*", name):
+            raise ContractError(f"{where}: header {name!r} is UA-Blob- followed by words joined by -")
+        if not isinstance(header, dict) or set(header) != {"value", "presence"} or header["value"] not in shared \
+                or header["presence"] not in BLOB_HEADER_PRESENCE:
+            raise ContractError(f"{where}: header {name} names a common.schema.json type (value) and when it is "
+                                f"present ({sorted(BLOB_HEADER_PRESENCE)})")
+    if sum(header["presence"] == "owner" for header in headers.values()) < 2:
+        raise ContractError(f"{where}: the owner headers name at least two kinds of owner (a request, an agent)")
+
+
+def reaches_blob(resolver: "ModelWriter", file: str, node: Any, seen: set[tuple[str, str]]) -> bool:
+    """Whether a schema can hold a blob reference anywhere, through any reference."""
+
+    if isinstance(node, list):
+        return any(reaches_blob(resolver, file, item, seen) for item in node)
+    if not isinstance(node, dict):
+        return False
+    if "$ref" in node:
+        target = resolver.resolve(file, node["$ref"])
+        if target == BLOB_REF:
+            return True
+        if target in seen:
+            return False
+        seen.add(target)
+        return reaches_blob(resolver, target[0], resolver.node(*target), seen)
+    return any(reaches_blob(resolver, file, item, seen) for item in node.values())
+
+
+def blob_receivers(registry: dict[str, Any], transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> set[str]:
+    """The roles that receive a kind, a copy of it, or a reply whose schema can carry a blob reference."""
+
+    resolver = ModelWriter(schemas)
+    roles: set[str] = set()
+    for entry in registry["kinds"].values():
+        if reaches_blob(resolver, entry["body"], schemas[entry["body"]], set()):
+            roles.update(role for address in entry_addresses(entry) for role in receiving_roles(entry, address, transport))
+        reply = entry.get("reply", {}).get("body")
+        if reply and reaches_blob(resolver, reply, schemas[reply], set()):
+            # A reply goes back to whoever sent the request.
+            roles.update(role for address in own_addresses(entry) for role in address_senders(entry, address))
+    return roles
+
+
 def check_key_value_stream(settings: Any) -> None:
     """Every bucket's stream refuses rollup headers and stream-API deletes and serves direct reads (README, "Key-value grants")."""
 
@@ -1563,7 +1666,8 @@ def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
 
     owner: set[str] = set()
     buckets = [bucket_stream(bucket) for bucket in transport["key_value"]]
-    for stream in [*transport["streams"], *buckets]:
+    objects = [object_stream(bucket) for bucket in transport["object_store"]]
+    for stream in [*transport["streams"], *buckets, *objects]:
         owner |= {f"$JS.API.STREAM.{action}.{stream}" for action in ("CREATE", "UPDATE", "INFO")}
     for stream in {consumer["stream"] for consumer in transport["consumers"].values()}:
         owner |= {f"$JS.API.CONSUMER.CREATE.{stream}.*", f"$JS.API.CONSUMER.CREATE.{stream}.*.>",
@@ -1615,6 +1719,39 @@ def key_value_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     return grants
 
 
+def object_stream(bucket: str) -> str:
+    """The JetStream stream behind an object store."""
+
+    return f"OBJ_{bucket}"
+
+
+def object_store_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
+    """Per role: the subjects that read, write and delete objects (README, "Blobs").
+
+    The subjects are the ones the NATS object store client uses. A reader gets the
+    bucket's stream information, the message get that finds an object's metadata
+    by its subject, and what reading the chunks needs: an unnamed ordered consumer
+    on its own inbox, that consumer's information and its flow control, as for a
+    key-value watch. A writer publishes chunks and metadata; NATS cannot tie a
+    publish to one object, so readers check every blob's SHA-256 against its name.
+    A deleter purges the object's chunks after marking it deleted; the purge grant
+    covers the whole bucket, so only the team services hold it.
+    """
+
+    grants: dict[str, set[str]] = {}
+    for bucket, spec in transport["object_store"].items():
+        stream = object_stream(bucket)
+        reads = {f"$JS.API.STREAM.INFO.{stream}", f"$JS.API.STREAM.MSG.GET.{stream}",
+                 f"$JS.API.CONSUMER.CREATE.{stream}", f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.FC.{stream}.>"}
+        for role in spec["readers"]:
+            grants.setdefault(role, set()).update(reads)
+        for role in spec["writers"]:
+            grants.setdefault(role, set()).update({f"$O.{bucket}.C.>", f"$O.{bucket}.M.>"})
+        for role in spec["deleters"]:
+            grants.setdefault(role, set()).add(f"$JS.API.STREAM.PURGE.{stream}")
+    return grants
+
+
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Per host role: the NATS permissions it gets, as templates.
 
@@ -1630,9 +1767,10 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
     reply_window = transport["classes"]["request_reply"]["max_expiry_seconds"] + transport["clock_skew_seconds"]
     management = stream_management_grants(transport)
     buckets = key_value_grants(transport)
+    blobs = object_store_grants(transport)
     result = {}
     for role in registry["host_roles"]:
-        publish: set[str] = set(management.get(role, set())) | buckets.get(role, set())
+        publish: set[str] = set(management.get(role, set())) | buckets.get(role, set()) | blobs.get(role, set())
         subscribe = {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         answers_requests = False
         for entry in registry["kinds"].values():
