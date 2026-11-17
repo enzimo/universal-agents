@@ -8,14 +8,23 @@ from __future__ import annotations
 
 import pytest
 
-from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, MAX_PARTITION_COUNT
+import json
+from pathlib import Path
+
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, MAX_PARTITION_COUNT, PARTITIONED_ADDRESSES
 from custom_messages.wire.partitions import (
     agent_partition,
     agent_record_key,
+    arrival_subject,
     check_partition_count,
     every_partition,
     partition_owner_key,
+    signed_subject_of,
 )
+from custom_messages.wire.refusals import FrameRefused
+
+TRANSPORT = json.loads((Path(__file__).resolve().parents[1]
+                        / "contracts/messages/v1/generated/transport.json").read_text())
 
 # FNV-1a 32-bit of the concatenated bytes (the published test vectors for "", "a" and "foobar").
 FNV1A_32 = {"": 0x811C9DC5, "a": 0xE40C292C, "foobar": 0xBF9CF968}
@@ -56,3 +65,39 @@ def test_counts_outside_what_an_installation_may_choose_are_refused() -> None:
 def test_every_partition_covers_each_team_whole() -> None:
     assert every_partition(("a", "b"), 4) == {"a": (0, 1, 2, 3), "b": (0, 1, 2, 3)}
     assert len(every_partition(("a",))["a"]) == DEFAULT_PARTITION_COUNT
+
+
+def test_the_mapped_addresses_are_the_ones_the_account_maps() -> None:
+    mapped = {source.split(".", 4)[4].replace("*", "{agent}") for source in TRANSPORT["partitions"]["account_mappings"]}
+    assert mapped == set(PARTITIONED_ADDRESSES) == {"work.agent.{agent}", "work.control.{agent}", "ctl.agent.{agent}"}
+
+
+@pytest.mark.parametrize("address", ["work.agent", "work.control", "ctl.agent"])
+@pytest.mark.parametrize("count", [7, DEFAULT_PARTITION_COUNT])
+def test_a_mapped_address_arrives_with_its_agents_partition_and_verifies_as_signed(address: str, count: int) -> None:
+    signed = f"ua.v1.team_example.lead-host-1.{address}.researcher-2"
+    arrived = arrival_subject(signed, count)
+    assert arrived == f"{signed}.{agent_partition('team_example', 'researcher-2', count)}"
+    assert signed_subject_of(arrived, count) == signed
+
+
+@pytest.mark.parametrize("subject", [
+    "ua.v1.team_example.lead-host-1.work.pool.researcher", "ua.v1.team_example.lead-host-1.work.team",
+    "ua.v1.team_example.gateway-1.work.edge.web", "ua.v1._install.new-host-1.svc", "_INBOX.lead-host-1.x.y",
+    "ua.v1.team_example.lead-host-1.svc.team",
+])
+def test_every_other_subject_arrives_as_signed(subject: str) -> None:
+    assert arrival_subject(subject) == subject == signed_subject_of(subject)
+
+
+@pytest.mark.parametrize("suffix", ["", ".7", ".8.8", ".x", ".08"])
+def test_a_missing_extra_or_other_partition_token_is_refused(suffix: str) -> None:
+    """README, "Partitions": the arrival suffix is the agent's partition at the installation's count, once."""
+
+    signed = "ua.v1.team_example.lead-host-1.work.control.researcher-2"
+    assert agent_partition("team_example", "researcher-2") == 8
+    with pytest.raises(FrameRefused) as refused:
+        signed_subject_of(signed + suffix)
+    assert (refused.value.code, refused.value.at) == ("subject_mismatch", "/subject")
+    # The partition at another count is another token, so a receiver at the wrong count refuses too.
+    assert signed_subject_of(arrival_subject(signed, 7), 7) == signed

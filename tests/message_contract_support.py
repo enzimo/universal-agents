@@ -10,6 +10,7 @@ replay record or answered request, or says when a stream stored the frame.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +40,17 @@ EXAMPLE_CONTRACT_SHA256 = "c734d95cdcb5b0081997c039906cf13cf3eeef0e0ef105160fb11
 # Edge routes the examples' edge adapter serves for outside agents (others are gateway routes).
 OUTSIDE_EDGES = {"a2a_partner"}
 _UNSET: Any = object()
+
+
+def longest_id(definition: str) -> int:
+    """The most characters a common.schema.json id definition allows (its pattern's {0,n} plus the first character)."""
+
+    defs = json.loads((CONTRACT / "schemas" / "common.schema.json").read_text(encoding="utf-8"))["$defs"]
+    while "pattern" not in defs[definition]:
+        definition = defs[definition]["$ref"].rsplit("/", 1)[-1]
+    found = re.search(r"\{0,(\d+)\}\$$", defs[definition]["pattern"])
+    assert found, definition
+    return int(found.group(1)) + 1
 
 
 def private_key(key_id: str) -> Ed25519PrivateKey:

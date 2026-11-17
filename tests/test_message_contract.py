@@ -53,6 +53,7 @@ from custom_messages.wire.trust import TrustStore, ed25519_public_key, sign_stat
 from custom_messages.wire.values import parse_timestamp
 from id_generation import RANDOM_ID_SUFFIX_LENGTH
 from tests import message_contract_support as fixtures
+from tests.message_contract_support import longest_id
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "contracts" / "messages" / "v1"
@@ -708,17 +709,6 @@ def test_a_placement_names_only_teams_its_host_serves() -> None:
         HostPlacement("edge-adapter-1", ("team_a",), installation="install_example", peers=("install_example",))
     with pytest.raises(ValueError, match="cannot fill"):
         host_subjects("$KV.X.{peer}.{team}", HostPlacement("edge-adapter-1", ("team_a",), peers=("install_peer",)))
-
-
-def longest_id(definition: str) -> int:
-    """The most characters a common.schema.json id definition allows (its pattern's {0,n} plus the first character)."""
-
-    defs = CONTRACT_SCHEMAS["common.schema.json"]["$defs"]
-    while "pattern" not in defs[definition]:
-        definition = defs[definition]["$ref"].rsplit("/", 1)[-1]
-    found = re.search(r"\{0,(\d+)\}\$$", defs[definition]["pattern"])
-    assert found, definition
-    return int(found.group(1)) + 1
 
 
 # Each permission placeholder, filled with the longest id its definition allows; a partition is

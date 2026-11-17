@@ -245,9 +245,10 @@ return text as bytes, which can look like contract or ownership failures.
 
 Protocol 1 contract changes also run `tests/test_message_contract.py` and the
 isolated `tests/test_live_message_contract.py` with NATS 2.15.1 or later, named by
-`LIVE_TEST_NATS_SERVER` or found on PATH. The latter starts its own broker so
-generated role permissions can be tested without changing a team's users or
-reading its credentials. It checks durable fetch/acknowledgement and signed
+`LIVE_TEST_NATS_SERVER` or found on PATH. The latter starts its own broker in
+NATS operator mode, signing its own account and user JWTs, so generated role
+permissions and the partition mappings can be tested without changing a team's
+users or reading its credentials. It checks durable fetch/acknowledgement and signed
 request/reply delivery, including refused access to other consumers. The NATS CI
 job sets `LIVE_TEST_NATS_SERVER`, so a missing server fails there instead of
 skipping. Regenerate the contract sources with

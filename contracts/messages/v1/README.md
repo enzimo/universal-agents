@@ -796,7 +796,7 @@ below are computed with it.
   the subject a frame arrives on is its signed `subject` plus one token, and that token must
   be the agent's partition at the installation's count; a receiver compares the signed
   subject with the arrival subject less that token, and refuses a missing or extra token, or
-  another partition, as `subject_mismatch`. Every other address arrives exactly as signed.
+  another partition, as `subject_mismatch` (`custom_messages.wire.partitions.signed_subject_of`). Every other address arrives exactly as signed.
   The bundled server applies no mapping yet, so today's receivers compare exact subjects; the
   release that installs the mapping switches them to this rule.
 - **Streams.** The inboxes and control queues of a team's agents in partition `p` are stored
@@ -1317,9 +1317,12 @@ already-revoked certificate cannot check that sequence. Missing header copies an
 mismatched header copies have separate refusal examples.
 
 Run `tests/test_message_contract.py` for contract agreement, the examples and hostile
-input refusals. `tests/test_live_message_contract.py` starts a separate authenticated
-broker, since the role-permission checks require their own users and authorization
-file. It uses public fixture signing keys and no operator credentials.
+input refusals. `tests/test_live_message_contract.py` starts a separate broker in NATS
+operator mode, as an installation's server runs once every process has its own user ("NATS
+users and the account"): the account JWT carries the partition mappings at the default
+count, and each host logs in with a user JWT holding its role's filled grants, the largest
+credential at the default count among them. It signs its own operator, account and user
+keys (`tests/nats_operator_support.py`) and uses public fixture signing keys for frames.
 
 - **Server binary:** `LIVE_TEST_NATS_SERVER` names it and makes the test fail when it
   is missing; the NATS CI job sets it. Without the variable the test uses `nats-server`

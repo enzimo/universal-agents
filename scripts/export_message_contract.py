@@ -2551,6 +2551,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
         f"DEFAULT_PARTITION_COUNT = {transport['partitions']['default_count']!r}\n"
         f"MAX_PARTITION_COUNT = {transport['partitions']['max_count']!r}\n"
+        f"PARTITIONED_ADDRESSES = {tuple(sorted(partitioned_addresses(transport)))!r}\n"
         f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
         f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"
         f"PEER_SENDER_SLOT = {transport['peer_sender_slot']!r}\n"

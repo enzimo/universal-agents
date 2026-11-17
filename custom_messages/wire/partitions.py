@@ -9,18 +9,32 @@ whole partitions, and the keys of agent records and partition ownership records 
 
 The count is fixed when an installation is created (``transport.queues.partitions``, default
 ``DEFAULT_PARTITION_COUNT``). Until the step that adds that setting, callers use the default.
+
+The arrival suffix: a frame's signed ``subject`` is the unmapped one, so a receiver of a
+mapped address takes the partition token off the subject the frame arrived on, after checking
+it is the agent's partition, and compares the rest with the signed subject
+(``signed_subject_of``). The bundled server applies no mapping yet, so running receivers still
+compare exact subjects; the release that installs the mapping switches them to this.
 """
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Optional
 
-from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, MAX_PARTITION_COUNT
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, MAX_PARTITION_COUNT, PARTITIONED_ADDRESSES, SUBJECT_PREFIX
+from custom_messages.wire.refusals import FrameRefused
 
 # The middle word of a partition ownership record's key, <team>.partition.<partition>, in UA1_PLACEMENT.
 PARTITION_OWNER_WORD = "partition"
 
 _FNV_OFFSET, _FNV_PRIME, _FNV_MASK = 0x811C9DC5, 0x01000193, 0xFFFFFFFF
+# A subject is ua.v1.<team>.<sender>.<address>; the mapped addresses' fixed words, with the
+# position of the agent's own token in the address.
+_ROOT = tuple(SUBJECT_PREFIX.split("{team}", 1)[0].rstrip(".").split("."))
+_MAPPED = {tuple(word for word in address.split(".") if word != "{agent}"): address.split(".").index("{agent}")
+           for address in PARTITIONED_ADDRESSES}
+# The token counts of mapped subjects without their partition token.
+_MAPPED_LENGTHS = sorted({len(_ROOT) + 2 + len(words) + 1 for words in _MAPPED})
 
 
 def check_partition_count(count: int) -> int:
@@ -69,3 +83,44 @@ def every_partition(teams: Iterable[str], count: int = DEFAULT_PARTITION_COUNT) 
 
     numbers = tuple(range(check_partition_count(count)))
     return {team: numbers for team in teams}
+
+
+def _mapped_agent(tokens: list[str]) -> Optional[tuple[str, str]]:
+    """(team, agent) when ``tokens`` are a mapped address's subject without the partition token, else None."""
+
+    head = len(_ROOT) + 2  # the root, the team and the sender slot
+    address = tokens[head:]
+    if tuple(tokens[:len(_ROOT)]) != _ROOT:
+        return None
+    for words, agent_at in _MAPPED.items():
+        if len(address) == len(words) + 1 and tuple(address[:agent_at] + address[agent_at + 1:]) == words:
+            return tokens[len(_ROOT)], address[agent_at]
+    return None
+
+
+def arrival_subject(signed_subject: str, count: int = DEFAULT_PARTITION_COUNT) -> str:
+    """The subject NATS delivers a frame signed with ``signed_subject`` on: the agent's partition appended for a
+    mapped address (an agent's inbox, control queue or live control address), any other subject unchanged."""
+
+    found = _mapped_agent(signed_subject.split("."))
+    return signed_subject if found is None else f"{signed_subject}.{agent_partition(*found, count)}"
+
+
+def signed_subject_of(arrived_on: str, count: int = DEFAULT_PARTITION_COUNT) -> str:
+    """The signed subject of a frame that arrived on ``arrived_on``: the arrival suffix checked and taken off.
+
+    A mapped address must arrive with exactly one more token, the agent's partition at the
+    installation's count; a missing token, an extra one or another partition is refused as
+    ``subject_mismatch``, like any other subject that differs from the signed one. Any other
+    subject is returned unchanged for the receiver's exact comparison.
+    """
+
+    tokens = arrived_on.split(".")
+    for length in _MAPPED_LENGTHS:
+        found = _mapped_agent(tokens[:length])
+        if found is not None:
+            if tokens[length:] != [str(agent_partition(*found, count))]:
+                raise FrameRefused("subject_mismatch", "a mapped address arrives with its agent's partition, once",
+                                   at="/subject")
+            return ".".join(tokens[:length])
+    return arrived_on
