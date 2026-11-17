@@ -402,16 +402,22 @@ class _RelationalAdapterHostRepository(AdapterHostRepository):
                 raise KeyError(f"Unknown adapter inbox request {request_id!r}.")
             conn.commit()
 
-    def list_inbox_for_recovery(self, *, limit: int = 100) -> list[AdapterInboxRecord]:
+    def list_inbox_for_recovery(
+        self, *, limit: int = 100, after: tuple[str, str] | None = None
+    ) -> list[AdapterInboxRecord]:
+        # ``after`` is the (created_at_utc, request_id) of the last row of the
+        # previous page, so a reader can go through every accepted row.
+        bind = self._dialect.bind
+        page = "" if after is None else f"AND (created_at_utc, request_id) > ({bind}, {bind})"
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT * FROM gateway_adapter_inbox
-                WHERE status = 'accepted'
+                WHERE status = 'accepted' {page}
                 ORDER BY created_at_utc, request_id
-                LIMIT {self._dialect.bind}
+                LIMIT {bind}
                 """,
-                (limit,),
+                (*(after or ()), limit),
             ).fetchall()
         return [_required_record(AdapterInboxRecord, row) for row in rows]
 

@@ -4107,12 +4107,16 @@ Limits:
   (`task_manager_plans`), not the request's. The same follow-up (a clean-up
   deletes the uploads its deleted turns list) covers answers too.
 - Copies in the adapter host's transfer folder that no gateway record or
-  conversation turn names stay there: copies 0.9 made whose records are
-  gone, which the upgrade step cannot find ("Upgrading an instance in
-  place"), and copies of a message the gateway never handled. Retention,
-  history clean-up and person removal cover only `state/uploads`, and the
-  adapter host's own prune deletes its rows, not their files. Follow-up:
-  delete each expired row's transfer file.
+  conversation turn names stay there. The upgrade step counts and reports
+  the ones left at the upgrade once, at the start that finishes it (copies
+  0.9 made whose records are gone, "Upgrading an instance in place"), but
+  does not delete them: the owner chose reporting over deleting. An
+  administrator deletes those older than the step's marker once the gateway
+  has run on 0.10 since, while the instance is stopped. Copies of a message
+  the 0.10 gateway never handled still stay unreported. Retention, history
+  clean-up and person removal cover only `state/uploads`, and the adapter
+  host's own prune deletes its rows, not their files. Follow-up: delete each
+  expired row's transfer file.
 - Protocol 1's `task.answer` message has no files field. Answers still travel
   in the older message, which carries `TaskQuery.attachments`; moving answers
   to protocol 1 needs that field.
@@ -4742,8 +4746,9 @@ the desktop app never offers an older version.
   several links, another sha256, a destination already taken, a copy, sync,
   rename or removal of that file that fails) refuses only that record, keeps
   its records and the file as they are, is logged
-  (`event=adapter_host_file_not_moved` with the folder, the file, the
-  attachment id, `records=kept` and the reason) and never stops startup; the
+  (`event=adapter_host_file_not_moved` with the transfer-folder files its
+  records name (`sources`), the folder, the file, the attachment id,
+  `records=kept` and the reason) and never stops startup; the
   file tools refuse such a record as outside `state/uploads`, and after the
   operator fixes the file, deleting the marker and restarting tries the kept
   records again (moved files are no longer found there, so nothing moves
@@ -4778,7 +4783,56 @@ the desktop app never offers an older version.
   with no gateway record (no chat session for its folder) or naming another
   path or sha256 is never moved; it is dropped only when its file is proven
   absent. One line, `event=adapter_host_files_upgraded` with the counts,
-  reports the result, at warning level when a file was not moved. Guidance
+  reports the result, at warning level when a file was not moved. Before it
+  writes the marker, the step also counts the files left in the transfer
+  folder that no record it found names (`files_without_records` in that line
+  and the marker): files of people removed on 0.9, files whose records were
+  deleted while the step waited, and copies of messages the gateway never
+  handled. The owner chose reporting them over deleting them or leaving them
+  unmentioned. Only regular `adapter_upload_*` files directly in the folder
+  count (the names 0.9.13 wrote; an operator's folder may hold other files),
+  looked at with `lstat` only, so no link is followed and no file is opened,
+  and a file a record still names is left out because it has its own
+  not-moved warning. Also left out is a file the 0.10 gateway reads at its
+  start: at startup `AdapterHostApplicationService.start` handles every
+  hosted-chat message still `accepted` in `gateway_adapter_inbox`, 0.9.13's
+  included (the protocol and the tables are unchanged since then), resolves
+  its file references in order (a completed upload of the same registration
+  epoch, stopping at the first that does not resolve), reads those files and
+  removes them. The step resolves them the same way, reading the adapter
+  host's records only when a file no record names is found, because opening
+  them creates their tables on an instance that never ran the adapter host.
+  A nonzero count logs one warning
+  (`event=adapter_host_files_without_records`) with the folder, the count and
+  what to do, and no file names, which are people's text: an administrator
+  may delete the `adapter_upload_*` files last changed before the marker was
+  written (`find … ! -newer <marker>`), only after the gateway has run on
+  0.10 since then and while the instance is stopped, keeping the files in
+  the `sources` field of not-moved warnings (their `file` field may name the
+  `state/uploads` side, such as a destination already taken, so it cannot
+  carry that advice). Both conditions are needed: the 0.10 adapter host
+  passes new files through the same folder under the same prefix, so a count
+  beside a running team (`--files-gone`) or at a re-run after the marker was
+  deleted may include its copies, all written before that marker; once the
+  gateway has run, the copies of messages it had taken in are gone, and the
+  rest are never read again: a message it marked `outcome_unknown` because
+  its start recovers only `accepted` messages, and an upload whose message
+  never came because each registration gets a new epoch, so the upload no
+  longer resolves. If the folder was at another path under 0.9.13, its records name that
+  path and every file here looks unrecorded, so the warning says not to
+  delete them then; putting the folder back is not enough, because the step
+  reads only `upload_dir` (resolved through links), so it says to move or
+  mount the folder back at that path and set `upload_dir` to it. A folder
+  that is not there counts 0. One gone or with another device and inode
+  than the step saw when it started (every look opens it by path, so a
+  folder unmounted or replaced meanwhile would look empty), any other error
+  listing it and a database error reading the adapter host's records log
+  `event=adapter_host_files_without_records_uncounted` and leave the count
+  unset (`null` in the marker), because the count only reports: it never
+  stops startup, keeps the marker from being written or changes a record.
+  Only the run that writes the marker reports, so the count is said once; a
+  run that stops part way never counts, and the run that finishes it does.
+  Guidance
   the gateway still holds (`gateway_held_guidance`) is rewritten with its
   moved file, between the turns and the gateway record and under the same
   path-and-sha256 rule, because the gateway signs it again from that copy at
