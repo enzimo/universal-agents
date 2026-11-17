@@ -11,7 +11,8 @@ import pytest
 
 from custom_messages.wire.models import SessionsOpenReplyAdapter
 from custom_messages.wire.refusals import FrameRefused
-from team_services.sessions import AGENT_SESSION, SessionService, session_key
+from custom_messages.wire.partitions import partition_owner_key
+from team_services.sessions import AGENT_SESSION, PLACEMENT, SessionService, session_key
 
 TEAM, INSTALLATION = "team_example", "install_example"
 NOW = datetime(2026, 11, 12, 9, 0, tzinfo=timezone.utc)
@@ -117,3 +118,38 @@ async def test_a_session_key_longer_than_any_id_is_cut_so_the_lead_refusal_still
     assert message.startswith(f"Stored session records do not verify: {long_key[:100]}")
     assert "… and 1 more, each logged as event=lead_session_record_unreadable." in message
     assert message.endswith("deletes it from the UA1_CERTS bucket.")
+
+
+class _PlacementBucket(_Records):
+    """A placement bucket that holds one placement and one partition ownership record, as step 2 will write."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.placement_keys = [f"{TEAM}.lead", partition_owner_key(TEAM, 5)]
+        self.placement_reads: list[str] = []
+
+    async def keys(self, record: str, prefix: str, *, team: Optional[str] = None) -> list[str]:
+        if record == PLACEMENT:
+            return [key for key in self.placement_keys if key.startswith(prefix)]
+        return await super().keys(record, prefix, team=team)
+
+    async def read_report(self, record: str, key: str, *, now: datetime) -> None:
+        if record == PLACEMENT:
+            self.placement_reads.append(key)
+        return None
+
+    def writer(self) -> SimpleNamespace:
+        return SimpleNamespace(certificate=SimpleNamespace(membership_epoch=1))
+
+
+@pytest.mark.asyncio
+async def test_placement_scans_never_read_a_partition_ownership_record_as_a_placement(caplog) -> None:
+    caplog.set_level(logging.WARNING)
+    records = _PlacementBucket()
+    service = _service(records)
+
+    assert await service._host_placements(TEAM, "lead-host") == []
+    await service.maintain(TEAM)
+
+    assert records.placement_reads and set(records.placement_reads) == {f"{TEAM}.lead"}
+    assert "team_services_record_refused" not in caplog.text

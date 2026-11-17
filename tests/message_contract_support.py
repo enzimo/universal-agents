@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 
 from custom_messages.wire.encoding import b64url_decode
 from custom_messages.wire.frame import Receiver, ReplayKey, ReplayLookup, VerifiedFrame, format_timestamp, sign_frame, verify_frame
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
 from custom_messages.wire.models import Frame
 from custom_messages.wire.trust import AuthorityKey, TrustStore, VerifiedRecord, sign_state
 from custom_messages.wire.values import parse_timestamp
@@ -56,13 +57,14 @@ def default_records() -> list[str]:
 
 
 def trust_store(add: Iterable[str] = (), remove: Iterable[str] = (), extra_documents: Iterable[bytes] = (),
-                now: datetime = NOW) -> TrustStore:
+                now: datetime = NOW, partition_count: int = DEFAULT_PARTITION_COUNT) -> TrustStore:
     """The examples' trust store, loaded at ``now``; ``add`` and ``remove`` name records under examples/trust."""
 
     names = [name for name in default_records() if name not in set(remove)] + list(add)
     documents = [(TRUST / name).read_bytes() for name in names] + list(extra_documents)
     documents.sort(key=lambda data: RECORD_ORDER.index(json.loads(data)["record"]))
-    store = TrustStore(anchors()[0].installation, anchors(), contract_sha256=EXAMPLE_CONTRACT_SHA256)
+    store = TrustStore(anchors()[0].installation, anchors(), contract_sha256=EXAMPLE_CONTRACT_SHA256,
+                       partition_count=partition_count)
     for data in documents:
         store.add(data, now=now)
     return store

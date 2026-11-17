@@ -59,7 +59,8 @@ class _Trust:
     def __init__(self) -> None:
         self.added: list[bytes] = []
         self.sequence = 1
-        self.store = SimpleNamespace(held_record=lambda record, key: (self.sequence, "digest"))
+        self.store = SimpleNamespace(held_record=lambda record, key: (self.sequence, "digest"),
+                                     partition_count=DEFAULT_PARTITION_COUNT)
 
     def add(self, data: bytes, *, now: datetime) -> bool:
         self.added.append(data)

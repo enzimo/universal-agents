@@ -2181,7 +2181,7 @@ class HostJoinReplyPending(WireModel):
 
 class HostJoinReplyDenied(WireModel):
     outcome: Literal['denied']
-    reason: Literal['not_approved', 'key_mismatch', 'team_not_allowed', 'role_not_allowed', 'over_limit']
+    reason: Literal['not_approved', 'key_mismatch', 'team_not_allowed', 'role_not_allowed', 'over_limit', 'credential_too_large']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 

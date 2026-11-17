@@ -43,6 +43,18 @@ async def test_a_change_during_a_write_waits_for_the_next_interval(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_records_are_written_under_the_trust_stores_partition_count():
+    process, _ = _process()
+    process.host.live.trust.store.partition_count = 7
+    hosted = _hosted("a1")
+    hosted.session, hosted.state = "s-a1-1", "idle"
+    process.agents["a1"] = hosted
+    await process._write_record(hosted)
+    assert [item["key"] for item in process.host.records.written] == [agent_record_key("team_one", "a1", 7)]
+    assert agent_record_key("team_one", "a1", 7) != A1_RECORD
+
+
+@pytest.mark.asyncio
 async def test_a_session_change_during_a_write_is_not_lost(monkeypatch):
     process, _ = _process()
     hosted = _hosted("a1")

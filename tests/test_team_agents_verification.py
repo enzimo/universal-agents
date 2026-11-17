@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from custom_messages.wire.encoding import format_timestamp
-from custom_messages.wire.partitions import agent_record_key
+from custom_messages.wire.partitions import agent_partition, agent_record_key
 from custom_messages.wire.trust import sign_state
 from custom_transport.protocol1.team_agents import TeamAgents
 from tests.message_contract_support import EXAMPLES, NOW, private_key, trust_store
@@ -134,6 +134,39 @@ async def test_copied_records_cannot_relabel_an_agent_or_extend_another_hosts_li
         host.clock = lambda: NOW + timedelta(minutes=1)
         await _until(lambda: reader.agent("lead") is None)
         assert reader.departure_reason("lead") == "host_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_only_the_agents_own_partition_key_can_remove_or_replace_its_record(caplog):
+    # A host owning another partition may write any key of it, including <team>.<its partition>.lead.
+    foreign = f"{TEAM}.{(agent_partition(TEAM, 'lead') + 1) % 96}.lead"
+    async with _reading() as (reader, records, host):
+        await records.feed("agent", foreign, None)
+        await records.feed("agent", foreign, None)
+        await records.feed("agent", foreign, _signed(_agent(sequence=101, state="paused")))
+        assert reader.lead() is not None and reader.agent("lead").state == "idle"
+        assert reader.departure_reason("lead") is None
+        assert caplog.text.count(f"key={foreign} code=invalid_body at=/key") == 1
+        await records.feed("agent", AGENT_KEY, None)
+        assert reader.lead() is None and reader.departure_reason("lead") == "record_removed"
+
+
+@pytest.mark.asyncio
+async def test_the_reader_names_agent_keys_with_its_trust_stores_partition_count():
+    store = trust_store(partition_count=7)
+    own = agent_record_key(TEAM, "lead", 7)
+    assert own != AGENT_KEY
+    async with _reading(store=store, preload={}) as (reader, records, host):
+        await records.feed("placement", KEY, _signed(_example("placement/lead.json")))
+        await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
+        lead = _agent()
+        lead["key"] = own
+        await records.feed("agent", own, _signed(lead))
+        await _until(lambda: reader.lead() is not None)
+        await records.feed("agent", AGENT_KEY, None)  # the default count's key is not this installation's
+        assert reader.lead() is not None
+        await records.feed("agent", own, None)
+        assert reader.lead() is None
 
 
 @pytest.mark.asyncio

@@ -4,8 +4,10 @@ Three report buckets and the team's session records say it, each verified as it 
 - ``UA1_AGENTS``: each agent's state (starting, idle, busy, paused, exiting), whether it
   accepts work and its name, written by the host it runs on when it changes
   and refreshed every minute, expiring within three (``custom_agents.agent_host``), under
-  ``<team>.<partition>.<agent>``: only those keys are watched, and the trust store refuses
-  one whose partition is not the agent's;
+  ``<team>.<partition>.<agent>``: only those keys are watched, and an event, a deletion
+  included, counts only under the key its agent's partition gives (a host's grant covers
+  every key of its partitions, so a deletion under another partition's key must not remove
+  an agent it does not run); the trust store refuses a record whose key is not its agent's;
 - ``UA1_PLACEMENT``: which host runs each agent, written by the team services;
 - ``UA1_HOSTS``: each host's liveness, written every 10 seconds, each record lasting 30
   (``custom_transport.protocol1.host_runtime``).
@@ -379,7 +381,7 @@ class TeamAgents:
         if record == "host":
             return name
         if record == "agent":
-            return agent_record_key(self.team, name)
+            return agent_record_key(self.team, name, self._host.live.trust.store.partition_count)
         return f"{self.team}.{name}"
 
     async def _take_over(self, record: str, held: dict[str, _Held], before: set[str], seen: set[str],
@@ -406,6 +408,11 @@ class TeamAgents:
         records = self._host.records
         async for key, raw in records.watch(record, keys, caught_up=caught_up):
             name = self._name(record, key)
+            if record == "agent" and key != self._key(record, name):
+                # Another partition's key ending in this name: whoever wrote it, it is not this
+                # agent's record, and a deletion there must not remove the agent (module docstring).
+                self._refused(record, key, "invalid_body", "/key")
+                continue
             seen.add(name)
             if raw is None:
                 self._remove(record, key, name, held)

@@ -541,8 +541,9 @@ thread, instead of refusing the frame. Replies carry no token.
 Each task has one holder at a time. The team services keep the task's custody record, whose
 revision is the custody token, and only a result that carries the current token resolves
 the requester's stand-in. Agents stay on the host they are placed on. An agent moves only
-by a handover from a connected host, which stops it at a safe point and sends its ledger to
-the team services, or after an administrator retires its host. Tasks can move to another
+with its whole partition ("Credentials follow ownership"): by a handover from a connected
+host, which stops the partition's agents at a safe point and sends their ledgers to the team
+services, or after an administrator retires its host. Tasks can move to another
 holder, and the custody window says when.
 
 **Every confirmation names a window.** `custody.confirmed` carries `custody_window`. Its kind
@@ -774,6 +775,41 @@ only when it is among the kind's receivers and serves that target (`audience_tar
 `transport.yaml`): team services receive a task's copy on `work.team`, not the agent and
 pool inboxes the same kind also uses.
 
+**Partitions.** Every agent of a team belongs to one of the team's partitions, from its id:
+FNV-1a (32 bits) over the UTF-8 bytes of the team id followed at once by the agent id, modulo
+the installation's partition count (`custom_messages.wire.partitions.agent_partition`). The
+count is the installation setting `transport.queues.partitions` (`partitions` in
+`transport.yaml`): 96 unless chosen otherwise, at most 128 ("Credential size"), and fixed when
+the installation is created, because another count would put every queued message in another
+stream; changing it needs an upgrade that drains the queues. Every process of an installation
+uses the same count: its trust store holds it, and agent record keys and the arrival check
+below are computed with it.
+- **The mapping.** The installation's NATS account maps three addresses, an agent's inbox
+  (`work.agent.<agent>`), its control queue (`work.control.<agent>`) and its live control
+  address (`ctl.agent.<agent>`), to the same subject with one more token, the agent's
+  partition, which nats-server computes with `partition(COUNT,1,3)` over the team and agent
+  tokens (`account_mappings` in `transport.yaml`, with `COUNT` the installation's count). The
+  mapping belongs to the account's settings, so it applies to every publisher alike, and
+  publishers keep addressing agents by id.
+- **The arrival suffix.** The signed `subject` stays the unmapped one. For a mapped address,
+  the subject a frame arrives on is its signed `subject` plus one token, and that token must
+  be the agent's partition at the installation's count; a receiver compares the signed
+  subject with the arrival subject less that token, and refuses a missing or extra token, or
+  another partition, as `subject_mismatch`. Every other address arrives exactly as signed.
+  The bundled server applies no mapping yet, so today's receivers compare exact subjects; the
+  release that installs the mapping switches them to this rule.
+- **Streams.** The inboxes and control queues of a team's agents in partition `p` are stored
+  in `UA1_PART_<team>~<p>`, one stream per team and partition, each agent with its own two
+  consumers there; worker pools in `UA1_POOL_WORK_<team>`. An agent with a long backlog fills
+  only its partition's stream, and no other agent's consumer passes over its messages.
+- **Ownership.** A partition of a team has at most one owner, a lead or worker host, recorded
+  by the team services in a partition ownership record ("State records"). The team services
+  give a host partitions that hold no placed agent, and change the owner of a partition that
+  holds placed agents only by moving it whole ("Credentials follow ownership"). A host draws
+  new agent ids until one falls in a partition it owns, and the team services refuse a session
+  or placement for an agent outside the asking host's partitions (`partition_not_owned`,
+  "Agent sessions"). A partition without an owner gets no agents.
+
 **Grants for the agents a host runs.** A lead or worker host owns whole partitions of its
 team ("Partitions"): every agent whose id falls in one of them runs on it. It receives
 requests and queued work only for the agents of its own partitions and the pools it runs:
@@ -852,29 +888,39 @@ call continues the model's turn: an access decision (except `waiting`, which lea
 open), a tool setup's result and the end of a coordination wait. A credential form's result
 ends no local wait: the lead goes on, and sees the result at its next turn.
 
-**Credentials follow placement.** A host's NATS credential names the agents and pools it
-runs, so it changes when the host gains or loses one. NATS checks a user's permissions only
-when it connects, and acknowledgements are not signed, so a credential that names an agent
-must stop working before another host reads that agent's queue. An agent moves in this
-order:
-1. The old host stops pulling the agent's inbox and answering its control address. It
-   keeps reading the agent's control queue while it finishes, or hands back with
-   `task.handback`, every task it admitted, and acknowledges their messages while its
-   credential still names the agent; then it stops reading the control queue too. The
-   handover sends the agent's ledger to the team services ("Custody windows").
+**Credentials follow ownership.** A host's NATS credential names the partitions it owns and
+the pools it runs, so it changes when the host gains or loses one, never when an agent is
+placed or ends. NATS checks a user's permissions only when it connects, and acknowledgements
+are not signed, so a credential that names a partition must stop working before another host
+reads that partition's queues. A partition moves only whole, with every agent placed in it:
+moving one agent to another host moves the other agents of its partition too, and no path
+copies one agent's queued work. A connected host hands a partition over in this order:
+1. The old host stops pulling the inboxes and answering the control addresses of the
+   partition's agents. It keeps reading their control queues while it finishes, or hands
+   back with `task.handback`, every task they admitted, and acknowledges their messages
+   while its credential still names the partition; then it stops reading those control
+   queues too. The handover sends each agent's ledger to the team services ("Custody
+   windows").
 2. The old host renews (`host.renew`) and connects with the credential of the reply, which
-   no longer names the agent. The installation authority then revokes every credential for
-   the host's NATS key issued before that one: the NATS account's revocation list names the
-   key with the new credential's issue time, which also closes any connection still using
-   an old credential.
-3. Only then do the team services write the new placement, and the new host gets a
-   credential that names the agent. Work queued for the agent stays in the agent's
-   consumers, and the new host reads it.
+   no longer names the partition. The installation authority then revokes every credential
+   for the host's NATS key issued before that one: the NATS account's revocation list names
+   the key with the new credential's issue time, which also closes any connection still
+   using an old credential.
+3. Only then do the team services write the partition's new ownership record and its
+   agents' new placements, and the new host gets a credential that names the partition.
+   Queued messages never move: they stay in the agents' consumers in the partition's stream
+   with their stored times, and the new host reads them.
+
+A replacement that takes over a gone agent's saved work also takes over its queues without
+a credential of its own: on the gone agent's host, that host already owns the partition and
+reads the gone agent's consumers with the grant it holds; on another host, the gone agent's
+partition moves to the replacement's host as above. The topology owner deletes the gone
+agent's consumers once both are empty.
 
 A host that is cut off or retired cannot take step 1. The authority revokes its credential
-first (with its certificate, when an administrator retires it), and the work it admitted
-without acknowledging comes back to the agent's queues after `ack_wait_seconds`, where the
-new host takes it; its custody moves by the rules of "Custody windows". A credential never
+first (with its certificate, when an administrator retires it), its partitions move to other
+hosts, and the work it admitted without acknowledging comes back to the agents' queues after
+`ack_wait_seconds`, where the new owner takes it; its custody moves by the rules of "Custody windows". A credential never
 outlives the certificate it comes with: a join or renewal reply whose `connection` ends
 after its certificate is refused (`invalid_body` at `/body/connection/expires_at`).
 
@@ -899,10 +945,20 @@ the longest ids, a lead or worker host that serves two teams holds at most 141 p
 pairs, so at the default count a host can own every partition of one team but not of two
 (that would need about 84 KB). The team services' credential holds every partition of at most
 3 teams at 96 partitions (2 at 128). `tests/test_message_contract.py` recomputes these
-figures from the generated templates and checks that one step more does not fit. Open for the
-step that issues these credentials: who keeps a host's and the team services' teams within
-these bounds, and so how many teams one host or team services runtime may serve. A
-certificate may name up to 64 teams, and nothing refuses a credential past the bound yet. A host may run any number of agents in its partitions; a certificate's
+figures from the generated templates and checks that one step more does not fit.
+
+The installation authority, which issues every certificate and its credential and sees every
+team, keeps credentials within the bound: it refuses a certificate whose credential would be
+larger than `max_credential_bytes`, computing the size from the same generated templates that
+fill it, so the bound and the check cannot disagree. For a lead or worker host it counts the
+partition-team pairs and the pools the host would own; for the team services every partition
+of each team they serve. At the default count that is every partition of one team for a host,
+and at most 3 teams for one team services runtime (2 at 128). A join is refused with
+`credential_too_large` (`host.join.reply`, `denied`), and a renewal, such as one asked for when
+a host would gain a partition, with `not_allowed` and a message naming the limit; both say what
+to do: give the host or the team services runtime fewer teams, or the host fewer partitions. A
+certificate may name up to 64 teams; the credential's size, not the certificate, is what
+limits them. A host may run any number of agents in its partitions; a certificate's
 `session_limit` is what limits them. A host writes the records of its partitions' agents
 only, rather than any agent record of its team: readers would refuse another host's record,
 but agent records are written only when they change, so an overwritten one would stay
@@ -1311,7 +1367,7 @@ These comparisons, and a renewal's comparison with its certificate, read the bod
 
 The authority does not answer a join with a fresh challenge to sign. A join frame lasts 30 seconds, the receiver's replay record refuses other content under its message id, and its retry key names the runtime, key and join id. A copied join can therefore only repeat the same request within its lifetime, and the certificate it gets back is useless without the private key.
 
-**What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again, and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for.
+**What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again, and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for. It issues no certificate whose NATS credential would be larger than `max_credential_bytes` (`credential_too_large`, "Credential size").
 
 **Connection class and tools.** A join states the host's `connection_class` (`connected` or `intermittent`, "Custody windows") and, for a host that decides tool calls from signed lists, the `tools` it can run ("Access on remote hosts"). Tool ids the catalog lacks, such as a local device's, are the host's proposal: the administrator reviews them with the join. The catalog's entries are records of the access store, not messages, so approving a proposal adds the entry there. The certificate names the connection class the join asked for and at most the tools it asked for, each once. A host whose connection class or tool list must change sends a new join under the key it holds, which an administrator approves like a lost-key recovery: its certificate gets a higher membership epoch and `replaces` the old one.
 
@@ -1372,8 +1428,8 @@ session record:
   restart. Reopening the same lead ends its earlier sessions before signing a replacement;
   a restarting lead host closes its earlier sessions before opening its new lead. An agent
   that runs on another host is refused with
-  `already_placed`, naming that host: agents stay on their host and move only by a handover
-  ("Custody windows"). A host that already runs as many agents as its certificate allows
+  `already_placed`, naming that host: agents stay on their host and move only with their partition, by a
+  handover ("Custody windows"). A host that already runs as many agents as its certificate allows
   gets `limit_reached`. Its NATS credential names partitions, not agents, so more agents
   never make it larger; the partitions it owns across its teams do ("Credential size"). An
   agent whose partition the asking host does not own is refused with `partition_not_owned`,
@@ -1399,9 +1455,9 @@ session record:
 
 Renew and close answer `not_found` for a session that does not place its agent on the asking
 host, so no host renews or ends another host's sessions. Where hosts have their own NATS
-credentials, an open that adds an agent is followed by a certificate renewal whose credential
-names the agent's subjects ("Credentials follow placement"); until then the host cannot read
-the agent's queues or write its agent record.
+credentials, an open needs no new credential: the host already owns the agent's partition,
+and its credential names that partition's queues and agent records ("Credentials follow
+ownership").
 
 **Restarts.** A host scans verified sessions in `UA1_CERTS` for its own runtime and closes
 those its earlier run left behind. Failed reads and closes retry during upkeep. Sessions
@@ -1465,9 +1521,9 @@ Trust records (`TrustStore.add`) follow the same order without the reader's chec
 
 What each record says, and what `TrustStore.verify` checks about it:
 - **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
-- **Agent records.** The key is `<team>.<partition>.<agent>` of the body, where the partition is the agent's ("Partitions", `custom_messages.wire.partitions.agent_record_key`), and the team is one the writer's certificate serves. A host's write grant names the partitions it owns, so only the owner of an agent's partition can store its record; a key with another partition, or the two-part key of an earlier release, is refused (`invalid_body` at `/key`). A reader accepts an agent record only from the host its placement names, with the same agent type. Its session must name the same agent, type and host and still be current; only that session decides its role. The reader checks these joins, since verification of one record cannot establish them. Readers bind every report to its actual bucket key and retain replay protection after deletion, separately for each signing host. The record may carry the agent's `display_name`, the name the team lead routes by and the gateway's Team page shows; it names an agent, never a person. Hosts remove their agents' records after writing `exiting` and closing their sessions, and retry unfinished cleanup. They remove only a current verified record of their own, with a conditional delete on its bucket revision. Unchanged records are refreshed with current certificates. A record whose signer cannot be verified is left in place; its key alone authorizes no deletion.
+- **Agent records.** The key is `<team>.<partition>.<agent>` of the body, where the partition is the agent's ("Partitions", `custom_messages.wire.partitions.agent_record_key`), and the team is one the writer's certificate serves. A host's write grant names the partitions it owns, so only the owner of an agent's partition can store its record; a key with another partition, or the two-part key of an earlier release, is refused (`invalid_body` at `/key`). A host's grant covers every key of its partitions, including keys that end in another partition's agent, so a reader takes an event, a deletion included, only under the key the agent's own partition gives and ignores any other (logged as `invalid_body` at `/key`): a deletion elsewhere removes no agent from its view. A reader accepts an agent record only from the host its placement names, with the same agent type. Its session must name the same agent, type and host and still be current; only that session decides its role. The reader checks these joins, since verification of one record cannot establish them. Readers bind every report to its actual bucket key and retain replay protection after deletion, separately for each signing host. The record may carry the agent's `display_name`, the name the team lead routes by and the gateway's Team page shows; it names an agent, never a person. Hosts remove their agents' records after writing `exiting` and closing their sessions, and retry unfinished cleanup. They remove only a current verified record of their own, with a conditional delete on its bucket revision. Unchanged records are refreshed with current certificates. A record whose signer cannot be verified is left in place; its key alone authorizes no deletion.
 - **Placement.** The key and team follow the same rule. The team services write a placement with compare-and-set on the last key-value revision and the next sequence. The fencing token written into admission records is the signed sequence, not the revision, which the server assigns and nobody signs. `host_epoch` is the membership epoch of the host's certificate when the agent was placed. Renewals raise the epoch without moving the agent: a reader accepts the placement while the host's liveness record names a certificate of that runtime at `host_epoch` or later.
-- **Partition ownership.** The key is `<team>.partition.<partition>` of the body, in `UA1_PLACEMENT` beside the placements, and only the team services sign it. The partition is below the installation's count (`invalid_body` at `/body/partition`). The team services write it like a placement, with compare-and-set and the next sequence, when they give a host a partition that holds no placed agent or move a partition with all its agents to another host. `host_epoch` follows the placement's rule. A partition without a record has no owner, and the team services place no agent in it. The team services refuse a session or placement for an agent whose partition the asking host does not own (`partition_not_owned`, "Agent sessions").
+- **Partition ownership.** The key is `<team>.partition.<partition>` of the body, in `UA1_PLACEMENT` beside the placements, and only the team services sign it. The partition is below the installation's count (`invalid_body` at `/body/partition`). The team services write it like a placement, with compare-and-set and the next sequence, when they give a host a partition that holds no placed agent or move a partition with all its agents to another host. `host_epoch` follows the placement's rule. A partition without a record has no owner, and the team services place no agent in it. The team services refuse a session or placement for an agent whose partition the asking host does not own (`partition_not_owned`, "Agent sessions"). Placement readers take only two-part keys, `<team>.<agent>`, so an ownership record is never read as a placement.
 - **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs. A task's entry repeats its holder's custody window ("Custody windows").
 - **Block list.** The key is the body's team, one the writer's certificate serves, and only the team services sign it. No block id and no person appears twice. Readers keep the highest sequence they have seen, also across restarts, and `fresh(record, now)` tells whether the list is recent enough for `fresh_check` tools ("Access on remote hosts").
 
@@ -1760,7 +1816,7 @@ code names its own digest (`custom_messages.wire.kinds.CONTRACT_SHA256`).
 - **The authority.** While the label ends in `-pre`, it answers a join or renewal whose digest
   differs from its own with `protocol_mismatch`, naming the digest it runs
   (`accepted_contract_sha256`) and what to install. It still answers a renewal that only gives
-  up agents or pools ("Credentials follow placement"), so a host on another contract can hand
+  up agents or pools ("Credentials follow ownership"), so a host on another contract can hand
   its agents over. `verify_frame` returns such a frame with `other_contract` and no body,
   after checking everything before the body; the authority then reads the body again as this
   revision shapes it, strictly, and answers it as a give-up only when it fits this contract,
