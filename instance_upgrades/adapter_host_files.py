@@ -538,10 +538,11 @@ def _report_files_without_records(transfer: Path, marker: Path, count: int) -> N
         "%s file(s) are left in the adapter host's transfer folder that no record names: files of people removed "
         "on 0.9, files whose records were deleted, or files of messages the gateway never handled. 0.10 never "
         "opens them. An administrator may delete the files there whose names start with %s while the instance "
-        "is stopped, keeping any an adapter_host_file_not_moved warning names (see upgrading.md). If this folder "
-        "was at another path under 0.9.13 (moved, mounted elsewhere or reached through another link), their "
-        "records may name that path: do not delete them; put the folder back at that path or set upload_dir to "
-        "it, delete %s and restart. event=adapter_host_files_without_records folder=%s files_without_records=%s",
+        "is stopped, keeping every file named in the file= field of an adapter_host_file_not_moved warning (see "
+        "upgrading.md). If this folder was at another path under 0.9.13 (moved, mounted elsewhere or reached "
+        "through another link), their records may name that path: do not delete them; put the folder back at that "
+        "path or set upload_dir to it, delete %s and restart. event=adapter_host_files_without_records folder=%s "
+        "files_without_records=%s",
         count,
         TRANSFER_FILE_PREFIX,
         marker,

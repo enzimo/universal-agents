@@ -257,7 +257,9 @@ def _databases(tmp_path: Path, request: pytest.FixtureRequest, sections: dict[st
 
 
 def _events(caplog: pytest.LogCaptureFixture, event: str) -> list[str]:
-    return [record.getMessage() for record in caplog.records if f"event={event}" in record.getMessage()]
+    """Messages with exactly this event (one event name can be the start of another)."""
+
+    return [record.getMessage() for record in caplog.records if f"event={event} " in f"{record.getMessage()} "]
 
 
 # --- The move ------------------------------------------------------------------------------------
@@ -587,6 +589,7 @@ def _assert_reported(caplog: pytest.LogCaptureFixture, instance: _Instance, coun
     assert warning.endswith(f"folder={instance.transfer} files_without_records={count}")
     assert "may delete" in warning and "while the instance is stopped" in warning
     assert "another path under 0.9.13" in warning and "do not delete them" in warning, "C02"
+    assert "keeping every file named in the file= field of an adapter_host_file_not_moved warning" in warning, "C03"
     assert "adapter_upload_stray" not in warning and STRAY.decode() not in warning, "no names, no contents"
 
 
@@ -1316,6 +1319,14 @@ class _Fault:
     cross_disk: bool = False
     also: tuple[tuple[str, Callable[[_Instance, Path], bool], Any], ...] = ()
     setup: Callable[[_Instance], Any] | None = None
+    counted: bool = True  # False: counting the files no record names fails, which only gives a warning and None
+
+
+def _plant_stray(instance: _Instance) -> Path:
+    return _write(instance.transfer / "adapter_upload_stray", STRAY)
+
+
+_STRAY = _is(lambda instance: instance.transfer / "adapter_upload_stray")
 
 
 _FAULTS = {
@@ -1377,6 +1388,9 @@ _FAULTS = {
     "unlink_source_after_copy": _Fault("unlink", _PHOTO, errno.EACCES, "moved", cross_disk=True),
     "fsync_folder_not_offered": _Fault("fsync", _SESSION, errno.EINVAL, "moved"),
     "fsync_copy_not_offered": _Fault("fsync", _copy, errno.EINVAL, "moved", cross_disk=True),
+    # Counting the files no record names only reports: an error there never stops startup or the marker (A2).
+    "listdir_transfer_io": _Fault("listdir", _TRANSFER, errno.EIO, "moved", counted=False),
+    "stat_stray_io": _Fault("stat", _STRAY, errno.EIO, "moved", setup=_plant_stray, counted=False),
 }
 
 
@@ -1480,6 +1494,16 @@ def test_one_error_rule_holds_at_every_operation(instance: _Instance, monkeypatc
         assert not instance.photo_source.exists()
     if case.endswith("not_offered"):
         assert _events(caplog, "adapter_host_files_sync_unsupported")
+    if not fault.counted:
+        assert result.counts.files_without_records is None and marker.is_file()
+        assert json.loads(marker.read_text())["files_without_records"] is None
+        (uncounted,) = _events(caplog, "adapter_host_files_without_records_uncounted")
+        assert f"folder={instance.transfer} reason=" in uncounted and os.strerror(errno.EIO) in uncounted
+        assert not _events(caplog, "adapter_host_files_without_records")
+    elif fault.expect != "folder":
+        # A file it did not move keeps a record naming it, so it is never counted as one no record names.
+        assert result.counts.files_without_records == 0
+        assert not _events(caplog, "adapter_host_files_without_records_uncounted")
 
 
 def test_only_files_0_9_13_wrote_are_moved(instance: _Instance) -> None:
@@ -1514,22 +1538,57 @@ def test_only_files_0_9_13_wrote_are_moved(instance: _Instance) -> None:
     assert (instance.transfer / "notes.png").exists() and (instance.transfer / "sub" / "adapter_upload_nested").exists()
 
 
-def test_a_new_instance_finishes_at_once(tmp_path: Path) -> None:
+def _fresh_config(tmp_path: Path, upload_dir: Path | None = None) -> SimpleNamespace:
+    """A new instance's configuration: no records at all, and the transfer folder at ``upload_dir`` when given."""
+
     root = (tmp_path / "fresh").resolve()
-    layout = InstanceLayout.at(root)
     settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "fresh.db")}})
-    config = SimpleNamespace(
-        layout=layout,
+    adapter_host = AdapterHostSettings(upload_dir=str(upload_dir)) if upload_dir else AdapterHostSettings()
+    return SimpleNamespace(
+        layout=InstanceLayout.at(root),
         instance_root_path=root,
-        interactive_apps=SimpleNamespace(adapter_host=AdapterHostSettings()),
+        interactive_apps=SimpleNamespace(adapter_host=adapter_host),
         state_storage_settings=settings,
         manager_storage_settings=settings,
     )
 
+
+def test_a_new_instance_finishes_at_once(tmp_path: Path) -> None:
+    config = _fresh_config(tmp_path)
+
     result = upgrade_adapter_host_files(config)
 
     assert result.finished and result.counts == upgrade_module.UpgradeCounts(files_without_records=0)
-    assert layout.adapter_host_files_upgrade_path.is_file()
+    assert config.layout.adapter_host_files_upgrade_path.is_file()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permissions do not stop root")
+@pytest.mark.parametrize("mode", [0, 0o444], ids=["unreadable", "readable_not_searchable"])
+def test_a_transfer_folder_it_cannot_list_gives_a_warning_and_no_count(tmp_path: Path, caplog, mode) -> None:
+    """A2: the count only reports, so the step finishes and writes its marker; it never gives a wrong number.
+
+    A folder that can be read but not searched lists its names but cannot
+    say what they are: that is a warning too, not a silent 0.
+    """
+
+    transfer = (tmp_path / "transfer").resolve()
+    _write(transfer / "adapter_upload_stray", STRAY)
+    config = _fresh_config(tmp_path, transfer)
+    os.chmod(transfer, mode)
+    try:
+        with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+            result = upgrade_adapter_host_files(config)
+    finally:
+        os.chmod(transfer, 0o755)
+
+    assert result.finished and result.counts == upgrade_module.UpgradeCounts()
+    marker = config.layout.adapter_host_files_upgrade_path
+    assert json.loads(marker.read_text())["files_without_records"] is None
+    (uncounted,) = _events(caplog, "adapter_host_files_without_records_uncounted")
+    assert f"folder={transfer} reason=" in uncounted and os.strerror(errno.EACCES) in uncounted
+    assert not _events(caplog, "adapter_host_files_without_records")
+    assert not _events(caplog, "adapter_host_files_folder_unusable")
+    assert (transfer / "adapter_upload_stray").read_bytes() == STRAY
 
 
 # --- Stopping part way, and other file systems ------------------------------------------------------
@@ -2080,6 +2139,7 @@ def test_the_operator_command_runs_the_step_on_a_saved_instance(tmp_path: Path) 
     _load(lambda: connect_sqlite(config.state_storage_settings.sqlite_path), sections["gateway"])
     _load(lambda: connect_sqlite(config.manager_storage_settings.sqlite_path), sections["tasks"])
     _write(root / "runtime" / "adapter-host-uploads" / "adapter_upload_photo", CONTENT["att_photo"])
+    _write(root / "runtime" / "adapter-host-uploads" / "adapter_upload_stray", STRAY)
     env = {key: value for key, value in os.environ.items() if not key.startswith(("NATS_", "POSTGRES_"))}
 
     completed = subprocess.run(
@@ -2095,8 +2155,28 @@ def test_the_operator_command_runs_the_step_on_a_saved_instance(tmp_path: Path) 
     assert "Moved 1 file(s) into state/uploads; 1 could not be moved" in completed.stdout
     assert "1 file(s) have no gateway record" in completed.stdout and "trying again does not help" in completed.stdout
     assert "event=adapter_host_files_upgraded moved=1" in completed.stderr
+    assert "1 file(s) are left in the transfer folder that no record names" in completed.stdout
+    assert "event=adapter_host_files_without_records " in completed.stderr
     assert (config.layout.uploads_dir / "telegram_chat_7" / "att_photo.png").read_bytes() == CONTENT["att_photo"]
     assert config.layout.adapter_host_files_upgrade_path.is_file()
+
+
+def test_the_operator_command_says_when_the_leftover_files_could_not_be_counted(monkeypatch, capsys) -> None:
+    import assistant_cli
+
+    monkeypatch.setattr(assistant_cli.GatewayInstanceConfig, "load_for_process", staticmethod(lambda _path: object()))
+    outcomes = [
+        upgrade_module.UpgradeResult(finished=True, counts=upgrade_module.UpgradeCounts()),
+        upgrade_module.UpgradeResult(finished=True, counts=upgrade_module.UpgradeCounts(files_without_records=0)),
+    ]
+    monkeypatch.setattr(upgrade_module, "upgrade_adapter_host_files", lambda _config, *, files_gone: outcomes.pop(0))
+    args = SimpleNamespace(config="instance_config.yaml", files_gone=False)
+
+    assistant_cli._upgrade_adapter_host_files(args)
+    assert "could not be counted; see the log" in capsys.readouterr().out
+    assistant_cli._upgrade_adapter_host_files(args)
+    printed = capsys.readouterr().out
+    assert "transfer folder" not in printed, "a count of 0 adds no line"
 
 
 def test_the_fixture_matches_the_bytes_it_was_written_for() -> None:
