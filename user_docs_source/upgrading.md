@@ -56,6 +56,22 @@ supported, because it may not read what a newer one saved.
     trying again does not help. Its conversation records are kept while
     the file is there, the team cannot open it, and the person can send it
     again. The log counts these as `no_record`.
+  - **Files no record names** stay in the transfer folder: files of people
+    removed on 0.9, files whose records were deleted, or files of messages
+    the gateway never handled. 0.10 never opens them. The upgrade counts
+    them once, when it finishes, and a warning gives the folder and the
+    number (`event=adapter_host_files_without_records`). You may delete the
+    files there whose names start with `adapter_upload_` while the instance
+    is stopped, keeping every file named in the `file=` field of an
+    `adapter_host_file_not_moved` warning: those can still be moved once
+    you fix them, as above. If the folder was at another path under 0.9
+    (moved, mounted elsewhere or reached through another link), their
+    records may name that path: do not delete them; put the folder back at
+    that path or set `upload_dir` to it, delete
+    `state/upgrades/adapter-host-files.json` and restart. If the folder
+    cannot be listed, the warning
+    `event=adapter_host_files_without_records_uncounted` gives the reason;
+    counting them changed nothing and startup goes on.
   - **The transfer folder is not here.** It belongs to the gateway: 0.9
     wrote it on the gateway's machine, also when the adapter host ran
     elsewhere. It is missing when it was not copied or mounted with the

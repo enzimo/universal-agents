@@ -183,6 +183,28 @@ which of three cases it is.
    or naming another path or sha256 than the gateway record is never moved:
    it is dropped when its file is proven absent and kept otherwise.
 
+After the moves and drops, and before the marker, the step counts the files
+left in the transfer folder that no record it found names
+(``files_without_records`` in the counts, the marker and
+``event=adapter_host_files_upgraded``): files of people removed on 0.9, files
+whose records were deleted while the step waited, and copies of messages the
+gateway never handled (F16; the owner chose reporting them over deleting them
+or leaving them unmentioned). Only regular files named ``adapter_upload_*``
+directly in the folder count, the names 0.9.13 wrote (an operator's folder may
+hold other files); each is looked at with ``lstat`` only, so no link is
+followed and no file is opened, and a file a record names is left out (a file
+that did not move has its own warning). A nonzero count logs one warning
+(``event=adapter_host_files_without_records``) with the folder, the count and
+what an administrator may do, and no file names, which are people's text. The
+advice is to delete them only while the instance is stopped, because the
+running 0.10 adapter host passes new files through the same folder under the
+same prefix. A folder that is not there counts 0; any other error listing it
+logs ``event=adapter_host_files_without_records_uncounted`` and leaves the count
+unset: the count only reports, so it never stops startup, keeps the marker
+from being written or changes a record. Only the run that writes the marker
+reports, so the count is said once; a run that stops part way never counts,
+and the run that finishes it does.
+
 Guidance the gateway still holds (``gateway_held_guidance``) is rewritten
 with its moved file: the gateway signs it again from that copy at each send,
 so the team lead receives the new path. A held copy whose file did not move
@@ -744,7 +766,7 @@ class _Step:
     def _log_uncounted(self, exc: BaseException) -> None:
         logger.warning(
             "The files left in the adapter host's transfer folder could not be counted, so it is not known whether "
-            "any are left that no record names; nothing was changed and startup goes on. "
+            "any are left that no record names; counting them changed nothing and startup goes on. "
             "event=adapter_host_files_without_records_uncounted folder=%s reason=%s",
             self._transfer,
             _detail(exc),

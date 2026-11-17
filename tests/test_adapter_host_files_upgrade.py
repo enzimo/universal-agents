@@ -33,7 +33,12 @@ sync that fails or is not offered after the copy is in place), upload
 retention and a person's removal finding the moved file, records read past
 one batch, a transfer folder set to ``state/uploads``, a run that waits for
 another's lock (and a state folder without locks), the launcher step and the
-operator command. A held request still naming the old path gets
+operator command. Files left in the transfer folder that no record names
+(a removed person's, one whose records were deleted while the step waited)
+are counted and reported once, without names or contents, by the run that
+writes the marker, also after a run stopped part way; moved, not-moved and
+other files are not counted, a link is not followed, and a folder it cannot
+list gives a warning and no count without stopping the start. A held request still naming the old path gets
 the stuck-task notice: ``tests/test_stuck_tasks.py`` (``ADAPTER_HOST_FOLDER``).
 Held guidance the gateway sends again after the step keeps its file through
 the team lead's real steering handler:
@@ -1586,6 +1591,8 @@ def test_a_transfer_folder_it_cannot_list_gives_a_warning_and_no_count(tmp_path:
     assert json.loads(marker.read_text())["files_without_records"] is None
     (uncounted,) = _events(caplog, "adapter_host_files_without_records_uncounted")
     assert f"folder={transfer} reason=" in uncounted and os.strerror(errno.EACCES) in uncounted
+    # It says the failed count changed nothing, not the run, which may have moved files (C04).
+    assert "counting them changed nothing and startup goes on" in uncounted
     assert not _events(caplog, "adapter_host_files_without_records")
     assert not _events(caplog, "adapter_host_files_folder_unusable")
     assert (transfer / "adapter_upload_stray").read_bytes() == STRAY
