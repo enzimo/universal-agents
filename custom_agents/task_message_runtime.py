@@ -99,6 +99,11 @@ from custom_messages.enums import (
 )
 
 
+# History event of a secure credential form's (or signup's) result reaching
+# its waiting task; it ends the task's outside-result wait
+# (``custom_agents.task_wait_reasons``).
+SECURE_CREDENTIAL_RESULT_EVENT = "secure_credential_result"
+
 # What a specialist that asked for a credential form or signup is told: only
 # TeamArchitect may ask the person (ADR-018), so it escalates instead.
 DELEGATE_CREDENTIAL_REQUEST_REFUSAL = (
@@ -625,7 +630,7 @@ async def _handle_secure_credential_collection_result(
         timestamp=now_ts,
         related_task_id=credential_result.credential_request_id,
         details={
-            "event": "secure_credential_result",
+            "event": SECURE_CREDENTIAL_RESULT_EVENT,
             "credential_request_id": credential_result.credential_request_id,
             "credential_key": credential_result.credential_key,
             "status": credential_result.status,
@@ -1712,6 +1717,9 @@ async def _apply_task_processing_result(
                 )
                 await self._complete_task_and_schedule_aar_review(task_id, now_ts)
         elif task_result.task_type == MessageMetaType.REQUEST:
+            if task_result.task_id == task_id:
+                await _keep_held_answer_state(self, task_id)
+                return
             self._logger.info(
                 "Task %s generated a sub-Task REQUEST: %s", task_id, task_result.task_id
             )
@@ -1786,6 +1794,52 @@ async def _apply_task_processing_result(
         # send_interrupt_request_for_result persisted WAITING before publication.
         # A fast delegated decision may already have resumed this task.
         return
+
+
+async def _keep_held_answer_state(self: Any, task_id: str) -> None:
+    """Leave a task whose turn output was held back in the state its hold saved.
+
+    A turn whose result is a request naming its own task had its output held
+    back instead of sent: a final answer, or a delegation or question the
+    plan-activation guard suppressed. Every hold saves the state the task
+    needs before it returns that request:
+
+    - delegated work or a TaskQuery still pending, a runtime plan running, or a
+      delegation suppressed after plan activation: WAITING, until that work
+      or answer wakes the task;
+    - an open access workflow with unfinished steps: queued at the front to
+      run again at once with a continuation note (``access_workflow_runtime``);
+      the batch's state projection makes it PARTIAL.
+
+    Only a delegated subtask (a request with another task id) makes the task
+    wait here. Why: this handling used to write WAITING for a held answer too.
+    On 2026-11-14 that removed the queue entry of a task its workflow hold had
+    queued, so nothing ever ran it again and the person's later messages were
+    accepted but never read.
+
+    A task still in an executing state means a hold returned without saving
+    one: nothing would release its slot except the orphaned-slot safety net,
+    which hides the cause, so that is logged as a warning.
+    """
+
+    info = await self.task_manager.operations_runtime.run(
+        self.task_manager.get_task_info, task_id
+    )
+    state = info.state if info is not None else None
+    if state is not None and self.task_manager.is_executing_state(state):
+        self._logger.warning(
+            "The turn's output was held back, but its hold saved no state for the task. "
+            "event=held_output_state_not_saved task_id=%s state=%s",
+            task_id,
+            state.value,
+        )
+        return
+    self._logger.info(
+        "The turn's output was held back; the task keeps the state its hold saved. "
+        "event=turn_output_held task_id=%s state=%s",
+        task_id,
+        state.value if state is not None else "missing",
+    )
 
 
 async def _handle_task_response(

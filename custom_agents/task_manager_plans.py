@@ -25,6 +25,21 @@ from custom_messages.records.plans import PlanActionRecord, PlanRecord, PlanStep
 from id_generation import new_id
 
 
+def plan_execution_active(plan: Optional[PlanRecord], root_task_id: str) -> bool:
+    """Whether ``root_task_id`` is running ``plan``'s steps now.
+
+    It must be the plan's active execution with a step still planned or in
+    progress. The plan coordinator and the stuck-task check
+    (``custom_agents.task_wait_reasons``) share this rule.
+    """
+    if plan is None or not plan.plan_steps or plan.active_execution_task_id != root_task_id:
+        return False
+    return any(
+        step.status in {ExecutionPlanItemStatus.PLANNED, ExecutionPlanItemStatus.IN_PROGRESS}
+        for step in plan.plan_steps
+    )
+
+
 class PlanCoordinator:
     """Coordinate execution plans, plan-step tasks, and isolated recovery workflows."""
 
@@ -555,15 +570,7 @@ class PlanCoordinator:
         plan_id = self.get_task_plan_id(root_task_id)
         if not plan_id:
             return False
-        plan = self.get_plan(plan_id)
-        if plan is None or not plan.plan_steps:
-            return False
-        if plan.active_execution_task_id != root_task_id:
-            return False
-        return any(
-            step.status in {ExecutionPlanItemStatus.PLANNED, ExecutionPlanItemStatus.IN_PROGRESS}
-            for step in plan.plan_steps
-        )
+        return plan_execution_active(self.get_plan(plan_id), root_task_id)
 
     def is_final_review_pending(self, task_id: str) -> bool:
         """Return whether a suppressed terminal response queued a bounded final review turn."""

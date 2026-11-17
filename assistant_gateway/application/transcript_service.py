@@ -382,13 +382,10 @@ class GatewayTranscriptService:
         if existing_reply is not None:
             return existing_reply
         message_type = str(response.message_type or "assistant_message")
-        safe_content = (
-            str(response.transcript_text)
-            if response.transcript_text is not None
-            else self.safe_presentation_text(
-                content=str(response.text or ""),
-                message_type=message_type,
-            )
+        safe_content = self.history_text(
+            content=str(response.text or ""),
+            transcript_text=response.transcript_text,
+            message_type=message_type,
         )
         role = self._role_for_message_type(message_type)
         with self._unit_of_work_factory.transcript_unit_of_work() as unit_of_work:
@@ -497,8 +494,16 @@ class GatewayTranscriptService:
         source_id: str,
         content: str,
         message_type: str,
+        transcript_text: str | None = None,
     ) -> GatewayTranscriptMessage:
-        """Append one trusted gateway-local receipt without inventing user input."""
+        """Append one trusted gateway-local receipt without inventing user input.
+
+        ``transcript_text`` is the reply's own secret-free line
+        (``GatewayResponse.transcript_text``), kept as it is, the same as for a
+        live reply (``history_text``). A setup page opened after the chat reply
+        closed keeps its own line this way, such as "Account link form opened
+        for Portainer (your account).", instead of the fixed text for its type.
+        """
 
         return self._repository.append_transcript_message(
             TranscriptAppendRequest(
@@ -509,8 +514,9 @@ class GatewayTranscriptService:
                 channel_name=TRANSCRIPT_CHANNEL_WEBSITE,
                 chat_id=TRANSCRIPT_CHAT_WEB,
                 role=TRANSCRIPT_ROLE_SYSTEM,
-                content=self.safe_presentation_text(
+                content=self.history_text(
                     content=content,
+                    transcript_text=transcript_text,
                     message_type=message_type,
                 ),
                 message_type=message_type,
@@ -702,6 +708,21 @@ class GatewayTranscriptService:
     @staticmethod
     def safe_presentation_text(*, content: str, message_type: str) -> str:
         return _SENSITIVE_RESPONSE_TEXT.get(message_type, content)
+
+    @staticmethod
+    def history_text(*, content: str, transcript_text: str | None, message_type: str) -> str:
+        """The text chat history keeps for a reply or receipt.
+
+        Trusted gateway code that builds a reply which can carry a page address
+        sets ``transcript_text`` to its secret-free line (a setup page's
+        receipt, a refusal's reason); that line is kept. Without one, a reply
+        type that can carry a page address keeps its fixed safe text
+        (``safe_presentation_text``), and any other reply keeps its text.
+        """
+
+        if transcript_text is not None:
+            return transcript_text
+        return GatewayTranscriptService.safe_presentation_text(content=content, message_type=message_type)
 
     @staticmethod
     def _role_for_message_type(message_type: str) -> str:
