@@ -41,16 +41,16 @@
       "bound_to": {
         "type": "root_task",
         "id": "run_scheduled_job_id_1_0430",
-        "request_id": "task_context_e497c1a15afd"
+        "request_id": "schedule_run_e497c1a15afd"
       },
       "schedule_id": "scheduled_job_id_1",
       "issued_at": "2026-10-22T04:30:00.000Z",
       "expires_at": "2026-10-23T04:30:00.000Z",
       "algorithm": "ed25519",
-      "signature": "m1pXjxVYj_LKdMIMbt1Pv9AjNql-Eg9dsT8SJvZxA9nhjsGRmNL9xdOJTvAq-1oXGelDk1kS8g6mD_t_IGRFAA"
+      "signature": "GaHyr7mIOBJOO1yIkrKH5My-P8txxi9BOGXZ05tbq0AXYU2qeSM5uBbbyvYKf3TjPIPcAIdW5koNJmsAkgx8AA"
     }
   },
   "causation_id": "01928f3a-7b2c-7446-8000-000000000446",
-  "body_digest": "SFExbzd2250GuwmKBRijLVlfSTTcQmwp7CM9PWKmZq8",
-  "signature": "mF9NazO4Tf5rG-GyeAfBXFQ8-LCFkRumwXDKNEfjaaBIsjWTxoORC9V775-mJAQgs_QsoGRuEzzKyhTgAtwYAQ"
+  "body_digest": "wfCDcQp-VUu6Y0Iqug6CSkReHndCgpQJhjn0JMH3bFQ",
+  "signature": "YqHPbvvaE8ivML2-MipqpHhYhCOkVMpyGzUghpEKjMRfCxVzkmogyZ6LFf15E7Zw5A3GY7s-YOwB7gL80Y_yCg"
 }

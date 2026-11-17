@@ -277,7 +277,7 @@
                   "$ref": "#/$defs/record_id"
                 },
                 "request_id": {
-                  "description": "The person's request the root task belongs to: the id that grants for one request, the change ledger's request rows and the coordination registry are keyed by. A new request keeps today's task_context_ form; a stored context converted at the upgrade keeps its id.",
+                  "description": "The person's request the root task belongs to: the id that grants for one request, the change ledger's request rows and the coordination registry are keyed by. It is the id of today's signed task context in the form its issuer makes: message_context_<sha256> for a gateway message that can bring files (access_control.ownership), schedule_run_<hex> for a run started from a schedule permit (custom_agents.schedule_permits), task_context_<hex> for other contexts (access_control.identity.ContextSigner.issue); a stored context converted at the upgrade keeps its id.",
                   "$ref": "#/$defs/record_id"
                 }
               },

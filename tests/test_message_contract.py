@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
+from custom_messages.contracts.access_v2 import MESSAGE_CONTEXT_ID_PREFIX, SCHEDULE_RUN_ID_PREFIX
 from custom_messages.enums import ChangeRecordKind, ChangeRefusal
 from custom_messages.wire import canonical, frame as wire_frame, kinds, models, topology, trust as wire_trust
 from custom_messages.wire.canonical import CanonicalJsonError
@@ -48,6 +49,7 @@ from custom_messages.wire.frame import (
 from custom_messages.wire.permissions import HostPlacement, host_permissions, host_subjects
 from custom_messages.wire.trust import TrustStore, ed25519_public_key, sign_state, state_signing_bytes
 from custom_messages.wire.values import parse_timestamp
+from id_generation import RANDOM_ID_SUFFIX_LENGTH
 from tests import message_contract_support as fixtures
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1218,11 +1220,23 @@ def test_a_command_token_lasts_no_longer_than_other_tokens() -> None:
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
+# Today's signed task context ids, the forms a root-task token's request id takes (README,
+# "On behalf of a person"), by prefix: the gateway's message-bound contexts
+# (access_control.ownership), runs from a schedule permit (custom_agents.schedule_permits), and
+# every other context (access_control.identity.ContextSigner.issue's default).
+REQUEST_ID_FORMS = {
+    MESSAGE_CONTEXT_ID_PREFIX: rf"{MESSAGE_CONTEXT_ID_PREFIX}_[0-9a-f]{{64}}",
+    SCHEDULE_RUN_ID_PREFIX: rf"{SCHEDULE_RUN_ID_PREFIX}_[0-9a-f]{{{RANDOM_ID_SUFFIX_LENGTH}}}",
+    "task_context": rf"task_context_[0-9a-f]{{{RANDOM_ID_SUFFIX_LENGTH}}}",
+}
+
+
 def test_only_a_root_task_token_names_the_persons_request_and_it_must() -> None:
     """README, "On behalf of a person": a root-task token carries request_id; command and access-request tokens do not."""
 
     token = fixtures.example_frame("task.request", "for-person")["authority"]
-    assert token["bound_to"]["request_id"] == "task_context_aed7c50ed538"
+    # A person's chat request: the gateway's message-bound context id (request_context_id).
+    assert re.fullmatch(REQUEST_ID_FORMS[MESSAGE_CONTEXT_ID_PREFIX], token["bound_to"]["request_id"])
     models.AuthorityToken.model_validate(token)
     bound = token["bound_to"]
     refused = ({key: value for key, value in bound.items() if key != "request_id"},  # a root task without it
@@ -1232,15 +1246,17 @@ def test_only_a_root_task_token_names_the_persons_request_and_it_must() -> None:
             models.AuthorityToken.model_validate({**token, "bound_to": bound_to})
     models.AuthorityToken.model_validate({**token, "bound_to": {"type": "command", "id": "cmd_1"}})
 
-    # Frame examples carry every binding, and every example token bound to a root task names
-    # its request in today's task_context_ form.
+    # Frame examples carry every binding the schema has, and every example token bound to a
+    # root task names its request in one of today's context id forms, each form at least once.
     frames = [json.loads(path.read_text(encoding="utf-8")) for path in valid_examples()]
     assert {frame["authority"]["bound_to"]["type"] for frame in frames if "authority" in frame} == \
-        {"root_task", "command", "access_request"}
+        set(EXPORT.token_binding_types(EXPORT.load_schemas()))
     root_task = [token for frame in frames for _, token in carried_tokens(frame, "")
                  if token["bound_to"]["type"] == "root_task"]
     assert len(root_task) > 100
-    assert all(re.fullmatch(r"task_context_[0-9a-f]{12}", token["bound_to"]["request_id"]) for token in root_task)
+    forms = {next((prefix for prefix, form in REQUEST_ID_FORMS.items() if re.fullmatch(form, request_id)), request_id)
+             for request_id in (token["bound_to"]["request_id"] for token in root_task)}
+    assert forms == set(REQUEST_ID_FORMS)
     # The signing vectors cover a token with a request id and one without.
     assert {vector["token"]["bound_to"]["type"]: "request_id" in vector["token"]["bound_to"]
             for vector in VECTORS["authority_tokens"]} == {"root_task": True, "command": False}
@@ -1716,9 +1732,12 @@ def variant_values(file: str, node: dict, path: str, found: dict, depth: int = 0
 
     while "$ref" in node:
         file, fragment = RESOLVER.resolve(file, node["$ref"])
-        if (file, fragment) == ("common.schema.json", "/$defs/authority_token"):
-            return  # a carried token's bindings are covered where tokens travel, in frames' own authority
         node = RESOLVER.node(file, fragment)
+        if (file, fragment) == ("common.schema.json", "/$defs/authority_token"):
+            # A carried token's bindings are covered where tokens travel, in frames' own
+            # authority; anything else in it that has alternatives still needs examples here.
+            node = {**node, "properties": {name: child for name, child in node["properties"].items()
+                                           if name != "bound_to"}}
     if depth > 32:
         raise AssertionError(f"{file}{path}: schema nesting exceeds the frame limit; example coverage cannot skip it")
     if "oneOf" in node:

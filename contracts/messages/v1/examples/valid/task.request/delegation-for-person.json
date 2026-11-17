@@ -38,12 +38,12 @@
     "bound_to": {
       "type": "root_task",
       "id": "task_root_9c",
-      "request_id": "task_context_aed7c50ed538"
+      "request_id": "message_context_aed7c50ed538b4b85d1fc0867c3757ce1f9fd787ac3f9154e0aa3440a4909dff"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
     "expires_at": "2026-10-23T04:29:00.000Z",
     "algorithm": "ed25519",
-    "signature": "LgQeApQtHwysGVAldB4dp30bFUjyj61PHvEpBKjJ4_kmn0Xq9PbDRDYM3O157Fdom7x8sqe4X3fWelHBSLWXAg"
+    "signature": "8P9AZFOekd3bOH8tUWUIGgxf34Jvi0HbWPsx3lHHQsQ_wINMyu1WUTeVF8RkuUFKiMBeJPoMZcIVzNo8mXt5Bg"
   },
   "algorithm": "ed25519",
   "body": {
@@ -63,5 +63,5 @@
     "instructions": "Find three places near the office that take a group of eight on Friday."
   },
   "body_digest": "twEbNJUXAmeDuaB_39MYqGsNf2330TadG1H1g1is27E",
-  "signature": "diRirFwRrmAlut9s5ZeOxxnMNqt4pQ39sp_nWEOOWs5Fr00nfNNtqwgXo1BiVRmxdVeSmKnJ-sAZNDx9_4JDCg"
+  "signature": "Ikm9OXPbiHYtNo5z1oxn7QZIXZ5TWjKfL8_k-szocWSWukwbp6kQFVsuwNCW0KFBLCSrvYN8IYkcni9oaXwUBw"
 }

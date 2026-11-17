@@ -450,10 +450,20 @@ An authority token (`authority` in the frame) proves that work acts for a person
 - A token bound to a root task also names the person's request the task belongs to
   (`bound_to.request_id`), and must: grants for one request, the change ledger's request
   rows and the coordination registry are keyed by it, and the `token_id`, a UUIDv7,
-  cannot hold those existing ids. A new request keeps today's form
-  (`task_context_<hex>`); a stored signed context converted at the upgrade keeps its id,
-  so nothing keyed by a request id is converted. A command or access-request token has
-  no request id, and a frame whose root-task token lacks one is refused as `malformed`.
+  cannot hold those existing ids. The request id is the id of today's signed task
+  context (`AgentPrincipal.work_id`), in whichever form the code that issues it makes
+  today, and signers reuse that code rather than make ids of their own:
+  `message_context_<sha256>` for a message that can bring a person's files, which is
+  every new chat request, guidance and answer the gateway sends
+  (`access_control.ownership`: `request_context_id`, `steering_context_id`,
+  `answer_context_id`); `schedule_run_<hex>` for a scheduled run that a worker process
+  starts from its schedule's permit (`custom_agents.schedule_permits`); and
+  `task_context_<hex>` for every other context, among them scheduled runs and system
+  work the manager signs (`access_control.identity.ContextSigner.issue`). The schema
+  takes any `record_id`, so all three forms and a stored signed context converted at the
+  upgrade keep their ids, and nothing keyed by a request id is converted. A command or
+  access-request token has no request id, and a frame whose root-task token lacks one is
+  refused as `malformed`.
 - It names no roles: receivers read the person's current roles and standing from the
   team's people records, so a role taken away while a token lasts no longer counts.
 - A scheduled job's run has a token the scheduler signed with the run's `schedule_id`,
