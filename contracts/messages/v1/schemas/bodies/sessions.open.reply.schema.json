@@ -77,7 +77,7 @@
           "const": "partition_not_owned"
         },
         "partition": {
-          "description": "The agent's partition, which the asking host does not own: a host draws new agent ids until one falls in a partition it owns.",
+          "description": "The agent's partition, which the asking host does not own, or is giving up (a released ownership record) when the agent is new: a host draws new agent ids until one falls in a partition it owns.",
           "$ref": "../common.schema.json#/$defs/partition"
         },
         "message": {

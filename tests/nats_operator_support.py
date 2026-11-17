@@ -28,6 +28,8 @@ from typing import Any, Callable, Mapping, Optional
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from docker.nats_service import contract_server_settings
+
 # nkeys prefix bytes: the first base32 letter of a public key names its kind (O, A, U).
 _PREFIX = {"operator": 14 << 3, "account": 0, "user": 20 << 3}
 # An account without limits, JetStream included (operator mode enables JetStream per account).
@@ -145,12 +147,16 @@ class OperatorAccount:
         claims = {**user_claims(permissions), "issuer_account": self.account.public}
         return NatsUser(name, encode_jwt(self.signing, key.public, name, claims), key)
 
-    def server_settings(self, folder: Path, max_credential_bytes: int, jetstream: Mapping[str, Any]) -> dict[str, Any]:
+    def server_settings(self, folder: Path) -> dict[str, Any]:
         """nats-server settings trusting this operator, with the account and the system account preloaded.
 
-        ``max_control_line`` leaves room for the largest credential plus the rest of the
-        client's CONNECT line (README, "Credential size").
+        The JetStream settings and ``max_control_line`` are the ones the bundled server is
+        configured with (``docker.nats_service.contract_server_settings``), so the live tests
+        run with what an installation's server runs: every lead or worker host's credential
+        is over the 4,096-byte default control line (README, "Credential size").
         """
+
+        jetstream, control_line, _minimum_version = contract_server_settings()
 
         operator = folder / "operator.jwt"
         operator.write_text(encode_jwt(self.operator, self.operator.public, "operator", {
@@ -160,4 +166,4 @@ class OperatorAccount:
             "type": "account", "version": 2})
         return {"operator": str(operator), "system_account": self.system.public, "resolver": "MEMORY",
                 "resolver_preload": {self.account.public: self.account_jwt(), self.system.public: system},
-                "max_control_line": max_credential_bytes + 4096, "jetstream": dict(jetstream)}
+                "max_control_line": control_line, "jetstream": jetstream}

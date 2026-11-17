@@ -99,5 +99,8 @@ def test_a_missing_extra_or_other_partition_token_is_refused(suffix: str) -> Non
     with pytest.raises(FrameRefused) as refused:
         signed_subject_of(signed + suffix)
     assert (refused.value.code, refused.value.at) == ("subject_mismatch", "/subject")
-    # The partition at another count is another token, so a receiver at the wrong count refuses too.
+    # The partition at another count is another token (3 at 7, 8 at 96), so a receiver at the wrong count refuses too.
     assert signed_subject_of(arrival_subject(signed, 7), 7) == signed
+    with pytest.raises(FrameRefused) as refused:
+        signed_subject_of(arrival_subject(signed, 7))
+    assert (refused.value.code, refused.value.at) == ("subject_mismatch", "/subject")

@@ -22,10 +22,13 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, MAX_PARTITION_COUNT, PARTITIONED_ADDRESSES, SUBJECT_PREFIX
+from custom_messages.wire.models import PartitionOwnerState
 from custom_messages.wire.refusals import FrameRefused
 
 # The middle word of a partition ownership record's key, <team>.partition.<partition>, in UA1_PLACEMENT.
 PARTITION_OWNER_WORD = "partition"
+# A partition ownership record's states: the host owns the partition, or is giving it up.
+OWNED, RELEASED = "owned", "released"
 
 _FNV_OFFSET, _FNV_PRIME, _FNV_MASK = 0x811C9DC5, 0x01000193, 0xFFFFFFFF
 # A subject is ua.v1.<team>.<sender>.<address>; the mapped addresses' fixed words, with the
@@ -83,6 +86,22 @@ def every_partition(teams: Iterable[str], count: int = DEFAULT_PARTITION_COUNT) 
 
     numbers = tuple(range(check_partition_count(count)))
     return {team: numbers for team in teams}
+
+
+def owned_partitions(records: Iterable[PartitionOwnerState], host: str) -> dict[str, tuple[int, ...]]:
+    """Per team, the partitions that ``host`` owns: what its credential's ``{partition}`` grants name.
+
+    ``records`` are verified partition ownership record bodies. Only an ``owned`` record that
+    names the host counts. A ``released`` one still names the host that is giving the
+    partition up, and is left out, so the credential of the renewal that gives it up no longer
+    names it (README, "Credentials follow ownership" and "Filling the templates").
+    """
+
+    owned: dict[str, list[int]] = {}
+    for record in records:
+        if record.state == OWNED and record.host == host:
+            owned.setdefault(record.team, []).append(record.partition)
+    return {team: tuple(sorted(numbers)) for team, numbers in owned.items()}
 
 
 def _mapped_agent(tokens: list[str]) -> Optional[tuple[str, str]]:

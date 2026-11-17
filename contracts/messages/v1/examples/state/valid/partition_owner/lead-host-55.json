@@ -14,6 +14,7 @@
   "body": {
     "team": "team_example",
     "partition": 55,
+    "state": "owned",
     "host": "lead-host-1",
     "host_epoch": 3,
     "assigned_at": "2026-10-22T04:00:00.000Z",
@@ -21,6 +22,6 @@
     "previous_host": "lead-host-0"
   },
   "algorithm": "ed25519",
-  "body_digest": "_vAP2hojWDTn4RO0OlSENteUjC0lkWFg1gj1Xk33hyo",
-  "signature": "Kj7qt_o-JRG_Uij-JQ-oZSLBYNWtOcp6itvcjeCtdRCJWeqxFK86om7NUc8QBECw3fZj9rp7ogk2s6QK6oFOCQ"
+  "body_digest": "rWPS9m9tOcNZd9Ra--roNv14jIOR2bn-0ro-7_PM9xA",
+  "signature": "QcrzSHgUb25-O8RbZMh_2G8_TR2P0QVOCcLa5BrY73OQne7s7xf1tFm7OFkL6TGXg76iC1DPR-kXMNQKD03mAA"
 }

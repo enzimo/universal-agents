@@ -244,8 +244,7 @@ def isolated_broker(tmp_path: Path):
     users = {name: account.user(name, permissions(name)) for name in HOSTS}
     # Test setup only: creates streams and buckets without being any of the contract's roles.
     users["admin"] = account.user("admin", None)
-    settings = account.server_settings(tmp_path, TRANSPORT["limits"]["max_credential_bytes"],
-                                       TRANSPORT["server"]["jetstream"])
+    settings = account.server_settings(tmp_path)
     config = tmp_path / "nats.json"
     config.write_text(json.dumps(settings))
     config.chmod(0o600)
@@ -424,6 +423,35 @@ async def test_the_server_stores_and_delivers_every_agent_in_the_partition_the_w
         stored = await js.publish(f"ua.v1.{TEAM}.lead-host-1.work.team", b"x")
         assert (await js.get_msg(stored.stream, stored.seq)).subject == f"ua.v1.{TEAM}.lead-host-1.work.team"
         assert admin.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_sender_may_pick_the_partition_token_and_the_receiver_refuses_it(isolated_broker) -> None:
+    """README, "Partitions", the arrival suffix: NATS checks grants after mapping, so it cannot stop this.
+
+    The lead host publishes researcher-2's stop in the mapped form with the lead's partition.
+    The server stores it in that partition's stream, where only the lead's consumers read, and
+    the receiver's check refuses it; with the right partition it lands where the mapping puts it.
+    """
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        lead = await connect(stack, isolated_broker, "lead")
+        await create_topology(admin, ["researcher-2", "lead"])
+        right, wrong = part("researcher-2"), part("lead")
+        assert right != wrong
+        frame = fixtures.example_frame("task.stop")
+        assert frame["subject"].endswith(".work.control.researcher-2")
+        js = lead.nc.jetstream()
+        stored = await js.publish(f"{frame['subject']}.{wrong}", json.dumps(frame).encode(), headers=headers(frame))
+        assert stored.stream == agent_stream("lead") != agent_stream("researcher-2")
+        message = await admin.nc.jetstream().get_msg(stored.stream, stored.seq)
+        with pytest.raises(FrameRefused) as refused:
+            signed_subject_of(message.subject, COUNT)
+        assert (refused.value.code, refused.value.at) == ("subject_mismatch", "/subject")
+        stored = await js.publish(f"{frame['subject']}.{right}", b"x")
+        assert stored.stream == agent_stream("researcher-2")
+        assert lead.errors.empty()
 
 
 @pytest.mark.asyncio

@@ -47,7 +47,7 @@ from custom_messages.wire.frame import (
     signing_bytes,
     verify_frame,
 )
-from custom_messages.wire.partitions import every_partition
+from custom_messages.wire.partitions import every_partition, owned_partitions
 from custom_messages.wire.permissions import HostPlacement, host_permissions, host_subjects
 from custom_messages.wire.trust import TrustStore, ed25519_public_key, sign_state, state_signing_bytes
 from custom_messages.wire.values import parse_timestamp
@@ -636,6 +636,33 @@ def expanded(role: str, placement: HostPlacement | None = None, **ids: list[str]
                                   installation="install_example", peers=("install_peer",))
     filled = host_permissions(document, placement)
     return set(filled["publish"]) | set(filled["subscribe"])
+
+
+def test_a_released_partition_leaves_the_credential_of_the_host_giving_it_up() -> None:
+    """README, "Credentials follow ownership": the renewal that gives a partition up gets a credential without it.
+
+    The authority fills ``{partition}`` from ownership records. A ``released`` record still
+    names the old host, so only the record's state keeps the partition out of that host's
+    next credential before the new owner's record is written.
+    """
+
+    released = json.loads((CONTRACT / "examples/state/valid/partition_owner/worker-host-released-8.json").read_text())
+    records = [models.PartitionOwnerStateAdapter.validate_python(body) for body in (
+        released["body"],
+        {**released["body"], "partition": 3, "state": "owned", "reason": "initial"},
+        {**released["body"], "team": "team_other", "partition": 8, "state": "owned", "reason": "initial"},
+        {**released["body"], "partition": 9, "state": "owned", "host": "worker-host-2", "reason": "initial"},
+    )]
+    assert released["body"]["state"] == "released" and released["body"]["partition"] == 8
+    owned = owned_partitions(records, "worker-host-1")
+    assert owned == {"team_example": (3,), "team_other": (8,)}
+    placement = HostPlacement("worker-host-1", ("team_example", "team_other"), partitions=owned,
+                              installation="install_example")
+    subjects = expanded("worker_host", placement)
+    assert "$JS.API.CONSUMER.MSG.NEXT.UA1_PART_team_example~3.*" in subjects
+    assert "$JS.API.CONSUMER.MSG.NEXT.UA1_PART_team_other~8.*" in subjects
+    assert not {subject for subject in subjects if "team_example~8" in subject or subject.endswith("team_example.*.ctl.agent.*.8")
+                or ".team_example.8." in subject or "~9" in subject}
 
 
 def test_a_host_holds_no_grant_on_another_hosts_partitions() -> None:

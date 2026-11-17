@@ -1000,10 +1000,11 @@ class HostState(WireModel):
 
 
 class PartitionOwnerState(WireModel):
-    "Which host owns one partition of a team. The host serves the agents placed in the partition, and its NATS credential names the partition; its signed sequence is the fencing token, as a placement's is."
+    "Which host owns one partition of a team, or which host is giving it up. An owned partition's host serves the agents placed in it, and its NATS credential names the partition; a released partition's host is handing it over and gets no credential that names it again. Its signed sequence is the fencing token, as a placement's is."
 
     team: TeamId
     partition: Partition
+    state: Literal['owned', 'released']
     host: RuntimeId
     host_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
     assigned_at: Timestamp

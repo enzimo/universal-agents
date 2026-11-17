@@ -1,0 +1,26 @@
+{
+  "record": "partition_owner",
+  "protocol": "1.0-pre",
+  "key": "team_example.partition.8",
+  "writer": {
+    "type": "host",
+    "installation": "install_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "key_id": "test-services-key-1"
+  },
+  "sequence": 4,
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "body": {
+    "team": "team_example",
+    "partition": 8,
+    "state": "released",
+    "host": "worker-host-1",
+    "host_epoch": 2,
+    "assigned_at": "2026-10-22T04:25:00.000Z",
+    "reason": "rebalanced"
+  },
+  "algorithm": "ed25519",
+  "body_digest": "ImGtKQlSH0ftCb6Zn4UX4ogIqBW_hsBSse38HXihvyU",
+  "signature": "T6PMkpFasHOkuIagPRKnXcUP6Vtg6bBzypJgXUOt-f4VRnp9-OY-w9YcNTgrhHw7w5mZ4j5W10XunJRNf7ytBg"
+}
