@@ -926,6 +926,28 @@ requests or events, and stream subjects never overlap, which NATS would refuse. 
 named with `{team}` exists once per team and stores only that team's subjects. The
 generator refuses settings that break these rules.
 
+**Stream sizes.** Every work and dead-letter stream has a byte limit besides its age
+limit, so a growing backlog cannot fill the server's disk. The installation authority
+reads the limits from the instance's settings when it creates or updates a stream:
+`transport.queues.max_bytes` holds one limit per size kind, and each stream names its kind
+(`size_kind` in `transport.yaml`: `agent_work`, `work` or `dead_letter`). The team services
+check their streams' sizes every minute and warn administrators, as a Status page problem
+and an Inbox notice, while a stream holds more than `transport.queues.warn_at_percent` of
+its limit (80 by default); the warning clears when the stream falls below that level
+again. These settings enter the `config.yaml` and `instance_config.yaml` schemas, with
+their measured defaults, in the step whose code first reads them; `transport.yaml` names
+them so that step builds on a fixed contract.
+
+A full stream refuses new messages (`discard: new`) instead of dropping its oldest ones,
+because dropping would lose queued work, or set-aside copies and notices nobody has read
+yet, without anyone being told:
+- **A full work stream** refuses the publish, and the sender keeps the work in its outbox
+  and sends it again later.
+- **A full dead-letter stream** refuses a set-aside: see "Dead letters".
+
+The generator refuses a work or dead-letter stream without a size kind or with any other
+discard policy.
+
 A receiver accepts a frame from `issued_at` (or a later `not_before`) through the earlier
 of `expires_at` and `issued_at + expiry_seconds` for its kind, with the end exclusive.
 Hosts' clocks may differ by up to `clock_skew_seconds` (8 seconds), so both ends of this
@@ -1396,7 +1418,7 @@ proves who holds it. Only the team services read or write this bucket.
 A receiver that sets a message aside picks a copy id at random (256 bits, written as 64 lowercase hexadecimal characters). It keeps the exact bytes at `dlq.raw.<copy>` under its own runtime id, and sends a `dlq.notice` to its team's services, which tell administrators. Both wait in the team's `UA1_DLQ_<team>` for 30 days. The installation authority, whose installation traffic has no team, sends notices about that traffic to a team its certificate serves; a certificate always serves at least one.
 - **The notice holds identifiers only:**
   - the copy id, which its subject also names;
-  - the reason: a verification refusal code, or `handler_failed`, `delivery_limit` or `upgrade_drain` (the generator checks that the list names every refusal code except the temporary `revocations_not_current`, for which nothing is set aside);
+  - the reason: a verification refusal code, or `handler_failed`, `delivery_limit`, `upgrade_drain` or `upgrade_old_format` (below; the generator checks that the list names every refusal code except the temporary `revocations_not_current`, for which nothing is set aside);
   - the refusal's JSON pointer, up to the last field the receiver's schema knows (`FrameRefused.known_at`): an unknown field is named by the object that holds it, so a name the sender chose never reaches the notice;
   - where the message sat in its stream;
   - the set-aside message's own unverified claims: kind, message id, issuer team and runtime, protocol;
@@ -1419,6 +1441,29 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
   inspection consumers.
 - **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference: they read the team's raw copies subject by subject (`next_by_subj` on `ua.v1.<team>.*.dlq.raw.*`) and delete each one that names the person by the sequence that read returned.
 - **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
+- **When the stream is full.** The dead-letter stream refuses new messages when it reaches
+  its byte limit ("Stream sizes"), so no unread copy or notice is ever dropped to make room.
+  A receiver acknowledges a refused message only after both its raw copy and its notice are
+  stored. When the dead-letter stream refuses either, the receiver leaves the message
+  unacknowledged and logs it with its ids; the message stops after its consumer's
+  `max_deliveries` and waits in its own stream until that stream's age limit, where it counts
+  toward that stream's size warning. The team services' size check warns administrators as
+  the dead-letter stream fills, and says set-asides are refused while it is full.
+- **Two upgrade reasons.** `upgrade_drain` and `upgrade_old_format` both come from upgrades
+  but name different messages:
+  - `upgrade_drain`: a protocol 1 frame that waited in a queue while the installation moved
+    to another contract revision, and its receiver could no longer handle it ("Versions",
+    "The host on another contract"). The notice names the frame's own claims.
+  - `upgrade_old_format`: a message in the format used before protocol 1, still queued in the
+    old work stream when an instance first starts 0.10. It is no frame, so the notice claims
+    nothing about it (no `claimed`, no `pointer`); `original` names the old stream and
+    subject, and the raw copy keeps its bytes, from which the team services name the task
+    and the person's request it belonged to in their notice to administrators, with what to
+    do (send it again). As for any set-aside, a raw copy is kept only up to
+    `max_frame_bytes`; for a larger old message the administrators' notice can say only
+    where it sat. Before it sets aside the old messages, the upgrade checks that the
+    dead-letter stream has room for all of them, and stops with a message saying so if they
+    do not fit.
 
 ## Versions
 

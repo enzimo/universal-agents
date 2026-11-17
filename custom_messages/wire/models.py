@@ -1712,7 +1712,7 @@ class DlqNoticeBody(WireModel):
     "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only."
 
     copy_id: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
-    reason: Literal['too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_issuer', 'wrong_sender', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'bad_authority', 'access_denied', 'handler_failed', 'delivery_limit', 'upgrade_drain']
+    reason: Literal['too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_issuer', 'wrong_sender', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'bad_authority', 'access_denied', 'handler_failed', 'delivery_limit', 'upgrade_drain', 'upgrade_old_format']
     pointer: Union[Annotated[str, StringConstraints(pattern='^(/[a-z0-9_]{1,64}){0,16}$')], MISSING] = Field(default=MISSING)
     original: DlqNoticeBodyOriginal
     claimed: Union[DlqNoticeBodyClaimed, MISSING] = Field(default=MISSING)

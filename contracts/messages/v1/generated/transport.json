@@ -324,6 +324,16 @@
     }
   },
   "peer_sender_slot": "x-{installation}",
+  "queues": {
+    "max_bytes_setting": "transport.queues.max_bytes",
+    "size_kinds": [
+      "agent_work",
+      "work",
+      "dead_letter"
+    ],
+    "warn_at_percent_default": 80,
+    "warn_at_percent_setting": "transport.queues.warn_at_percent"
+  },
   "replay_ledger_retention_seconds": 2592060,
   "reply_inbox_prefix": "_INBOX.{runtime}",
   "server": {
@@ -334,11 +344,13 @@
   },
   "streams": {
     "UA1_AGENT_WORK_{team}": {
+      "discard": "new",
       "duplicate_window_seconds": 120,
       "max_age_seconds": 604860,
       "max_consumers": 4096,
       "max_message_bytes": 263168,
       "retention": "workqueue",
+      "size_kind": "agent_work",
       "storage": "file",
       "subjects": [
         "ua.v1.{team}.*.work.agent.*",
@@ -347,22 +359,26 @@
       ]
     },
     "UA1_DLQ_{team}": {
+      "discard": "new",
       "max_age_seconds": 2592060,
       "max_consumers": 16,
       "max_message_bytes": 263168,
       "max_msgs_per_subject": 1,
       "retention": "limits",
+      "size_kind": "dead_letter",
       "storage": "file",
       "subjects": [
         "ua.v1.{team}.*.dlq.>"
       ]
     },
     "UA1_WORK": {
+      "discard": "new",
       "duplicate_window_seconds": 120,
       "max_age_seconds": 604860,
       "max_consumers": 4096,
       "max_message_bytes": 263168,
       "retention": "workqueue",
+      "size_kind": "work",
       "storage": "file",
       "subjects": [
         "ua.v1.*.*.work.edge.*",

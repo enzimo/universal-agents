@@ -58,6 +58,22 @@ limits:
   nats_max_payload_bytes: 1048576
   max_credential_bytes: 65536  # a host's NATS user JWT, which grows with the agents and pools it runs; servers' max_control_line fits it
 
+# Stream sizes (README, "Stream sizes"). Every work and dead-letter stream has a byte limit
+# besides its age limit. The installation authority, which creates the streams, reads the
+# limits from the instance's settings named here (config.yaml and instance_config.yaml); their
+# schema entries and default values come with the code that first reads them (13C.10 step 2),
+# so the contract names the settings, not numbers. Each stream names its entry in the byte
+# limits as its size_kind. The team services warn administrators while a stream holds more than
+# warn_at_percent of its limit. Every stream refuses new messages when full (discard: new):
+# a full work stream makes the sender keep the work in its outbox, and a full dead-letter
+# stream makes the receiver leave the refused message unacknowledged in its own stream, so
+# nothing queued or set aside is dropped unread.
+queues:
+  max_bytes_setting: transport.queues.max_bytes                # one byte limit per size kind
+  size_kinds: [agent_work, work, dead_letter]
+  warn_at_percent_setting: transport.queues.warn_at_percent
+  warn_at_percent_default: 80
+
 classes:
   durable:
     description: at least once; the sender records before publishing, the receiver admits durably before acknowledging
@@ -118,6 +134,8 @@ streams:
     duplicate_window_seconds: 120
     max_consumers: 4096         # two per agent (inbox and control queue) and one per pool of one team; NATS 2.15 defaults to 1,000 per stream
     max_message_bytes: 263168   # max_frame_bytes plus max_header_bytes: JetStream counts headers in a message's size
+    size_kind: agent_work
+    discard: new                # a full stream refuses new work, which its sender keeps in its outbox
   UA1_WORK:
     # Edge deliveries and the team services' inbox, read through exact consumer grants.
     subjects: [ua.v1.*.*.work.edge.*, ua.v1.*.*.work.team]
@@ -127,6 +145,8 @@ streams:
     duplicate_window_seconds: 120
     max_consumers: 4096         # NATS 2.15 defaults to 1,000 per stream
     max_message_bytes: 263168   # as UA1_AGENT_WORK_{team}
+    size_kind: work
+    discard: new                # as UA1_AGENT_WORK_{team}
   UA1_DLQ_{team}:
     # One team's set-aside copies and notices; of the hosts, only its team services read and
     # delete here (the topology owner, which creates every stream's consumers, could too).
@@ -137,6 +157,13 @@ streams:
     max_message_bytes: 263168   # as UA1_AGENT_WORK_{team}; a raw copy keeps at most max_frame_bytes of the refused message, and a larger message gets a notice with raw.stored false
     max_consumers: 16           # the team services' notice consumer, and a few the topology owner creates for an administrator's inspection
     max_msgs_per_subject: 1     # each copy id names one subject: a retried publish replaces its copy, so deleting a copy leaves no duplicate
+    size_kind: dead_letter
+    # A full stream refuses a set-aside instead of dropping the oldest unread copies and
+    # notices. The receiver acknowledges the refused message only after both its raw copy and
+    # its notice are stored; when this stream refuses either, it leaves the message
+    # unacknowledged and logs it with its ids, so the message stops after max_deliveries and
+    # waits in its own stream until its age limit (README, "Dead letters").
+    discard: new
 
 # Consumer names join ids with ~, which ids cannot contain: with _ (allowed in ids),
 # team "team_example" with agent "researcher-2" and team "team" with agent

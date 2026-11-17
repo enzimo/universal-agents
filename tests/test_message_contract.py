@@ -421,6 +421,46 @@ def test_streams_store_each_queued_address_once_and_nothing_else(change, problem
         EXPORT.check_transport(transport)
 
 
+def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_messages_when_full() -> None:
+    """README, "Stream sizes": nothing queued or set aside is dropped to make room."""
+
+    queues = TRANSPORT["queues"]
+    assert (queues["max_bytes_setting"], queues["warn_at_percent_setting"], queues["warn_at_percent_default"]) == (
+        "transport.queues.max_bytes", "transport.queues.warn_at_percent", 80)
+    queued = {stream for spec in TRANSPORT["classes"].values() for stream in spec.get("streams", [])}
+    assert queued == {"UA1_AGENT_WORK_{team}", "UA1_WORK", "UA1_DLQ_{team}"}
+    assert {name: (TRANSPORT["streams"][name]["size_kind"], TRANSPORT["streams"][name]["discard"]) for name in queued} == {
+        "UA1_AGENT_WORK_{team}": ("agent_work", "new"), "UA1_WORK": ("work", "new"),
+        "UA1_DLQ_{team}": ("dead_letter", "new")}
+    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    for text in ("**Stream sizes.**", "`transport.queues.max_bytes`", "`transport.queues.warn_at_percent`",
+                 "(80 by default)", "**When the stream is full.**"):
+        assert text in readme
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        # Dropping the oldest messages would lose unread set-aside copies and notices.
+        (lambda t: t["streams"]["UA1_DLQ_{team}"].update(discard="old"), "UA1_DLQ_{team} refuses new messages"),
+        (lambda t: t["streams"]["UA1_WORK"].pop("discard"), "UA1_WORK refuses new messages"),
+        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"].pop("size_kind"), "names its byte limit's size kind"),
+        (lambda t: t["streams"]["UA1_WORK"].update(size_kind="pool"), "names its byte limit's size kind"),
+        (lambda t: t["queues"]["size_kinds"].append("pool"), "unused ['pool']"),
+        (lambda t: t["queues"]["size_kinds"].append("work"), "distinct snake_case"),
+        (lambda t: t["queues"].update(max_bytes_setting="queues.max_bytes"), "names the settings"),
+        (lambda t: t["queues"].pop("warn_at_percent_setting"), "names the settings"),
+        (lambda t: t["queues"].update(warn_at_percent_default=100), "from 1 to 99"),
+        (lambda t: t.pop("queues"), "names the settings"),
+    ],
+)
+def test_stream_sizes_that_would_drop_messages_or_name_no_setting_are_refused(change, problem) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    change(transport)
+    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+        EXPORT.check_transport(transport)
+
+
 def test_streams_store_a_full_size_frame_with_the_largest_headers_senders_may_set() -> None:
     """README, "NATS headers": JetStream counts headers in a stream's maximum message size."""
 
@@ -2800,6 +2840,25 @@ def test_a_temporary_refusal_is_no_dead_letter_reason() -> None:
     reasons = set(json.loads((CONTRACT / "schemas/bodies/dlq.notice.schema.json").read_text())["properties"]["reason"]["enum"])
     assert set(kinds.VERIFICATION_REFUSALS) - kinds.TEMPORARY_REFUSALS <= reasons
     assert not reasons & kinds.TEMPORARY_REFUSALS
+
+
+def test_an_old_format_message_found_at_the_upgrade_has_its_own_dead_letter_reason() -> None:
+    """README, "Dead letters": upgrade_old_format is no frame, unlike upgrade_drain's protocol 1 frames."""
+
+    notice = fixtures.example_frame("dlq.notice", "upgrade-old-format")
+    body = models.DlqNoticeBody.model_validate(notice["body"])
+    assert body.reason == "upgrade_old_format"
+    assert "claimed" not in notice["body"] and "pointer" not in notice["body"]
+    reasons = json.loads((CONTRACT / "schemas/bodies/dlq.notice.schema.json").read_text())["properties"]["reason"]
+    assert {"upgrade_drain", "upgrade_old_format"} <= set(reasons["enum"])
+    assert "upgrade_old_format (a message in the format before protocol 1" in reasons["description"]
+    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    for text in ("**Two upgrade reasons.**", "- `upgrade_drain`: a protocol 1 frame",
+                 "- `upgrade_old_format`: a message in the format used before protocol 1",
+                 "the upgrade checks that the\n    dead-letter stream has room"):
+        assert text in readme
+    with pytest.raises(ValidationError):
+        models.DlqNoticeBody.model_validate(dict(notice["body"], reason="upgrade_old"))
 
 
 def test_the_revocations_record_is_never_forgotten() -> None:

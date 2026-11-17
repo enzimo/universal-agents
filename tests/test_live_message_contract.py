@@ -29,7 +29,7 @@ from typing import Iterable
 
 import nats
 import pytest
-from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
+from nats.js.api import AckPolicy, ConsumerConfig, DiscardPolicy, RetentionPolicy, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
 
 from custom_messages.wire import frame as wire_frame
@@ -47,6 +47,7 @@ TRANSPORT = json.loads((CONTRACT / "generated/transport.json").read_text())
 TEAM = "team_example"
 RETENTION = {"workqueue": RetentionPolicy.WORK_QUEUE, "limits": RetentionPolicy.LIMITS}
 STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
+DISCARD = {"new": DiscardPolicy.NEW, "old": DiscardPolicy.OLD}
 # Which host runs which agents in these tests.
 HOSTS = {
     "lead": {"role": "lead_host", "runtime": "lead-host-1", "agents": ["lead"], "pools": [], "edges": []},
@@ -114,6 +115,9 @@ def stream_config(name: str, team: str = TEAM) -> StreamConfig:
         max_consumers=spec.get("max_consumers"),
         max_msg_size=spec.get("max_message_bytes"),
         max_msgs_per_subject=spec.get("max_msgs_per_subject", -1),
+        # The byte limit comes from the instance's settings (README, "Stream sizes"); these
+        # tests leave it unlimited, except the one that fills a stream.
+        discard=DISCARD[spec["discard"]],
     )
 
 
@@ -238,7 +242,8 @@ async def create_topology(admin: Client, agents: Iterable[str] = (), teams: Iter
     expected = [stream_config("UA1_WORK")] + [stream_config("UA1_AGENT_WORK_{team}", team) for team in teams]
     for config in expected:
         info = await js.add_stream(config=config)
-        for setting in ("subjects", "retention", "storage", "max_age", "duplicate_window", "max_consumers", "max_msg_size"):
+        for setting in ("subjects", "retention", "storage", "max_age", "duplicate_window", "max_consumers", "max_msg_size",
+                        "discard"):
             assert getattr(info.config, setting) == getattr(config, setting), setting
     for agent in agents:
         for queue in AGENT_QUEUES:
@@ -416,6 +421,30 @@ async def test_a_custody_confirmation_reaches_a_busy_agent_past_the_tasks_waitin
         inbox = await admin.nc.jetstream().consumer_info(AGENT_STREAM, consumer_name("agent_inbox", agent="researcher-2"))
         assert (inbox.num_pending, inbox.num_ack_pending) == (2, 0)
         assert lead.errors.empty() and services.errors.empty() and worker.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_full_stream_refuses_new_messages_and_keeps_what_it_holds(isolated_broker) -> None:
+    """README, "Stream sizes": a full work or dead-letter stream drops nothing queued or set aside."""
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        js = admin.nc.jetstream()
+        work, dead_letters = f"UA1_AGENT_WORK_{TEAM}", f"UA1_DLQ_{TEAM}"
+        first, second = b"x" * 600, b"y" * 600
+        for template, stored in (("UA1_AGENT_WORK_{team}", work), ("UA1_DLQ_{team}", dead_letters)):
+            # Room for one of the two messages: the byte limit counts subjects and headers too.
+            config = stream_config(template)
+            config.max_bytes = 1024
+            await js.add_stream(config=config)
+            subject = (f"ua.v1.{TEAM}.lead-host-1.work.agent.researcher-2" if stored == work
+                       else f"ua.v1.{TEAM}.worker-host-1.dlq.raw.{'e' * 64}")
+            await js.publish(subject, first)
+            with pytest.raises(nats.js.errors.APIError) as refused:
+                await js.publish(subject.replace("researcher-2", "researcher-3").replace("e" * 64, "f" * 64), second)
+            assert refused.value.err_code == 10077, refused.value  # maximum bytes exceeded
+            assert (await js.stream_info(stored)).state.messages == 1
+            assert (await js.get_msg(stored, 1)).data == first
 
 
 @pytest.mark.asyncio

@@ -1176,6 +1176,48 @@ def check_transport(transport: dict[str, Any]) -> None:
         check_class_streams(name, spec, transport, skew)
     check_stream_subjects(transport)
     check_agent_queues(transport)
+    check_stream_sizes(transport)
+
+
+# The instance settings that size the streams (transport.yaml queues).
+QUEUE_SETTINGS = {"max_bytes_setting": "transport.queues.max_bytes",
+                  "warn_at_percent_setting": "transport.queues.warn_at_percent"}
+
+
+def check_stream_sizes(transport: dict[str, Any]) -> None:
+    """Every queued stream has a byte limit from the instance's settings and refuses new messages when full.
+
+    A stream that dropped its oldest messages when full (discard: old) would lose queued work
+    or unread set-aside copies and notices without anyone being told (README, "Stream sizes").
+    """
+
+    queues = transport.get("queues")
+    if not isinstance(queues, dict) or set(queues) != {*QUEUE_SETTINGS, "size_kinds", "warn_at_percent_default"} \
+            or any(queues[key] != name for key, name in QUEUE_SETTINGS.items()):
+        raise ContractError("transport.yaml: queues names the settings transport.queues.max_bytes and "
+                            "transport.queues.warn_at_percent, the size kinds and the warning's default")
+    kinds = queues["size_kinds"]
+    if not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) \
+            or not all(isinstance(kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", kind) for kind in kinds):
+        raise ContractError("transport.yaml: queues.size_kinds lists distinct snake_case names")
+    warn = queues["warn_at_percent_default"]
+    if type(warn) is not int or not 1 <= warn <= 99:
+        raise ContractError("transport.yaml: queues.warn_at_percent_default is a whole percentage from 1 to 99")
+    queued = {stream for spec in transport["classes"].values() for stream in spec.get("streams", [])}
+    used = set()
+    for name, stream in transport["streams"].items():
+        if name not in queued:
+            continue
+        if stream.get("size_kind") not in kinds:
+            raise ContractError(f"transport.yaml: stream {name} names its byte limit's size kind (size_kind, one of "
+                                "queues.size_kinds)")
+        if stream.get("discard") != "new":
+            raise ContractError(f"transport.yaml: stream {name} refuses new messages when full (discard: new), so "
+                                "nothing queued or set aside is dropped unread")
+        used.add(stream["size_kind"])
+    if used != set(kinds):
+        raise ContractError(f"transport.yaml: queues.size_kinds names only kinds a stream uses; unused "
+                            f"{sorted(set(kinds) - used)}")
 
 
 def check_agent_queues(transport: dict[str, Any]) -> None:
