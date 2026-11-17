@@ -304,7 +304,9 @@ token signature included, so the token is signed first.
   also refuse dates such as 30 February. The generated models check this during form
   validation, before looking up a key, including timestamps inside an authority token.
 - Keys, digests and signatures are unpadded base64url, and only the one spelling that
-  encoding the bytes produces is accepted. Some decoders, Python's among them, ignore the
+  encoding the bytes produces is accepted. The one exception is outside frames: a blob's
+  metadata subject and its object information's `digest` keep NATS's padded spelling
+  ("Blobs"). Some decoders, Python's among them, ignore the
   unused low bits of the last character, which would give every signature 16 accepted
   spellings; receivers re-encode and compare.
 - A public key that someone else chose must be the canonical encoding of a point of
@@ -1496,7 +1498,9 @@ request or answer over `long_text`, the files a result or notice carries, Knowle
   are its own, and one team's services never delete another team's copy of the same bytes.
   Within a team, two objects with one name hold the same bytes. A reader checks the bytes
   it read against the name and the reference and refuses a blob that does not match.
-- **Owner headers.** Each object's metadata carries these headers (`transport.yaml`
+- **Owner headers.** Each object's metadata carries these headers in its object information's
+  `headers` field, NATS's own object headers, where each name holds a list of one value; they
+  are not NATS message headers, so `nats object info` shows them (`transport.yaml`
   `object_store.UA1_BLOBS.headers`, each value of the named `common.schema.json` type):
   - `UA-Blob-SHA256` (`sha256_digest`) and `UA-Blob-Team` (`team_id`, the name's team),
     always;
@@ -1516,20 +1520,57 @@ request or answer over `long_text`, the files a result or notice carries, Knowle
   settings"), so the NATS object store client's `put` and `delete`, which send
   `Nats-Rollup: sub`, are refused, and its `get`, which asks the server which stream holds
   the chunks (`$JS.API.STREAM.NAMES`, a list of every team's streams), has no grant. The
-  product does these steps itself:
-  - a writer looks the name up (the last message on its metadata subject,
-    `$O.UA1_BLOBS.M.<name in base64url>`, through `$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`)
-    and stops when a live object is there; otherwise it publishes the chunks
-    (`$O.UA1_BLOBS.C.<new id>`), then one metadata message with no rollup header. It purges
-    nothing, even when it stops partway;
-  - a reader takes the last metadata message for the name and reads the chunks through an
-    ordered consumer it opens naming the stream (`OBJ_UA1_BLOBS`), as the key-value watches
-    do;
-  - a deleter (the team services) writes a deleted metadata message with no rollup header,
-    then purges the object's chunks by their subject and the name's earlier metadata
-    messages (a purge of the metadata subject that keeps the last one). The team services
-    also purge chunks that no metadata names, which a writer leaves when it stops partway or
-    when two writers put the same blob at once.
+  product does these steps itself, keeping the NATS object store's own subjects and
+  metadata ([ADR-20](https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-20.md)),
+  so the `nats object` tools still list and inspect objects:
+  - the metadata subject is `$O.UA1_BLOBS.M.<name>` with the name encoded as padded
+    base64url, as NATS's clients spell it (`team_example~KZJ…` becomes
+    `$O.UA1_BLOBS.M.dGVhbV9leGFtcGxlfktaSi1K…ZnkFt_o=`); this and the object information's
+    `digest` are the only padded base64url in the contract. A metadata message's body is
+    NATS's object information JSON: `name`, `bucket` (`UA1_BLOBS`), `nuid` (a new NATS
+    unique id per write; the chunks are on `$O.UA1_BLOBS.C.<nuid>`), `size` (bytes),
+    `chunks` (count), `digest` (`SHA-256=` and the content's SHA-256 in padded base64url),
+    `headers` (the owner headers) and `options.max_chunk_size`. A writer writes no other
+    field, and a reader ignores fields it does not use (NATS's `mtime`, `description`);
+  - a writer cuts the content into chunks of exactly `chunk_bytes` (131,072, NATS's own
+    default), the last one shorter. A reader assumes no chunk size: it checks the chunk
+    count and the bytes it read against `chunks`, `size` and the name;
+  - a writer looks the name up (the last message on its metadata subject, through
+    `$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`) and stops when a live object is there;
+    otherwise it publishes the chunks under a new `nuid`, then one metadata message with no
+    rollup header. It purges nothing, even when it stops partway. A writer that would
+    publish its metadata later than half of `orphan_chunk_grace_seconds` after it began
+    gives the write up and publishes no metadata (it may start again under a new `nuid`),
+    so no metadata ever names chunks old enough to be swept;
+  - a reader takes the last metadata message for the name, treats one with `deleted: true`
+    as no object, and reads the chunks through an ordered consumer it opens naming the
+    stream (`OBJ_UA1_BLOBS`), as the key-value watches do;
+  - a deleter (the team services) writes a deleted marker with no rollup header: the last
+    metadata with `deleted: true`, `size` and `chunks` 0 and `digest` empty, every other
+    field kept, the owner headers among them (as NATS's own delete does), so the headers
+    marked always are on every metadata message. It then purges the object's chunks by their
+    subject and the name's earlier metadata messages (a purge of the metadata subject that
+    keeps the last one);
+  - the team services also purge chunks that no metadata names, which a writer leaves when
+    it gives up or stops partway, or when two writers put the same blob at once. A sweep
+    purges a chunk subject only when its newest message is older than
+    `orphan_chunk_grace_seconds` (one day) plus the clock tolerance, and reads the
+    metadata after it checked that age. A write in progress has a chunk newer than that, and
+    a finished write's metadata was published within half of it, so the sweep never purges
+    chunks a live object names.
+
+  A metadata message for 300,000 bytes stored by a person's request, on
+  `$O.UA1_BLOBS.M.dGVhbV9leGFtcGxlfktaSi1KenJNeG9LR0FGQVg5X3B1VHllOTIwMnpDRF80dU5URFpua0Z0X28=`:
+
+  ```json
+  {"name": "team_example~KZJ-JzrMxoKGAFAX9_puTye9202zCD_4uNTDZnkFt_o", "bucket": "UA1_BLOBS",
+   "nuid": "Zq4GJ3mT8wKx1bN0aRdYfE", "size": 300000, "chunks": 3,
+   "digest": "SHA-256=KZJ-JzrMxoKGAFAX9_puTye9202zCD_4uNTDZnkFt_o=",
+   "headers": {"UA-Blob-SHA256": ["KZJ-JzrMxoKGAFAX9_puTye9202zCD_4uNTDZnkFt_o"],
+               "UA-Blob-Team": ["team_example"], "UA-Blob-Request": ["task_context_7f3a9c1e5b2d"],
+               "UA-Blob-Person": ["person_example"]},
+   "options": {"max_chunk_size": 131072}}
+  ```
 - **Grants.** These take effect where each host has its own NATS credential, as for the
   buckets ("Key-value grants"):
   - readers are exactly the roles that receive a kind, a copy or a reply whose schema can
@@ -1566,7 +1607,8 @@ The generator checks that the readers are exactly the roles that receive somethi
 carry a blob reference (none lacks the grant and none has it without need), that writers
 also read and deleters also write, that an object's name is its team and a `blob_ref` field
 joined by a separator neither can hold, that each header names a shared type and when it is
-present, and the stream settings, rollups off among them.
+present, that a chunk fits one NATS message, that the orphan grace is more than twice the
+clock tolerance, and the stream settings, rollups off among them.
 
 ## Dead letters
 

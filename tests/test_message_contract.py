@@ -10,6 +10,7 @@ that the signing vectors re-sign to the same bytes.
 
 from __future__ import annotations
 
+import base64
 import copy
 import dataclasses
 import hashlib
@@ -1508,6 +1509,34 @@ def test_blob_grants_follow_who_receives_writes_and_deletes_blobs() -> None:
     assert "Not generated yet" not in readme
 
 
+def test_the_readme_metadata_example_follows_the_nats_object_store_format() -> None:
+    """The README's metadata example is what writers write and readers read (README, "Blobs").
+
+    Writers, readers and the Rust peers build the metadata from this example, so its
+    subject, padded digest, chunk count and owner headers must agree with the contract.
+    """
+
+    blobs = TRANSPORT["object_store"]["UA1_BLOBS"]
+    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    section = readme[readme.index("A metadata message for 300,000 bytes"):]
+    subject = re.search(r"`(\$O\.UA1_BLOBS\.M\.[^`]+)`", section).group(1)
+    info = json.loads(section[section.index("```json") + len("```json"):section.index("```", section.index("```json") + 7)])
+    assert set(info) == {"name", "bucket", "nuid", "size", "chunks", "digest", "headers", "options"}
+    assert info["bucket"] == "UA1_BLOBS" and info["options"] == {"max_chunk_size": blobs["chunk_bytes"]}
+    # NATS spells the metadata subject's name and the digest in padded base64url.
+    assert subject == "$O.UA1_BLOBS.M." + base64.urlsafe_b64encode(info["name"].encode()).decode()
+    assert subject.endswith("=")
+    team, digest = info["name"].split("~")
+    assert info["digest"] == "SHA-256=" + digest + "="
+    assert info["chunks"] == -(-info["size"] // blobs["chunk_bytes"])
+    shared = json.loads((CONTRACT / "schemas" / "common.schema.json").read_text(encoding="utf-8"))["$defs"]
+    assert set(info["headers"]) <= set(blobs["headers"])
+    for name, values in info["headers"].items():
+        assert len(values) == 1 and re.fullmatch(shared[blobs["headers"][name]["value"]]["pattern"], values[0]), name
+    assert info["headers"]["UA-Blob-SHA256"] == [digest] and info["headers"]["UA-Blob-Team"] == [team]
+    assert sum(blobs["headers"][name]["presence"] == "owner" for name in info["headers"]) == 1
+
+
 @pytest.mark.parametrize(("change", "problem"), [
     (lambda t: t["object_store"]["UA1_BLOBS"]["readers"].remove("edge_adapter"), "readers are exactly the roles"),
     (lambda t: t["object_store"]["UA1_BLOBS"]["readers"].append("scheduler"), "readers are exactly the roles"),
@@ -1528,6 +1557,12 @@ def test_blob_grants_follow_who_receives_writes_and_deletes_blobs() -> None:
      "UA-Blob- followed by words"),
     (lambda t: t["object_store"]["UA1_BLOBS"]["headers"].pop("UA-Blob-Agent"), "at least two kinds of owner"),
     (lambda t: t["object_store"].update({"UA1_BLOBS_{team}": t["object_store"].pop("UA1_BLOBS")}), "installation-wide"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(chunk_bytes=0), "chunk_bytes is"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(chunk_bytes=t["limits"]["nats_max_payload_bytes"] + 1), "chunk_bytes is"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(chunk_bytes=131072.0), "chunk_bytes is"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(orphan_chunk_grace_seconds=2 * t["clock_skew_seconds"]),
+     "orphan_chunk_grace_seconds is"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].pop("orphan_chunk_grace_seconds"), "installation-wide"),
     (lambda t: t["object_store_stream"].update(deny_purge=True), "deny_purge is False"),
     # With rollups allowed, any writer could erase every object with Nats-Rollup: all.
     (lambda t: t["object_store_stream"].update(allow_rollup_hdrs=True), "allow_rollup_hdrs is False"),

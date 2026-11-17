@@ -337,7 +337,10 @@ object_store_stream:
 # headers name the owner that stored it (common.schema.json types; presence: always, owner =
 # exactly one of the owner headers, person = when a person's work stored it). readers are
 # exactly the roles that receive a kind or reply whose schema can carry a blob_ref; writers
-# also read, to find whether an object already exists; deleters also write (README, "Blobs").
+# also read, to find whether an object already exists; deleters also write. Subjects and metadata
+# are the NATS object store's own (ADR-20): the metadata subject holds the name in padded base64url,
+# the body is NATS's object information JSON, and the owner headers are in its headers field, not
+# NATS message headers; a deleted marker keeps them (README, "Blobs").
 object_store:
   UA1_BLOBS:
     description: files and long text, named by their team and SHA-256; the team services keep every owner of an object and delete it when the last owner's retention ends or the last owner departs
@@ -351,6 +354,8 @@ object_store:
     readers: [gateway, lead_host, worker_host, team_services, edge_adapter]
     writers: [gateway, lead_host, worker_host, team_services]
     deleters: [team_services]
+    chunk_bytes: 131072                 # every chunk but the last holds exactly this many bytes (NATS's default); readers assume no size
+    orphan_chunk_grace_seconds: 86400   # the team services sweep unnamed chunks only when the newest is older; a writer gives up after half
 
 # How long a receiver keeps replay records: at least the longest expiry of any class plus the clock tolerance.
 replay_ledger_retention_seconds: 2592060   # 30 days plus a minute

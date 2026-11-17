@@ -320,6 +320,7 @@
   },
   "object_store": {
     "UA1_BLOBS": {
+      "chunk_bytes": 131072,
       "deleters": [
         "team_services"
       ],
@@ -347,6 +348,7 @@
         }
       },
       "object_name": "{team}~{sha256}",
+      "orphan_chunk_grace_seconds": 86400,
       "readers": [
         "gateway",
         "lead_host",

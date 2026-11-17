@@ -1365,7 +1365,8 @@ def check_key_value(registry: dict[str, Any], transport: dict[str, Any]) -> None
 # would erase every object of the bucket; deleting an object purges its chunks (the deleters'
 # grant alone); no message is deleted one by one. Only the storage is a choice.
 OBJECT_STORE_STREAM = {"allow_rollup_hdrs": False, "deny_delete": True, "deny_purge": False}
-OBJECT_STORE_FIELDS = {"description", "object_name", "headers", "readers", "writers", "deleters"}
+OBJECT_STORE_FIELDS = {"description", "object_name", "headers", "readers", "writers", "deleters", "chunk_bytes",
+                       "orphan_chunk_grace_seconds"}
 # When an object's metadata carries a header: always, as one of the owner headers (exactly one
 # of them), or when a person's work stored the object.
 BLOB_HEADER_PRESENCE = {"always", "owner", "person"}
@@ -1413,6 +1414,24 @@ def check_object_store(registry: dict[str, Any], transport: dict[str, Any], sche
         if not set(spec["writers"]) <= set(spec["readers"]) or not set(spec["deleters"]) <= set(spec["writers"]):
             raise ContractError(f"{where}: writers also read (to find an object before putting it) and deleters also write")
         check_blob_headers(where, spec["headers"], schemas)
+        check_blob_timing(where, spec, transport)
+
+
+def check_blob_timing(where: str, spec: dict[str, Any], transport: dict[str, Any]) -> None:
+    """A chunk fits one NATS message, and the orphan sweep's grace leaves a writer time to finish.
+
+    A writer gives a write up when its metadata would come later than half the grace after
+    it began, and the sweep waits the whole grace plus the clock tolerance after a chunk
+    subject's newest message, so the grace must be more than twice the clock tolerance for
+    a writer to have any time at all (README, "Blobs").
+    """
+
+    chunk, grace = spec["chunk_bytes"], spec["orphan_chunk_grace_seconds"]
+    if type(chunk) is not int or not 0 < chunk <= transport["limits"]["nats_max_payload_bytes"]:
+        raise ContractError(f"{where}: chunk_bytes is a whole number of bytes that fits nats_max_payload_bytes")
+    if type(grace) is not int or grace <= 2 * transport["clock_skew_seconds"]:
+        raise ContractError(f"{where}: orphan_chunk_grace_seconds is a whole number of seconds over twice "
+                            f"clock_skew_seconds")
 
 
 def check_blob_name(where: str, template: Any, schemas: dict[str, dict[str, Any]]) -> None:
