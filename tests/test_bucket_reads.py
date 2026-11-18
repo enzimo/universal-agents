@@ -21,6 +21,7 @@ from custom_transport.protocol1 import bucket_reads
 from custom_transport.protocol1.bucket_reads import (
     BucketReadTimedOut, BucketTooLarge, KeyChange, list_keys, watch_keys,
 )
+from custom_transport.protocol1.state_records import StateRecords
 
 BUCKET = "UA1_EXAMPLE"
 PREFIX = f"$KV.{BUCKET}."
@@ -45,7 +46,9 @@ class FakeJetStream:
     Each stream information request takes the next reply; the last one repeats.
     """
 
-    def __init__(self, *replies: Reply, unsubscribe_error: Optional[BaseException] = None) -> None:
+    def __init__(self, *replies: Reply, unsubscribe_error: Optional[BaseException] = None,
+                 bucket: str = BUCKET) -> None:
+        self.prefix = f"$KV.{bucket}."
         self.replies = list(replies)
         self.subscription = FakeSubscription(unsubscribe_error)
         self.subscribed: list[tuple[str, dict[str, Any]]] = []
@@ -64,11 +67,11 @@ class FakeJetStream:
         self.answered.set()
         if isinstance(reply, BaseException):
             raise reply
-        subjects = {f"{PREFIX}{key}": 1 for key in reply}
+        subjects = {f"{self.prefix}{key}": 1 for key in reply}
         return SimpleNamespace(state=SimpleNamespace(subjects=subjects or None))
 
     async def send(self, key: str, value: bytes = b"v", *, headers: Optional[dict[str, str]] = None) -> None:
-        await self.callback(SimpleNamespace(subject=f"{PREFIX}{key}", data=value, headers=headers))
+        await self.callback(SimpleNamespace(subject=f"{self.prefix}{key}", data=value, headers=headers))
 
     async def delete(self, key: str, operation: str = "DEL") -> None:
         await self.send(key, b"", headers={"KV-Operation": operation})
@@ -228,6 +231,29 @@ async def test_a_key_the_stream_dropped_by_age_is_no_longer_awaited(
 
 
 @pytest.mark.asyncio
+async def test_a_key_dropped_by_age_stops_being_awaited_while_another_key_keeps_changing(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Changes more often than the quiet period must not put off asking the stream again
+    # until the deadline: the waiting between them adds up.
+    monkeypatch.setattr(bucket_reads, "QUIET_SECONDS", 0.05)
+    monkeypatch.setattr(bucket_reads, "FIRST_VALUES_SECONDS", 5.0)
+    js = FakeJetStream(["a", "aged"], ["a"])
+    task = await listing(js)
+
+    async def rewrite_a() -> None:
+        while True:
+            await js.send("a")
+            await asyncio.sleep(0.005)
+
+    writer = asyncio.create_task(rewrite_a())
+    try:
+        assert await asyncio.wait_for(task, 2.0) == ["a"]  # about one quiet period, far from the 5 s deadline
+    finally:
+        writer.cancel()
+    assert len(js.asked) == 2
+
+
+@pytest.mark.asyncio
 async def test_a_key_the_stream_still_holds_is_awaited_after_a_quiet_period(short_waits: pytest.MonkeyPatch) -> None:
     js = FakeJetStream(["a", "slow"])
     task = await listing(js)
@@ -248,7 +274,14 @@ async def test_a_listing_whose_keys_never_arrive_raises_and_unsubscribes(short_w
         await task
     assert (raised.value.bucket, raised.value.awaited, raised.value.received) == (BUCKET, 1, 1)
     assert raised.value.subject == f"{PREFIX}>"
+    assert "waiting for 1 keys (never)" in str(raised.value)
     assert js.subscription.unsubscribed == 1
+
+
+def test_a_timed_out_read_names_the_first_awaited_keys_in_order() -> None:
+    error = BucketReadTimedOut(BUCKET, f"{PREFIX}>", {"g", "f", "e", "d", "c", "b", "a"}, 3)
+    assert "waiting for 7 keys (a, b, c, d, e and 2 more); 3 messages arrived." in str(error)
+    assert error.awaited == 7
 
 
 @pytest.mark.asyncio
@@ -382,3 +415,81 @@ async def test_a_listing_keeps_only_keys_that_start_with_the_prefix() -> None:
     for key in ("team_one.agent-1", "team_one.lead", "team_one.agent-2"):
         await js.send(key)
     assert await task == ["team_one.agent-1", "team_one.agent-2"]
+
+
+# -- StateRecords reads through this module ---------------------------------------------------------------
+
+def agent_records(js: FakeJetStream) -> StateRecords:
+    """StateRecords over the fake; a watch or listing uses neither the identity nor the trust store."""
+
+    return StateRecords(js, lambda: None, None)  # type: ignore[arg-type, return-value]
+
+
+@pytest.mark.asyncio
+async def test_a_state_records_watch_says_caught_up_after_every_held_key_and_gives_deletions_as_none() -> None:
+    js = FakeJetStream(["team_example.lead", "team_example.worker"], bucket="UA1_AGENTS")
+    caught_up = asyncio.Event()
+    seen: list[tuple[str, Optional[bytes]]] = []
+
+    async def read() -> None:
+        async for change in agent_records(js).watch("agent", team="team_example", caught_up=caught_up):
+            seen.append(change)
+
+    task = asyncio.create_task(read())
+    await js.answered.wait()
+    assert js.subscribed[0][0] == "$KV.UA1_AGENTS.>"
+    await js.send("team_example.lead", b"{}")
+    await settle()
+    assert not caught_up.is_set()
+    await js.send("team_example.worker", b"")  # an empty value reads as a deletion, as before
+    await settle()
+    assert caught_up.is_set()
+    await js.delete("team_example.lead")
+    await settle()
+    assert seen == [("team_example.lead", b"{}"), ("team_example.worker", None), ("team_example.lead", None)]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert js.subscription.unsubscribed == 1
+
+
+@pytest.mark.asyncio
+async def test_closing_a_state_records_watch_between_changes_unsubscribes_at_once() -> None:
+    # The watch is suspended at a change it gave, so closing it does not pass through the
+    # inner read; StateRecords.watch closes that one itself (aclosing), so the subscription
+    # goes now instead of whenever the inner generator is collected.
+    js = FakeJetStream(["team_example.lead"], bucket="UA1_AGENTS")
+    changes = agent_records(js).watch("agent", team="team_example")
+    reading = asyncio.ensure_future(anext(changes))
+    await js.answered.wait()
+    await js.send("team_example.lead", b"{}")
+    assert await reading == ("team_example.lead", b"{}")
+    await changes.aclose()
+    assert js.subscription.unsubscribed == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_task_that_reads_a_state_records_watch_unsubscribes_at_once() -> None:
+    js = FakeJetStream(["team_example.lead"], bucket="UA1_AGENTS")
+
+    async def read() -> None:
+        async for _change in agent_records(js).watch("agent", team="team_example"):
+            pass
+
+    task = asyncio.create_task(read())
+    await js.answered.wait()
+    await settle()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert js.subscription.unsubscribed == 1
+
+
+@pytest.mark.asyncio
+async def test_a_state_records_listing_raises_instead_of_reading_a_failed_read_as_empty() -> None:
+    js = FakeJetStream(NatsTimeoutError(), bucket="UA1_PLACEMENT")
+    with pytest.raises(NatsTimeoutError):
+        await agent_records(js).keys("placement", "team_example.", team="team_example")
+    js = FakeJetStream([], bucket="UA1_PLACEMENT")
+    assert await agent_records(js).keys("placement", "team_example.", team="team_example") == []
+    assert js.subscribed[0][0] == "$KV.UA1_PLACEMENT.team_example.>"

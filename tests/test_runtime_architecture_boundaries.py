@@ -943,6 +943,49 @@ def test_the_raw_nats_handle_check_sees_each_way_in(source: str) -> None:
     assert _handle_name(call.func.value) in NATS_CLIENT_NAMES
 
 
+# nats-py's bucket reads that end their first values on the consumer's pending count, which
+# can end them early while other processes write (README_ARCHITECTURE.md "Bucket reads").
+# The product lists and watches buckets only through custom_transport.protocol1.bucket_reads.
+# Only NATS_CLIENT_MODULES can bind a bucket (the raw handle check above), so only they are
+# searched; there an awaited ``keys()`` is a bucket's, never a dictionary's. Elsewhere
+# ``await records.keys(...)`` is StateRecords', which reads through bucket_reads.
+NATS_PY_BUCKET_READS = frozenset({"keys", "watch", "watchall", "history"})
+
+
+def _nats_py_bucket_reads(tree: ast.AST) -> list[ast.Call]:
+    return [node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute) and node.value.func.attr in NATS_PY_BUCKET_READS]
+
+
+def test_buckets_are_listed_and_watched_only_through_bucket_reads() -> None:
+    offenders: list[str] = []
+    for path in _production_python_files():
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if relative in NATS_CLIENT_MODULES:
+            offenders += [f"{relative}:{call.lineno} {call.func.attr}"  # type: ignore[attr-defined]
+                          for call in _nats_py_bucket_reads(tree)]
+        # nats-py raises NoKeysError when its listing ends at the marker with no key; reading
+        # it as an empty bucket was how a listing that ended early became "no keys".
+        offenders += [f"{relative}:{node.lineno} NoKeysError" for node in ast.walk(tree)
+                      if isinstance(node, ast.ImportFrom) and any(alias.name == "NoKeysError" for alias in node.names)]
+    assert offenders == []
+
+
+@pytest.mark.parametrize(("source", "found"), [
+    ("keys = await bucket.keys()", ["keys"]),
+    ("watcher = await (await js.key_value('UA1_AGENTS')).watch('team_one.>')", ["watch"]),
+    ("entries = await self._records().history('host.install_one.lead-host-1.1')", ["history"]),
+    ("everything = await kv.watchall(include_history=True)", ["watchall"]),
+    ("async for key, raw in self.records.watch('host', runtime): pass", []),
+    ("names = sorted(handlers.keys())", []),
+])
+def test_the_bucket_read_check_sees_each_way_in(source: str, found: list[str]) -> None:
+    tree = ast.parse(f"async def read():\n    {source}\n")
+    assert [call.func.attr for call in _nats_py_bucket_reads(tree)] == found  # type: ignore[attr-defined]
+
+
 # Who may write Objective records. A new record is inserted (creation and the
 # team import into a fresh instance); every change to a stored record goes
 # through ``ObjectiveCoordinator.change_objective``, which has the store apply

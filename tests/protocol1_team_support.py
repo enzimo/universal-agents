@@ -21,12 +21,13 @@ from pathlib import Path
 from typing import AsyncIterator, Iterable
 
 import nats
-from nats.js.errors import NoKeysError, NotFoundError
+from nats.js.errors import NotFoundError
 
 from custom_agents.agent_host import AgentProcessHost, lead_host_profile
 from custom_agents.agent_requests import configure_process_host
 from custom_agents.live_controls import EVENT_HANDLERS, LIVE_CONTROL_HANDLERS
 from custom_agents.relayed_task_controls import RELAYED_HANDLERS
+from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
 from docker import message_hosts
@@ -61,11 +62,12 @@ async def _remove_what_the_team_left(nc, installation: str, team: str) -> None:
              "UA1_AGENTS": (f"{team}.",), "UA1_PLACEMENT": (f"{team}.",),
              "UA1_LOCKS": (f"team_services.{team}",)}
     for name, filters in owned.items():
-        with contextlib.suppress(NotFoundError, NoKeysError):
-            bucket = await jetstream.key_value(name)
+        with contextlib.suppress(NotFoundError):  # a bucket this run never created
             # The contract forbids purging bucket streams. Delete only this
             # test's keys with ordinary markers, which keep other teams intact.
-            for key in await bucket.keys():
+            keys = await list_keys(jetstream, name)
+            bucket = await jetstream.key_value(name)
+            for key in keys:
                 if any(key.startswith(prefix) if prefix.endswith(".") else key == prefix for prefix in filters):
                     await bucket.delete(key)
 

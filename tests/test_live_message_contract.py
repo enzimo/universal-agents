@@ -30,7 +30,7 @@ import shutil
 import string
 import subprocess
 import time
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -55,6 +55,7 @@ from custom_messages.wire.partitions import (
 )
 from custom_messages.wire.permissions import HostPlacement, host_permissions
 from custom_messages.wire.refusals import FrameRefused
+from custom_transport.protocol1.bucket_reads import KeyChange, list_keys, watch_keys
 from tests import message_contract_support as fixtures
 from tests.live_nats_support import flush_fully
 from tests.nats_operator_support import NatsUser, OperatorAccount
@@ -958,6 +959,12 @@ async def test_hosts_write_only_their_own_records_and_read_every_bucket(isolated
 
         assert await asyncio.wait_for(first_value(), timeout=2) == b"liveness"
         await watch.stop()
+        # The product reads buckets through bucket_reads, which also asks for the stream's
+        # information under the read's filter: a host's read grants cover that too.
+        assert await list_keys(worker.nc.jetstream(), "UA1_HOSTS") == ["worker-host-1"]
+        async with aclosing(watch_keys(worker.nc.jetstream(), "UA1_HOSTS", "worker-host-1")) as changes:
+            assert await asyncio.wait_for(anext(changes), 2) == KeyChange("worker-host-1", b"liveness")
+            assert await asyncio.wait_for(anext(changes), 2) is None
         # Agent records live under their partition; the host writes those of its own partitions only.
         agents = await worker.nc.jetstream().key_value("UA1_AGENTS")
         await agents.put(agent_record_key(TEAM, "researcher-2", COUNT), b"idle")
@@ -1044,6 +1051,10 @@ async def test_bucket_readers_watch_through_unnamed_consumers_and_read_only_thei
         # It reads its own team's bucket.
         with pytest.raises(nats.js.errors.KeyNotFoundError):
             await (await other.nc.jetstream().key_value("UA1_TEAM_VIEW_team_other")).get("team_other.objective.o9")
+        # The product's listings (bucket_reads) work under each host's own login.
+        assert await list_keys(worker.nc.jetstream(), f"UA1_TEAM_VIEW_{TEAM}", f"{TEAM}.") == [f"{TEAM}.objective.o1"]
+        assert await list_keys(other.nc.jetstream(), "UA1_TEAM_VIEW_team_other") == []
+        assert "worker-host-1" in await list_keys(lead.nc.jetstream(), "UA1_HOSTS")
 
         # The edge adapter keeps peers' copies only; the team services sign sessions of their own installation only.
         for subject in (f"$KV.UA1_CERTS.revocations.{INSTALLATION}", f"$KV.UA1_CERTS.host.{INSTALLATION}.lead-host-1.1",

@@ -73,7 +73,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 import rfc8785
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from nats.js.api import StorageType, StreamConfig
-from nats.js.errors import KeyNotFoundError, NoKeysError, NotFoundError
+from nats.js.errors import KeyNotFoundError, NotFoundError
 from pydantic import ValidationError
 
 from custom_messages.wire.buckets import TEAM_PLACEHOLDER, bucket_name, bucket_stream
@@ -84,6 +84,7 @@ from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import CERTIFICATE, AuthorityKey, HostCertificate, TrustStore, kept_for, sign_state
 from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
+from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.contract_files import transport
 from custom_transport.protocol1.host_keys import AuthorityKeys, HostKeys
 from custom_transport.protocol1.identity import HostIdentity
@@ -315,10 +316,12 @@ class InstallationAuthority:
         return entry.value or None
 
     async def _bucket_keys(self, prefix: str) -> list[str]:
-        try:
-            return [key for key in await (await self._records()).keys() if key.startswith(prefix)]
-        except (NoKeysError, NotFoundError):  # the bucket holds no keys yet
-            return []
+        """Every key in UA1_CERTS that starts with ``prefix``, or an error (``bucket_reads.list_keys``).
+
+        The authority creates the bucket before it reads it, so a missing bucket is an error too.
+        """
+
+        return await list_keys(self._js, CERTIFICATES_BUCKET, prefix)
 
     def _own_record(self, data: bytes, record: str, key: str, now: datetime) -> dict[str, Any]:
         """``data`` as a ``record`` under ``key`` that this authority signed; raises ``FrameRefused`` otherwise.

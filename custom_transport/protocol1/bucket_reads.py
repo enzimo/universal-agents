@@ -27,9 +27,10 @@ the end, which is right either way.
 What can still stop a key from arriving, and what the read does:
 
 - A bucket that drops records by age (``UA1_HOSTS``, ``UA1_AGENTS``) removes a key with
-  no message. When no message arrives for ``QUIET_SECONDS`` while keys are awaited, the
-  read asks the stream again and stops waiting for the keys it no longer holds
-  (``event=bucket_read_keys_expired``).
+  no message. Each time the read has spent ``QUIET_SECONDS`` waiting for messages since
+  it last asked, while keys are still awaited, it asks the stream again and stops waiting
+  for the keys it no longer holds (``event=bucket_read_keys_expired``). The waiting adds
+  up across messages, so other keys that keep changing do not put the question off.
 - After ``FIRST_VALUES_SECONDS`` spent waiting for messages, the read raises
   ``BucketReadTimedOut``. Callers treat a failed read as a failure, never as an empty bucket.
 - The server lists at most ``MAX_SUBJECTS`` subjects in one reply and nats-py reads no
@@ -52,7 +53,7 @@ import logging
 import re
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Collection, Optional
 
 from nats.errors import BadSubscriptionError, ConnectionClosedError, ConnectionDrainingError
 from nats.js.api import DeliverPolicy
@@ -64,11 +65,15 @@ _LOGGER = logging.getLogger(__name__)
 
 # How long a read may wait for messages before its first values have all arrived.
 FIRST_VALUES_SECONDS = 10.0
-# With keys still awaited and no message for this long, ask the stream which it still holds.
+# With keys still awaited, ask the stream which it still holds each time this much waiting has added up.
 QUIET_SECONDS = 1.0
-# Messages waiting for the reader, as nats-py's watch; a full queue holds the server back
-# through the ordered consumer's flow control.
+# Messages handed over by nats-py, kept in order for the reader (the size nats-py's watch uses).
+# It does not hold the server back: nats-py answers the consumer's flow control as messages
+# arrive and keeps what the reader has not taken yet in its own subscription queue, up to its
+# limits per subscription (over 500,000 messages or 256 MiB), far above the product's buckets.
 QUEUE_SIZE = 256
+# How many of the awaited keys a timed-out read names in its error.
+NAMED_KEYS = 5
 # How long the server keeps a watch's consumer after its client stops answering (nats-py's default).
 WATCH_INACTIVE_SECONDS = 300.0
 # nats-server's JSMaxSubjectDetails: a stream information reply lists at most this many subjects.
@@ -82,14 +87,21 @@ _TOKEN_PREFIX = re.compile(r"[-/_=a-zA-Z0-9]+(?:\.[-/_=a-zA-Z0-9]+)*\.")
 
 
 class BucketReadTimedOut(Exception):
-    """A read's first values did not all arrive in time; the bucket's contents are unknown."""
+    """A read's first values did not all arrive in time; the bucket's contents are unknown.
 
-    def __init__(self, bucket: str, subject: str, awaited: int, received: int) -> None:
+    The message names the first ``NAMED_KEYS`` awaited keys in order, so a log shows which
+    records never arrived; ``awaited`` is how many there were.
+    """
+
+    def __init__(self, bucket: str, subject: str, awaited: Collection[str], received: int) -> None:
+        ordered = sorted(awaited)
+        named = ", ".join(ordered[:NAMED_KEYS])
+        more = f" and {len(ordered) - NAMED_KEYS} more" if len(ordered) > NAMED_KEYS else ""
         super().__init__(f"Reading bucket {bucket} ({subject}) timed out after {FIRST_VALUES_SECONDS:g} s "
-                         f"waiting for {awaited} keys; {received} messages arrived.")
+                         f"waiting for {len(ordered)} keys ({named}{more}); {received} messages arrived.")
         self.bucket = bucket
         self.subject = subject
-        self.awaited = awaited
+        self.awaited = len(ordered)
         self.received = received
 
 
@@ -137,19 +149,25 @@ async def watch_keys(js: Any, bucket: str, keys: str = ">", *,
         awaited = await _held_keys(js, bucket, subject)
         loop = asyncio.get_running_loop()
         waited = 0.0  # time spent waiting for messages; the reader's own time between changes does not count
+        asked_at = 0.0  # ``waited`` when the stream was last asked which keys it holds
         received = 0
         while awaited:
-            remaining = FIRST_VALUES_SECONDS - waited
-            if remaining <= 0:
-                raise BucketReadTimedOut(bucket, subject, len(awaited), received)
+            if waited >= min(asked_at + QUIET_SECONDS, FIRST_VALUES_SECONDS):
+                # Asked again at the deadline too, so a key dropped just before it does not fail the read.
+                awaited = await _still_held(js, bucket, subject, awaited)
+                asked_at = waited
+                if awaited and waited >= FIRST_VALUES_SECONDS:
+                    raise BucketReadTimedOut(bucket, subject, awaited, received)
+                continue
             started = loop.time()
             try:
-                message = await asyncio.wait_for(queue.get(), min(QUIET_SECONDS, remaining))
+                message = await asyncio.wait_for(
+                    queue.get(), min(asked_at + QUIET_SECONDS, FIRST_VALUES_SECONDS) - waited)
             except TimeoutError:
-                waited += loop.time() - started
-                awaited = await _still_held(js, bucket, subject, awaited)
-                continue
+                message = None
             waited += loop.time() - started
+            if message is None:
+                continue
             received += 1
             key = message.subject[key_start:]
             awaited.discard(key)
