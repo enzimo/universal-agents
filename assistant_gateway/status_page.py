@@ -33,6 +33,10 @@ Sources, each producing ``StatusFindingV1`` items:
   messages against the account's limit. Nearing the limit is a warning that
   administrators are told about anyway, nearly full a problem; a message
   server that sets no limit is a note;
+- the team's protocol 1 work and dead-letter streams that are filling up
+  (``assistant_gateway.queue_capacity``), each against its own limit: a problem
+  at ``transport.queues.warn_at_percent``. A stream list that fails marks the
+  message server unavailable;
 - people's stored-data totals that the manager stopped measuring
   (``assistant_gateway.storage_usage``), a warning: those people get no
   storage notices meanwhile;
@@ -46,8 +50,15 @@ Sources, each producing ``StatusFindingV1`` items:
 
 A source that cannot be asked is listed in ``unavailable_sources`` and, for
 the broker, shown as a problem: silence must not look like health.
-``notify_new_problems`` sends administrators one Inbox notice per new set of
-problems, linking to the page; the page itself never changes anything. Storage
+``notify_new_problems`` sends administrators one Inbox notice when a check
+finds a problem the previous check did not, linking to the page; the page
+itself never changes anything. The notice lists every current problem, and its
+id is the digest of their ids, so the store never keeps the same notice twice.
+A problem that goes away, or stays while another goes away, sends nothing. The
+previous check's problems are kept in ``InstanceLayout.status_problems_path``
+(``PreviousProblems``), so a restart neither repeats a notice nor forgets one
+is due; while a source cannot be asked, the problems it found before are kept
+too, so they are not announced again once it answers. Storage
 nearing its limit counts as a problem for the notice, although the page shows
 it as a warning: administrators must hear before it fills, not when saving
 fails. Its finding id names the level and when it was entered, never the
@@ -65,14 +76,16 @@ import asyncio
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Iterable, Sequence
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Iterable, Literal, Sequence
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from access_control.people import PERSON_ROLE_ADMIN
 from access_control.person_settings import PersonSettings
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.model_key_endpoints import configured_model_endpoints
+from assistant_gateway.queue_capacity import QueueCapacity
 from assistant_gateway.storage_capacity import StorageCapacity, tells_administrators
 from custom_messages.contracts.access_v2 import (
     AccessNoticeKind,
@@ -97,7 +110,11 @@ from custom_messages.contracts.status_v1 import (
     StatusReportV1,
     StatusSeverity,
 )
-from mcp_control.hosting import HostedMCPLifecycle, MCPHostedServerStore, resolve_mcp_hosting_paths
+from mcp_control.hosting import (
+    HostedMCPLifecycle,
+    MCPHostedServerStore,
+    resolve_mcp_hosting_paths,
+)
 from model_providers.endpoints import (
     EndpointKind,
     display_host,
@@ -119,6 +136,7 @@ LAUNCHER_SOURCE = "launcher"
 GATEWAY_SOURCE = "gateway"
 MESSAGE_SERVER_SOURCE = "message server"
 STORAGE_SOURCE = "storage checks"
+QUEUE_SOURCE = "queue stream checks"
 PERSON_STORAGE_SOURCE = "stored-data totals"
 HOSTED_MCP_SOURCE = "hosted MCP servers"
 # The longest the page waits for the message server's account information.
@@ -131,6 +149,62 @@ async def _no_message_storage() -> None:
 
 async def _no_agent_findings() -> Sequence[StatusFindingV1]:
     return ()
+
+
+async def _no_team_streams() -> None:
+    return None
+
+
+class _PreviousProblemsFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    finding_ids: list[str] = []
+
+
+class PreviousProblems:
+    """The ids of the problems the previous check found, kept in a file so a restart remembers them.
+
+    Bounded by the problems one check can find. Read and written off the gateway's loop.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._ids: frozenset[str] | None = None
+
+    def load(self) -> frozenset[str]:
+        if self._ids is not None:
+            return self._ids
+        self._ids = frozenset()
+        if self._path.is_file():
+            try:
+                self._ids = frozenset(
+                    _PreviousProblemsFile.model_validate_json(self._path.read_text(encoding="utf-8")).finding_ids
+                )
+            except (OSError, ValidationError) as exc:
+                # Starting over announces the current problems once more, unless that very set was announced.
+                LOGGER.warning(
+                    "The record of the Status page's previous problems is unreadable, so it starts over. "
+                    "event=status_problems_unreadable path=%s error=%s",
+                    self._path,
+                    exc,
+                )
+        return self._ids
+
+    def save(self, ids: frozenset[str]) -> None:
+        from custom_agents.governance.authorized_operations import atomic_write_bytes
+
+        self._ids = ids
+        content = _PreviousProblemsFile(finding_ids=sorted(ids)).model_dump_json(indent=2) + "\n"
+        try:
+            atomic_write_bytes(self._path, content.encode("utf-8"))
+        except OSError as exc:
+            # Kept in memory meanwhile; after a restart the current problems may be announced once more.
+            LOGGER.warning(
+                "Could not save the Status page's previous problems. event=status_problems_unsaved path=%s error=%s",
+                self._path,
+                exc,
+            )
 
 
 class StatusPage:
@@ -147,6 +221,8 @@ class StatusPage:
         stopped_receivers: Callable[[], Sequence[Any]] = lambda: (),
         storage: StorageCapacity | None = None,
         jetstream_usage: Callable[[], Awaitable[Any]] = _no_message_storage,
+        queues: QueueCapacity | None = None,
+        team_streams: Callable[[], Awaitable[Any]] = _no_team_streams,
         person_storage_totals: Callable[[], StatusFindingV1 | None] = lambda: None,
         team_findings: Callable[[], Sequence[StatusFindingV1]] = lambda: (),
         agent_findings: Callable[[], Awaitable[Sequence[StatusFindingV1]]] = _no_agent_findings,
@@ -163,6 +239,11 @@ class StatusPage:
         # the gateway always gives it, a test may leave it out.
         self.storage = storage
         self._jetstream_usage = jetstream_usage
+        # The team's queue streams against their own limits (assistant_gateway.queue_capacity), and
+        # the stream list it reads (GatewayManagerRuntime.team_streams); the gateway gives both.
+        self.queues = queues
+        self._team_streams = team_streams
+        self._previous_problems = PreviousProblems(config.layout.status_problems_path)
         # Out-of-date totals behind people's storage notices (storage_usage.StorageUsageNotices.stale_finding).
         self._person_storage_totals = person_storage_totals
         # The gateway's own judgement of the team from its records, and the agents' own findings
@@ -183,6 +264,7 @@ class StatusPage:
         findings.extend(await asyncio.to_thread(self._person_findings, unavailable))
         findings.extend(self._configuration_findings())
         findings.extend(await self._storage_findings(unavailable))
+        findings.extend(await self._queue_findings(unavailable))
         findings.extend(await asyncio.to_thread(self._person_storage_findings, unavailable))
         findings.extend(await asyncio.to_thread(self._hosted_mcp_findings, unavailable))
         # Last: ``_unique`` keeps the first finding per id, so an agent cannot hide the gateway's own (review F17).
@@ -192,16 +274,29 @@ class StatusPage:
         )
 
     async def notify_new_problems(self) -> None:
-        """One Inbox notice to administrators per set of findings they must hear about (the set's digest is the notice id).
+        """One Inbox notice to administrators when a check finds a problem the previous check did not.
 
-        Those are the problems, and storage nearing its limit
-        (``storage_capacity.tells_administrators``).
+        Administrators must hear about the problems and about storage nearing its limit
+        (``storage_capacity.tells_administrators``). The notice lists every current one,
+        and its id is the digest of their ids, so the store keeps no notice twice: not
+        after a restart between storing a notice and saving this check's problems, nor
+        when a set announced before comes back. A notice that could not be stored raises
+        before this check's problems are saved, so the next check tries again.
         """
 
         report = await self.report()
         problems = [item for item in report.findings if _tells_administrators(item)]
-        if not problems:
-            return
+        current = frozenset(item.finding_id for item in problems)
+        previous = await asyncio.to_thread(self._previous_problems.load)
+        if current - previous:
+            await self._send_problems_notice(problems, new=current - previous)
+        # A source that could not be asked hides its problems for this check only: keep them, so
+        # they are not announced again when it answers.
+        remembered = current | previous if report.unavailable_sources else current
+        if remembered != previous:
+            await asyncio.to_thread(self._previous_problems.save, remembered)
+
+    async def _send_problems_notice(self, problems: Sequence[StatusFindingV1], *, new: frozenset[str]) -> None:
         digest = hashlib.sha256("\n".join(sorted(item.finding_id for item in problems)).encode("utf-8")).hexdigest()
         stored = await asyncio.to_thread(
             self._send_notice_once,
@@ -218,8 +313,10 @@ class StatusPage:
         )
         if stored:
             LOGGER.warning(
-                "Told administrators about problems on the Status page. event=status_problems_notice problems=%s",
+                "Told administrators about problems on the Status page. event=status_problems_notice problems=%s "
+                "new=%s",
                 ",".join(item.finding_id for item in problems),
+                ",".join(sorted(new)),
             )
 
     async def run(self, stop_event: asyncio.Event, *, first_check_after: Sequence[asyncio.Task[Any]] = ()) -> None:
@@ -390,6 +487,30 @@ class StatusPage:
         except Exception:  # noqa: BLE001 - listed as unavailable; the rest of the page still shows
             LOGGER.exception("The storage checks failed. event=status_storage_check_failed")
             unavailable.append(STORAGE_SOURCE)
+            return []
+
+    async def _queue_findings(self, unavailable: list[str]) -> list[StatusFindingV1]:
+        if self.queues is None:
+            return []
+        try:
+            listed = await asyncio.wait_for(self._team_streams(), timeout=MESSAGE_SERVER_TIMEOUT_SECONDS)
+        except Exception as exc:  # noqa: BLE001 - listed as unavailable, never shown as healthy
+            LOGGER.warning(
+                "The message server did not list the team's streams. event=status_queue_streams_unreadable team=%s "
+                "error=%s",
+                self.queues.team,
+                str(exc) or type(exc).__name__,
+            )
+            if MESSAGE_SERVER_SOURCE not in unavailable:
+                unavailable.append(MESSAGE_SERVER_SOURCE)
+            return []
+        if listed is None:  # the gateway uses no JetStream here, as for the stored messages
+            return []
+        try:
+            return await asyncio.to_thread(self.queues.findings, listed)
+        except Exception:  # noqa: BLE001 - listed as unavailable; the rest of the page still shows
+            LOGGER.exception("The queue stream checks failed. event=status_queue_check_failed team=%s", self.queues.team)
+            unavailable.append(QUEUE_SOURCE)
             return []
 
     def _person_storage_findings(self, unavailable: list[str]) -> list[StatusFindingV1]:

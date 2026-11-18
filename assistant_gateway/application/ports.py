@@ -114,6 +114,9 @@ class GatewayManagerRuntime(GatewayManagerTransport, Protocol):
     async def jetstream_usage(self) -> Any:
         """The messaging account's stored messages and limits, or None when it keeps none (Status page)."""
 
+    async def team_streams(self, team: str) -> Any:
+        """The team's protocol 1 streams with their limits and sizes, or None without JetStream (Status page)."""
+
     async def put_object(
         self,
         *,

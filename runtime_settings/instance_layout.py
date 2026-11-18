@@ -17,8 +17,9 @@ Docker). The root is split by who may touch each area:
     records of published pages (which folder, whose, and the SHA-256 of each
     file), model failover state, diagnostics, execution artifacts, and the
     folders of people removed from the team, held until they are restored or
-    purged (``held_people/``, ``access_control.held_person_folders``), and
-    when storage warning levels were entered (``storage_levels.json``).
+    purged (``held_people/``, ``access_control.held_person_folders``), when
+    storage warning levels were entered (``storage_levels.json``), and the
+    problems the Status page's previous check found (``status_problems.json``).
     Trusted maintenance deletes old offloaded tool results here, and old
     conversation artifacts in ``dbs/`` (``custom_agents.output_retention``).
 ``workspaces/``
@@ -695,6 +696,15 @@ class InstanceLayout:
         restart neither repeats an administrators' notice nor forgets one."""
 
         return self.state_dir / "storage_levels.json"
+
+    @property
+    def status_problems_path(self) -> Path:
+        """The problems the Status page's previous check found, by finding id.
+
+        Written by the gateway (assistant_gateway.status_page), so administrators get a notice
+        only for a problem the previous check did not find, after a restart too."""
+
+        return self.state_dir / "status_problems.json"
 
     @property
     def attachment_copies_dir(self) -> Path:

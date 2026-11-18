@@ -231,6 +231,25 @@ class JetStreamAccountUsage:
     max_memory: int | None
 
 
+# The stream list request: every stream with its configuration and state, up to 256 a page.
+STREAM_LIST_SUBJECT = "$JS.API.STREAM.LIST"
+# The longest one page of the stream list may take to arrive.
+STREAM_LIST_TIMEOUT_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class JetStreamStreamUsage:
+    """One stream's byte limit and what it stores, as the stream list reports them (metadata only).
+
+    ``max_bytes`` is None when the stream has no byte limit (the server reports -1).
+    """
+
+    name: str
+    max_bytes: int | None
+    stored_bytes: int
+    messages: int
+
+
 def _positive_limit(value: Any) -> int | None:
     """A JetStream account limit, or None for "no limit" (-1) and "not allowed here" (0)."""
 
@@ -658,6 +677,42 @@ class NatsTransportAdapter:
             max_storage=_positive_limit(getattr(limits, "max_storage", None)),
             max_memory=_positive_limit(getattr(limits, "max_memory", None)),
         )
+
+    async def jetstream_streams(self, *, subject: str) -> Optional[list[JetStreamStreamUsage]]:
+        """Each stream with a subject that overlaps ``subject``, its byte limit and what it stores.
+
+        For the gateway's size warning (``assistant_gateway.queue_capacity``): one stream list
+        request (``$JS.API.STREAM.LIST``, the size check's grant in the message contract) per
+        256 streams, metadata only, never a message. None while JetStream is not in use here;
+        a server that does not answer, or answers with an error, raises, so the Status page can
+        say the message server is unavailable.
+        """
+
+        if self._js is None or self._nc is None:
+            return None
+        from nats.js.errors import APIError
+
+        streams: list[JetStreamStreamUsage] = []
+        while True:
+            request = json.dumps({"subject": subject, "offset": len(streams)}).encode()
+            reply = json.loads(
+                (await self._nc.request(STREAM_LIST_SUBJECT, request, timeout=STREAM_LIST_TIMEOUT_SECONDS)).data
+            )
+            if "error" in reply:
+                APIError.from_error(reply["error"])  # raises the error's kind
+            page = reply.get("streams") or []
+            for item in page:
+                config, state = item.get("config") or {}, item.get("state") or {}
+                streams.append(
+                    JetStreamStreamUsage(
+                        name=str(config.get("name", "")),
+                        max_bytes=_positive_limit(config.get("max_bytes")),
+                        stored_bytes=int(state.get("bytes") or 0),
+                        messages=int(state.get("messages") or 0),
+                    )
+                )
+            if not page or len(streams) >= int(reply.get("total") or 0):
+                return streams
 
     async def worker_queue_state(self, named_agent_type: str) -> Optional[ConsumerQueueState]:
         """Waiting tasks, idle workers asking, and handed-out tasks; None if absent."""

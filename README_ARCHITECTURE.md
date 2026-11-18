@@ -4358,11 +4358,21 @@ MCP servers that do not load, degraded memory search, skill refresh errors,
 schedules for administrators, receive loops that stopped, and knowledge too long
 to open in Web Chat, which only the team lead counts, at most every ten minutes and
 in a thread of its own, `custom_agents/long_knowledge.py`), whether TeamLead
-reports, its own configuration and receive loops, and storage filling up
-(`assistant_gateway/storage_capacity.py`). A source that does not answer is listed and shown as a
+reports, its own configuration and receive loops, storage filling up
+(`assistant_gateway/storage_capacity.py`), and the team's message streams
+filling up (`assistant_gateway/queue_capacity.py`). A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
-gateway sends administrators one Inbox notice per new set of problems
-(`status_problems`), linking to the page. A notice records what
+gateway checks, and sends administrators one Inbox notice (`status_problems`),
+linking to the page, when the check finds a problem the previous check did
+not. The notice lists every current problem, and its id is the digest of
+their ids, so the store never keeps the same notice twice. A problem that goes
+away, or stays while another goes away, sends nothing. The previous check's
+problem ids are kept in `state/status_problems.json` (`PreviousProblems`), so
+a restart neither repeats nor forgets a notice, and while a source cannot be
+asked the problems it found before stay remembered, so they are not
+announced again when it answers. Why: with a notice per new set, one full
+stream draining while another stayed full sent a notice repeating the one
+still full. A notice records what
 administrators were told and stays when its problems go away, so the first
 check after a start waits for the gateway's onboarding key hand-over
 (`StatusPage.run`, `assistant_gateway/onboarding_account_keys.py`). Checked
@@ -4400,12 +4410,30 @@ the findings' details. The bundled NATS server sets no JetStream limit
 none; the page then shows a note with the stored size instead of inventing a
 limit. Without `max_file_store` the server itself stops storing at three
 quarters of the disk space that was free when it started. The percentage
-counts bytes stored, not the space streams reserve, which the account
-information does not report, and the finding says so. An account limit must
-leave room for the streams' own reservations: the server refuses to create
-the dead-letter stream (64 MB) in an account allowed less. People's
+counts bytes stored, not the space streams set aside, and the finding says
+so: every stream sets its whole byte limit aside when it is created, each
+team's protocol 1 work and dead-letter streams about 2.1 GiB at the default
+`transport.queues.max_bytes` and the 0.9 dead-letter stream 64 MB, and the
+server refuses a new or changed stream in an account allowed less (the
+authority checks before it creates any, `installation_authority/queues.py`). People's
 stored-data totals that the manager stopped measuring are a warning on the
 page too (`StorageUsageNotices.stale_finding`).
+
+Queue stream findings (`assistant_gateway/queue_capacity.py`) exist because a
+full work or dead-letter stream refuses new messages (`discard: new`):
+senders keep refused work and send it again until it expires, and receivers
+hold what they would set aside. On each check the gateway lists its team's
+streams in one stream list request filtered to `ua.v1.<team>.>`
+(`$JS.API.STREAM.LIST`, `NatsTransportAdapter.jetstream_streams`, metadata
+only) and measures each work and dead-letter stream the contract names for
+the team against its own limit. At `transport.queues.warn_at_percent` (80 by
+default) a stream is a problem whose id names the stream and when it entered
+the level (`queue_filling:UA1_PART_team_a~7:20261118T120000Z`). When it
+entered is kept with the storage levels, through the storage check's own
+`StorageLevels` object (each object holds and rewrites the whole file, so two
+would overwrite each other), and the level ends three points below its
+threshold. A stream list that fails marks the message server unavailable.
+Each gateway checks only its own team.
 
 ### Knowledge page
 

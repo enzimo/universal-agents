@@ -1275,10 +1275,12 @@ room: see "Control messages share their stream's room" below. These settings are
   (`$JS.API.INFO`), and
   its grants add one list of every stream with its limit and current size
   (`$JS.API.STREAM.LIST`): two lines whatever the number of teams and partitions, metadata
-  only, never a message. It checks every work and dead-letter stream every minute, and when a stream first holds more than `transport.queues.warn_at_percent`
-  of its limit (80 by default), administrators get one Inbox notice and the Status page
-  shows a problem; the warning ends only once the stream falls a release margin below that
-  level, so a stream hovering at the level does not send a notice on every crossing. The
+  only, never a message. Each gateway checks its own team's work and dead-letter streams
+  with the Status page's check, every five minutes (`assistant_gateway.queue_capacity`), and
+  when a stream first holds `transport.queues.warn_at_percent` of its limit (80 by default),
+  administrators get one Inbox notice and the Status page shows a problem; the warning ends
+  only once the stream falls a release margin (3 percentage points) below that level, so a
+  stream hovering at the level does not send a notice on every crossing. The
   setting is a transport setting, not a level of `gateway.storage_warnings`, because it
   measures a stream against its own limit rather than a disk or the server's storage.
 

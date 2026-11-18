@@ -453,8 +453,20 @@ Other disks and the message server still show their results.
 The bundled NATS server sets no limit for stored messages, so the page notes
 how much they take instead of a percentage; they are on the instance's disk.
 When a server does set a limit for the account, the percentage counts the
-bytes stored, not the space its streams reserve, so leave room for those
-reservations (64 MB for set-aside messages).
+bytes stored, not the space its streams set aside. Every stream sets its
+whole limit aside when it is created: each team's message streams about
+2.1 GiB at the default `transport.queues.max_bytes`, plus 64 MB for set-aside
+messages. Leave room for those.
+
+Each of the team's message streams also has a limit of its own. When one
+holds `transport.queues.warn_at_percent` of its limit (80 by default), Status
+shows a problem naming the team, what the stream holds and the setting to
+raise, and administrators get one Inbox notice. The warning ends once the
+stream falls 3 percentage points below that level.
+
+Administrators get a Status notice only when a check finds a problem the
+previous check did not. A problem that goes away, or stays while another one
+goes away, sends nothing.
 
 ### Upgrading from the single workspace folder
 

@@ -9,13 +9,19 @@ from assistant_gateway.application.ports import GatewayManagerEnvelopeHandler
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.enums import RoutingType
+from custom_messages.wire.frame import SUBJECT_ROOT
 from custom_transport.base import (
     DeliveryHandler,
     InboundDelivery,
     SubscriptionDelivery,
     TransportPublishOptions,
 )
-from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAdapter, NatsTransportConfig
+from custom_transport.nats_adapter import (
+    JetStreamAccountUsage,
+    JetStreamStreamUsage,
+    NatsTransportAdapter,
+    NatsTransportConfig,
+)
 from custom_transport.subjects import NatsSubjectMapper
 
 if TYPE_CHECKING:
@@ -231,6 +237,16 @@ class NatsGatewayManagerRuntime:
         if not self._connected or not self.settings.jetstream_enabled:
             return None
         return await self._adapter.jetstream_account_usage()
+
+    async def team_streams(self, team: str) -> list[JetStreamStreamUsage] | None:
+        """The streams of ``team``'s protocol 1 subjects with their limits and sizes (the size warning).
+
+        None while not connected or without JetStream.
+        """
+
+        if not self._connected or not self.settings.jetstream_enabled:
+            return None
+        return await self._adapter.jetstream_streams(subject=f"{SUBJECT_ROOT}{team}.>")
 
     @staticmethod
     def _delivery_handler(
