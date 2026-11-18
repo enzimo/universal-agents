@@ -9,7 +9,9 @@ installation authority vouches for them (``installation_authority``,
    since nothing the old key signed can be checked any more;
 2. creates any missing key: the authority's, and each host's it starts;
 3. writes the list of hosts the authority approves without asking anyone, with their
-   public keys (``expected-hosts.json``), and the bootstrap bundle's authority keys;
+   public keys (``expected-hosts.json``), and the bootstrap bundle's authority keys and the
+   installation's partition count (``transport.queues.partitions``), which every host's trust
+   store takes from the bundle;
 4. starts the installation authority once NATS and the team's message streams are ready,
    and waits until the bundle carries its certificate and a fresh revocations record, so
    every later host can join (a join that comes before the authority serves waits for it);
@@ -21,9 +23,9 @@ installation authority vouches for them (``installation_authority``,
 A process that is not ready in time, or whose wait ends any other way (Ctrl+C included),
 is stopped and waited for, so nothing a failed start began is left running.
 ``MessageServices`` does steps 3 to 5 at launch and again on a restart of everything (the
-configuration editor's restart): it writes the expected hosts from the saved configuration
-as it is then, so a raised limit takes effect, and the restarted authority and team
-services read the saved settings again.
+configuration editor's restart): it writes the expected hosts and the partition count from
+the saved configuration as it is then, so a raised limit takes effect, and the restarted
+authority and team services read the saved settings again.
 
 Keys are files only their owner can read; each process is given only its own folder
 (``runtime_settings.instance_layout``). A process the launcher stops listing loses
@@ -91,8 +93,14 @@ def _installation_id(layout: InstanceLayout) -> str:
     return installation
 
 
-def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, ExpectedHost] | None = None) -> str:
-    """Keys, the expected hosts and the bundle's authority keys; returns the installation id."""
+def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, ExpectedHost] | None = None, *,
+                               partitions: int) -> str:
+    """Keys, the expected hosts, and the bundle's authority keys and partition count; returns the installation id.
+
+    ``partitions`` is the saved ``transport.queues.partitions``. The count is fixed when the
+    installation is created; a changed setting is written as it is and logged, and the
+    installation authority refuses to start when the team's streams were made with another.
+    """
 
     layout.trust_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     installation = _installation_id(layout)
@@ -110,10 +118,15 @@ def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, Expec
         existing: Optional[BootstrapBundle] = read_bundle(layout.trust_bootstrap_path)
     except BootstrapError:
         existing = None
-    if existing is None or existing.authority_keys != keys or existing.installation != installation:
+    # The records of another installation's bundle are not kept: its key signed none of them.
+    kept = existing if existing is not None and existing.installation == installation else None
+    if kept is not None and kept.partitions not in (None, partitions):
+        LOGGER.warning("The partition count in the saved settings differs from the one the message hosts used. "
+                       "event=partition_count_changed setting=transport.queues.partitions previous=%s count=%s",
+                       kept.partitions, partitions)
+    if kept is None or kept.authority_keys != keys or kept.partitions != partitions:
         write_bundle(layout.trust_bootstrap_path,
-                     BootstrapBundle(installation, keys, existing.records if existing and existing.installation == installation
-                                     else ()))
+                     BootstrapBundle(installation, keys, kept.records if kept else (), partitions=partitions))
     return installation
 
 
@@ -265,8 +278,9 @@ class MessageServices:
     """The installation authority and the team services, which every other message host needs.
 
     ``start`` writes the trust folder with ``hosts()``, the hosts the launcher starts as
-    the saved configuration lists them now, then starts the authority and the team services
-    in that order, each once the one before is ready. A restart of everything stops the
+    the saved configuration lists them now, and ``partitions()``, the saved partition count,
+    then starts the authority and the team services in that order, each once the one before
+    is ready. A restart of everything stops the
     other processes, then ``stop`` stops the team services and the authority, and ``start``
     runs again with each environment's copies of saved settings recomputed
     (``environment``), before the other processes start again (plan 13B.2).
@@ -274,6 +288,7 @@ class MessageServices:
 
     layout: InstanceLayout
     hosts: Callable[[], Mapping[str, ExpectedHost]]
+    partitions: Callable[[], int]
     authority_command: list[str]
     authority_env: Mapping[str, str]
     team_services_command: list[str]
@@ -290,7 +305,7 @@ class MessageServices:
         ``ValueError`` when the trust folder or the saved configuration cannot be read.
         """
 
-        prepare_message_host_trust(self.layout, self.hosts())
+        prepare_message_host_trust(self.layout, self.hosts(), partitions=self.partitions())
         self.authority = start_installation_authority(self.layout, self.authority_command,
                                                       environment(self.authority_env, AUTHORITY_NAME), cwd=self.cwd,
                                                       stop_requested=stop_requested)

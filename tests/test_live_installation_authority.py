@@ -25,7 +25,7 @@ from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.buckets import TEAM_PLACEHOLDER, bucket_name, bucket_stream
 from custom_messages.wire.frame import Receiver, reply_audience, sign_frame, verify_frame
-from custom_messages.wire.kinds import CONTRACT_SHA256
+from custom_messages.wire.kinds import CONTRACT_SHA256, DEFAULT_PARTITION_COUNT
 from custom_messages.wire.models import Frame
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import kept_for, sign_state
@@ -79,7 +79,8 @@ def prepare(layout: InstanceLayout, *others: HostProfile) -> host_keys.HostKeys:
     authority, _ = host_keys.ensure_authority_keys(layout, INSTALLATION)
     host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
     list_hosts(layout, WORKER, *others)
-    write_bundle(layout.trust_bootstrap_path, BootstrapBundle(INSTALLATION, ((authority.key_id, authority.public_key_text),)))
+    write_bundle(layout.trust_bootstrap_path, BootstrapBundle(INSTALLATION, ((authority.key_id, authority.public_key_text),),
+                                                              partitions=DEFAULT_PARTITION_COUNT))
     return host_keys.load_host_keys(layout, WORKER.runtime)
 
 
@@ -113,7 +114,8 @@ async def connect(stack: AsyncExitStack, url: str, runtime: str):
 
 async def start_authority(stack: AsyncExitStack, url: str, layout: InstanceLayout, **options) -> InstallationAuthority:
     authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
-                                      host_keys.load_host_keys(layout, AUTHORITY_RUNTIME), **options)
+                                      host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
+                                      **{"partitions": DEFAULT_PARTITION_COUNT, **options})
     await authority.start(await connect(stack, url, AUTHORITY_RUNTIME), teams=[TEAM])
     return authority
 
@@ -546,7 +548,8 @@ async def test_an_authority_that_verified_no_revocations_record_does_not_start(b
         settings["storage"] = StorageType.FILE
         await nc.jetstream().add_stream(config=StreamConfig(**settings))
         authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
-                                          host_keys.load_host_keys(layout, AUTHORITY_RUNTIME))
+                                          host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
+                                          partitions=DEFAULT_PARTITION_COUNT)
         now = utc_now()
         record = forged(authority.revocations_record(sequence=int(now.timestamp() * 1000), revocation_epoch=1, entries=[],
                                                      issued=now))
@@ -623,7 +626,8 @@ async def test_the_launcher_starts_the_real_authority_and_a_listed_host_joins(br
     expected = {WORKER.runtime: ExpectedHost(WORKER.runtime, worker_keys.key_id, worker_keys.public_key_text,
                                              frozenset(WORKER.roles), frozenset(WORKER.teams), frozenset(WORKER.agent_types),
                                              WORKER.session_limit)}
-    installation = message_hosts.prepare_message_host_trust(layout, expected)
+    installation = message_hosts.prepare_message_host_trust(layout, expected,
+                                                            partitions=config.transport.queues.partitions)
     env = {key: value for key, value in os.environ.items() if not key.startswith("NATS_")}
     env["NATS_URL"] = broker
     repo = Path(__file__).resolve().parents[1]
@@ -657,6 +661,7 @@ async def test_the_lead_host_asks_for_the_catalogs_agent_types_and_a_new_type_ge
     async with AsyncExitStack() as stack:
         authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
                                           host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
+                                          partitions=DEFAULT_PARTITION_COUNT,
                                           catalog_agent_types=lambda: frozenset(catalog))
         await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
         lead_nc = await connect(stack, broker, "lead")
@@ -703,6 +708,7 @@ async def test_a_type_removed_from_the_catalog_does_not_stop_the_lead_host_joini
     async with AsyncExitStack() as stack:
         authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
                                           host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
+                                          partitions=DEFAULT_PARTITION_COUNT,
                                           catalog_agent_types=lambda: frozenset(catalog))
         await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
         profile = HostProfile("lead", (TEAM,), ("lead_host", "worker_host"), ("Researcher", "TeamArchitect", "Writer"), 8)

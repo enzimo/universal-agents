@@ -27,6 +27,7 @@ from custom_agents.agent_host import AgentProcessHost, lead_host_profile
 from custom_agents.agent_requests import configure_process_host
 from custom_agents.live_controls import EVENT_HANDLERS, LIVE_CONTROL_HANDLERS
 from custom_agents.relayed_task_controls import RELAYED_HANDLERS
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
 from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
 from docker import message_hosts
@@ -81,8 +82,9 @@ async def protocol1_team(tmp_path: Path, team_id: str, agent_types: Iterable[str
     async with AsyncExitStack() as stack:
         hosts = {profile.runtime: message_hosts.expected_host(layout, profile)
                  for profile in (services_profile, lead_profile)}
-        installation = message_hosts.prepare_message_host_trust(layout, hosts)
-        authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME))
+        installation = message_hosts.prepare_message_host_trust(layout, hosts, partitions=DEFAULT_PARTITION_COUNT)
+        authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
+                                          partitions=DEFAULT_PARTITION_COUNT)
         authority_nc = await _connect(stack, AUTHORITY_RUNTIME)
         await authority.start(authority_nc, teams=[team_id])
         services = MessageHost(layout, services_profile, await _connect(stack, TEAM_SERVICES_RUNTIME))

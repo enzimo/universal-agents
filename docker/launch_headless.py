@@ -3168,6 +3168,7 @@ def main() -> int:
     message_services = MessageServices(
         config.layout,
         lambda: message_hosts_to_approve(GatewayInstanceConfig.load_for_process(config_path), startup_agent_commands),
+        lambda: GatewayInstanceConfig.load_for_process(config_path).transport.queues.partitions,
         build_installation_authority_command(config_path, repo_root=REPO_ROOT),
         environment_for(PROCESS_INSTALLATION_AUTHORITY, inherited_env, renamed=renamed_secrets),
         build_team_services_command(config_path, repo_root=REPO_ROOT),

@@ -2599,7 +2599,7 @@ def test_a_join_of_another_contract_is_still_checked_for_its_signature_time_and_
 def test_the_generated_code_names_the_contract_digest() -> None:
     record = json.loads((CONTRACT / "generated" / "compatibility.json").read_text(encoding="utf-8"))
     assert kinds.CONTRACT_SHA256 == record["contract_sha256"]
-    assert wire_trust.TrustStore("install_example", []).contract_sha256 == kinds.CONTRACT_SHA256
+    assert wire_trust.TrustStore("install_example", [], partition_count=96).contract_sha256 == kinds.CONTRACT_SHA256
 
 
 def test_a_certificate_names_its_connection_class_and_a_remote_hosts_tools() -> None:
@@ -3860,7 +3860,7 @@ def test_frame_omission_is_preserved_and_null_is_not_an_absent_value() -> None:
     b'{"text":"\\ud800"}',
 ])
 def test_hostile_json_is_refused_before_key_lookup(data: bytes) -> None:
-    assert refusal(data, signed_example(), trust=TrustStore("install_example", [])).code == "malformed"
+    assert refusal(data, signed_example(), trust=TrustStore("install_example", [], partition_count=96)).code == "malformed"
 
 
 def test_str_naive_times_and_foreign_trust_stores_are_programming_errors() -> None:
@@ -3874,7 +3874,7 @@ def test_str_naive_times_and_foreign_trust_stores_are_programming_errors() -> No
     with pytest.raises(ValueError, match="time zone"):
         verify_frame(data, **dict(arguments, now=fixtures.NOW.replace(tzinfo=None)))
     with pytest.raises(ValueError, match="installation"):
-        verify_frame(data, **dict(arguments, trust=TrustStore("install_peer", [])))
+        verify_frame(data, **dict(arguments, trust=TrustStore("install_peer", [], partition_count=96)))
     assert verify_frame(bytearray(data), **arguments).frame.message_id == frame["message_id"]
 
 
@@ -3893,7 +3893,7 @@ def test_nesting_limit_counts_containers_but_not_escaped_string_content() -> Non
 def test_impossible_calendar_times_are_malformed_before_authentication(field: str) -> None:
     frame = signed_example()
     frame[field] = "2026-02-30T04:30:00.000Z"
-    refused = refusal(fixtures.resign(frame), frame, trust=TrustStore("install_example", []))
+    refused = refusal(fixtures.resign(frame), frame, trust=TrustStore("install_example", [], partition_count=96))
     assert (refused.code, refused.at) == ("malformed", f"/{field}")
 
 

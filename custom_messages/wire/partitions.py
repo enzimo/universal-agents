@@ -8,7 +8,9 @@ the partition computed here is the stream NATS stores the agent's messages in. H
 whole partitions, and the keys of agent records and partition ownership records name them.
 
 The count is fixed when an installation is created (``transport.queues.partitions``, default
-``DEFAULT_PARTITION_COUNT``). Until the step that adds that setting, callers use the default.
+``DEFAULT_PARTITION_COUNT``). The launcher writes it into the bootstrap bundle, and every
+host computes with its trust store's count (``TrustStore.partition_count``); the defaults
+below serve tests and tools that work with the contract's default.
 
 The arrival suffix: a frame's signed ``subject`` is the unmapped one, so a receiver of a
 mapped address takes the partition token off the subject the frame arrived on, after checking

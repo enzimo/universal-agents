@@ -793,8 +793,10 @@ count is the installation setting `transport.queues.partitions` (`partitions` in
 `transport.yaml`): 96 unless chosen otherwise, at most 128 ("Credential size"), and fixed when
 the installation is created, because another count would put every queued message in another
 stream; changing it needs an upgrade that drains the queues. Every process of an installation
-uses the same count: its trust store holds it, and agent record keys and the arrival check
-below are computed with it.
+uses the same count: the launcher writes the saved setting into the bootstrap bundle every
+host starts from ("Starting a host"), each host's trust store takes it from there, and agent
+record keys and the arrival check below are computed with it. The installation authority
+refuses to start when its own setting and the bundle's count differ.
 - **The mapping.** The installation's NATS account maps three addresses, an agent's inbox
   (`work.agent.<agent>`), its control queue (`work.control.<agent>`) and its live control
   address (`ctl.agent.<agent>`), to the same subject with one more token, the agent's
@@ -1505,6 +1507,7 @@ Joining an installation and renewing a certificate use the address `ua.v1._insta
 
 **Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it. The bundle holds:
 - the installation's authority keys;
+- the installation's partition count ("Partitions"), which the host's trust store takes; a host does not start from a bundle without one, since another count would put its agents' records and queues where other hosts do not look;
 - the certificates of the installation authority's hosts, so the host can check the authority's replies before it has a certificate of its own, and the installation's revocations record. The authority's replies need no current record, so a bundle older than a day still lets the host join; the host reads the current record before it accepts other hosts' frames;
 - the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`, with its private NATS key, so a bundle is a secret and reaches the host privately. With it the host can publish its own installation requests and read the replies under `_INBOX.<runtime>.join.`, and nothing else; it ends after the credential lifetime, so a bundle that waits longer is made again. Of those requests only a join can succeed: a renewal needs a certificate the host does not have yet (`unknown_key`).
 

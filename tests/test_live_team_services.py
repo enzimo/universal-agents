@@ -20,7 +20,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from custom_messages.wire.encoding import format_timestamp
-from custom_messages.wire.kinds import PROTOCOL
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, PROTOCOL
 from custom_messages.wire.trust import sign_state
 from custom_transport.protocol1.host_keys import ensure_host_keys, load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
@@ -60,8 +60,9 @@ async def installation(stack: AsyncExitStack, url: str, layout: InstanceLayout, 
     """What the launcher does: keys, the expected hosts, then a running authority."""
 
     hosts = {profile.runtime: message_hosts.expected_host(layout, profile) for profile in profiles}
-    message_hosts.prepare_message_host_trust(layout, hosts)
-    authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME))
+    message_hosts.prepare_message_host_trust(layout, hosts, partitions=DEFAULT_PARTITION_COUNT)
+    authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
+                                      partitions=DEFAULT_PARTITION_COUNT)
     await authority.start(await connect(stack, url, AUTHORITY_RUNTIME), teams=[TEAM])
 
 

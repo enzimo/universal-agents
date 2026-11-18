@@ -30,13 +30,14 @@ from team_services import serving
 
 def test_the_first_start_makes_the_keys_the_bundle_and_the_list(tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path)
-    installation = message_hosts.prepare_message_host_trust(layout)
+    installation = message_hosts.prepare_message_host_trust(layout, partitions=96)
     assert installation.startswith("ua-")
     authority = load_authority_keys(layout)
     assert authority.installation == installation
     assert load_host_keys(layout, AUTHORITY_RUNTIME).runtime == AUTHORITY_RUNTIME
     bundle = read_bundle(layout.trust_bootstrap_path)
     assert (bundle.installation, bundle.authority_keys) == (installation, ((authority.key_id, authority.public_key_text),))
+    assert bundle.partitions == 96
     assert read_expected_hosts(layout.trust_expected_hosts_path) == {}
     assert stat.S_IMODE(layout.trust_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE((layout.host_trust_dir(AUTHORITY_RUNTIME) / HOST_KEYS_FILENAME).stat().st_mode) == 0o600
@@ -46,28 +47,61 @@ def test_the_first_start_makes_the_keys_the_bundle_and_the_list(tmp_path: Path) 
 
 def test_later_starts_keep_the_installation_its_keys_and_the_authoritys_records(tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path)
-    installation = message_hosts.prepare_message_host_trust(layout)
+    installation = message_hosts.prepare_message_host_trust(layout, partitions=96)
     key_id = load_authority_keys(layout).key_id
     delivery_ref = DeliveryRefs.load(layout, "team_one").ref("session_one")
     record = {"record": "revocations", "sequence": 7}
     write_bundle(layout.trust_bootstrap_path, read_bundle(layout.trust_bootstrap_path).with_records([record]))
     host = ExpectedHost("team-services", "team-services.0123", "AAAA", frozenset({"team_services"}), frozenset({"team_one"}))
-    assert message_hosts.prepare_message_host_trust(layout, {"team-services": host}) == installation
+    assert message_hosts.prepare_message_host_trust(layout, {"team-services": host}, partitions=96) == installation
     assert load_authority_keys(layout).key_id == key_id
     # A chat keeps its reference across starts, so schedules stay listed for it.
     assert DeliveryRefs.load(layout, "team_one").ref("session_one") == delivery_ref
     assert read_bundle(layout.trust_bootstrap_path).records == (record,)
     assert set(read_expected_hosts(layout.trust_expected_hosts_path)) == {"team-services"}
     # A host the launcher no longer starts loses automatic approval at the next start.
-    message_hosts.prepare_message_host_trust(layout)
+    message_hosts.prepare_message_host_trust(layout, partitions=96)
     assert read_expected_hosts(layout.trust_expected_hosts_path) == {}
+
+
+def test_an_older_bundle_gets_the_saved_partition_count_and_keeps_its_records(tmp_path: Path, caplog) -> None:
+    """A bundle written before the count joined it is completed at the next start, without a warning."""
+
+    layout = InstanceLayout.at(tmp_path)
+    installation = message_hosts.prepare_message_host_trust(layout, partitions=96)
+    record = {"record": "revocations", "sequence": 7}
+    write_bundle(layout.trust_bootstrap_path, read_bundle(layout.trust_bootstrap_path).with_records([record]))
+    document = json.loads(layout.trust_bootstrap_path.read_text())
+    del document["partitions"]
+    layout.trust_bootstrap_path.write_text(json.dumps(document))
+
+    assert message_hosts.prepare_message_host_trust(layout, partitions=96) == installation
+
+    bundle = read_bundle(layout.trust_bootstrap_path)
+    assert (bundle.partitions, bundle.records) == (96, (record,))
+    assert "event=partition_count_changed" not in caplog.text
+
+
+def test_a_changed_partition_count_is_written_and_logged(tmp_path: Path, caplog) -> None:
+    """The authority, not the launcher, refuses a count the team's streams were not made with."""
+
+    layout = InstanceLayout.at(tmp_path)
+    message_hosts.prepare_message_host_trust(layout, partitions=96)
+    record = {"record": "revocations", "sequence": 7}
+    write_bundle(layout.trust_bootstrap_path, read_bundle(layout.trust_bootstrap_path).with_records([record]))
+
+    message_hosts.prepare_message_host_trust(layout, partitions=64)
+
+    assert (read_bundle(layout.trust_bootstrap_path).partitions, read_bundle(layout.trust_bootstrap_path).records) == (
+        64, (record,))
+    assert "event=partition_count_changed setting=transport.queues.partitions previous=96 count=64" in caplog.text
 
 
 def test_a_lost_bundle_is_rebuilt_for_the_same_installation(tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path)
-    installation = message_hosts.prepare_message_host_trust(layout)
+    installation = message_hosts.prepare_message_host_trust(layout, partitions=96)
     layout.trust_bootstrap_path.unlink()
-    assert message_hosts.prepare_message_host_trust(layout) == installation
+    assert message_hosts.prepare_message_host_trust(layout, partitions=96) == installation
     assert read_bundle(layout.trust_bootstrap_path).installation == installation
 
 
@@ -88,7 +122,7 @@ def ready_bundle_writer(layout: InstanceLayout, sequence: int) -> list[str]:
 
 def test_the_launcher_waits_until_the_authority_signed_its_records(tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path)
-    message_hosts.prepare_message_host_trust(layout)
+    message_hosts.prepare_message_host_trust(layout, partitions=96)
     process = message_hosts.start_installation_authority(layout, ready_bundle_writer(layout, 5), {}, cwd=tmp_path,
                                                          timeout_seconds=10)
     try:
@@ -100,7 +134,7 @@ def test_the_launcher_waits_until_the_authority_signed_its_records(tmp_path: Pat
 
 def test_an_authority_that_exits_or_stays_silent_stops_the_launch(tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path)
-    message_hosts.prepare_message_host_trust(layout)
+    message_hosts.prepare_message_host_trust(layout, partitions=96)
     with pytest.raises(RuntimeError, match="exited with code 3"):
         message_hosts.start_installation_authority(layout, [sys.executable, "-c", "raise SystemExit(3)"], {},
                                                    cwd=tmp_path, timeout_seconds=10)
@@ -267,6 +301,7 @@ def test_message_services_start_in_order_with_the_hosts_written_first_and_stop_i
     layout = InstanceLayout.at(tmp_path)
     events: list[str] = []
     limits = iter([2, 5])
+    counts = iter([96, 7])
 
     def hosts() -> dict[str, ExpectedHost]:
         limit = next(limits)
@@ -277,27 +312,29 @@ def test_message_services_start_in_order_with_the_hosts_written_first_and_stop_i
     def start(name: str):
         def started(layout_, command, env, *, cwd, stop_requested):
             listed = read_expected_hosts(layout_.trust_expected_hosts_path)["lead-host"].session_limit
-            events.append(f"start:{name}:{env['ROLE']}:hosts={listed}")
+            count = read_bundle(layout_.trust_bootstrap_path).partitions
+            events.append(f"start:{name}:{env['ROLE']}:hosts={listed}:partitions={count}")
             return FakeProcess(name, events)
         return started
 
     monkeypatch.setattr(message_hosts, "start_installation_authority", start("authority"))
     monkeypatch.setattr(message_hosts, "start_team_services", start("team-services"))
-    services = message_hosts.MessageServices(layout, hosts, ["authority"], {"ROLE": "authority"}, ["team-services"],
-                                             {"ROLE": "team-services"}, cwd=tmp_path)
+    services = message_hosts.MessageServices(layout, hosts, lambda: next(counts), ["authority"], {"ROLE": "authority"},
+                                             ["team-services"], {"ROLE": "team-services"}, cwd=tmp_path)
 
     assert services.start() is True
     assert [name for name, _ in services.processes()] == ["installation authority", "team services"]
     services.stop(lambda process, _name: process.terminate())
     assert services.processes() == ()
-    # Again, as a restart of everything does: the hosts are read and written again first, and the
-    # environments get their copies of saved settings recomputed.
+    # Again, as a restart of everything does: the hosts and the partition count are read and written
+    # again first, and the environments get their copies of saved settings recomputed.
     assert services.start(lambda env, process: {**env, "ROLE": f"{env['ROLE']}+{process}"}) is True
     assert events == [
-        "hosts:2", "start:authority:authority:hosts=2", "start:team-services:team-services:hosts=2",
+        "hosts:2", "start:authority:authority:hosts=2:partitions=96",
+        "start:team-services:team-services:hosts=2:partitions=96",
         "stop:team-services", "stop:authority",
-        "hosts:5", "start:authority:authority+installation authority:hosts=5",
-        "start:team-services:team-services+team services:hosts=5",
+        "hosts:5", "start:authority:authority+installation authority:hosts=5:partitions=7",
+        "start:team-services:team-services+team services:hosts=5:partitions=7",
     ]
 
 
@@ -307,7 +344,8 @@ def test_a_stop_while_the_authority_starts_does_not_start_the_team_services(tmp_
     monkeypatch.setattr(message_hosts, "start_installation_authority",
                         lambda *_args, **_kwargs: FakeProcess("authority", events))
     monkeypatch.setattr(message_hosts, "start_team_services", lambda *_args, **_kwargs: pytest.fail("not started"))
-    services = message_hosts.MessageServices(layout, dict, ["authority"], {}, ["team-services"], {}, cwd=tmp_path)
+    services = message_hosts.MessageServices(layout, dict, lambda: 96, ["authority"], {}, ["team-services"], {},
+                                             cwd=tmp_path)
     assert services.start(stop_requested=lambda: True) is False
     assert [name for name, _ in services.processes()] == ["installation authority"], "stopped with the others"
 
@@ -316,11 +354,11 @@ def test_a_lost_authority_key_starts_a_new_installation(tmp_path: Path, caplog) 
     """A new key could check nothing the old one signed, so the bundle's id is not reused: every host joins anew."""
 
     layout = InstanceLayout.at(tmp_path)
-    old = message_hosts.prepare_message_host_trust(layout)
+    old = message_hosts.prepare_message_host_trust(layout, partitions=96)
     write_bundle(layout.trust_bootstrap_path, read_bundle(layout.trust_bootstrap_path).with_records(
         [{"record": "revocations", "sequence": 7}]))
     (layout.trust_authority_dir / "authority-key.json").unlink()
-    new = message_hosts.prepare_message_host_trust(layout)
+    new = message_hosts.prepare_message_host_trust(layout, partitions=96)
     assert new != old and new.startswith("ua-")
     assert load_authority_keys(layout).installation == new
     bundle = read_bundle(layout.trust_bootstrap_path)
@@ -343,7 +381,7 @@ def _recording_popen(monkeypatch) -> list[subprocess.Popen[bytes]]:
 
 def test_an_authority_that_is_not_ready_in_time_is_stopped(tmp_path: Path, monkeypatch) -> None:
     layout = InstanceLayout.at(tmp_path)
-    message_hosts.prepare_message_host_trust(layout)
+    message_hosts.prepare_message_host_trust(layout, partitions=96)
     started = _recording_popen(monkeypatch)
     with pytest.raises(RuntimeError, match="did not get ready within"):
         message_hosts.start_installation_authority(layout, [sys.executable, "-c", "import time; time.sleep(30)"], {},
@@ -353,7 +391,7 @@ def test_an_authority_that_is_not_ready_in_time_is_stopped(tmp_path: Path, monke
 
 def test_an_interrupted_wait_stops_the_authority(tmp_path: Path, monkeypatch) -> None:
     layout = InstanceLayout.at(tmp_path)
-    message_hosts.prepare_message_host_trust(layout)
+    message_hosts.prepare_message_host_trust(layout, partitions=96)
     started = _recording_popen(monkeypatch)
 
     def interrupt(*_args) -> bool:

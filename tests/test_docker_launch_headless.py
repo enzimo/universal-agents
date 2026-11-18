@@ -1564,8 +1564,8 @@ def _supervised_with_message_services(tmp_path: Path, monkeypatch, *, restart_te
     monkeypatch.setattr("docker.launch_headless.time.sleep", lambda _seconds: None)
     monkeypatch.setattr("docker.launch_headless.signal.signal", handlers.__setitem__)
     monkeypatch.setattr("docker.launch_headless.pop_runtime_restart_request", lambda _path: next(requests, None))
-    services = message_hosts.MessageServices(InstanceLayout.at(tmp_path), hosts, ["authority"], {}, ["team-services"],
-                                             {}, cwd=tmp_path)
+    services = message_hosts.MessageServices(InstanceLayout.at(tmp_path), hosts, lambda: 96, ["authority"], {},
+                                             ["team-services"], {}, cwd=tmp_path)
     assert services.start() is True  # what the launcher does before it supervises
 
     code = run_supervised(

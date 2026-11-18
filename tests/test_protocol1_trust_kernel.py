@@ -195,23 +195,57 @@ def test_the_authority_key_names_its_installation(tmp_path: Path) -> None:
 
 # -- the bootstrap bundle and kept trust records --------------------------------------------------
 
-def example_bundle(*, revocations: bytes | None = None) -> BootstrapBundle:
+def example_bundle(*, revocations: bytes | None = None, partitions: int | None = 96) -> BootstrapBundle:
     anchors = json.loads((fixtures.TRUST / "anchors.json").read_text())
     records = [json.loads(path.read_text()) for path in sorted((fixtures.TRUST / "certificates").glob("*.json"))]
     records.append(json.loads(revocations or (fixtures.TRUST / "revocations" / "install_example.json").read_bytes()))
     records += [json.loads(path.read_text()) for path in sorted((fixtures.TRUST / "sessions").glob("*.json"))]
     return BootstrapBundle(anchors["installation"], tuple((key["key_id"], key["public_key"]) for key in anchors["authority_keys"]),
-                           tuple(records))
+                           tuple(records), partitions=partitions)
 
 
 def test_the_bundle_round_trips_and_builds_a_trust_store(tmp_path: Path) -> None:
-    bundle = example_bundle()
+    bundle = example_bundle(partitions=7)
     write_bundle(tmp_path / "bootstrap.json", bundle)
     read = read_bundle(tmp_path / "bootstrap.json")
     assert read == bundle and stat.S_IMODE((tmp_path / "bootstrap.json").stat().st_mode) == 0o600
     store = read.trust_store(fixtures.NOW)
     assert store.host_certificate("install_example", "team-services-1", 2) is not None
     assert store.revocations_current("install_example", fixtures.NOW)
+    assert store.partition_count == 7
+    assert read.with_records(()).partitions == 7
+
+
+def test_a_bundle_without_a_partition_count_is_read_but_builds_no_trust_store_and_is_never_written(tmp_path: Path) -> None:
+    """A bundle from before the count joined it keeps its records for the launcher; no host guesses a count."""
+
+    path = tmp_path / "bootstrap.json"
+    write_bundle(path, example_bundle())
+    document = json.loads(path.read_text())
+    del document["partitions"]
+    path.write_text(json.dumps(document))
+
+    old = read_bundle(path)
+
+    assert old.partitions is None and old.records == example_bundle().records
+    with pytest.raises(BootstrapError, match="holds no partition count.*restart the instance"):
+        old.trust_store(fixtures.NOW)
+    with pytest.raises(BootstrapError, match="holds no partition count"):
+        PersistentTrustStore.open(old, tmp_path / "host", fixtures.NOW)
+    assert not (tmp_path / "host").exists()
+    with pytest.raises(BootstrapError, match="holds no partition count"):
+        write_bundle(path, old)
+    assert json.loads(path.read_text()) == document
+
+
+@pytest.mark.parametrize("count", [0, 129, "96", 96.0, True])
+def test_a_bundle_with_a_partition_count_no_installation_may_choose_is_damaged(tmp_path: Path, count) -> None:
+    path = tmp_path / "bootstrap.json"
+    write_bundle(path, example_bundle())
+    path.write_text(json.dumps({**json.loads(path.read_text()), "partitions": count}))
+
+    with pytest.raises(BootstrapError, match="is damaged: a partition count is a whole number from 1 to 128"):
+        read_bundle(path)
 
 
 def test_a_stale_bundle_record_is_skipped_with_a_warning(caplog) -> None:

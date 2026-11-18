@@ -60,6 +60,7 @@ def catalog_agent_types(config: GatewayInstanceConfig) -> frozenset[str]:
 async def run_installation_authority(config: GatewayInstanceConfig) -> None:
     layout = config.layout
     authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
+                                      partitions=config.transport.queues.partitions,
                                       logger=_LOGGER, replicas=config.transport.replicas,
                                       catalog_agent_types=lambda: catalog_agent_types(config))
     adapter = NatsTransportAdapter(config=transport_config(config),

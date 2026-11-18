@@ -21,6 +21,7 @@ import pytest
 
 from custom_messages.wire.trust import kept_for
 from custom_transport.protocol1 import host_keys
+from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.live import utc_now
 from installation_authority import process as authority_process
 from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts, write_expected_hosts
@@ -30,6 +31,7 @@ from installation_authority.service import (
     AuthorityDisconnected,
     CertificateRequest,
     InstallationAuthority,
+    PartitionCountMismatch,
     RevocationsUnverified,
     _denial,
     _renewal_refusal,
@@ -195,11 +197,55 @@ def test_receivers_and_writers_forget_a_certificate_at_the_same_time() -> None:
 # -- the authority without a server ----------------------------------------------------------------
 
 
-def authority_at(tmp_path: Path) -> InstallationAuthority:
+def authority_at(tmp_path: Path, *, partitions: int = 96) -> InstallationAuthority:
     layout = InstanceLayout.at(tmp_path / "instance")
     authority, _ = host_keys.ensure_authority_keys(layout, "install_one")
     keys, _ = host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
-    return InstallationAuthority(layout, authority, keys)
+    return InstallationAuthority(layout, authority, keys, partitions=partitions)
+
+
+class _NoServer:
+    """A NATS connection the authority must not touch: the count check comes before anything else."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"the authority used its NATS connection ({name}) before refusing")
+
+
+@pytest.mark.parametrize("held", [7, None])
+def test_the_authority_refuses_to_start_when_the_bundles_partition_count_is_not_its_own(tmp_path: Path, held) -> None:
+    """Hosts compute agents' partitions with the bundle's count, the authority with its setting."""
+
+    authority = authority_at(tmp_path, partitions=96)
+    path = authority.layout.trust_bootstrap_path
+    write_bundle(path, BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),),
+                                       partitions=7))
+    if held is None:  # a bundle written before the count joined it
+        document = json.loads(path.read_text())
+        del document["partitions"]
+        path.write_text(json.dumps(document))
+    before = path.read_bytes()
+
+    with pytest.raises(PartitionCountMismatch) as refused:
+        asyncio.run(authority.start(_NoServer(), teams=["team_one"]))
+
+    shown = "no partition count" if held is None else "partition count 7"
+    assert f"holds {shown}, but this authority's transport.queues.partitions is 96" in str(refused.value)
+    assert "restart the instance" in str(refused.value)
+    assert path.read_bytes() == before
+    assert not (authority.layout.host_trust_dir(AUTHORITY_RUNTIME) / ISSUED_FILENAME).exists()
+
+
+def test_the_authority_keeps_the_bundles_partition_count_when_it_writes_its_records(tmp_path: Path) -> None:
+    authority = authority_at(tmp_path, partitions=7)
+    path = authority.layout.trust_bootstrap_path
+    write_bundle(path, BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),),
+                                       partitions=7))
+    authority._own, authority._revocations = {"record": "certificate"}, {"record": "revocations"}
+
+    authority._publish_bundle()
+
+    assert read_bundle(path).partitions == 7
+    assert [record["record"] for record in read_bundle(path).records] == ["certificate", "revocations"]
 
 
 def test_a_stored_certificate_is_handed_back_only_for_the_same_keys_while_newest(tmp_path: Path) -> None:
@@ -269,12 +315,16 @@ def _config(tmp_path: Path) -> Any:
                            manager=SimpleNamespace(team_id="team_one"),
                            transport=SimpleNamespace(replicas=1, nats_servers=["nats://127.0.0.1:1"], nats_url=None,
                                                      subject_prefix="team", nats_user=None, nats_password=None,
-                                                     credentials_file=None))
+                                                     credentials_file=None, queues=SimpleNamespace(partitions=7)))
 
 
-def _run_with(monkeypatch, tmp_path: Path, authority: Any) -> None:
+def _run_with(monkeypatch, tmp_path: Path, authority: Any, made: dict[str, Any] | None = None) -> None:
+    def make(*_args: Any, **kwargs: Any) -> Any:
+        (made if made is not None else {}).update(kwargs)
+        return authority
+
     monkeypatch.setattr(authority_process, "NatsTransportAdapter", _Adapter)
-    monkeypatch.setattr(authority_process, "InstallationAuthority", lambda *_args, **_kwargs: authority)
+    monkeypatch.setattr(authority_process, "InstallationAuthority", make)
     monkeypatch.setattr(authority_process, "load_authority_keys", lambda _layout: None)
     monkeypatch.setattr(authority_process, "load_host_keys", lambda _layout, _runtime: None)
     asyncio.run(authority_process.run_installation_authority(_config(tmp_path)))
@@ -286,11 +336,13 @@ def test_the_process_exits_with_a_reason_when_it_cannot_start_safely(tmp_path: P
             raise RevocationsUnverified("Restore the instance's trust folder.")
 
     caplog.set_level(logging.ERROR)
+    made: dict[str, Any] = {}
     with pytest.raises(SystemExit) as exited:
-        _run_with(monkeypatch, tmp_path, Refusing())
+        _run_with(monkeypatch, tmp_path, Refusing(), made)
     assert exited.value.code == 1
     assert "event=installation_authority_start_refused reason=RevocationsUnverified" in caplog.text
     assert "Restore the instance's trust folder." in caplog.text
+    assert made["partitions"] == 7  # the saved transport.queues.partitions
 
 
 def test_the_process_exits_when_its_upkeep_stops(tmp_path: Path, monkeypatch, caplog) -> None:
