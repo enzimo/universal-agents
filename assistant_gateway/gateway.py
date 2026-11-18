@@ -262,7 +262,6 @@ from custom_messages.system_schedules import (
     COREMEM_AUDIT_SCHEDULE_NAME_PREFIX,
     KNOWLEDGE_CURATION_TEAM_SCHEDULE_NAME_PREFIX,
 )
-from custom_transport.protocol1.contract_files import transport as contract_transport
 from id_generation import (
     HEARTBEAT_SCHEDULE_ID_PREFIX,
     HEARTBEAT_SOURCE_ID_PREFIX,
@@ -1437,7 +1436,7 @@ class UserGateway:
                 storage=self.stored_data.capacity,
                 person_storage_totals=self.stored_data.usage.stale_finding,
                 jetstream_usage=resolved_manager_runtime.jetstream_usage,
-                queues=build_queue_capacity(config, transport=contract_transport(), storage=self.stored_data.capacity),
+                queues=build_queue_capacity(config, storage=self.stored_data.capacity),
                 team_streams=lambda: resolved_manager_runtime.team_streams(config.manager.team_id),
                 # Without a team view (command-line runs) the gateway does not judge the team (review F11).
                 **(

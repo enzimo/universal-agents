@@ -262,7 +262,12 @@ def test_jobs_require_their_documented_runners_and_bounded_execution() -> None:
 def test_live_nats_uses_job_identity_and_dynamic_loopback_port() -> None:
     steps = _workflow("tests.yml")["jobs"]["nats-live"]["steps"]
     start = next(s for s in steps if s.get("name") == "Start NATS with JetStream")
-    assert start["run"] == "python .github/runner/start_service.py nats"
+    mappings = next(s for s in steps if s.get("name") == "Write the partition mappings for the live NATS server")
+    config = '"$RUNNER_TEMP/nats-config/server.conf"'
+    # The live tests' server applies the partition mappings, written before it starts.
+    assert mappings["run"] == f"python scripts/write_nats_mapping_config.py {config}"
+    assert start["run"] == f"python .github/runner/start_service.py nats --config {config}"
+    assert steps.index(mappings) < steps.index(start)
 
 
 def test_evidence_storage_cannot_skip_tests_or_hide_verification_failures() -> None:

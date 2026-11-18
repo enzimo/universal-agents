@@ -198,7 +198,7 @@ def test_the_queue_and_storage_levels_share_one_record(tmp_path) -> None:
     storage = build_storage_capacity(config)
     storage._disks = lambda: [SpaceUse(key="disk:instance", label="The disk", used=disk["used"], capacity=100)]
     storage._databases = list
-    queues = build_queue_capacity(config, transport=transport(), storage=storage)
+    queues = build_queue_capacity(config, storage=storage)
 
     assert queues.team == TEAM and queues.warn_at_percent == 60
     assert len(storage.findings(None)) == 1

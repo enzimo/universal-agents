@@ -9,7 +9,6 @@ from assistant_gateway.application.ports import GatewayManagerEnvelopeHandler
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.enums import RoutingType
-from custom_messages.wire.frame import SUBJECT_ROOT
 from custom_transport.base import (
     DeliveryHandler,
     InboundDelivery,
@@ -247,6 +246,10 @@ class NatsGatewayManagerRuntime:
 
         if not self._connected or not self.settings.jetstream_enabled:
             return None
+        # Imported here: the protocol 1 subject root comes from the contract's generated code,
+        # which command-line runs that import this module never need (about half a second).
+        from custom_messages.wire.frame import SUBJECT_ROOT
+
         return await self._adapter.jetstream_streams(subject=f"{SUBJECT_ROOT}{team}.>")
 
     @staticmethod

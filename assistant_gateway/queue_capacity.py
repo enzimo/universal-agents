@@ -39,13 +39,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Final, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Final, Mapping, Sequence
 
 from assistant_gateway.storage_capacity import RELEASE_POINTS, StorageCapacity, StorageLevels
 from assistant_gateway.storage_usage import readable_bytes
 from custom_messages.contracts.status_v1 import StatusFindingV1, StatusSeverity
-from custom_messages.wire.queues import QueueStream, team_queue_streams
 from custom_transport.nats_adapter import JetStreamStreamUsage
+from custom_transport.protocol1.contract_files import transport as contract_transport
+
+if TYPE_CHECKING:
+    from custom_messages.wire.queues import QueueStream
 
 SOURCE: Final = "gateway"
 # Finding ids and the keys in StorageLevels start with these.
@@ -110,6 +113,11 @@ class QueueCapacity:
         """The team's work and dead-letter streams by name (``wire.queues.team_queue_streams``); raises for a bad id."""
 
         if self._streams is None:
+            # Imported here: the stream names come from the contract's generated models, which
+            # cost about half a second to import, and the gateway module that imports this one
+            # also serves command-line runs that never check streams.
+            from custom_messages.wire.queues import team_queue_streams
+
             streams = team_queue_streams(self._transport, self.team, self._partitions)
             self._streams = {stream.name: stream for stream in streams}
         return self._streams
@@ -180,16 +188,18 @@ def stream_finding(item: FillingStream, *, since: datetime, warn_at_percent: int
     )
 
 
-def build_queue_capacity(config: Any, *, transport: Mapping[str, Any], storage: StorageCapacity) -> QueueCapacity:
-    """The gateway's check: its team's streams at the instance's partition count and warning level.
+def build_queue_capacity(config: Any, *, storage: StorageCapacity) -> QueueCapacity:
+    """The gateway's check: its team's streams, from the contract, at the instance's partition count and warning level.
 
-    It keeps its levels in the storage warnings' own record (``storage.levels``).
+    It keeps its levels in the storage warnings' own record (``storage.levels``). The contract's
+    transport document is read here rather than by the gateway, which reaches the message
+    transport only through its manager runtime.
     """
 
     queues = config.transport.queues
     return QueueCapacity(
         team=config.manager.team_id,
-        transport=transport,
+        transport=contract_transport(),
         partitions=queues.partitions,
         levels=storage.levels,
         warn_at_percent=queues.warn_at_percent,
