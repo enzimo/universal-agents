@@ -259,6 +259,24 @@ def test_a_store_that_cannot_be_read_stops_the_start(tmp_path) -> None:
     assert refusal is not None and "event=protocol1_ids_check_failed" in refusal
 
 
+def test_a_postgresql_store_that_cannot_be_reached_is_refused_without_its_password() -> None:
+    """SEC-1 of pull request 152's review: libpq repeats the unreadable part of a connection string."""
+
+    from storage.config import PostgresStorageSettings, StorageSettings
+
+    password = "S3cr%zzPw"  # an unencoded % that libpq cannot parse
+    storage = StorageSettings(backend="postgres", postgres=PostgresStorageSettings(
+        dsn=f"postgresql://ua:{password}@127.0.0.1:1/team"))
+
+    with pytest.raises(Protocol1IdCheckFailed) as refused:
+        stored_agent_ids_over_cap(storage, TEAM)
+
+    assert password not in str(refused.value) and password in str(refused.value.__cause__)
+    assert str(refused.value).endswith(
+        "ProgrammingError. Its text is left out, since it can repeat the connection string's password: check the "
+        "connection string and that PostgreSQL answers.")
+
+
 # -- the launchers refuse before anything changes (C01) -----------------------------------------
 
 

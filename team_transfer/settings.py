@@ -40,7 +40,7 @@ from runtime_settings.transport import (
     PARTITION_COUNT_SETTING,
     REPLICAS_SETTING,
     RETIRED_PRESENCE_SETTING,
-    zero_replicas_meant_one,
+    upgraded_replicas,
 )
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
@@ -706,12 +706,13 @@ __all__ = [
 # (RETIRED_CONCURRENCY_SETTING), which loaders before it ignored but left in saved
 # files, so any earlier export may carry it: the same step drops it. V12 added
 # transport.queues; an older export has none, so the new instance takes their defaults
-# and the same step reads version 11. Version 12 also refuses transport.replicas 0, which
-# every earlier version read as one copy, so the same step writes it as 1.
+# and the same step reads version 11. Version 12 also takes only a whole number from 1 to 5
+# for transport.replicas, so the same step writes what earlier versions read as their count
+# (0, which they read as one copy, "3", 1.0, true; runtime_settings.transport.upgraded_replicas).
 
 
 def _upgraded_settings(records: SectionRecords) -> SectionRecords:
-    """An older export's records as version 12 reads them: retired settings dropped, a replica count of 0 as 1."""
+    """An older export's records as version 12 reads them: retired settings dropped, a replica count as a whole number."""
 
     retired = {RETIRED_PRESENCE_SETTING, RETIRED_CONCURRENCY_SETTING}
     upgraded: SectionRecords = []
@@ -719,8 +720,8 @@ def _upgraded_settings(records: SectionRecords) -> SectionRecords:
         path = tuple(record.get("path", ()))
         if path in retired:
             continue
-        if path == REPLICAS_SETTING and zero_replicas_meant_one(record.get("value")):
-            record = {**record, "value": 1}
+        if path == REPLICAS_SETTING and (count := upgraded_replicas(record.get("value"))) is not None:
+            record = {**record, "value": count}
         upgraded.append(record)
     return upgraded
 

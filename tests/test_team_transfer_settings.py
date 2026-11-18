@@ -167,8 +167,8 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
     Version 10 is this branch's pre-release export after step 7d. Every earlier version
     may still carry the ignored agent.max_concurrent_top_level_tasks, which version 11
     removed, so the conversion drops it too. Version 11 predates transport.queues, so the
-    imported instance takes their defaults. Every earlier version read transport.replicas 0 as
-    one copy, which version 12 refuses: the conversion writes it as 1.
+    imported instance takes their defaults. Every earlier version read transport.replicas 0 (and
+    "0") as one copy, which version 12 refuses: the conversion writes it as 1.
     """
 
     from assistant_gateway.config import GatewayInstanceConfig
@@ -192,7 +192,8 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
                 records.append(SettingV1(path=SEMANTIC_REVIEW + ("mode",), value="task_model"))
                 records.append(SettingV1(path=SEMANTIC_REVIEW + ("max_input_bytes",), value=524288))
             records.append(SettingV1(path=("agent", "max_concurrent_top_level_tasks"), value=4))
-            records.append(SettingV1(path=("transport", "replicas"), value=0))  # read as one copy before 0.10
+            # Read as one copy before 0.10; a quoted 0 too, which 0.9's int field read (DI-1 of PR 152's review).
+            records.append(SettingV1(path=("transport", "replicas"), value="0" if exported_version % 2 else 0))
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
     path, _config = _old_instance(tmp_path)

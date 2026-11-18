@@ -55,10 +55,10 @@ from runtime_settings.retired_concurrency import (
     drop_retired_concurrency_setting, refuse_retired_concurrency_setting,
 )
 from runtime_settings.transport import (
-    REPLICAS_SETTING,
     drop_retired_presence_setting,
     refuse_retired_presence_setting,
-    write_zero_replicas_as_one,
+    replicas_step,
+    write_upgraded_replicas,
 )
 from runtime_settings.values import (
     DEFAULT_AUTHORIZATION_CONFIG,
@@ -414,14 +414,12 @@ def _migrate_config_dict(
         version = 12
 
     if version == 12:
-        # A replica count of 0, which earlier releases read as one copy and this one refuses,
-        # is written as 1 (runtime_settings.transport.write_zero_replicas_as_one).
-        written = write_zero_replicas_as_one(migrated)
+        # A replica count earlier releases read but this one refuses (0, which they read as one
+        # copy, "3", 1.0, true) is written as the whole number they read
+        # (runtime_settings.transport.write_upgraded_replicas).
+        written = write_upgraded_replicas(migrated)
         migrated["schema_version"] = 13
-        applied_steps.append(
-            "12 -> 13: transport.replicas is 1 to 5"
-            + (f"; {'.'.join(REPLICAS_SETTING)} 0 set to 1" if written else "")
-        )
+        applied_steps.append("12 -> 13: transport.replicas is 1 to 5" + replicas_step(written))
         version = 13
 
     refuse_removed_access_settings(migrated)

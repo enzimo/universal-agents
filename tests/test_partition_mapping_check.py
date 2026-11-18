@@ -144,7 +144,13 @@ def test_a_server_without_the_mappings_is_named_line_by_line_with_the_lines_to_a
         assert f"the line for {mapping_source(address)} is missing: a probe to {ROOT}" in message
     assert '"ua.v1.*.*.ctl.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.ctl.agent.{{wildcard(3)}}.' \
            '{{partition(7,1,3)}}"' in message
-    assert "(python scripts/write_nats_mapping_config.py FILE --partitions 7 writes them)" in message
+    # G3 of pull request 152's review: the lines first, inside the login's account; the script only for a source
+    # checkout (the published image keeps no .py files), and what its top-level block serves.
+    assert ("Add these mapping lines inside the account the instance logs in to (in the server's configuration file, "
+            "the account's mappings block): ") in message
+    assert message.endswith(". In a source checkout, python scripts/write_nats_mapping_config.py FILE --partitions 7 "
+                            "writes them as a top-level mappings block, which serves a server whose logins are in no "
+                            "named account.")
     assert "set it back" not in message
 
 

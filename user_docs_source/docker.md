@@ -418,6 +418,11 @@ the setup the runtime is tested with. Compared with 0.9, the login also needs:
   server's JetStream storage. Without the right or the room the authority stops
   before any other process starts (`event=installation_authority_start_refused`),
   naming the stream and, for room, the setting to lower.
+- An account consumer limit of 4,096 or none. NATS refuses a stream whose own
+  consumer limit is above the account's, and the key-value buckets' streams take
+  up to 4,096 consumers each (the teams' partition streams 1,024). With a lower
+  limit the authority stops before it changes anything, naming the account's
+  limit.
 
 The login needs no right to the team's old presence stream: startup never looks
 at it. This list names what changed since 0.9. It is not a tested set of NATS

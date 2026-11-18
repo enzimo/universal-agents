@@ -94,6 +94,16 @@ REFUSED_EVENT: Final = "protocol1_ids_over_caps"
 STARTUP_TYPES_REFUSED_EVENT: Final = "protocol1_startup_agent_types_over_cap"
 # The check could not read the settings, the catalog or a store; the start stops (both launchers).
 CHECK_FAILED_EVENT: Final = "protocol1_ids_check_failed"
+# A team export whose ids do not fit, refused before a fresh import writes anything
+# (``team_transfer.protocol1_ids``; ``import_refusal_message``).
+IMPORT_REFUSED_EVENT: Final = "team_import_ids_over_caps"
+# What renaming an agent type that does not fit takes, on an instance that runs 0.9.x.
+_RENAME_AGENT_TYPE: Final = (
+    f"rename it to at most {AGENT_TYPE.cap} letters, digits, '-' and '_' in the file that defines it and everywhere "
+    "the instance names it: gateway.startup_agents in the configuration file and the team roster "
+    f"({CONTROL_DIRNAME}/{TEAM_COMPOSITION_FILENAME}). For a specialist the team lead created, remove it and have it "
+    "created again under the shorter name."
+)
 # The newest instance_config.yaml schema version 0.9.x reads (0.9.13): a newer saved file was
 # upgraded for this version before the check ran, and 0.9.x refuses it.
 LAST_09_CONFIG_SCHEMA_VERSION: Final = 12
@@ -286,7 +296,7 @@ def stored_agent_ids_over_cap(storage: StorageSettings | None, team_id: str) -> 
                     holders.setdefault(value, []).append(stored.holds)
     except Exception as exc:  # noqa: BLE001 - fail closed: the later upgrade steps read the same records
         raise Protocol1IdCheckFailed(
-            f"The stored records could not be read ({_store_name(storage)}): {str(exc) or type(exc).__name__}"
+            f"The stored records could not be read ({_store_name(storage)}): {_store_error(storage, exc)}"
         ) from exc
     return [
         IdOverCap(AGENT_ID.what, value, AGENT_ID.problem(value) or "", tuple(kinds))
@@ -329,6 +339,22 @@ def _over_cap(conn: Any, dialect: SqlDialect, stored: _StoredIds, team_id: str) 
         (team_id,),
     ).fetchall()
     return [str(row[0]) for row in rows]
+
+
+def _store_error(storage: StorageSettings | None, exc: Exception) -> str:
+    """What the refusal says about a store's error: a PostgreSQL error only by its kind.
+
+    libpq repeats the part of a connection string it cannot parse, which can be the
+    password (SEC-1 of pull request 152's review), and the launchers log the refusal. A
+    SQLite error names only what went wrong with the file.
+    """
+
+    if storage is not None and storage.postgres_dsn:
+        return (
+            f"{type(exc).__name__}. Its text is left out, since it can repeat the connection string's password: check "
+            "the connection string and that PostgreSQL answers."
+        )
+    return str(exc) or type(exc).__name__
 
 
 def _store_name(storage: StorageSettings | None) -> str:
@@ -389,13 +415,9 @@ def refusal_message(found: Sequence[IdOverCap], *, upgraded_note: str | None = N
                 "keep running 0.9.x."
             )
         elif item.rule_what == AGENT_TYPE.what:
-            where = f" ({'; '.join(item.found_in)})" if item.found_in else ""
             lines.append(
-                f"- The agent type {item.value!r}{where} {item.problem}. On 0.9.x, rename it to at most "
-                f"{AGENT_TYPE.cap} letters, digits, '-' and '_' in the file that defines it and everywhere the "
-                "instance names it: gateway.startup_agents in the configuration file and the team roster "
-                f"({CONTROL_DIRNAME}/{TEAM_COMPOSITION_FILENAME}). For a specialist the team lead created, remove "
-                "it and have it created again under the shorter name. Then start this version again."
+                f"- The agent type {item.value!r}{_where(item)} {item.problem}. On 0.9.x, {_RENAME_AGENT_TYPE} Then "
+                "start this version again."
             )
         else:
             lines.append(
@@ -404,6 +426,36 @@ def refusal_message(found: Sequence[IdOverCap], *, upgraded_note: str | None = N
                 "handed back, so these records go. Then start this version again."
             )
     return "\n".join(lines)
+
+
+def import_refusal_message(found: Sequence[IdOverCap]) -> str:
+    """Why a team export cannot be imported into this version, one sentence per id; nothing was written.
+
+    The import keeps the export's team id and agent types (``team_transfer.protocol1_ids``),
+    so the advice is for the instance the export came from, which runs 0.9.x. Lines carry no
+    list marks: onboarding's Import page shows the message as one paragraph.
+    """
+
+    lines = [
+        "This export's team cannot be imported into this version: protocol 1 carries these ids in message addresses, "
+        f"and they do not fit (event={IMPORT_REFUSED_EVENT}). Nothing was written."
+    ]
+    for item in found:
+        if item.rule_what == TEAM_ID.what:
+            lines.append(
+                f"The team id {item.value!r} {item.problem}. A team keeps its id when it moves, and this version has "
+                "no way yet to give a team a shorter one, so this export cannot be imported into it."
+            )
+        else:
+            lines.append(
+                f"The agent type {item.value!r}{_where(item)} {item.problem}. On the instance this export came from, "
+                f"{_RENAME_AGENT_TYPE} Then export the team again and import the new export."
+            )
+    return "\n".join(lines)
+
+
+def _where(item: IdOverCap) -> str:
+    return f" ({'; '.join(item.found_in)})" if item.found_in else ""
 
 
 def startup_types_refusal(startup_types: Sequence[str], config_path: Path) -> str:
@@ -562,6 +614,7 @@ def _write_record(path: Path, team_id: str) -> None:
 
 __all__ = [
     "CHECK_FAILED_EVENT",
+    "IMPORT_REFUSED_EVENT",
     "IdOverCap",
     "LAST_09_CONFIG_SCHEMA_VERSION",
     "Protocol1IdCheckFailed",
@@ -572,6 +625,7 @@ __all__ = [
     "catalog_definitions",
     "check_due",
     "check_ids_before_upgrade",
+    "import_refusal_message",
     "load_saved_for_check",
     "refusal_message",
     "startup_types_over_cap",

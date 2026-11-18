@@ -14,8 +14,9 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 import pytest
+from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import ConsumerConfig, StreamConfig
-from nats.js.errors import APIError, NotFoundError
+from nats.js.errors import APIError, NotFoundError, ServiceUnavailableError
 
 from custom_messages.wire.partitions import agent_partition
 from custom_messages.wire.queues import (
@@ -56,15 +57,16 @@ class StandInJetStream:
 
     ``room`` is the server's storage: past it, and for any change at all while what is set
     aside already exceeds it, 10047 (as nats-server 2.15.1 refuses after restarting with less
-    storage). ``account_limit`` and ``account_streams`` are the account's ``max_storage`` and
-    ``max_streams`` (-1: none), ``tiers`` its limits per replica tier instead
+    storage). ``account_limit``, ``account_streams`` and ``account_consumers`` are the account's
+    ``max_storage``, ``max_streams`` and ``max_consumers`` (-1: none), ``tiers`` its limits per replica tier instead
     (``{"R1": (max_storage, max_streams)}``). ``subjects`` gives a stream's stored messages per
     subject.
     """
 
     def __init__(self, *, room: Optional[int] = None, account_limit: int = -1, account_streams: int = -1,
-                 tiers: Optional[dict[str, tuple[int, int]]] = None) -> None:
+                 account_consumers: int = -1, tiers: Optional[dict[str, tuple[int, int]]] = None) -> None:
         self.room, self.account_limit, self.account_streams, self.tiers = room, account_limit, account_streams, tiers
+        self.account_consumers = account_consumers
         self.streams: dict[str, StreamConfig] = {}
         self.consumers: dict[tuple[str, str], ConsumerConfig] = {}
         self.subjects: dict[str, dict[str, int]] = {}
@@ -159,7 +161,8 @@ class StandInConnection:
         self.requests += 1
         js = self.js
         info: dict[str, Any] = {"reserved_storage": js.reserved, "streams": len(js.streams),
-                                "limits": {"max_storage": js.account_limit, "max_streams": js.account_streams}}
+                                "limits": {"max_storage": js.account_limit, "max_streams": js.account_streams,
+                                           "max_consumers": js.account_consumers}}
         if js.tiers is not None:
             info["limits"] = {"max_storage": 0, "max_streams": 0}
             info["tiers"] = {}
@@ -510,15 +513,124 @@ def test_the_authority_refuses_a_team_made_with_another_count_before_its_own_rec
     assert not [call for call in js.calls if call[0] in {"create", "update"}], "no stream or bucket changed"
 
 
-def test_another_refusal_of_the_server_names_the_stream_and_what_to_check() -> None:
-    class RefusingReplicas(StandInJetStream):
-        async def add_stream(self, config: StreamConfig) -> Any:
-            raise APIError(code=500, err_code=10074, description="replicas > 1 not supported in non-clustered mode")
+# The first stream a start creates, in the contract's order: the team's dead-letter stream.
+FIRST = queue_stream_config(transport(), team_queue_streams(transport(), TEAM, COUNT)[0], TEST_QUEUE_LIMITS)
 
+
+def _refusing_streams(error: Exception) -> StandInJetStream:
+    class Refusing(StandInJetStream):
+        async def add_stream(self, config: StreamConfig) -> Any:
+            raise error
+
+    return Refusing()
+
+
+@pytest.mark.parametrize(("error", "kind", "says"), [
+    # More copies than the servers hold: one server (10074), a cluster too small (10005, measured on 2.15.1).
+    (APIError(code=500, err_code=10074, description="replicas > 1 not supported in non-clustered mode"), StreamRefused,
+     "the servers JetStream runs on cannot hold 3 copies of each stream (JetStream error 10074, replicas > 1 not "
+     "supported in non-clustered mode). Set transport.replicas to at most the number of servers"),
+    (APIError(code=400, err_code=10005, description="no suitable peers for placement"), StreamRefused,
+     "cannot hold 3 copies of each stream (JetStream error 10005, no suitable peers for placement). Set "
+     "transport.replicas"),
+    (APIError(code=400, err_code=10065, description="subjects overlap with an existing stream"), StreamRefused,
+     f"another stream in the NATS account takes some of its subjects ({', '.join(FIRST['subjects'])}) (JetStream "
+     "error 10065, subjects overlap with an existing stream). The instance needs these subjects to itself: remove "
+     "the other stream or narrow its subjects"),
+    (APIError(code=400, err_code=10026, description="maximum consumers limit reached"), StreamAccountRefused,
+     "the NATS account allows fewer consumers per stream than the instance's streams take (JetStream error 10026, "
+     f"maximum consumers limit reached); stream {STREAMS[0]} takes up to {FIRST['max_consumers']}. Raise the "
+     "account's consumer limit to at least 4,096, or remove it."),
+])
+def test_each_server_refusal_names_the_setting_or_limit_that_fixes_it(error, kind, says) -> None:
+    """FA-3 of pull request 152's review: one table; a setting is named only for the errors it fixes."""
+
+    with pytest.raises(kind) as refused:
+        ensured(_refusing_streams(error), queue_limits(replicas=3))
+    message = str(refused.value)
+    assert message.startswith(f"NATS refused to create stream {STREAMS[0]}: ") and says in message
+    assert message.endswith("The streams made so far stay; once the cause is fixed, the next start finishes the team.")
+    assert ("transport.replicas" in message) == (error.err_code in queues_module.REPLICA_ERRORS)
+
+
+def test_a_refusal_the_table_does_not_know_is_shown_as_the_server_sent_it_naming_no_setting() -> None:
+    error = APIError(code=500, err_code=10052, description="stream configuration update can not change storage type")
     with pytest.raises(StreamRefused) as refused:
-        ensured(RefusingReplicas(), queue_limits(replicas=3))
-    assert str(refused.value).startswith(f"NATS refused to create stream {STREAMS[0]}: JetStream error 10074, replicas "
-                                         "> 1 not supported in non-clustered mode. Check transport.replicas")
+        ensured(_refusing_streams(error))
+    assert str(refused.value) == (
+        f"NATS refused to create stream {STREAMS[0]}: JetStream error 10052, stream configuration update can not "
+        "change storage type. The streams made so far stay; once the cause is fixed, the next start finishes the team.")
+
+
+def test_an_account_allowing_fewer_consumers_per_stream_than_a_stream_takes_refuses_before_any_change() -> None:
+    """FA-1: nats-server 2.15.1 refuses (10026) a stream whose consumer limit is above the account's."""
+
+    js = StandInJetStream(account_consumers=2_000)
+    with pytest.raises(StreamAccountRefused) as refused:
+        ensured(js)
+    assert str(refused.value) == (
+        f"The NATS account allows 2,000 consumers per stream, and bucket {SHARED_BUCKETS[0][3:]} takes up to 4,096: "
+        "NATS refuses a stream whose consumer limit is above the account's. The contract sets how many consumers each "
+        "stream takes, so raise the account's consumer limit to at least 4,096, or remove it. Nothing was changed.")
+    assert not [call for call in js.calls if call[0] in {"create", "update"}]
+    ensured(StandInJetStream(account_consumers=4_096))  # the contract's largest fits
+
+
+class _Unanswered(StandInJetStream):
+    """A JetStream that answers no request of ``kind`` ("info", "subjects", "consumer info" or "consumer")."""
+
+    def __init__(self, kind: str, error: Exception) -> None:
+        super().__init__()
+        self.kind, self.error = kind, error
+
+    async def stream_info(self, name: str, subjects_filter: Optional[str] = None) -> Any:
+        if self.kind == "info":
+            raise self.error
+        return await super().stream_info(name, subjects_filter)
+
+    async def consumer_info(self, stream: str, name: str) -> Any:
+        if self.kind == "consumer info":
+            raise self.error
+        return await super().consumer_info(stream, name)
+
+    async def add_consumer(self, stream: str, config: ConsumerConfig) -> Any:
+        if self.kind == "consumer":
+            raise self.error
+        return await super().add_consumer(stream, config)
+
+
+@pytest.mark.parametrize(("kind", "error", "says"), [
+    ("info", NatsTimeoutError(), f"NATS did not answer the request to read stream {STREAMS[0]} (TimeoutError): its "
+     "JetStream may be starting, or a cluster choosing a leader. Start again once NATS answers. Nothing was changed."),
+    ("info", ServiceUnavailableError(code=503, err_code=10008, description="JetStream system temporarily unavailable"),
+     f"NATS refused to read stream {STREAMS[0]}: JetStream error 10008, JetStream system temporarily unavailable. "
+     "Nothing was changed."),
+    ("consumer info", NatsTimeoutError(), "NATS did not answer the request to create or update consumer "),
+    ("consumer", APIError(code=400, err_code=10026, description="maximum consumers limit reached"),
+     "the NATS account allows fewer consumers per stream than the instance's streams take (JetStream error 10026, "
+     "maximum consumers limit reached). Raise the account's consumer limit to at least 4,096, or remove it. The "
+     "streams made so far stay"),
+])
+def test_errors_reading_streams_or_making_team_consumers_refuse_the_start_naming_what_failed(kind, error, says) -> None:
+    """FA-4 and CRIT-2: the launcher shows the reason instead of a traceback and "exited with code 1"."""
+
+    with pytest.raises((StreamRefused, StreamAccountRefused)) as refused:
+        ensured(_Unanswered(kind, error))
+    assert says in str(refused.value)
+    assert "transport." not in str(refused.value)
+
+
+def test_an_unanswered_account_information_request_refuses_the_start_before_any_change() -> None:
+    class Silent(StandInConnection):
+        async def request(self, subject: str, data: bytes, timeout: float) -> Any:
+            raise NatsTimeoutError()
+
+    js = StandInJetStream()
+    topology = QueueTopology(Silent(js), js, transport=transport(), limits=TEST_QUEUE_LIMITS, partitions=COUNT)
+    with pytest.raises(StreamRefused, match="NATS did not answer the request to read the NATS account's JetStream "
+                                            "information \\(TimeoutError\\).* Nothing was changed.$"):
+        asyncio.run(topology.ensure([TEAM]))
+    assert not js.streams
 
 
 # -- agents' consumers (installation_authority.placements decides when) -------------------------

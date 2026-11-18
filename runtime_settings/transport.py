@@ -3,7 +3,7 @@
 from __future__ import annotations
 import logging
 from typing import Any, Final, Optional
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator, model_validator
 from custom_messages.contracts.runtime_v1 import TRANSPORT_NATS
 from default_values import (
     MAX_QUEUE_MESSAGE_BYTES, MAX_QUEUE_PARTITIONS, MIN_QUEUE_BYTES, QUEUE_SENDERS_AT_CAP, TRANSPORT_DEFAULTS,
@@ -97,34 +97,56 @@ def store_partition_count(config: dict[str, Any]) -> bool:
     return True
 
 
-# Releases before 0.10 made every stream with ``int(replicas or 1)`` copies, so a saved 0
-# meant one copy. ``TransportSettings`` refuses 0 now, so that every stream the installation
-# authority creates has the count the settings name; the upgrade steps write what an older
-# file meant (instance configuration 14 -> 15, config.yaml 12 -> 13, and the team transfer's
-# settings section from versions before 12).
+# Releases before 0.10 read ``transport.replicas`` as a pydantic ``int``, which also takes a
+# whole float, a boolean and a numeric string ("0", "3"), and made every stream with
+# ``int(replicas or 1)`` copies, so a saved 0 meant one copy. ``TransportSettings`` takes only a
+# whole number from 1 to 5 now, so that every stream the installation authority creates has
+# the count the settings name; the upgrade steps write the count an older file meant
+# (instance configuration 14 -> 15, config.yaml 12 -> 13, and the team transfer's settings
+# section from versions before 12; DI-1 of pull request 152's review).
 REPLICAS_SETTING: Final = ("transport", "replicas")
+_OLDER_RELEASES_INT: Final = TypeAdapter(int)
 
 
-def zero_replicas_meant_one(value: Any) -> bool:
-    """Whether a saved ``transport.replicas`` is the 0 that releases before 0.10 read as one copy."""
+def upgraded_replicas(value: Any) -> Optional[int]:
+    """The whole number to write for a ``transport.replicas`` an older release saved, or None to leave it as it is.
 
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and value == 0
+    None for a whole number other than 0, which needs no change, and for a value older releases
+    refused or one whose count is outside 1 to 5: validation refuses those by name.
+    """
+
+    try:
+        count = _OLDER_RELEASES_INT.validate_python(value) or 1
+    except ValidationError:
+        return None
+    if (type(value) is int and value == count) or not 1 <= count <= MAX_JETSTREAM_REPLICAS:
+        return None
+    return count
 
 
-def write_zero_replicas_as_one(config: dict[str, Any]) -> bool:
-    """Upgrade step: write a saved replica count of 0 as 1, the count it always meant; whether it did.
+def write_upgraded_replicas(config: dict[str, Any]) -> Optional[tuple[Any, int]]:
+    """Upgrade step: write a saved replica count as the whole number older releases read; ``(saved, written)`` if it did.
 
-    A value of another kind is left for validation to refuse by name. Callers pass a shallow
-    copy of the file's mapping; the ``transport`` section is copied before it is changed. Logs
-    nothing, like ``store_partition_count``.
+    Callers pass a shallow copy of the file's mapping; the ``transport`` section is copied
+    before it is changed. Logs nothing, like ``store_partition_count``: the callers name the
+    change in the upgrade's steps.
     """
 
     section, key = REPLICAS_SETTING
     transport = config.get(section)
-    if not isinstance(transport, dict) or not zero_replicas_meant_one(transport.get(key)):
-        return False
-    config[section] = {**transport, key: 1}
-    return True
+    if not isinstance(transport, dict) or key not in transport:
+        return None
+    written = upgraded_replicas(transport[key])
+    if written is None:
+        return None
+    config[section] = {**transport, key: written}
+    return transport[key], written
+
+
+def replicas_step(written: Optional[tuple[Any, int]]) -> str:
+    """The upgrade step's words for ``write_upgraded_replicas``'s result: nothing when it wrote nothing."""
+
+    return f"; {'.'.join(REPLICAS_SETTING)} {written[0]!r} set to {written[1]}" if written else ""
 
 
 def least_partition_bytes(per_subject_cap: int) -> int:

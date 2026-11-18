@@ -594,10 +594,15 @@ def test_the_partition_count_upgrade_writes_the_default_into_a_file_without_one(
     (_migrate_instance_config_dict, 14, 15, "14 -> 15: store the protocol 1 partition count; "
      "transport.queues.partitions set to 96", {"queues": {"partitions": 96}}),
 ])
-@pytest.mark.parametrize(("replicas", "upgraded_replicas"), [(0, 1), (0.0, 1), (3, 3), ("0", "0"), (False, False)])
-def test_a_saved_replica_count_of_0_is_written_as_1(tmp_path, migrate, previous, current, step, later, replicas,
-                                                    upgraded_replicas) -> None:
-    """Every stream was made with int(replicas or 1) copies, so 0 meant one; validation refuses it now."""
+@pytest.mark.parametrize(("replicas", "upgraded_replicas"), [
+    (0, 1), (0.0, 1), ("0", 1), (False, 1),  # 0 meant one copy
+    (1.0, 1), (True, 1), ("3", 3), (" 3 ", 3), ("3.0", 3),  # DI-1 of PR 152's review: what 0.9's int field read
+    (3, 3), (1.5, 1.5), ("many", "many"), (None, None), (7, 7), ("-2", "-2"),  # left for validation to name
+])
+def test_a_saved_replica_count_is_written_as_the_whole_number_earlier_releases_read(
+        tmp_path, migrate, previous, current, step, later, replicas, upgraded_replicas) -> None:
+    """Earlier releases read the setting as a pydantic int and made every stream with int(replicas or 1) copies, so 0
+    meant one; validation takes only a whole number from 1 to 5 now."""
 
     source = {"schema_version": previous, "transport": {"replicas": replicas}}
     before = yaml.safe_dump(source)
@@ -605,8 +610,8 @@ def test_a_saved_replica_count_of_0_is_written_as_1(tmp_path, migrate, previous,
     upgraded, steps = migrate(source, source_path=tmp_path / "settings.yaml")
 
     assert upgraded == {"schema_version": current, "transport": {"replicas": upgraded_replicas, **later}}
-    written = replicas is not False and replicas in (0, 0.0) and not isinstance(replicas, str)
-    assert steps[-1] == step + ("; transport.replicas 0 set to 1" if written else "")
+    written = type(upgraded_replicas) is int and not (type(replicas) is int and replicas == upgraded_replicas)
+    assert steps[-1] == step + (f"; transport.replicas {replicas!r} set to {upgraded_replicas}" if written else "")
     assert yaml.safe_dump(source) == before, "the caller's mapping is not changed"
 
 

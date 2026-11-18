@@ -22,8 +22,8 @@ nothing, when
   ``max_msgs_per_subject`` (measured on nats-server 2.15.1);
 - the NATS account's limits do not allow what this start would make: no limits for the
   replica count on an account that keeps them per replica tier, more streams than the
-  account allows (``StreamAccountRefused``), or more storage than its limit
-  (``StreamStorageRefused``).
+  account allows, a stream taking more consumers than the account allows per stream
+  (``StreamAccountRefused``), or more storage than its limit (``StreamStorageRefused``).
 
 Then it lowers the streams whose limits go down, which gives back the room they set aside,
 creates and enlarges the others, and creates or updates the team consumers. A start changes
@@ -32,8 +32,15 @@ does not own, so a restart with the same settings asks NATS for no change at all
 matters beyond speed: a NATS server whose storage is now smaller than what its streams set
 aside (the bundled server measures its storage from the disk's free space at every start)
 keeps serving the streams it has but refuses every new or changed stream, so a start that
-asked for no change still serves there. The server's refusals (JetStream errors 10047 and
-10027) stop a start the same way as the checks, naming the stream and what to do.
+asked for no change still serves there.
+
+The server's refusals, and requests it does not answer, stop a start the same way as the
+checks (``AuthorityStartRefused``, which the authority's process logs as
+``installation_authority_start_refused``), naming the stream or consumer and the server's
+error. One table decides the advice (``_server_refusal``): a setting or an account limit is
+named only for the errors it fixes (10047 storage, 10027 streams, 10026 consumers, 10065
+subjects another stream takes, 10074 and 10005 copies the servers cannot hold); any other
+error is shown as the server sent it, naming no setting.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional
 
+from nats.errors import Error as NatsError
 from nats.js.api import ConsumerConfig, StorageType, StreamConfig
 from nats.js.errors import APIError, NotFoundError
 
@@ -63,10 +71,26 @@ from custom_messages.wire.queues import (
 from installation_authority.refusals import AuthorityStartRefused
 
 _LOGGER = logging.getLogger(__name__)
-# JetStream's error when a stream's limit does not fit the server's or the account's storage.
+# JetStream's errors whose cause a start names, measured on nats-server 2.15.1; every other
+# error is shown as the server sent it (``QueueTopology._server_refusal``).
+# A stream's limit does not fit the server's or the account's storage.
 INSUFFICIENT_STORAGE = 10047
-# JetStream's error when the account (or its replica tier) holds as many streams as it allows.
+# The account (or its replica tier) holds as many streams as it allows.
 MAXIMUM_STREAMS = 10027
+# A stream's own consumer limit is above the account's, which caps each stream's consumers,
+# or a stream holds as many consumers as it may.
+MAXIMUM_CONSUMERS = 10026
+# Another stream of the account takes some of the stream's subjects.
+SUBJECTS_OVERLAP = 10065
+# More copies than the servers JetStream runs on can hold: more than one on a server that is
+# not in a cluster (10074), or more than the cluster has servers (10005, no suitable peers).
+REPLICA_ERRORS = frozenset({10074, 10005})
+# What a request about streams can meet besides success: a refusal (``APIError``), no answer in
+# time (``TimeoutError``), or no JetStream to answer. ``NotFoundError`` is caught before it.
+_SERVER_ERRORS = (NatsError, TimeoutError)
+# What a refusal says the start left: nothing before the first change, the streams made after.
+_NOTHING_CHANGED = "Nothing was changed."
+_MADE_SO_FAR_STAY = "The streams made so far stay; once the cause is fixed, the next start finishes the team."
 # The account information request ($JS.API.INFO): what the account sets aside, its limits and tiers.
 ACCOUNT_INFO_SUBJECT = "$JS.API.INFO"
 CAP_SETTING = "transport.queues.max_messages_per_subject"
@@ -99,11 +123,11 @@ class StreamStorageRefused(AuthorityStartRefused):
 
 
 class StreamAccountRefused(AuthorityStartRefused):
-    """The NATS account allows no more streams, or has no limits for the replica count."""
+    """The NATS account allows no more streams, fewer consumers per stream than a stream takes, or no replica tier."""
 
 
 class StreamRefused(AuthorityStartRefused):
-    """The server refused to create or update a stream for another reason, such as more replicas than it has servers."""
+    """The server refused a stream or consumer for another reason, or did not answer; a setting is named only if it fixes it."""
 
 
 @dataclass(frozen=True)
@@ -156,6 +180,8 @@ class AccountRoom:
     reported: int  # what the account (or the tier) reports its streams set aside, once per stream
     streams: int
     stream_limit: int  # 0 or below: none
+    # Consumers per stream (measured on 2.15.1: a cap on each stream, not a total); 0 or below: none.
+    consumer_limit: int = -1
 
     @property
     def copies(self) -> int:
@@ -187,7 +213,8 @@ class AccountRoom:
         limits = part.get("limits") or {}
         return cls(replicas=replicas, tier=tier, storage_limit=int(limits.get("max_storage", -1)),
                    reported=int(part.get("reserved_storage", 0)), streams=int(part.get("streams", 0)),
-                   stream_limit=int(limits.get("max_streams", -1)))
+                   stream_limit=int(limits.get("max_streams", -1)),
+                   consumer_limit=int(limits.get("max_consumers", -1)))
 
     def reserve_of(self, change: StreamChange) -> int:
         """What ``change`` adds to ``used``: each copy on a flat account; a stream entering the tier adds its limit."""
@@ -258,7 +285,11 @@ class QueueTopology:
             pending -= change.reserve
         for team in teams:
             for consumer in team_consumers(self._transport, team):
-                await self._ensure_consumer(consumer)
+                try:
+                    await self._ensure_consumer(consumer)
+                except _SERVER_ERRORS as error:
+                    raise self._server_refusal(f"create or update consumer {consumer.name} of stream {consumer.stream}",
+                                               error, after=_MADE_SO_FAR_STAY) from None
         self._logger.info("Every team's message streams are set up. event=protocol1_queue_streams_ready teams=%s "
                           "created=%s updated=%s", ",".join(teams),
                           sum(change.current is None for change in changes),
@@ -307,6 +338,8 @@ class QueueTopology:
             config: StreamConfig = (await self._js.stream_info(name)).config
         except NotFoundError:
             return None
+        except _SERVER_ERRORS as error:
+            raise self._server_refusal(f"read stream {name}", error, after=_NOTHING_CHANGED) from None
         return config
 
     def _check_count(self, stream: QueueStream, current: StreamConfig) -> None:
@@ -337,7 +370,10 @@ class QueueTopology:
         before = int(current.max_msgs_per_subject if current.max_msgs_per_subject is not None else -1)
         if 0 < before <= cap:
             return
-        info = await self._js.stream_info(stream.name, subjects_filter=">")
+        try:
+            info = await self._js.stream_info(stream.name, subjects_filter=">")
+        except _SERVER_ERRORS as error:
+            raise self._server_refusal(f"read what stream {stream.name} holds", error, after=_NOTHING_CHANGED) from None
         held = info.state.subjects or {}
         over = sorted(((count, subject) for subject, count in held.items() if count > cap), reverse=True)
         if over:
@@ -350,7 +386,7 @@ class QueueTopology:
                 f"was changed.")
 
     async def _check_account(self, ordered: list[StreamChange]) -> None:
-        """Refuse when the account's limits do not allow what this start makes: its tier, stream count or storage.
+        """Refuse when the account's limits do not allow what this start makes: its tier, streams, consumers or storage.
 
         An account without a storage limit of its own (``max_storage`` -1, the bundled server's
         global account) leaves the storage to the server, whose 10047 refusal is the check there
@@ -360,7 +396,7 @@ class QueueTopology:
 
         if not ordered:
             return
-        account = await self._account_info()
+        account = await self._account_info(after=_NOTHING_CHANGED)
         room = AccountRoom.read(account, self.limits.replicas)
         entering = sum(room.enters(change) for change in ordered)
         if 0 < room.stream_limit < room.streams + entering:
@@ -369,6 +405,15 @@ class QueueTopology:
                 f"start would add {entering:,}. {self._team_count()} The partition count is fixed when the "
                 f"installation is created, so raise the account's stream limit to at least "
                 f"{room.streams + entering:,}. Nothing was changed.")
+        most = max(ordered, key=_consumers_of)
+        if 0 < room.consumer_limit < _consumers_of(most):
+            # Measured on nats-server 2.15.1: it refuses (10026) a stream whose own consumer
+            # limit is above the account's, so the start would stop partway through.
+            raise StreamAccountRefused(
+                f"{_first_upper(room.where())} allows {room.consumer_limit:,} consumers per stream, and {most.what} "
+                f"takes up to {_consumers_of(most):,}: NATS refuses a stream whose consumer limit is above the "
+                f"account's. The contract sets how many consumers each stream takes, so raise the account's consumer "
+                f"limit to at least {self.consumers_needed:,}, or remove it. Nothing was changed.")
         if room.storage_limit < 0:
             return
         copies_change = any(change.current is not None and int(change.current.num_replicas or 1) != room.replicas
@@ -410,7 +455,7 @@ class QueueTopology:
                 await self._js.add_stream(config=config)
             else:
                 await self._js.update_stream(config=config)
-        except APIError as error:
+        except _SERVER_ERRORS as error:
             raise await self._refusal(change, error, pending) from None
         kind = "bucket" if change.bucket else "queue_stream"
         if change.current is None:
@@ -495,21 +540,13 @@ class QueueTopology:
 
     # -- what the refusals say ----------------------------------------------------------------------
 
-    async def _refusal(self, change: StreamChange, error: APIError, pending: int) -> AuthorityStartRefused:
-        """The start refusal for the server's refusal of ``change``."""
+    async def _refusal(self, change: StreamChange, error: BaseException, pending: int) -> AuthorityStartRefused:
+        """The start refusal for the server's refusal of ``change``, or its missing answer."""
 
         action = "create" if change.current is None else "update"
-        if error.err_code == MAXIMUM_STREAMS:
-            return StreamAccountRefused(
-                f"NATS refused to create {change.what}: the NATS account allows no more streams (JetStream error "
-                f"{MAXIMUM_STREAMS}, {error.description}). {self._team_count()} Raise the account's stream limit. The "
-                f"streams made so far stay; once the account allows them, the next start finishes the team.")
-        if error.err_code != INSUFFICIENT_STORAGE:
-            return StreamRefused(
-                f"NATS refused to {action} {change.what}: JetStream error {error.err_code}, {error.description}. "
-                f"Check {REPLICAS_SETTING} against the servers JetStream runs on, and the server's JetStream "
-                f"settings. The streams made so far stay; the next start finishes the team.")
-        room = AccountRoom.read(await self._account_info(), self.limits.replicas)
+        if not isinstance(error, APIError) or error.err_code != INSUFFICIENT_STORAGE:
+            return self._server_refusal(f"{action} {change.what}", error, after=_MADE_SO_FAR_STAY, change=change)
+        room = AccountRoom.read(await self._account_info(after=_MADE_SO_FAR_STAY), self.limits.replicas)
         refused = f"JetStream error {INSUFFICIENT_STORAGE}, {error.description}."
         if change.reserve <= 0:
             # A lowering or a change of no size can be refused only when what is set aside already
@@ -532,12 +569,63 @@ class QueueTopology:
             f"room than its streams had already set aside, it refuses every change, a lowered limit too, until it "
             f"has more. The streams made so far stay; once the limits fit, the next start finishes the team.")
 
-    async def _account_info(self) -> dict[str, Any]:
-        """The account's information as the server sends it: nats-py's ``AccountInfo`` lacks ``reserved_storage``."""
+    def _server_refusal(self, doing: str, error: BaseException, *, after: str,
+                        change: Optional[StreamChange] = None) -> AuthorityStartRefused:
+        """The start refusal for ``error`` while trying ``doing`` ("create stream X"); 10047 has its own (``_refusal``).
 
-        reply: dict[str, Any] = json.loads((await self._nc.request(ACCOUNT_INFO_SUBJECT, b"", timeout=5)).data)
-        if "error" in reply:
-            APIError.from_error(reply["error"])  # raises the error's kind
+        One table from JetStream error to advice (FA-3 of pull request 152's review): a setting
+        or the account's limit is named only where changing it fixes the cause, and any other
+        error is shown as the server sent it. ``after`` says what the start left;
+        ``change`` is the stream being created or updated, when there is one.
+        """
+
+        if not isinstance(error, APIError):
+            return StreamRefused(
+                f"NATS did not answer the request to {doing} ({type(error).__name__}): its JetStream may be starting, "
+                f"or a cluster choosing a leader. Start again once NATS answers. {after}")
+        refused = f"JetStream error {error.err_code}, {error.description}"
+        if error.err_code == MAXIMUM_STREAMS:
+            return StreamAccountRefused(
+                f"NATS refused to {doing}: the NATS account allows no more streams ({refused}). {self._team_count()} "
+                f"Raise the account's stream limit. {after}")
+        if error.err_code == MAXIMUM_CONSUMERS:
+            takes = f"; {change.what} takes up to {_consumers_of(change):,}" if change is not None else ""
+            return StreamAccountRefused(
+                f"NATS refused to {doing}: the NATS account allows fewer consumers per stream than the instance's "
+                f"streams take ({refused}){takes}. Raise the account's consumer limit to at least "
+                f"{self.consumers_needed:,}, or remove it. {after}")
+        if error.err_code == SUBJECTS_OVERLAP:
+            subjects = f" ({', '.join(change.config.get('subjects') or ())})" if change is not None else ""
+            return StreamRefused(
+                f"NATS refused to {doing}: another stream in the NATS account takes some of its subjects{subjects} "
+                f"({refused}). The instance needs these subjects to itself: remove the other stream or narrow its "
+                f"subjects (nats stream ls lists the account's streams). {after}")
+        if error.err_code in REPLICA_ERRORS:
+            return StreamRefused(
+                f"NATS refused to {doing}: the servers JetStream runs on cannot hold {self.limits.replicas} copies of "
+                f"each stream ({refused}). Set {REPLICAS_SETTING} to at most the number of servers in the JetStream "
+                f"cluster, or to 1 for a server that is not in a cluster. {after}")
+        return StreamRefused(f"NATS refused to {doing}: {refused}. {after}")
+
+    @property
+    def consumers_needed(self) -> int:
+        """The most consumers one of the instance's streams takes: the contract's largest ``max_consumers``, buckets too."""
+
+        streams = [int(spec.get("max_consumers", 0)) for spec in self._transport["streams"].values()]
+        return max([*streams, int(self._transport["key_value_stream"].get("max_consumers", 0))])
+
+    async def _account_info(self, *, after: str) -> dict[str, Any]:
+        """The account's information as the server sends it: nats-py's ``AccountInfo`` lacks ``reserved_storage``.
+
+        ``after`` says what the start left, for the refusal when the server does not answer.
+        """
+
+        try:
+            reply: dict[str, Any] = json.loads((await self._nc.request(ACCOUNT_INFO_SUBJECT, b"", timeout=5)).data)
+            if "error" in reply:
+                APIError.from_error(reply["error"])  # raises the error's kind
+        except _SERVER_ERRORS as error:
+            raise self._server_refusal("read the NATS account's JetStream information", error, after=after) from None
         return reply
 
     def _totals(self, team: Optional[str], room: AccountRoom) -> str:
@@ -595,6 +683,12 @@ def _limit(config: Mapping[str, Any]) -> int:
     """A stream configuration's byte limit, 0 for none (a bucket's stream)."""
 
     return max(int(config.get("max_bytes", -1)), 0)
+
+
+def _consumers_of(change: StreamChange) -> int:
+    """How many consumers ``change``'s stream takes, -1 for no limit of its own."""
+
+    return int(change.config.get("max_consumers", -1))
 
 
 def _changed_fields(config: Mapping[str, Any], current: StreamConfig) -> tuple[str, ...]:

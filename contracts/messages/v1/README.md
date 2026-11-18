@@ -1226,7 +1226,14 @@ room: see "Control messages share their stream's room" below. These settings are
   change when they do not fit, and when the account has no tier for the replica count. An
   account without a storage limit of its own reports none to check against, so there the
   server's 10047 refusal is the check, and it stops the authority the same way, naming the
-  stream and the setting. The server can also refuse when the account's check passed,
+  stream and the setting. The authority also checks the account's consumer limit
+  (`limits.max_consumers`, a cap on each stream's consumers, measured on 2.15.1): the server
+  refuses a stream whose own `max_consumers` is above it (10026), so an account allows 4,096
+  consumers per stream (the buckets' streams) or has no limit. Other refusals name a setting
+  or a limit only where it fixes the cause: copies the servers cannot hold (10074 on one
+  server, 10005 in a cluster too small) name `transport.replicas`, and subjects another
+  stream of the account takes (10065) name that conflict; any other error, and a request the
+  server does not answer, stops the authority with the server's own words. The server can also refuse when the account's check passed,
   because other accounts or other uses share the server's storage. A refusal partway
   through a team's streams leaves the streams already made in place, with their limits
   still set aside, and the team only partly set up. The authority's next run, after the

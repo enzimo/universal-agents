@@ -8,12 +8,16 @@ nats-server of its own, so a test chooses the server's storage and its partition
 - a changed limit updates the stream at the next start and keeps metadata the authority
   does not own; a team made with another partition count refuses the start;
 - a store too small stops the start naming the stream and the setting, and a later start
-  with lower limits finishes the team; no host can join meanwhile;
+  with lower limits finishes the team; no host can join meanwhile; a start lowers limits
+  before it raises others, so room moved between them fits a nearly full store;
 - after NATS restarts with less storage than its streams set aside (the bundled server
   measures its storage from the disk's free space at every start), the same settings still
   serve and a changed limit is refused saying that lowering cannot help;
 - an account whose limits are kept per replica tier is checked against its tier, and one
-  that allows too few streams refuses the start before any change;
+  that allows too few streams, or fewer consumers per stream than the contract's streams
+  take, refuses the start before any change;
+- another stream on the instance's subjects stops the start naming that conflict, not a
+  setting;
 - a full work stream refuses new messages and keeps its oldest; the per-subject cap keeps
   room for control messages (FA-3 of PR #151, with four senders at the cap and full-size
   messages); a lowered cap that would drop queued messages refuses the start.
@@ -45,6 +49,7 @@ from installation_authority.queues import (
     StreamAccountRefused,
     StreamCapWouldDrop,
     StreamCountMismatch,
+    StreamRefused,
     StreamStorageRefused,
 )
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
@@ -177,6 +182,23 @@ def test_a_store_too_small_stops_the_start_naming_the_stream_and_a_later_start_w
     run(tmp_path, scenario, max_file_store=40 * MIB)
 
 
+def test_room_a_lowered_limit_gives_back_serves_a_raised_one_at_the_same_start(tmp_path):
+    """EA-2 of pull request 152's review: a start lowers limits before it creates or enlarges streams.
+
+    A nearly full store of 20 MiB holds four partition streams of 1 MiB, a pool of 8 MiB and three
+    more streams of 1 MiB (15 MiB set aside). The next start moves room from the pool to the
+    partition streams (3 MiB each, a pool of 1 MiB: 16 MiB). Enlarging the partition streams
+    first would set aside 21 MiB by the third of them, and NATS would refuse it (10047).
+    """
+
+    async def scenario(nc: Any) -> None:
+        await topology(nc, queue_limits(pool=8 * MIB), partitions=4).ensure([TEAM])
+        await topology(nc, queue_limits(partition=3 * MIB, pool=MIB), partitions=4).ensure([TEAM])
+        assert (await account(nc))["reserved_storage"] == 4 * 3 * MIB + MIB + 3 * MIB
+
+    run(tmp_path, scenario, partitions=4, max_file_store=20 * MIB)
+
+
 def test_no_host_can_join_while_the_streams_do_not_fit(tmp_path):
     """The authority refuses before it signs anything, so the bundle holds no certificate for the launcher to wait on."""
 
@@ -266,6 +288,49 @@ def test_an_account_with_limits_per_replica_tier_is_checked_against_its_tier(tmp
 
     with own_nats_server(nats_server(), tmp_path, "-c", str(config)) as url:
         asyncio.run(scenario(url))
+
+
+def test_an_account_allowing_fewer_consumers_per_stream_than_the_contract_refuses_the_start_before_any_change(tmp_path):
+    """FA-1 and CRIT-1 of pull request 152's review: NATS refuses (10026) a stream whose own consumer limit is above
+    the account's, and the buckets' streams take 4,096 consumers."""
+
+    config, operator = _tiered_account(tmp_path, {"R1": {"disk_storage": 4096 * MIB, "consumer": 2000}})
+
+    async def scenario(url: str) -> None:
+        nc = await nats.connect(url, allow_reconnect=False, **operator.user("authority", None).login())
+        try:
+            with pytest.raises(StreamAccountRefused) as refused:
+                await topology(nc, queue_limits()).ensure([TEAM])
+            message = str(refused.value)
+            assert message.startswith("The NATS account's tier R1 allows 2,000 consumers per stream, and bucket ")
+            assert message.endswith("raise the account's consumer limit to at least 4,096, or remove it. Nothing was "
+                                    "changed.")
+            assert (await account(nc))["tiers"]["R1"]["streams"] == 0, "nothing was made"
+            # What the check stands in front of: the server's own refusal of such a stream.
+            with pytest.raises(APIError) as server:
+                await nc.jetstream().add_stream(name="WIDE", subjects=["wide.>"], max_consumers=4096)
+            assert server.value.err_code == 10026
+        finally:
+            await nc.close()
+
+    with own_nats_server(nats_server(), tmp_path, "-c", str(config)) as url:
+        asyncio.run(scenario(url))
+
+
+def test_another_stream_on_the_instances_subjects_stops_the_start_naming_that_conflict_not_a_setting(tmp_path):
+    """FA-3 of pull request 152's review: before, every refusal but 10027 and 10047 said to check transport.replicas."""
+
+    async def scenario(nc: Any) -> None:
+        await nc.jetstream().add_stream(name="AUDIT_EVERYTHING", subjects=["ua.>"])
+        with pytest.raises(StreamRefused) as refused:
+            await topology(nc, queue_limits(), partitions=1).ensure([TEAM])
+        message = str(refused.value)
+        assert message.startswith(f"NATS refused to create stream UA1_DLQ_{TEAM}: another stream in the NATS account "
+                                  f"takes some of its subjects (ua.v1.{TEAM}.")
+        assert "(JetStream error 10065, subjects overlap with an existing stream)" in message
+        assert "transport." not in message
+
+    run(tmp_path, scenario, partitions=1)
 
 
 def test_a_full_work_stream_refuses_new_messages_and_keeps_its_oldest(tmp_path):

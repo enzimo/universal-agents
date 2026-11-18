@@ -124,7 +124,11 @@ supported, because it may not read what a newer one saved.
   0.9 again:
   - **A team id over 24 characters:** this instance cannot run 0.10 with that
     team id. Keep running 0.9.x. A team transfer keeps the team id, so it does
-    not help here.
+    not help here: onboarding's Import, and `assistant_cli team import` into a
+    fresh folder, refuse such an export when they open it, before they write
+    anything (`event=team_import_ids_over_caps`). They refuse an export with an
+    agent type over 24 characters the same way; rename it on 0.9 as below and
+    export again.
   - **An agent type over 24 characters:** on 0.9, rename it in the file the
     message names and everywhere the instance names it:
     `gateway.startup_agents` in `instance_config.yaml` and the team roster
@@ -141,7 +145,11 @@ supported, because it may not read what a newer one saved.
   the start instead, with a message naming that entry
   (`event=protocol1_startup_agent_types_over_cap`): remove the entry or change
   it to a shorter type, then start again. Do not go back to 0.9 then, since
-  0.10 has already run on the instance.
+  0.10 has already run on the instance. The record is written before 0.10
+  creates its message streams, so if 0.10 then refuses to start (for example
+  for room, below) and you go back to 0.9, delete
+  `state/upgrades/protocol1-ids.json` too, so that the next 0.10 start checks
+  the ids again.
 
   Upgrade from 0.9 by starting 0.10, not with `assistant_cli.py
   migrate-config`: the start checks the ids before it upgrades

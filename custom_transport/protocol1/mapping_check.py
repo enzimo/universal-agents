@@ -50,7 +50,9 @@ PROBE_WAIT_SECONDS = 5.0
 MIN_PROBES = 16
 # More candidate ids than any count needs: a handful tell every other count apart.
 _MAX_CANDIDATES = 10_000
-# What writes the mapping lines at a count, for the refusals.
+# What writes the mapping lines at a count, named in the refusals for source checkouts only: the
+# published image keeps no .py files, and the script writes a top-level mappings block, which
+# serves only a server whose logins are in no named account (G3 of pull request 152's review).
 _LINES_SCRIPT = "python scripts/write_nats_mapping_config.py FILE --partitions {count}"
 
 # Why a mapping line failed: the server applies no mapping there, maps with another count, or
@@ -106,6 +108,15 @@ def _mapping_lines(count: int) -> str:
     return ", ".join(mapping_line(source, target) for source, target in sorted(account_mappings(count).items()))
 
 
+def _lines_advice(count: int) -> str:
+    """Where the mapping lines go and the lines themselves, then the script for a source checkout."""
+
+    return (f"Add these mapping lines inside the account the instance logs in to (in the server's configuration "
+            f"file, the account's mappings block): {_mapping_lines(count)}. In a source checkout, "
+            f"{_LINES_SCRIPT.format(count=count)} writes them as a top-level mappings block, which serves a server "
+            f"whose logins are in no named account.")
+
+
 async def check_partition_mapping(nc: Any, *, sender: str, count: int,
                                   wait_seconds: float = PROBE_WAIT_SECONDS) -> None:
     """Return when the server maps every agent address at ``count``; ``PartitionMappingError`` otherwise.
@@ -159,15 +170,13 @@ async def check_partition_mapping(nc: Any, *, sender: str, count: int,
 
 def _judge(arrived: dict[tuple[str, str], str], agents: tuple[str, ...], *, sender: str, count: int, root: str,
            wait_seconds: float) -> None:
-    lines = _mapping_lines(count)
-    script = _LINES_SCRIPT.format(count=count)
     if not arrived:
         raise PartitionMappingError(
             {mapping_source(address): NO_ANSWER for address in PARTITIONED_ADDRESSES},
             f"The partition mapping check got no answer within {wait_seconds:g} s: none of its probes came back on "
             f"{root}>. The NATS login of runtime {sender} must be allowed to publish and subscribe to {root}>, or the "
-            f"connection to the server was lost. The installation's account must also hold these mapping lines at "
-            f"transport.queues.partitions {count} ({script} writes them): {lines}")
+            f"connection to the server was lost. The account must also map agents' addresses at "
+            f"transport.queues.partitions {count}. {_lines_advice(count)}")
     problems: dict[str, str] = {}
     findings: list[str] = []
     for address in PARTITIONED_ADDRESSES:
@@ -186,8 +195,7 @@ def _judge(arrived: dict[tuple[str, str], str], agents: tuple[str, ...], *, send
     raise PartitionMappingError(
         problems,
         f"The NATS server does not map agents' addresses at transport.queues.partitions {count}: "
-        f"{'; '.join(findings)}. {advice}The installation's account needs these mapping lines ({script} writes "
-        f"them): {lines}")
+        f"{'; '.join(findings)}. {advice}{_lines_advice(count)}")
 
 
 def _judge_line(address: str, tokens: dict[str, str], agents: tuple[str, ...], *, count: int,

@@ -964,9 +964,11 @@ delivered (a crashed process loses nothing either way). So:
   control address; hosts subscribe to an agent's live control address with
   that partition token. The installation authority checks that the server
   applies them before it serves (`custom_transport.protocol1.mapping_check`);
-  an external server's operator adds the same lines to the installation's
-  account (`scripts/write_nats_mapping_config.py --partitions N`, the
-  configuration guide's "Message Broker").
+  an external server's operator adds the same lines inside the installation's
+  account, as the authority's refusal prints them (the configuration guide's
+  "Message Broker"; in a source checkout
+  `scripts/write_nats_mapping_config.py --partitions N` writes them as a
+  top-level block, for a server without named accounts).
 - All of it needs storage that flushes when asked: a local disk, or a network
   share that passes the request on. Slow commits and flushes are logged
   (`sqlite_commit_slow`, `sqlite_flush_slow`). The hermetic tests commit with
@@ -4966,6 +4968,17 @@ the desktop app never offers an older version.
   onboarding routes, the page and the command-line `onboard`, cut the team id
   they derive to 24 characters and refuse a typed one that does not fit
   (`onboarding_engine.team_id_answer`), so a new instance never stops here.
+  A team transfer keeps the team id and the agent types, so a fresh import
+  applies the same caps before it writes anything (`team_transfer.protocol1_ids`,
+  G1 of pull request 152's review): onboarding's Import when the export is
+  opened, before its review is prepared, and every plan for a fresh root
+  (`team_transfer.service._import_context`, which covers the command-line
+  import and the review pages). It checks the export's team id and every agent
+  type its control section defines, selected or not, as the launcher checks the
+  whole catalog, and refuses with advice for the instance the export came from
+  (`event=team_import_ids_over_caps`). A later batch into an instance that
+  exists is not checked: its team id is the instance's, and a type added there
+  later is handled as any type added later.
   `assistant_cli.py migrate-config` and the command-line tool's offer to upgrade
   the file run no check, since the check belongs to starting the instance and
   the command-line tool has no store settings of its own; when such an upgrade
@@ -5374,10 +5387,16 @@ renamed secrets included). The authority:
   another partition count (each records its count, `PARTITION_COUNT_METADATA`), when a
   lowered per-subject cap would drop queued messages (NATS keeps messages above a lowered
   byte limit but drops the oldest above a lowered `max_msgs_per_subject`), or when the NATS
-  account or server has no room or too few streams left; each refusal names the stream,
-  the limit and the setting to change (`event=installation_authority_start_refused`). Then
-  it lowers the streams whose limits go down, which gives back the room they set aside,
-  and creates or enlarges the others. A stream whose fields the contract sets already
+  account or server has no room or too few streams left, or the account allows fewer
+  consumers per stream than a stream takes (NATS refuses such a stream, 10026); each
+  refusal names the stream, the limit and the setting to change
+  (`event=installation_authority_start_refused`). Then it lowers the streams whose limits
+  go down, which gives back the room they set aside, and creates or enlarges the others.
+  The server's own refusals, and requests it does not answer, stop the start the same
+  way (`QueueTopology._server_refusal`, FA-3 of pull request 152's review): one table
+  names a setting or limit only for the errors it fixes (storage, streams, consumers,
+  subjects another stream takes, copies the servers cannot hold), and shows any other
+  error as the server sent it. A stream whose fields the contract sets already
   match is not sent to NATS, so a restart with the same settings asks for no change: a
   server whose storage is now smaller than what its streams set aside (the bundled server
   measures it from the disk's free space at every start) keeps serving the streams it has
@@ -6074,10 +6093,13 @@ installation is created, and the launcher's upgrade writes the upgraded settings
 are rather than saving them through the settings model, so without this step an upgraded
 instance would follow the code's default and a release with another default would stop
 its start. The same step, `config.yaml` 12 -> 13 and the team transfer's settings
-conversion from versions before 12 write a saved `transport.replicas` of 0 as 1
-(`runtime_settings.transport.write_zero_replicas_as_one`): earlier releases made every
-stream with `int(replicas or 1)` copies, so 0 meant one, and the settings now accept only
-1 to 5 so that every stream the installation authority makes has the count they name.
+conversion from versions before 12 write a saved `transport.replicas` as the whole number
+earlier releases read (`runtime_settings.transport.upgraded_replicas`): they read the
+setting as a pydantic `int`, which also takes `"3"`, `1.0` and `true`, and made every
+stream with `int(replicas or 1)` copies, so 0 meant one. The settings now accept only a
+whole number from 1 to 5, so that every stream the installation authority makes has the
+count they name; a value earlier releases refused, or one outside 1 to 5, is left for
+validation to refuse by name.
 
 The watchdog, delegated-work progress notes and check-back timers find records by parents
 in the recovered task tree, rather than by the requester's earlier agent id. The check-back

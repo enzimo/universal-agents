@@ -928,9 +928,13 @@ JetStream-backed delivery where configured. Verify:
   inbox, control queue and live control address in one of its team's
   partitions. The bundled server's configuration gets them at every start, at
   the instance's partition count (`transport.queues.partitions`, 96 unless
-  chosen otherwise). An external server's operator adds them to the account the
-  instance logs in to; `python scripts/write_nats_mapping_config.py FILE
-  --partitions N` writes the three lines. In a NATS cluster whose accounts are
+  chosen otherwise). An external server's operator adds them inside the account
+  the instance logs in to (in the server's configuration file, that account's
+  `mappings` block); the installation authority's refusal prints the three
+  lines at the instance's count. In a source checkout,
+  `python scripts/write_nats_mapping_config.py FILE --partitions N` writes
+  them as a top-level `mappings` block, which serves only a server whose logins
+  are in no named account. In a NATS cluster whose accounts are
   kept in the servers' configuration files, every server needs the lines: a
   server maps only what its own clients publish. Before it serves, the
   installation authority checks each line at the instance's count on the server
