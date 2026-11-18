@@ -502,9 +502,10 @@ start and keep the old file as `instance_config.yaml.bak.v12`. Services you
 start yourself (`assistant_cli.py run-gateway` and the other `run-*`
 commands) ask to upgrade the file when run in a terminal; without one they
 stop and name `assistant_cli.py migrate-config --config <instance_config.yaml>`,
-which upgrades it and keeps the same backup. Neither checks that the team id
-and agent ids fit 0.10's message addresses, so when you come from 0.9, start
-the instance with the launcher first ([Upgrading](upgrading.md)). A
+which upgrades it and keeps the same backup. Neither checks that the team id,
+the agent types and the agent ids fit 0.10's message addresses, so when you
+come from 0.9, start the instance with the launcher first
+([Upgrading](upgrading.md)). A
 `config.yaml` you run with `strands_main.py --config` is upgraded when you
 confirm the prompt, or, without a terminal, when you run
 `strands_main.py --config <config.yaml> --migrate-config --yes`. A file of

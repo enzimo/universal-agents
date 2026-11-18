@@ -392,7 +392,11 @@ NATS login private to this instance.
 
 The authority creates the `UA1_*` key-value buckets in NATS on its first start and
 updates their settings on every later start. NATS lists each bucket as a stream
-named `KV_` and the bucket's name, for example `KV_UA1_CERTS`.
+named `KV_` and the bucket's name, for example `KV_UA1_CERTS`. It does the same
+for each team's message streams (`UA1_PART_<team>~<n>` for each of the
+`transport.queues.partitions`, `UA1_POOL_WORK_<team>`, `UA1_EDGE_WORK_<team>`,
+`UA1_TEAM_WORK_<team>` and `UA1_DLQ_<team>`) and their consumers, before any
+other process starts.
 
 Every process of the instance uses the same NATS login. With an external NATS
 server, give the instance a NATS account that no other application uses, and give
@@ -407,6 +411,13 @@ the setup the runtime is tested with. Compared with 0.9, the login also needs:
   the authority cannot store its records, and without those subjects the other
   processes cannot join; either way the start stops with
   `event=message_services_start_failed`.
+- To create and update the teams' `UA1_*` message streams and their consumers,
+  with room for them: NATS sets each stream's whole size limit aside when it
+  creates the stream, about 2.1 GiB per team at the default
+  `transport.queues.max_bytes`, from the account's storage limit and the
+  server's JetStream storage. Without the right or the room the authority stops
+  before any other process starts (`event=installation_authority_start_refused`),
+  naming the stream and, for room, the setting to lower.
 
 The login needs no right to the team's old presence stream: startup never looks
 at it. This list names what changed since 0.9. It is not a tested set of NATS
