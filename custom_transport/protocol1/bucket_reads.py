@@ -47,9 +47,10 @@ and after ``PAGE_ATTEMPTS`` tries the read raises ``BucketKeyListShifted``.
 
 The read sets no cap on the subject count, but one limit remains. The server sends the
 consumer's messages while the read is still asking for the pages, and nats-py holds at
-most 524,288 messages per subscription that the reader has not taken (``QUEUE_SIZE``).
-Once one filter holds more than about 524,000 subjects, delete markers included, the
-messages past that are dropped, their keys never arrive, and the read raises
+most 524,288 messages per subscription that the reader has not taken (nats-py's default,
+not this module's ``QUEUE_SIZE``; the comment on ``QUEUE_SIZE`` says how the two queues
+relate). Once one filter holds more than about 524,000 subjects, delete markers included,
+the messages past that are dropped, their keys never arrive, and the read raises
 ``BucketReadTimedOut``, each time, until the markers are removed (a follow-up).
 
 Subscriptions are nats-py ordered consumers with the settings its own watch uses, so a
