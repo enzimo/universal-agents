@@ -1163,9 +1163,9 @@ any other). That stream fills only when the team services stop reading; then eve
 kind of the team is refused until they read again or an administrator raises the
 `team_services` limit. The team's work needs the team services' custody answers anyway, so it
 waits on them either way. Readers that share a partition, pool or edge stream do share its
-room: see "Control messages share their stream's room" below. These settings enter the `config.yaml` and
-`instance_config.yaml` schemas, with their measured defaults, in the step whose code first
-reads them; `transport.yaml` names them so that step builds on a fixed contract.
+room: see "Control messages share their stream's room" below. These settings are in the
+`config.yaml` and `instance_config.yaml` schemas (`transport.queues`, with their defaults);
+`transport.yaml` names them, never their numbers.
 
 - **Limits are set aside when a stream is created.** NATS reserves a stream's whole byte
   limit from the server's JetStream file storage (`max_file_store`, which a server that
@@ -1208,7 +1208,8 @@ because dropping would lose queued work, or set-aside copies and notices nobody 
 yet, without anyone being told:
 - **A full work stream** refuses the publish with JetStream error code 10077 (the code
   NATS gives when a stream's byte, message or per-subject limit is reached; work streams
-  set only the byte limit). This refusal is the retryable "full" case. The sender keeps
+  set the byte limit, and partition streams also the per-subject cap below). This refusal
+  is the retryable "full" case. The sender keeps
   the saved frame in its outbox and publishes it again with growing pauses while the frame
   is still valid (until its `expires_at`); retries are the same frame ("Task dispatch and
   retries"). When the frame expires unsent, the sender records the dispatch as failed,
@@ -1234,16 +1235,21 @@ yet, without anyone being told:
   withdraw queued work (a person's stop does this without publishing into the full stream),
   or when an administrator raises the limit. The size warning reaches administrators
   before a stream is full, and defaults are measured so that it leaves time to act. NATS
-  2.15.1 has no byte limit per subject. A cap on messages per subject
-  (`max_msgs_per_subject` with `discard_new_per_subject`, refused with the same 10077)
-  would stop one sender's backlog for one agent at a fixed count without changing this
-  layout; it counts per sender and agent, since the sender's runtime is a subject token.
-  Step 2 measures it against the byte limits it needs and sets it. The two queues keep
-  control messages from waiting behind new work; they do not reserve room for them.
+  2.15.1 has no byte limit per subject, so the partition streams cap the messages per
+  subject instead: `transport.queues.max_messages_per_subject` (`max_msgs_per_subject`
+  with `discard_new_per_subject`, refused with the same 10077, the oldest never dropped).
+  It counts per sender and agent, since the stored subject names the sender's runtime and
+  the agent, and it applies to the control queue too. The cap keeps room only while the
+  stream can hold the senders' backlog at it, so the settings refuse a partition limit
+  below five senders' waiting messages for one agent at the cap, each of the largest
+  message size (`max_message_bytes`): four senders (a gateway, the lead host, the team
+  services and the scheduler) and one more. The two queues keep control messages from
+  waiting behind new work; the cap keeps one agent's backlog from taking the room they need.
 - **A full dead-letter stream** refuses a set-aside: see "Dead letters".
 
 The generator refuses a work or dead-letter stream without a size kind or with any other
-discard policy.
+discard policy, and a stream of agents' queues without the per-subject cap from
+`transport.queues.max_messages_per_subject` or with one that drops the oldest message.
 
 A receiver accepts a frame from `issued_at` (or a later `not_before`) through the earlier
 of `expires_at` and `issued_at + expiry_seconds` for its kind, with the end exclusive.

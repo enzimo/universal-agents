@@ -483,9 +483,51 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
         (lambda t: t["queues"].pop("warn_at_percent_setting"), "names the settings"),
         (lambda t: t["queues"].update(warn_at_percent_default=100), "from 1 to 99"),
         (lambda t: t.pop("queues"), "names the settings"),
+        (lambda t: t["queues"].pop("max_messages_per_subject_setting"), "names the settings"),
     ],
 )
 def test_stream_sizes_that_would_drop_messages_or_name_no_setting_are_refused(change, problem) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    change(transport)
+    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+        EXPORT.check_transport(transport)
+
+
+def test_the_partition_streams_cap_each_senders_waiting_messages_per_agent_from_the_settings() -> None:
+    """Review point FA-3 of PR #151: one agent's backlog must leave room for its partition's control messages."""
+
+    setting = "transport.queues.max_messages_per_subject"
+    assert TRANSPORT["queues"]["max_messages_per_subject_setting"] == setting
+    capped = {name: (stream.get("max_msgs_per_subject_setting"), stream.get("max_msgs_per_subject"),
+                     stream.get("discard_new_per_subject", False)) for name, stream in TRANSPORT["streams"].items()}
+    assert capped == {
+        "UA1_PART_{team}~{partition}": (setting, None, True),
+        "UA1_POOL_WORK_{team}": (None, None, False), "UA1_EDGE_WORK_{team}": (None, None, False),
+        "UA1_TEAM_WORK_{team}": (None, None, False),
+        "UA1_DLQ_{team}": (None, 1, False),  # a retried set-aside replaces its copy
+    }
+
+
+PART = "UA1_PART_{team}~{partition}"
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (lambda t: t["streams"][PART].pop("max_msgs_per_subject_setting"), f"stream {PART} stores agents' queues"),
+        (lambda t: t["streams"][PART].update(max_msgs_per_subject_setting="transport.queues.cap"),
+         f"stream {PART} stores agents' queues"),
+        (lambda t: t["streams"][PART].update(max_msgs_per_subject=16), "from transport.queues.max_messages_per_subject alone"),
+        # At the cap NATS would drop the agent's oldest queued message instead of refusing the sender.
+        (lambda t: t["streams"][PART].pop("discard_new_per_subject"), "discard_new_per_subject: true"),
+        (lambda t: t["streams"][PART].update(discard_new_per_subject="yes"), "discard_new_per_subject: true"),
+        (lambda t: t["streams"]["UA1_POOL_WORK_{team}"].update(discard_new_per_subject=True), "as NATS requires"),
+        (lambda t: t["streams"]["UA1_POOL_WORK_{team}"].update(
+            max_msgs_per_subject_setting="transport.queues.cap", discard_new_per_subject=True),
+         "UA1_POOL_WORK_{team} takes its per-subject cap from transport.queues.max_messages_per_subject alone"),
+    ],
+)
+def test_a_per_subject_cap_that_misses_agents_queues_or_drops_their_messages_is_refused(change, problem) -> None:
     transport = copy.deepcopy(TRANSPORT)
     change(transport)
     with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):

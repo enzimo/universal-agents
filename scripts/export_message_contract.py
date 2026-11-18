@@ -1360,7 +1360,8 @@ def check_partitions(transport: dict[str, Any]) -> None:
 
 # The instance settings that size the streams (transport.yaml queues).
 QUEUE_SETTINGS = {"max_bytes_setting": "transport.queues.max_bytes",
-                  "warn_at_percent_setting": "transport.queues.warn_at_percent"}
+                  "warn_at_percent_setting": "transport.queues.warn_at_percent",
+                  "max_messages_per_subject_setting": "transport.queues.max_messages_per_subject"}
 
 
 def check_stream_sizes(transport: dict[str, Any]) -> None:
@@ -1373,8 +1374,9 @@ def check_stream_sizes(transport: dict[str, Any]) -> None:
     queues = transport.get("queues")
     if not isinstance(queues, dict) or set(queues) != {*QUEUE_SETTINGS, "size_kinds", "warn_at_percent_default"} \
             or any(queues[key] != name for key, name in QUEUE_SETTINGS.items()):
-        raise ContractError("transport.yaml: queues names the settings transport.queues.max_bytes and "
-                            "transport.queues.warn_at_percent, the size kinds and the warning's default")
+        raise ContractError("transport.yaml: queues names the settings transport.queues.max_bytes, "
+                            "transport.queues.warn_at_percent and transport.queues.max_messages_per_subject, the size "
+                            "kinds and the warning's default")
     kinds = queues["size_kinds"]
     if not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) \
             or not all(isinstance(kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", kind) for kind in kinds):
@@ -1397,6 +1399,39 @@ def check_stream_sizes(transport: dict[str, Any]) -> None:
     if used != set(kinds):
         raise ContractError(f"transport.yaml: queues.size_kinds names only kinds a stream uses; unused "
                             f"{sorted(set(kinds) - used)}")
+    check_per_subject_caps(transport)
+
+
+def check_per_subject_caps(transport: dict[str, Any]) -> None:
+    """The streams of agents' queues cap each sender's waiting messages per agent from the settings, refusing past it.
+
+    Review point FA-3 of PR #151: one agent's backlog could fill its partition stream, and
+    then its partition's control messages were refused too. The stored subject names the
+    sender and the agent, so a per-subject cap bounds one sender's backlog for one agent's
+    queue; with discard_new_per_subject a sender at the cap is refused (10077) instead of the
+    oldest message being dropped, and the stream still takes other subjects (NATS also needs
+    discard: new, which check_stream_sizes requires of every queued stream). A stream with a
+    fixed cap and no discard_new_per_subject (the dead letters') keeps one message per
+    subject, the latest (README, "Stream sizes").
+    """
+
+    setting = transport["queues"]["max_messages_per_subject_setting"]
+    stored = [stored_subject(address, "*", transport) for address in transport["agent_queues"].values()]
+    for name, stream in transport["streams"].items():
+        named = stream.get("max_msgs_per_subject_setting")
+        holds_agent_queues = any(subject_covers(pattern, subject) for pattern in stream["subjects"] for subject in stored)
+        if holds_agent_queues and named != setting:
+            raise ContractError(f"transport.yaml: stream {name} stores agents' queues, so it caps each sender's waiting "
+                                f"messages per agent (max_msgs_per_subject_setting: {setting})")
+        if named is not None and (named != setting or "max_msgs_per_subject" in stream):
+            raise ContractError(f"transport.yaml: stream {name} takes its per-subject cap from {setting} alone")
+        per_subject = stream.get("discard_new_per_subject", False)
+        if not isinstance(per_subject, bool) or (named is not None and not per_subject):
+            raise ContractError(f"transport.yaml: stream {name} refuses a sender's next message at a cap from the "
+                                "settings (discard_new_per_subject: true), so queued work is never dropped")
+        if per_subject and named is None and "max_msgs_per_subject" not in stream:
+            raise ContractError(f"transport.yaml: stream {name} sets discard_new_per_subject only with a per-subject "
+                                "cap, as NATS requires")
 
 
 def check_agent_queues(transport: dict[str, Any]) -> None:

@@ -54,6 +54,8 @@ def test_defaults_and_bounds_match_the_contract() -> None:
     assert ".".join(PARTITION_COUNT_SETTING) == contract["partitions"]["count_setting"]
     assert "transport.queues.max_bytes" == contract["queues"]["max_bytes_setting"]
     assert "transport.queues.warn_at_percent" == contract["queues"]["warn_at_percent_setting"]
+    assert CAP == contract["queues"]["max_messages_per_subject_setting"]
+    assert contract["streams"]["UA1_PART_{team}~{partition}"]["max_msgs_per_subject_setting"] == CAP
 
 
 def test_defaults_reserve_the_documented_room_per_team() -> None:
