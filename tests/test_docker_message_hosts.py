@@ -64,24 +64,6 @@ def test_later_starts_keep_the_installation_its_keys_and_the_authoritys_records(
     assert read_expected_hosts(layout.trust_expected_hosts_path) == {}
 
 
-def test_an_older_bundle_gets_the_saved_partition_count_and_keeps_its_records(tmp_path: Path, caplog) -> None:
-    """A bundle written before the count joined it is completed at the next start, without a warning."""
-
-    layout = InstanceLayout.at(tmp_path)
-    installation = message_hosts.prepare_message_host_trust(layout, partitions=96)
-    record = {"record": "revocations", "sequence": 7}
-    write_bundle(layout.trust_bootstrap_path, read_bundle(layout.trust_bootstrap_path).with_records([record]))
-    document = json.loads(layout.trust_bootstrap_path.read_text())
-    del document["partitions"]
-    layout.trust_bootstrap_path.write_text(json.dumps(document))
-
-    assert message_hosts.prepare_message_host_trust(layout, partitions=96) == installation
-
-    bundle = read_bundle(layout.trust_bootstrap_path)
-    assert (bundle.partitions, bundle.records) == (96, (record,))
-    assert "event=partition_count_changed" not in caplog.text
-
-
 def test_a_changed_partition_count_is_written_and_logged(tmp_path: Path, caplog) -> None:
     """The authority, not the launcher, refuses a count the team's streams were not made with."""
 
@@ -97,12 +79,32 @@ def test_a_changed_partition_count_is_written_and_logged(tmp_path: Path, caplog)
     assert "event=partition_count_changed setting=transport.queues.partitions previous=96 count=64" in caplog.text
 
 
-def test_a_lost_bundle_is_rebuilt_for_the_same_installation(tmp_path: Path) -> None:
+def test_a_lost_bundle_is_rebuilt_for_the_same_installation(tmp_path: Path, caplog) -> None:
     layout = InstanceLayout.at(tmp_path)
     installation = message_hosts.prepare_message_host_trust(layout, partitions=96)
     layout.trust_bootstrap_path.unlink()
     assert message_hosts.prepare_message_host_trust(layout, partitions=96) == installation
     assert read_bundle(layout.trust_bootstrap_path).installation == installation
+    assert "event=bootstrap_bundle_rewritten" not in caplog.text
+
+
+def test_a_bundle_that_does_not_read_is_rebuilt_with_a_warning(tmp_path: Path, caplog) -> None:
+    """A bundle without a partition count, for example: the authority signs its records again."""
+
+    layout = InstanceLayout.at(tmp_path)
+    installation = message_hosts.prepare_message_host_trust(layout, partitions=96)
+    write_bundle(layout.trust_bootstrap_path,
+                 read_bundle(layout.trust_bootstrap_path).with_records([{"record": "revocations", "sequence": 7}]))
+    document = json.loads(layout.trust_bootstrap_path.read_text())
+    del document["partitions"]
+    layout.trust_bootstrap_path.write_text(json.dumps(document))
+
+    assert message_hosts.prepare_message_host_trust(layout, partitions=96) == installation
+
+    bundle = read_bundle(layout.trust_bootstrap_path)
+    assert (bundle.installation, bundle.partitions, bundle.records) == (installation, 96, ())
+    assert "event=bootstrap_bundle_rewritten reason=The bootstrap bundle" in caplog.text
+    assert "holds no partition count" in caplog.text
 
 
 def ready_bundle_writer(layout: InstanceLayout, sequence: int) -> list[str]:

@@ -11,9 +11,9 @@ It holds what a host needs before it has a certificate of its own:
 The launcher writes the authority keys when it creates them and the partition count from
 the saved settings at every start, before any host starts; the installation authority
 adds its own certificate and the current revocations record whenever it signs new ones
-and keeps the count. A bundle written before the count joined it is read, so the launcher
-can keep its records, but no trust store is built from it: a host that has no count
-would have to guess one.
+and keeps the count. Every bundle holds the count: no release wrote one without it, so a
+bundle that lacks it is refused like a damaged one, and the launcher writes a new one at
+the next start (the authority signs its records again from its own folder).
 
 The authority keys are the root of trust: whoever can change the file can name other
 keys, so it lives in the owner-only trust folder and only the launcher and the
@@ -53,33 +53,22 @@ class BootstrapError(RuntimeError):
 
 @dataclass(frozen=True)
 class BootstrapBundle:
-    """``partitions`` is ``None`` only in a bundle written before the count joined it."""
-
     installation: str
     authority_keys: tuple[tuple[str, str], ...]
     records: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
-    partitions: Optional[int] = field(default=None, kw_only=True)
+    partitions: int = field(kw_only=True)
 
     def __post_init__(self) -> None:
-        if self.partitions is not None:
-            check_partition_count(self.partitions)
+        check_partition_count(self.partitions)
 
     def anchors(self) -> list[AuthorityKey]:
         return [AuthorityKey(self.installation, key_id, Ed25519PublicKey.from_public_bytes(b64url_decode(public_key)))
                 for key_id, public_key in self.authority_keys]
 
-    def partition_count(self) -> int:
-        """The installation's partition count; ``BootstrapError`` when the bundle holds none."""
-
-        if self.partitions is None:
-            raise BootstrapError("The bootstrap bundle holds no partition count. The launcher writes it before any "
-                                 "host starts; restart the instance.")
-        return self.partitions
-
     def empty_trust_store(self) -> TrustStore:
         """A trust store holding the bundle's authority keys and partition count, and no records yet."""
 
-        return TrustStore(self.installation, self.anchors(), partition_count=self.partition_count())
+        return TrustStore(self.installation, self.anchors(), partition_count=self.partitions)
 
     def trust_store(self, now: datetime) -> TrustStore:
         """A trust store holding the bundle's authority keys, its partition count and the records that verify at ``now``."""
@@ -130,21 +119,21 @@ def read_bundle(path: Path) -> BootstrapBundle:
         records = tuple(document.get("records", ()))
         if not keys or any(not isinstance(record, dict) or record.get("record") not in _RECORD_ORDER for record in records):
             raise BootstrapError(f"The bootstrap bundle {path} names no authority key or holds an unknown record.")
-        return BootstrapBundle(str(document["installation"]), keys, records, partitions=document.get("partitions"))
+        if "partitions" not in document:
+            raise BootstrapError(f"The bootstrap bundle {path} holds no partition count. The launcher writes a new "
+                                 "bundle at every start; restart the instance.")
+        return BootstrapBundle(str(document["installation"]), keys, records, partitions=document["partitions"])
     except (KeyError, TypeError, ValueError) as error:
         raise BootstrapError(f"The bootstrap bundle {path} is damaged: {error}") from error
 
 
 def write_bundle(path: Path, bundle: BootstrapBundle) -> None:
-    """Replace the bundle whole; readers see the old or the new file, never a part, also after a power loss.
-
-    Every bundle written holds the partition count (``BootstrapError`` otherwise).
-    """
+    """Replace the bundle whole; readers see the old or the new file, never a part, also after a power loss."""
 
     document = {
         "version": _BUNDLE_VERSION,
         "installation": bundle.installation,
-        "partitions": bundle.partition_count(),
+        "partitions": bundle.partitions,
         "authority_keys": [{"key_id": key_id, "public_key": public_key} for key_id, public_key in bundle.authority_keys],
         "records": list(bundle.records),
     }

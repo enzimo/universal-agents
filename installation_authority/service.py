@@ -298,10 +298,10 @@ class InstallationAuthority:
 
         bundle = read_bundle(self.layout.trust_bootstrap_path)
         if bundle.partitions != self.partitions:
-            held = "no partition count" if bundle.partitions is None else f"partition count {bundle.partitions}"
             raise PartitionCountMismatch(
-                f"The bootstrap bundle {self.layout.trust_bootstrap_path} holds {held}, but this authority's "
-                f"transport.queues.partitions is {self.partitions}. The launcher writes the setting into the bundle "
+                f"The bootstrap bundle {self.layout.trust_bootstrap_path} holds partition count {bundle.partitions}, "
+                f"but this authority's transport.queues.partitions is {self.partitions}. The launcher writes the setting "
+                "into the bundle "
                 "before it starts the authority; restart the instance so both use the saved setting.")
         return bundle
 

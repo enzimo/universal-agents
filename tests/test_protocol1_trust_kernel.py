@@ -195,7 +195,7 @@ def test_the_authority_key_names_its_installation(tmp_path: Path) -> None:
 
 # -- the bootstrap bundle and kept trust records --------------------------------------------------
 
-def example_bundle(*, revocations: bytes | None = None, partitions: int | None = 96) -> BootstrapBundle:
+def example_bundle(*, revocations: bytes | None = None, partitions: int = 96) -> BootstrapBundle:
     anchors = json.loads((fixtures.TRUST / "anchors.json").read_text())
     records = [json.loads(path.read_text()) for path in sorted((fixtures.TRUST / "certificates").glob("*.json"))]
     records.append(json.loads(revocations or (fixtures.TRUST / "revocations" / "install_example.json").read_bytes()))
@@ -216,8 +216,8 @@ def test_the_bundle_round_trips_and_builds_a_trust_store(tmp_path: Path) -> None
     assert read.with_records(()).partitions == 7
 
 
-def test_a_bundle_without_a_partition_count_is_read_but_builds_no_trust_store_and_is_never_written(tmp_path: Path) -> None:
-    """A bundle from before the count joined it keeps its records for the launcher; no host guesses a count."""
+def test_a_bundle_without_a_partition_count_is_refused(tmp_path: Path) -> None:
+    """No release wrote a bundle without the count; the launcher writes a new one at the next start."""
 
     path = tmp_path / "bootstrap.json"
     write_bundle(path, example_bundle())
@@ -225,17 +225,9 @@ def test_a_bundle_without_a_partition_count_is_read_but_builds_no_trust_store_an
     del document["partitions"]
     path.write_text(json.dumps(document))
 
-    old = read_bundle(path)
-
-    assert old.partitions is None and old.records == example_bundle().records
-    with pytest.raises(BootstrapError, match="holds no partition count.*restart the instance"):
-        old.trust_store(fixtures.NOW)
-    with pytest.raises(BootstrapError, match="holds no partition count"):
-        PersistentTrustStore.open(old, tmp_path / "host", fixtures.NOW)
-    assert not (tmp_path / "host").exists()
-    with pytest.raises(BootstrapError, match="holds no partition count"):
-        write_bundle(path, old)
-    assert json.loads(path.read_text()) == document
+    with pytest.raises(BootstrapError, match="holds no partition count. The launcher writes a new bundle at every "
+                                             "start; restart the instance"):
+        read_bundle(path)
 
 
 @pytest.mark.parametrize("count", [0, 129, "96", 96.0, True])

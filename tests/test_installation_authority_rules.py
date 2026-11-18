@@ -211,25 +211,19 @@ class _NoServer:
         raise AssertionError(f"the authority used its NATS connection ({name}) before refusing")
 
 
-@pytest.mark.parametrize("held", [7, None])
-def test_the_authority_refuses_to_start_when_the_bundles_partition_count_is_not_its_own(tmp_path: Path, held) -> None:
+def test_the_authority_refuses_to_start_when_the_bundles_partition_count_is_not_its_own(tmp_path: Path) -> None:
     """Hosts compute agents' partitions with the bundle's count, the authority with its setting."""
 
     authority = authority_at(tmp_path, partitions=96)
     path = authority.layout.trust_bootstrap_path
     write_bundle(path, BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),),
                                        partitions=7))
-    if held is None:  # a bundle written before the count joined it
-        document = json.loads(path.read_text())
-        del document["partitions"]
-        path.write_text(json.dumps(document))
     before = path.read_bytes()
 
     with pytest.raises(PartitionCountMismatch) as refused:
         asyncio.run(authority.start(_NoServer(), teams=["team_one"]))
 
-    shown = "no partition count" if held is None else "partition count 7"
-    assert f"holds {shown}, but this authority's transport.queues.partitions is 96" in str(refused.value)
+    assert "holds partition count 7, but this authority's transport.queues.partitions is 96" in str(refused.value)
     assert "restart the instance" in str(refused.value)
     assert path.read_bytes() == before
     assert not (authority.layout.host_trust_dir(AUTHORITY_RUNTIME) / ISSUED_FILENAME).exists()

@@ -116,11 +116,15 @@ def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, Expec
     keys = ((authority.key_id, authority.public_key_text),)
     try:
         existing: Optional[BootstrapBundle] = read_bundle(layout.trust_bootstrap_path)
-    except BootstrapError:
+    except BootstrapError as error:
         existing = None
+        if layout.trust_bootstrap_path.exists():
+            # A new bundle holds no records; the authority signs them again from its own folder.
+            LOGGER.warning("The bootstrap bundle cannot be read and is written again. event=bootstrap_bundle_rewritten "
+                           "reason=%s", error)
     # The records of another installation's bundle are not kept: its key signed none of them.
     kept = existing if existing is not None and existing.installation == installation else None
-    if kept is not None and kept.partitions not in (None, partitions):
+    if kept is not None and kept.partitions != partitions:
         LOGGER.warning("The partition count in the saved settings differs from the one the message hosts used. "
                        "event=partition_count_changed setting=transport.queues.partitions previous=%s count=%s",
                        kept.partitions, partitions)
