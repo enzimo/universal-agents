@@ -66,11 +66,12 @@ supported, because it may not read what a newer one saved.
     `state/upgrades/adapter-host-files.without-records.txt`, one name per
     line. The list leaves out files of messages the gateway took in but had
     not handled yet: at its start 0.10 handles those messages, 0.9's
-    included, reads their files and then removes them. You may delete
-    exactly the listed files, but only after the gateway has started on
-    0.10 since `state/upgrades/adapter-host-files.json` (the upgrade's
-    marker) was written, and only while the instance is stopped. The
-    warning gives the command. It deletes nothing, and says so, when the
+    included, reads their files and then removes them. Unless the folder
+    was at another path under 0.9 (see below: then keep every file), you
+    may delete exactly the listed files, but only after the gateway has
+    started on 0.10 since `state/upgrades/adapter-host-files.json` (the
+    upgrade's marker) was written, and only while the instance is stopped.
+    The warning says when not to delete first and then gives the command. It deletes nothing, and says so, when the
     marker is not beside the list: a list is valid only beside the marker
     written with it, and a later run of the upgrade removes a list whose
     marker is gone. The list never names a file in the `sources=` field of

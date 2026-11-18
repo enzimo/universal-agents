@@ -660,13 +660,13 @@ def _assert_reported(caplog: pytest.LogCaptureFixture, instance: _Instance, list
     fields = f"folder={instance.transfer} files_without_records={len(listed) + unlisted} unlisted={unlisted}"
     assert warning.endswith(f"{fields} list={leftover_list}")
     shown = ", ".join(sorted(listed)[:10]) + (f" and {len(listed) - 10} more" if len(listed) > 10 else "")
-    assert f"Listed in {leftover_list} ({len(listed)} file(s), one name per line): {shown}. An admin" in warning
+    assert f"Listed in {leftover_list} ({len(listed)} file(s), one name per line): {shown}. If this folder" in warning
     # C04, C06 and C07: every path quoted, and nothing deleted, said aloud, while the marker is missing.
     quoted = [shlex.quote(str(path)) for path in (marker, instance.transfer, leftover_list)]
     command = "if test -f {}; then cd {} && xargs rm -f -- < {}; else echo {} >&2; false; fi".format(
         *quoted, shlex.quote(DELETE_REFUSED)
     )
-    assert f"may delete exactly the listed files ({command}) only while the instance is stopped" in warning
+    assert f"Otherwise an administrator may delete exactly the listed files ({command}) only while the instance is stopped" in warning
     assert "files of people removed on 0.9" in warning, "C08: the causes are those of the gateway's names"
     assert f"only after the gateway has started on 0.10 since the step's marker {marker} was written" in warning, "C03"
     assert "after such a run, restart the instance once before deleting" in warning, "C03: a list beside the team"
@@ -674,6 +674,8 @@ def _assert_reported(caplog: pytest.LogCaptureFixture, instance: _Instance, list
     assert "! -newer" not in warning, "the list replaces the time limit"
     assert "never opens" not in warning, "0.10 reads the files of messages it had not handled"
     assert "another path under 0.9.13" in warning and "do not delete them" in warning, "C02"
+    # C10 of F6: the one case where the list is wrong by design is said before the command that deletes on one paste.
+    assert warning.index("do not delete them") < warning.index("may delete exactly"), "C10"
     # Putting the folder back alone changes nothing: the step reads only upload_dir (F1 of PR #150's review).
     assert "set upload_dir to that path, delete the marker and restart" in warning
     # C08: the list already leaves out what a record keeps, so the administrator takes nothing out of it.
@@ -929,7 +931,7 @@ def test_the_warning_names_the_first_files_and_says_where_the_rest_are(instance:
     assert result.finished and result.counts.files_without_records == count
     warning = _assert_reported(caplog, instance, names)
     more = f" and {count - 10} more" if count > 10 else ""
-    assert f"one name per line): {', '.join(names[:10])}{more}. An admin" in warning
+    assert f"one name per line): {', '.join(names[:10])}{more}. If this folder" in warning
     assert not [name for name in names[10:] if name in warning]
     _assert_listed(instance.layout, names)
 
@@ -1338,7 +1340,9 @@ def test_a_run_that_finds_the_lock_held_waits_for_the_other(instance: _Instance,
 def test_the_run_holds_its_lock_from_find_to_the_marker(instance: _Instance, monkeypatch, cross_disk) -> None:
     """C11 (F13): the lock covers every phase, the cross-disk copy and the marker included, not only its taking.
 
-    Each phase tries the lock from a descriptor of its own, as another run would; it must find it held.
+    Each phase tries the lock from a descriptor of its own, as another run would; it must find it held. The
+    list is already written when the marker is (C11 of F6): a stop between the two then leaves a list the next
+    run removes, never a marker counting files with no list beside it.
     """
 
     if cross_disk:
@@ -1374,10 +1378,13 @@ def test_the_run_holds_its_lock_from_find_to_the_marker(instance: _Instance, mon
     for name in list_steps:
         monkeypatch.setattr(upgrade_module, name, probed(name, getattr(upgrade_module, name)))
     real_write = upgrade_module._write_state_file
+    leftover_list = instance.layout.adapter_host_files_without_records_path
+    list_at_marker: list[bytes | None] = []
 
     def write(path, body):
         if Path(path) == Path(marker):
             held_in["marker"] = lock_is_held()
+            list_at_marker.append(leftover_list.read_bytes() if leftover_list.exists() else None)
         return real_write(path, body)
 
     monkeypatch.setattr(upgrade_module, "_write_state_file", write)
@@ -1386,6 +1393,7 @@ def test_the_run_holds_its_lock_from_find_to_the_marker(instance: _Instance, mon
 
     assert result.finished and result.counts.moved == 1
     assert held_in == {phase: True for phase in [*phases, *list_steps, "marker"]}
+    assert list_at_marker == [f"{STRAY_NAME}\n".encode()], "C11 of F6: the list is written before the marker"
     _assert_listed(instance.layout, [STRAY_NAME])
     assert not lock_is_held(), "the lock is released when the run ends"
 
@@ -2025,7 +2033,9 @@ def test_a_list_that_cannot_be_written_never_stops_the_start(instance: _Instance
     (warning,) = _events(caplog, "adapter_host_files_without_records")
     assert warning.endswith(f"folder={instance.transfer} files_without_records=1 unlisted=0 list=-")
     assert f"The 1 file(s) with names the gateway gives: {STRAY_NAME}. The full list could not be written" in warning
-    assert "may delete exactly the files named here only while" in warning and "xargs" not in warning
+    assert "Otherwise an administrator may delete exactly the files named here only while" in warning
+    assert "xargs" not in warning
+    assert warning.index("do not delete them") < warning.index("may delete exactly"), "C10"
     assert "This warning names no file from the sources= field of an adapter_host_file_not_moved warning" in warning
     assert "only after the gateway has started on 0.10 since the step's marker" in warning
 
@@ -2752,7 +2762,9 @@ def test_the_operator_command_runs_the_step_on_a_saved_instance(tmp_path: Path) 
     assert "event=adapter_host_files_upgraded moved=1" in completed.stderr
     assert "1 file(s) are left in the transfer folder that no record names" in completed.stdout
     assert "event=adapter_host_files_without_records " in completed.stderr
-    assert f"one name per line): {STRAY_NAME}. An administrator may delete exactly the listed files" in completed.stderr
+    assert f"one name per line): {STRAY_NAME}. If this folder was at another path under 0.9.13" in completed.stderr
+    assert "do not delete them; move or mount the folder back" in completed.stderr
+    assert "Otherwise an administrator may delete exactly the listed files" in completed.stderr
     assert (config.layout.uploads_dir / "telegram_chat_7" / "att_photo.png").read_bytes() == CONTENT["att_photo"]
     assert config.layout.adapter_host_files_upgrade_path.is_file()
     _assert_listed(config.layout, [STRAY_NAME])

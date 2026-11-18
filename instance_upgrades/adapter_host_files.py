@@ -209,9 +209,11 @@ so those names hold no one's text: only names of that form are shown
 there and which may be text someone chose, is only counted (``unlisted=``).
 The run that writes the marker writes those names, sorted and one per line,
 to ``InstanceLayout.adapter_host_files_without_records_path`` just before the
-marker; the warning shows the first ten and gives a command that deletes
-exactly the listed files, and that refuses, saying so, while the marker is
-not where it names it. A list is valid only beside the marker of the run that
+marker; the warning shows the first ten, then says to keep them when the
+folder was at another path under 0.9.13 (the one case where the list is
+wrong by design), and only then gives a command that deletes exactly the
+listed files, and that refuses, saying so, while the marker is not where it
+names it. A list is valid only beside the marker of the run that
 wrote it: every later run that does not find the marker removes it, under
 the step's lock and before it reads any record, and a run with nothing to
 list removes it too. A failure writing or removing the list is logged
@@ -771,19 +773,22 @@ def _listed_advice(transfer: Path, marker: Path, leftover_list: Optional[Path], 
         )
         what = "exactly the files named here"
         names = "This warning names"
-    # Both the names and the not-moved warning's sources= come from the same records, so no listed file is one a
-    # record keeps (C08 of F6): the administrator removes nothing from the list.
+    # A folder at another path under 0.9.13 is the one case where the list is wrong by design, so it comes before
+    # the command (C10 of F6): the command deletes on one paste, and a person who acts on it before reading the
+    # whole line must already have been told when not to. Both the names and the not-moved warning's sources= come
+    # from the same records, so no listed file is one a record keeps (C08 of F6): the administrator removes nothing
+    # from the list.
     return (
-        f"{where} An administrator may delete {what} only while the instance is stopped and only after the gateway "
-        f"has started on 0.10 since the step's marker {marker} was written: at its start the gateway handles "
-        "messages taken in but not handled yet (0.9's too) and removes their files, and the 0.10 adapter host "
-        "passes new files through this folder, so a list taken while the team runs (the operator's command, with "
-        "or without --files-gone) may name one a message will still use: after such a run, restart the instance "
-        f"once before deleting. {names} no file from the sources= field of an adapter_host_file_not_moved warning, "
-        "and those must be kept. With the adapter host turned off, keep the files until it has run again. If this "
-        "folder was at another path under 0.9.13 (moved, mounted elsewhere or reached through another link), their "
-        "records may name that path: do not delete them; move or mount the folder back at that path (a link does "
-        "not work), set upload_dir to that path, delete the marker and restart."
+        f"{where} If this folder was at another path under 0.9.13 (moved, mounted elsewhere or reached through "
+        "another link), the records of these files may name that path: do not delete them; move or mount the "
+        "folder back at that path (a link does not work), set upload_dir to that path, delete the marker and "
+        f"restart. Otherwise an administrator may delete {what} only while the instance is stopped and only after "
+        f"the gateway has started on 0.10 since the step's marker {marker} was written: at its start the gateway "
+        "handles messages taken in but not handled yet (0.9's too) and removes their files, and the 0.10 adapter "
+        "host passes new files through this folder, so a list taken while the team runs (the operator's command, "
+        "with or without --files-gone) may name one a message will still use: after such a run, restart the "
+        f"instance once before deleting. {names} no file from the sources= field of an adapter_host_file_not_moved "
+        "warning, and those must be kept. With the adapter host turned off, keep the files until it has run again."
     )
 
 

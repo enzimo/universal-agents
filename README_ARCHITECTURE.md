@@ -4851,7 +4851,10 @@ the desktop app never offers an older version.
   runs, so an upload it finished just before the list may still resolve for
   a message after the restart. If the folder was at another path under 0.9.13, its records name that
   path and every file here looks unrecorded, so the warning says not to
-  delete them then; putting the folder back is not enough, because the step
+  delete them then, before it gives the command: that is the one case where
+  the list is wrong by design, and the command deletes on one paste, so a
+  person who acts on it before reading the whole line must already have
+  read when not to. Putting the folder back is not enough, because the step
   reads only `upload_dir` (resolved through links), so it says to move or
   mount the folder back at that path and set `upload_dir` to it. A folder
   that is not there counts 0. One gone or with another device and inode
