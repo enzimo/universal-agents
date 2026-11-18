@@ -565,8 +565,9 @@ def test_each_server_refusal_names_the_setting_or_limit_that_fixes_it(error, kin
 
 @pytest.mark.parametrize("replicas", [3, 1])
 def test_a_cluster_without_room_for_a_streams_copies_gets_the_storage_refusal_not_replica_advice(replicas) -> None:
-    """C36: measured on three-server 2.15.1 clusters, a stream too large for the servers' storage is refused with
-    10005 and "insufficient storage" (with one copy too), never 10047."""
+    """C36: measured on three-server 2.15.1 clusters, a new stream too large for the servers' storage is refused
+    with 10005 and "insufficient storage" (with one copy too). Raising an existing stream's limit beyond their room
+    gets 10047 there, as on one server (C39), whose refusal the storage tests above cover."""
 
     error = APIError(code=500, err_code=10005, description="no suitable peers for placement, insufficient storage")
     setting = team_queue_streams(transport(), TEAM, COUNT)[0].setting

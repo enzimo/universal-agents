@@ -5398,9 +5398,10 @@ renamed secrets included). The authority:
   subjects another stream takes, copies the servers cannot hold), says to enable
   JetStream when none answers or the account has none (10039), and shows any other
   error as the server sent it. A cluster's 10005 is read by its reason: "insufficient
-  storage" (how a cluster refuses a stream too large for its servers, never 10047) gets
-  the storage refusal, no reason means fewer servers than copies, and any other reason is
-  shown as sent. A stream whose fields the contract sets already
+  storage" (how a cluster refuses a new stream too large for its servers; a raised limit
+  of an existing stream gets 10047 there, as on one server) gets the storage refusal, no
+  reason means fewer servers than copies, and any other reason is shown as sent. A
+  stream whose fields the contract sets already
   match is not sent to NATS, so a restart with the same settings asks for no change: a
   server whose storage is now smaller than what its streams set aside (the bundled server
   measures it from the disk's free space at every start) keeps serving the streams it has

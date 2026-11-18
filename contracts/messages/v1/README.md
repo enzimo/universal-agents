@@ -1226,10 +1226,11 @@ room: see "Control messages share their stream's room" below. These settings are
   change when they do not fit, and when the account has no tier for the replica count. An
   account without a storage limit of its own reports none to check against, so there the
   server's refusal is the check, and it stops the authority the same way, naming the
-  stream and the setting: 10047 from one server, and from a cluster 10005 "no suitable
-  peers for placement, insufficient storage" (measured on three-server 2.15.1 clusters:
-  each server that keeps a copy needs room for the stream's whole limit, and a stream too
-  large for enough servers gets 10005, with one copy too, never 10047). The authority also
+  stream and the setting: 10047 from one server; from a cluster, 10005 "no suitable peers
+  for placement, insufficient storage" for a new stream and 10047, as from one server, for
+  a raised limit of an existing one (measured on three-server 2.15.1 clusters: each server
+  that keeps a copy needs room for the stream's whole limit, and a new stream too large for
+  enough servers gets 10005, with one copy too). The authority also
   checks the account's consumer limit (`limits.max_consumers`, a cap on each stream's
   consumers, measured on 2.15.1): the server
   refuses a stream whose own `max_consumers` is above it (10026), so an account allows 4,096

@@ -39,8 +39,8 @@ checks (``AuthorityStartRefused``, which the authority's process logs as
 ``installation_authority_start_refused``), naming the stream or consumer and the server's
 error. One table decides the advice (``_server_refusal``): a setting or an account limit is
 named only for the errors it fixes: storage (10047, and in a cluster a 10005 whose reasons
-include "insufficient storage", since a cluster refuses a stream too large for its servers'
-storage that way), 10027 streams, 10026 consumers, 10065 subjects another stream takes, and
+include "insufficient storage", since a cluster refuses a new stream too large for its
+servers' storage that way and a raised limit of an existing one with 10047), 10027 streams, 10026 consumers, 10065 subjects another stream takes, and
 copies the servers cannot hold (10074, and a 10005 that gives no reason). A request no
 JetStream answers, and an account without JetStream (10039), say to enable it. Any other
 error is shown as the server sent it, naming no setting.
@@ -77,7 +77,8 @@ from installation_authority.refusals import AuthorityStartRefused
 _LOGGER = logging.getLogger(__name__)
 # JetStream's errors whose cause a start names, measured on nats-server 2.15.1; every other
 # error is shown as the server sent it (``QueueTopology._server_refusal``).
-# A stream's limit does not fit the server's or the account's storage.
+# A stream's limit does not fit the server's or the account's storage. A cluster answers it too,
+# for a raised limit of an existing stream (a new stream gets NO_SUITABLE_PEERS there).
 INSUFFICIENT_STORAGE = 10047
 # The account (or its replica tier) holds as many streams as it allows.
 MAXIMUM_STREAMS = 10027
@@ -91,8 +92,9 @@ REPLICAS_WITHOUT_CLUSTER = 10074
 # A cluster found too few servers to keep a stream's copies. Its text is NO_PEERS_TEXT and then
 # the reasons servers were passed over (nats-server's selectPeerError: ", insufficient storage",
 # ", peer offline" and others); with no reason, the cluster has fewer servers than the copies.
-# Measured on three-server 2.15.1 clusters: a stream too large for the servers' storage gets
-# 10005 with "insufficient storage" (with one copy too), never 10047; five copies get the bare text.
+# Measured on three-server 2.15.1 clusters: a new stream too large for the servers' storage gets
+# 10005 with "insufficient storage" (with one copy too), while raising an existing stream's limit
+# beyond their room gets 10047, as on one server; five copies get the bare text.
 NO_SUITABLE_PEERS = 10005
 NO_PEERS_TEXT = "no suitable peers for placement"
 NO_STORAGE_REASON = "insufficient storage"
@@ -587,8 +589,9 @@ class QueueTopology:
         """The start refusal for a cluster's 10005 "insufficient storage": too few servers have room for the copies.
 
         A cluster places each copy of a stream on a server whose own storage has room for the
-        stream's whole limit, so its totals are per server, and it refuses a stream that fits
-        nowhere with 10005 rather than 10047. Fewer copies help when some servers have room.
+        stream's whole limit, so its totals are per server, and it refuses a new stream that fits
+        nowhere with 10005. Fewer copies help when some servers have room. A raised limit of an
+        existing stream is refused with 10047 instead, and gets the 10047 refusal (``_refusal``).
         """
 
         room = AccountRoom.read(await self._account_info(after=_MADE_SO_FAR_STAY), self.limits.replicas)
