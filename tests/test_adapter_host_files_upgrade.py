@@ -608,7 +608,7 @@ STRAY = b"a file of a person removed on 0.9"
 
 
 def _hex_name(label: str) -> str:
-    """A transfer-file name of the gateway's own form (``new_id("adapter_upload")``): the prefix and a hex id."""
+    """A transfer-file name of the gateway's own form (``new_id("adapter_upload")``): the prefix and 12 lowercase hex digits."""
 
     return "adapter_upload_" + hashlib.sha256(label.encode()).hexdigest()[:12]
 
