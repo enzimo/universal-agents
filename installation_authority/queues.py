@@ -40,10 +40,11 @@ checks (``AuthorityStartRefused``, which the authority's process logs as
 error. One table decides the advice (``_server_refusal``): a setting or an account limit is
 named only for the errors it fixes: storage (10047, and in a cluster a 10005 whose reasons
 include "insufficient storage", since a cluster refuses a new stream too large for its
-servers' storage that way and a raised limit of an existing one with 10047), 10027 streams, 10026 consumers, 10065 subjects another stream takes, and
-copies the servers cannot hold (10074, and a 10005 that gives no reason). A request no
-JetStream answers, and an account without JetStream (10039), say to enable it. Any other
-error is shown as the server sent it, naming no setting.
+servers' storage that way and a raised limit of an existing one with 10047), 10027
+streams, 10026 consumers, 10065 subjects another stream takes, and copies the servers
+cannot hold (10074, and a 10005 that gives no reason). A request no JetStream answers, and
+an account without JetStream (10039), say to enable it. Any other error is shown as the
+server sent it, naming no setting.
 """
 
 from __future__ import annotations
