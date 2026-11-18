@@ -4433,6 +4433,13 @@ entered is kept with the storage levels, through the storage check's own
 `StorageLevels` object (each object holds and rewrites the whole file, so two
 would overwrite each other), and the level ends three points below its
 threshold. A stream list that fails marks the message server unavailable.
+So does a list that names one of the team's streams as missing: in a NATS
+cluster, the server answering the list names the streams whose servers did not
+answer within its 4 seconds or are all offline, and lists the offline ones with
+no state. Those are never measured as empty; the streams that were measured are
+still judged, and the missing stream's level and earlier problem are kept until
+it can be measured again. The next page of the list starts after the distinct
+names of the last page, since a stream can be listed and named missing at once.
 Each gateway checks only its own team.
 
 ### Knowledge page

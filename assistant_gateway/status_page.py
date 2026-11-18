@@ -165,7 +165,9 @@ class _PreviousProblemsFile(BaseModel):
 class PreviousProblems:
     """The ids of the problems the previous check found, kept in a file so a restart remembers them.
 
-    Bounded by the problems one check can find. Read and written off the gateway's loop.
+    Bounded by the problems one check can find, except while a source stays unavailable: the
+    earlier problems are kept beside the current ones then, so the set grows until every source
+    answers at one check. Read and written off the gateway's loop.
     """
 
     def __init__(self, path: Path) -> None:
@@ -507,11 +509,25 @@ class StatusPage:
         if listed is None:  # the gateway uses no JetStream here, as for the stored messages
             return []
         try:
-            return await asyncio.to_thread(self.queues.findings, listed)
+            findings = await asyncio.to_thread(self.queues.findings, listed.streams)
+            unmeasured = self.queues.unmeasured(listed.missing)
         except Exception:  # noqa: BLE001 - listed as unavailable; the rest of the page still shows
             LOGGER.exception("The queue stream checks failed. event=status_queue_check_failed team=%s", self.queues.team)
             unavailable.append(QUEUE_SOURCE)
             return []
+        if unmeasured:
+            # Never shown as fine: with a source unavailable, notify_new_problems also keeps the
+            # earlier problems these streams may still have.
+            LOGGER.warning(
+                "The message server could not measure some of the team's streams. "
+                "event=status_queue_streams_missing team=%s count=%d streams=%s",
+                self.queues.team,
+                len(unmeasured),
+                ",".join(unmeasured[:10]) + (",..." if len(unmeasured) > 10 else ""),
+            )
+            if MESSAGE_SERVER_SOURCE not in unavailable:
+                unavailable.append(MESSAGE_SERVER_SOURCE)
+        return findings
 
     def _person_storage_findings(self, unavailable: list[str]) -> list[StatusFindingV1]:
         try:

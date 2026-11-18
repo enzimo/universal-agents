@@ -22,7 +22,10 @@ administrators must hear before a stream fills, like the storage warnings
   warning ends only once the stream falls ``storage_capacity.RELEASE_POINTS`` percentage points
   below the level, so a stream moving around it does not announce it again on every crossing.
 - A stream that is not listed (the authority has not created it, or the server lost it) is not
-  judged here; a list that fails marks the message server unavailable on the page.
+  judged here; a list that fails marks the message server unavailable on the page. So does a
+  list that names one of the team's streams as missing (``unmeasured``; in a cluster, a stream
+  whose servers are down): the streams it did measure are still judged, and the missing one's
+  level and earlier problem are kept until it can be measured again, never shown as fine.
 - The team's streams are named at the first check, not when the gateway is built: a team id
   protocol 1 refuses (over 24 characters, which the launcher's id check stops before any process
   starts) fails the check, logged and listed as unavailable on the page, instead of keeping the
@@ -110,6 +113,12 @@ class QueueCapacity:
             streams = team_queue_streams(self._transport, self.team, self._partitions)
             self._streams = {stream.name: stream for stream in streams}
         return self._streams
+
+    def unmeasured(self, missing: Sequence[str]) -> list[str]:
+        """The team's work and dead-letter streams among those the server could not measure."""
+
+        streams = self.team_streams()
+        return sorted(name for name in missing if name in streams)
 
     def findings(self, listed: Sequence[JetStreamStreamUsage]) -> list[StatusFindingV1]:
         """This check's findings; saves when a stream entered or left the level, so it runs off the gateway's loop."""

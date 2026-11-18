@@ -18,7 +18,7 @@ from custom_transport.base import (
 )
 from custom_transport.nats_adapter import (
     JetStreamAccountUsage,
-    JetStreamStreamUsage,
+    JetStreamStreamList,
     NatsTransportAdapter,
     NatsTransportConfig,
 )
@@ -238,10 +238,11 @@ class NatsGatewayManagerRuntime:
             return None
         return await self._adapter.jetstream_account_usage()
 
-    async def team_streams(self, team: str) -> list[JetStreamStreamUsage] | None:
+    async def team_streams(self, team: str) -> JetStreamStreamList | None:
         """The streams of ``team``'s protocol 1 subjects with their limits and sizes (the size warning).
 
-        None while not connected or without JetStream.
+        Streams the server could not measure are named in the list's ``missing``. None while not
+        connected or without JetStream.
         """
 
         if not self._connected or not self.settings.jetstream_enabled:

@@ -8,8 +8,10 @@ warning ends only below the storage warnings' release margin; the queue and stor
 share one record; administrators get one notice when a stream fills, none while it stays full
 or when it drains, and one again when it fills anew; a notice only for a problem the previous
 check did not find (C05 of the step 2a plan review), also after a restart and across a check
-whose stream list failed; a failed stream list marks the message server unavailable; the stream
-list read page by page with the team's subject filter; and, with a real NATS server
+whose stream list failed; a failed stream list, or one that names a team stream as missing (a
+cluster whose servers holding it are down, C27), marks the message server unavailable while the
+measured streams are still judged; the stream list read page by page with the team's subject
+filter, the next page after the distinct names of the last; and, with a real NATS server
 (``LIVE_TEST_NATS_SERVER`` or ``nats-server`` on PATH), the authority's streams listed for the
 gateway's team only, with the full one found.
 """
@@ -36,6 +38,7 @@ from custom_messages.wire.frame import SUBJECT_ROOT
 from custom_messages.wire.queues import team_queue_streams
 from custom_transport.nats_adapter import (
     STREAM_LIST_SUBJECT,
+    JetStreamStreamList,
     JetStreamStreamUsage,
     NatsTransportAdapter,
     NatsTransportConfig,
@@ -75,6 +78,8 @@ class _Streams:
     def __init__(self, **percent: float) -> None:
         self.percent: dict[str, float] = {}
         self.error: Exception | None = None
+        # Streams the server names as missing (their servers do not answer): listed by name only.
+        self.missing: tuple[str, ...] = ()
         self.set(**percent)
 
     def set(self, **percent: float) -> None:
@@ -83,10 +88,11 @@ class _Streams:
     def usages(self) -> list[JetStreamStreamUsage]:
         return [usage(name, value) for name, value in self.percent.items()]
 
-    async def __call__(self) -> list[JetStreamStreamUsage]:
+    async def __call__(self) -> JetStreamStreamList:
         if self.error is not None:
             raise self.error
-        return self.usages()
+        return JetStreamStreamList(streams=[item for item in self.usages() if item.name not in self.missing],
+                                   missing=self.missing)
 
 
 _NAMES = {"part_0": PART_0, "part_1": PART_1, "pool": POOL, "dead_letters": DEAD_LETTERS}
@@ -286,6 +292,32 @@ async def test_a_stream_list_that_fails_marks_the_message_server_unavailable_and
 
 
 @pytest.mark.asyncio
+async def test_a_team_stream_the_server_could_not_measure_marks_it_unavailable_and_keeps_its_problem(
+        tmp_path, caplog) -> None:
+    """C27: in a cluster whose servers holding a stream are down, the list names it as missing, never as fine."""
+
+    config, clock, notices, streams = _config(tmp_path), _Clock(), _Notices(), _Streams(pool=90.0, part_0=50.0)
+    page = _page(config, streams, notices, clock)
+    await page.notify_new_problems()
+    [full_pool] = _ids((await page.report()).findings)
+
+    streams.missing = (POOL, f"UA1_POOL_WORK_{OTHER}")  # another team's missing stream is not this gateway's
+    streams.set(pool=90.0, part_0=85.0)
+    clock.advance()
+    report = await page.report()
+    assert report.unavailable_sources == ("message server",)
+    assert _ids(report.findings) == [f"queue_filling:{PART_0}:20261118T120500Z"]  # the measured ones are judged
+    await page.notify_new_problems()  # the partition is new; the pool's problem is kept, not dropped
+    streams.missing = ()  # its servers answer again, the pool stream still full
+    clock.advance()
+    assert sorted(_ids((await page.report()).findings)) == sorted([full_pool, f"queue_filling:{PART_0}:20261118T120500Z"])
+    await page.notify_new_problems()
+
+    assert len(notices.stored) == 2
+    assert f"event=status_queue_streams_missing team={TEAM} count=1 streams={POOL}" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_a_notice_that_could_not_be_stored_is_sent_at_the_next_check(tmp_path) -> None:
     config, clock, notices, streams = _config(tmp_path), _Clock(), _Notices(), _Streams(pool=90.0)
     notices.fail = 1
@@ -358,8 +390,43 @@ def test_the_stream_list_is_read_page_by_page_with_the_teams_subject_filter() ->
 
     assert asked == [(STREAM_LIST_SUBJECT, {"subject": f"ua.v1.{TEAM}.>", "offset": 0}),
                      (STREAM_LIST_SUBJECT, {"subject": f"ua.v1.{TEAM}.>", "offset": 2})]
-    assert listed == [JetStreamStreamUsage(POOL, MIB, 10, 3), JetStreamStreamUsage(PART_0, None, 0, 3),
-                      JetStreamStreamUsage(DEAD_LETTERS, 2 * MIB, 5, 3)]
+    assert listed == JetStreamStreamList(
+        streams=[JetStreamStreamUsage(POOL, MIB, 10, 3), JetStreamStreamUsage(PART_0, None, 0, 3),
+                 JetStreamStreamUsage(DEAD_LETTERS, 2 * MIB, 5, 3)],
+        missing=(),
+    )
+
+
+def test_streams_a_cluster_names_as_missing_are_returned_by_name_and_the_next_page_follows_them() -> None:
+    """C27, from nats-server 2.15.1's clustered stream list: a stream whose servers are all offline is listed
+    with its configuration and no state and is named as missing as well; one whose servers did not answer is
+    only named as missing. Every stream of a page is one or both, so the next page starts after its distinct
+    names."""
+
+    no_state = {"config": {"name": PART_0, "max_bytes": MIB, "subjects": ["x"]}}
+    pages = [
+        {"total": 4, "offset": 0, "limit": 256, "streams": [_stream(POOL, MIB, 10), no_state],
+         "missing": [PART_0, PART_1]},
+        {"total": 4, "offset": 3, "limit": 256, "streams": [_stream(DEAD_LETTERS, 2 * MIB, 5)]},
+    ]
+    offsets: list[int] = []
+
+    async def request(subject: str, payload: bytes, timeout: float) -> Any:
+        offsets.append(json.loads(payload)["offset"])
+        return SimpleNamespace(data=json.dumps(pages[len(offsets) - 1]).encode())
+
+    adapter = NatsTransportAdapter(config=NatsTransportConfig(), mapper=NatsSubjectMapper(team_id=TEAM))
+    adapter._nc, adapter._js = SimpleNamespace(request=request), object()
+
+    listed = asyncio.run(adapter.jetstream_streams(subject=f"ua.v1.{TEAM}.>"))
+
+    assert offsets == [0, 3]
+    assert listed == JetStreamStreamList(
+        streams=[JetStreamStreamUsage(POOL, MIB, 10, 3), JetStreamStreamUsage(DEAD_LETTERS, 2 * MIB, 5, 3)],
+        missing=(PART_0, PART_1),
+    )
+    capacity = _capacity(Path("/nonexistent/levels.json"), _Clock())
+    assert capacity.unmeasured([*listed.missing, f"UA1_PART_{OTHER}~0"]) == [PART_0, PART_1]
 
 
 def test_a_stream_list_error_raises_and_no_jetstream_lists_nothing() -> None:
@@ -403,7 +470,7 @@ def test_the_gateway_lists_its_teams_streams_on_a_real_server_and_finds_the_full
 
     filler = b"w" * (100 * 1024)
 
-    async def scenario(url: str) -> tuple[list[JetStreamStreamUsage], list]:
+    async def scenario(url: str) -> tuple[JetStreamStreamList, list]:
         nc = await nats.connect(url, allow_reconnect=False)
         try:
             await topology(nc, queue_limits(), partitions=1).ensure([TEAM, OTHER])
@@ -423,13 +490,15 @@ def test_the_gateway_lists_its_teams_streams_on_a_real_server_and_finds_the_full
         assert listed is not None
         capacity = QueueCapacity(team=TEAM, transport=transport(), partitions=1,
                                  levels=StorageLevels(tmp_path / "levels.json"), warn_at_percent=80)
-        return listed, capacity.findings(listed)
+        return listed, capacity.findings(listed.streams)
 
     with own_nats_server(nats_server(), tmp_path, "-c", str(server_config(tmp_path, partitions=1))) as url:
         listed, findings = asyncio.run(scenario(url))
 
-    assert {item.name for item in listed} == {stream.name for stream in team_queue_streams(transport(), TEAM, 1)}
-    pool = next(item for item in listed if item.name == POOL)
+    assert listed.missing == ()
+    assert {item.name for item in listed.streams} == {
+        stream.name for stream in team_queue_streams(transport(), TEAM, 1)}
+    pool = next(item for item in listed.streams if item.name == POOL)
     assert pool.max_bytes == MIB and pool.messages == 9 and 0.8 * MIB < pool.stored_bytes < MIB
     [finding] = findings
     assert finding.finding_id.startswith(f"queue_filling:{POOL}:")
