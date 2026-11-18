@@ -270,12 +270,15 @@ def _render_instance_config_migration_notice(
     )
 
 
-def protocol1_id_check_refusal(config: GatewayInstanceConfig, storage: StorageSettings | None) -> str | None:
+def protocol1_id_check_refusal(
+    config: GatewayInstanceConfig, find_store: Callable[[], StorageSettings | None]
+) -> str | None:
     """The id check before anything changes (``instance_upgrades.protocol1_ids``): its refusal, or None.
 
     ``config`` is the saved file read without upgrading it on disk
-    (``protocol1_ids.load_saved_for_check``). A catalog or store that cannot be read, or
-    settings that cannot be resolved, refuse the start as well.
+    (``protocol1_ids.load_saved_for_check``); ``find_store`` gives the team's store and is
+    called only when the whole check runs. A catalog or store that cannot be read, or a
+    store that cannot be found, refuses the start as well.
     """
 
     from instance_upgrades.protocol1_ids import CHECK_FAILED_EVENT, Protocol1IdCheckFailed, check_ids_before_upgrade
@@ -283,7 +286,7 @@ def protocol1_id_check_refusal(config: GatewayInstanceConfig, storage: StorageSe
     from team_transfer.runtime_guard import IMPORT_UNFINISHED_EVENT
 
     try:
-        return check_ids_before_upgrade(config, storage)
+        return check_ids_before_upgrade(config, find_store)
     except TransferError as exc:
         return f"event={IMPORT_UNFINISHED_EVENT} {exc}"
     except (Protocol1IdCheckFailed, ValueError) as exc:
@@ -296,13 +299,18 @@ def protocol1_id_check_refusal(config: GatewayInstanceConfig, storage: StorageSe
 def check_protocol1_ids(config_path: Path, explicit_env_path: str | None) -> str | None:
     """The launcher's id check, first in ``main``: before the file's upgrade and any start; the refusal, or None.
 
-    The team's store is resolved as the processes resolve it, with the env file under the
-    process environment (``build_process_env``'s order), since ``POSTGRES_DSN`` may be in
-    either. In the Docker bundle the check already ran (``docker.run_bundle``), so its record
-    exists and this returns at once.
+    The team's store is found only when the whole check runs, as the processes find it: with
+    the env file under the process environment (``build_process_env``'s order), since
+    ``POSTGRES_DSN`` may be in either. In the Docker bundle the check already ran
+    (``docker.run_bundle``), so its record exists and this returns at once.
     """
 
-    from instance_upgrades.protocol1_ids import CHECK_FAILED_EVENT, check_due, load_saved_for_check
+    from instance_upgrades.protocol1_ids import (
+        CHECK_FAILED_EVENT,
+        Protocol1IdCheckFailed,
+        check_due,
+        load_saved_for_check,
+    )
     from team_transfer.errors import TransferError
     from team_transfer.runtime_guard import IMPORT_UNFINISHED_EVENT, require_finished_import
 
@@ -312,8 +320,6 @@ def check_protocol1_ids(config_path: Path, explicit_env_path: str | None) -> str
         require_finished_import(config.layout)
         if not check_due(config):
             return None
-        env_path = resolve_env_file_path(config, explicit_env_path, report_ignored_env_file=False)
-        storage = config.resolve_manager_storage_settings(env={**load_env_file_values(env_path), **os.environ})
     except TransferError as exc:
         return f"event={IMPORT_UNFINISHED_EVENT} {exc}"
     except ValueError as exc:
@@ -321,7 +327,16 @@ def check_protocol1_ids(config_path: Path, explicit_env_path: str | None) -> str
             f"The check that every id fits protocol 1 could not read the settings in {config_path}, so nothing "
             f"was changed (event={CHECK_FAILED_EVENT}): {exc}"
         )
-    return protocol1_id_check_refusal(config, storage)
+
+    def find_store() -> StorageSettings | None:
+        try:
+            env_path = resolve_env_file_path(config, explicit_env_path, report_ignored_env_file=False)
+            return config.resolve_manager_storage_settings(env={**load_env_file_values(env_path), **os.environ})
+        except ValueError as exc:
+            raise Protocol1IdCheckFailed(f"The team's store could not be found from the settings in {config_path}: "
+                                         f"{exc}") from exc
+
+    return protocol1_id_check_refusal(config, find_store)
 
 
 def ensure_instance_config_ready_for_headless_launch(config_path: Path) -> str | None:
@@ -330,11 +345,12 @@ def ensure_instance_config_ready_for_headless_launch(config_path: Path) -> str |
         return None
     result = migrate_instance_config_file(status.path)
     LOGGER.warning(
-        "Headless launch migrated stale instance config %s from schema_version %s to %s; backup=%s",
+        "Headless launch migrated stale instance config %s from schema_version %s to %s; backup=%s; steps=%s",
         result.path,
         result.original_version,
         result.migrated_version,
         result.backup_path or "-",
+        " | ".join(result.applied_steps) or "-",
     )
     return _render_instance_config_migration_notice(
         result.path,

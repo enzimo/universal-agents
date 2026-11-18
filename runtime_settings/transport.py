@@ -80,7 +80,9 @@ def store_partition_count(config: dict[str, Any]) -> bool:
     with, and the installation authority would refuse to start. The launcher's upgrade
     writes the upgraded mapping rather than saving through the model, so this step is what
     puts the count in an upgraded instance's file. A value of the wrong type is left for
-    validation to refuse by name. The caller's mapping is not changed.
+    validation to refuse by name. The caller's mapping is not changed. Logs nothing: the
+    upgrade also runs in memory at every read of an older file, so what an upgrade did is
+    reported where the file is written, from its applied steps.
     """
 
     section, group, key = PARTITION_COUNT_SETTING
@@ -92,8 +94,6 @@ def store_partition_count(config: dict[str, Any]) -> bool:
         return False
     count = TRANSPORT_DEFAULTS.queues_partitions.value
     config[section] = {**transport, group: {**queues, key: count}}
-    logger.info("Stored the partition count in the instance configuration. event=config_partition_count_stored "
-                "setting=%s count=%s", ".".join(PARTITION_COUNT_SETTING), count)
     return True
 
 
@@ -115,7 +115,8 @@ def write_zero_replicas_as_one(config: dict[str, Any]) -> bool:
     """Upgrade step: write a saved replica count of 0 as 1, the count it always meant; whether it did.
 
     A value of another kind is left for validation to refuse by name. Callers pass a shallow
-    copy of the file's mapping; the ``transport`` section is copied before it is changed.
+    copy of the file's mapping; the ``transport`` section is copied before it is changed. Logs
+    nothing, like ``store_partition_count``.
     """
 
     section, key = REPLICAS_SETTING
@@ -123,8 +124,6 @@ def write_zero_replicas_as_one(config: dict[str, Any]) -> bool:
     if not isinstance(transport, dict) or not zero_replicas_meant_one(transport.get(key)):
         return False
     config[section] = {**transport, key: 1}
-    logger.info("Wrote the saved replica count of 0 as 1, the count it always meant. "
-                "event=config_zero_replicas_written setting=%s", ".".join(REPLICAS_SETTING))
     return True
 
 

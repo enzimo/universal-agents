@@ -43,7 +43,12 @@ from docker.launch_headless import (
     validate_runtime_layout,
 )
 from env_secrets import PROCESS_POSTGRES, environment_for, materialize_secret_file_envs
-from instance_upgrades.protocol1_ids import CHECK_FAILED_EVENT, check_due, load_saved_for_check
+from instance_upgrades.protocol1_ids import (
+    CHECK_FAILED_EVENT,
+    Protocol1IdCheckFailed,
+    check_due,
+    load_saved_for_check,
+)
 from storage.config import PostgresStorageSettings, StorageSettings
 from storage.postgres_connection import (
     BUNDLED_POSTGRES_ADDRESS_ENV,
@@ -529,7 +534,8 @@ def check_ids_then_upgrade_config(config: GatewayInstanceConfig, runtime_env: Ma
 
     Runs once the bundled PostgreSQL answers and before NATS, seeding or the launcher start,
     so a refused start changes nothing: not the file, not a store, not the message server.
-    Once the check passed (its record exists), later starts only upgrade the file.
+    Once the check passed (its record exists), later starts only upgrade the file, unless a
+    startup agent type does not fit, which stops them without reading the store.
     """
 
     try:
@@ -540,14 +546,14 @@ def check_ids_then_upgrade_config(config: GatewayInstanceConfig, runtime_env: Ma
             f"nothing was changed (event={CHECK_FAILED_EVENT}): {exc}"
         )
     if due:
-        try:
-            storage = id_check_storage(config, runtime_env)
-        except Exception as exc:  # noqa: BLE001 - fail closed: the check cannot read the store
-            return (
-                "The check that every id fits protocol 1 could not reach the bundled PostgreSQL, so nothing was "
-                f"changed (event={CHECK_FAILED_EVENT}): {exc}"
-            )
-        refusal = protocol1_id_check_refusal(config, storage)
+
+        def find_store() -> StorageSettings | None:
+            try:
+                return id_check_storage(config, runtime_env)
+            except Exception as exc:  # noqa: BLE001 - fail closed: the check cannot read the store
+                raise Protocol1IdCheckFailed(f"The bundled PostgreSQL could not be reached: {exc}") from exc
+
+        refusal = protocol1_id_check_refusal(config, find_store)
         if refusal:
             return refusal
     try:

@@ -4946,7 +4946,14 @@ the desktop app never offers an older version.
   records `InstanceLayout.protocol1_ids_check_path`
   (`state/upgrades/protocol1-ids.json`) with the team id and does not run again
   for that team id, so an agent type added later does not stop the instance:
-  the agent host gives it no session and the Status page says why. Both
+  the agent host gives it no session and the Status page says why. A record of
+  any kind means 0.10 has started there, so its stores may already be changed
+  and 0.9 is no longer the way back: with a record for the current team id, a
+  startup agent type that does not fit (which the configuration refuses) stops
+  the start with a short message naming only those entries and what to change
+  (`event=protocol1_startup_agent_types_over_cap`), without reading the
+  catalog or the store; the launchers pass the check a function that finds the
+  store, called only when the whole check runs. Both
   onboarding routes, the page and the command-line `onboard`, cut the team id
   they derive to 24 characters and refuse a typed one that does not fit
   (`onboarding_engine.team_id_answer`), so a new instance never stops here.
@@ -4954,7 +4961,9 @@ the desktop app never offers an older version.
   the file run no check, since the check belongs to starting the instance and
   the command-line tool has no store settings of its own; when such an upgrade
   came first, the refusal names the backup 0.9 reads
-  (`instance_config.yaml.bak.v12`) to put back before starting 0.9 again.
+  (`instance_config.yaml.bak.v12`) to put back before starting 0.9 again, but
+  only while no record exists (the launcher's own upgrade after a check that
+  passed on an instance that was not ready yet leaves the same backup).
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the

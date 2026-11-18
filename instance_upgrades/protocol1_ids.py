@@ -15,17 +15,26 @@ Docker bundle (``docker.run_bundle``) runs it as soon as its PostgreSQL answers,
 stored ids may be there, and before it upgrades the file or starts NATS or the launcher.
 It writes ``InstanceLayout.protocol1_ids_check_path`` only when every id fits and the
 instance can run as it is (onboarded, in the current folder layout), so the stores it read
-are the ones the instance runs with; until then it runs again at each start. It does
-nothing while a record for the current team id exists (``check_due``). It runs once rather
-than at every start so that an agent type added later never stops the instance: the agent
-host gives such a type no session and the Status page says why
-(``agent_type_not_certifiable``). A startup agent type that does not fit is the exception:
-the configuration refuses it, so the check runs again and names it with every other id.
+are the ones the instance runs with; until then it runs again at each start. It runs once
+rather than at every start so that an agent type added later never stops the instance: the
+agent host gives such a type no session and the Status page says why
+(``agent_type_not_certifiable``).
+
+A record file of any kind means this version has started here, so its stores may already be
+changed and going back to 0.9.x is no longer the way out (``_RecordState``):
+
+- a record for the current team id: nothing is checked again, except that a startup agent
+  type that does not fit, which the configuration refuses, stops the start with a short
+  message naming only those entries (``startup_types_refusal``). The store is not read;
+- a record for another team id, or one that cannot be read: the whole check runs again, and
+  its refusal names no 0.9.x backup;
+- no record: the whole check runs, and its refusal names the 0.9.x backup to put back when
+  the file was already upgraded (``upgraded_file_note``).
 
 The check runs where the launchers start an instance. ``assistant_cli.py migrate-config``
-and the command-line tool's offer to upgrade the file do not run it; when such an upgrade
-came first, the refusal names the backup to put back before starting 0.9.x again
-(``upgraded_file_note``).
+and the command-line tool's offer to upgrade the file do not run it; when such an upgrade,
+or the launcher's own on an earlier start of an instance that was not ready yet, came
+first, the refusal names that backup.
 
 What it reads, read only (``storage.read_only``: SQLite opened ``mode=ro``, PostgreSQL in
 a read-only transaction), never creating a database or a table (SQLite opens its own empty
@@ -65,6 +74,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Sequence
 
@@ -80,6 +90,8 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 REFUSED_EVENT: Final = "protocol1_ids_over_caps"
+# A startup agent type that does not fit, once the check passed here (``startup_types_refusal``).
+STARTUP_TYPES_REFUSED_EVENT: Final = "protocol1_startup_agent_types_over_cap"
 # The check could not read the settings, the catalog or a store; the start stops (both launchers).
 CHECK_FAILED_EVENT: Final = "protocol1_ids_check_failed"
 # The newest instance_config.yaml schema version 0.9.x reads (0.9.13): a newer saved file was
@@ -91,6 +103,30 @@ _IDS_PER_TABLE: Final = 20
 
 class Protocol1IdCheckFailed(RuntimeError):
     """The check could not read the agent catalog or a store that exists; the start stops."""
+
+
+# How a launcher finds the team's store, or None when it does not exist yet. Called only when
+# the whole check runs, so a start the record lets through never reaches the store.
+StoreResolver = Callable[[], StorageSettings | None]
+
+
+class _RecordState(Enum):
+    """What the check's record (``InstanceLayout.protocol1_ids_check_path``) says.
+
+    The check writes a record only after it passed on an instance that could run, so any
+    record file means this version has started here. Only ``PASSED`` lets a start skip it.
+    """
+
+    MISSING = "missing"
+    PASSED = "passed"  # for the current team id
+    OTHER_TEAM = "other_team"
+    UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True)
+class _Record:
+    state: _RecordState
+    detail: str = ""  # the recorded team id, or why the record cannot be read
 
 
 @dataclass(frozen=True)
@@ -304,12 +340,15 @@ def _store_name(storage: StorageSettings | None) -> str:
 
 
 def upgraded_file_note(config_path: Path) -> str | None:
-    """What to put back before starting 0.9.x when the saved file was upgraded before the check ran.
+    """What to put back before starting 0.9.x when the saved file was upgraded before the check refused.
 
     ``assistant_cli.py migrate-config`` and the command-line tool's offer to upgrade the file
-    run no id check, and 0.9.x refuses a file newer than ``LAST_09_CONFIG_SCHEMA_VERSION``.
-    Named only when a backup 0.9.x reads is beside the file: a file this version created has
-    none, and never ran on 0.9.x; nor has a configuration that was never saved.
+    run no id check, and the launcher upgrades it after a check that passed on an instance
+    that was not ready yet (``_not_ready_to_record``); 0.9.x refuses a file newer than
+    ``LAST_09_CONFIG_SCHEMA_VERSION``. Named only when a backup 0.9.x reads is beside the
+    file: a file this version created has none, and never ran on 0.9.x; nor has a
+    configuration that was never saved. The caller asks only when no record exists: an
+    instance this version has started on goes forward, never back to 0.9.x.
     """
 
     from assistant_gateway.config import inspect_instance_config_version
@@ -328,8 +367,8 @@ def upgraded_file_note(config_path: Path) -> str | None:
         return None
     return (
         f"The configuration file {config_path} was already upgraded to schema_version {version} for this "
-        "version (by assistant_cli.py migrate-config or the command-line tool's offer to upgrade it), which "
-        f"0.9.x cannot read. Before starting 0.9.x again, put back {backups[-1][1]} as {config_path.name}."
+        f"version, which 0.9.x cannot read. Before starting 0.9.x again, put back {backups[-1][1]} as "
+        f"{config_path.name}."
     )
 
 
@@ -367,40 +406,72 @@ def refusal_message(found: Sequence[IdOverCap], *, upgraded_note: str | None = N
     return "\n".join(lines)
 
 
-def check_due(config: GatewayInstanceConfig) -> bool:
-    """Whether the check must run: no record for the current team id, or a startup agent type that does not fit.
+def startup_types_refusal(startup_types: Sequence[str], config_path: Path) -> str:
+    """The refusal for startup agent types that do not fit on an instance whose check passed.
 
-    The launchers ask this before resolving the team's store. ``config`` comes from
-    ``load_saved_for_check``.
+    This version has started here, so the advice is to change the file and start again. Only
+    those entries are named: nothing else the check reads stops a later start.
     """
 
-    return bool(startup_types_over_cap(config)) or not _passed_for(config)
+    lines = [
+        f"This instance cannot start: gateway.startup_agents in {config_path} starts agent types that protocol 1 "
+        f"cannot carry in message addresses (event={STARTUP_TYPES_REFUSED_EVENT}). This start changed nothing."
+    ]
+    for agent_type in startup_types:
+        lines.append(
+            f"- The agent type {agent_type!r} {AGENT_TYPE.problem(agent_type)}. Remove its entry from "
+            f"gateway.startup_agents, or change it to an agent type of at most {AGENT_TYPE.cap} letters, digits, "
+            "'-' and '_' (a type you rename, rename where it is defined as well). Then start again."
+        )
+    return "\n".join(lines)
 
 
-def check_ids_before_upgrade(config: GatewayInstanceConfig, storage: StorageSettings | None) -> str | None:
+def check_due(config: GatewayInstanceConfig) -> bool:
+    """Whether the check has anything to say: no record for the current team id, or a startup type that does not fit.
+
+    The launchers ask this first, so a start the record lets through loads nothing more.
+    ``config`` comes from ``load_saved_for_check``. Logs nothing: ``check_ids_before_upgrade``
+    says why the record did not count.
+    """
+
+    return bool(startup_types_over_cap(config)) or _read_record(config).state is not _RecordState.PASSED
+
+
+def check_ids_before_upgrade(config: GatewayInstanceConfig, find_store: StoreResolver) -> str | None:
     """None when the ids fit or the check already passed; else the refusal message.
 
     ``config`` is the saved instance configuration as this version reads it, upgraded in memory
-    only (``load_saved_for_check``); ``storage`` is the team's store
-    (``resolve_manager_storage_settings``), or None when it does not exist yet. When the ids
-    fit, the record is written if the instance can run as it is (``_not_ready_to_record``).
-    Raises ``Protocol1IdCheckFailed`` when the catalog or an existing store cannot be read,
-    ``ValueError`` when the saved file cannot be read, and ``TransferError`` for a team whose
-    import did not finish, which nothing may read (``team_transfer.runtime_guard``).
+    only (``load_saved_for_check``). ``find_store`` gives the team's store
+    (``resolve_manager_storage_settings``), or None when it does not exist yet; it is called
+    only when the whole check runs. When the ids fit, the record is written if the instance
+    can run as it is (``_not_ready_to_record``). Raises ``Protocol1IdCheckFailed`` when the
+    catalog or an existing store cannot be read, ``ValueError`` when the saved file cannot be
+    read, and ``TransferError`` for a team whose import did not finish, which nothing may read
+    (``team_transfer.runtime_guard``).
     """
 
     from team_transfer.runtime_guard import require_finished_import
 
     require_finished_import(config.layout)
-    startup_types = startup_types_over_cap(config)
-    if not startup_types and _passed_for(config):
-        return None
     team_id = str(config.manager.team_id)
+    startup_types = startup_types_over_cap(config)
+    record = _read_record(config)
+    if record.state is _RecordState.PASSED:
+        if not startup_types:
+            return None
+        LOGGER.error(
+            "Startup agent types protocol 1 cannot carry stop the start. event=%s team_id=%s agent_types=%s",
+            STARTUP_TYPES_REFUSED_EVENT,
+            team_id,
+            ",".join(startup_types),
+        )
+        return startup_types_refusal(startup_types, config.config_path)
+    _log_record_not_counted(record, Path(config.layout.protocol1_ids_check_path), team_id)
     catalog = catalog_definitions(config.instance_root_path, config.agent.agent_definition_paths)
     found = [
         *team_id_over_cap(team_id),
         *agent_types_over_cap(catalog, startup_types, config.config_path),
-        *stored_agent_ids_over_cap(storage, team_id),
+        *stored_agent_ids_over_cap(find_store(), team_id),
     ]
     if found:
         LOGGER.error(
@@ -409,7 +480,9 @@ def check_ids_before_upgrade(config: GatewayInstanceConfig, storage: StorageSett
             team_id,
             ",".join(f"{item.rule_what}:{item.value}" for item in found),
         )
-        return refusal_message(found, upgraded_note=upgraded_file_note(config.config_path))
+        # Any record means this version started here: its stores go forward, never back to 0.9.x.
+        first_start = record.state is _RecordState.MISSING
+        return refusal_message(found, upgraded_note=upgraded_file_note(config.config_path) if first_start else None)
     not_ready = _not_ready_to_record(config)
     if not_ready:
         LOGGER.info(
@@ -424,34 +497,42 @@ def check_ids_before_upgrade(config: GatewayInstanceConfig, storage: StorageSett
     return None
 
 
-def _passed_for(config: GatewayInstanceConfig) -> bool:
-    """Whether the record says the check passed for the current team id."""
+def _read_record(config: GatewayInstanceConfig) -> _Record:
+    """What the check's record says about the current team id; logs nothing."""
 
     path = Path(config.layout.protocol1_ids_check_path)
-    team_id = str(config.manager.team_id)
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return False
+        return _Record(_RecordState.MISSING)
     except (OSError, ValueError) as exc:
+        return _Record(_RecordState.UNREADABLE, str(exc))
+    if not isinstance(body, dict):
+        return _Record(_RecordState.UNREADABLE, "it holds no team id")
+    recorded = body.get("team_id")
+    if recorded != str(config.manager.team_id):
+        return _Record(_RecordState.OTHER_TEAM, str(recorded))
+    return _Record(_RecordState.PASSED)
+
+
+def _log_record_not_counted(record: _Record, path: Path, team_id: str) -> None:
+    """Why a record that exists did not let the start skip the check: once per start."""
+
+    if record.state is _RecordState.UNREADABLE:
         LOGGER.warning(
             "The id check's record cannot be read, so the check runs again. "
             "event=protocol1_ids_record_unreadable path=%s error=%s",
             path,
-            exc,
+            record.detail,
         )
-        return False
-    recorded = body.get("team_id") if isinstance(body, dict) else None
-    if recorded != team_id:
+    elif record.state is _RecordState.OTHER_TEAM:
         LOGGER.info(
             "The id check's record is for another team id, so the check runs again. "
             "event=protocol1_ids_record_other_team path=%s recorded_team_id=%s team_id=%s",
             path,
-            recorded,
+            record.detail,
             team_id,
         )
-        return False
-    return True
 
 
 def _not_ready_to_record(config: GatewayInstanceConfig) -> str | None:
@@ -485,6 +566,8 @@ __all__ = [
     "LAST_09_CONFIG_SCHEMA_VERSION",
     "Protocol1IdCheckFailed",
     "REFUSED_EVENT",
+    "STARTUP_TYPES_REFUSED_EVENT",
+    "StoreResolver",
     "agent_types_over_cap",
     "catalog_definitions",
     "check_due",
@@ -492,6 +575,7 @@ __all__ = [
     "load_saved_for_check",
     "refusal_message",
     "startup_types_over_cap",
+    "startup_types_refusal",
     "stored_agent_ids_over_cap",
     "team_id_over_cap",
     "upgraded_file_note",

@@ -1310,8 +1310,9 @@ disappears once it is fixed:
   show no running TeamLead, the gateway cannot see the team (the installation
   refused its join, or it has not read the team's records), an agent cannot run its work because the team gave it
   no session (the finding says why, for example the worker limit is reached,
-  and what to do), or a disk the instance uses is nearly full (95% by
-  default).
+  and what to do), a disk the instance uses is nearly full (95% by
+  default), or one of the team's message streams holds 80% of its size limit
+  (`transport.queues.warn_at_percent`) and will soon refuse new messages.
 - **Warning**: something works, but not as configured, for example a
   variable in `team.env` or the container environment that overrides a saved
   setting or a key saved with `/auth model`, memory search that stopped

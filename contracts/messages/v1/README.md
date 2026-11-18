@@ -1234,6 +1234,22 @@ room: see "Control messages share their stream's room" below. These settings are
   (which gives back the room they had set aside and drops nothing) and creates the missing
   ones, so running it again finishes a team it stopped partway through. Defaults are
   measured against what they set aside, not only against the expected backlog.
+- **The defaults** (`transport.queues`, measured on nats-server 2.15.1 with
+  `sync_interval: always`): `partition` 16 MiB, `pool` 128 MiB, `edge` 128 MiB,
+  `team_services` 256 MiB and `dead_letter` 128 MiB, 8 messages per subject
+  (`max_messages_per_subject`) and 96 partitions. One team's streams then set aside
+  2,281,701,376 bytes (2.125 GiB: 96 times 16 MiB, plus 640 MiB), which is what the
+  account reported as `reserved_storage` for them. The largest message a work stream
+  stores is 263,168 bytes, headers included (`max_message_bytes`), so one sender's backlog
+  for one agent at the cap holds at most 2,105,344 bytes, and the settings refuse a
+  `partition` limit below five such backlogs (10,526,720 bytes at a cap of 8; "Control
+  messages share their stream's room"). Review point FA-3 of step 1, measured: four
+  senders (a gateway, the lead host, the team services and the scheduler, each under its
+  own runtime id) each queued 8 messages of the largest size for one agent. Its partition
+  stream then held 32 messages, 8,423,984 of its 16,777,216 bytes; a ninth from one of
+  them was refused with 10077 "maximum messages per subject exceeded", while that agent's
+  control message and a neighbour's inbox and control messages were stored, and a fifth
+  sender still stored all 8 of its own (11,319,729 bytes in the end).
 - **The room is needed at every start of NATS.** A server that does not set
   `max_file_store`, as the bundled one does not, gives JetStream three quarters of the
   disk's free space, measured each time it starts (measured: 0.750). So the disk needs a

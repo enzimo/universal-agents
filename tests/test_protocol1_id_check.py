@@ -10,7 +10,9 @@ start; the record is written only for an instance that can run as it is and only
 its team id (C30); the launcher and the Docker bundle refuse before the configuration
 file's upgrade, NATS, seeding or the launcher start (C01), name a startup agent type that
 does not fit with every other id (C28), and the bundle upgrades and starts once the ids
-fit; a file upgraded before the check gets the backup to put back (C31); the bundle reads
+fit; a file upgraded before the check gets the backup to put back (C31), but only while no
+record exists; once the check passed, a startup agent type that does not fit gets a short
+refusal of its own, with no 0.9.x advice and no store read (C32); the bundle reads
 PostgreSQL as its administrator and a database that does not exist yet holds nothing;
 both onboarding routes cut a derived team id to fit and refuse a typed one that does not
 (C29); and, with ``LIVE_TEST_POSTGRES_DSN``, the stored ids read from PostgreSQL.
@@ -38,6 +40,7 @@ from assistant_gateway.onboarding_engine import OnboardingTemplate, normalize_on
 from custom_messages.wire.ids import AGENT_ID, AGENT_TYPE, TEAM_ID
 from instance_upgrades.protocol1_ids import (
     Protocol1IdCheckFailed,
+    check_due,
     check_ids_before_upgrade,
     load_saved_for_check,
     stored_agent_ids_over_cap,
@@ -161,7 +164,7 @@ def test_ids_at_their_caps_pass_and_the_record_is_written_once(tmp_path, monkeyp
     _write_sqlite(storage, AT_ID_CAP, team="t" * 24)
     stored = Path(str(storage.sqlite_path)).read_bytes()
 
-    assert check_ids_before_upgrade(config, storage) is None
+    assert check_ids_before_upgrade(config, lambda: storage) is None
 
     record = json.loads(config.layout.protocol1_ids_check_path.read_text(encoding="utf-8"))
     assert record["team_id"] == "t" * 24 and record["version"] and record["checked_at"]
@@ -174,7 +177,7 @@ def test_ids_at_their_caps_pass_and_the_record_is_written_once(tmp_path, monkeyp
 
     monkeypatch.setattr("instance_upgrades.protocol1_ids.catalog_definitions", unread)
     _write_sqlite(storage, OVER_ID_CAP)
-    assert check_ids_before_upgrade(config, storage) is None  # later stored ids never stop a start
+    assert check_ids_before_upgrade(config, lambda: storage) is None  # later stored ids never stop a start
 
 
 def test_each_id_just_over_its_cap_stops_the_start_and_says_what_to_do(tmp_path, caplog) -> None:
@@ -182,7 +185,7 @@ def test_each_id_just_over_its_cap_stops_the_start_and_says_what_to_do(tmp_path,
     config, storage = _config(tmp_path, team=long_team, types=(OVER_TYPE_CAP, AT_TYPE_CAP)), _sqlite(tmp_path)
     _write_sqlite(storage, OVER_ID_CAP, AT_ID_CAP, team=long_team)
 
-    message = check_ids_before_upgrade(config, storage)
+    message = check_ids_before_upgrade(config, lambda: storage)
 
     assert message is not None and not config.layout.protocol1_ids_check_path.exists()
     lines = message.splitlines()
@@ -217,7 +220,7 @@ def test_the_check_reads_the_stores_own_schemas(tmp_path) -> None:
 def test_an_instance_with_nothing_stored_passes_and_its_store_is_not_created(tmp_path) -> None:
     storage = _sqlite(tmp_path)
 
-    assert check_ids_before_upgrade(_config(tmp_path), storage) is None
+    assert check_ids_before_upgrade(_config(tmp_path), lambda: storage) is None
     assert not Path(str(storage.sqlite_path)).exists()
     sqlite3.connect(str(storage.sqlite_path)).close()  # a database without the tables
     assert stored_agent_ids_over_cap(storage, TEAM) == []
@@ -252,7 +255,7 @@ def test_a_store_that_cannot_be_read_stops_the_start(tmp_path) -> None:
 
     with pytest.raises(Protocol1IdCheckFailed, match="The stored records could not be read"):
         stored_agent_ids_over_cap(storage, TEAM)
-    refusal = launch_headless.protocol1_id_check_refusal(_config(tmp_path), storage)
+    refusal = launch_headless.protocol1_id_check_refusal(_config(tmp_path), lambda: storage)
     assert refusal is not None and "event=protocol1_ids_check_failed" in refusal
 
 
@@ -267,7 +270,7 @@ def test_a_team_whose_import_did_not_finish_is_not_read(tmp_path, monkeypatch) -
     monkeypatch.setattr("instance_upgrades.protocol1_ids.catalog_definitions",
                         lambda *_args: pytest.fail("a half-imported team was read"))
 
-    refusal = launch_headless.protocol1_id_check_refusal(config, _sqlite(tmp_path))
+    refusal = launch_headless.protocol1_id_check_refusal(config, lambda: _sqlite(tmp_path))
 
     assert refusal is not None and refusal.startswith("event=team_import_unfinished The team import into")
     assert not config.layout.protocol1_ids_check_path.exists()
@@ -283,18 +286,18 @@ def test_the_record_is_written_only_for_an_instance_that_can_run_as_it_is(tmp_pa
     config, storage = _config(tmp_path, onboarded=False), _sqlite(tmp_path)
     record = config.layout.protocol1_ids_check_path
 
-    assert check_ids_before_upgrade(config, storage) is None
+    assert check_ids_before_upgrade(config, lambda: storage) is None
     assert not record.exists()
     assert "the instance is not onboarded yet" in caplog.text and "event=protocol1_ids_checked_not_recorded" in caplog.text
 
     config.layout.control_dir.mkdir(parents=True)
     (config.instance_root_path / "workspace").mkdir()
     (config.instance_root_path / "workspace" / "notes.md").write_text("old layout", encoding="utf-8")
-    assert check_ids_before_upgrade(config, storage) is None
+    assert check_ids_before_upgrade(config, lambda: storage) is None
     assert not record.exists() and "still in the old layout" in caplog.text
 
     (config.instance_root_path / "workspace" / "notes.md").unlink()
-    assert check_ids_before_upgrade(config, storage) is None
+    assert check_ids_before_upgrade(config, lambda: storage) is None
     assert json.loads(record.read_text(encoding="utf-8"))["team_id"] == TEAM
 
 
@@ -306,12 +309,16 @@ def test_a_record_for_another_team_id_or_one_that_cannot_be_read_does_not_count(
     _write_sqlite(storage, OVER_ID_CAP)
 
     record.write_text(json.dumps({"team_id": "team_other"}), encoding="utf-8")
-    assert OVER_ID_CAP in (check_ids_before_upgrade(config, storage) or "")
-    assert "recorded_team_id=team_other team_id=team_ids" in caplog.text
+    assert check_due(config)  # says nothing itself: the check logs why, once per start
+    assert OVER_ID_CAP in (check_ids_before_upgrade(config, lambda: storage) or "")
+    assert caplog.text.count("recorded_team_id=team_other team_id=team_ids") == 1
 
-    record.write_text("{not json", encoding="utf-8")
-    assert OVER_ID_CAP in (check_ids_before_upgrade(config, storage) or "")
-    assert "event=protocol1_ids_record_unreadable" in caplog.text
+    for unreadable in ("{not json", "[]"):
+        caplog.clear()
+        record.write_text(unreadable, encoding="utf-8")
+        assert check_due(config)
+        assert OVER_ID_CAP in (check_ids_before_upgrade(config, lambda: storage) or "")
+        assert caplog.text.count("event=protocol1_ids_record_unreadable") == 1
 
 
 def test_the_launcher_leaves_no_record_for_an_instance_it_then_refuses(tmp_path, monkeypatch, caplog) -> None:
@@ -477,22 +484,82 @@ def test_the_bundle_refuses_settings_it_cannot_read_without_a_traceback(tmp_path
 
 
 def test_a_file_upgraded_before_the_check_gets_the_backup_to_put_back(tmp_path) -> None:
-    """migrate-config runs no id check; 0.9.x cannot read the file it writes (C31)."""
+    """migrate-config runs no id check; 0.9.x cannot read the file it writes (C31).
+
+    Named only while no record exists: a record of any kind, for another team id or one that
+    cannot be read, means this version started here, and its stores go forward only (C32).
+    """
 
     path = _version_12_file(tmp_path, team="team_" + "y" * 25)
     backup = migrate_instance_config_file(path).backup_path
     config, storage = load_saved_for_check(path), _sqlite(tmp_path)
 
-    lines = (check_ids_before_upgrade(config, storage) or "").splitlines()
+    lines = (check_ids_before_upgrade(config, lambda: storage) or "").splitlines()
 
     assert lines[1] == (
-        f"The configuration file {path} was already upgraded to schema_version 15 for this version (by "
-        "assistant_cli.py migrate-config or the command-line tool's offer to upgrade it), which 0.9.x cannot read. "
-        f"Before starting 0.9.x again, put back {path}.bak.v12 as instance_config.yaml."
+        f"The configuration file {path} was already upgraded to schema_version 15 for this version, which 0.9.x "
+        f"cannot read. Before starting 0.9.x again, put back {path}.bak.v12 as instance_config.yaml."
     )
     assert backup == path.with_name("instance_config.yaml.bak.v12")
+    record = config.layout.protocol1_ids_check_path
+    record.parent.mkdir(parents=True)
+    for written in (json.dumps({"team_id": "team_other"}), "{not json"):
+        record.write_text(written, encoding="utf-8")
+        refusal = check_ids_before_upgrade(config, lambda: storage) or ""
+        assert "is 30 characters long" in refusal and "put back" not in refusal
+    record.unlink()
     backup.unlink()  # as for a file this version created: it never ran on 0.9.x
-    assert "already upgraded" not in (check_ids_before_upgrade(config, storage) or "")
+    assert "already upgraded" not in (check_ids_before_upgrade(config, lambda: storage) or "")
+
+
+def test_once_the_check_passed_a_startup_type_that_does_not_fit_gets_a_short_refusal_in_both_launchers(
+        tmp_path, monkeypatch, caplog) -> None:
+    """0.10 runs here, so the refusal names only the startup entry, with no 0.9.x advice and no store read (C32).
+
+    The critic's sequence: the check passed and the launcher upgraded the file (keeping
+    instance_config.yaml.bak.v12); then a startup agent with a long type is added to the
+    file by hand and a long type to the catalog, which never stops a start of its own.
+    """
+
+    path = _version_12_file(tmp_path, team=TEAM, types=(AT_TYPE_CAP,))
+    _Started(monkeypatch)
+    assert _run_bundle(path) == 0
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["schema_version"] == 15
+    assert path.with_name("instance_config.yaml.bak.v12").exists()
+    started_only = "Started" + "z" * 18
+    _catalog(tmp_path, (AT_TYPE_CAP, OVER_TYPE_CAP))
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["gateway"]["startup_agents"].append({"named_agent_type": started_only, "count": 1, "enabled": True})
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    before = path.read_bytes()
+    for reader in ("catalog_definitions", "stored_agent_ids_over_cap"):
+        monkeypatch.setattr(f"instance_upgrades.protocol1_ids.{reader}",
+                            lambda *_args, _reader=reader: pytest.fail(f"{_reader} ran"))
+    monkeypatch.setattr(run_bundle, "id_check_storage", lambda *_args: pytest.fail("the store was found"))
+    expected = (
+        f"This instance cannot start: gateway.startup_agents in {path} starts agent types that protocol 1 cannot "
+        "carry in message addresses (event=protocol1_startup_agent_types_over_cap). This start changed nothing.\n"
+        f"- The agent type '{started_only}' is 25 characters long; protocol 1 allows at most 24. Remove its entry "
+        "from gateway.startup_agents, or change it to an agent type of at most 24 letters, digits, '-' and '_' (a "
+        "type you rename, rename where it is defined as well). Then start again."
+    )
+
+    monkeypatch.setattr(sys, "argv", ["launch_headless.py", "--config", str(path)])
+    assert launch_headless.main() == 2
+    assert f"Headless launch refused. {expected}" in caplog.text
+
+    caplog.clear()
+    started = _Started(monkeypatch)
+    monkeypatch.setenv("TEAM_BUNDLE_SERVICE_ROOT", str(tmp_path / "services"))
+    monkeypatch.setattr(sys, "argv", ["run_bundle.py", "--config", str(path)])
+    assert run_bundle.main() == 2
+    assert started.calls == []
+    assert f"Bundle launch refused. {expected}" in caplog.text
+
+    for text in ("0.9.x", "put back", OVER_TYPE_CAP):
+        assert text not in caplog.text
+    assert path.read_bytes() == before
+    assert json.loads(load_saved_for_check(path).layout.protocol1_ids_check_path.read_text(encoding="utf-8"))
 
 
 def test_the_bundle_reads_postgresql_as_its_administrator_and_a_missing_database_holds_nothing(
