@@ -342,14 +342,16 @@ def _over_cap(conn: Any, dialect: SqlDialect, stored: _StoredIds, team_id: str) 
 
 
 def _store_error(storage: StorageSettings | None, exc: Exception) -> str:
-    """What the refusal says about a store's error: a PostgreSQL error only by its kind.
+    """What the refusal says about a store's error: one psycopg raised itself only by its kind.
 
     libpq repeats the part of a connection string it cannot parse, which can be the
-    password (SEC-1 of pull request 152's review), and the launchers log the refusal. A
-    SQLite error names only what went wrong with the file.
+    password (SEC-1 of pull request 152's review), and the launchers log the refusal. An
+    error the PostgreSQL server sent about a query (psycopg sets its ``sqlstate``; a failed
+    connection has none) cannot hold the connection string, so it keeps its text, as a
+    SQLite error, which names only what went wrong with the file, does.
     """
 
-    if storage is not None and storage.postgres_dsn:
+    if storage is not None and storage.postgres_dsn and not getattr(exc, "sqlstate", None):
         return (
             f"{type(exc).__name__}. Its text is left out, since it can repeat the connection string's password: check "
             "the connection string and that PostgreSQL answers."

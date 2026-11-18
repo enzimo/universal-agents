@@ -415,7 +415,9 @@ the setup the runtime is tested with. Compared with 0.9, the login also needs:
   with room for them: NATS sets each stream's whole size limit aside when it
   creates the stream, about 2.1 GiB per team at the default
   `transport.queues.max_bytes`, from the account's storage limit and the
-  server's JetStream storage. Without the right or the room the authority stops
+  server's JetStream storage. In a JetStream cluster each server that keeps one of
+  a stream's `transport.replicas` copies needs room for the stream's whole limit.
+  Without the right or the room the authority stops
   before any other process starts (`event=installation_authority_start_refused`),
   naming the stream and, for room, the setting to lower.
 - An account consumer limit of 4,096 or none. NATS refuses a stream whose own

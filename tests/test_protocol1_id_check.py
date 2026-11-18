@@ -259,22 +259,49 @@ def test_a_store_that_cannot_be_read_stops_the_start(tmp_path) -> None:
     assert refusal is not None and "event=protocol1_ids_check_failed" in refusal
 
 
-def test_a_postgresql_store_that_cannot_be_reached_is_refused_without_its_password() -> None:
+def _postgres(dsn: str) -> StorageSettings:
+    from storage.config import PostgresStorageSettings
+
+    return StorageSettings(backend="postgres", postgres=PostgresStorageSettings(dsn=dsn))
+
+
+@pytest.mark.parametrize(("password", "kind", "repeated"), [
+    ("S3cr%zzPw", "ProgrammingError", True),  # an unencoded % that libpq cannot parse, and repeats
+    ("S3crPw", "OperationalError", False),  # C38: nothing answers; a failed connection has no sqlstate either
+])
+def test_a_postgresql_store_that_cannot_be_reached_is_refused_without_its_password(password, kind, repeated) -> None:
     """SEC-1 of pull request 152's review: libpq repeats the unreadable part of a connection string."""
 
-    from storage.config import PostgresStorageSettings, StorageSettings
-
-    password = "S3cr%zzPw"  # an unencoded % that libpq cannot parse
-    storage = StorageSettings(backend="postgres", postgres=PostgresStorageSettings(
-        dsn=f"postgresql://ua:{password}@127.0.0.1:1/team"))
-
     with pytest.raises(Protocol1IdCheckFailed) as refused:
-        stored_agent_ids_over_cap(storage, TEAM)
+        stored_agent_ids_over_cap(_postgres(f"postgresql://ua:{password}@127.0.0.1:1/team"), TEAM)
 
-    assert password not in str(refused.value) and password in str(refused.value.__cause__)
+    assert password not in str(refused.value) and (password in str(refused.value.__cause__)) == repeated
     assert str(refused.value).endswith(
-        "ProgrammingError. Its text is left out, since it can repeat the connection string's password: check the "
+        f"{kind}. Its text is left out, since it can repeat the connection string's password: check the "
         "connection string and that PostgreSQL answers.")
+
+
+def test_an_error_postgresql_sent_about_a_query_keeps_its_text(monkeypatch) -> None:
+    """C38: an error with a sqlstate came from the server, which never sees the connection string."""
+
+    import psycopg
+
+    class Refusing:
+        def __enter__(self) -> "Refusing":
+            return self
+
+        def __exit__(self, *_exc: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any) -> Any:
+            raise psycopg.errors.InsufficientPrivilege("permission denied for table active_task_runtime")
+
+    monkeypatch.setattr("storage.postgres_connection.connect_postgres", lambda _dsn: Refusing())
+    with pytest.raises(Protocol1IdCheckFailed) as refused:
+        stored_agent_ids_over_cap(_postgres("postgresql://ua:S3crPw@127.0.0.1:1/team"), TEAM)
+    assert str(refused.value) == (
+        "The stored records could not be read (user=ua password=*** dbname=team host=127.0.0.1 port=1): permission "
+        "denied for table active_task_runtime")
 
 
 # -- the launchers refuse before anything changes (C01) -----------------------------------------
@@ -685,3 +712,39 @@ def test_stored_ids_are_read_from_postgresql_without_creating_anything() -> None
     finally:
         with connect_postgres(dsn) as conn:
             conn.execute(f"DROP SCHEMA {schema} CASCADE")
+
+
+@pytest.mark.integration
+@pytest.mark.live
+@pytest.mark.postgres
+def test_a_query_postgresql_refuses_is_shown_in_its_own_words_without_the_password() -> None:
+    """C38: a login that may not read the stored records gets the server's reason, not advice about connecting."""
+
+    from psycopg.conninfo import make_conninfo
+
+    from storage.postgres_connection import connect_postgres
+
+    dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("LIVE_TEST_POSTGRES_DSN is required for the PostgreSQL id check")
+    schema, role, password = "ids_" + uuid4().hex, "ids_reader_" + uuid4().hex[:12], "S3crPw" + uuid4().hex[:8]
+    with connect_postgres(dsn) as conn:
+        conn.execute(f"CREATE SCHEMA {schema}")
+        conn.execute(f"CREATE ROLE {role} LOGIN PASSWORD '{password}'")
+        conn.execute(f"GRANT USAGE ON SCHEMA {schema} TO {role}")  # sees the tables, may read none
+    owner = resolve_storage_settings(
+        {"backend": "postgres", "postgres": {"dsn": make_conninfo(dsn, options=f"-csearch_path={schema}")}})
+    reader = _postgres(make_conninfo(dsn, user=role, password=password, options=f"-csearch_path={schema}"))
+    try:
+        _real_stores(owner, "%s", OVER_ID_CAP)
+
+        with pytest.raises(Protocol1IdCheckFailed) as refused:
+            stored_agent_ids_over_cap(reader, TEAM)
+
+        assert getattr(refused.value.__cause__, "sqlstate", None) == "42501"
+        assert str(refused.value).endswith("): permission denied for table active_task_runtime")
+        assert password not in str(refused.value) and "connection string" not in str(refused.value)
+    finally:
+        with connect_postgres(dsn) as conn:
+            conn.execute(f"DROP SCHEMA {schema} CASCADE")
+            conn.execute(f"DROP ROLE {role}")

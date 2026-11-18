@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 import pytest
+from nats.errors import NoRespondersError
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import ConsumerConfig, StreamConfig
 from nats.js.errors import APIError, NotFoundError, ServiceUnavailableError
@@ -526,13 +527,22 @@ def _refusing_streams(error: Exception) -> StandInJetStream:
 
 
 @pytest.mark.parametrize(("error", "kind", "says"), [
-    # More copies than the servers hold: one server (10074), a cluster too small (10005, measured on 2.15.1).
+    # More copies than the servers hold: one server (10074), or a cluster with fewer servers than copies, whose 10005
+    # gives no reason (both measured on 2.15.1).
     (APIError(code=500, err_code=10074, description="replicas > 1 not supported in non-clustered mode"), StreamRefused,
      "the servers JetStream runs on cannot hold 3 copies of each stream (JetStream error 10074, replicas > 1 not "
      "supported in non-clustered mode). Set transport.replicas to at most the number of servers"),
     (APIError(code=400, err_code=10005, description="no suitable peers for placement"), StreamRefused,
      "cannot hold 3 copies of each stream (JetStream error 10005, no suitable peers for placement). Set "
      "transport.replicas"),
+    # C36: a 10005 with another reason (nats-server's selectPeerError) is shown as sent; storage has its own refusal.
+    (APIError(code=400, err_code=10005, description="no suitable peers for placement, peer offline"), StreamRefused,
+     "JetStream error 10005, no suitable peers for placement, peer offline. The streams"),
+    # C37: JetStream runs, but not for the login's account (measured on 2.15.1).
+    (ServiceUnavailableError(code=503, err_code=10039, description="JetStream not enabled for account"), StreamRefused,
+     "JetStream is not enabled for the NATS account the instance logs in to (JetStream error 10039, JetStream not "
+     "enabled for account). Enable JetStream for that account (jetstream: enabled in the account's block of the "
+     "server's configuration file), then start again."),
     (APIError(code=400, err_code=10065, description="subjects overlap with an existing stream"), StreamRefused,
      f"another stream in the NATS account takes some of its subjects ({', '.join(FIRST['subjects'])}) (JetStream "
      "error 10065, subjects overlap with an existing stream). The instance needs these subjects to itself: remove "
@@ -550,7 +560,31 @@ def test_each_server_refusal_names_the_setting_or_limit_that_fixes_it(error, kin
     message = str(refused.value)
     assert message.startswith(f"NATS refused to create stream {STREAMS[0]}: ") and says in message
     assert message.endswith("The streams made so far stay; once the cause is fixed, the next start finishes the team.")
-    assert ("transport.replicas" in message) == (error.err_code in queues_module.REPLICA_ERRORS)
+    assert ("transport.replicas" in message) == ("transport.replicas" in says)
+
+
+@pytest.mark.parametrize("replicas", [3, 1])
+def test_a_cluster_without_room_for_a_streams_copies_gets_the_storage_refusal_not_replica_advice(replicas) -> None:
+    """C36: measured on three-server 2.15.1 clusters, a stream too large for the servers' storage is refused with
+    10005 and "insufficient storage" (with one copy too), never 10047."""
+
+    error = APIError(code=500, err_code=10005, description="no suitable peers for placement, insufficient storage")
+    setting = team_queue_streams(transport(), TEAM, COUNT)[0].setting
+    with pytest.raises(StreamStorageRefused) as refused:
+        ensured(_refusing_streams(error), queue_limits(replicas=replicas))
+    message = str(refused.value)
+    lacking = "too few servers of the NATS cluster have room for its 3 copies" if replicas > 1 else (
+        "no server of the NATS cluster has room for it")
+    assert message.startswith(
+        f"NATS refused to create stream {STREAMS[0]}: {lacking} (JetStream error 10005, no suitable peers for "
+        "placement, insufficient storage). Each server that keeps a copy of a stream needs room for the stream's whole limit in its own "
+        f"storage, here 1,048,576 bytes ({setting}). Team {TEAM}'s streams set aside 6,291,456 bytes at the current "
+        "settings")
+    assert f"Lower {setting} or the other transport.queues.max_bytes entries" in message
+    assert ("lower transport.replicas so fewer servers need that room" in message) == (replicas > 1)
+    assert "Set transport.replicas" not in message and "On the bundled NATS server" not in message
+    assert message.endswith(", or give the cluster's servers more storage (their max_file_store). The streams made so "
+                            "far stay; once the cause is fixed, the next start finishes the team.")
 
 
 def test_a_refusal_the_table_does_not_know_is_shown_as_the_server_sent_it_naming_no_setting() -> None:
@@ -606,6 +640,10 @@ class _Unanswered(StandInJetStream):
      f"NATS refused to read stream {STREAMS[0]}: JetStream error 10008, JetStream system temporarily unavailable. "
      "Nothing was changed."),
     ("consumer info", NatsTimeoutError(), "NATS did not answer the request to create or update consumer "),
+    # C37: nats-py's answer when nothing serves JetStream (measured on nats-server 2.15.1 without JetStream).
+    ("info", ServiceUnavailableError(), f"No JetStream answered the request to read stream {STREAMS[0]}: the NATS "
+     "server runs without JetStream, or it is still starting. Enable JetStream on the NATS server (a jetstream block "
+     "in its configuration file), then start again. Nothing was changed."),
     ("consumer", APIError(code=400, err_code=10026, description="maximum consumers limit reached"),
      "the NATS account allows fewer consumers per stream than the instance's streams take (JetStream error 10026, "
      "maximum consumers limit reached). Raise the account's consumer limit to at least 4,096, or remove it. The "
@@ -620,16 +658,23 @@ def test_errors_reading_streams_or_making_team_consumers_refuse_the_start_naming
     assert "transport." not in str(refused.value)
 
 
-def test_an_unanswered_account_information_request_refuses_the_start_before_any_change() -> None:
+@pytest.mark.parametrize(("error", "says"), [
+    (NatsTimeoutError(), "NATS did not answer the request to read the NATS account's JetStream information "
+     "(TimeoutError): its JetStream may be starting"),
+    # C37: a plain request nothing serves (measured on nats-server 2.15.1 without JetStream).
+    (NoRespondersError(), "No JetStream answered the request to read the NATS account's JetStream information: the "
+     "NATS server runs without JetStream"),
+])
+def test_an_unanswered_account_information_request_refuses_the_start_before_any_change(error, says) -> None:
     class Silent(StandInConnection):
         async def request(self, subject: str, data: bytes, timeout: float) -> Any:
-            raise NatsTimeoutError()
+            raise error
 
     js = StandInJetStream()
     topology = QueueTopology(Silent(js), js, transport=transport(), limits=TEST_QUEUE_LIMITS, partitions=COUNT)
-    with pytest.raises(StreamRefused, match="NATS did not answer the request to read the NATS account's JetStream "
-                                            "information \\(TimeoutError\\).* Nothing was changed.$"):
+    with pytest.raises(StreamRefused) as refused:
         asyncio.run(topology.ensure([TEAM]))
+    assert str(refused.value).startswith(says) and str(refused.value).endswith(" Nothing was changed.")
     assert not js.streams
 
 

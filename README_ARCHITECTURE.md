@@ -5395,8 +5395,12 @@ renamed secrets included). The authority:
   The server's own refusals, and requests it does not answer, stop the start the same
   way (`QueueTopology._server_refusal`, FA-3 of pull request 152's review): one table
   names a setting or limit only for the errors it fixes (storage, streams, consumers,
-  subjects another stream takes, copies the servers cannot hold), and shows any other
-  error as the server sent it. A stream whose fields the contract sets already
+  subjects another stream takes, copies the servers cannot hold), says to enable
+  JetStream when none answers or the account has none (10039), and shows any other
+  error as the server sent it. A cluster's 10005 is read by its reason: "insufficient
+  storage" (how a cluster refuses a stream too large for its servers, never 10047) gets
+  the storage refusal, no reason means fewer servers than copies, and any other reason is
+  shown as sent. A stream whose fields the contract sets already
   match is not sent to NATS, so a restart with the same settings asks for no change: a
   server whose storage is now smaller than what its streams set aside (the bundled server
   measures it from the disk's free space at every start) keeps serving the streams it has

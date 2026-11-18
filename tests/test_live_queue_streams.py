@@ -17,7 +17,7 @@ nats-server of its own, so a test chooses the server's storage and its partition
   that allows too few streams, or fewer consumers per stream than the contract's streams
   take, refuses the start before any change;
 - another stream on the instance's subjects stops the start naming that conflict, not a
-  setting;
+  setting, and an account without JetStream stops it saying to enable JetStream there;
 - a full work stream refuses new messages and keeps its oldest; the per-subject cap keeps
   room for control messages (FA-3 of PR #151, with four senders at the cap and full-size
   messages); a lowered cap that would drop queued messages refuses the start.
@@ -331,6 +331,32 @@ def test_another_stream_on_the_instances_subjects_stops_the_start_naming_that_co
         assert "transport." not in message
 
     run(tmp_path, scenario, partitions=1)
+
+
+def test_an_account_without_jetstream_stops_the_start_saying_to_enable_it_there(tmp_path):
+    """C37: on a server with JetStream, an account without it is refused with 10039 (measured on 2.15.1)."""
+
+    config = tmp_path / "accounts.conf"
+    config.write_text("accounts {\n"
+                      "  STREAMS: { jetstream: enabled, users: [{user: streams, password: streams}] }\n"
+                      "  BARE: { users: [{user: bare, password: bare}] }\n"
+                      "}\n", encoding="utf-8")
+
+    async def scenario(url: str) -> None:
+        nc = await nats.connect(url, allow_reconnect=False, user="bare", password="bare")
+        try:
+            with pytest.raises(StreamRefused) as refused:
+                await topology(nc, queue_limits(), partitions=1).ensure([TEAM])
+        finally:
+            await nc.close()
+        assert str(refused.value) == (
+            f"NATS refused to read stream UA1_DLQ_{TEAM}: JetStream is not enabled for the NATS account the instance "
+            "logs in to (JetStream error 10039, JetStream not enabled for account). Enable JetStream for that account "
+            "(jetstream: enabled in the account's block of the server's configuration file), then start again. "
+            "Nothing was changed.")
+
+    with own_nats_server(nats_server(), tmp_path, "-c", str(config)) as url:
+        asyncio.run(scenario(url))
 
 
 def test_a_full_work_stream_refuses_new_messages_and_keeps_its_oldest(tmp_path):
