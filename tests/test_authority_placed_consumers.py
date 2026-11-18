@@ -3,16 +3,18 @@
 installation_authority.placements.PlacedConsumers: a placement that verifies gets the
 agent's two consumers; a deleted placement removes them once its queues hold nothing and
 keeps them while they hold work; the catch-up at start reads the current placements, looks
-up no deleted key, and sweeps the consumers of agents no longer placed. The same with the
-real team services and nats-server 2.15.1 is in tests/test_live_placed_consumers.py.
+up no deleted key, and sweeps the consumers of agents no longer placed; a failed change is
+tried again after a wait that doubles, from the placement as it is under the lock. The same
+with the real team services and nats-server 2.15.1 is in tests/test_live_placed_consumers.py.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 import pytest
 
@@ -112,8 +114,15 @@ async def settle() -> None:
         await asyncio.sleep(0)
 
 
+async def eventually(check: Callable[[], bool], timeout: float = 5) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not check():
+        assert asyncio.get_running_loop().time() < deadline, "not within the time allowed"
+        await asyncio.sleep(0.005)
+
+
 async def following(records: StandInRecords, consumers: StandInConsumers, scenario: Any, **options: Any) -> PlacedConsumers:
-    placed = PlacedConsumers(records, consumers, verify=verify, teams=[TEAM], recheck_seconds=3600, **options)
+    placed = PlacedConsumers(records, consumers, verify=verify, teams=[TEAM], **{"recheck_seconds": 3600, **options})
     stop = asyncio.Event()
     running = asyncio.create_task(placed.run(stop))
     try:
@@ -237,7 +246,7 @@ def test_the_catch_up_looks_up_no_deleted_key_and_sweeps_agents_no_longer_placed
     assert not [call for call in consumers.calls if call[1].startswith("gone-")]
     assert not [read for read in records.reads if ".gone-" in read]
     assert f"event=agent_consumers_kept team={TEAM} agent=ended-2" in caplog.text
-    assert f"event=placed_consumers_caught_up team={TEAM} placed=2 ended=2" in caplog.text
+    assert f"event=placed_consumers_caught_up team={TEAM} placed=2 unplaced=2" in caplog.text
 
 
 def test_a_failed_watch_is_opened_again_and_catches_up_again(caplog) -> None:
@@ -316,12 +325,15 @@ def test_every_team_served_is_followed(teams: tuple[str, ...]) -> None:
     assert sorted(records.watched) == ["team_a.*", "team_b.*"]
 
 
-def test_one_agents_failed_change_leaves_the_others_and_is_tried_again_at_the_next_check(caplog) -> None:
+def test_one_agents_failed_change_leaves_the_others_and_is_tried_again_after_a_wait_that_doubles(caplog) -> None:
+    """C25 of the step 2a review: the first wait is retry_seconds, each failure doubles it, up to recheck_seconds."""
+
     class FullPartition(StandInConsumers):
-        refuse = {"researcher-1"}
+        refusals = 4
 
         async def ensure_agent_consumers(self, team: str, agent: str) -> None:
-            if agent in self.refuse:
+            if agent == "researcher-1" and self.refusals:
+                self.refusals -= 1
                 raise RuntimeError("maximum consumers limit reached")
             await super().ensure_agent_consumers(team, agent)
 
@@ -332,14 +344,58 @@ def test_one_agents_failed_change_leaves_the_others_and_is_tried_again_at_the_ne
         records.change("writer-1", placement("writer-1"))
         await settle()
         assert consumers.agents == {"researcher-2", "writer-1"}, "the watch carried on"
-        consumers.refuse = set()
-        await placed.recheck()
-        assert consumers.agents == {"researcher-1", "researcher-2", "writer-1"}
+        await eventually(lambda: "researcher-1" in consumers.agents)
         consumers.calls.clear()
-        await placed.recheck()
-        assert consumers.calls == [], "retried once, then done"
+        await asyncio.sleep(0.1)
+        assert consumers.calls == [], "tried again until it worked, then done"
 
     with caplog.at_level("INFO"):
-        asyncio.run(following(records, consumers, scenario))
-    assert (f"event=agent_consumers_change_failed team={TEAM} agent=researcher-1 action=create" in caplog.text)
+        asyncio.run(following(records, consumers, scenario, retry_seconds=0.01, recheck_seconds=0.04))
+    assert re.findall(r"agent=researcher-1 action=(\w+) retry_in=([\d.]+)", caplog.text) == [
+        ("create", "0.01"), ("retry", "0.02"), ("retry", "0.04"), ("retry", "0.04")]
     assert "event=placement_watch_failed" not in caplog.text
+
+
+def test_a_retry_reads_the_placement_under_the_lock_so_a_deletion_handled_meanwhile_is_not_undone() -> None:
+    """C25 of the step 2a review: the retry's read and its change both happen under the one lock.
+
+    The creation failed, so a retry is due. It reads the placement (still there) and its
+    answer is on its way when the placement is deleted and the watch handles the deletion.
+    The removal waits for the lock, so it comes after the retry's creation and removes it.
+    """
+
+    class ReplyOnItsWay(StandInRecords):
+        def __init__(self, **placements: bytes) -> None:
+            super().__init__(**placements)
+            self.holding, self.release = asyncio.Event(), asyncio.Event()
+
+        async def raw(self, record: str, key: str) -> Optional[tuple[int, bytes]]:
+            answer = await super().raw(record, key)
+            if not self.holding.is_set():  # the first read is the retry's
+                self.holding.set()
+                await self.release.wait()
+            return answer
+
+    class FailsOnce(StandInConsumers):
+        failed = False
+
+        async def ensure_agent_consumers(self, team: str, agent: str) -> None:
+            if not self.failed:
+                self.failed = True
+                raise TimeoutError("no reply")
+            await super().ensure_agent_consumers(team, agent)
+
+    records = ReplyOnItsWay(**{"researcher-1": placement("researcher-1")})
+    consumers = FailsOnce()
+
+    async def scenario(placed: PlacedConsumers) -> None:
+        await asyncio.wait_for(records.holding.wait(), timeout=5)
+        records.change("researcher-1", None)
+        await settle()
+        records.release.set()
+        await eventually(lambda: ("delete", "researcher-1") in consumers.calls)
+
+    asyncio.run(following(records, consumers, scenario, retry_seconds=0.01))
+    assert [call for call in consumers.calls if call[0] != "list"] == [
+        ("ensure", "researcher-1"), ("backlog", "researcher-1"), ("delete", "researcher-1")]
+    assert consumers.agents == set()

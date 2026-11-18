@@ -8,7 +8,8 @@ a worker host running, as in tests/test_live_team_services.py:
   them;
 - consumers whose queues hold work stay when the placement ends, logged, and go once the
   work is taken; a message past its last delivery keeps them too and is not delivered again;
-- an authority that follows the placements again catches up on what changed meanwhile.
+- an authority started again, a new object on a new connection as the launcher starts it,
+  catches up on what changed while none ran.
 
 Each test starts its own nats-server (``LIVE_TEST_NATS_SERVER``, or nats-server on PATH),
 with the partition mappings at the default count. The same rules against stand-ins are in
@@ -220,30 +221,44 @@ async def test_a_message_past_its_last_delivery_keeps_the_consumers_and_is_not_d
 
 
 @pytest.mark.asyncio
-async def test_an_authority_following_again_catches_up_on_placements_that_changed_meanwhile(
+async def test_an_authority_started_again_catches_up_on_placements_that_changed_while_it_was_down(
         broker: str, tmp_path: Path, caplog) -> None:
+    """C26 of the step 2a review: the catch-up through what a real start rebuilds.
+
+    The first authority stops following and its connection closes. A new InstallationAuthority
+    on a new connection then opens its trust store again from the trust folder and fills it
+    from the certificates stored in UA1_CERTS; the placement written while none ran must
+    verify against it to get its consumers.
+    """
+
     layout = InstanceLayout.at(tmp_path / "instance")
-    stop, stop_following = asyncio.Event(), asyncio.Event()
+    stop, stop_first = asyncio.Event(), asyncio.Event()
     caplog.set_level("INFO")
     async with AsyncExitStack() as stack:
-        authority = await authority_with_placements(stack, broker, layout)
-        following = await follow(authority, stop_following)
+        first_connection = AsyncExitStack()
+        stack.push_async_callback(first_connection.aclose)
+        first = await authority_with_placements(first_connection, broker, layout)
+        following = await follow(first, stop_first)
         serving = await team_services(stack, broker, layout, stop)
         worker = await host(stack, broker, layout, WORKER)
         js = (await connect(stack, broker, "admin")).jetstream()
-        first = await open_session(worker, "researcher-1")
+        placed = await open_session(worker, "researcher-1")
         await eventually(lambda: _have(js, "researcher-1", both("researcher-1")))
 
-        stop_following.set()  # the authority stops following, as when it is down
+        stop_first.set()  # the authority goes away: it follows no more and its connection closes
         await asyncio.wait_for(following, timeout=10)
+        await first_connection.aclose()
         await open_session(worker, "researcher-2")
-        await close_session(worker, first["session"]["body"]["session"])
+        await close_session(worker, placed["session"]["body"]["session"])
         assert await consumers_of(js, "researcher-2") == set()
 
-        following = await follow(authority, stop)
+        started_again = await authority_with_placements(stack, broker, layout)
+        assert started_again is not first
+        following = await follow(started_again, stop)
         assert await consumers_of(js, "researcher-2") == both("researcher-2")
         assert await consumers_of(js, "researcher-1") == set()
-        assert f"event=placed_consumers_caught_up team={TEAM} placed=1 ended=1" in caplog.text
+        assert f"event=placed_consumers_caught_up team={TEAM} placed=1 unplaced=1" in caplog.text
+        assert "event=placement_not_verified" not in caplog.text
         stop.set()
         await asyncio.wait_for(asyncio.gather(serving, following), timeout=10)
 

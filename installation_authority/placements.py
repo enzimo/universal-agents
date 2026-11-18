@@ -25,13 +25,16 @@ authority, the topology owner, follows each team it serves:
   covers placements that ended while the authority was down. A present key keeps its agent's
   consumers whether or not it verifies.
 
-One lock serialises every consumer change, and the placement key is read again under it
-before consumers are removed, so a placement written meanwhile keeps them. A change that
-fails for one agent (a partition stream at its consumer limit, a lost reply) is logged and
-tried again at the next minute's check from the placement as it is then, while the watch
-carries on with the other agents. A watch that fails is logged and opened again after a
-pause; the authority's process still exits when its NATS connection closes for good
-(``service.InstallationAuthority.upkeep``).
+One lock serialises every consumer change. Removals and retries read the placement key
+again under it and act on the key as it is then, so a placement written or deleted
+meanwhile is never undone by an answer read before it. A change that fails for one agent
+(a partition stream at its consumer limit, a lost reply) is logged and tried again from
+the placement as it is then, after 5 seconds and then after a wait that doubles up to the
+minute, while the watch carries on with the other agents. A watch that fails is logged and
+opened again after 5 seconds. A NATS restart needs neither: the NATS client notices the
+missed heartbeats of the watch's reader within 10 to 20 seconds and opens it again from
+the last change it read, so nothing is lost. The authority's process still exits when its
+NATS connection closes for good (``service.InstallationAuthority.upkeep``).
 
 Nothing publishes to these consumers' queues or reads them yet (steps 6 and 7); creating a
 consumer grants nothing, since every reader's NATS permissions name its own consumers.
@@ -41,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Optional, Protocol
 
 from pydantic import TypeAdapter, ValidationError
@@ -52,11 +56,21 @@ from custom_transport.protocol1.state_records import require_record_key
 from installation_authority.queues import AgentBacklog
 
 _LOGGER = logging.getLogger(__name__)
-# How often consumers kept for work their ended placement left are checked again.
+# How often consumers kept for work their ended placement left are checked again, and the
+# longest wait before a failed consumer change is tried again.
 RECHECK_SECONDS = 60.0
-# How long a failed watch waits before it is opened again.
-WATCH_RETRY_SECONDS = 5.0
+# How long a failed watch waits before it is opened again, and the first wait before a
+# failed consumer change is tried again (it doubles at each failure, up to RECHECK_SECONDS).
+RETRY_SECONDS = 5.0
 _AGENT_ID = TypeAdapter(AgentId)
+
+
+@dataclass(frozen=True)
+class _Retry:
+    """When a failed consumer change is tried again, and how long it waited for that."""
+
+    due: float
+    wait: float
 
 
 class PlacementRecords(Protocol):
@@ -85,7 +99,7 @@ class PlacedConsumers:
 
     def __init__(self, records: PlacementRecords, consumers: AgentConsumers, *,
                  verify: Callable[[bytes], VerifiedRecord], teams: Iterable[str], logger: logging.Logger = _LOGGER,
-                 recheck_seconds: float = RECHECK_SECONDS, retry_seconds: float = WATCH_RETRY_SECONDS) -> None:
+                 recheck_seconds: float = RECHECK_SECONDS, retry_seconds: float = RETRY_SECONDS) -> None:
         self._records = records
         self._consumers = consumers
         # Verifies a placement record as of now through the authority's trust store.
@@ -99,8 +113,8 @@ class PlacedConsumers:
         self._present: dict[str, set[str]] = {team: set() for team in self.teams}
         # Agents whose placement ended while their queues held work.
         self._kept: set[tuple[str, str]] = set()
-        # Agents whose consumer change failed; tried again from their placement at the next check.
-        self._failed: set[tuple[str, str]] = set()
+        # Agents whose consumer change failed, and when each is tried again from its placement.
+        self._failed: dict[tuple[str, str], _Retry] = {}
         # Teams whose sweep failed; tried again at the next check.
         self._sweep_due: set[str] = set()
         # Set once every team's watch caught up and its sweep ran.
@@ -112,6 +126,7 @@ class PlacedConsumers:
 
         tasks = [asyncio.create_task(self._follow(team, stop)) for team in self.teams]
         tasks.append(asyncio.create_task(self._recheck_every(stop)))
+        tasks.append(asyncio.create_task(self._retry_every(stop)))
         try:
             await stop.wait()
         finally:
@@ -120,15 +135,20 @@ class PlacedConsumers:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def recheck(self) -> None:
-        """Check the consumers kept for work again, retry failed changes, and run a sweep that failed again."""
+        """Check the consumers kept for work again, and run a sweep that failed again."""
 
         for team, agent in sorted(self._kept):
             await self._guarded(team, agent, "recheck", self._end(team, agent))
-        for team, agent in sorted(self._failed):
-            self._failed.discard((team, agent))
-            await self._guarded(team, agent, "retry", self._reconcile(team, agent))
         for team in sorted(self._sweep_due):
             await self._sweep(team)
+
+    async def retry_failed(self) -> None:
+        """Try again each failed consumer change whose wait has passed, from its placement as it is now."""
+
+        now = asyncio.get_running_loop().time()
+        for team, agent in sorted(key for key, retry in self._failed.items() if retry.due <= now):
+            retry = self._failed.pop((team, agent))
+            await self._guarded(team, agent, "retry", self._reconcile(team, agent), waited=retry.wait)
 
     # -- following a team ---------------------------------------------------------------------
 
@@ -172,18 +192,18 @@ class PlacedConsumers:
 
         try:
             agents = await self._consumers.agents_with_consumers(team)
-            ended = sorted(agents - self._present[team])
+            unplaced = sorted(agents - self._present[team])
         except Exception:
             self._sweep_due.add(team)
             self._logger.warning("Ending the consumers of agents no longer placed failed; it is tried again at the "
                                  "next check. event=placed_consumers_sweep_failed team=%s", team, exc_info=True)
             return
         self._sweep_due.discard(team)
-        for agent in ended:
+        for agent in unplaced:
             await self._guarded(team, agent, "remove", self._end(team, agent))
         self._logger.info("Caught up on the team's placements and their agents' consumers. "
-                          "event=placed_consumers_caught_up team=%s placed=%s ended=%s", team,
-                          len(self._present[team]), len(ended))
+                          "event=placed_consumers_caught_up team=%s placed=%s unplaced=%s", team,
+                          len(self._present[team]), len(unplaced))
         self._swept.add(team)
         if self._swept >= set(self.teams):
             self.ready.set()
@@ -192,32 +212,46 @@ class PlacedConsumers:
         while not await _stopped_within(stop, self._recheck_seconds):
             await self.recheck()
 
+    async def _retry_every(self, stop: asyncio.Event) -> None:
+        while not await _stopped_within(stop, self._retry_seconds):
+            await self.retry_failed()
+
     # -- one agent --------------------------------------------------------------------------------
 
-    async def _guarded(self, team: str, agent: str, action: str, change: Awaitable[None]) -> None:
-        """Run one agent's consumer change; a failure is logged and tried again at the next check."""
+    async def _guarded(self, team: str, agent: str, action: str, change: Awaitable[None], *,
+                       waited: float = 0.0) -> None:
+        """Run one agent's consumer change; a failure is logged and tried again after a wait.
+
+        The first wait is ``retry_seconds``; a retry that fails again (``waited`` is the wait
+        before it) waits twice as long, up to ``recheck_seconds``, so a change that keeps
+        failing, such as a partition stream at its consumer limit, is logged at most once a
+        minute once the wait has grown.
+        """
 
         try:
             await change
         except Exception:
-            self._failed.add((team, agent))
-            self._logger.warning("Changing an agent's consumers failed; it is tried again at the next check. "
-                                 "event=agent_consumers_change_failed team=%s agent=%s action=%s", team, agent, action,
-                                 exc_info=True)
+            wait = min(max(2 * waited, self._retry_seconds), self._recheck_seconds)
+            self._failed[(team, agent)] = _Retry(asyncio.get_running_loop().time() + wait, wait)
+            self._logger.warning("Changing an agent's consumers failed; it is tried again after a wait. "
+                                 "event=agent_consumers_change_failed team=%s agent=%s action=%s retry_in=%s", team,
+                                 agent, action, wait, exc_info=True)
 
     async def _ensure(self, team: str, agent: str) -> None:
         async with self._lock:
-            self._kept.discard((team, agent))
-            await self._consumers.ensure_agent_consumers(team, agent)
+            await self._create(team, agent)
 
     async def _reconcile(self, team: str, agent: str) -> None:
-        """Bring the agent's consumers in line with its placement as the bucket holds it now."""
+        """Bring the agent's consumers in line with its placement as the bucket holds it under the lock."""
 
-        stored = await self._records.raw(PLACEMENT, f"{team}.{agent}")
-        if stored is None:
-            await self._end(team, agent)
-        elif self._verifies(team, agent, f"{team}.{agent}", stored[1]):
-            await self._ensure(team, agent)
+        async with self._lock:
+            stored = await self._records.raw(PLACEMENT, f"{team}.{agent}")
+            if stored is None:
+                await self._remove_if_idle(team, agent)
+                return
+            self._kept.discard((team, agent))  # a present key keeps its consumers, verified or not
+            if self._verifies(team, agent, f"{team}.{agent}", stored[1]):
+                await self._create(team, agent)
 
     async def _end(self, team: str, agent: str) -> None:
         """Remove the agent's consumers if its placement is still gone and its queues hold nothing; keep them otherwise."""
@@ -226,19 +260,37 @@ class PlacedConsumers:
             if await self._records.raw(PLACEMENT, f"{team}.{agent}") is not None:
                 self._kept.discard((team, agent))  # placed again meanwhile: the watch brings its placement
                 return
-            backlog = await self._consumers.agent_backlog(team, agent)
-            if not backlog.empty:
-                if (team, agent) not in self._kept:
-                    self._kept.add((team, agent))
-                    self._logger.info(
-                        "An agent's placement ended while its queues hold work; its consumers stay until they are "
-                        "empty. event=agent_consumers_kept team=%s agent=%s pending=%s ack_pending=%s stored=%s",
-                        team, agent, backlog.pending, backlog.ack_pending, backlog.stored)
-                return
-            self._kept.discard((team, agent))
-            if await self._consumers.delete_agent_consumers(team, agent):
-                self._logger.info("Removed an agent's consumers: its placement ended and its queues are empty. "
-                                  "event=agent_consumers_removed team=%s agent=%s", team, agent)
+            await self._remove_if_idle(team, agent)
+
+    async def _create(self, team: str, agent: str) -> None:
+        """Create the agent's consumers, or update them to the contract's settings; the lock is held."""
+
+        self._kept.discard((team, agent))
+        await self._consumers.ensure_agent_consumers(team, agent)
+
+    async def _remove_if_idle(self, team: str, agent: str) -> None:
+        """Remove the agent's consumers if its queues hold nothing, keep them otherwise.
+
+        The lock is held and the agent's placement key was just read as gone. Until senders
+        publish to the partition streams (step 6) nothing can arrive between the backlog read
+        and the removal; from then on a message arriving in between stays stored with no
+        consumer, where the next agent placed under that id would get it, which the step
+        that adds the senders weighs.
+        """
+
+        backlog = await self._consumers.agent_backlog(team, agent)
+        if not backlog.empty:
+            if (team, agent) not in self._kept:
+                self._kept.add((team, agent))
+                self._logger.info(
+                    "An agent's placement ended while its queues hold work; its consumers stay until they are "
+                    "empty. event=agent_consumers_kept team=%s agent=%s pending=%s ack_pending=%s stored=%s",
+                    team, agent, backlog.pending, backlog.ack_pending, backlog.stored)
+            return
+        self._kept.discard((team, agent))
+        if await self._consumers.delete_agent_consumers(team, agent):
+            self._logger.info("Removed an agent's consumers: its placement ended and its queues are empty. "
+                              "event=agent_consumers_removed team=%s agent=%s", team, agent)
 
     def _agent_of(self, team: str, key: str) -> Optional[str]:
         """The agent a placement key names; None, logged, for a key that names no valid agent id."""
