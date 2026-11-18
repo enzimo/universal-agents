@@ -600,6 +600,7 @@ def test_run_supervised_bundle_skips_postgres_for_sqlite_runtime(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _make_config(tmp_path)
+    config.save()  # the bundle upgrades the saved file once the id check passed
     events: list[str] = []
     monkeypatch.setenv("TEAM_BUNDLE_SERVICE_ROOT", str(tmp_path / "services"))
 
@@ -670,6 +671,7 @@ def test_run_supervised_bundle_skips_local_nats_when_disabled(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _make_config(tmp_path)
+    config.save()  # the bundle upgrades the saved file once the id check passed
     events: list[str] = []
 
     class FakeProcess:
@@ -732,6 +734,7 @@ def test_run_supervised_bundle_skips_local_nats_when_disabled(
 
 def test_run_supervised_bundle_starts_local_nats(tmp_path: Path, monkeypatch) -> None:
     config = _make_config(tmp_path)
+    config.save()  # the bundle upgrades the saved file once the id check passed
     config.transport.type = "nats"
     events: list[str] = []
     headless_popen_kwargs: dict[str, object] = {}
@@ -798,6 +801,7 @@ def test_run_supervised_bundle_uses_external_nats_when_bundled_nats_disabled(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _make_config(tmp_path)
+    config.save()  # the bundle upgrades the saved file once the id check passed
     config.transport.type = "nats"
     events: list[str] = []
 

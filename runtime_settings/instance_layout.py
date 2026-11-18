@@ -151,6 +151,7 @@ UPGRADES_DIRNAME = "upgrades"
 ADAPTER_HOST_FILES_UPGRADE_FILENAME = "adapter-host-files.json"
 ADAPTER_HOST_FILES_UPGRADE_PROGRESS_FILENAME = "adapter-host-files.started"
 ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME = "adapter-host-files.lock"
+PROTOCOL1_IDS_CHECK_FILENAME = "protocol1-ids.json"
 # /upgrade: team exports the supervisor wrote, and the requests it reads
 # (team_transfer.export_requests).
 EXPORTS_DIRNAME = "exports"
@@ -687,6 +688,17 @@ class InstanceLayout:
         ``flock`` matters."""
 
         return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME
+
+    @property
+    def protocol1_ids_check_path(self) -> Path:
+        """The record that every id protocol 1 carries fitted its cap at the first start of 0.10.
+
+        The launchers' id check (``instance_upgrades.protocol1_ids``) writes it, with the
+        time and the version, only when the team id, the agent catalog's types and the
+        stored agent ids all fit, and runs only while it is missing. Under ``state/``, so
+        no agent tool or sandboxed code can reach it."""
+
+        return self.state_dir / UPGRADES_DIRNAME / PROTOCOL1_IDS_CHECK_FILENAME
 
     @property
     def storage_levels_path(self) -> Path:

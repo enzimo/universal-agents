@@ -1,0 +1,447 @@
+"""The id check at the first start of 0.10 (instance_upgrades.protocol1_ids, plan decisions 56 and 98).
+
+Covered: the caps follow the contract's patterns; each id kind at its cap passes and just
+over it stops the start with what to do (the team id's line as the lead ruled: its length,
+the 24-character cap, stay on 0.9.x; an agent id's line names the records that hold it,
+C09); the record is written only when every id fits, and a check that passed does not run
+again; an instance with nothing stored passes and its store is not created; settled
+handbacks and another team's rows are not checked; a store that cannot be read stops the
+start; the launcher and the Docker bundle refuse before the configuration file's upgrade,
+NATS, seeding or the launcher start (C01), and the bundle upgrades and starts once the ids
+fit; the bundle reads PostgreSQL as its administrator and a database that does not exist
+yet holds nothing; onboarding cuts a derived team id to fit and refuses a typed one that
+does not; and, with ``LIVE_TEST_POSTGRES_DSN``, the stored ids read from PostgreSQL.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+import pytest
+import yaml
+
+import docker.launch_headless as launch_headless
+import docker.run_bundle as run_bundle
+from assistant_gateway.config import GatewayInstanceConfig
+from assistant_gateway.onboarding_engine import OnboardingTemplate, normalize_onboarding_answers
+from custom_messages.wire.ids import AGENT_ID, AGENT_TYPE, TEAM_ID
+from instance_upgrades.protocol1_ids import (
+    Protocol1IdCheckFailed,
+    check_ids_before_upgrade,
+    stored_agent_ids_over_cap,
+)
+from storage.config import StorageSettings, resolve_storage_settings
+
+TEAM = "team_ids"
+AT_ID_CAP = "agent_" + "a" * 26  # 32 characters
+OVER_ID_CAP = "agent_" + "a" * 27  # 33
+AT_TYPE_CAP = "Planner" + "x" * 17  # 24
+OVER_TYPE_CAP = "Planner" + "x" * 18  # 25
+
+
+def _config(tmp_path: Path, *, team: str = TEAM, types: tuple[str, ...] = ()) -> GatewayInstanceConfig:
+    config = GatewayInstanceConfig.create(instance_name="ids", instance_root=str(tmp_path / "instance"), team_id=team,
+                                          timezone="UTC")
+    if types:
+        config.agent.agent_definition_paths = [str(_catalog(tmp_path, types))]
+    return config
+
+
+def _catalog(tmp_path: Path, types: tuple[str, ...]) -> Path:
+    (tmp_path / "prompt.md").write_text("# Planner\n\nPlan things.", encoding="utf-8")
+    definitions = {
+        name: {"display_name": "Planner", "role": "Planning", "description": "Plans.", "prompt_ref": "prompt.md",
+               "backstory": "hub_and_spoke", "onboarding": {"visible": False}}
+        for name in types
+    }
+    path = tmp_path / "agents.yaml"
+    path.write_text(yaml.safe_dump({"schema_version": 1, "agent_types": definitions}), encoding="utf-8")
+    return path
+
+
+def _sqlite(tmp_path: Path) -> StorageSettings:
+    return resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "team.db")}})
+
+
+_SCHEMA = (
+    "CREATE TABLE active_task_runtime (owner_agent_id TEXT PRIMARY KEY, team_id TEXT, runtime_state_json TEXT)",
+    "CREATE TABLE active_task_runtime_records (owner_agent_id TEXT, section TEXT, record_id TEXT)",
+    "CREATE TABLE agent_deferred_messages (owner_agent_id TEXT PRIMARY KEY, team_id TEXT, messages_json TEXT)",
+    "CREATE TABLE runtime_task_custody (team_id TEXT, task_id TEXT, holder_agent_id TEXT)",
+    "CREATE TABLE worker_task_handbacks (handback_id TEXT, team_id TEXT, worker_agent_id TEXT, status TEXT)",
+)
+
+
+def _store(conn: Any, bind: str, agent_id: str, *, team: str | None = TEAM, status: str = "received") -> None:
+    rows = (
+        ("INSERT INTO active_task_runtime VALUES ({p},{p},'{{}}')", (agent_id, team)),
+        ("INSERT INTO active_task_runtime_records VALUES ({p},'tasks','t1')", (agent_id,)),
+        ("INSERT INTO agent_deferred_messages VALUES ({p},{p},'[]')", (agent_id, team)),
+        ("INSERT INTO runtime_task_custody VALUES ({p},'t1',{p})", (team or TEAM, agent_id)),
+        ("INSERT INTO worker_task_handbacks VALUES ({p},{p},{p},{p})", ("hb-" + agent_id, team or TEAM, agent_id,
+                                                                       status)),
+    )
+    for sql, params in rows:
+        conn.execute(sql.format(p=bind), params)
+
+
+def _write_sqlite(storage: StorageSettings, *agent_ids: str, wal: bool = True, **kwargs: Any) -> None:
+    with sqlite3.connect(str(storage.sqlite_path)) as conn:
+        if wal:
+            conn.execute("PRAGMA journal_mode=WAL")
+        for statement in _SCHEMA:
+            conn.execute(statement.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"))
+        for agent_id in agent_ids:
+            _store(conn, "?", agent_id, **kwargs)
+    conn.close()
+
+
+def _real_stores(storage: StorageSettings, bind: str, *agent_ids: str) -> None:
+    """The stores' own schemas (the repositories create them), with a row per id in each column checked."""
+
+    from storage.runtime_state_repository import create_runtime_state_repository
+    from storage.worker_handback_repository import WorkerHandbackRepository
+
+    create_runtime_state_repository(storage)
+    WorkerHandbackRepository(storage)
+    now = "2026-11-18T12:00:00+00:00"
+    p = bind
+    with _open(storage) as conn:
+        for agent_id in agent_ids:
+            conn.execute(f"INSERT INTO active_task_runtime (owner_agent_id, team_id, runtime_state_json) "
+                         f"VALUES ({p},{p},'{{}}')", (agent_id, TEAM))
+            conn.execute(f"INSERT INTO active_task_runtime_records VALUES ({p},'tasks','t1','{{}}','d')", (agent_id,))
+            conn.execute(f"INSERT INTO agent_deferred_messages (owner_agent_id, team_id, messages_json) "
+                         f"VALUES ({p},{p},'[]')", (agent_id, TEAM))
+            conn.execute(f"INSERT INTO runtime_task_custody (team_id, task_id, holder_agent_id, claimed_at) "
+                         f"VALUES ({p},{p},{p},{p})", (TEAM, "task-" + agent_id, agent_id, now))
+            conn.execute(f"INSERT INTO worker_task_handbacks VALUES ({p},{p},{p},{p},'interrupted','received',{p},{p},"
+                         "'{}')", ("hb-" + agent_id, TEAM, "task-" + agent_id, agent_id, now, now))
+        conn.commit()
+
+
+def _open(storage: StorageSettings) -> Any:
+    from storage.postgres_connection import connect_postgres
+    from storage.sqlite_connection import connect_sqlite
+
+    return connect_postgres(storage.postgres_dsn) if storage.postgres_dsn else connect_sqlite(str(storage.sqlite_path))
+
+
+# -- the caps --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rule", [TEAM_ID, AGENT_TYPE, AGENT_ID], ids=lambda rule: rule.what)
+def test_the_caps_follow_the_contract(rule) -> None:
+    assert rule.problem("a" * rule.cap) is None
+    assert rule.problem("a" * (rule.cap + 1)) == f"is {rule.cap + 1} characters long; protocol 1 allows at most {rule.cap}"
+    assert "letters, digits, '-' and '_', starting with a letter or digit" in (rule.problem("_a") or "")
+    assert (TEAM_ID.cap, AGENT_TYPE.cap, AGENT_ID.cap) == (24, 24, 32)  # plan decisions 56 and 98
+
+
+# -- the check -------------------------------------------------------------------------------
+
+
+def test_ids_at_their_caps_pass_and_the_record_is_written_once(tmp_path, monkeypatch) -> None:
+    config, storage = _config(tmp_path, team="t" * 24, types=(AT_TYPE_CAP,)), _sqlite(tmp_path)
+    _write_sqlite(storage, AT_ID_CAP, team="t" * 24)
+    stored = Path(str(storage.sqlite_path)).read_bytes()
+
+    assert check_ids_before_upgrade(config, storage) is None
+
+    record = json.loads(config.layout.protocol1_ids_check_path.read_text(encoding="utf-8"))
+    assert record["team_id"] == "t" * 24 and record["version"] and record["checked_at"]
+    # Read only: the database is as it was; SQLite's own log is opened, as by any reader, and stays empty.
+    assert Path(str(storage.sqlite_path)).read_bytes() == stored
+    assert Path(str(storage.sqlite_path) + "-wal").stat().st_size == 0
+
+    def unread(*_args: Any) -> None:
+        raise AssertionError("a check that passed runs again")
+
+    monkeypatch.setattr("instance_upgrades.protocol1_ids.catalog_definitions", unread)
+    _write_sqlite(storage, OVER_ID_CAP)
+    assert check_ids_before_upgrade(config, storage) is None  # later stored ids never stop a start
+
+
+def test_each_id_just_over_its_cap_stops_the_start_and_says_what_to_do(tmp_path, caplog) -> None:
+    long_team = "team_" + "x" * 20  # 25 characters
+    config, storage = _config(tmp_path, team=long_team, types=(OVER_TYPE_CAP, AT_TYPE_CAP)), _sqlite(tmp_path)
+    _write_sqlite(storage, OVER_ID_CAP, AT_ID_CAP, team=long_team)
+
+    message = check_ids_before_upgrade(config, storage)
+
+    assert message is not None and not config.layout.protocol1_ids_check_path.exists()
+    lines = message.splitlines()
+    assert "event=protocol1_ids_over_caps" in lines[0] and "Nothing was changed" in lines[0]
+    assert lines[1] == (f"- The team id '{long_team}' is 25 characters long; protocol 1 allows at most 24. This "
+                        "instance cannot run 0.10 with that team id: keep running 0.9.x.")
+    assert lines[2].startswith(f"- The agent type '{OVER_TYPE_CAP}' (defined in {tmp_path / 'agents.yaml'}) is 25 "
+                               "characters long; protocol 1 allows at most 24. On 0.9.x, rename it")
+    assert "for a specialist the team lead created, remove it and have it created again" in lines[2]
+    assert lines[3] == (
+        f"- The agent id '{OVER_ID_CAP}' is 33 characters long; protocol 1 allows at most 32. It is stored with "
+        "its running tasks, its running tasks' saved progress, messages waiting for it, the tasks it holds, tasks "
+        "it handed back that the team lead has not dealt with yet. On 0.9.x, let that agent's tasks finish or stop "
+        "them, and let the team lead deal with tasks it handed back, so these records go. Then start this version "
+        "again."
+    )
+    assert len(lines) == 4  # the ids at their caps are not named
+    assert f"event=protocol1_ids_over_caps team_id={long_team}" in caplog.text
+
+
+def test_the_check_reads_the_stores_own_schemas(tmp_path) -> None:
+    storage = _sqlite(tmp_path)
+    _real_stores(storage, "?", OVER_ID_CAP, AT_ID_CAP)
+
+    [found] = stored_agent_ids_over_cap(storage, TEAM)
+
+    assert found.value == OVER_ID_CAP and len(found.found_in) == 5
+
+
+def test_an_instance_with_nothing_stored_passes_and_its_store_is_not_created(tmp_path) -> None:
+    storage = _sqlite(tmp_path)
+
+    assert check_ids_before_upgrade(_config(tmp_path), storage) is None
+    assert not Path(str(storage.sqlite_path)).exists()
+    sqlite3.connect(str(storage.sqlite_path)).close()  # a database without the tables
+    assert stored_agent_ids_over_cap(storage, TEAM) == []
+    with sqlite3.connect(str(storage.sqlite_path)) as conn:
+        assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone() == (0,)
+    conn.close()
+
+
+def test_settled_handbacks_and_another_teams_rows_are_not_checked(tmp_path) -> None:
+    storage = _sqlite(tmp_path)
+    with sqlite3.connect(str(storage.sqlite_path)) as conn:
+        for statement in _SCHEMA:
+            conn.execute(statement)
+        conn.execute("INSERT INTO worker_task_handbacks VALUES ('hb1', ?, ?, 'redispatched')", (TEAM, OVER_ID_CAP))
+        conn.execute("INSERT INTO worker_task_handbacks VALUES ('hb2', ?, ?, 'closed_finished')", (TEAM, OVER_ID_CAP))
+        other = "other_" + "b" * 27
+        conn.execute("INSERT INTO active_task_runtime VALUES (?, 'team_other', '{}')", (other,))
+        conn.execute("INSERT INTO active_task_runtime_records VALUES (?, 'tasks', 't1')", (other,))
+        conn.execute("INSERT INTO runtime_task_custody VALUES ('team_other', 't1', ?)", (other,))
+        unteamed = "unteamed_" + "c" * 24
+        conn.execute("INSERT INTO agent_deferred_messages VALUES (?, NULL, '[]')", (unteamed,))
+    conn.close()
+
+    [found] = stored_agent_ids_over_cap(storage, TEAM)
+
+    assert found.value == unteamed and found.found_in == ("messages waiting for it",)  # no team id: checked
+
+
+def test_a_store_that_cannot_be_read_stops_the_start(tmp_path) -> None:
+    storage = _sqlite(tmp_path)
+    Path(str(storage.sqlite_path)).write_bytes(b"not a database" * 100)
+
+    with pytest.raises(Protocol1IdCheckFailed, match="The stored records could not be read"):
+        stored_agent_ids_over_cap(storage, TEAM)
+    refusal = launch_headless.protocol1_id_check_refusal(_config(tmp_path), storage)
+    assert refusal is not None and "event=protocol1_ids_check_failed" in refusal
+
+
+# -- the launchers refuse before anything changes (C01) -----------------------------------------
+
+
+def test_a_team_whose_import_did_not_finish_is_not_read(tmp_path, monkeypatch) -> None:
+    config = _config(tmp_path, team="team_" + "y" * 25)
+    marker = config.layout.team_import_marker_path
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("instance_upgrades.protocol1_ids.catalog_definitions",
+                        lambda *_args: pytest.fail("a half-imported team was read"))
+
+    refusal = launch_headless.protocol1_id_check_refusal(config, _sqlite(tmp_path))
+
+    assert refusal is not None and refusal.startswith("event=team_import_unfinished The team import into")
+    assert not config.layout.protocol1_ids_check_path.exists()
+
+
+def _version_12_file(tmp_path: Path, *, team: str) -> Path:
+    """A saved instance configuration as 0.9 wrote it: schema version 12, no queue settings."""
+
+    config = _config(tmp_path, team=team)
+    config.layout.control_dir.mkdir(parents=True)  # onboarded
+    path = config.save()
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["schema_version"] = 12
+    data.get("transport", {}).pop("queues", None)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _unchanged(path: Path, before: bytes) -> None:
+    assert path.read_bytes() == before
+    assert list(path.parent.glob(f"{path.name}.bak*")) == []
+    assert not GatewayInstanceConfig.load_saved(path).layout.protocol1_ids_check_path.exists()
+
+
+def test_the_launcher_refuses_a_long_team_id_before_it_upgrades_the_file(tmp_path, monkeypatch, caplog) -> None:
+    path = _version_12_file(tmp_path, team="team_" + "y" * 25)
+    before = path.read_bytes()
+    monkeypatch.setattr(sys, "argv", ["launch_headless.py", "--config", str(path)])
+    monkeypatch.setattr(launch_headless, "ensure_instance_config_ready_for_headless_launch",
+                        lambda _path: pytest.fail("the file was upgraded"))
+
+    assert launch_headless.main() == 2
+
+    _unchanged(path, before)
+    assert "Headless launch refused." in caplog.text and "is 30 characters long" in caplog.text
+
+
+class _Started:
+    """Fakes for what the bundle starts after the check, recording each start."""
+
+    def __init__(self, monkeypatch) -> None:
+        self.calls: list[str] = []
+        record = self.calls.append
+
+        class _Exited:
+            def poll(self) -> int:
+                return 0
+
+        monkeypatch.setattr(run_bundle, "start_postgres", lambda: pytest.fail("PostgreSQL started for SQLite"))
+        monkeypatch.setattr(run_bundle, "start_local_nats", lambda **_kwargs: record("nats") or _Exited())
+        monkeypatch.setattr(run_bundle, "seed_postgres_from_targets", lambda targets: record("seed"))
+        monkeypatch.setattr(run_bundle.subprocess, "Popen", lambda *args, **kwargs: record("launcher") or _Exited())
+        monkeypatch.setattr(run_bundle, "terminate_process", lambda process, name: None)
+
+
+def _run_bundle(path: Path) -> int:
+    return run_bundle.run_supervised_bundle(config=GatewayInstanceConfig.load_saved(path), runtime_env={},
+                                            env_path=None, gateway_args=[])
+
+
+def test_the_bundle_refuses_a_long_team_id_before_it_upgrades_the_file_or_starts_anything(
+        tmp_path, monkeypatch, caplog) -> None:
+    path = _version_12_file(tmp_path, team="team_" + "y" * 25)
+    before = path.read_bytes()
+    started = _Started(monkeypatch)
+
+    assert _run_bundle(path) == 2
+
+    _unchanged(path, before)
+    assert started.calls == []
+    assert "Bundle launch refused." in caplog.text and "keep running 0.9.x" in caplog.text
+
+
+def test_the_bundle_leaves_the_file_to_the_check_before_postgresql_starts(tmp_path, monkeypatch) -> None:
+    """The bundle's main reads the saved file upgraded in memory only; run_supervised_bundle upgrades it."""
+
+    path = _version_12_file(tmp_path, team="team_" + "y" * 25)
+    before = path.read_bytes()
+    handed: list[GatewayInstanceConfig] = []
+    monkeypatch.setenv("TEAM_BUNDLE_SERVICE_ROOT", str(tmp_path / "services"))
+    monkeypatch.setattr(sys, "argv", ["run_bundle.py", "--config", str(path)])
+    monkeypatch.setattr(run_bundle, "run_supervised_bundle", lambda **kwargs: handed.append(kwargs["config"]) or 7)
+
+    assert run_bundle.main() == 7
+
+    assert path.read_bytes() == before
+    assert handed[0].manager.team_id == "team_" + "y" * 25 and handed[0].transport.queues.partitions == 96
+
+
+def test_the_bundle_upgrades_the_file_and_starts_once_the_ids_fit(tmp_path, monkeypatch) -> None:
+    path = _version_12_file(tmp_path, team=TEAM)
+    started = _Started(monkeypatch)
+
+    assert _run_bundle(path) == 0
+
+    assert started.calls == ["nats", "seed", "launcher"]
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["schema_version"] == 15
+    assert list(path.parent.glob(f"{path.name}.bak*"))
+    assert GatewayInstanceConfig.load_saved(path).layout.protocol1_ids_check_path.exists()
+
+    monkeypatch.setattr(run_bundle, "id_check_storage", lambda *_args: pytest.fail("checked again"))
+    assert _run_bundle(path) == 0  # a later start: the store is not read again
+
+
+def test_the_bundle_reads_postgresql_as_its_administrator_and_a_missing_database_holds_nothing(
+        tmp_path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    config.state.storage.backend = "postgres"
+    config.state.storage.postgres.dsn = "postgresql://team:secret@db.example:6543/team_agents"
+    databases: set[str] = set()
+    asked: list[str] = []
+
+    class _Connection:
+        def __enter__(self) -> _Connection:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def execute(self, _sql: str, params: tuple[str]) -> Any:
+            return type("Rows", (), {"fetchone": lambda _self: (1,) if params[0] in databases else None})()
+
+    def connect(dsn: str, autocommit: bool) -> _Connection:
+        asked.append(dsn)
+        return _Connection()
+
+    monkeypatch.setitem(sys.modules, "psycopg", type(sys)("psycopg"))
+    monkeypatch.setattr(sys.modules["psycopg"], "connect", connect, raising=False)
+
+    assert run_bundle.id_check_storage(config, {}) is None  # no database yet: nothing stored
+    databases.add("team_agents")
+    storage = run_bundle.id_check_storage(config, {})
+    assert storage is not None and storage.postgres_dsn == "postgresql://postgres@127.0.0.1:5432/team_agents"
+    assert asked == ["postgresql://postgres@127.0.0.1:5432/postgres"] * 2
+
+
+# -- onboarding --------------------------------------------------------------------------------
+
+
+def _team_id(**answers: str) -> str:
+    return normalize_onboarding_answers(answers, OnboardingTemplate(team_id="team_template"))["team_id"]
+
+
+def test_onboarding_cuts_a_derived_team_id_to_fit_and_refuses_a_typed_one_that_does_not() -> None:
+    assert _team_id(assistant_name="The Very Long Assistant Name Of Ours") == "team_the_very_long_assis"
+    assert _team_id(assistant_name="Ada Lovelace Helper") == "team_ada_lovelace_helper"  # 24: kept whole
+    assert _team_id(assistant_name="Ada Lovelace Helpe Desk") == "team_ada_lovelace_helpe"  # cut; no trailing '_'
+    assert _team_id(team_id="team_ours") == "team_ours"
+    with pytest.raises(ValueError, match="The team id 'team_with_a_much_too_long_name' is 30 characters long"):
+        _team_id(team_id="team_with_a_much_too_long_name")
+    with pytest.raises(ValueError, match="has characters protocol 1 does not allow"):
+        _team_id(team_id="team ours")
+
+
+# -- a real PostgreSQL ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.live
+@pytest.mark.postgres
+def test_stored_ids_are_read_from_postgresql_without_creating_anything() -> None:
+    from psycopg.conninfo import make_conninfo
+
+    from storage.postgres_connection import connect_postgres
+
+    dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("LIVE_TEST_POSTGRES_DSN is required for the PostgreSQL id check")
+    schema = "ids_" + uuid4().hex
+    with connect_postgres(dsn) as conn:
+        conn.execute(f"CREATE SCHEMA {schema}")
+    in_schema = resolve_storage_settings(
+        {"backend": "postgres", "postgres": {"dsn": make_conninfo(dsn, options=f"-csearch_path={schema}")}})
+    try:
+        assert stored_agent_ids_over_cap(in_schema, TEAM) == []  # no tables: nothing stored, none created
+        with connect_postgres(in_schema.postgres_dsn) as conn:
+            assert conn.execute("SELECT count(*) FROM pg_tables WHERE schemaname = %s", (schema,)).fetchone()[0] == 0
+        _real_stores(in_schema, "%s", OVER_ID_CAP, AT_ID_CAP)
+        with connect_postgres(in_schema.postgres_dsn) as conn:  # another team's agent in the same database
+            conn.execute("INSERT INTO active_task_runtime (owner_agent_id, team_id, runtime_state_json) "
+                         "VALUES (%s, 'team_other', '{}')", ("other_" + "b" * 27,))
+
+        [found] = stored_agent_ids_over_cap(in_schema, TEAM)
+
+        assert found.value == OVER_ID_CAP and len(found.found_in) == 5
+    finally:
+        with connect_postgres(dsn) as conn:
+            conn.execute(f"DROP SCHEMA {schema} CASCADE")

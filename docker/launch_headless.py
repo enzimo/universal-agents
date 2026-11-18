@@ -153,6 +153,7 @@ from secure_tool_broker.sealbox_runtime import (
     resolve_sealbox_runtime_config,
     sealbox_server_env,
 )
+from storage.config import StorageSettings
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.sqlite_connection import prepare_sqlite_database
 from runtime_hosting.manifest_rendering import write_runtime_manifests
@@ -267,6 +268,57 @@ def _render_instance_config_migration_notice(
         f"Headless startup migrated {config_path.name} from schema_version {original_version} "
         f"to {migrated_version}.{backup_suffix}"
     )
+
+
+def protocol1_id_check_refusal(config: GatewayInstanceConfig, storage: StorageSettings | None) -> str | None:
+    """The id check before anything changes (``instance_upgrades.protocol1_ids``): its refusal, or None.
+
+    ``config`` is the saved file read without upgrading it on disk. A catalog or store that
+    cannot be read, or settings that cannot be resolved, refuse the start as well.
+    """
+
+    from instance_upgrades.protocol1_ids import Protocol1IdCheckFailed, check_ids_before_upgrade
+    from team_transfer.errors import TransferError
+
+    try:
+        return check_ids_before_upgrade(config, storage)
+    except TransferError as exc:
+        return f"event=team_import_unfinished {exc}"
+    except (Protocol1IdCheckFailed, ValueError) as exc:
+        return (
+            "The check that every id fits protocol 1 could not finish, so nothing was changed "
+            f"(event=protocol1_ids_check_failed): {exc}"
+        )
+
+
+def check_protocol1_ids(config_path: Path, explicit_env_path: str | None) -> str | None:
+    """The launcher's id check, first in ``main``: before the file's upgrade and any start; the refusal, or None.
+
+    The team's store is resolved as the processes resolve it, with the env file under the
+    process environment (``build_process_env``'s order), since ``POSTGRES_DSN`` may be in
+    either. In the Docker bundle the check already ran (``docker.run_bundle``), so its record
+    exists and this returns at once.
+    """
+
+    from team_transfer.errors import TransferError
+    from team_transfer.runtime_guard import require_finished_import
+
+    try:
+        config = GatewayInstanceConfig.load_saved(config_path)
+        # A half-imported team is read by nothing, this check included (team_transfer.runtime_guard).
+        require_finished_import(config.layout)
+        if config.layout.protocol1_ids_check_path.exists():
+            return None
+        env_path = resolve_env_file_path(config, explicit_env_path, report_ignored_env_file=False)
+        storage = config.resolve_manager_storage_settings(env={**load_env_file_values(env_path), **os.environ})
+    except TransferError as exc:
+        return f"event=team_import_unfinished {exc}"
+    except ValueError as exc:
+        return (
+            "The check that every id fits protocol 1 could not read the settings, so nothing was changed "
+            f"(event=protocol1_ids_check_failed): {exc}"
+        )
+    return protocol1_id_check_refusal(config, storage)
 
 
 def ensure_instance_config_ready_for_headless_launch(config_path: Path) -> str | None:
@@ -2944,6 +2996,11 @@ def main() -> int:
     if not config_path.exists():
         raise SystemExit(f"No such instance config: {config_path}")
 
+    # First, before the configuration file's upgrade or anything else changes.
+    refusal = check_protocol1_ids(config_path, args.env)
+    if refusal:
+        LOGGER.error("Headless launch refused. %s", refusal)
+        return 2
     startup_notice = ensure_instance_config_ready_for_headless_launch(config_path)
     # The saved file plus this deployment's details (for the Docker bundle, its
     # own NATS and PostgreSQL), applied in memory and never saved.

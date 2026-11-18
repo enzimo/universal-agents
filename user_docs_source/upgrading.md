@@ -112,6 +112,29 @@ supported, because it may not read what a newer one saved.
     folder it has no permission to read): startup stops with a message
     naming the folder. Fix it and restart; the step goes on where it
     stopped.
+- **From 0.9: ids that fit message addresses.** 0.10 carries the team id,
+  each agent type and each agent's id in its message addresses, which allow at
+  most 24 characters for a team id or an agent type and 32 for an agent id
+  (letters, digits, `-` and `_`, starting with a letter or digit). At its first
+  start, before it changes anything, 0.10 checks the team id
+  (`gateway.team_id`), the agent types and the ids of agents that still have
+  running tasks, waiting messages or handed-back tasks. If one does not fit, it
+  stops with a message naming each id and what to do
+  (`event=protocol1_ids_over_caps`). Nothing has changed then, so you can start
+  0.9 again:
+  - **A team id over 24 characters:** this instance cannot run 0.10 with that
+    team id. Keep running 0.9.x. A team transfer keeps the team id, so it does
+    not help here.
+  - **An agent type over 24 characters:** on 0.9, rename it in the file the
+    message names. For a specialist the team lead created, remove it and have
+    it created again under a shorter name. Then start 0.10.
+  - **An agent id over 32 characters:** on 0.9, let that agent's tasks finish
+    or stop them, and let the team lead deal with tasks it handed back. Then
+    start 0.10.
+
+  When every id fits, 0.10 records it in `state/upgrades/protocol1-ids.json`
+  and does not check again. Agents of a type added later with a name that is
+  too long cannot join the team's messages, and the Status page says why.
 - **From 0.9 with an external NATS server:** prepare the server first. 0.10
   needs NATS Server 2.15.1 or later with two server settings
   ([Surviving a power loss](configuration.md#surviving-a-power-loss)), and more

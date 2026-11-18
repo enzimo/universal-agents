@@ -4915,6 +4915,34 @@ the desktop app never offers an older version.
   by default); work still queued when the team lead starts is reported on the
   first pass after an agent takes it; work whose request has ended is not
   reported. The condition goes with the other upgrade steps from 0.9.
+- **Ids protocol 1 carries, checked first.** Protocol 1 puts the team id, each
+  agent's type and each agent's id into NATS subjects, consumer names, record
+  keys and host credentials, with caps of 24, 24 and 32 characters (plan
+  decisions 56 and 98, `custom_messages.wire.ids`). Phase 3's later upgrade
+  steps convert the records that hold agent ids and move queued work into the
+  partition streams, so an id over its cap would fail part-way through. The
+  launchers therefore check every id before anything changes
+  (`instance_upgrades.protocol1_ids`, plan 13C.9 step 1): the headless launcher
+  first in `main`, before the configuration file's upgrade; the Docker bundle as
+  soon as its PostgreSQL answers (stored ids may be there) and before it
+  upgrades the file or starts NATS or the launcher, which is why the bundle no
+  longer upgrades the file before loading it. The check reads the team id, the
+  agent catalog's types (with the file that defines each) and agent ids over 32
+  characters in the records phase 3 converts: running tasks and their saved
+  progress, waiting messages, task custody and handbacks the team lead has not
+  dealt with (settled handbacks stay as history, which nothing on 0.9 removes).
+  It reads only (SQLite `mode=ro`, a read-only PostgreSQL transaction; the
+  bundle reads its PostgreSQL as the administrator, since the team's role may
+  not exist before seeding), leaves out other teams' rows in a shared database,
+  and fails closed when a store that exists cannot be read. When an id does not
+  fit, startup stops with one line per id saying what to do
+  (`event=protocol1_ids_over_caps`). When all fit it records
+  `InstanceLayout.protocol1_ids_check_path`
+  (`state/upgrades/protocol1-ids.json`) and never runs again, so an agent type
+  added later does not stop the instance: the agent host gives it no session and
+  the Status page says why. Onboarding cuts the team id it derives to 24
+  characters and refuses a typed one that does not fit, so a new instance never
+  stops here.
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the
