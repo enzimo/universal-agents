@@ -87,7 +87,15 @@ from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, KIND
 from custom_messages.wire.partitions import check_partition_count
 from custom_messages.wire.queues import QueueLimits
 from custom_messages.wire.refusals import FrameRefused
-from custom_messages.wire.trust import CERTIFICATE, AuthorityKey, HostCertificate, TrustStore, kept_for, sign_state
+from custom_messages.wire.trust import (
+    CERTIFICATE,
+    PLACEMENT,
+    AuthorityKey,
+    HostCertificate,
+    TrustStore,
+    kept_for,
+    sign_state,
+)
 from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.contract_files import transport
@@ -96,9 +104,11 @@ from custom_transport.protocol1.host_keys import AuthorityKeys, HostKeys
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.joining import AUTHORITY_SERVICE_ID, HostProfile
 from custom_transport.protocol1.live import LiveHost, Unsupported, utc_now
+from custom_transport.protocol1.state_records import StateRecords
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts
 from installation_authority.ledger import ISSUED_FILENAME, IssueLedger
+from installation_authority.placements import PlacedConsumers
 from installation_authority.queues import QueueTopology
 from installation_authority.refusals import AuthorityStartRefused
 from release_version import release_version
@@ -204,6 +214,11 @@ class InstallationAuthority:
         self.live: Optional[LiveHost] = None
         self._nc: Any = None
         self._js: Any = None
+        self._teams: tuple[str, ...] = ()
+        # The teams' streams, buckets and consumers on the authority's connection (set up at start).
+        self._topology: Optional[QueueTopology] = None
+        # Each placed agent's consumers, while ``follow_placements`` runs.
+        self.placements: Optional[PlacedConsumers] = None
         self._own: dict[str, Any] = {}
         self._revocations: dict[str, Any] = {}
         self._lock = asyncio.Lock()
@@ -281,6 +296,7 @@ class InstallationAuthority:
         self._nc = nc
         self._js = nc.jetstream()
         teams = sorted(set(teams))
+        self._teams = tuple(teams)
         await self.ensure_topology(teams)
         self._ledger = IssueLedger.open(self.layout.host_trust_dir(AUTHORITY_RUNTIME), self.installation,
                                         logger=self.logger)
@@ -325,8 +341,24 @@ class InstallationAuthority:
         anything changes, and a stream whose settings already match is not sent to NATS.
         """
 
-        await QueueTopology(self._nc, self._js, transport=transport(), limits=self.queues, partitions=self.partitions,
-                            logger=self.logger).ensure(teams)
+        self._topology = QueueTopology(self._nc, self._js, transport=transport(), limits=self.queues,
+                                       partitions=self.partitions, logger=self.logger)
+        await self._topology.ensure(teams)
+
+    async def follow_placements(self, stop: asyncio.Event) -> None:
+        """Keep each placed agent's inbox and control consumers in step with its team's placements, until ``stop``.
+
+        ``placements.PlacedConsumers`` reads ``UA1_PLACEMENT`` and checks each record with the
+        authority's own trust store, which holds every certificate it issued.
+        """
+
+        assert self._topology is not None and self._trust is not None and self.live is not None, "start() first"
+        trust, live = self._trust, self.live
+        records = StateRecords(self._js, lambda: live.identity, trust)
+        self.placements = PlacedConsumers(
+            records, self._topology, teams=self._teams, logger=self.logger,
+            verify=lambda raw: trust.store.verify(raw, record=PLACEMENT, now=self.clock()))
+        await self.placements.run(stop)
 
     async def _records(self) -> Any:
         return await self._js.key_value(CERTIFICATES_BUCKET)

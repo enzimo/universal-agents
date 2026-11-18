@@ -356,10 +356,32 @@ def test_the_process_exits_when_its_upkeep_stops(tmp_path: Path, monkeypatch, ca
         async def keep_current(self) -> None:
             raise AuthorityDisconnected("closed")
 
+        async def follow_placements(self, stop: asyncio.Event) -> None:
+            await stop.wait()
+
     with pytest.raises(SystemExit) as exited:
         _run_with(monkeypatch, tmp_path, Disconnecting())
     assert exited.value.code == 1
     assert "event=installation_authority_upkeep_stopped" in caplog.text
+
+
+def test_the_process_exits_when_it_stops_following_placements(tmp_path: Path, monkeypatch, caplog) -> None:
+    """It opens failed watches again itself, so ending before the stop is an error of its own."""
+
+    class LosingPlacements:
+        async def start(self, _nc: Any, *, teams: Any) -> None:
+            pass
+
+        async def keep_current(self) -> None:
+            await asyncio.Event().wait()
+
+        async def follow_placements(self, stop: asyncio.Event) -> None:
+            raise RuntimeError("the consumers could not be listed")
+
+    with pytest.raises(SystemExit) as exited:
+        _run_with(monkeypatch, tmp_path, LosingPlacements())
+    assert exited.value.code == 1
+    assert "event=installation_authority_placements_stopped error=the consumers could not be listed" in caplog.text
 
 
 @pytest.mark.parametrize("changed", ["key_id", "public_key", "expired", "absent"])

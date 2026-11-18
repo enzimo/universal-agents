@@ -1114,7 +1114,12 @@ agent or pool appears or leaves, and it runs no model. It creates a team's strea
 team (a stream per partition, its pool stream, its edge stream, its team services' inbox
 stream and its dead-letter stream) and the team services' inbox and dead-letter notice
 consumers, before it serves, so no host joins a team whose streams are missing; each agent's
-two consumers in its partition's stream when the agent is placed; each pool's consumer with
+two consumers in its partition's stream when the team services place the agent (a placement
+record that verifies with the authority's trust store), removed when the placement ends and
+both queues hold nothing, neither waiting, delivered and unacknowledged, nor stored on their
+subjects (a message past its last delivery is the last kind), and kept with a log line, checked
+every minute, while they hold work; it catches up at start on placements that changed while
+it was down (`installation_authority.placements`); each pool's consumer with
 the pool and each edge's with the edge, once a later step names pools and edges (edges with
 the gateways' routes: step 2b names gateways, step 6 delivers to their routes); and the
 key-value buckets and the object store (`installation_authority.queues`). Its generated grants name every stream

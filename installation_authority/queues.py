@@ -6,9 +6,10 @@ contract (``custom_messages.wire.queues``: a stream per partition, the pool, edg
 team-services and dead-letter streams) with the byte limits, per-subject cap and replica
 count of the instance's settings, the key-value buckets' streams (``custom_messages.wire.
 buckets``: the installation's and each team's), and the consumers that exist once per team
-(the team services' inbox and dead-letter notices). Agents' consumers follow placements,
-pools' and edges' come with the steps that name them. Nothing publishes to the work streams
-or reads them yet.
+(the team services' inbox and dead-letter notices). Agents' consumers follow placements
+(``installation_authority.placements`` decides when; this module makes, inspects and
+removes them), pools' and edges' come with the steps that name them. Nothing publishes to
+the work streams or reads them yet.
 
 ``QueueTopology.ensure`` first reads every stream it wants and refuses the start, changing
 nothing, when
@@ -52,6 +53,8 @@ from custom_messages.wire.queues import (
     QueueConsumer,
     QueueLimits,
     QueueStream,
+    agent_consumers,
+    consumer_agent,
     queue_stream_config,
     queue_streams_per_team,
     team_consumers,
@@ -78,6 +81,8 @@ BUNDLED_STORAGE_SHARE = 3 / 4
 _SERVER_METADATA_PREFIX = "_nats."
 # Consumer settings the contract sets, compared to decide whether a consumer needs an update.
 _CONSUMER_FIELDS = ("filter_subject", "ack_wait", "max_deliver", "ack_policy")
+# The most consumers one consumer list reply holds (nats-server's API list limit).
+CONSUMER_LIST_PAGE = 256
 _STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
 
 
@@ -204,6 +209,26 @@ class AccountRoom:
         return f"the NATS account's tier {self.tier}" if self.tier else "the NATS account"
 
 
+@dataclass(frozen=True)
+class AgentBacklog:
+    """What an agent's inbox and control queues still hold.
+
+    ``pending`` is waiting for delivery and ``ack_pending`` delivered but not acknowledged,
+    both as the consumers report them; ``stored`` is what the partition stream holds on the
+    queues' subjects. A message past its last delivery is neither pending nor waiting for an
+    acknowledgement, yet stays in the work-queue stream (measured on nats-server 2.15.1), so
+    only all three at 0 mean the queues hold nothing.
+    """
+
+    pending: int
+    ack_pending: int
+    stored: int
+
+    @property
+    def empty(self) -> bool:
+        return self.pending == 0 and self.ack_pending == 0 and self.stored == 0
+
+
 class QueueTopology:
     """The topology owner's streams on one NATS connection: every team's work and dead-letter streams, the buckets'
     streams and the team consumers, as the contract describes."""
@@ -279,9 +304,10 @@ class QueueTopology:
 
     async def _current(self, name: str) -> Optional[StreamConfig]:
         try:
-            return (await self._js.stream_info(name)).config
+            config: StreamConfig = (await self._js.stream_info(name)).config
         except NotFoundError:
             return None
+        return config
 
     def _check_count(self, stream: QueueStream, current: StreamConfig) -> None:
         """Refuse a partition stream created with another count (only ``ua.partitions``; the server adds keys of its own)."""
@@ -403,14 +429,69 @@ class QueueTopology:
             info = await self._js.consumer_info(consumer.stream, consumer.name)
         except NotFoundError:
             await self._js.add_consumer(consumer.stream, config=config)
-            self._logger.info("Created a team consumer. event=protocol1_queue_consumer_created stream=%s consumer=%s",
+            self._logger.info("Created a queue consumer. event=protocol1_queue_consumer_created stream=%s consumer=%s",
                               consumer.stream, consumer.name)
             return
         changed = [name for name in _CONSUMER_FIELDS if not _same(getattr(info.config, name), getattr(config, name))]
         if changed:
             await self._js.add_consumer(consumer.stream, config=config)  # creates or updates a consumer of that name
-            self._logger.info("Updated a team consumer. event=protocol1_queue_consumer_updated stream=%s consumer=%s "
+            self._logger.info("Updated a queue consumer. event=protocol1_queue_consumer_updated stream=%s consumer=%s "
                               "changed=%s", consumer.stream, consumer.name, ",".join(changed))
+
+    # -- agents' consumers (installation_authority.placements decides when) ----------------------
+
+    async def ensure_agent_consumers(self, team: str, agent: str) -> None:
+        """Create the agent's inbox and control consumers in its partition's stream, or update what differs."""
+
+        for consumer in agent_consumers(self._transport, team, agent, self.partitions):
+            await self._ensure_consumer(consumer)
+
+    async def agent_backlog(self, team: str, agent: str) -> AgentBacklog:
+        """What the agent's two queues hold; a consumer that does not exist holds nothing of its own."""
+
+        pending = ack_pending = stored = 0
+        for consumer in agent_consumers(self._transport, team, agent, self.partitions):
+            try:
+                info = await self._js.consumer_info(consumer.stream, consumer.name)
+            except NotFoundError:
+                pass
+            else:
+                pending += int(info.num_pending or 0)
+                ack_pending += int(info.num_ack_pending or 0)
+            held = await self._js.stream_info(consumer.stream, subjects_filter=consumer.config["filter_subject"])
+            stored += sum((held.state.subjects or {}).values())
+        return AgentBacklog(pending, ack_pending, stored)
+
+    async def delete_agent_consumers(self, team: str, agent: str) -> int:
+        """Delete the agent's two consumers; how many existed."""
+
+        deleted = 0
+        for consumer in agent_consumers(self._transport, team, agent, self.partitions):
+            try:
+                await self._js.delete_consumer(consumer.stream, consumer.name)
+            except NotFoundError:
+                continue
+            deleted += 1
+        return deleted
+
+    async def agents_with_consumers(self, team: str) -> set[str]:
+        """The agents with a consumer in one of ``team``'s partition streams (agent~ or control~ names)."""
+
+        agents: set[str] = set()
+        for stream in team_queue_streams(self._transport, team, self.partitions):
+            if stream.partition is None:
+                continue
+            offset = 0
+            while True:
+                page = await self._js.consumers_info(stream.name, offset=offset)
+                for info in page:
+                    agent = consumer_agent(self._transport, info.name or "")
+                    if agent is not None:
+                        agents.add(agent)
+                if len(page) < CONSUMER_LIST_PAGE:
+                    break
+                offset += len(page)
+        return agents
 
     # -- what the refusals say ----------------------------------------------------------------------
 

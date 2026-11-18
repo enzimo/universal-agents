@@ -3,8 +3,9 @@
 It connects to NATS as host ``authority`` with its own reply inbox, sets up the
 topology (every team's streams with the instance's ``transport.queues`` limits, and the
 buckets) and its records (``service.InstallationAuthority.start``), answers joins and
-renewals, and keeps its records current (``InstallationAuthority.keep_current``) until
-it is stopped. The launcher starts it once NATS and the team's message streams are
+renewals, keeps its records current (``InstallationAuthority.keep_current``) and each
+placed agent's consumers in step with the placements
+(``InstallationAuthority.follow_placements``) until it is stopped. The launcher starts it once NATS and the team's message streams are
 ready, and waits for its certificate in the bootstrap bundle before it starts any other
 host.
 
@@ -89,12 +90,19 @@ async def run_installation_authority(config: GatewayInstanceConfig) -> None:
                           "reason=%s %s", type(refused).__name__, refused)
             raise SystemExit(1) from None
         upkeep = asyncio.create_task(authority.keep_current())
+        placements = asyncio.create_task(authority.follow_placements(stop))
         stopping = asyncio.create_task(stop.wait())
-        tasks = [upkeep, stopping]
+        tasks = [upkeep, placements, stopping]
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         if upkeep.done():
             _LOGGER.error("The installation authority stopped keeping its records current and exits. "
                           "event=installation_authority_upkeep_stopped error=%s", upkeep.exception())
+            raise SystemExit(1)
+        if placements.done() and not stop.is_set():
+            # It opens failed watches again itself, so it ends early only on an error of its own.
+            _LOGGER.error("The installation authority stopped following placements and exits. "
+                          "event=installation_authority_placements_stopped error=%s",
+                          placements.exception() if not placements.cancelled() else "cancelled")
             raise SystemExit(1)
         _LOGGER.info("The installation authority is stopping. event=installation_authority_stopping")
     finally:

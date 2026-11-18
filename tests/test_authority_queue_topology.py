@@ -17,11 +17,20 @@ import pytest
 from nats.js.api import ConsumerConfig, StreamConfig
 from nats.js.errors import APIError, NotFoundError
 
-from custom_messages.wire.queues import QueueLimits, queue_stream_config, team_consumers, team_queue_streams
+from custom_messages.wire.partitions import agent_partition
+from custom_messages.wire.queues import (
+    QueueLimits,
+    agent_consumers,
+    queue_stream_config,
+    team_consumers,
+    team_queue_streams,
+)
 from custom_transport.protocol1.bootstrap import BootstrapBundle, write_bundle
 from custom_transport.protocol1.contract_files import transport
 from installation_authority.ledger import ISSUED_FILENAME
+from installation_authority import queues as queues_module
 from installation_authority.queues import (
+    AgentBacklog,
     QueueTopology,
     StreamAccountRefused,
     StreamCapWouldDrop,
@@ -59,6 +68,8 @@ class StandInJetStream:
         self.streams: dict[str, StreamConfig] = {}
         self.consumers: dict[tuple[str, str], ConsumerConfig] = {}
         self.subjects: dict[str, dict[str, int]] = {}
+        # A consumer's (num_pending, num_ack_pending), as its information reports them.
+        self.backlogs: dict[tuple[str, str], tuple[int, int]] = {}
         self.calls: list[tuple[str, str]] = []
 
     @property
@@ -70,8 +81,10 @@ class StandInJetStream:
         if name not in self.streams:
             raise NotFoundError(code=404, err_code=10059, description="stream not found")
         stored = self.subjects.get(name, {})
+        matching = {subject: count for subject, count in stored.items()
+                    if subjects_filter is not None and _matches(subjects_filter, subject)}
         return SimpleNamespace(config=self.streams[name],
-                               state=SimpleNamespace(subjects=dict(stored) if subjects_filter else None))
+                               state=SimpleNamespace(subjects=matching if subjects_filter else None))
 
     def _fits(self, config: StreamConfig) -> None:
         before = max(self.streams[config.name].max_bytes or 0, 0) if config.name in self.streams else 0
@@ -96,12 +109,38 @@ class StandInJetStream:
     async def consumer_info(self, stream: str, name: str) -> Any:
         if (stream, name) not in self.consumers:
             raise NotFoundError(code=404, err_code=10014, description="consumer not found")
-        return SimpleNamespace(config=self.consumers[(stream, name)])
+        pending, ack_pending = self.backlogs.get((stream, name), (0, 0))
+        return SimpleNamespace(config=self.consumers[(stream, name)], num_pending=pending, num_ack_pending=ack_pending)
 
     async def add_consumer(self, stream: str, config: ConsumerConfig) -> Any:
         self.calls.append(("consumer", config.name))
         self.consumers[(stream, config.name)] = config
         return SimpleNamespace(config=config)
+
+    async def delete_consumer(self, stream: str, name: str) -> bool:
+        self.calls.append(("delete consumer", name))
+        if (stream, name) not in self.consumers:
+            raise NotFoundError(code=404, err_code=10014, description="consumer not found")
+        del self.consumers[(stream, name)]
+        return True
+
+    async def consumers_info(self, stream: str, offset: Optional[int] = None) -> list[Any]:
+        self.calls.append(("list consumers", stream))
+        names = sorted(name for held, name in self.consumers if held == stream)
+        page = names[offset or 0:(offset or 0) + queues_module.CONSUMER_LIST_PAGE]
+        return [SimpleNamespace(name=name) for name in page]
+
+
+def _matches(pattern: str, subject: str) -> bool:
+    """NATS subject matching: ``*`` takes one token, ``>`` the rest."""
+
+    wanted, tokens = pattern.split("."), subject.split(".")
+    for index, token in enumerate(wanted):
+        if token == ">":
+            return len(tokens) > index
+        if index >= len(tokens) or token not in ("*", tokens[index]):
+            return False
+    return len(tokens) == len(wanted)
 
 
 class StandInConnection:
@@ -480,3 +519,57 @@ def test_another_refusal_of_the_server_names_the_stream_and_what_to_check() -> N
         ensured(RefusingReplicas(), queue_limits(replicas=3))
     assert str(refused.value).startswith(f"NATS refused to create stream {STREAMS[0]}: JetStream error 10074, replicas "
                                          "> 1 not supported in non-clustered mode. Check transport.replicas")
+
+
+# -- agents' consumers (installation_authority.placements decides when) -------------------------
+
+
+def topology_of(js: StandInJetStream, count: int = COUNT) -> QueueTopology:
+    return QueueTopology(StandInConnection(js), js, transport=transport(), limits=TEST_QUEUE_LIMITS, partitions=count)
+
+
+def test_an_agents_two_consumers_are_made_in_its_partitions_stream_with_the_contracts_settings() -> None:
+    js = StandInJetStream()
+    ensured(js)
+    asyncio.run(topology_of(js).ensure_agent_consumers(TEAM, "researcher-1"))
+    stream = f"UA1_PART_{TEAM}~{agent_partition(TEAM, 'researcher-1', COUNT)}"
+    for consumer in agent_consumers(transport(), TEAM, "researcher-1", COUNT):
+        stored = js.consumers[(stream, consumer.name)]
+        assert consumer.stream == stream and stored.filter_subject == consumer.config["filter_subject"]
+        assert (stored.durable_name, stored.max_deliver, stored.ack_wait) == (
+            consumer.name, consumer.config["max_deliver"], consumer.config["ack_wait"])
+    assert {name for _stream, name in js.consumers} >= {"agent~researcher-1", "control~researcher-1"}
+
+
+def test_an_agents_backlog_counts_waiting_unacknowledged_and_stored_messages_on_its_own_subjects() -> None:
+    js = StandInJetStream()
+    ensured(js)
+    topology = topology_of(js)
+    asyncio.run(topology.ensure_agent_consumers(TEAM, "researcher-1"))
+    assert asyncio.run(topology.agent_backlog(TEAM, "researcher-1")) == AgentBacklog(0, 0, 0)
+    partition = agent_partition(TEAM, "researcher-1", COUNT)
+    stream = f"UA1_PART_{TEAM}~{partition}"
+    js.backlogs[(stream, "agent~researcher-1")] = (2, 1)
+    js.subjects[stream] = {f"ua.v1.{TEAM}.gateway-1.work.agent.researcher-1.{partition}": 3,
+                           f"ua.v1.{TEAM}.sched.work.control.researcher-1.{partition}": 1,
+                           f"ua.v1.{TEAM}.gateway-1.work.agent.researcher-10.{partition}": 5}  # a neighbour's
+    assert asyncio.run(topology.agent_backlog(TEAM, "researcher-1")) == AgentBacklog(2, 1, 4)
+    # A message past its last delivery is neither waiting nor unacknowledged, but still stored.
+    js.backlogs.clear()
+    js.subjects[stream] = {f"ua.v1.{TEAM}.gateway-1.work.agent.researcher-1.{partition}": 1}
+    backlog = asyncio.run(topology.agent_backlog(TEAM, "researcher-1"))
+    assert backlog == AgentBacklog(0, 0, 1) and not backlog.empty
+
+
+def test_an_agents_consumers_are_deleted_and_listed_through_every_page(monkeypatch) -> None:
+    js = StandInJetStream()
+    ensured(js, count=1)
+    topology = topology_of(js, count=1)
+    agents = [f"researcher-{number}" for number in range(5)]
+    for agent in agents:
+        asyncio.run(topology.ensure_agent_consumers(TEAM, agent))
+    monkeypatch.setattr(queues_module, "CONSUMER_LIST_PAGE", 3)  # ten consumers in the one partition stream: four pages
+    assert asyncio.run(topology.agents_with_consumers(TEAM)) == set(agents)
+    assert asyncio.run(topology.delete_agent_consumers(TEAM, "researcher-0")) == 2
+    assert asyncio.run(topology.delete_agent_consumers(TEAM, "researcher-0")) == 0
+    assert asyncio.run(topology.agents_with_consumers(TEAM)) == set(agents[1:])
