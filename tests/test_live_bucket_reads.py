@@ -8,11 +8,13 @@ team reader forgets every record a reopened watch did not give before ``caught_u
 listing or watch that ends early removes or hides live records.
 
 The bucket is the placement bucket with the contract's stream settings (history 1). It
-holds three groups of keys under one team: keys nobody touches, keys the writers only
-rewrite (never delete), and keys the writers rewrite and delete. Writers run on their own
-connections, as other processes write. The keys of the first two groups are in the
-bucket for the whole read, so every listing and every watch's first values must hold
-them all. Each test checks every read and reports how many of them were bad.
+holds four groups of keys under one team: keys nobody touches, keys the writers only
+rewrite (never delete), keys the writers rewrite and delete, and keys deleted before the
+writers start and never written again. Writers run on their own connections, as other
+processes write. The keys of the first two groups are in the bucket for the whole read,
+so every listing and every watch's first values must hold them all; the deleted keys are
+never in the bucket during a read, so no listing may hold them and no watch may give them
+a value. Each test checks every read and reports how many of them were bad.
 """
 
 from __future__ import annotations
@@ -40,7 +42,9 @@ OTHER_TEAM = "team_two"
 UNTOUCHED = frozenset(f"{TEAM}.untouched-{number}" for number in range(150))
 REWRITTEN = frozenset(f"{TEAM}.rewritten-{number}" for number in range(50))  # put again, never deleted
 CHURNED = frozenset(f"{TEAM}.churned-{number}" for number in range(50))  # put again or deleted
+DELETED = frozenset(f"{TEAM}.deleted-{number}" for number in range(10))  # deleted before the reads, never written again
 HELD = UNTOUCHED | REWRITTEN  # in the bucket for the whole read
+MAY_HOLD = HELD | CHURNED  # every key a read may give with a value
 # The only key under OTHER_TEAM: a listing of that team's keys must hold exactly this one.
 SOLO = f"{OTHER_TEAM}.solo"
 ROUNDS = 500
@@ -57,8 +61,10 @@ async def filled_bucket(stack: AsyncExitStack, url: str) -> StateRecords:
     settings = bucket_stream(TRANSPORT, BUCKET)
     await js.add_stream(config=StreamConfig(**{**settings, "storage": STORAGE[settings["storage"]]}))
     bucket = await js.key_value(BUCKET)
-    for key in sorted(UNTOUCHED | REWRITTEN | CHURNED | {SOLO}):
+    for key in sorted(UNTOUCHED | REWRITTEN | CHURNED | DELETED | {SOLO}):
         await bucket.put(key, b"first value")
+    for key in sorted(DELETED):
+        await bucket.delete(key)
     reader = await connect(stack, url, "reader")
     # Listings and watches read no signatures, so the reader needs no identity or trust store.
     return StateRecords(reader.jetstream(), lambda: None, None)
@@ -101,28 +107,37 @@ async def writers(stack: AsyncExitStack, url: str, rewrite: Sequence[str],
         await asyncio.gather(*tasks)
 
 
-def bad_reads(bad: list[tuple[int, set[str], set[str]]], reads: int, what: str, written: int) -> str:
-    """A summary of the bad reads: how many, how they were short, and the first few."""
+# A bad read: its number, the keys it gave, the held keys it missed, the keys it gave that it
+# must not, and how many keys a listing named more than once.
+BadRead = tuple[int, set[str], set[str], set[str], int]
 
-    empty = sum(1 for _round, found, _missing in bad if not found)
-    untouched = sum(1 for _round, _found, missing in bad if missing & UNTOUCHED)
-    rewritten = sum(1 for _round, _found, missing in bad if missing & REWRITTEN)
-    first = "; ".join(f"read {round_number}: {len(found)} keys, {len(missing)} missing"
-                      for round_number, found, missing in bad[:5])
-    return (f"{len(bad)} of {reads} {what} were short while {WRITERS} writers wrote {written} times "
-            f"({empty} empty, {untouched} missing an untouched key, {rewritten} missing a rewritten key); {first}")
+
+def bad_reads(bad: list[BadRead], reads: int, what: str, written: int) -> str:
+    """A summary of the bad reads: how many, how they were wrong, and the first few."""
+
+    empty = sum(1 for _round, found, _missing, _extra, _repeated in bad if not found)
+    untouched = sum(1 for _round, _found, missing, _extra, _repeated in bad if missing & UNTOUCHED)
+    rewritten = sum(1 for _round, _found, missing, _extra, _repeated in bad if missing & REWRITTEN)
+    extra = sum(1 for _round, _found, _missing, extra, _repeated in bad if extra)
+    repeated = sum(1 for *_read, repeats in bad if repeats)
+    first = "; ".join(f"read {round_number}: {len(found)} keys, {len(missing)} missing, {len(extra)} not held, "
+                      f"{repeats} repeated" for round_number, found, missing, extra, repeats in bad[:5])
+    return (f"{len(bad)} of {reads} {what} were wrong while {WRITERS} writers wrote {written} times "
+            f"({empty} empty, {untouched} missing an untouched key, {rewritten} missing a rewritten key, "
+            f"{extra} giving a deleted or unknown key, {repeated} naming a key twice); {first}")
 
 
 @pytest.mark.asyncio
 async def test_a_listing_holds_every_key_the_bucket_holds_throughout(broker: str) -> None:  # noqa: F811
     async with AsyncExitStack() as stack:
         records = await filled_bucket(stack, broker)
-        bad: list[tuple[int, set[str], set[str]]] = []
+        bad: list[BadRead] = []
         async with writers(stack, broker, sorted(REWRITTEN), sorted(CHURNED)) as written:
             for round_number in range(ROUNDS):
-                listed = set(await records.keys(RECORD, f"{TEAM}."))
-                if HELD - listed:
-                    bad.append((round_number, listed, HELD - listed))
+                listed = await records.keys(RECORD, f"{TEAM}.")
+                found = set(listed)
+                if HELD - found or found - MAY_HOLD or len(listed) != len(found):
+                    bad.append((round_number, found, HELD - found, found - MAY_HOLD, len(listed) - len(found)))
         assert written[0] > ROUNDS, "the writers barely wrote while the bucket was listed"
         assert not bad, bad_reads(bad, ROUNDS, "listings", written[0])
 
@@ -133,21 +148,26 @@ async def test_a_listing_of_a_single_rewritten_key_is_never_empty(broker: str) -
 
     async with AsyncExitStack() as stack:
         records = await filled_bucket(stack, broker)
-        bad: list[tuple[int, set[str], set[str]]] = []
+        bad: list[BadRead] = []
         async with writers(stack, broker, [SOLO]) as written:
             for round_number in range(ROUNDS):
                 listed = await records.keys(RECORD, f"{OTHER_TEAM}.")
                 if listed != [SOLO]:
-                    bad.append((round_number, set(listed), {SOLO} - set(listed)))
+                    bad.append((round_number, set(listed), {SOLO} - set(listed), set(listed) - {SOLO},
+                                len(listed) - len(set(listed))))
         assert written[0] > ROUNDS, "the writers barely wrote while the bucket was listed"
         assert not bad, bad_reads(bad, ROUNDS, "listings of one key", written[0])
 
 
-async def first_values(records: StateRecords) -> set[str]:
-    """The keys (with a value) a watch of TEAM's keys gave before it said its first values were all given."""
+async def first_values(records: StateRecords) -> tuple[set[str], set[str]]:
+    """What a watch of TEAM's keys gave before it said its first values were all given.
+
+    Returns the keys whose last change was a value, and every key it gave a value at all.
+    """
 
     caught_up = asyncio.Event()
     given: set[str] = set()
+    valued: set[str] = set()
 
     async def read() -> None:
         async with aclosing(records.watch(RECORD, f"{TEAM}.>", team=TEAM, caught_up=caught_up)) as changes:
@@ -158,6 +178,7 @@ async def first_values(records: StateRecords) -> set[str]:
                     given.discard(key)
                 else:
                     given.add(key)
+                    valued.add(key)
 
     reading = asyncio.create_task(read())
     waiting = asyncio.create_task(caught_up.wait())
@@ -170,18 +191,18 @@ async def first_values(records: StateRecords) -> set[str]:
         for task in (reading, waiting):
             task.cancel()
         await asyncio.gather(reading, waiting, return_exceptions=True)
-    return given
+    return given, valued
 
 
 @pytest.mark.asyncio
 async def test_a_watch_gives_every_key_the_bucket_holds_before_it_says_caught_up(broker: str) -> None:  # noqa: F811
     async with AsyncExitStack() as stack:
         records = await filled_bucket(stack, broker)
-        bad: list[tuple[int, set[str], set[str]]] = []
+        bad: list[BadRead] = []
         async with writers(stack, broker, sorted(REWRITTEN), sorted(CHURNED)) as written:
             for round_number in range(ROUNDS):
-                given = await first_values(records)
-                if HELD - given:
-                    bad.append((round_number, given, HELD - given))
+                given, valued = await first_values(records)
+                if HELD - given or valued - MAY_HOLD:
+                    bad.append((round_number, given, HELD - given, valued - MAY_HOLD, 0))  # a watch may repeat a key
         assert written[0] > ROUNDS, "the writers barely wrote while the bucket was watched"
         assert not bad, bad_reads(bad, ROUNDS, "watches", written[0])

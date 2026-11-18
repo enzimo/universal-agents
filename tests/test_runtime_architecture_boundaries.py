@@ -832,9 +832,11 @@ def test_large_facades_cannot_grow(
 # subscribes to NATS, and nothing creates a deliver group (the push consumer
 # shape that handed work to busy agents). Protocol 1's live module subscribes only
 # to request/reply and event addresses (custom_transport.protocol1.live.serve), which
-# hold no queued work; its queued kinds are pulled like today's.
+# hold no queued work; its queued kinds are pulled like today's. Bucket reads subscribe
+# with ordered consumers to key-value buckets (listings and watches of state records),
+# which hold state, never work.
 NATS_SUBSCRIBERS = {"custom_transport/nats_adapter.py", "custom_transport/nats_pull.py",
-                    "custom_transport/protocol1/live.py"}
+                    "custom_transport/protocol1/live.py", "custom_transport/protocol1/bucket_reads.py"}
 # The names a raw NATS connection or JetStream context goes by; ``nats_connection`` is the
 # adapter's property that hands the connection to the protocol 1 kernel.
 NATS_CLIENT_NAMES = ("_js", "js", "jetstream", "_nc", "nc", "nats_client", "nats_connection")
@@ -848,9 +850,10 @@ NATS_CLIENT_CALLS = frozenset({
 # The only modules that use a raw NATS handle at all (plan 13B.6). Everything else goes
 # through them, so the flush before sending (custom_transport.send_barrier), the
 # requester's-inbox rule for answers and the pull-only rule each live in one place. A
-# key-value watch is an ordered push subscription on state, never work; it is reachable
-# only through a bucket these modules bind. A module that needs a raw handle is added
-# here in the same change, with its reason.
+# key-value watch or listing is an ordered push subscription on state, never work; the
+# product reads buckets that way only through bucket_reads, which decides itself where a
+# read's first values end (README_ARCHITECTURE.md "Bucket reads"). A module that needs a
+# raw handle is added here in the same change, with its reason.
 NATS_CLIENT_MODULES = {
     "custom_transport/nats_adapter.py": "the transport adapter: publishing, delivery, object store",
     "custom_transport/nats_pull.py": "pull consumers for queued work",
@@ -858,6 +861,7 @@ NATS_CLIENT_MODULES = {
     "custom_transport/nats_topology.py": "creates and updates the streams",
     "custom_transport/protocol1/live.py": "protocol 1 requests, replies and served addresses",
     "custom_transport/protocol1/state_records.py": "protocol 1 signed records in key-value buckets",
+    "custom_transport/protocol1/bucket_reads.py": "key-value listings and watches that cannot end early",
     "custom_transport/protocol1/joining.py": "a host's join request, signed before it has a certificate",
     "installation_authority/service.py": "the topology owner's buckets, and the certificates it keeps in UA1_CERTS",
     "team_services/lock.py": "the team services' single-instance lock in UA1_LOCKS, an unsigned lease",
