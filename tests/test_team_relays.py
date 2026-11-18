@@ -15,7 +15,8 @@ import pytest
 
 from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.state_records import StoredRecord
-from team_services.relays import AGENT_UNAVAILABLE_TEXT, Relays
+from custom_transport.protocol1.bucket_reads import BucketReadTimedOut
+from team_services.relays import AGENT_UNAVAILABLE_TEXT, LEAD_LOOKUP_FAILED_TEXT, Relays
 
 TEAM = "team_one"
 NOW = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
@@ -49,14 +50,6 @@ def _relays(stored: dict[str, Any]) -> tuple[Relays, list[tuple[str, dict[str, A
     async def take(record, key, **kwargs):
         return True
 
-    class _Bucket:
-        async def keys(self) -> list[str]:
-            return list(stored)
-
-    class _JetStream:
-        async def key_value(self, bucket: str) -> _Bucket:
-            return _Bucket()
-
     class _Live:
         identity = SimpleNamespace(installation="install_one")
         trust = SimpleNamespace(store=SimpleNamespace(agent_session=lambda installation, team, session: sessions.get(session)))
@@ -65,8 +58,7 @@ def _relays(stored: dict[str, Any]) -> tuple[Relays, list[tuple[str, dict[str, A
             sent.append((audience["id"], body))
             return SimpleNamespace(raw={"body": {"outcome": "ok", "enabled": True}})
 
-    host = SimpleNamespace(live=_Live(), records=SimpleNamespace(read_report=read_report, keys=keys, take_trust_record=take), clock=lambda: NOW,
-                           nc=SimpleNamespace(jetstream=lambda: _JetStream()))
+    host = SimpleNamespace(live=_Live(), records=SimpleNamespace(read_report=read_report, keys=keys, take_trust_record=take), clock=lambda: NOW)
     return Relays(host, TEAM, "TeamArchitect", logging.getLogger("test.relays")), sent  # type: ignore[arg-type]
 
 
@@ -125,3 +117,20 @@ async def test_relay_failures_explain_the_outcome_without_protocol_codes(failure
     reply = await relays.handle(_frame("tasks.remove", {"agent": "worker_1"}))
     assert reply["outcome"] == "runtime_error" and expected in reply["message"]
     assert "wrong_authority" not in reply["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_session_listing_is_answered_as_a_failed_lookup_not_as_no_lead(caplog) -> None:
+    # The lead is placed and running; only listing the team's sessions fails.
+    relays, sent = _relays({f"{TEAM}.lead_1": _placed("lead_1", "TeamArchitect")})
+
+    async def keys(record, prefix):
+        raise BucketReadTimedOut("UA1_CERTS", f"$KV.UA1_CERTS.{prefix}>", [f"{prefix}lead_1"], 0)
+
+    relays._host.records.keys = keys
+    with caplog.at_level(logging.WARNING):
+        reply = await relays.handle(_frame("debug.dump", {"request_id": "r3", "enabled": True}))
+    assert reply == {"outcome": "runtime_error", "message": LEAD_LOOKUP_FAILED_TEXT} and sent == []
+    failed = [record for record in caplog.records if "event=team_relay_lead_lookup_failed" in record.getMessage()]
+    assert len(failed) == 1 and "team=team_one" in failed[0].getMessage()
+    assert failed[0].exc_info is not None and isinstance(failed[0].exc_info[1], BucketReadTimedOut)

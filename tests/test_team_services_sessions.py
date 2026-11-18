@@ -12,6 +12,8 @@ import pytest
 from custom_messages.wire.models import SessionsOpenReplyAdapter
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.partitions import partition_owner_key
+from custom_transport.protocol1.bucket_reads import BucketReadTimedOut
+from custom_transport.protocol1.state_records import StoredRecord
 from team_services.sessions import AGENT_SESSION, PLACEMENT, SessionService, session_key
 
 TEAM, INSTALLATION = "team_example", "install_example"
@@ -153,3 +155,67 @@ async def test_placement_scans_never_read_a_partition_ownership_record_as_a_plac
 
     assert records.placement_reads and set(records.placement_reads) == {f"{TEAM}.lead"}
     assert "team_services_record_refused" not in caplog.text
+
+
+class _SessionListingFails(_Records):
+    """The lead runs on lead-host under a placement that verifies; listing the session records fails.
+
+    Before bucket_reads such a listing could come back empty, and the lead's placement was
+    then removed as abandoned (event=orphan_placement_removed). Now it raises.
+    """
+
+    def __init__(self, placements: list[str]) -> None:
+        super().__init__([])
+        self.placement_keys = placements
+        self.deletes: list[tuple[str, str]] = []
+        self.failing = True
+
+    async def keys(self, record: str, prefix: str, *, team: Optional[str] = None) -> list[str]:
+        if record == PLACEMENT:
+            return [key for key in self.placement_keys if key.startswith(prefix)]
+        if self.failing:
+            raise BucketReadTimedOut("UA1_CERTS", f"$KV.UA1_CERTS.{prefix}>", [f"{prefix}s-lead-1"], 0)
+        return []
+
+    async def read_report(self, record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
+        if record != PLACEMENT or key not in self.placement_keys:
+            return None
+        body = SimpleNamespace(agent="lead", host="lead-host", placed_at="2026-11-12T08:00:00.000Z", handed_over=None)
+        return StoredRecord(7, SimpleNamespace(body=body, signer=SimpleNamespace(membership_epoch=1)))  # type: ignore[arg-type]
+
+    async def delete(self, record: str, key: str, *, last_revision: Optional[int] = None) -> bool:
+        self.deletes.append((record, key))
+        return True
+
+    def writer(self) -> SimpleNamespace:
+        return SimpleNamespace(certificate=SimpleNamespace(membership_epoch=1))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_session_listing_removes_no_placement(caplog) -> None:
+    records = _SessionListingFails([f"{TEAM}.lead"])
+    service = _service(records)
+
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(BucketReadTimedOut):
+            await service.maintain(TEAM)  # logged and tried again by team_services.process._maintain
+        with pytest.raises(BucketReadTimedOut):
+            await service._remove_orphan_placements(TEAM)  # maintenance's last step, on its own
+        with pytest.raises(BucketReadTimedOut):
+            await service.open(_open("researcher-1", "researcher"))  # type: ignore[arg-type]  # answered handler_failed
+    assert records.deletes == [] and records.puts == []
+    assert "orphan_placement_removed" not in caplog.text and "agent_session_opened" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_session_listing_opens_no_lead() -> None:
+    records = _SessionListingFails([])  # no placement, so only the lead check lists the sessions
+    service = _service(records)
+
+    with pytest.raises(BucketReadTimedOut):
+        await service.open(_open("lead", "TeamArchitect"))  # type: ignore[arg-type]
+    assert records.puts == []
+
+    records.failing = False  # the same team with a listing that ends: the lead opens
+    opened = await service.open(_open("lead", "TeamArchitect"))  # type: ignore[arg-type]
+    assert opened["outcome"] == "ok" and opened["session"]["body"]["agent_role"] == "lead"
