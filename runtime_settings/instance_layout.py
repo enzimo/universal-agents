@@ -150,6 +150,7 @@ UPGRADES_DIRNAME = "upgrades"
 ADAPTER_HOST_FILES_UPGRADE_FILENAME = "adapter-host-files.json"
 ADAPTER_HOST_FILES_UPGRADE_PROGRESS_FILENAME = "adapter-host-files.started"
 ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME = "adapter-host-files.lock"
+ADAPTER_HOST_FILES_WITHOUT_RECORDS_FILENAME = "adapter-host-files.without-records.txt"
 # /upgrade: team exports the supervisor wrote, and the requests it reads
 # (team_transfer.export_requests).
 EXPORTS_DIRNAME = "exports"
@@ -686,6 +687,20 @@ class InstanceLayout:
         ``flock`` matters."""
 
         return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME
+
+    @property
+    def adapter_host_files_without_records_path(self) -> Path:
+        """The names of the files the upgrade step for adapter-host files left that no record names.
+
+        One name per line, sorted: only names of the gateway's own form
+        (``adapter_upload_`` and a hex id), never one a person may have chosen.
+        Written by the run that writes the step's marker, just before it, so an
+        administrator can delete exactly those files under the conditions the
+        step's warning gives; removed by every other run, so a list without
+        the marker beside it is never valid. Under ``state/``, so no agent
+        tool or sandboxed code can reach it."""
+
+        return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_WITHOUT_RECORDS_FILENAME
 
     @property
     def storage_levels_path(self) -> Path:

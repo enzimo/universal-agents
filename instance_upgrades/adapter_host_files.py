@@ -247,6 +247,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import stat
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
@@ -327,6 +328,12 @@ REASON_FOLDER_CHANGED = "folder_changed"
 # What 0.9.13's adapter host named each file it kept, directly in its transfer folder
 # (``new_id("adapter_upload")`` in ``assistant_gateway.adapter_host.service``).
 TRANSFER_FILE_PREFIX = "adapter_upload_"
+# The names the gateway itself gives those files: the prefix and a lowercase hex id (``new_id`` takes
+# ``uuid4().hex``), matched in full. Only these are listed and named (F6 of PR #150's review): any other
+# name an operator's folder holds may be text someone chose. A hex-only name also has no space, quote,
+# newline or undecodable byte, so a list of one name per line is safe for ``xargs`` and always UTF-8.
+# The length is left open, so ids a version made longer are still listed.
+_GATEWAY_NAME = re.compile(re.escape(TRANSFER_FILE_PREFIX) + "[0-9a-f]+")
 # How a hosted-chat message names a file in the transfer folder (``AdapterAttachmentV1.storage_reference``).
 _UPLOAD_REFERENCE_SCHEME = "adapter-upload"
 # The upload status a message's file must have for the gateway to read it (``resolve_upload_reference``).
@@ -389,6 +396,27 @@ class UpgradeResult:
     @property
     def folder_missing(self) -> bool:
         return not self.finished and self.waiting > 0
+
+
+@dataclass(frozen=True)
+class _Leftovers:
+    """The files left in the transfer folder that no record names (F16): those that may be named, and the rest.
+
+    ``listed`` are the names of the gateway's form (``_GATEWAY_NAME``),
+    sorted; ``unlisted`` counts the other names, which are never shown.
+    """
+
+    listed: tuple[str, ...] = ()
+    unlisted: int = 0
+
+    @classmethod
+    def of(cls, names: set[str]) -> _Leftovers:
+        listed = tuple(sorted(name for name in names if _GATEWAY_NAME.fullmatch(name)))
+        return cls(listed, len(names) - len(listed))
+
+    @property
+    def count(self) -> int:
+        return len(self.listed) + self.unlisted
 
 
 @dataclass
@@ -512,6 +540,7 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
 
     layout = config.layout
     marker = Path(layout.adapter_host_files_upgrade_path)
+    leftover_list = Path(layout.adapter_host_files_without_records_path)
     if marker.is_file():
         return UpgradeResult(finished=True, counts=UpgradeCounts(), already_done=True)
     transfer = config.interactive_apps.adapter_host.resolved_upload_dir(config.instance_root_path)
@@ -519,6 +548,9 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
         with _step_lock(Path(layout.adapter_host_files_upgrade_lock_path)):
             if marker.is_file():  # the run this one waited for finished the step
                 return UpgradeResult(finished=True, counts=UpgradeCounts(), already_done=True)
+            # An earlier run's list has no marker beside it, so it is not valid: gone before anything can
+            # stop or wait (C01), and only the run that writes the marker writes a list again.
+            _remove_leftover_list(leftover_list)
             step = _Step(
                 transfer=transfer,
                 uploads=Path(layout.uploads_dir).resolve(),
@@ -542,8 +574,9 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
             for item in items:
                 step.handle(item)
             step.forget_unmovable()
-            step.counts.files_without_records = step.count_files_without_records()
-            _write_state_file(marker, {"finished_at_utc": _now(), **asdict(step.counts)})
+            leftovers = step.files_without_records()
+            step.counts.files_without_records = None if leftovers is None else leftovers.count
+            _finish(marker, leftover_list, step.counts, leftovers)
     except FolderProblem as problem:
         problem.files_gone_helps = problem.not_there and problem.folder == transfer
         logger.error(
@@ -573,6 +606,75 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
     if counts.files_without_records:
         _report_files_without_records(transfer, marker, counts.files_without_records)
     return UpgradeResult(finished=True, counts=counts)
+
+
+def _finish(marker: Path, leftover_list: Path, counts: UpgradeCounts, leftovers: Optional[_Leftovers]) -> bool:
+    """Write the list of the files no record names, or settle that there is none, then the marker.
+
+    Returns whether ``leftover_list`` holds this run's list. The list goes
+    first: a run stopped between the two leaves a list without a marker,
+    which the next run removes at its start, while a list written after the
+    marker could be missing or stale beside it with no later run to correct
+    it. A marker that cannot be written (``FolderProblem``) takes the list
+    just written with it, so no list is left without its marker.
+    """
+
+    listed = _settle_leftover_list(leftover_list, leftovers.listed if leftovers is not None else ())
+    try:
+        _write_state_file(marker, {"finished_at_utc": _now(), **asdict(counts)})
+    except FolderProblem:
+        if listed:
+            _remove_leftover_list(leftover_list)
+        raise
+    return listed
+
+
+def _settle_leftover_list(path: Path, names: tuple[str, ...]) -> bool:
+    """Make ``path`` hold ``names``, one per line, or nothing when there are none; whether it holds them.
+
+    The list only reports (A3 of F6): an ``OSError`` is logged
+    (``event=adapter_host_files_without_records_list_failed``), never
+    raised, so it never stops the start or keeps the marker from being
+    written. A list that could not be written leaves no earlier one behind
+    where it can be removed.
+    """
+
+    if names:
+        try:
+            _replace_file(path, "".join(f"{name}\n" for name in names))
+            return True
+        except OSError as exc:
+            _log_list_failed(path, "written", exc)
+    _remove_leftover_list(path)
+    return False
+
+
+def _remove_leftover_list(path: Path) -> None:
+    """Remove a list of the files no record names that has no marker of its run beside it; logged, never raised (C01)."""
+
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        _log_list_failed(path, "removed", exc)
+        return
+    logger.info(
+        "A list of files no record names that has no marker of the run that wrote it beside it is not valid, so it "
+        "was removed. event=adapter_host_files_without_records_list_removed list=%s",
+        path,
+    )
+
+
+def _log_list_failed(path: Path, action: str, exc: OSError) -> None:
+    logger.warning(
+        "The list of files left in the adapter host's transfer folder that no record names could not be %s; a list "
+        "still at that path is not this run's, so do not use it. Startup goes on. "
+        "event=adapter_host_files_without_records_list_failed list=%s reason=%s",
+        action,
+        path,
+        _detail(exc),
+    )
 
 
 def _report_files_without_records(transfer: Path, marker: Path, count: int) -> None:
@@ -766,8 +868,8 @@ class _Step:
 
         return self._uploads == self._transfer or self._uploads in self._transfer.parents
 
-    def count_files_without_records(self) -> Optional[int]:
-        """How many files 0.9.13 could have written are left in the transfer folder that no record names.
+    def files_without_records(self) -> Optional[_Leftovers]:
+        """The files 0.9.13 could have written that are left in the transfer folder and no record names.
 
         Counted after the moves and drops: regular files named
         ``adapter_upload_*`` directly in the folder (the step's own scope,
@@ -785,20 +887,21 @@ class _Step:
         host's records are logged
         (``event=adapter_host_files_without_records_uncounted``) and give
         None: the count only reports, so it never stops the start or keeps
-        the marker from being written (rule 2 does not apply).
+        the marker from being written (rule 2 does not apply). Which of the
+        names may be shown is ``_Leftovers.of``'s rule.
         """
 
         if self._transfer_in_uploads:
-            return 0
+            return _Leftovers()
         unnamed = self._list_unnamed_files()
         if not unnamed:
-            return None if unnamed is None else 0
+            return None if unnamed is None else _Leftovers()
         try:
             unnamed -= self._files_the_gateway_reads()
         except Exception as exc:  # a database error: the count only reports (A2), so it is left unset, logged
             self._log_uncounted(f"{type(exc).__name__}: {exc}")
             return None
-        return len(unnamed)
+        return _Leftovers.of(unnamed)
 
     def _list_unnamed_files(self) -> Optional[set[str]]:
         """The folder's files no found record names; None, logged, when the folder cannot be listed or changed."""
@@ -1782,20 +1885,36 @@ def _take_lock(descriptor: int, path: Path) -> None:
 
 
 def _write_state_file(path: Path, body: dict[str, Any]) -> None:
-    """Write the marker or the progress record in ``state/upgrades``: a temporary file renamed into place (rule 2).
+    """Write the marker or the progress record in ``state/upgrades`` (``_replace_file``); a failure is rule 2.
 
     Not synced: losing the progress record only makes a later run wait (it
     is never proof that files are absent), and losing the marker runs the
     step again, which finds nothing left to do.
     """
 
+    try:
+        _replace_file(path, json.dumps(body, indent=2) + "\n")
+    except OSError as exc:
+        raise FolderProblem(path.parent, safe_open.REASON_OPEN_FAILED, _detail(exc), file=path) from exc
+
+
+def _replace_file(path: Path, text: str) -> None:
+    """Write ``text`` to a temporary file renamed onto ``path``, so a reader never sees half of it.
+
+    Raises ``OSError`` after removing the temporary file. Not synced: the
+    marker and the progress record say why above; a list of files no record
+    names that a crash loses only leads to fewer files being deleted.
+    """
+
     temporary = path.with_name(f".{path.name}.writing")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+        temporary.write_text(text, encoding="utf-8")
         os.replace(temporary, path)
-    except OSError as exc:
-        raise FolderProblem(path.parent, safe_open.REASON_OPEN_FAILED, _detail(exc), file=path) from exc
+    except OSError:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+        raise
 
 
 __all__ = ["FolderProblem", "UpgradeCounts", "UpgradeResult", "upgrade_adapter_host_files"]
