@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,6 @@ TRANSPORT = json.loads((Path(__file__).resolve().parents[1]
                         / "contracts/messages/v1/generated/transport.json").read_text())
 MIB = 1024 * 1024
 LIMITS = QueueLimits(
-    partitions=7,
     max_bytes={"partition": 16 * MIB, "pool": 128 * MIB, "edge": 64 * MIB, "team_services": 256 * MIB,
                "dead_letter": 32 * MIB},
     max_messages_per_subject=8,
@@ -110,6 +110,25 @@ def test_every_stream_takes_its_kinds_limit_and_only_partition_streams_take_the_
         assert all(subject.startswith("ua.v1.team_b.") for subject in config["subjects"])
 
 
+def test_a_partition_stream_records_the_count_its_team_was_listed_with() -> None:
+    """The count comes from one place: the listing that gave the stream its partition number."""
+
+    config = queue_stream_config(TRANSPORT, _streams("team_a", 96)["UA1_PART_team_a~50"], LIMITS)
+
+    assert config["metadata"] == {PARTITION_COUNT_METADATA: "96"}
+    assert {stream.partitions for stream in team_queue_streams(TRANSPORT, "team_a", 96)} == {96}
+
+
+def test_every_stream_of_the_contract_is_listed_even_one_no_class_names() -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    transport["streams"]["UA1_EXTRA_{team}"] = {**transport["streams"]["UA1_POOL_WORK_{team}"],
+                                               "subjects": ["ua.v1.{team}.*.work.extra"]}
+
+    names = [stream.name for stream in team_queue_streams(transport, "team_a", 7)]
+
+    assert "UA1_EXTRA_team_a" in names and len(names) == len(set(names)) == 7 + 5
+
+
 def test_a_contract_field_this_version_cannot_apply_is_refused_rather_than_left_out() -> None:
     transport = copy.deepcopy(TRANSPORT)
     transport["streams"]["UA1_POOL_WORK_{team}"]["max_msgs"] = 1000
@@ -120,21 +139,29 @@ def test_a_contract_field_this_version_cannot_apply_is_refused_rather_than_left_
 
 
 def test_a_missing_size_kind_names_its_setting() -> None:
-    limits = QueueLimits(partitions=7, max_bytes={"partition": 16 * MIB}, max_messages_per_subject=8)
+    limits = QueueLimits(max_bytes={"partition": 16 * MIB}, max_messages_per_subject=8)
     edge = next(stream for stream in team_queue_streams(TRANSPORT, "team_a", 7) if stream.kind == "edge")
 
     with pytest.raises(ValueError, match="UA1_EDGE_WORK_team_a: transport.queues.max_bytes.edge is missing"):
         queue_stream_config(TRANSPORT, edge, limits)
 
 
-@pytest.mark.parametrize("wrong", [
-    {"partitions": 0}, {"partitions": 129}, {"max_messages_per_subject": 0}, {"replicas": True},
-    {"max_bytes": {"partition": 0}},
+@pytest.mark.parametrize(("wrong", "setting"), [
+    ({"max_messages_per_subject": 0}, "transport.queues.max_messages_per_subject"),
+    ({"replicas": True}, "transport.replicas"),
+    ({"replicas": 0}, "transport.replicas"),  # NATS reads 0 as 1, so the stream would differ at every start
+    ({"max_bytes": {"partition": 0}}, "transport.queues.max_bytes.partition"),
 ])
-def test_limits_nats_would_refuse_are_refused_first(wrong: dict) -> None:
-    values = {"partitions": 7, "max_bytes": {"partition": MIB}, "max_messages_per_subject": 1, **wrong}
-    with pytest.raises(ValueError):
+def test_limits_nats_would_refuse_are_refused_first_naming_their_setting(wrong: dict, setting: str) -> None:
+    values = {"max_bytes": {"partition": MIB}, "max_messages_per_subject": 1, **wrong}
+    with pytest.raises(ValueError, match=f"^{re.escape(setting)} is a whole number of at least 1"):
         QueueLimits(**values)
+
+
+@pytest.mark.parametrize("count", [0, 129])
+def test_a_partition_count_outside_the_contracts_range_is_refused(count: int) -> None:
+    with pytest.raises(ValueError):
+        team_queue_streams(TRANSPORT, "team_a", count)
 
 
 @pytest.mark.parametrize("team", ["team.a", "team_*", "team>", "_probe", "t" * 25, ""])
@@ -169,7 +196,7 @@ def test_an_agents_consumers_read_where_the_account_mapping_stores_its_messages(
         inbox, control = consumers[f"agent~{agent}"], consumers[f"control~{agent}"]
         stream = _streams("team_a", count)[f"UA1_PART_team_a~{partition}"]
         subjects = queue_stream_config(TRANSPORT, stream, QueueLimits(
-            partitions=count, max_bytes={"partition": MIB}, max_messages_per_subject=1))["subjects"]
+            max_bytes={"partition": MIB}, max_messages_per_subject=1))["subjects"]
 
         assert (inbox.stream, control.stream) == (stream.name, stream.name) == (f"UA1_PART_team_a~{partition}",) * 2
         for consumer, address, other in ((inbox, "work.agent", "work.control"), (control, "work.control", "work.agent")):

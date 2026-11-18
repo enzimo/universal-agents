@@ -55,12 +55,17 @@ MIN_QUEUE_BYTES = MIB
 # The largest message a protocol 1 work stream stores: a full-size frame with its headers
 # (every stream's max_message_bytes in the contract; checked by the same test).
 MAX_QUEUE_MESSAGE_BYTES = 263_168
-# The senders the per-subject cap (transport.queues.max_messages_per_subject) is sized for:
-# a gateway, the lead host, the team services and the scheduler, each with its own waiting
-# messages for one agent, since the stored subject names the sender. A partition stream must
-# hold their backlog at the cap with full-size messages plus one more sender's, so one busy
-# agent leaves room for its own and its neighbours' control messages (contract README,
-# "Stream sizes"; runtime_settings.transport.least_partition_bytes).
+# How many senders at the per-subject cap (transport.queues.max_messages_per_subject) a
+# partition stream keeps room beside. The stored subject names the sender, so each running
+# host that may send to an agent's queues is a sender of its own: every gateway, worker host
+# and edge adapter, the lead host, the team services and the scheduler (six roles in the
+# generated permissions), and their number grows with the team's hosts. A partition stream
+# must hold this many senders' backlog for one agent at the cap with full-size messages plus
+# one more sender's, which is room for that agent's and its neighbours' control messages.
+# It guarantees that room only while at most this many senders are at the cap with
+# messages of the largest size; with more, the stream relies on smaller real messages and
+# on the size warning (contract README, "Stream sizes";
+# runtime_settings.transport.least_partition_bytes).
 QUEUE_SENDERS_AT_CAP = 4
 
 

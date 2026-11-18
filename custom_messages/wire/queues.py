@@ -54,36 +54,46 @@ _FILLED_CONSUMER_FIELDS = {"stream", "name", "filter", "mode"}
 
 @dataclass(frozen=True)
 class QueueLimits:
-    """What sizes a team's streams: the instance's ``transport.queues`` settings and the replica count.
+    """What sizes a team's streams: the instance's ``transport.queues`` limits and the replica count.
 
     ``max_bytes`` holds one byte limit per size kind (``transport.queues.max_bytes``);
     ``max_messages_per_subject`` is the partition streams' per-subject cap;
     ``replicas`` is the operator's JetStream replica count (``transport.replicas``).
+    The partition count is not here: it comes with each stream (``QueueStream.partitions``),
+    from the one count its team's streams were listed with, so a stream never records a
+    count other than the one its partition number belongs to.
     The settings model checks the values and how they relate; this checks only what NATS
-    needs to accept them.
+    needs to accept them. NATS would read 0 replicas as 1, so a stream created with 0 would
+    differ from its settings at every start: 0 is refused rather than read as 1.
     """
 
-    partitions: int
     max_bytes: Mapping[str, int]
     max_messages_per_subject: int
     replicas: int = 1
 
     def __post_init__(self) -> None:
-        check_partition_count(self.partitions)
-        for name, value in (("max_messages_per_subject", self.max_messages_per_subject), ("replicas", self.replicas),
-                            *((f"max_bytes.{kind}", limit) for kind, limit in self.max_bytes.items())):
+        settings = (("transport.queues.max_messages_per_subject", self.max_messages_per_subject),
+                    ("transport.replicas", self.replicas),
+                    *((f"transport.queues.max_bytes.{kind}", limit) for kind, limit in self.max_bytes.items()))
+        for setting, value in settings:
             if type(value) is not int or value < 1:
-                raise ValueError(f"transport.queues {name} is a whole number of at least 1, not {value!r}")
+                raise ValueError(f"{setting} is a whole number of at least 1, not {value!r}")
 
 
 @dataclass(frozen=True)
 class QueueStream:
-    """One of a team's work or dead-letter streams: ``UA1_PART_team_a~7`` from ``UA1_PART_{team}~{partition}``."""
+    """One of a team's work or dead-letter streams: ``UA1_PART_team_a~7`` from ``UA1_PART_{team}~{partition}``.
+
+    ``partitions`` is the installation's partition count the team's streams were listed
+    with; a partition stream's ``partition`` is one of its numbers, and the stream records
+    that count (``PARTITION_COUNT_METADATA``).
+    """
 
     name: str
     template: str
     team: str
     kind: str
+    partitions: int
     partition: Optional[int] = None
 
     @property
@@ -108,18 +118,18 @@ class QueueConsumer:
 def team_queue_streams(transport: Mapping[str, Any], team: str, count: int) -> tuple[QueueStream, ...]:
     """Every work and dead-letter stream of ``team``: a ``{partition}`` stream once per partition.
 
-    ``count`` is the installation's partition count. The streams are those the contract's
-    queued classes name (``classes.*.streams``), which are every stream of ``streams``, in
-    the generated contract's order, a partition stream's partitions in ascending order.
+    ``count`` is the installation's partition count; each stream carries it. The streams
+    are every stream of the contract's ``streams``, in the generated contract's order, a
+    partition stream's partitions in ascending order.
     """
 
     _check_id(_TEAM_ID, team, "team id")
     numbers = range(check_partition_count(count))
     streams: list[QueueStream] = []
-    for template in _queued_streams(transport):
-        kind = transport["streams"][template]["size_kind"]
+    for template, spec in transport["streams"].items():
         for partition in numbers if "{" + _PARTITION + "}" in template else (None,):
-            streams.append(QueueStream(_fill(template, team=team, partition=partition), template, team, kind, partition))
+            name = _fill(template, team=team, partition=partition)
+            streams.append(QueueStream(name, template, team, spec["size_kind"], count, partition))
     return tuple(streams)
 
 
@@ -128,7 +138,7 @@ def queue_stream_config(transport: Mapping[str, Any], stream: QueueStream, limit
 
     Every contract field is carried over; the byte limit comes from the stream's size kind,
     the per-subject cap from ``max_messages_per_subject`` where the contract names that
-    setting, and a partition stream records the count in its metadata
+    setting, and a partition stream records the count it was listed with in its metadata
     (``PARTITION_COUNT_METADATA``).
     """
 
@@ -148,7 +158,7 @@ def queue_stream_config(transport: Mapping[str, Any], stream: QueueStream, limit
     if "max_msgs_per_subject_setting" in spec:
         config["max_msgs_per_subject"] = limits.max_messages_per_subject
     if stream.partition is not None:
-        config["metadata"] = {PARTITION_COUNT_METADATA: str(limits.partitions)}
+        config["metadata"] = {PARTITION_COUNT_METADATA: str(stream.partitions)}
     return config
 
 
@@ -186,10 +196,6 @@ def consumer_agent(transport: Mapping[str, Any], name: str) -> Optional[str]:
             except ValueError:
                 return None
     return None
-
-
-def _queued_streams(transport: Mapping[str, Any]) -> list[str]:
-    return [stream for spec in transport["classes"].values() for stream in spec.get("streams", [])]
 
 
 def _agent_consumer_specs(transport: Mapping[str, Any]) -> list[Mapping[str, Any]]:

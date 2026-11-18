@@ -1411,8 +1411,9 @@ def check_per_subject_caps(transport: dict[str, Any]) -> None:
     queue; with discard_new_per_subject a sender at the cap is refused (10077) instead of the
     oldest message being dropped, and the stream still takes other subjects (NATS also needs
     discard: new, which check_stream_sizes requires of every queued stream). A stream with a
-    fixed cap and no discard_new_per_subject (the dead letters') keeps one message per
-    subject, the latest (README, "Stream sizes").
+    fixed cap keeps one message per subject, the latest (README, "Stream sizes"), so it must
+    not set discard_new_per_subject: the dead letters' retried set-aside would be refused
+    (10077) instead of replacing its copy.
     """
 
     setting = transport["queues"]["max_messages_per_subject_setting"]
@@ -1429,9 +1430,12 @@ def check_per_subject_caps(transport: dict[str, Any]) -> None:
         if not isinstance(per_subject, bool) or (named is not None and not per_subject):
             raise ContractError(f"transport.yaml: stream {name} refuses a sender's next message at a cap from the "
                                 "settings (discard_new_per_subject: true), so queued work is never dropped")
-        if per_subject and named is None and "max_msgs_per_subject" not in stream:
-            raise ContractError(f"transport.yaml: stream {name} sets discard_new_per_subject only with a per-subject "
-                                "cap, as NATS requires")
+        # NATS needs a cap for discard_new_per_subject, and with a fixed cap it would refuse the
+        # dead letters' retried set-aside instead of replacing its copy, so only the cap from the
+        # settings takes it.
+        if per_subject and named is None:
+            raise ContractError(f"transport.yaml: stream {name} sets discard_new_per_subject only with its cap from "
+                                f"{setting}; a fixed cap without it keeps the latest message per subject")
 
 
 def check_agent_queues(transport: dict[str, Any]) -> None:

@@ -1239,17 +1239,29 @@ yet, without anyone being told:
   subject instead: `transport.queues.max_messages_per_subject` (`max_msgs_per_subject`
   with `discard_new_per_subject`, refused with the same 10077, the oldest never dropped).
   It counts per sender and agent, since the stored subject names the sender's runtime and
-  the agent, and it applies to the control queue too. The cap keeps room only while the
-  stream can hold the senders' backlog at it, so the settings refuse a partition limit
-  below five senders' waiting messages for one agent at the cap, each of the largest
-  message size (`max_message_bytes`): four senders (a gateway, the lead host, the team
-  services and the scheduler) and one more. The two queues keep control messages from
-  waiting behind new work; the cap keeps one agent's backlog from taking the room they need.
+  the agent, and it applies to the control queue too. Six host roles may send to an agent's
+  queues (the generated permissions name them: gateway, lead host, team services,
+  scheduler, worker host and edge adapter), and each running host is a sender of its own,
+  so a team has one sender per gateway, per worker host and per edge adapter beside its
+  lead host, team services and scheduler; their number grows with the team's hosts. The
+  cap keeps room only while the stream can hold the senders' backlog at it, so the
+  settings refuse a partition limit below five senders' waiting messages for one agent at
+  the cap, each of the largest message size (`max_message_bytes`). That is what the rule
+  guarantees: while at most four senders are at the cap for one agent with messages of the
+  largest size, a fifth sender's worth of room stays free for control messages. It does
+  not guarantee room when more senders are at the cap at once, such as many worker hosts
+  returning results to a busy lead: then the stream relies on real messages being smaller
+  than the largest size, and on the size warning reaching administrators first. The two
+  queues keep control messages from waiting behind new work; the cap keeps one agent's
+  backlog from taking the room they need.
 - **A full dead-letter stream** refuses a set-aside: see "Dead letters".
 
 The generator refuses a work or dead-letter stream without a size kind or with any other
 discard policy, and a stream of agents' queues without the per-subject cap from
-`transport.queues.max_messages_per_subject` or with one that drops the oldest message.
+`transport.queues.max_messages_per_subject` or with one that drops the oldest message. It
+also refuses `discard_new_per_subject` on any stream without that cap: the dead-letter
+stream's fixed cap of one keeps the latest copy per subject, so a retried set-aside
+replaces its copy instead of being refused.
 
 A receiver accepts a frame from `issued_at` (or a later `not_before`) through the earlier
 of `expires_at` and `issued_at + expiry_seconds` for its kind, with the end exclusive.

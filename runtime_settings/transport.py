@@ -101,7 +101,10 @@ def least_partition_bytes(per_subject_cap: int) -> int:
     The cap protects control messages only while a partition stream has room left once the
     senders reach it: ``QUEUE_SENDERS_AT_CAP`` senders' waiting messages for one agent at the
     cap, each a full-size message, plus one more sender's, so that agent's and its
-    neighbours' control messages still fit (contract README, "Stream sizes").
+    neighbours' control messages still fit. A team can have more senders than that (one per
+    gateway, worker host and edge adapter, beside the lead host, team services and
+    scheduler); with more of them at the cap at once, the room depends on their messages
+    being smaller than the largest size (contract README, "Stream sizes").
     """
 
     return (QUEUE_SENDERS_AT_CAP + 1) * per_subject_cap * MAX_QUEUE_MESSAGE_BYTES
@@ -192,8 +195,8 @@ class QueueSettings(BaseModel):
             f"transport.queues.max_bytes.partition ({partition:,} bytes) is too small for "
             f"transport.queues.max_messages_per_subject ({cap}). A partition stream must hold "
             f"{QUEUE_SENDERS_AT_CAP + 1} senders' waiting messages for one agent at that cap, at up to "
-            f"{MAX_QUEUE_MESSAGE_BYTES:,} bytes each ({least:,} bytes), so that one agent's backlog still leaves "
-            f"room for control messages. Raise transport.queues.max_bytes.partition to {least:,} or more{lower_cap}."
+            f"{MAX_QUEUE_MESSAGE_BYTES:,} bytes each ({least:,} bytes), so that {QUEUE_SENDERS_AT_CAP} senders' "
+            f"backlog for one agent still leaves room for control messages. Raise transport.queues.max_bytes.partition to {least:,} or more{lower_cap}."
         )
 
 

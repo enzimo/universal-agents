@@ -521,7 +521,11 @@ PART = "UA1_PART_{team}~{partition}"
         # At the cap NATS would drop the agent's oldest queued message instead of refusing the sender.
         (lambda t: t["streams"][PART].pop("discard_new_per_subject"), "discard_new_per_subject: true"),
         (lambda t: t["streams"][PART].update(discard_new_per_subject="yes"), "discard_new_per_subject: true"),
-        (lambda t: t["streams"]["UA1_POOL_WORK_{team}"].update(discard_new_per_subject=True), "as NATS requires"),
+        (lambda t: t["streams"]["UA1_POOL_WORK_{team}"].update(discard_new_per_subject=True),
+         "UA1_POOL_WORK_{team} sets discard_new_per_subject only with its cap from"),
+        # With its fixed cap of 1 a retried set-aside would be refused instead of replacing its copy.
+        (lambda t: t["streams"]["UA1_DLQ_{team}"].update(discard_new_per_subject=True),
+         "UA1_DLQ_{team} sets discard_new_per_subject only with its cap from"),
         (lambda t: t["streams"]["UA1_POOL_WORK_{team}"].update(
             max_msgs_per_subject_setting="transport.queues.cap", discard_new_per_subject=True),
          "UA1_POOL_WORK_{team} takes its per-subject cap from transport.queues.max_messages_per_subject alone"),
