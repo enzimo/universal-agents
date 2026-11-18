@@ -46,6 +46,7 @@ from assistant_gateway.storage_usage import readable_bytes
 from custom_messages.contracts.status_v1 import StatusFindingV1, StatusSeverity
 from custom_transport.nats_adapter import JetStreamStreamUsage
 from custom_transport.protocol1.contract_files import transport as contract_transport
+from runtime_settings.instance_layout import INSTANCE_CONFIG_FILENAME
 
 if TYPE_CHECKING:
     from custom_messages.wire.queues import QueueStream
@@ -172,9 +173,9 @@ def stream_finding(item: FillingStream, *, since: datetime, warn_at_percent: int
             f"{readable_bytes(limit)} limit. {effect}"
         )[:2000],
         action=(
-            f"{cause} If the team has more waiting than fits, raise {stream.setting} in config.yaml and restart "
-            "the instance. NATS sets a stream's whole limit aside when it creates it, for every stream of that "
-            "kind, so the disk needs room for the larger limits."
+            f"{cause} If the team has more waiting than fits, raise {stream.setting} in {INSTANCE_CONFIG_FILENAME} "
+            "and restart the instance. NATS sets a stream's whole limit aside when it creates it, for every "
+            "stream of that kind, so the disk needs room for the larger limits."
         )[:1000],
         source=SOURCE,
         since=since,

@@ -166,7 +166,7 @@ def test_a_stream_at_the_level_is_a_problem_naming_the_team_its_kind_and_the_set
     assert f"Stream {PART_1} holds 891.3 kB of its 1 MB limit" in partition.summary
     assert "senders keep each one and send it again until it expires" in partition.summary
     assert "hosts are running and taking their work" in partition.action
-    assert "raise transport.queues.max_bytes.partition in config.yaml and restart" in partition.action
+    assert "raise transport.queues.max_bytes.partition in instance_config.yaml and restart" in partition.action
     assert "Warning level: 80% (transport.queues.warn_at_percent); the warning ends below 77%" in partition.details
     assert dead_letters.title == f"Team {TEAM}'s message stream for set-aside messages (dead letters) is 90% full"
     assert "receivers keep each message they would set aside" in dead_letters.summary

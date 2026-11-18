@@ -958,6 +958,15 @@ delivered (a crashed process loses nothing either way). So:
   the disk too (about 4 ms per confirmed message or acknowledgement on that
   disk), and a `max_control_line` that fits the largest host credential the
   message contract allows (`docker.nats_service.contract_server_settings`).
+  It also carries the account's partition mappings at the saved
+  `transport.queues.partitions` (`docker.nats_service.mappings_block`), which
+  add the agent's partition to each agent's inbox, control queue and live
+  control address; hosts subscribe to an agent's live control address with
+  that partition token. The installation authority checks that the server
+  applies them before it serves (`custom_transport.protocol1.mapping_check`);
+  an external server's operator adds the same lines to the installation's
+  account (`scripts/write_nats_mapping_config.py --partitions N`, the
+  configuration guide's "Message Broker").
 - All of it needs storage that flushes when asked: a local disk, or a network
   share that passes the request on. Slow commits and flushes are logged
   (`sqlite_commit_slow`, `sqlite_flush_slow`). The hermetic tests commit with
@@ -5275,10 +5284,16 @@ loss", and what the NATS login needs in the Docker guide's "Message host trust".
   own. All processes run as one operating-system user, so this keeps keys apart by
   path, not by permission: a broken-into process could read another host's key file.
   Remote hosts keep their keys on their own machines.
-- **The bootstrap bundle** (`bootstrap`): the authority public keys and the records a
-  new host needs before it has a certificate. The authority keys are the root of
-  trust, so only the launcher and the installation authority write the file, in the
-  owner-only trust folder; the records in it are verified like any other copy.
+- **The bootstrap bundle** (`bootstrap`): the authority public keys, the installation's
+  partition count and the records a new host needs before it has a certificate. The
+  authority keys are the root of trust, so only the launcher and the installation
+  authority write the file, in the owner-only trust folder; the records in it are
+  verified like any other copy. The launcher writes the partition count from the saved
+  `transport.queues.partitions` at every start, and each host's trust store takes it
+  from the bundle, so every process computes agents' partitions with one count. No
+  release wrote a bundle without a count, so one that lacks it is refused like a damaged
+  one and the launcher writes a new bundle at the next start (the authority signs its
+  records into it again from its own folder).
 - **Kept trust records** (`trust_state`): the revocations record the host holds, plus
   any older one that still lists an entry the newer one left out early, and the
   highest block-list sequence of each team survive a restart, as the contract
@@ -5296,7 +5311,11 @@ loss", and what the NATS login needs in the Docker guide's "Message host trust".
   requests answered at once with only the refusal's code and known pointer. A served
   address answers only on the requester's own inbox (`answer_subject`): NATS lets a
   receiver answer once past its own grants, so an answer on a subject the requester
-  named, such as a JetStream API subject, would act with the receiver's rights. Each
+  named, such as a JetStream API subject, would act with the receiver's rights. An
+  agent's live control address is mapped to its partition, so the host subscribes to it
+  with the agent's partition token at its trust store's count and takes the token off the
+  arrival subject before the subject check
+  (`custom_messages.wire.partitions.signed_subject_of`). Each
   request is handled in a task of its own: kinds run one at a time in arrival order
   unless the caller lets them run side by side (handlers that only wait on another
   host), an address holds at most 64 requests, and one that waited past its expiry is
@@ -5325,19 +5344,58 @@ prepares the trust folder first (`docker.message_hosts`): it keeps the installat
 id, which the authority's key file holds (a missing key file gives a new id, since a new
 key could check nothing the old one signed), creates any missing key, writes the hosts it
 starts with their public keys (`expected-hosts.json`; empty until the launcher starts
-message hosts) and the bundle's authority keys. It starts the authority once NATS and the
-team's message streams are ready and waits until the bundle carries the authority's
-certificate and a freshly signed revocations record; a host that joins before the authority
-serves waits for it (`joining.join`). A failed or interrupted start stops the authority and the services already
-started. The authority gets only the NATS login (`env_secrets`, renamed secrets included).
-The authority:
+message hosts), and the bundle's authority keys and partition count, from the saved
+configuration as it is at each start. It starts the authority once NATS and the message
+streams the current runtime uses are ready (`prepare_message_streams_before_services`)
+and waits until the bundle carries the authority's certificate and a freshly signed
+revocations record; a host that joins before the authority serves waits for it
+(`joining.join`). How long it waits grows with `transport.replicas`
+(`docker.message_hosts.authority_ready_timeout`): 60 seconds for the mapping check and the
+records, plus 30 seconds for the team's streams with one copy each or 300 with more,
+measured on nats-server 2.15.1 with room for a disk about 15 times slower; the team
+services' wait grows by the same. A failed or interrupted start stops the authority and
+the services already started. The authority gets only the NATS login (`env_secrets`,
+renamed secrets included). The authority:
 
-- creates the key-value buckets, with the operator's `transport.replicas`. It is the
-  contract's topology owner: queued work streams come with queued work, and each team's
-  dead-letter stream with phase 3's dead letters (plan decision 71). Per-team buckets use
+- checks, before it changes anything, that the bundle holds its own
+  `transport.queues.partitions` (`PartitionCountMismatch`) and that the NATS server maps
+  agents' addresses to their partitions at that count
+  (`custom_transport.protocol1.mapping_check`, `PartitionMappingRefused`), with probe
+  messages that name the mapping line that is missing or maps with another count;
+- creates, or brings up to date at each start before it serves, what the contract's
+  topology owner owns (plan decision 71, `installation_authority/queues.py`,
+  `QueueTopology`): every team's work and dead-letter streams from
+  `custom_messages.wire.queues` (a stream per partition,
+  the pool, edge, team-services and dead-letter streams; 100 streams at the default 96
+  partitions), the key-value buckets, and the two consumers each team has once (the team
+  services' inbox and dead-letter notices), with the instance's `transport.queues` byte
+  limits and per-subject cap and `transport.replicas`. It first reads every stream it wants
+  and refuses the start, changing nothing, when a team's partition streams were made with
+  another partition count (each records its count, `PARTITION_COUNT_METADATA`), when a
+  lowered per-subject cap would drop queued messages (NATS keeps messages above a lowered
+  byte limit but drops the oldest above a lowered `max_msgs_per_subject`), or when the NATS
+  account or server has no room or too few streams left; each refusal names the stream,
+  the limit and the setting to change (`event=installation_authority_start_refused`). Then
+  it lowers the streams whose limits go down, which gives back the room they set aside,
+  and creates or enlarges the others. A stream whose fields the contract sets already
+  match is not sent to NATS, so a restart with the same settings asks for no change: a
+  server whose storage is now smaller than what its streams set aside (the bundled server
+  measures it from the disk's free space at every start) keeps serving the streams it has
+  but refuses every new or changed one. Per-team buckets use
   `custom_messages.wire.buckets.bucket_name` and every bucket's stream `bucket_stream`.
   The contract disables rollup, stream deletion and purge, so writing one key cannot
   erase the bucket. Repeated setup reconciles those settings without discarding records;
+- follows each team's placements in `UA1_PLACEMENT` (`installation_authority/placements.py`,
+  `PlacedConsumers`) once it serves: a placement that verifies gets the agent's inbox and
+  control consumers in its partition's stream. A deleted placement removes them only once
+  the agent's queues hold nothing (nothing waiting, delivered and unacknowledged, or stored
+  on their subjects); while they hold work they stay (`event=agent_consumers_kept`) and are
+  checked again every minute. At start and whenever its watch opens again, one sweep ends
+  the agent consumers of agents with no placement by the same rule, which covers placements
+  that ended while the authority was down. One lock serialises every consumer change, and
+  each change acts on the placement key as it is then, so an answer read earlier never
+  undoes a newer placement. Pools' and edges' consumers come with the steps that name
+  them, and nothing publishes to the work streams or reads them yet;
 - keeps its records current by the wall clock, checking every minute (`keep_current`), so
   a laptop or a paused virtual machine that slept wakes to a current record within a
   minute: it signs the revocations record again once it is six hours old (it lasts a day,
@@ -5756,8 +5814,9 @@ has no address, so nothing can ask it anything and its exit goes unseen. So:
   repeating an open replaces its placement and session. A refused renewal opens a new session.
 
 **Agent records and who is live** (step 7a): each agent's host signs the agent's state into
-`UA1_AGENTS` (key `<team>.<partition>.<agent>`, the partition computed with the contract's
-default count by `custom_messages.wire.partitions.agent_record_key`, so a host's grant can
+`UA1_AGENTS` (key `<team>.<partition>.<agent>`, the partition computed by
+`custom_messages.wire.partitions.agent_record_key` with the count the host's trust store took
+from the bootstrap bundle, the saved `transport.queues.partitions`, so a host's grant can
 name the partitions it owns: starting, idle, busy, paused or exiting, whether it
 accepts work, and its `display_name`, plan decision 69) when the agent reports a change
 (`custom_agents.agent_host.report_agent_state`, called wherever the agent refreshes its own
