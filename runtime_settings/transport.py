@@ -3,9 +3,9 @@
 from __future__ import annotations
 import logging
 from typing import Any, Final, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from custom_messages.contracts.runtime_v1 import TRANSPORT_NATS
-from default_values import TRANSPORT_DEFAULTS
+from default_values import MAX_QUEUE_PARTITIONS, MIN_QUEUE_BYTES, TRANSPORT_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,99 @@ def refuse_retired_presence_setting(config: Any) -> None:
         )
 
 
+# The installation's partition count is fixed when the installation is created: another
+# count puts every queued message in another stream (contracts/messages/v1/README.md,
+# "Partitions"). So it does not travel with a team (team_transfer.settings), and the
+# installation authority refuses to start with a count other than the one its teams'
+# streams were created with.
+PARTITION_COUNT_SETTING: Final = ("transport", "queues", "partitions")
+# The size warning ends three points below its level (assistant_gateway.storage_capacity
+# RELEASE_POINTS), so a level of 3 or less could never end; below 10 it would also be
+# raised by a handful of messages.
+MIN_WARN_AT_PERCENT: Final = 10
+MAX_WARN_AT_PERCENT: Final = 99
+
+
+def _queue_setting_number(value: Any, *, name: str, least: int, most: Optional[int] = None) -> int:
+    """A whole number from ``least`` (to ``most``) for a ``transport.queues`` setting.
+
+    Accepts an int or a string of digits (environment-style YAML values); refuses true/false
+    and fractions, which pydantic's int coercion would otherwise accept or round.
+    """
+
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a whole number.")
+    if value < least or (most is not None and value > most):
+        bound = f"from {least} to {most}" if most is not None else f"at least {least}"
+        raise ValueError(f"{name} must be {bound}, not {value}.")
+    return value
+
+
+class QueueByteLimits(BaseModel):
+    """``transport.queues.max_bytes``: one byte limit per size kind of the contract's streams.
+
+    The field names are the contract's size kinds (``transport.yaml`` ``queues.size_kinds``).
+    Each limit applies to each stream of its kind, each team's apart: every one of a team's
+    partition streams has the ``partition`` limit. NATS sets the whole limit aside from its
+    storage when it creates the stream, so these are also what the installation reserves.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    partition: int = TRANSPORT_DEFAULTS.queues_max_bytes_partition.value
+    pool: int = TRANSPORT_DEFAULTS.queues_max_bytes_pool.value
+    edge: int = TRANSPORT_DEFAULTS.queues_max_bytes_edge.value
+    team_services: int = TRANSPORT_DEFAULTS.queues_max_bytes_team_services.value
+    dead_letter: int = TRANSPORT_DEFAULTS.queues_max_bytes_dead_letter.value
+
+    @field_validator("partition", "pool", "edge", "team_services", "dead_letter", mode="before")
+    @classmethod
+    def _at_least_one_frame(cls, value: Any, info: Any) -> int:
+        return _queue_setting_number(
+            value, name=f"transport.queues.max_bytes.{info.field_name}", least=MIN_QUEUE_BYTES
+        )
+
+
+class QueueSettings(BaseModel):
+    """``transport.queues``: the protocol 1 work and dead-letter streams of every team.
+
+    The installation authority creates the streams with these limits at every start and the
+    gateway warns administrators when one fills (contracts/messages/v1/README.md, "Stream
+    sizes"). ``partitions`` is fixed when the installation is created
+    (``PARTITION_COUNT_SETTING``). ``max_messages_per_subject`` caps one sender's waiting
+    messages for one agent's inbox or control queue in a partition stream, so one agent's
+    backlog leaves room for its own and its neighbours' control messages.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_bytes: QueueByteLimits = Field(default_factory=QueueByteLimits)
+    warn_at_percent: int = TRANSPORT_DEFAULTS.queues_warn_at_percent.value
+    partitions: int = TRANSPORT_DEFAULTS.queues_partitions.value
+    max_messages_per_subject: int = TRANSPORT_DEFAULTS.queues_max_messages_per_subject.value
+
+    @field_validator("warn_at_percent", mode="before")
+    @classmethod
+    def _warn_level(cls, value: Any) -> int:
+        return _queue_setting_number(
+            value, name="transport.queues.warn_at_percent", least=MIN_WARN_AT_PERCENT, most=MAX_WARN_AT_PERCENT
+        )
+
+    @field_validator("partitions", mode="before")
+    @classmethod
+    def _partition_count(cls, value: Any) -> int:
+        return _queue_setting_number(
+            value, name="transport.queues.partitions", least=1, most=MAX_QUEUE_PARTITIONS
+        )
+
+    @field_validator("max_messages_per_subject", mode="before")
+    @classmethod
+    def _per_subject_cap(cls, value: Any) -> int:
+        return _queue_setting_number(value, name="transport.queues.max_messages_per_subject", least=1)
+
+
 class TransportSettings(BaseModel):
     type: str = TRANSPORT_DEFAULTS.type.value
     nats_url: str = TRANSPORT_DEFAULTS.nats_url.value
@@ -76,6 +169,7 @@ class TransportSettings(BaseModel):
     nats_user: Optional[str] = TRANSPORT_DEFAULTS.nats_user.value
     nats_password: Optional[str] = TRANSPORT_DEFAULTS.nats_password.value
     credentials_file: Optional[str] = TRANSPORT_DEFAULTS.credentials_file.value
+    queues: QueueSettings = Field(default_factory=QueueSettings)
 
     @field_validator("type")
     @classmethod

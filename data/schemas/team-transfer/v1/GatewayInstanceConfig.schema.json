@@ -3518,6 +3518,65 @@
       "title": "ProviderLimitSettings",
       "type": "object"
     },
+    "QueueByteLimits": {
+      "additionalProperties": false,
+      "description": "``transport.queues.max_bytes``: one byte limit per size kind of the contract's streams.\n\nThe field names are the contract's size kinds (``transport.yaml`` ``queues.size_kinds``).\nEach limit applies to each stream of its kind, each team's apart: every one of a team's\npartition streams has the ``partition`` limit. NATS sets the whole limit aside from its\nstorage when it creates the stream, so these are also what the installation reserves.",
+      "properties": {
+        "dead_letter": {
+          "default": 134217728,
+          "title": "Dead Letter",
+          "type": "integer"
+        },
+        "edge": {
+          "default": 134217728,
+          "title": "Edge",
+          "type": "integer"
+        },
+        "partition": {
+          "default": 16777216,
+          "title": "Partition",
+          "type": "integer"
+        },
+        "pool": {
+          "default": 134217728,
+          "title": "Pool",
+          "type": "integer"
+        },
+        "team_services": {
+          "default": 268435456,
+          "title": "Team Services",
+          "type": "integer"
+        }
+      },
+      "title": "QueueByteLimits",
+      "type": "object"
+    },
+    "QueueSettings": {
+      "additionalProperties": false,
+      "description": "``transport.queues``: the protocol 1 work and dead-letter streams of every team.\n\nThe installation authority creates the streams with these limits at every start and the\ngateway warns administrators when one fills (contracts/messages/v1/README.md, \"Stream\nsizes\"). ``partitions`` is fixed when the installation is created\n(``PARTITION_COUNT_SETTING``). ``max_messages_per_subject`` caps one sender's waiting\nmessages for one agent's inbox or control queue in a partition stream, so one agent's\nbacklog leaves room for its own and its neighbours' control messages.",
+      "properties": {
+        "max_bytes": {
+          "$ref": "#/$defs/QueueByteLimits"
+        },
+        "max_messages_per_subject": {
+          "default": 8,
+          "title": "Max Messages Per Subject",
+          "type": "integer"
+        },
+        "partitions": {
+          "default": 96,
+          "title": "Partitions",
+          "type": "integer"
+        },
+        "warn_at_percent": {
+          "default": 80,
+          "title": "Warn At Percent",
+          "type": "integer"
+        }
+      },
+      "title": "QueueSettings",
+      "type": "object"
+    },
     "QuietHoursSettings": {
       "properties": {
         "allow_urgent_delivery": {
@@ -4240,6 +4299,9 @@
           "exclusiveMinimum": 0,
           "title": "Process Consumer Inactive Threshold Seconds",
           "type": "number"
+        },
+        "queues": {
+          "$ref": "#/$defs/QueueSettings"
         },
         "replicas": {
           "default": 1,
