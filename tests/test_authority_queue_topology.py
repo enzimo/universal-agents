@@ -577,9 +577,9 @@ def test_a_cluster_without_room_for_a_streams_copies_gets_the_storage_refusal_no
         "no server of the NATS cluster has room for it")
     assert message.startswith(
         f"NATS refused to create stream {STREAMS[0]}: {lacking} (JetStream error 10005, no suitable peers for "
-        "placement, insufficient storage). Each server that keeps a copy of a stream needs room for the stream's whole limit in its own "
-        f"storage, here 1,048,576 bytes ({setting}). Team {TEAM}'s streams set aside 6,291,456 bytes at the current "
-        "settings")
+        "placement, insufficient storage). Each server that keeps a copy of a stream needs room for the stream's "
+        f"whole limit in its own storage, here 1,048,576 bytes ({setting}). Team {TEAM}'s streams set aside "
+        "6,291,456 bytes at the current settings")
     assert f"Lower {setting} or the other transport.queues.max_bytes entries" in message
     assert ("lower transport.replicas so fewer servers need that room" in message) == (replicas > 1)
     assert "Set transport.replicas" not in message and "On the bundled NATS server" not in message

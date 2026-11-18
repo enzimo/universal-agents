@@ -599,9 +599,9 @@ class QueueTopology:
                    else f"too few servers of the NATS cluster have room for its {copies} copies")
         return StreamStorageRefused(
             f"NATS refused to {action} {change.what}: {lacking} (JetStream error {error.err_code}, "
-            f"{error.description}). Each server that keeps a copy of a stream needs room for the stream's whole limit in its own storage, "
-            f"here {_limit(change.config):,} bytes{setting}. {self._totals(change.team, room)} {_lower(change)}"
-            f"{fewer}, or give the cluster's servers more storage (their max_file_store). {_MADE_SO_FAR_STAY}")
+            f"{error.description}). Each server that keeps a copy of a stream needs room for the stream's whole "
+            f"limit in its own storage, here {_limit(change.config):,} bytes{setting}. "
+            f"{self._totals(change.team, room)} {_lower(change)}{fewer}, or give the cluster's servers more storage (their max_file_store). {_MADE_SO_FAR_STAY}")
 
     def _server_refusal(self, doing: str, error: BaseException, *, after: str,
                         change: Optional[StreamChange] = None) -> AuthorityStartRefused:
