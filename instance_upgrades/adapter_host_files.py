@@ -203,27 +203,35 @@ creates their tables on an instance that never ran it. A nonzero count logs
 one warning (``event=adapter_host_files_without_records``) with the folder,
 the count, the names and what an administrator may do (F6 of the review of
 PR #150; the owner chose naming them). The gateway of 0.9.13 and 0.10 names
-every transfer file ``adapter_upload_`` and a lowercase hex id (``new_id``),
-so those names hold no one's text: only names of that form are shown
-(``_GATEWAY_NAME``), and any other counted name, which something else put
-there and which may be text someone chose, is only counted (``unlisted=``).
+every transfer file ``adapter_upload_`` and 12 lowercase hex digits
+(``new_id``), so those names hold no one's text: only names of exactly that
+form are shown (``_GATEWAY_NAME``), and any other counted name, which
+something else put there and which may be text someone chose, is only
+counted (``unlisted=``).
 The run that writes the marker writes those names, sorted and one per line,
 to ``InstanceLayout.adapter_host_files_without_records_path`` just before the
 marker; the warning shows the first ten, then says to keep them when the
 folder was at another path under 0.9.13 (the one case where the list is
 wrong by design), and only then gives a command that deletes exactly the
-listed files, and that refuses, saying so, while the marker is not where it
-names it. A list is valid only beside the marker of the run that
-wrote it: every later run that does not find the marker removes it, under
-the step's lock and before it reads any record, and a run with nothing to
-list removes it too. A failure writing or removing the list is logged
+listed files. A list is valid only beside the marker of the run that wrote
+it: every later run that does not find the marker removes it, under the
+step's lock and before it reads any record, and a run with nothing to list
+removes it too. Removing it can fail while the marker is still written, so
+the marker holds a random id for the list its run wrote
+(``without_records_list_id``, null without one), and the command deletes
+nothing, saying so, unless the marker holds its list's id (F1 of PR #154's
+review). A failure writing or removing the list is logged
 (``event=adapter_host_files_without_records_list_failed``) and changes
 nothing else. The team cannot open those files, but the 0.10 adapter host
 passes new files through the same folder under the same names, so a list
 taken while the team runs (the operator's command) may name its copies. The
 advice is therefore to delete them only after the gateway has started on 0.10
 since the marker was written (it has then handled the messages taken in
-before), and only while the instance is stopped. A folder that is not there
+before), and only while the instance is stopped, letting the team run a few
+minutes after that start first: a remote adapter host keeps its registration
+epoch until its message arrives or a request fails (a heartbeat renews even
+an expired lease), so an upload it finished before the list can still be
+used just after the start. A folder that is not there
 counts 0; one gone or replaced since the step first opened it (its device and
 inode differ), any other error listing it and a database error reading the adapter host's
 records log ``event=adapter_host_files_without_records_uncounted`` and leave
@@ -285,6 +293,7 @@ from assistant_gateway.domain.delivery import AttachmentRecord
 from assistant_gateway.inbound_attachments import safe_attachment_session_dir_name, sanitize_attachment_filename
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.task_v1 import TaskSteering
+from id_generation import RANDOM_ID_SUFFIX_LENGTH, new_id_suffix
 from storage.adapter_host_repository import create_adapter_host_repository
 from storage.conversation_repository import ConversationRepository, create_conversation_repository
 from storage.gateway_state_repository import GatewayStateRepository, create_gateway_state_repository
@@ -344,18 +353,26 @@ REASON_FOLDER_CHANGED = "folder_changed"
 # What 0.9.13's adapter host named each file it kept, directly in its transfer folder
 # (``new_id("adapter_upload")`` in ``assistant_gateway.adapter_host.service``).
 TRANSFER_FILE_PREFIX = "adapter_upload_"
-# The names the gateway itself gives those files: the prefix and a lowercase hex id (``new_id`` takes
-# ``uuid4().hex``), matched in full. Only these are listed and named (F6 of PR #150's review): any other
-# name an operator's folder holds may be text someone chose. A hex-only name also has no space, quote,
-# newline or undecodable byte, so a list of one name per line is safe for ``xargs`` and always UTF-8.
-# The length is left open, so ids a version made longer are still listed.
-_GATEWAY_NAME = re.compile(re.escape(TRANSFER_FILE_PREFIX) + "[0-9a-f]+")
+# The names the gateway itself gives those files: the prefix and exactly the lowercase hex digits ``new_id``
+# adds (``RANDOM_ID_SUFFIX_LENGTH``, the same from 0.9.4 to 0.10), matched in full. Only these are listed and
+# named (F6 of PR #150's review): any other name an operator's folder holds may be text someone chose, and so
+# may a longer hex run (SEC-1 of PR #154's review). The step handles only files 0.9.13 or earlier wrote, so no
+# other length needs listing. A hex-only name also has no space, quote, newline or undecodable byte, so a list
+# of one name per line is safe for ``xargs`` and always UTF-8.
+_GATEWAY_NAME = re.compile(re.escape(TRANSFER_FILE_PREFIX) + f"[0-9a-f]{{{RANDOM_ID_SUFFIX_LENGTH}}}")
 # How many of those names the files-without-records warning shows; the list file holds them all, so the log
 # line stays bounded.
 _NAMED_IN_WARNING = 10
-# What the delete command prints, with a nonzero status, when the marker is not where it names it (C07 of F6):
-# ``rm -f`` prints nothing when it deletes, so a silent refusal would look the same as a delete.
-DELETE_REFUSED = "Nothing deleted: the marker this command names is not there, so the list must not be used."
+# The marker's field holding the id of the list its run wrote (``None`` when it wrote none). The delete
+# command checks the marker for it, so only the marker written with a list lets that list be used (F1 of
+# PR #154's review).
+LIST_ID_FIELD = "without_records_list_id"
+# What the delete command prints, with a nonzero status, when the marker is not the one written with its list
+# (C07 of F6): ``rm -f`` prints nothing when it deletes, so a silent refusal would look the same as a delete.
+DELETE_REFUSED = (
+    "Nothing deleted: the marker this command checks is missing or was not written with this list, so the list "
+    "must not be used."
+)
 # How a hosted-chat message names a file in the transfer folder (``AdapterAttachmentV1.storage_reference``).
 _UPLOAD_REFERENCE_SCHEME = "adapter-upload"
 # The upload status a message's file must have for the gateway to read it (``resolve_upload_reference``).
@@ -439,6 +456,14 @@ class _Leftovers:
     @property
     def count(self) -> int:
         return len(self.listed) + self.unlisted
+
+
+@dataclass(frozen=True)
+class _WrittenList:
+    """The list of files no record names this run wrote, and the random id its marker holds for it (F1 of PR #154's review)."""
+
+    path: Path
+    list_id: str
 
 
 @dataclass
@@ -600,7 +625,7 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
             step.forget_unmovable()
             leftovers = step.files_without_records()
             step.counts.files_without_records = None if leftovers is None else leftovers.count
-            listed = _finish(marker, leftover_list, step.counts, leftovers)
+            written = _finish(marker, leftover_list, step.counts, leftovers)
     except FolderProblem as problem:
         problem.files_gone_helps = problem.not_there and problem.folder == transfer
         logger.error(
@@ -628,29 +653,45 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
         "-" if counts.files_without_records is None else counts.files_without_records,
     )
     if leftovers is not None and leftovers.count:
-        _report_files_without_records(transfer, marker, leftover_list if listed else None, leftovers)
+        _report_files_without_records(transfer, marker, written, leftovers)
     return UpgradeResult(finished=True, counts=counts)
 
 
-def _finish(marker: Path, leftover_list: Path, counts: UpgradeCounts, leftovers: Optional[_Leftovers]) -> bool:
+def _finish(
+    marker: Path, leftover_list: Path, counts: UpgradeCounts, leftovers: Optional[_Leftovers]
+) -> Optional[_WrittenList]:
     """Write the list of the files no record names, or settle that there is none, then the marker.
 
-    Returns whether ``leftover_list`` holds this run's list. The list goes
-    first: a run stopped between the two leaves a list without a marker,
-    which the next run removes at its start, while a list written after the
-    marker could be missing or stale beside it with no later run to correct
-    it. A marker that cannot be written (``FolderProblem``) takes the list
-    just written with it, so no list is left without its marker.
+    Returns this run's list, or None when ``leftover_list`` does not hold
+    one. The list goes first: a run stopped between the two leaves a list
+    without a marker, which the next run removes at its start, while a list
+    written after the marker could be missing or stale beside it with no
+    later run to correct it. A marker that cannot be written
+    (``FolderProblem``) takes the list just written with it, so no list is
+    left without its marker.
+
+    The marker holds a new random id for the list (``LIST_ID_FIELD``, None
+    without a list), which the delete command checks. Removing a list a
+    later run finds can fail (a bind-mounted file answers ``EBUSY``, an
+    immutable one ``EPERM``) while the marker is still written, so a marker
+    beside a list does not prove that its run wrote that list; without the
+    id a command copied from the earlier run's warning would delete from a
+    list the later run did not write, including a file the later run says
+    to keep (F1 of PR #154's review). The review's probe showed that
+    checking the list's sha256 or giving each run its own list name does
+    not stop that: the stale list and its name are unchanged.
     """
 
     listed = _settle_leftover_list(leftover_list, leftovers.listed if leftovers is not None else ())
+    written = _WrittenList(leftover_list, new_id_suffix()) if listed else None
+    body = {"finished_at_utc": _now(), **asdict(counts), LIST_ID_FIELD: written.list_id if written else None}
     try:
-        _write_state_file(marker, {"finished_at_utc": _now(), **asdict(counts)})
+        _write_state_file(marker, body)
     except FolderProblem:
-        if listed:
+        if written:
             _remove_leftover_list(leftover_list)
         raise
-    return listed
+    return written
 
 
 def _settle_leftover_list(path: Path, names: tuple[str, ...]) -> bool:
@@ -702,7 +743,7 @@ def _log_list_failed(path: Path, action: str, exc: OSError) -> None:
 
 
 def _report_files_without_records(
-    transfer: Path, marker: Path, leftover_list: Optional[Path], leftovers: _Leftovers
+    transfer: Path, marker: Path, written: Optional[_WrittenList], leftovers: _Leftovers
 ) -> None:
     """Say once, from the run that wrote the marker, which files no record names are left and what to do (F16).
 
@@ -710,9 +751,9 @@ def _report_files_without_records(
     (``new_id("adapter_upload")``, ``_GATEWAY_NAME``) are shown, never one
     of another form, which may be text someone chose and is only counted
     (F6 of the review of PR #150). Never contents. The warning shows the
-    first ``_NAMED_IN_WARNING`` names and points at ``leftover_list``, which
-    holds them all, with a command that deletes exactly those
-    (``_delete_command``); ``leftover_list`` is None when the list could not
+    first ``_NAMED_IN_WARNING`` names and points at the list this run
+    ``written``, which holds them all, with a command that deletes exactly
+    those (``_delete_command``); ``written`` is None when the list could not
     be written, and then only the names shown may go. With no name of the
     gateway's form there is no delete advice at all, and the warning gives
     none of the causes it gives for the gateway's names (files of people
@@ -744,16 +785,16 @@ def _report_files_without_records(
         "event=adapter_host_files_without_records folder=%s files_without_records=%s unlisted=%s list=%s",
         leftovers.count,
         causes,
-        _listed_advice(transfer, marker, leftover_list, leftovers.listed),
+        _listed_advice(transfer, marker, written, leftovers.listed),
         _unlisted_note(leftovers),
         transfer,
         leftovers.count,
         leftovers.unlisted,
-        leftover_list or "-",
+        written.path if written else "-",
     )
 
 
-def _listed_advice(transfer: Path, marker: Path, leftover_list: Optional[Path], listed: tuple[str, ...]) -> str:
+def _listed_advice(transfer: Path, marker: Path, written: Optional[_WrittenList], listed: tuple[str, ...]) -> str:
     """The names the warning shows, where the rest are, and which of them an administrator may delete, and when."""
 
     if not listed:
@@ -761,9 +802,9 @@ def _listed_advice(transfer: Path, marker: Path, leftover_list: Optional[Path], 
     shown = ", ".join(listed[:_NAMED_IN_WARNING])
     if len(listed) > _NAMED_IN_WARNING:
         shown += f" and {len(listed) - _NAMED_IN_WARNING} more"
-    if leftover_list is not None:
-        where = f" Listed in {leftover_list} ({len(listed)} file(s), one name per line): {shown}."
-        what = f"exactly the listed files ({_delete_command(marker, transfer, leftover_list)})"
+    if written is not None:
+        where = f" Listed in {written.path} ({len(listed)} file(s), one name per line): {shown}."
+        what = f"exactly the listed files ({_delete_command(marker, transfer, written)})"
         names = "The list names"
     else:
         where = (
@@ -777,7 +818,9 @@ def _listed_advice(transfer: Path, marker: Path, leftover_list: Optional[Path], 
     # the command (C10 of F6): the command deletes on one paste, and a person who acts on it before reading the
     # whole line must already have been told when not to. Both the names and the not-moved warning's sources= come
     # from the same records, so no listed file is one a record keeps (C08 of F6): the administrator removes nothing
-    # from the list.
+    # from the list. A remote adapter host keeps its registration epoch across a short restart until its message
+    # arrives or a request fails (a heartbeat renews even an expired lease), so an upload it finished before the
+    # list can still resolve after the restart: hence the few minutes (GEN-1 and CRIT-1 of PR #154's review).
     return (
         f"{where} If this folder was at another path under 0.9.13 (moved, mounted elsewhere or reached through "
         "another link), the records of these files may name that path: do not delete them; move or mount the "
@@ -787,8 +830,10 @@ def _listed_advice(transfer: Path, marker: Path, leftover_list: Optional[Path], 
         "handles messages taken in but not handled yet (0.9's too) and removes their files, and the 0.10 adapter "
         "host passes new files through this folder, so a list taken while the team runs (the operator's command, "
         "with or without --files-gone) may name one a message will still use: after such a run, restart the "
-        f"instance once before deleting. {names} no file from the sources= field of an adapter_host_file_not_moved "
-        "warning, and those must be kept. With the adapter host turned off, keep the files until it has run again."
+        "instance once before deleting. Before stopping the instance to delete, let the team run a few minutes "
+        "after the gateway's start, so that messages a remote adapter host is still sending arrive. "
+        f"{names} no file from the sources= field of an adapter_host_file_not_moved warning, and those must be "
+        "kept. With the adapter host turned off, keep the files until it has run again."
     )
 
 
@@ -800,29 +845,37 @@ def _unlisted_note(leftovers: _Leftovers) -> str:
     scope = "this advice does not cover them" if leftovers.listed else "the step gives no advice for them"
     return (
         f" Not listed: {leftovers.unlisted} file(s) whose names are not ones the gateway gives "
-        f"({TRANSFER_FILE_PREFIX} and a lowercase hex id), so something else put them there and their names may be "
-        f"text someone chose; {scope}."
+        f"({TRANSFER_FILE_PREFIX} and {RANDOM_ID_SUFFIX_LENGTH} lowercase hex digits), so something else put them "
+        f"there and their names may be text someone chose; {scope}."
     )
 
 
-def _delete_command(marker: Path, transfer: Path, leftover_list: Path) -> str:
-    """The shell command that deletes exactly the listed files, and refuses to while the marker is missing.
+def _delete_command(marker: Path, transfer: Path, written: _WrittenList) -> str:
+    """The shell command that deletes exactly the listed files, and refuses unless the marker was written with them.
 
     A list is valid only beside the marker of the run that wrote it (C01 and
     C06 of F6): one whose marker was deleted, as the advice for a folder that
-    was at another path asks, may name files whose records are live, so
-    ``test -f`` stops the command before anything is deleted. The refusal
-    prints ``DELETE_REFUSED`` and exits nonzero (C07): ``rm -f`` prints
-    nothing when it deletes, and a person who pasted the command where the
-    paths are not (a container's paths on its host) must see that nothing
-    happened. Each path is quoted for the shell (an instance root may hold a
-    space); the names in the list are hex ids, which ``xargs`` reads as they
-    are.
+    was at another path asks, may name files whose records are live, and an
+    earlier list a later run could not remove may name a file that run says
+    to keep (F1 of PR #154's review). So the command first looks in the
+    marker for the id this run stored for its list (``LIST_ID_FIELD``), with
+    ``grep -qF`` (fixed text, in every ``grep``: GNU, BusyBox, macOS); a
+    missing marker, another run's or one written without a list stops it
+    before anything is deleted, and grep's own message says when the marker
+    is missing or unreadable. The text looked for is the field as
+    ``json.dumps`` writes it, which ``_write_state_file`` puts on one line.
+    The refusal prints ``DELETE_REFUSED`` and exits nonzero (C07): ``rm -f``
+    prints nothing when it deletes, and a person who pasted the command
+    where the paths are not (a container's paths on its host) must see that
+    nothing happened. Each path and the text are quoted for the shell (an
+    instance root may hold a space); the names in the list are hex ids,
+    which ``xargs`` reads as they are.
     """
 
+    entry = json.dumps({LIST_ID_FIELD: written.list_id})[1:-1]  # '"without_records_list_id": "<id>"'
     return (
-        f"if test -f {shlex.quote(str(marker))}; then cd {shlex.quote(str(transfer))} && "
-        f"xargs rm -f -- < {shlex.quote(str(leftover_list))}; else echo {shlex.quote(DELETE_REFUSED)} >&2; false; fi"
+        f"if grep -qF -- {shlex.quote(entry)} {shlex.quote(str(marker))}; then cd {shlex.quote(str(transfer))} && "
+        f"xargs rm -f -- < {shlex.quote(str(written.path))}; else echo {shlex.quote(DELETE_REFUSED)} >&2; false; fi"
     )
 
 

@@ -79,7 +79,7 @@ from uuid import uuid4
 import pytest
 
 import instance_upgrades.adapter_host_files as upgrade_module
-from instance_upgrades.adapter_host_files import DELETE_REFUSED, upgrade_adapter_host_files
+from instance_upgrades.adapter_host_files import DELETE_REFUSED, LIST_ID_FIELD, upgrade_adapter_host_files
 from assistant_gateway.adapter_host.domain import AdapterInboxRecord, AdapterUploadRecord
 from assistant_gateway.adapter_host.service import AdapterHostApplicationService
 from assistant_gateway.contracts.adapter_host_v1 import (
@@ -637,6 +637,46 @@ def _plant_earlier_list(layout: InstanceLayout) -> Path:
     return path
 
 
+def _list_id_entry(layout: InstanceLayout) -> str:
+    """The marker's line naming its run's list id (F1 of PR #154's review), as the delete command looks for it."""
+
+    marker = layout.adapter_host_files_upgrade_path
+    list_id = json.loads(marker.read_text())[LIST_ID_FIELD]
+    assert re.fullmatch("[0-9a-f]{12}", list_id), "a new random id per list"
+    entry = f'"{LIST_ID_FIELD}": "{list_id}"'
+    assert any(entry in line for line in marker.read_text().splitlines()), "on one line of the marker, as grep reads it"
+    return entry
+
+
+def _command_in(warning: str) -> str:
+    """The delete command the warning gives."""
+
+    return re.search(r"may delete exactly the listed files \((.+?)\) only while", warning).group(1)
+
+
+def _paste(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run a warning's command as an administrator pastes it: ``sh -c``, from another folder."""
+
+    return subprocess.run(["sh", "-c", command], cwd=cwd, capture_output=True, text=True, timeout=30)
+
+
+def _refuse_removal(monkeypatch: pytest.MonkeyPatch, path: Path, *, times: int | None) -> list[str]:
+    """Make removing ``path`` fail with EACCES ``times`` times (None: always); returns the attempts."""
+
+    attempts: list[str] = []
+    real_unlink = os.unlink
+
+    def refusing(target, *args, **kwargs):
+        if Path(os.fsdecode(target)) == path:
+            attempts.append("unlink")
+            if times is None or len(attempts) <= times:
+                raise OSError(errno.EACCES, os.strerror(errno.EACCES))
+        return real_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", refusing)
+    return attempts
+
+
 def _opened_names(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """The last path component of every ``os.open`` from here on: what the step opened."""
 
@@ -661,15 +701,20 @@ def _assert_reported(caplog: pytest.LogCaptureFixture, instance: _Instance, list
     assert warning.endswith(f"{fields} list={leftover_list}")
     shown = ", ".join(sorted(listed)[:10]) + (f" and {len(listed) - 10} more" if len(listed) > 10 else "")
     assert f"Listed in {leftover_list} ({len(listed)} file(s), one name per line): {shown}. If this folder" in warning
-    # C04, C06 and C07: every path quoted, and nothing deleted, said aloud, while the marker is missing.
-    quoted = [shlex.quote(str(path)) for path in (marker, instance.transfer, leftover_list)]
-    command = "if test -f {}; then cd {} && xargs rm -f -- < {}; else echo {} >&2; false; fi".format(
+    # C04, C06 and C07: every path quoted, and nothing deleted, said aloud, unless the marker holds the id of
+    # this list (F1 of PR #154's review).
+    quoted = [shlex.quote(str(text)) for text in (_list_id_entry(instance.layout), marker, instance.transfer, leftover_list)]
+    command = "if grep -qF -- {} {}; then cd {} && xargs rm -f -- < {}; else echo {} >&2; false; fi".format(
         *quoted, shlex.quote(DELETE_REFUSED)
     )
     assert f"Otherwise an administrator may delete exactly the listed files ({command}) only while the instance is stopped" in warning
     assert "files of people removed on 0.9" in warning, "C08: the causes are those of the gateway's names"
     assert f"only after the gateway has started on 0.10 since the step's marker {marker} was written" in warning, "C03"
     assert "after such a run, restart the instance once before deleting" in warning, "C03: a list beside the team"
+    assert (
+        "Before stopping the instance to delete, let the team run a few minutes after the gateway's start, so that "
+        "messages a remote adapter host is still sending arrive." in warning
+    ), "GEN-1 of PR #154's review"
     assert "(the operator's command, with or without --files-gone)" in warning, "C08: not only --files-gone"
     assert "! -newer" not in warning, "the list replaces the time limit"
     assert "never opens" not in warning, "0.10 reads the files of messages it had not handled"
@@ -863,10 +908,14 @@ def test_a_file_only_a_gateway_record_or_held_guidance_names_is_not_counted(inst
 # Counted names that are not of the gateway's form: never listed (C02 of F6). Each would pass a looser rule.
 _OTHER_NAMES = {
     "space": "adapter_upload_my notes",
-    "newline": "adapter_upload_ab\n",  # with re.match and "$" it would add a line xargs reads as adapter_upload_ab
+    # With re.match and "$" it would add a line xargs reads as the gateway's name before the newline.
+    "newline": _hex_name("newline") + "\n",
     "uppercase": "adapter_upload_ABCDEF012345",
     "bare_prefix": "adapter_upload_",
-    "not_utf8": os.fsdecode(b"adapter_upload_ab\xff"),
+    "not_utf8": os.fsdecode(_hex_name("not_utf8").encode() + b"\xff"),
+    # SEC-1 of PR #154's review: the gateway's ids are exactly 12 hex digits; a longer run may encode chosen text.
+    "11_hex_digits": "adapter_upload_" + "a" * 11,
+    "13_hex_digits": "adapter_upload_" + "b" * 13,
 }
 
 
@@ -874,8 +923,8 @@ _OTHER_NAMES = {
 def test_only_names_of_the_gateways_form_are_listed(instance: _Instance, caplog, with_gateway_names) -> None:
     """A1 of F6 (C02): a name the gateway did not give may be text someone chose, so it is counted, never shown.
 
-    The gateway names each file ``adapter_upload_`` and a lowercase hex id,
-    matched in full. The warning names only those and says how many others
+    The gateway names each file ``adapter_upload_`` and 12 lowercase hex
+    digits, matched in full. The warning names only those and says how many others
     it leaves out and why. Only other names: no list is written and the
     warning gives no delete advice.
     """
@@ -886,7 +935,7 @@ def test_only_names_of_the_gateways_form_are_listed(instance: _Instance, caplog,
             others.append(_write(instance.transfer / name, b"not a name the gateway gives"))
         except OSError as exc:  # a file system that only takes UTF-8 names
             pytest.skip(f"the file system refuses the name {name!r}: {exc}")
-    gateway_names = [STRAY_NAME, "adapter_upload_ab"] if with_gateway_names else []
+    gateway_names = [STRAY_NAME, _hex_name("another")] if with_gateway_names else []
     for name in gateway_names:
         _write(instance.transfer / name, STRAY)
 
@@ -910,7 +959,8 @@ def test_only_names_of_the_gateways_form_are_listed(instance: _Instance, caplog,
     scope = "this advice does not cover them" if gateway_names else "the step gives no advice for them"
     assert f"Not listed: {len(_OTHER_NAMES)} file(s) whose names are not ones the gateway gives" in warning
     assert f"may be text someone chose; {scope}. See upgrading.md." in warning
-    assert not [part for part in ("my notes", "ABCDEF", "\n", "\udcff") if part in warning], "no other name is shown"
+    shown = [part for part in ("my notes", "ABCDEF", "\n", "\udcff", "a" * 11, "b" * 13) if part in warning]
+    assert not shown, "no other name is shown"
     assert all(path.exists() for path in others), "nothing is deleted"
 
 
@@ -943,8 +993,10 @@ def test_the_delete_command_removes_exactly_the_listed_files_and_only_beside_the
 
     The instance root holds a space (the fixture's), so each path must be
     quoted. The files a record keeps, a name of another form, a nested file,
-    a link and the orphan its turn names stay. Without the marker the list
-    is not valid, and the command deletes nothing.
+    a link and the orphan its turn names stay. Without the marker written
+    with the list the list is not valid, and the command deletes nothing:
+    no marker, or one holding another run's list id or none (F1 of PR
+    #154's review).
     """
 
     assert " " in str(instance.root)
@@ -965,17 +1017,24 @@ def test_the_delete_command_removes_exactly_the_listed_files_and_only_beside_the
     (not_moved,) = [m for m in _events(caplog, "adapter_host_file_not_moved") if "attachment_id=att_kept" in m]
     assert f" sources={kept_by_record} folder=" in not_moved
     warning = _assert_reported(caplog, instance, [path.name for path in listed], unlisted=1)
-    command = re.search(r"may delete exactly the listed files \((.+?)\) only while", warning).group(1)
+    command = _command_in(warning)
     marker = instance.layout.adapter_host_files_upgrade_path
+    entry, written = _list_id_entry(instance.layout), marker.read_text()
     aside = marker.rename(marker.with_name("marker-aside"))
 
-    refused = subprocess.run(["sh", "-c", command], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    refused = _paste(command, tmp_path)
 
     assert refused.returncode != 0 and all(path.read_bytes() == STRAY for path in listed), "C06: no marker, no delete"
-    assert refused.stderr == f"{DELETE_REFUSED}\n" and not refused.stdout, "C07: the refusal says why"
-    aside.rename(marker)
+    # C07: the refusal says why; grep's own line before it names the missing marker.
+    assert refused.stderr.endswith(f"{DELETE_REFUSED}\n") and str(marker) in refused.stderr and not refused.stdout
+    for other in (f'"{LIST_ID_FIELD}": "{"0" * 12}"', f'"{LIST_ID_FIELD}": null'):
+        marker.write_text(written.replace(entry, other))
+        refused = _paste(command, tmp_path)
+        assert refused.returncode != 0 and refused.stderr == f"{DELETE_REFUSED}\n" and not refused.stdout, other
+        assert all(path.read_bytes() == STRAY for path in listed), f"another run's marker, no delete: {other}"
+    aside.replace(marker)
 
-    done = subprocess.run(["sh", "-c", command], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    done = _paste(command, tmp_path)
 
     assert done.returncode == 0 and not done.stderr and not done.stdout, done.stderr
     assert not any(path.exists() for path in listed), "exactly the listed files are gone"
@@ -2012,23 +2071,34 @@ def test_one_error_rule_holds_at_every_operation(instance: _Instance, monkeypatc
         _assert_no_list(instance.layout)
 
 
-def test_a_list_that_cannot_be_written_never_stops_the_start(instance: _Instance, monkeypatch, caplog) -> None:
-    """A3 of F6: the list only reports; a failure writing it is logged, and the marker is written with the count."""
+@pytest.mark.parametrize("first_removal", ["succeeds", "fails"])
+def test_a_list_that_cannot_be_written_never_stops_the_start(instance: _Instance, monkeypatch, caplog, first_removal) -> None:
+    """A3 of F6: the list only reports; a failure writing it is logged, and the marker is written with the count.
+
+    An earlier list the start could not remove is removed again after the
+    failed write (EA-1 of PR #154's review), so no list is left beside the
+    marker that is not its run's.
+    """
 
     _write(instance.transfer / STRAY_NAME, STRAY)
     listed = _plant_earlier_list(instance.layout)
+    removals = _refuse_removal(monkeypatch, listed, times=1 if first_removal == "fails" else 0)
     fired = _inject(instance, monkeypatch, _Fault("replace", _LIST, errno.ENOSPC, "moved"))
     with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
         result = instance.run()
     monkeypatch.undo()
 
     assert fired == ["replace"]
+    assert removals == ["unlink", "unlink"], "at the start and once more after the failed write"
     assert result.finished and result.counts.moved == 1 and result.counts.files_without_records == 1
-    assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())["files_without_records"] == 1
-    (failed,) = _events(caplog, "adapter_host_files_without_records_list_failed")
+    marker = json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())
+    assert marker["files_without_records"] == 1 and marker[LIST_ID_FIELD] is None, "no list, no id"
+    *removal_failed, failed = _events(caplog, "adapter_host_files_without_records_list_failed")
+    assert len(removal_failed) == (1 if first_removal == "fails" else 0)
+    assert all("could not be removed" in message for message in removal_failed)
     assert failed.endswith(f"list={listed} reason=ENOSPC: {os.strerror(errno.ENOSPC)}")
     assert "could not be written; a list still at that path is not this run's, so do not use it" in failed
-    _assert_no_list(instance.layout)  # the earlier list was removed at the start, and no temporary file is left
+    _assert_no_list(instance.layout)  # the earlier list is gone, and no temporary file is left
     # The count is still reported; only the names shown may go, and there is no command for a list that is not there.
     (warning,) = _events(caplog, "adapter_host_files_without_records")
     assert warning.endswith(f"folder={instance.transfer} files_without_records=1 unlisted=0 list=-")
@@ -2041,34 +2111,40 @@ def test_a_list_that_cannot_be_written_never_stops_the_start(instance: _Instance
 
 
 @pytest.mark.parametrize("fails", ["once", "always"])
-def test_a_list_that_cannot_be_removed_never_stops_the_start(instance: _Instance, monkeypatch, caplog, fails) -> None:
+def test_a_list_that_cannot_be_removed_never_stops_the_start(
+    instance: _Instance, monkeypatch, caplog, tmp_path, fails
+) -> None:
     """A3 and C01 of F6: an earlier list is removed at the start and, if that fails, once more before the marker.
 
-    A failure is logged and never stops the start. A list that can never
-    be removed stays beside the new marker; both warnings say it is not
-    this run's.
+    A failure is logged and never stops the start. A list that can never be
+    removed (a bind-mounted file answers EBUSY, an immutable one EPERM)
+    stays beside the new marker, and both warnings say it is not this
+    run's. The earlier run's command, pasted after the later run, deletes
+    nothing (F1 of PR #154's review): its listed file has since gained a
+    record, so the later run keeps it and says so in its not-moved warning.
     """
 
-    earlier = _plant_earlier_list(instance.layout)
+    stray = _write(instance.transfer / STRAY_NAME, STRAY)
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        assert instance.run().counts.files_without_records == 1
+    earlier_command = _command_in(_assert_reported(caplog, instance, [STRAY_NAME]))
+    earlier = instance.layout.adapter_host_files_without_records_path
     before = earlier.read_bytes()
-    real_unlink = os.unlink
-    attempts: list[str] = []
-
-    def refusing(path, *args, **kwargs):
-        if Path(os.fsdecode(path)) == earlier:
-            attempts.append("unlink")
-            if fails == "always" or len(attempts) == 1:
-                raise OSError(errno.EACCES, os.strerror(errno.EACCES))
-        return real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "unlink", refusing)
+    _record_named(instance, "att_stray", str(stray))  # another sha256: refused and kept
+    instance.layout.adapter_host_files_upgrade_path.unlink()  # the documented re-run
+    attempts = _refuse_removal(monkeypatch, earlier, times=1 if fails == "once" else None)
+    caplog.clear()
     with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
         result = instance.run()
     monkeypatch.undo()
 
     assert result.finished and result.counts.files_without_records == 0
-    assert instance.layout.adapter_host_files_upgrade_path.is_file(), "the marker is still written"
+    marker = instance.layout.adapter_host_files_upgrade_path
+    assert marker.is_file(), "the marker is still written"
+    assert json.loads(marker.read_text())[LIST_ID_FIELD] is None, "this run wrote no list"
     assert attempts == ["unlink", "unlink"], "tried at the start and again before the marker"
+    (kept,) = [m for m in _events(caplog, "adapter_host_file_not_moved") if "attachment_id=att_stray" in m]
+    assert f" sources={stray} folder=" in kept and kept.endswith("records=kept reason=sha256_mismatch")
     failed = _events(caplog, "adapter_host_files_without_records_list_failed")
     removed = _events(caplog, "adapter_host_files_without_records_list_removed")
     reason = f"list={earlier} reason=EACCES: {os.strerror(errno.EACCES)}"
@@ -2079,6 +2155,11 @@ def test_a_list_that_cannot_be_removed_never_stops_the_start(instance: _Instance
     else:
         assert len(failed) == 2 and not removed and earlier.read_bytes() == before
         assert all("a list still at that path is not this run's, so do not use it" in message for message in failed)
+
+    pasted = _paste(earlier_command, tmp_path)
+
+    assert pasted.returncode != 0 and pasted.stderr == f"{DELETE_REFUSED}\n" and not pasted.stdout
+    assert stray.read_bytes() == STRAY, "the file the later run keeps is not deleted"
 
 
 def test_only_files_0_9_13_wrote_are_moved(instance: _Instance) -> None:
