@@ -201,16 +201,29 @@ then removes (``_Step._files_the_gateway_reads``). The adapter host's records
 are read only when a file no record names is found, because opening them
 creates their tables on an instance that never ran it. A nonzero count logs
 one warning (``event=adapter_host_files_without_records``) with the folder,
-the count and what an administrator may do, and no file names, which are
-people's text. The team cannot open those files, but the 0.10 adapter host
-passes new files through the same folder under the same prefix, so a count
-taken beside a running team (``--files-gone``) or after the marker was
-deleted may include its copies. The advice is therefore to delete only files
-last changed before the marker was written, only after the gateway has run on
-0.10 since then (it has then handled the messages taken in before), and only
-while the instance is stopped. A folder that is not there counts 0; one gone
-or replaced since the step first opened it (its device and inode differ), any
-other error listing it and a database error reading the adapter host's
+the count, the names and what an administrator may do (F6 of the review of
+PR #150; the owner chose naming them). The gateway of 0.9.13 and 0.10 names
+every transfer file ``adapter_upload_`` and a lowercase hex id (``new_id``),
+so those names hold no one's text: only names of that form are shown
+(``_GATEWAY_NAME``), and any other counted name, which something else put
+there and which may be text someone chose, is only counted (``unlisted=``).
+The run that writes the marker writes those names, sorted and one per line,
+to ``InstanceLayout.adapter_host_files_without_records_path`` just before the
+marker; the warning shows the first ten and gives a command that deletes
+exactly the listed files, and that refuses, saying so, while the marker is
+not where it names it. A list is valid only beside the marker of the run that
+wrote it: every later run that does not find the marker removes it, under
+the step's lock and before it reads any record, and a run with nothing to
+list removes it too. A failure writing or removing the list is logged
+(``event=adapter_host_files_without_records_list_failed``) and changes
+nothing else. The team cannot open those files, but the 0.10 adapter host
+passes new files through the same folder under the same names, so a list
+taken while the team runs (the operator's command) may name its copies. The
+advice is therefore to delete them only after the gateway has started on 0.10
+since the marker was written (it has then handled the messages taken in
+before), and only while the instance is stopped. A folder that is not there
+counts 0; one gone or replaced since the step first opened it (its device and
+inode differ), any other error listing it and a database error reading the adapter host's
 records log ``event=adapter_host_files_without_records_uncounted`` and leave
 the count unset: the count only reports, so it never stops startup, keeps the
 marker from being written or changes a record. Only the run that writes the
@@ -338,12 +351,9 @@ _GATEWAY_NAME = re.compile(re.escape(TRANSFER_FILE_PREFIX) + "[0-9a-f]+")
 # How many of those names the files-without-records warning shows; the list file holds them all, so the log
 # line stays bounded.
 _NAMED_IN_WARNING = 10
-# Added to that warning for the counted names of another form, which are never shown (``%s`` is their number).
-_UNLISTED_NOTE = (
-    f" Not listed: %s file(s) whose names are not ones the gateway gives ({TRANSFER_FILE_PREFIX} and a lowercase "
-    "hex id), so something else put them there and their names may be text someone chose; this advice does not "
-    "cover them."
-)
+# What the delete command prints, with a nonzero status, when the marker is not where it names it (C07 of F6):
+# ``rm -f`` prints nothing when it deletes, so a silent refusal would look the same as a delete.
+DELETE_REFUSED = "Nothing deleted: the marker this command names is not there, so the list must not be used."
 # How a hosted-chat message names a file in the transfer folder (``AdapterAttachmentV1.storage_reference``).
 _UPLOAD_REFERENCE_SCHEME = "adapter-upload"
 # The upload status a message's file must have for the gateway to read it (``resolve_upload_reference``).
@@ -702,30 +712,38 @@ def _report_files_without_records(
     holds them all, with a command that deletes exactly those
     (``_delete_command``); ``leftover_list`` is None when the list could not
     be written, and then only the names shown may go. With no name of the
-    gateway's form there is no delete advice at all.
+    gateway's form there is no delete advice at all, and the warning gives
+    none of the causes it gives for the gateway's names (files of people
+    removed on 0.9 and the rest), which cannot have produced such names.
 
     The advice stays bounded by the gateway (F2 of that review): at its
     start the gateway reads the files of messages it took in but had not
     handled yet, 0.9's included, and then removes them. The list leaves
-    those out (``_files_the_gateway_reads``), but a list taken beside a
-    running team (``--files-gone``) may name the 0.10 adapter host's copy of
-    an upload whose message comes later, so the files may go only once the
-    gateway has started on 0.10 since the marker was written, and while the
-    instance is stopped. When the folder was at another path under 0.9.13,
+    those out (``_files_the_gateway_reads``), but a list taken while the
+    team runs (the operator's command, with or without ``--files-gone``)
+    may name the 0.10 adapter host's copy of an upload whose message comes
+    later, so the files may go only once the gateway has started on 0.10
+    since the marker was written, and while the instance is stopped. When the folder was at another path under 0.9.13,
     its records name that path and match nothing here, so every file looks
     unrecorded; the step reads only ``upload_dir`` (resolved through links),
     so the warning says to set ``upload_dir`` to that path with the folder
     there (F1 of that review).
     """
 
+    # The causes are those of the gateway's names; with none of those, they would not apply (C08 of F6).
+    causes = (
+        ": files of people removed on 0.9, files whose records were deleted, or files of messages the gateway "
+        "never handled. The team cannot open them."
+        if leftovers.listed
+        else "."
+    )
     logger.warning(
-        "%s file(s) are left in the adapter host's transfer folder that no record names: files of people removed "
-        "on 0.9, files whose records were deleted, or files of messages the gateway never handled. The team cannot "
-        "open them.%s%s See upgrading.md. event=adapter_host_files_without_records folder=%s "
-        "files_without_records=%s unlisted=%s list=%s",
+        "%s file(s) are left in the adapter host's transfer folder that no record names%s%s%s See upgrading.md. "
+        "event=adapter_host_files_without_records folder=%s files_without_records=%s unlisted=%s list=%s",
         leftovers.count,
+        causes,
         _listed_advice(transfer, marker, leftover_list, leftovers.listed),
-        _UNLISTED_NOTE % leftovers.unlisted if leftovers.unlisted else "",
+        _unlisted_note(leftovers),
         transfer,
         leftovers.count,
         leftovers.unlisted,
@@ -744,6 +762,7 @@ def _listed_advice(transfer: Path, marker: Path, leftover_list: Optional[Path], 
     if leftover_list is not None:
         where = f" Listed in {leftover_list} ({len(listed)} file(s), one name per line): {shown}."
         what = f"exactly the listed files ({_delete_command(marker, transfer, leftover_list)})"
+        names = "The list names"
     else:
         where = (
             f" The {len(listed)} file(s) with names the gateway gives: {shown}. The full list could not be written (see "
@@ -751,17 +770,33 @@ def _listed_advice(transfer: Path, marker: Path, leftover_list: Optional[Path], 
             "marker and restarting lists them all."
         )
         what = "exactly the files named here"
+        names = "This warning names"
+    # Both the names and the not-moved warning's sources= come from the same records, so no listed file is one a
+    # record keeps (C08 of F6): the administrator removes nothing from the list.
     return (
-        f"{where} An administrator may delete {what}, keeping every file named in the sources= field of an "
-        "adapter_host_file_not_moved warning, only while the instance is stopped and only after the gateway has "
-        f"started on 0.10 since the step's marker {marker} was written: at its start the gateway handles messages "
-        "taken in but not handled yet (0.9's too) and removes their files, and the 0.10 adapter host passes new "
-        "files through this folder, so a list taken beside a running team (--files-gone) may name one a message "
-        "will still use: after such a run, restart the instance once before deleting. With the adapter host turned "
-        "off, keep the files until it has run again. If this folder was at another path under 0.9.13 (moved, "
-        "mounted elsewhere or reached through another link), their records may name that path: do not delete "
-        "them; move or mount the folder back at that path (a link does not work), set upload_dir to that path, "
-        "delete the marker and restart."
+        f"{where} An administrator may delete {what} only while the instance is stopped and only after the gateway "
+        f"has started on 0.10 since the step's marker {marker} was written: at its start the gateway handles "
+        "messages taken in but not handled yet (0.9's too) and removes their files, and the 0.10 adapter host "
+        "passes new files through this folder, so a list taken while the team runs (the operator's command, with "
+        "or without --files-gone) may name one a message will still use: after such a run, restart the instance "
+        f"once before deleting. {names} no file from the sources= field of an adapter_host_file_not_moved warning, "
+        "and those must be kept. With the adapter host turned off, keep the files until it has run again. If this "
+        "folder was at another path under 0.9.13 (moved, mounted elsewhere or reached through another link), their "
+        "records may name that path: do not delete them; move or mount the folder back at that path (a link does "
+        "not work), set upload_dir to that path, delete the marker and restart."
+    )
+
+
+def _unlisted_note(leftovers: _Leftovers) -> str:
+    """Why the counted names of another form are not shown, and that no advice covers them (C02, C08 of F6)."""
+
+    if not leftovers.unlisted:
+        return ""
+    scope = "this advice does not cover them" if leftovers.listed else "the step gives no advice for them"
+    return (
+        f" Not listed: {leftovers.unlisted} file(s) whose names are not ones the gateway gives "
+        f"({TRANSFER_FILE_PREFIX} and a lowercase hex id), so something else put them there and their names may be "
+        f"text someone chose; {scope}."
     )
 
 
@@ -771,14 +806,18 @@ def _delete_command(marker: Path, transfer: Path, leftover_list: Path) -> str:
     A list is valid only beside the marker of the run that wrote it (C01 and
     C06 of F6): one whose marker was deleted, as the advice for a folder that
     was at another path asks, may name files whose records are live, so
-    ``test -f`` stops the command before anything is deleted. Each path is
-    quoted for the shell (an instance root may hold a space); the names in the
-    list are hex ids, which ``xargs`` reads as they are.
+    ``test -f`` stops the command before anything is deleted. The refusal
+    prints ``DELETE_REFUSED`` and exits nonzero (C07): ``rm -f`` prints
+    nothing when it deletes, and a person who pasted the command where the
+    paths are not (a container's paths on its host) must see that nothing
+    happened. Each path is quoted for the shell (an instance root may hold a
+    space); the names in the list are hex ids, which ``xargs`` reads as they
+    are.
     """
 
     return (
-        f"test -f {shlex.quote(str(marker))} && cd {shlex.quote(str(transfer))} && "
-        f"xargs rm -f -- < {shlex.quote(str(leftover_list))}"
+        f"if test -f {shlex.quote(str(marker))}; then cd {shlex.quote(str(transfer))} && "
+        f"xargs rm -f -- < {shlex.quote(str(leftover_list))}; else echo {shlex.quote(DELETE_REFUSED)} >&2; false; fi"
     )
 
 

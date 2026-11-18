@@ -4107,12 +4107,13 @@ Limits:
   (`task_manager_plans`), not the request's. The same follow-up (a clean-up
   deletes the uploads its deleted turns list) covers answers too.
 - Copies in the adapter host's transfer folder that no gateway record or
-  conversation turn names stay there. The upgrade step counts and reports
+  conversation turn names stay there. The upgrade step counts and names
   the ones left at the upgrade once, at the start that finishes it (copies
-  0.9 made whose records are gone, "Upgrading an instance in place"), but
-  does not delete them: the owner chose reporting over deleting. An
-  administrator deletes those older than the step's marker once the gateway
-  has run on 0.10 since, while the instance is stopped. Copies of a message
+  0.9 made whose records are gone, "Upgrading an instance in place"), and
+  lists them beside its marker, but does not delete them: the owner chose
+  reporting over deleting. An administrator deletes exactly the listed files
+  once the gateway has started on 0.10 since the marker, while the instance
+  is stopped. Copies of a message
   the 0.10 gateway never handled still stay unreported. Retention, history
   clean-up and person removal cover only `state/uploads`, and the adapter
   host's own prune deletes its rows, not their files. Follow-up: delete each
@@ -4803,22 +4804,52 @@ the desktop app never offers an older version.
   host's records only when a file no record names is found, because opening
   them creates their tables on an instance that never ran the adapter host.
   A nonzero count logs one warning
-  (`event=adapter_host_files_without_records`) with the folder, the count and
-  what to do, and no file names, which are people's text: an administrator
-  may delete the `adapter_upload_*` files last changed before the marker was
-  written (`find … ! -newer <marker>`), only after the gateway has run on
-  0.10 since then and while the instance is stopped, keeping the files in
-  the `sources` field of not-moved warnings (their `file` field may name the
+  (`event=adapter_host_files_without_records`) with the folder, the count,
+  the files' names and what to do; the owner chose naming them so the advice
+  is exact (F6 of the review of PR #150). The gateway of 0.9.13 and 0.10
+  names every transfer file `adapter_upload_` and a lowercase hex id
+  (`new_id`), so those names hold no one's text. Only names of that form are
+  shown; any other counted name was put there by something else and may be
+  text someone chose, so it is only counted (`unlisted=`). The run that
+  writes the marker writes the shown names, sorted and one per line, to
+  `InstanceLayout.adapter_host_files_without_records_path`
+  (`state/upgrades/adapter-host-files.without-records.txt`) just before the
+  marker, and the warning shows the first ten, so the log line stays short.
+  The list is a file of its own, not part of the marker, because a failure
+  writing it must not stop the start, while a failure writing the marker
+  does; a hex-only name also makes a plain list safe for `xargs`. A failure
+  writing or removing the list is logged
+  (`event=adapter_host_files_without_records_list_failed`), the marker is
+  still written, and the warning then says only the names it shows may go. A
+  list is valid only beside the marker of the run that wrote it: every later
+  run that does not find the marker removes it under the step's lock before
+  it reads any record (a re-run may wait for its folder or stop, and the
+  documented re-run for a folder at another path deletes the marker), and a
+  run with nothing to list removes it too. The warning's command deletes
+  exactly the listed files and checks for the marker first:
+  `if test -f <marker>; then cd <folder> && xargs rm -f -- < <list>; else echo 'Nothing deleted: …' >&2; false; fi`,
+  each path quoted for the shell. The refusal prints a line and exits
+  nonzero, because `rm -f` prints nothing when it deletes and a person who
+  pasted a container's paths on its host must see that nothing happened. The
+  list never names a file in the `sources` field of a not-moved warning
+  (both come from the same records; their `file` field may name the
   `state/uploads` side, such as a destination already taken, so it cannot
-  carry that advice). Both conditions are needed: the 0.10 adapter host
-  passes new files through the same folder under the same prefix, so a count
-  beside a running team (`--files-gone`) or at a re-run after the marker was
-  deleted may include its copies, all written before that marker; once the
-  gateway has run, the copies of messages it had taken in are gone, and the
-  rest are never read again: a message it marked `outcome_unknown` because
-  its start recovers only `accepted` messages, and an upload whose message
-  never came because each registration gets a new epoch, so the upload no
-  longer resolves. If the folder was at another path under 0.9.13, its records name that
+  carry that advice), and the warning says so, so the administrator takes
+  nothing out of the list. The files may go only after the gateway has
+  started on 0.10 since the marker was written and while the instance is
+  stopped: the 0.10 adapter host passes new files through the same folder
+  under the same names, so a list taken while the team runs (the operator's
+  command, with or without `--files-gone`) may name its copies; once the
+  gateway has started, the copies of messages it had taken in are gone, and
+  the rest are never read again: a message it marked `outcome_unknown`
+  because its start recovers only `accepted` messages, and an upload whose
+  message never came because each registration gets a new epoch, so the
+  upload no longer resolves. After a list taken while the team runs, the
+  warning says to restart once before deleting, so the gateway's start
+  follows the list. One case stays open: a remote adapter host that sees no
+  failed request during a short restart keeps its epoch while its lease
+  runs, so an upload it finished just before the list may still resolve for
+  a message after the restart. If the folder was at another path under 0.9.13, its records name that
   path and every file here looks unrecorded, so the warning says not to
   delete them then; putting the folder back is not enough, because the step
   reads only `upload_dir` (resolved through links), so it says to move or

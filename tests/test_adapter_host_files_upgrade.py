@@ -79,7 +79,7 @@ from uuid import uuid4
 import pytest
 
 import instance_upgrades.adapter_host_files as upgrade_module
-from instance_upgrades.adapter_host_files import upgrade_adapter_host_files
+from instance_upgrades.adapter_host_files import DELETE_REFUSED, upgrade_adapter_host_files
 from assistant_gateway.adapter_host.domain import AdapterInboxRecord, AdapterUploadRecord
 from assistant_gateway.adapter_host.service import AdapterHostApplicationService
 from assistant_gateway.contracts.adapter_host_v1 import (
@@ -661,19 +661,23 @@ def _assert_reported(caplog: pytest.LogCaptureFixture, instance: _Instance, list
     assert warning.endswith(f"{fields} list={leftover_list}")
     shown = ", ".join(sorted(listed)[:10]) + (f" and {len(listed) - 10} more" if len(listed) > 10 else "")
     assert f"Listed in {leftover_list} ({len(listed)} file(s), one name per line): {shown}. An admin" in warning
-    # C04 and C06: every path quoted, and nothing deleted while the marker is missing.
+    # C04, C06 and C07: every path quoted, and nothing deleted, said aloud, while the marker is missing.
     quoted = [shlex.quote(str(path)) for path in (marker, instance.transfer, leftover_list)]
-    command = "test -f {} && cd {} && xargs rm -f -- < {}".format(*quoted)
-    assert f"may delete exactly the listed files ({command}), keeping" in warning
-    assert "while the instance is stopped" in warning
+    command = "if test -f {}; then cd {} && xargs rm -f -- < {}; else echo {} >&2; false; fi".format(
+        *quoted, shlex.quote(DELETE_REFUSED)
+    )
+    assert f"may delete exactly the listed files ({command}) only while the instance is stopped" in warning
+    assert "files of people removed on 0.9" in warning, "C08: the causes are those of the gateway's names"
     assert f"only after the gateway has started on 0.10 since the step's marker {marker} was written" in warning, "C03"
     assert "after such a run, restart the instance once before deleting" in warning, "C03: a list beside the team"
+    assert "(the operator's command, with or without --files-gone)" in warning, "C08: not only --files-gone"
     assert "! -newer" not in warning, "the list replaces the time limit"
     assert "never opens" not in warning, "0.10 reads the files of messages it had not handled"
     assert "another path under 0.9.13" in warning and "do not delete them" in warning, "C02"
     # Putting the folder back alone changes nothing: the step reads only upload_dir (F1 of PR #150's review).
     assert "set upload_dir to that path, delete the marker and restart" in warning
-    assert "keeping every file named in the sources= field of an adapter_host_file_not_moved warning" in warning, "C03, C05"
+    # C08: the list already leaves out what a record keeps, so the administrator takes nothing out of it.
+    assert "The list names no file from the sources= field of an adapter_host_file_not_moved warning, and those must be kept" in warning
     assert STRAY.decode() not in warning, "no contents"
     return warning
 
@@ -898,26 +902,35 @@ def test_only_names_of_the_gateways_form_are_listed(instance: _Instance, caplog,
         (warning,) = _events(caplog, "adapter_host_files_without_records")
         assert warning.endswith(f"files_without_records={len(_OTHER_NAMES)} unlisted={len(_OTHER_NAMES)} list=-")
         assert "Listed in" not in warning and "xargs" not in warning and "may delete" not in warning
+        # C08: no cause of the gateway's names, and no advice to point at.
+        assert f"{len(_OTHER_NAMES)} file(s) are left in the adapter host's transfer folder that no record names. Not listed:" in warning
+        assert "files of people removed" not in warning and "this advice" not in warning
+    scope = "this advice does not cover them" if gateway_names else "the step gives no advice for them"
     assert f"Not listed: {len(_OTHER_NAMES)} file(s) whose names are not ones the gateway gives" in warning
-    assert "may be text someone chose; this advice does not cover them" in warning
+    assert f"may be text someone chose; {scope}. See upgrading.md." in warning
     assert not [part for part in ("my notes", "ABCDEF", "\n", "\udcff") if part in warning], "no other name is shown"
     assert all(path.exists() for path in others), "nothing is deleted"
 
 
-def test_the_warning_names_the_first_files_and_says_where_the_rest_are(instance: _Instance, caplog) -> None:
-    """A1 of F6: the log line stays bounded; the list beside the marker holds every name."""
+@pytest.mark.parametrize("count", [10, 11, 12])
+def test_the_warning_names_the_first_files_and_says_where_the_rest_are(instance: _Instance, caplog, count) -> None:
+    """A1 of F6: the log line stays bounded; the list beside the marker holds every name.
 
-    names = sorted(_hex_name(f"stray_{number}") for number in range(12))
+    Ten names are all shown, with no "more" (C09: the edge of the cap).
+    """
+
+    names = sorted(_hex_name(f"stray_{number}") for number in range(count))
     for name in names:
         _write(instance.transfer / name, STRAY)
 
     with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
         result = instance.run()
 
-    assert result.finished and result.counts.files_without_records == 12
+    assert result.finished and result.counts.files_without_records == count
     warning = _assert_reported(caplog, instance, names)
-    assert f"one name per line): {', '.join(names[:10])} and 2 more. An admin" in warning
-    assert names[10] not in warning and names[11] not in warning
+    more = f" and {count - 10} more" if count > 10 else ""
+    assert f"one name per line): {', '.join(names[:10])}{more}. An admin" in warning
+    assert not [name for name in names[10:] if name in warning]
     _assert_listed(instance.layout, names)
 
 
@@ -950,18 +963,19 @@ def test_the_delete_command_removes_exactly_the_listed_files_and_only_beside_the
     (not_moved,) = [m for m in _events(caplog, "adapter_host_file_not_moved") if "attachment_id=att_kept" in m]
     assert f" sources={kept_by_record} folder=" in not_moved
     warning = _assert_reported(caplog, instance, [path.name for path in listed], unlisted=1)
-    command = re.search(r"may delete exactly the listed files \((.+?)\), keeping", warning).group(1)
+    command = re.search(r"may delete exactly the listed files \((.+?)\) only while", warning).group(1)
     marker = instance.layout.adapter_host_files_upgrade_path
     aside = marker.rename(marker.with_name("marker-aside"))
 
     refused = subprocess.run(["sh", "-c", command], cwd=tmp_path, capture_output=True, text=True, timeout=30)
 
     assert refused.returncode != 0 and all(path.read_bytes() == STRAY for path in listed), "C06: no marker, no delete"
+    assert refused.stderr == f"{DELETE_REFUSED}\n" and not refused.stdout, "C07: the refusal says why"
     aside.rename(marker)
 
     done = subprocess.run(["sh", "-c", command], cwd=tmp_path, capture_output=True, text=True, timeout=30)
 
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 0 and not done.stderr and not done.stdout, done.stderr
     assert not any(path.exists() for path in listed), "exactly the listed files are gone"
     assert all(path.is_file() for path in (kept_by_record, other_form, nested, orphan)), "everything else stays"
     assert link.is_symlink() and outside.read_bytes() == b"outside the folder"
@@ -2011,7 +2025,8 @@ def test_a_list_that_cannot_be_written_never_stops_the_start(instance: _Instance
     (warning,) = _events(caplog, "adapter_host_files_without_records")
     assert warning.endswith(f"folder={instance.transfer} files_without_records=1 unlisted=0 list=-")
     assert f"The 1 file(s) with names the gateway gives: {STRAY_NAME}. The full list could not be written" in warning
-    assert "may delete exactly the files named here, keeping" in warning and "xargs" not in warning
+    assert "may delete exactly the files named here only while" in warning and "xargs" not in warning
+    assert "This warning names no file from the sources= field of an adapter_host_file_not_moved warning" in warning
     assert "only after the gateway has started on 0.10 since the step's marker" in warning
 
 
