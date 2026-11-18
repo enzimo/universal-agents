@@ -101,7 +101,7 @@ supported, because it may not read what a newer one saved.
     `docker run --rm -it -v ~/.universal-agents/data:/data --entrypoint sh <image>`,
     with your folder in place of the default.
   - **Names the upgrade does not show.** A file whose name is not one the
-    gateway gives (`adapter_upload_` and a lowercase hex id) is counted
+    gateway gives (`adapter_upload_` and 12 lowercase hex digits) is counted
     (`unlisted=` in the warning) but not listed or shown: something else put
     it there, and its name may be text someone chose. The upgrade gives no
     advice for such files.

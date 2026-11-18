@@ -4663,7 +4663,8 @@ the desktop app never offers an older version.
   after the credential import and before the gateway, the adapter host and
   the agents start (`docker.launch_headless.build_first_start_tasks`), while
   `InstanceLayout.adapter_host_files_upgrade_path`
-  (`state/upgrades/adapter-host-files.json`, the finish time and the counts)
+  (`state/upgrades/adapter-host-files.json`, the finish time, the counts and
+  the id of the list its run wrote)
   is missing. Nothing else on the host writes the files or their records
   then. The operator's `--files-gone` run (`docker exec`, while the team
   runs) is safe beside the team for reasons a later change must keep: no
