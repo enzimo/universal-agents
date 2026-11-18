@@ -71,10 +71,12 @@ supported, because it may not read what a newer one saved.
     may delete exactly the listed files, but only after the gateway has
     started on 0.10 since `state/upgrades/adapter-host-files.json` (the
     upgrade's marker) was written, and only while the instance is stopped.
-    The warning says when not to delete first and then gives the command. It deletes nothing, and says so, when the
-    marker is not beside the list: a list is valid only beside the marker
-    written with it, and a later run of the upgrade removes a list whose
-    marker is gone. The list never names a file in the `sources=` field of
+    The warning first says when not to delete, then gives the command. The
+    command deletes nothing, and says so, unless the marker is the one
+    written with the list: the upgrade stores an id for the list in the
+    marker and the command checks for it, so a command from an earlier
+    warning deletes nothing after a later run of the upgrade. The list
+    never names a file in the `sources=` field of
     an `adapter_host_file_not_moved` warning, so you take nothing out of it;
     keep those files, because they can still be moved once you fix them, as
     above. (Its `file=` field may name the copy in `state/uploads` that
@@ -83,16 +85,21 @@ supported, because it may not read what a newer one saved.
     names, so a list taken while the team runs (when you run
     `assistant_cli upgrade adapter-host-files` yourself, with or without
     `--files-gone`) may name them: after such a run, restart the instance
-    once before deleting. If the adapter host is turned off, keep the files
-    until it has run again.
+    once before deleting. Before you stop the instance to delete, let the
+    team run a few minutes after the gateway's start, so messages a remote
+    adapter host is still sending arrive. If the adapter host is turned
+    off, keep the files until it has run again.
   - **Deleting the listed files in a container.** The paths in the warning
     are the container's (`/data/…`), and the instance must be stopped, so
     `docker exec` cannot run the command, and on the host the command finds
     no marker at that path and deletes nothing. Either run it in a one-off
-    container that mounts the instance's folder at `/data` (for the
-    installer, `docker run --rm -it -v ~/.universal-agents/data:/data --entrypoint sh <image>`)
-    and paste the command there, or replace `/data` in all three of its
-    paths with the folder the container mounts there.
+    container that mounts the instance's folder at `/data` and paste the
+    command there, or replace `/data` in all three of its paths with the
+    folder the container mounts there. For the installer, that folder is
+    the one it keeps data in (by default `~/.universal-agents/data`, or the
+    one you gave with `--data-dir`):
+    `docker run --rm -it -v ~/.universal-agents/data:/data --entrypoint sh <image>`,
+    with your folder in place of the default.
   - **Names the upgrade does not show.** A file whose name is not one the
     gateway gives (`adapter_upload_` and a lowercase hex id) is counted
     (`unlisted=` in the warning) but not listed or shown: something else put

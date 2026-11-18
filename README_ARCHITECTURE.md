@@ -4112,8 +4112,8 @@ Limits:
   0.9 made whose records are gone, "Upgrading an instance in place"), and
   lists them beside its marker, but does not delete them: the owner chose
   reporting over deleting. An administrator deletes exactly the listed files
-  once the gateway has started on 0.10 since the marker, while the instance
-  is stopped. Copies of a message
+  once the gateway has started on 0.10 since the marker and the team has run
+  a few minutes, while the instance is stopped. Copies of a message
   the 0.10 gateway never handled still stay unreported. Retention, history
   clean-up and person removal cover only `state/uploads`, and the adapter
   host's own prune deletes its rows, not their files. Follow-up: delete each
@@ -4807,10 +4807,11 @@ the desktop app never offers an older version.
   (`event=adapter_host_files_without_records`) with the folder, the count,
   the files' names and what to do; the owner chose naming them so the advice
   is exact (F6 of the review of PR #150). The gateway of 0.9.13 and 0.10
-  names every transfer file `adapter_upload_` and a lowercase hex id
-  (`new_id`), so those names hold no one's text. Only names of that form are
-  shown; any other counted name was put there by something else and may be
-  text someone chose, so it is only counted (`unlisted=`). The run that
+  names every transfer file `adapter_upload_` and 12 lowercase hex digits
+  (`new_id`), so those names hold no one's text. Only names of exactly that
+  form are shown; any other counted name, a longer hex run included, was put
+  there by something else and may be text someone chose, so it is only
+  counted (`unlisted=`). The run that
   writes the marker writes the shown names, sorted and one per line, to
   `InstanceLayout.adapter_host_files_without_records_path`
   (`state/upgrades/adapter-host-files.without-records.txt`) just before the
@@ -4825,10 +4826,20 @@ the desktop app never offers an older version.
   run that does not find the marker removes it under the step's lock before
   it reads any record (a re-run may wait for its folder or stop, and the
   documented re-run for a folder at another path deletes the marker), and a
-  run with nothing to list removes it too. The warning's command deletes
-  exactly the listed files and checks for the marker first:
-  `if test -f <marker>; then cd <folder> && xargs rm -f -- < <list>; else echo 'Nothing deleted: …' >&2; false; fi`,
-  each path quoted for the shell. The refusal prints a line and exits
+  run with nothing to list removes it too. Removing it can fail while the
+  marker is still written (a bind-mounted file answers `EBUSY`, an immutable
+  one `EPERM`), so a marker beside a list does not prove that its run wrote
+  that list. The run that writes a list therefore stores a new random id for
+  it in the marker (`without_records_list_id`, `null` without a list), and
+  the warning's command deletes exactly the listed files only when the
+  marker holds that id:
+  `if grep -qF -- '"without_records_list_id": "<id>"' <marker>; then cd <folder> && xargs rm -f -- < <list>; else echo 'Nothing deleted: …' >&2; false; fi`,
+  each path quoted for the shell. A command copied from an earlier warning
+  then deletes nothing once a later run has written its marker, even beside
+  a list that run could not remove (F1 of the review of PR #154). Checking
+  the list's sha256 in the command, or giving each run its own list name,
+  would not stop that: the stale list and its name do not change. The
+  refusal prints a line and exits
   nonzero, because `rm -f` prints nothing when it deletes and a person who
   pasted a container's paths on its host must see that nothing happened. The
   list never names a file in the `sources` field of a not-moved warning
@@ -4846,10 +4857,14 @@ the desktop app never offers an older version.
   message never came because each registration gets a new epoch, so the
   upload no longer resolves. After a list taken while the team runs, the
   warning says to restart once before deleting, so the gateway's start
-  follows the list. One case stays open: a remote adapter host that sees no
-  failed request during a short restart keeps its epoch while its lease
-  runs, so an upload it finished just before the list may still resolve for
-  a message after the restart. If the folder was at another path under 0.9.13, its records name that
+  follows the list. One case has no bound in code: a remote adapter host
+  keeps its registration epoch until its message arrives or a failed request
+  makes it register again (a heartbeat renews even an expired lease and
+  keeps the epoch, `AdapterHostApplicationService.heartbeat`), so an upload
+  it finished just before the list may still resolve for a message after
+  the gateway's start. The warning therefore says to let the team run a few
+  minutes after that start before stopping it to delete. If the folder was
+  at another path under 0.9.13, its records name that
   path and every file here looks unrecorded, so the warning says not to
   delete them then, before it gives the command: that is the one case where
   the list is wrong by design, and the command deletes on one paste, so a
