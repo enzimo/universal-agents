@@ -4927,22 +4927,34 @@ the desktop app never offers an older version.
   soon as its PostgreSQL answers (stored ids may be there) and before it
   upgrades the file or starts NATS or the launcher, which is why the bundle no
   longer upgrades the file before loading it. The check reads the team id, the
-  agent catalog's types (with the file that defines each) and agent ids over 32
-  characters in the records phase 3 converts: running tasks and their saved
-  progress, waiting messages, task custody and handbacks the team lead has not
-  dealt with (settled handbacks stay as history, which nothing on 0.9 removes).
-  It reads only (SQLite `mode=ro`, a read-only PostgreSQL transaction; the
-  bundle reads its PostgreSQL as the administrator, since the team's role may
-  not exist before seeding), leaves out other teams' rows in a shared database,
-  and fails closed when a store that exists cannot be read. When an id does not
-  fit, startup stops with one line per id saying what to do
-  (`event=protocol1_ids_over_caps`). When all fit it records
-  `InstanceLayout.protocol1_ids_check_path`
-  (`state/upgrades/protocol1-ids.json`) and never runs again, so an agent type
-  added later does not stop the instance: the agent host gives it no session and
-  the Status page says why. Onboarding cuts the team id it derives to 24
-  characters and refuses a typed one that does not fit, so a new instance never
-  stops here.
+  agent catalog's types (with the file that defines each), the types
+  `gateway.startup_agents` names and agent ids over 32 characters in the records
+  phase 3 converts: running tasks and their saved progress, waiting messages,
+  task custody and handbacks the team lead has not dealt with (settled handbacks
+  stay as history, which nothing on 0.9 removes). The configuration refuses a
+  startup agent type that does not fit, so both launchers load the file with
+  those entries set aside (`protocol1_ids.load_saved_for_check`) and the check
+  names them with every other id; nothing starts without them, because the
+  check then refuses. It reads only (SQLite `mode=ro`, a read-only PostgreSQL
+  transaction; the bundle reads its PostgreSQL as the administrator, since the
+  team's role may not exist before seeding), leaves out other teams' rows in a
+  shared database, and fails closed when a store that exists cannot be read.
+  When an id does not fit, startup stops with one line per id saying what to do
+  (`event=protocol1_ids_over_caps`). When all fit and the instance can run as it
+  is (onboarded, with no old-layout moves left, since onboarding writes the team
+  id and those moves bring the task database to where the check reads it), it
+  records `InstanceLayout.protocol1_ids_check_path`
+  (`state/upgrades/protocol1-ids.json`) with the team id and does not run again
+  for that team id, so an agent type added later does not stop the instance:
+  the agent host gives it no session and the Status page says why. Both
+  onboarding routes, the page and the command-line `onboard`, cut the team id
+  they derive to 24 characters and refuse a typed one that does not fit
+  (`onboarding_engine.team_id_answer`), so a new instance never stops here.
+  `assistant_cli.py migrate-config` and the command-line tool's offer to upgrade
+  the file run no check, since the check belongs to starting the instance and
+  the command-line tool has no store settings of its own; when such an upgrade
+  came first, the refusal names the backup 0.9 reads
+  (`instance_config.yaml.bak.v12`) to put back before starting 0.9 again.
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the

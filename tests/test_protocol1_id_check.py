@@ -6,16 +6,20 @@ the 24-character cap, stay on 0.9.x; an agent id's line names the records that h
 C09); the record is written only when every id fits, and a check that passed does not run
 again; an instance with nothing stored passes and its store is not created; settled
 handbacks and another team's rows are not checked; a store that cannot be read stops the
-start; the launcher and the Docker bundle refuse before the configuration file's upgrade,
-NATS, seeding or the launcher start (C01), and the bundle upgrades and starts once the ids
-fit; the bundle reads PostgreSQL as its administrator and a database that does not exist
-yet holds nothing; onboarding cuts a derived team id to fit and refuses a typed one that
-does not; and, with ``LIVE_TEST_POSTGRES_DSN``, the stored ids read from PostgreSQL.
+start; the record is written only for an instance that can run as it is and only counts for
+its team id (C30); the launcher and the Docker bundle refuse before the configuration
+file's upgrade, NATS, seeding or the launcher start (C01), name a startup agent type that
+does not fit with every other id (C28), and the bundle upgrades and starts once the ids
+fit; a file upgraded before the check gets the backup to put back (C31); the bundle reads
+PostgreSQL as its administrator and a database that does not exist yet holds nothing;
+both onboarding routes cut a derived team id to fit and refuse a typed one that does not
+(C29); and, with ``LIVE_TEST_POSTGRES_DSN``, the stored ids read from PostgreSQL.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -28,12 +32,14 @@ import yaml
 
 import docker.launch_headless as launch_headless
 import docker.run_bundle as run_bundle
-from assistant_gateway.config import GatewayInstanceConfig
+from assistant_cli import _collect_onboarding_answers, build_parser
+from assistant_gateway.config import GatewayInstanceConfig, migrate_instance_config_file
 from assistant_gateway.onboarding_engine import OnboardingTemplate, normalize_onboarding_answers
 from custom_messages.wire.ids import AGENT_ID, AGENT_TYPE, TEAM_ID
 from instance_upgrades.protocol1_ids import (
     Protocol1IdCheckFailed,
     check_ids_before_upgrade,
+    load_saved_for_check,
     stored_agent_ids_over_cap,
 )
 from storage.config import StorageSettings, resolve_storage_settings
@@ -45,11 +51,14 @@ AT_TYPE_CAP = "Planner" + "x" * 17  # 24
 OVER_TYPE_CAP = "Planner" + "x" * 18  # 25
 
 
-def _config(tmp_path: Path, *, team: str = TEAM, types: tuple[str, ...] = ()) -> GatewayInstanceConfig:
+def _config(tmp_path: Path, *, team: str = TEAM, types: tuple[str, ...] = (),
+            onboarded: bool = True) -> GatewayInstanceConfig:
     config = GatewayInstanceConfig.create(instance_name="ids", instance_root=str(tmp_path / "instance"), team_id=team,
                                           timezone="UTC")
     if types:
         config.agent.agent_definition_paths = [str(_catalog(tmp_path, types))]
+    if onboarded:
+        config.layout.control_dir.mkdir(parents=True, exist_ok=True)
     return config
 
 
@@ -177,12 +186,14 @@ def test_each_id_just_over_its_cap_stops_the_start_and_says_what_to_do(tmp_path,
 
     assert message is not None and not config.layout.protocol1_ids_check_path.exists()
     lines = message.splitlines()
-    assert "event=protocol1_ids_over_caps" in lines[0] and "Nothing was changed" in lines[0]
+    assert "event=protocol1_ids_over_caps" in lines[0] and "This start changed nothing" in lines[0]
     assert lines[1] == (f"- The team id '{long_team}' is 25 characters long; protocol 1 allows at most 24. This "
                         "instance cannot run 0.10 with that team id: keep running 0.9.x.")
     assert lines[2].startswith(f"- The agent type '{OVER_TYPE_CAP}' (defined in {tmp_path / 'agents.yaml'}) is 25 "
                                "characters long; protocol 1 allows at most 24. On 0.9.x, rename it")
-    assert "for a specialist the team lead created, remove it and have it created again" in lines[2]
+    assert ("in the file that defines it and everywhere the instance names it: gateway.startup_agents in the "
+            "configuration file and the team roster (control/TEAM_AGENTS.yaml). For a specialist the team lead "
+            "created, remove it and have it created again under the shorter name.") in lines[2]
     assert lines[3] == (
         f"- The agent id '{OVER_ID_CAP}' is 33 characters long; protocol 1 allows at most 32. It is stored with "
         "its running tasks, its running tasks' saved progress, messages waiting for it, the tasks it holds, tasks "
@@ -262,15 +273,73 @@ def test_a_team_whose_import_did_not_finish_is_not_read(tmp_path, monkeypatch) -
     assert not config.layout.protocol1_ids_check_path.exists()
 
 
-def _version_12_file(tmp_path: Path, *, team: str) -> Path:
-    """A saved instance configuration as 0.9 wrote it: schema version 12, no queue settings."""
+# -- the record (C30) ----------------------------------------------------------------------------
 
-    config = _config(tmp_path, team=team)
-    config.layout.control_dir.mkdir(parents=True)  # onboarded
-    path = config.save()
+
+def test_the_record_is_written_only_for_an_instance_that_can_run_as_it_is(tmp_path, caplog) -> None:
+    """Onboarding writes the team id and the layout's moves bring the task database to where the check reads."""
+
+    caplog.set_level(logging.INFO, logger="instance_upgrades.protocol1_ids")
+    config, storage = _config(tmp_path, onboarded=False), _sqlite(tmp_path)
+    record = config.layout.protocol1_ids_check_path
+
+    assert check_ids_before_upgrade(config, storage) is None
+    assert not record.exists()
+    assert "the instance is not onboarded yet" in caplog.text and "event=protocol1_ids_checked_not_recorded" in caplog.text
+
+    config.layout.control_dir.mkdir(parents=True)
+    (config.instance_root_path / "workspace").mkdir()
+    (config.instance_root_path / "workspace" / "notes.md").write_text("old layout", encoding="utf-8")
+    assert check_ids_before_upgrade(config, storage) is None
+    assert not record.exists() and "still in the old layout" in caplog.text
+
+    (config.instance_root_path / "workspace" / "notes.md").unlink()
+    assert check_ids_before_upgrade(config, storage) is None
+    assert json.loads(record.read_text(encoding="utf-8"))["team_id"] == TEAM
+
+
+def test_a_record_for_another_team_id_or_one_that_cannot_be_read_does_not_count(tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="instance_upgrades.protocol1_ids")
+    config, storage = _config(tmp_path), _sqlite(tmp_path)
+    record = config.layout.protocol1_ids_check_path
+    record.parent.mkdir(parents=True)
+    _write_sqlite(storage, OVER_ID_CAP)
+
+    record.write_text(json.dumps({"team_id": "team_other"}), encoding="utf-8")
+    assert OVER_ID_CAP in (check_ids_before_upgrade(config, storage) or "")
+    assert "recorded_team_id=team_other team_id=team_ids" in caplog.text
+
+    record.write_text("{not json", encoding="utf-8")
+    assert OVER_ID_CAP in (check_ids_before_upgrade(config, storage) or "")
+    assert "event=protocol1_ids_record_unreadable" in caplog.text
+
+
+def test_the_launcher_leaves_no_record_for_an_instance_it_then_refuses(tmp_path, monkeypatch, caplog) -> None:
+    path = _version_12_file(tmp_path, team=TEAM, onboarded=False)
+    monkeypatch.setattr(sys, "argv", ["launch_headless.py", "--config", str(path)])
+
+    assert launch_headless.main() == 2
+
+    assert "Team control folder is missing" in caplog.text and "Run `onboard`" in caplog.text
+    assert not load_saved_for_check(path).layout.protocol1_ids_check_path.exists()
+
+
+# -- the launchers refuse before anything changes (C01) -----------------------------------------
+
+
+def _version_12_file(tmp_path: Path, *, team: str, types: tuple[str, ...] = (), startup: tuple[str, ...] = (),
+                     onboarded: bool = True) -> Path:
+    """A saved instance configuration as 0.9 wrote it: schema version 12, no queue settings.
+
+    ``startup`` adds ``gateway.startup_agents`` entries, written into the file since this
+    version's configuration refuses a type protocol 1 cannot carry.
+    """
+
+    path = _config(tmp_path, team=team, types=types, onboarded=onboarded).save()
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     data["schema_version"] = 12
     data.get("transport", {}).pop("queues", None)
+    data["gateway"]["startup_agents"] += [{"named_agent_type": name, "count": 1, "enabled": True} for name in startup]
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return path
 
@@ -278,7 +347,7 @@ def _version_12_file(tmp_path: Path, *, team: str) -> Path:
 def _unchanged(path: Path, before: bytes) -> None:
     assert path.read_bytes() == before
     assert list(path.parent.glob(f"{path.name}.bak*")) == []
-    assert not GatewayInstanceConfig.load_saved(path).layout.protocol1_ids_check_path.exists()
+    assert not load_saved_for_check(path).layout.protocol1_ids_check_path.exists()
 
 
 def test_the_launcher_refuses_a_long_team_id_before_it_upgrades_the_file(tmp_path, monkeypatch, caplog) -> None:
@@ -361,6 +430,71 @@ def test_the_bundle_upgrades_the_file_and_starts_once_the_ids_fit(tmp_path, monk
     assert _run_bundle(path) == 0  # a later start: the store is not read again
 
 
+def test_both_launchers_name_a_startup_agent_type_that_does_not_fit_with_every_other_id(
+        tmp_path, monkeypatch, caplog) -> None:
+    """The configuration refuses such a type, so the check sets it aside to read the rest (C28)."""
+
+    long_team, started_only = "team_" + "y" * 25, "Started" + "z" * 18
+    path = _version_12_file(tmp_path, team=long_team, types=(OVER_TYPE_CAP,), startup=(OVER_TYPE_CAP, started_only))
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match=f"The startup agent type '{OVER_TYPE_CAP}' is 25 characters long"):
+        GatewayInstanceConfig.load_saved(path)
+    expected = (
+        f"- The team id '{long_team}' is 30 characters long",
+        f"- The agent type '{OVER_TYPE_CAP}' (defined in {tmp_path / 'agents.yaml'}; started by "
+        f"gateway.startup_agents in {path}) is 25 characters long; protocol 1 allows at most 24. On 0.9.x, rename it",
+        f"- The agent type '{started_only}' (started by gateway.startup_agents in {path}) is 25 characters long",
+    )
+
+    monkeypatch.setattr(sys, "argv", ["launch_headless.py", "--config", str(path)])
+    assert launch_headless.main() == 2
+    _unchanged(path, before)
+    assert "Headless launch refused." in caplog.text and all(line in caplog.text for line in expected)
+    assert "already upgraded" not in caplog.text  # a version-12 file 0.9.x still reads
+
+    caplog.clear()
+    started = _Started(monkeypatch)
+    monkeypatch.setenv("TEAM_BUNDLE_SERVICE_ROOT", str(tmp_path / "services"))
+    monkeypatch.setattr(sys, "argv", ["run_bundle.py", "--config", str(path)])
+    assert run_bundle.main() == 2
+    _unchanged(path, before)
+    assert started.calls == []
+    assert "Bundle launch refused." in caplog.text and all(line in caplog.text for line in expected)
+
+
+def test_the_bundle_refuses_settings_it_cannot_read_without_a_traceback(tmp_path, monkeypatch, caplog) -> None:
+    path = _version_12_file(tmp_path, team=TEAM)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["gateway"]["startup_agents"][0]["count"] = 99
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["run_bundle.py", "--config", str(path)])
+    monkeypatch.setattr(run_bundle, "run_supervised_bundle", lambda **_kwargs: pytest.fail("the bundle started"))
+
+    assert run_bundle.main() == 2
+
+    assert f"Bundle launch refused. The settings in {path} cannot be read" in caplog.text
+    assert "count must be between 1 and 32" in caplog.text
+
+
+def test_a_file_upgraded_before_the_check_gets_the_backup_to_put_back(tmp_path) -> None:
+    """migrate-config runs no id check; 0.9.x cannot read the file it writes (C31)."""
+
+    path = _version_12_file(tmp_path, team="team_" + "y" * 25)
+    backup = migrate_instance_config_file(path).backup_path
+    config, storage = load_saved_for_check(path), _sqlite(tmp_path)
+
+    lines = (check_ids_before_upgrade(config, storage) or "").splitlines()
+
+    assert lines[1] == (
+        f"The configuration file {path} was already upgraded to schema_version 15 for this version (by "
+        "assistant_cli.py migrate-config or the command-line tool's offer to upgrade it), which 0.9.x cannot read. "
+        f"Before starting 0.9.x again, put back {path}.bak.v12 as instance_config.yaml."
+    )
+    assert backup == path.with_name("instance_config.yaml.bak.v12")
+    backup.unlink()  # as for a file this version created: it never ran on 0.9.x
+    assert "already upgraded" not in (check_ids_before_upgrade(config, storage) or "")
+
+
 def test_the_bundle_reads_postgresql_as_its_administrator_and_a_missing_database_holds_nothing(
         tmp_path, monkeypatch) -> None:
     config = _config(tmp_path)
@@ -409,6 +543,27 @@ def test_onboarding_cuts_a_derived_team_id_to_fit_and_refuses_a_typed_one_that_d
         _team_id(team_id="team_with_a_much_too_long_name")
     with pytest.raises(ValueError, match="has characters protocol 1 does not allow"):
         _team_id(team_id="team ours")
+
+
+@pytest.mark.parametrize(("team_id", "problem"), [("team_" + "x" * 20, "is 25 characters long"),
+                                                  ("team ours", "has characters protocol 1 does not allow")])
+def test_the_command_line_onboarding_refuses_a_team_id_that_does_not_fit(tmp_path, monkeypatch, capsys, team_id,
+                                                                         problem) -> None:
+    """Without prompts it exits with the reason; at the prompt it asks again (C29)."""
+
+    monkeypatch.chdir(tmp_path)
+    template = OnboardingTemplate(team_id="team_template")
+    args = build_parser().parse_args(["onboard", "--instance-name", "ids", "--non-interactive", "--team-id", team_id])
+    with pytest.raises(SystemExit, match=f"The team id '{team_id}' {problem}"):
+        _collect_onboarding_answers(args, template=template)
+
+    typed = iter([team_id, "team_ours"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(typed) if prompt.startswith("Team id") else "")
+    answers = _collect_onboarding_answers(build_parser().parse_args(["onboard", "--instance-name", "ids"]),
+                                          template=template)
+
+    assert answers["team_id"] == "team_ours"
+    assert f"The team id '{team_id}' {problem}" in capsys.readouterr().out
 
 
 # -- a real PostgreSQL ---------------------------------------------------------------------------

@@ -1492,7 +1492,7 @@ function composedInstanceName() {
   }
 
 function composedTeamId() {
-    // At most 24 characters, the cap protocol 1 gives team ids (onboarding_engine._team_id_answer).
+    // At most 24 characters, the cap protocol 1 gives team ids (onboarding_engine.team_id_answer).
     return ("team_" + slugFromAssistantName()).slice(0, TEAM_ID_MAX_LENGTH).replace(/_+$/, "");
   }
 

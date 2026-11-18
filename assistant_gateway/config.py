@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, cast
+from typing import Any, Callable, Dict, Mapping, Optional, cast
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from config_backup_retention import prune_config_backups
@@ -1577,6 +1577,10 @@ def _migrate_instance_config_dict(
     return migrated, tuple(applied_steps)
 
 
+# Changes upgraded settings before validation, in memory only (``GatewayInstanceConfig.load``).
+SettingsPreparation = Callable[[Dict[str, Any]], Dict[str, Any]]
+
+
 def read_upgraded_instance_config(path: str | Path) -> Dict[str, Any]:
     """The saved file's settings as this version reads them, without validation.
 
@@ -1653,11 +1657,12 @@ class StartupAgentSettings(BaseModel):
             raise ValueError(
                 "gateway.startup_agents.named_agent_type must be non-empty."
             )
-        from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN
+        from custom_messages.wire.ids import AGENT_TYPE
 
-        if not AGENT_TYPE_PATTERN.fullmatch(normalized):
-            raise ValueError("A startup agent type must use 1 to 24 letters, digits, '-' or '_', "
-                             "starting with a letter or digit, so its message host can name it.")
+        problem = AGENT_TYPE.problem(normalized)
+        if problem is not None:
+            raise ValueError(f"The startup agent type {normalized!r} {problem}, so its message host cannot "
+                             "name it.")
         return normalized
 
     @field_validator("count", mode="before")
@@ -2523,18 +2528,29 @@ class GatewayInstanceConfig(BaseModel):
         return config_path
 
     @classmethod
-    def load(cls, path: str | Path) -> "GatewayInstanceConfig":
+    def load(cls, path: str | Path, *, prepare: SettingsPreparation | None = None) -> "GatewayInstanceConfig":
+        """The file's settings, upgraded in memory and validated.
+
+        ``prepare`` changes the upgraded settings before validation, in memory only. It is
+        for the protocol 1 id check, which must read a file whose startup agents this version
+        refuses so it can name them with every other id
+        (``instance_upgrades.protocol1_ids.load_saved_for_check``); a configuration loaded
+        with it is never saved.
+        """
+
         config_path = Path(path).expanduser().resolve()
         content = config_path.read_bytes()
         data = _parse_instance_config_yaml(content, config_path)
         migrated, _ = _migrate_instance_config_dict(data, source_path=config_path)
+        if prepare is not None:
+            migrated = prepare(migrated)
         config = cls.model_validate(migrated)
         config._config_path = config_path
         config._source_revision = config_revision(content)
         return config
 
     @classmethod
-    def load_saved(cls, path: str | Path) -> "GatewayInstanceConfig":
+    def load_saved(cls, path: str | Path, *, prepare: SettingsPreparation | None = None) -> "GatewayInstanceConfig":
         """The saved instance configuration, exactly as stored, for a process started from ``path``.
 
         Owner's decision (2026-09-29): one saved settings file,
@@ -2544,13 +2560,13 @@ class GatewayInstanceConfig(BaseModel):
         method, changes only its own fields and saves it back. A process started
         from another file (for example ``TEAM_INSTANCE_CONFIG`` pointing
         elsewhere) still reads and writes the saved file when one exists.
-        Processes that run from it use ``load_for_process``.
+        Processes that run from it use ``load_for_process``. ``prepare`` is ``load``'s.
         """
 
-        loaded = cls.load(path)
+        loaded = cls.load(path, prepare=prepare)
         saved = loaded.layout.instance_config_path
         if saved.is_file() and saved != loaded.config_path:
-            return cls.load(saved)
+            return cls.load(saved, prepare=prepare)
         return loaded
 
     @classmethod

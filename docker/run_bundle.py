@@ -43,6 +43,7 @@ from docker.launch_headless import (
     validate_runtime_layout,
 )
 from env_secrets import PROCESS_POSTGRES, environment_for, materialize_secret_file_envs
+from instance_upgrades.protocol1_ids import CHECK_FAILED_EVENT, check_due, load_saved_for_check
 from storage.config import PostgresStorageSettings, StorageSettings
 from storage.postgres_connection import (
     BUNDLED_POSTGRES_ADDRESS_ENV,
@@ -531,13 +532,20 @@ def check_ids_then_upgrade_config(config: GatewayInstanceConfig, runtime_env: Ma
     Once the check passed (its record exists), later starts only upgrade the file.
     """
 
-    if not config.layout.protocol1_ids_check_path.exists():
+    try:
+        due = check_due(config)
+    except ValueError as exc:
+        return (
+            f"The check that every id fits protocol 1 could not read the settings in {config.config_path}, so "
+            f"nothing was changed (event={CHECK_FAILED_EVENT}): {exc}"
+        )
+    if due:
         try:
             storage = id_check_storage(config, runtime_env)
         except Exception as exc:  # noqa: BLE001 - fail closed: the check cannot read the store
             return (
                 "The check that every id fits protocol 1 could not reach the bundled PostgreSQL, so nothing was "
-                f"changed (event=protocol1_ids_check_failed): {exc}"
+                f"changed (event={CHECK_FAILED_EVENT}): {exc}"
             )
         refusal = protocol1_id_check_refusal(config, storage)
         if refusal:
@@ -773,11 +781,13 @@ def main() -> int:
 
     try:
         # Only the saved file, upgraded in memory: the file itself is upgraded only after the
-        # id check passed (run_supervised_bundle). The bundle adds its own details to the
-        # launcher's environment below and never writes them into any file.
-        config = GatewayInstanceConfig.load_saved(config_path)
-    except InstanceConfigFileError as exc:
-        LOGGER.error("Bundle launch refused. %s", exc)
+        # id check passed (run_supervised_bundle). Startup agent types protocol 1 cannot carry
+        # are set aside so that check names them with every other id and refuses; nothing
+        # starts with them missing (protocol1_ids.load_saved_for_check). The bundle adds its
+        # own details to the launcher's environment below and never writes them into any file.
+        config = load_saved_for_check(config_path)
+    except ValueError as exc:  # the file or settings this version refuses, with their reason
+        LOGGER.error("Bundle launch refused. The settings in %s cannot be read: %s", config_path, exc)
         return 2
     try:
         validate_runtime_layout(config)

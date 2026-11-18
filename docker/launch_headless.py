@@ -273,21 +273,23 @@ def _render_instance_config_migration_notice(
 def protocol1_id_check_refusal(config: GatewayInstanceConfig, storage: StorageSettings | None) -> str | None:
     """The id check before anything changes (``instance_upgrades.protocol1_ids``): its refusal, or None.
 
-    ``config`` is the saved file read without upgrading it on disk. A catalog or store that
-    cannot be read, or settings that cannot be resolved, refuse the start as well.
+    ``config`` is the saved file read without upgrading it on disk
+    (``protocol1_ids.load_saved_for_check``). A catalog or store that cannot be read, or
+    settings that cannot be resolved, refuse the start as well.
     """
 
-    from instance_upgrades.protocol1_ids import Protocol1IdCheckFailed, check_ids_before_upgrade
+    from instance_upgrades.protocol1_ids import CHECK_FAILED_EVENT, Protocol1IdCheckFailed, check_ids_before_upgrade
     from team_transfer.errors import TransferError
+    from team_transfer.runtime_guard import IMPORT_UNFINISHED_EVENT
 
     try:
         return check_ids_before_upgrade(config, storage)
     except TransferError as exc:
-        return f"event=team_import_unfinished {exc}"
+        return f"event={IMPORT_UNFINISHED_EVENT} {exc}"
     except (Protocol1IdCheckFailed, ValueError) as exc:
         return (
             "The check that every id fits protocol 1 could not finish, so nothing was changed "
-            f"(event=protocol1_ids_check_failed): {exc}"
+            f"(event={CHECK_FAILED_EVENT}): {exc}"
         )
 
 
@@ -300,23 +302,24 @@ def check_protocol1_ids(config_path: Path, explicit_env_path: str | None) -> str
     exists and this returns at once.
     """
 
+    from instance_upgrades.protocol1_ids import CHECK_FAILED_EVENT, check_due, load_saved_for_check
     from team_transfer.errors import TransferError
-    from team_transfer.runtime_guard import require_finished_import
+    from team_transfer.runtime_guard import IMPORT_UNFINISHED_EVENT, require_finished_import
 
     try:
-        config = GatewayInstanceConfig.load_saved(config_path)
+        config = load_saved_for_check(config_path)
         # A half-imported team is read by nothing, this check included (team_transfer.runtime_guard).
         require_finished_import(config.layout)
-        if config.layout.protocol1_ids_check_path.exists():
+        if not check_due(config):
             return None
         env_path = resolve_env_file_path(config, explicit_env_path, report_ignored_env_file=False)
         storage = config.resolve_manager_storage_settings(env={**load_env_file_values(env_path), **os.environ})
     except TransferError as exc:
-        return f"event=team_import_unfinished {exc}"
+        return f"event={IMPORT_UNFINISHED_EVENT} {exc}"
     except ValueError as exc:
         return (
-            "The check that every id fits protocol 1 could not read the settings, so nothing was changed "
-            f"(event=protocol1_ids_check_failed): {exc}"
+            f"The check that every id fits protocol 1 could not read the settings in {config_path}, so nothing "
+            f"was changed (event={CHECK_FAILED_EVENT}): {exc}"
         )
     return protocol1_id_check_refusal(config, storage)
 
@@ -3006,13 +3009,14 @@ def main() -> int:
     # own NATS and PostgreSQL), applied in memory and never saved.
     # A half-imported team must never run (team_transfer.service). Checked
     # first, so the operator sees this cause rather than a missing folder.
+    from team_transfer.runtime_guard import IMPORT_UNFINISHED_EVENT
     from team_transfer.service import TransferError, require_finished_import
 
     try:
         config = GatewayInstanceConfig.load_for_process(config_path)
         require_finished_import(config.layout)
     except TransferError as exc:
-        LOGGER.error("Headless launch refused. event=team_import_unfinished %s", exc)
+        LOGGER.error("Headless launch refused. event=%s %s", IMPORT_UNFINISHED_EVENT, exc)
         return 2
     try:
         validate_runtime_layout(config)
