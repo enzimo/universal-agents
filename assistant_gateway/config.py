@@ -392,7 +392,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "transport.jetstream_enabled": "Use JetStream for durable work and reply messages.",
     "transport.subject_prefix": "Team subject prefix. Empty uses team_id, e.g. team_303. Use per-team values for external NATS ACLs.",
     "transport.storage": 'JetStream storage: "file" or "memory".',
-    "transport.replicas": "JetStream stream replica count.",
+    "transport.replicas": "JetStream stream replica count (1 to 5).",
     "transport.ack_wait_seconds": "Delivery ack wait for long-running agent work.",
     "transport.max_deliver": "Maximum redelivery attempts before termination.",
     "transport.duplicate_window_seconds": "JetStream duplicate message-id window.",

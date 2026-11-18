@@ -77,6 +77,8 @@ def test_a_changed_partition_count_is_written_and_logged(tmp_path: Path, caplog)
     assert (read_bundle(layout.trust_bootstrap_path).partitions, read_bundle(layout.trust_bootstrap_path).records) == (
         64, (record,))
     assert "event=partition_count_changed setting=transport.queues.partitions previous=96 count=64" in caplog.text
+    assert "the installation authority refuses to start when the teams' message streams were made with another" \
+           in caplog.text
 
 
 def test_a_lost_bundle_is_rebuilt_for_the_same_installation(tmp_path: Path, caplog) -> None:

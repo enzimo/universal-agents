@@ -58,9 +58,12 @@ Rules from the message contract's README ("Installation traffic", "Trust over ti
   bundle just before it serves, so every reply it signs comes from a certificate the
   bundle already holds; a host that joins in between waits for the authority to answer
   (``joining.join``).
-- **Topology.** The authority creates the key-value buckets, with the operator's replica
-  count. The queued work streams come with queued work, and each team's dead-letter stream
-  with the dead letters of phase 3 (plan decision 71).
+- **Topology.** Before anything else changes, the authority creates and keeps current
+  every team's work and dead-letter streams and their team consumers (``queues``), with the
+  instance's byte limits, per-subject cap and replica count, and refuses to start when they
+  cannot be (another partition count, a lowered cap that would drop messages, no room);
+  then the key-value buckets, with the same replica count. Agents' consumers follow
+  placements; nothing publishes to the streams yet.
 """
 
 from __future__ import annotations
@@ -84,6 +87,7 @@ from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.frame import Receiver, VerifiedFrame, body_model, expected_idempotency_key
 from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, KINDS, PROTOCOL, SINGLE_TEAM_ROLES
 from custom_messages.wire.partitions import check_partition_count
+from custom_messages.wire.queues import QueueLimits
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import CERTIFICATE, AuthorityKey, HostCertificate, TrustStore, kept_for, sign_state
 from custom_messages.wire.values import parse_timestamp
@@ -97,6 +101,8 @@ from custom_transport.protocol1.live import LiveHost, Unsupported, utc_now
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts
 from installation_authority.ledger import ISSUED_FILENAME, IssueLedger
+from installation_authority.queues import QueueTopology
+from installation_authority.refusals import AuthorityStartRefused
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
 
@@ -126,10 +132,6 @@ def certificate_key(installation: str, runtime: str, epoch: int) -> str:
 
 def revocations_key(installation: str) -> str:
     return f"revocations.{installation}"
-
-
-class AuthorityStartRefused(RuntimeError):
-    """The authority cannot start without risking trust; the message says what the operator can do."""
 
 
 class RevocationsUnverified(AuthorityStartRefused):
@@ -178,14 +180,16 @@ class InstallationAuthority:
     """One installation's authority: it signs with ``authority`` and speaks as the host ``host_keys``."""
 
     def __init__(self, layout: InstanceLayout, authority: AuthorityKeys, host_keys: HostKeys, *, partitions: int,
-                 clock: Callable[[], datetime] = utc_now, logger: logging.Logger = _LOGGER,
-                 contract_sha256: str = CONTRACT_SHA256, replicas: int = 1,
+                 queues: QueueLimits, clock: Callable[[], datetime] = utc_now, logger: logging.Logger = _LOGGER,
+                 contract_sha256: str = CONTRACT_SHA256,
                  catalog_agent_types: Callable[[], frozenset[str]] = frozenset) -> None:
         """``contract_sha256`` is the contract this authority runs: its code's, unless a test gives another.
 
         ``partitions`` is the installation's partition count (``transport.queues.partitions``),
         which the launcher also writes into the bootstrap bundle every host starts from.
-        ``replicas`` is the operator's JetStream replica count (``transport.replicas``) for the buckets.
+        ``queues`` holds the streams' byte limits, the partition streams' per-subject cap and the
+        operator's JetStream replica count (``transport.queues``, ``transport.replicas``), which
+        the buckets use too.
         """
 
         if host_keys.runtime != AUTHORITY_RUNTIME:
@@ -199,7 +203,8 @@ class InstallationAuthority:
         self.logger = logger
         # The instance's agent types, read at each join of a host listed with agent_types_from_catalog.
         self.catalog_agent_types = catalog_agent_types
-        self.replicas = max(1, int(replicas))
+        self.queues = queues
+        self.replicas = queues.replicas
         self.live: Optional[LiveHost] = None
         self._nc: Any = None
         self._js: Any = None
@@ -267,7 +272,9 @@ class InstallationAuthority:
         The bundle is written before the authority serves, so it holds the certificate
         of every reply; the launcher waits for it. Before anything changes, the bundle's
         partition count must be the authority's (``PartitionCountMismatch``) and the NATS
-        server must map agents' addresses at that count (``PartitionMappingRefused``).
+        server must map agents' addresses at that count (``PartitionMappingRefused``). The
+        teams' streams come next, before the authority's own records change, so a start the
+        streams refuse (``queues``) changes nothing else either.
         """
 
         bundle = self._bundle_with_own_count()
@@ -278,9 +285,9 @@ class InstallationAuthority:
         self._nc = nc
         self._js = nc.jetstream()
         teams = sorted(set(teams))
+        await self.ensure_topology(teams)
         self._ledger = IssueLedger.open(self.layout.host_trust_dir(AUTHORITY_RUNTIME), self.installation,
                                         logger=self.logger)
-        await self.ensure_topology(teams)
         now = self.clock()
         trust = self._trust = PersistentTrustStore.open(bundle, self.layout.host_trust_dir(AUTHORITY_RUNTIME), now)
         trust.store.contract_sha256 = self.contract_sha256
@@ -316,10 +323,16 @@ class InstallationAuthority:
         return bundle
 
     async def ensure_topology(self, teams: Iterable[str]) -> None:
-        """Create what the contract's topology owner owns in phase 2: the key-value buckets."""
+        """Create what the contract's topology owner owns: every team's streams and team consumers, then the buckets.
+
+        The streams first: their checks refuse a start before anything changes
+        (``queues.QueueTopology``).
+        """
 
         spec = transport()
         teams = tuple(teams)
+        await QueueTopology(self._nc, self._js, transport=spec, limits=self.queues, partitions=self.partitions,
+                            logger=self.logger).ensure(teams)
         for bucket in spec["key_value"]:
             for team in teams if TEAM_PLACEHOLDER in bucket else (None,):
                 await self._ensure_bucket(spec, bucket, team)

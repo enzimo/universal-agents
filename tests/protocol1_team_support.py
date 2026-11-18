@@ -39,6 +39,7 @@ from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_servic
 # Through the tests package, as tests/conftest.py imports it: the recorder state lives in that
 # module object, and a path-based import would load a second copy with none.
 from tests.live_nats_support import require_stream_recorder
+from tests.queue_limits_support import TEST_QUEUE_LIMITS
 
 
 async def _connect(stack: AsyncExitStack, runtime: str):
@@ -84,7 +85,7 @@ async def protocol1_team(tmp_path: Path, team_id: str, agent_types: Iterable[str
                  for profile in (services_profile, lead_profile)}
         installation = message_hosts.prepare_message_host_trust(layout, hosts, partitions=DEFAULT_PARTITION_COUNT)
         authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
-                                          partitions=DEFAULT_PARTITION_COUNT)
+                                          partitions=DEFAULT_PARTITION_COUNT, queues=TEST_QUEUE_LIMITS)
         authority_nc = await _connect(stack, AUTHORITY_RUNTIME)
         await authority.start(authority_nc, teams=[team_id])
         services = MessageHost(layout, services_profile, await _connect(stack, TEAM_SERVICES_RUNTIME))

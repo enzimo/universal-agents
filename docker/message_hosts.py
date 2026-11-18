@@ -57,8 +57,14 @@ from team_services.lock import LEASE
 from team_services.serving import forget_serving, serving_process
 
 LOGGER = logging.getLogger(__name__)
-# How long the authority may take to set up the topology and sign its records.
-AUTHORITY_READY_TIMEOUT_SECONDS = 60.0
+# How long the authority may take to create one team's message streams when none exist yet:
+# 1.8 s measured on nats-server 2.15.1 (a stream per partition at the default 96 partitions,
+# four more and two consumers; store on a local disk, sync_interval always), with room for a
+# disk about 15 times slower. A start that finds them all reads them in 0.02 s.
+STREAM_SETUP_SECONDS_PER_TEAM = 30.0
+# How long the authority may take to check the server's partition mapping, set up the topology
+# of the instance's one team (the launcher starts it for manager.team_id) and sign its records.
+AUTHORITY_READY_TIMEOUT_SECONDS = 60.0 + STREAM_SETUP_SECONDS_PER_TEAM
 # How long the team services may take to serve: after an unclean stop, the dead instance's lease
 # on the team's lock and the clock tolerance (team_services.lock), plus as long as the authority
 # may take, for starting and joining.
@@ -125,7 +131,11 @@ def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, Expec
     # The records of another installation's bundle are not kept: its key signed none of them.
     kept = existing if existing is not None and existing.installation == installation else None
     if kept is not None and kept.partitions != partitions:
-        LOGGER.warning("The partition count in the saved settings differs from the one the message hosts used. "
+        # The bundle holds what the settings said at the last start attempt, which the
+        # authority may have refused; the streams' own record is what decides.
+        LOGGER.warning("The partition count in the saved settings differs from the one the last start wrote. The count "
+                       "is fixed when the installation is created: the installation authority refuses to start when "
+                       "the teams' message streams were made with another count. "
                        "event=partition_count_changed setting=transport.queues.partitions previous=%s count=%s",
                        kept.partitions, partitions)
     if kept is None or kept.authority_keys != keys or kept.partitions != partitions:
@@ -246,7 +256,8 @@ def start_installation_authority(layout: InstanceLayout, command: list[str], env
     process = subprocess.Popen(command, cwd=cwd, env=dict(env))
     if _wait_until_ready(process, lambda: _ready(layout, sequence_before), name=AUTHORITY_NAME,
                          timeout_seconds=timeout_seconds, stop_requested=stop_requested,
-                         waiting_for="it sets up the message topology and signs its certificate and revocations"):
+                         waiting_for="it checks the server's partition mapping, creates the team's message streams "
+                                     "and signs its certificate and revocations"):
         LOGGER.info("The installation authority is ready. event=installation_authority_started")
     return process
 

@@ -250,3 +250,14 @@ def test_config_yaml_validates_the_same_settings() -> None:
 
     with pytest.raises(ValidationError, match="transport.queues.partitions must be from 1 to 128"):
         resolve_agent_type_settings(Config({"transport": {"queues": {"partitions": 0}}}))
+
+
+@pytest.mark.parametrize(("replicas", "accepted"), [(0, False), (1, True), (5, True), (6, False)])
+def test_the_replica_count_is_one_to_five(replicas: int, accepted: bool) -> None:
+    """The authority creates every stream with it; 0 is refused rather than read as 1."""
+
+    if accepted:
+        assert TransportSettings(replicas=replicas).replicas == replicas
+        return
+    with pytest.raises(ValidationError, match="transport.replicas"):
+        TransportSettings(replicas=replicas)

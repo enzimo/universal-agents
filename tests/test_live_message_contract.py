@@ -56,10 +56,12 @@ from custom_messages.wire.partitions import (
 from custom_messages.wire.permissions import HostPlacement, host_permissions
 from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.mapping_check import check_partition_mapping
+from installation_authority.queues import QueueTopology
 from tests import message_contract_support as fixtures
 from tests.live_nats_support import flush_fully
 from tests.nats_operator_support import NatsUser, OperatorAccount
 from tests.own_nats_server import own_nats_server
+from tests.queue_limits_support import queue_limits
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts/messages/v1"
@@ -585,6 +587,26 @@ async def test_the_topology_owner_sets_up_streams_and_the_team_services_withdraw
         await services.publish_refused(f"$JS.API.STREAM.MSG.GET.{consumer_stream('agent_inbox', 'team_other', 0)}")
         assert await owner.delete_consumer(consumer_stream("pool"), consumer_name("pool", pool="researcher"))
         assert authority.errors.empty() and services.errors.empty() and lead.errors.empty() and worker.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_the_authority_sets_up_every_teams_streams_and_team_consumers_under_its_own_grants(isolated_broker) -> None:
+    """README, "Who sets up the streams": what installation_authority.queues asks of the server, in operator mode."""
+
+    team = "team_grants"
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        nc = authority.nc
+        # Creating every stream reads each one and the account's storage first.
+        await QueueTopology(nc, nc.jetstream(), transport=TRANSPORT, limits=queue_limits(), partitions=COUNT).ensure([team])
+        # A lowered cap reads the partition streams' subjects; an enlarged limit updates the stream.
+        await QueueTopology(nc, nc.jetstream(), transport=TRANSPORT, limits=queue_limits(cap=4, pool=2 << 20),
+                            partitions=COUNT).ensure([team])
+        assert (await nc.jetstream().stream_info(f"UA1_POOL_WORK_{team}")).config.max_bytes == 2 << 20
+        assert authority.errors.empty()
+        # No other host sets up a stream.
+        lead = await connect(stack, isolated_broker, "lead")
+        await lead.publish_refused(f"$JS.API.STREAM.CREATE.UA1_PART_{team}~0")
 
 
 @pytest.mark.asyncio

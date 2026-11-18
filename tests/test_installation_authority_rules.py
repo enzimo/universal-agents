@@ -37,6 +37,9 @@ from installation_authority.service import (
     _renewal_refusal,
 )
 from runtime_settings.instance_layout import InstanceLayout
+from runtime_settings.transport import QueueSettings
+from custom_transport.protocol1.contract_files import transport
+from tests.queue_limits_support import TEST_QUEUE_LIMITS
 
 LISTED = ExpectedHost("worker-host-1", "worker.key1", "PUBLIC1", frozenset({"worker_host"}), frozenset({"team_one"}),
                       frozenset({"researcher"}), 4)
@@ -201,7 +204,7 @@ def authority_at(tmp_path: Path, *, partitions: int = 96) -> InstallationAuthori
     layout = InstanceLayout.at(tmp_path / "instance")
     authority, _ = host_keys.ensure_authority_keys(layout, "install_one")
     keys, _ = host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
-    return InstallationAuthority(layout, authority, keys, partitions=partitions)
+    return InstallationAuthority(layout, authority, keys, partitions=partitions, queues=TEST_QUEUE_LIMITS)
 
 
 class _NoServer:
@@ -307,9 +310,10 @@ class _Adapter:
 def _config(tmp_path: Path) -> Any:
     return SimpleNamespace(layout=InstanceLayout.at(tmp_path), instance_name="test",
                            manager=SimpleNamespace(team_id="team_one"),
-                           transport=SimpleNamespace(replicas=1, nats_servers=["nats://127.0.0.1:1"], nats_url=None,
+                           transport=SimpleNamespace(replicas=3, nats_servers=["nats://127.0.0.1:1"], nats_url=None,
                                                      subject_prefix="team", nats_user=None, nats_password=None,
-                                                     credentials_file=None, queues=SimpleNamespace(partitions=7)))
+                                                     credentials_file=None,
+                                                     queues=QueueSettings(partitions=7, max_bytes={"pool": 5 << 20})))
 
 
 def _run_with(monkeypatch, tmp_path: Path, authority: Any, made: dict[str, Any] | None = None) -> None:
@@ -337,6 +341,11 @@ def test_the_process_exits_with_a_reason_when_it_cannot_start_safely(tmp_path: P
     assert "event=installation_authority_start_refused reason=RevocationsUnverified" in caplog.text
     assert "Restore the instance's trust folder." in caplog.text
     assert made["partitions"] == 7  # the saved transport.queues.partitions
+    # The streams' limits are the saved transport.queues and transport.replicas.
+    queues = made["queues"]
+    assert (queues.max_bytes["pool"], queues.max_bytes["partition"], queues.max_messages_per_subject, queues.replicas) \
+        == (5 << 20, QueueSettings().max_bytes.partition, QueueSettings().max_messages_per_subject, 3)
+    assert set(queues.max_bytes) == set(transport()["queues"]["size_kinds"])
 
 
 def test_the_process_exits_when_its_upkeep_stops(tmp_path: Path, monkeypatch, caplog) -> None:

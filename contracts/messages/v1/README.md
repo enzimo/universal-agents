@@ -1112,9 +1112,12 @@ the installation authority. It already decides which hosts serve which teams, pa
 and pools, since it issues their certificates and credentials, so it knows when a team,
 agent or pool appears or leaves, and it runs no model. It creates a team's streams with the
 team (a stream per partition, its pool stream, its edge stream, its team services' inbox
-stream and its dead-letter stream), each agent's two
-consumers in its partition's stream when the agent is placed, each pool's consumer with the
-pool, and the key-value buckets and the object store. Its generated grants name every stream
+stream and its dead-letter stream) and the team services' inbox and dead-letter notice
+consumers, before it serves, so no host joins a team whose streams are missing; each agent's
+two consumers in its partition's stream when the agent is placed; each pool's consumer with
+the pool and each edge's with the edge, once a later step names pools and edges (edges with
+the gateways' routes: step 2b names gateways, step 6 delivers to their routes); and the
+key-value buckets and the object store (`installation_authority.queues`). Its generated grants name every stream
 of the account rather than a line per team and partition, which would grow with both: it
 reads the account's information (`$JS.API.INFO`, the storage check of "Stream sizes"),
 creates, updates, inspects and deletes streams, creates, inspects, lists and deletes their
@@ -1216,8 +1219,22 @@ room: see "Control messages share their stream's room" below. These settings are
   the room they had set aside and drops nothing) and creates the missing ones, so running
   it again finishes a team it stopped partway through. Defaults are measured against what
   they set aside, not only against the expected backlog.
-- **Lowering a limit drops nothing.** A stream that holds more than a lowered limit keeps
-  every message and refuses new ones until it falls below the limit.
+- **Lowering a limit drops nothing.** A stream that holds more than a lowered byte limit keeps
+  every message and refuses new ones until it falls below the limit. The per-subject cap is
+  the exception: NATS drops the oldest messages of a subject above a lowered
+  `max_msgs_per_subject` (measured on nats-server 2.15.1), so the authority refuses to start,
+  changing nothing, when a partition stream holds more on one subject than the lowered
+  `transport.queues.max_messages_per_subject`, and names the stream and subject; the cap can
+  be lowered once those queues drain.
+- **Every start checks before it changes.** The authority reads every stream it wants before
+  it changes any. A team's partition streams record the partition count they were made with
+  (metadata `ua.partitions`; the server's own `_nats.` keys are left aside), and a start with
+  another `transport.queues.partitions` is refused, changing nothing. It updates only a stream
+  whose settings differ in a field the contract sets, keeping metadata keys it does not own,
+  so a restart with the same settings changes nothing; it lowers limits before it creates or
+  enlarges streams, so the room they give back serves the others. Measured on nats-server
+  2.15.1 with the store on a local disk: a team's first start (every stream missing) takes
+  about 1.8 s, a later one 0.02 s.
 - **The size warning** follows the rules of the existing storage warnings
   (`assistant_gateway.storage_capacity`), and the gateway runs it with them (`size_check` in
   `transport.yaml`). It already reads the account's JetStream usage for those warnings

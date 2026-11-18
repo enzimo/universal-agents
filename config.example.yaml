@@ -98,7 +98,7 @@ transport:
   jetstream_enabled: true                       # Use JetStream for durable work and reply messages.
   subject_prefix: ""                            # Team subject prefix. Empty uses team_id, e.g. team_303. Use per-team values for external NATS ACLs.
   storage: "file"                               # JetStream storage: "file" or "memory". "memory" loses queued work when the NATS server restarts or the machine loses power (a warning is logged); for tests only.
-  replicas: 1                                   # JetStream stream replica count.
+  replicas: 1                                   # JetStream stream replica count (1 to 5).
   ack_wait_seconds: 3600.0                      # Delivery ack wait for long-running agent work.
   max_deliver: 5                                # Maximum redelivery attempts before termination.
   duplicate_window_seconds: 600.0               # JetStream duplicate message-id window.

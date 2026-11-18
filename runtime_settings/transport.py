@@ -66,6 +66,8 @@ PARTITION_COUNT_SETTING: Final = ("transport", "queues", "partitions")
 # raised by a handful of messages.
 MIN_WARN_AT_PERCENT: Final = 10
 MAX_WARN_AT_PERCENT: Final = 99
+# JetStream's most copies of a stream (transport.replicas).
+MAX_JETSTREAM_REPLICAS: Final = 5
 
 
 def store_partition_count(config: dict[str, Any]) -> bool:
@@ -225,6 +227,14 @@ class TransportSettings(BaseModel):
     nats_password: Optional[str] = TRANSPORT_DEFAULTS.nats_password.value
     credentials_file: Optional[str] = TRANSPORT_DEFAULTS.credentials_file.value
     queues: QueueSettings = Field(default_factory=QueueSettings)
+
+    @field_validator("replicas", mode="before")
+    @classmethod
+    def _replica_count(cls, value: Any) -> int:
+        """JetStream keeps 1 to 5 copies of a stream. 0 is refused rather than read as 1, so every
+        stream the installation authority creates has the count the settings name."""
+
+        return whole_number(value, name="transport.replicas", least=1, most=MAX_JETSTREAM_REPLICAS)
 
     @field_validator("type")
     @classmethod

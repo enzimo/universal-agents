@@ -33,6 +33,7 @@ from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
 from team_services.relays import AGENT_UNAVAILABLE_TEXT, Relays
 from tests.test_live_team_services import TEAM, broker, connect, installation  # noqa: F401 - broker is a fixture
+from tests.queue_limits_support import TEST_QUEUE_LIMITS
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 
@@ -192,7 +193,8 @@ async def _team_with_a_lead_host(stack: AsyncExitStack, broker: str, layout: Ins
         lead_profile.runtime: message_hosts.expected_host(layout, lead_profile, agent_types_from_catalog=True)},
         partitions=DEFAULT_PARTITION_COUNT)
     authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
-                                      partitions=DEFAULT_PARTITION_COUNT, catalog_agent_types=lambda: frozenset(catalog))
+                                      partitions=DEFAULT_PARTITION_COUNT, queues=TEST_QUEUE_LIMITS,
+                                      catalog_agent_types=lambda: frozenset(catalog))
     await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
     services = MessageHost(layout, services_profile, await connect(stack, broker, TEAM_SERVICES_RUNTIME))
     return services, asyncio.create_task(serve_team(services, TEAM, stop))

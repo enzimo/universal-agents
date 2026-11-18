@@ -17,7 +17,7 @@ from pathlib import Path
 
 import nats
 import pytest
-from nats.js.errors import APIError, KeyNotFoundError, NotFoundError
+from nats.js.errors import APIError, KeyNotFoundError
 from nats.js.api import StorageType, StreamConfig
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -58,6 +58,7 @@ from runtime_settings.instance_layout import InstanceLayout
 from tests.own_nats_server import own_nats_server
 from tests.test_live_message_contract import nats_server
 from tests.test_message_contract import body_schema_file, validator
+from tests.queue_limits_support import TEST_QUEUE_LIMITS
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 INSTALLATION, TEAM = "install_one", "team_one"
@@ -115,7 +116,7 @@ async def connect(stack: AsyncExitStack, url: str, runtime: str):
 async def start_authority(stack: AsyncExitStack, url: str, layout: InstanceLayout, **options) -> InstallationAuthority:
     authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
                                       host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
-                                      **{"partitions": DEFAULT_PARTITION_COUNT, **options})
+                                      **{"partitions": DEFAULT_PARTITION_COUNT, "queues": TEST_QUEUE_LIMITS, **options})
     await authority.start(await connect(stack, url, AUTHORITY_RUNTIME), teams=[TEAM])
     return authority
 
@@ -202,9 +203,9 @@ async def test_authority_creates_per_team_buckets_with_the_contracts_write_restr
         await authority.ensure_topology(iter(teams))
         assert (await bucket.get(f"{TEAM}.agent1")).value == b"kept"
         assert (await js.stream_info("KV_UA1_CERTS")).config.num_replicas == 1
-        # Each team's dead-letter stream comes with phase 3's dead letters (plan decision 71), not now.
-        with pytest.raises(NotFoundError):
-            await js.stream_info(f"UA1_DLQ_{TEAM}")
+        # Each team's work and dead-letter streams come with the topology (tests/test_live_queue_streams.py).
+        for team in teams:
+            assert (await js.stream_info(f"UA1_DLQ_{team}")).config.max_bytes == TEST_QUEUE_LIMITS.max_bytes["dead_letter"]
 
 
 @pytest.mark.asyncio
@@ -549,7 +550,7 @@ async def test_an_authority_that_verified_no_revocations_record_does_not_start(b
         await nc.jetstream().add_stream(config=StreamConfig(**settings))
         authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
                                           host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
-                                          partitions=DEFAULT_PARTITION_COUNT)
+                                          partitions=DEFAULT_PARTITION_COUNT, queues=TEST_QUEUE_LIMITS)
         now = utc_now()
         record = forged(authority.revocations_record(sequence=int(now.timestamp() * 1000), revocation_epoch=1, entries=[],
                                                      issued=now))
@@ -661,7 +662,7 @@ async def test_the_lead_host_asks_for_the_catalogs_agent_types_and_a_new_type_ge
     async with AsyncExitStack() as stack:
         authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
                                           host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
-                                          partitions=DEFAULT_PARTITION_COUNT,
+                                          partitions=DEFAULT_PARTITION_COUNT, queues=TEST_QUEUE_LIMITS,
                                           catalog_agent_types=lambda: frozenset(catalog))
         await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
         lead_nc = await connect(stack, broker, "lead")
@@ -708,7 +709,7 @@ async def test_a_type_removed_from_the_catalog_does_not_stop_the_lead_host_joini
     async with AsyncExitStack() as stack:
         authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
                                           host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
-                                          partitions=DEFAULT_PARTITION_COUNT,
+                                          partitions=DEFAULT_PARTITION_COUNT, queues=TEST_QUEUE_LIMITS,
                                           catalog_agent_types=lambda: frozenset(catalog))
         await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
         profile = HostProfile("lead", (TEAM,), ("lead_host", "worker_host"), ("Researcher", "TeamArchitect", "Writer"), 8)

@@ -1,7 +1,8 @@
 """The installation authority as a process the launcher supervises (``assistant_cli run-installation-authority``).
 
 It connects to NATS as host ``authority`` with its own reply inbox, sets up the
-topology and its records (``service.InstallationAuthority.start``), answers joins and
+topology (every team's streams with the instance's ``transport.queues`` limits, and the
+buckets) and its records (``service.InstallationAuthority.start``), answers joins and
 renewals, and keeps its records current (``InstallationAuthority.keep_current``) until
 it is stopped. The launcher starts it once NATS and the team's message streams are
 ready, and waits for its certificate in the bootstrap bundle before it starts any other
@@ -21,11 +22,13 @@ import signal
 from typing import Any
 
 from assistant_gateway.config import GatewayInstanceConfig
+from custom_messages.wire.queues import QueueLimits
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
 from custom_transport.protocol1.joining import certificate_agent_types
 from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
 from custom_transport.subjects import NatsSubjectMapper
-from installation_authority.service import AUTHORITY_RUNTIME, AuthorityStartRefused, InstallationAuthority
+from installation_authority.refusals import AuthorityStartRefused
+from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
 
 _LOGGER = logging.getLogger("installation_authority")
 
@@ -57,12 +60,19 @@ def catalog_agent_types(config: GatewayInstanceConfig) -> frozenset[str]:
     return certificate_agent_types(catalog.agent_types, _LOGGER)
 
 
+def queue_limits(config: GatewayInstanceConfig) -> QueueLimits:
+    """What sizes every team's streams: ``transport.queues`` and the operator's replica count."""
+
+    queues = config.transport.queues
+    return QueueLimits(max_bytes=queues.max_bytes.model_dump(), max_messages_per_subject=queues.max_messages_per_subject,
+                       replicas=config.transport.replicas)
+
+
 async def run_installation_authority(config: GatewayInstanceConfig) -> None:
     layout = config.layout
     authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
-                                      partitions=config.transport.queues.partitions,
-                                      logger=_LOGGER, replicas=config.transport.replicas,
-                                      catalog_agent_types=lambda: catalog_agent_types(config))
+                                      partitions=config.transport.queues.partitions, queues=queue_limits(config),
+                                      logger=_LOGGER, catalog_agent_types=lambda: catalog_agent_types(config))
     adapter = NatsTransportAdapter(config=transport_config(config),
                                    mapper=NatsSubjectMapper(team_id=config.manager.team_id), logger=_LOGGER)
     stop = asyncio.Event()
