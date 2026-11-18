@@ -12,7 +12,9 @@ agent's reply. The agent decides for the person the token names
 A missing agent, a lead that could not be looked up, and an unanswered or refused command
 get distinct plain runtime_error replies. Looking up the lead lists the team's session
 records; a listing that fails raises (``custom_transport.protocol1.bucket_reads``) and is
-answered as a failed lookup, never as "not running": nothing was sent to any agent.
+answered as a failed lookup, never as "not running": nothing was sent to any agent. The
+same holds when no lead was found and reading a listed session, its placement or its host
+failed: that lead may be running. A lead found among the others is still used.
 
 A placement is used only when it verifies (``StateRecords.read_report``: signed by a team
 services host, which the registry's signer roles check, and stored under its own key), as
@@ -117,6 +119,7 @@ class Relays:
         assert records is not None and live is not None
         now = self._host.clock()
         candidates = []
+        unread = False  # a listed session that could not be read may be the running lead
         prefix = f"session.{live.identity.installation}.{self._team}."
         try:
             keys = await records.keys("agent_session", prefix)
@@ -143,8 +146,9 @@ class Relays:
                 self._logger.warning("A stored lead record does not verify. event=team_services_record_refused "
                                      "record=agent_session key=%s code=%s at=%s", key, refused.code, refused.at)
             except Exception:
+                unread = True
                 self._logger.exception("A lead session could not be read; looking at the others. "
                                        "event=team_relay_placement_unreadable key=%s", key)
         if candidates:
             return str(max(candidates)[2])
-        raise AgentUnavailable(AGENT_UNAVAILABLE_TEXT)
+        raise AgentUnavailable(LEAD_LOOKUP_FAILED_TEXT if unread else AGENT_UNAVAILABLE_TEXT)

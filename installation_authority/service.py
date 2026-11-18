@@ -34,8 +34,9 @@ Rules from the message contract's README ("Installation traffic", "Trust over ti
   sequence above every one before it and at least its issue time in milliseconds), renews
   its own certificate at two thirds of its life and signs with the new one from then on,
   and forgets old certificates once a day, deleting them from ``UA1_CERTS`` (revoked ones
-  stay). A step that fails is tried again a minute later. When its NATS connection has
-  closed for good it stops (``AuthorityDisconnected``), so its supervisor sees it.
+  stay). A step that fails is tried again a minute later, except the forgetting, which
+  notes the day it ran before it starts and so runs again the next day. When its NATS
+  connection has closed for good it stops (``AuthorityDisconnected``), so its supervisor sees it.
 - **Only its own records count.** Every process shares one NATS login in this phase, so
   any of them can write ``UA1_CERTS``. The authority uses a record it reads there (the
   revocations record to sign again, a certificate to hand back) only when it verifies
@@ -467,7 +468,8 @@ class InstallationAuthority:
 
     async def upkeep(self, now: datetime) -> None:
         """Sign what is due at ``now``: revocations six hours old, its own certificate at two thirds of its life,
-        and the daily forgetting. A step that fails is logged and tried again at the next check.
+        and the daily forgetting. A step that fails is logged and tried again at the next check; the forgetting,
+        which notes the day it ran before it starts, the next day.
 
         Raises ``AuthorityDisconnected`` once the NATS client gave up reconnecting.
         """

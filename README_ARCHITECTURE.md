@@ -5223,6 +5223,55 @@ loss", and what the NATS login needs in the Docker guide's "Message host trust".
   the identity the host has when it signs (a renewal switches frames and records
   together), with compare-and-set for placements, and verified on every read; a record
   stored under another key than its own is refused.
+- **Bucket reads** (`bucket_reads`): every listing of a key-value bucket's keys
+  (`list_keys`) and every watch of its records (`watch_keys`). `StateRecords.keys` and
+  `watch` and the installation authority's certificate reads use them. The architecture
+  boundary test refuses nats-py's own `keys`, `watch`, `watchall` and `history` calls in
+  modules that can open a bucket, and `NoKeysError` anywhere in product code. A watch
+  first gives each key's current value (its first values), then each change; a listing
+  stops where the first values end, and a watch's reader is caught up there. nats-py
+  decides where they end from the consumer's pending count, which ends them early while
+  other processes write to the bucket. Phase 3 step 2a's live runs found it: the team
+  services removed a running agent's placement as abandoned, and a restarted agent host
+  was refused because its earlier session was not found. There are two causes. First,
+  nats-py puts its end marker first when the consumer information it asks for says
+  nothing is pending and the client has received nothing; nats-server answers that
+  request on another path than the messages, so the answer can arrive before messages it
+  already counted as delivered. The listing comes back empty, and nats-py's `NoKeysError`
+  was read as an empty bucket. Second, the server's pending count lags a rewrite:
+  rewriting a key the consumer has not sent yet lowers the count at once and raises it
+  for the new message only a moment later, so a message stamped "0 pending" in between
+  can be followed by keys the bucket held all along, and the listing comes back short.
+
+  On nats-server 2.15.1 with nats-py 2.16.0, with 150 keys nobody touches and 100 that
+  four writers on their own connections keep rewriting or deleting, 135 to 168 of 500
+  listings and 149 to 192 of 500 watches ended early (`tests/test_live_bucket_reads.py`,
+  five runs); nats-py 2.17.0 behaves the same. So these reads do not use the pending
+  count. Right after its consumer exists, a read asks the stream which keys it holds
+  under the same filter (stream information with a subjects filter, which every bucket
+  reader is already granted), and the first values end once each of those keys has
+  arrived, as a value or a deletion. A key the stream held then was either already passed
+  by the consumer, and so sent, or is still ahead of it and will be sent, in that version
+  or a later one. While keys are awaited, the read asks again after each second it spent
+  waiting and stops waiting for keys the stream dropped by age (`UA1_HOSTS`,
+  `UA1_AGENTS`; `event=bucket_read_keys_expired`). After 10 seconds spent waiting it
+  raises `BucketReadTimedOut`, and a stream that lists 100,000 subjects (the most one
+  reply holds) raises `BucketTooLarge`.
+
+  A failed read is never an empty bucket. On a failed listing the team services remove no
+  placement as abandoned and open no second lead: the opening is refused (the agent host
+  asks again) and the upkeep pass runs again. A person's command for the team lead is
+  answered that the lead could not be looked up, and nothing is sent. An agent host
+  closes its earlier sessions and removes its earlier records at its next upkeep. The
+  installation authority fails its start, refuses a join or renewal (the host asks
+  again), and runs its daily forgetting again the next day. A failed watch ends;
+  `TeamAgents` and the contract follower open it again, and `TeamAgents` removes the
+  records it held only once the new watch has caught up. The reads use nats-py's ordered
+  consumer with the settings of nats-py's own watch, so they need no permission beyond
+  the contract's read grants. A listing's consumer leaves the server within seconds; a
+  watch's stays 5 minutes after its client stops answering, as nats-py sets it. nats-py's
+  listings kept theirs 5 minutes too, so a burst of listings could reach the stream's
+  consumer limit.
 - **Private files** (`private_files`): keys, the bundle and kept records are written
   whole (a temporary file, flushed, then published and the folder flushed), 0600, in
   folders that are 0700 at every level.
@@ -5261,8 +5310,10 @@ The authority:
   its own certificate at two thirds of its life and signs with the new one from then on,
   and once a day forgets old trust records and deletes from `UA1_CERTS` the certificates
   receivers forget (`custom_messages.wire.trust.kept_for`; revoked ones stay). A failed
-  step is tried again a minute later. Hosts read the authority's renewed certificate from
-  `UA1_CERTS` when a reply names it, joining hosts too (`joining.join(fetch_trust=...)`,
+  step is tried again a minute later, except the forgetting: it notes the day it ran
+  before it starts, so after a failure it runs again the next day. Hosts read the
+  authority's renewed certificate from `UA1_CERTS` when a reply names it, joining hosts
+  too (`joining.join(fetch_trust=...)`,
   the same lookup as `MessageHost.fetch_trust`): a host on another machine holds its own
   copy of the bundle, made when it was set up, which never learns of the new certificate.
   The contract's pre-join permissions (`joining_host.json`) do not let a host that has not

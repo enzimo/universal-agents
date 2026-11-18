@@ -134,3 +134,31 @@ async def test_a_failed_session_listing_is_answered_as_a_failed_lookup_not_as_no
     failed = [record for record in caplog.records if "event=team_relay_lead_lookup_failed" in record.getMessage()]
     assert len(failed) == 1 and "team=team_one" in failed[0].getMessage()
     assert failed[0].exc_info is not None and isinstance(failed[0].exc_info[1], BucketReadTimedOut)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing,expected", [
+    ("session", LEAD_LOOKUP_FAILED_TEXT),  # the lead's session record could not be read
+    ("placement", LEAD_LOOKUP_FAILED_TEXT),  # its placement could not be read
+    ("forged", AGENT_UNAVAILABLE_TEXT),  # its placement does not verify: it counts as absent
+])
+async def test_a_lead_whose_records_could_not_be_read_is_not_answered_as_not_running(caplog, failing,
+                                                                                     expected) -> None:
+    # The listing works and names the lead; a read after it fails, so the lead may be running.
+    placement: Any = _placed("lead_1", "TeamArchitect")
+    if failing == "placement":
+        placement = RuntimeError("nats: timeout")
+    elif failing == "forged":
+        placement = FrameRefused("bad_signature", at="/signature")
+    relays, sent = _relays({f"{TEAM}.lead_1": placement})
+
+    async def take(record, key, **kwargs):
+        raise TimeoutError("nats: timeout")
+
+    if failing == "session":
+        relays._host.records.take_trust_record = take
+    with caplog.at_level(logging.WARNING):
+        reply = await relays.handle(_frame("debug.dump", {"request_id": "r4", "enabled": True}))
+    assert reply == {"outcome": "runtime_error", "message": expected} and sent == []
+    unreadable = "event=team_relay_placement_unreadable key=session.install_one.team_one.lead_1" in caplog.text
+    assert unreadable == (failing != "forged")
