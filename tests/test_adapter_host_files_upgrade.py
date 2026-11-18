@@ -35,8 +35,12 @@ one batch, a transfer folder set to ``state/uploads``, a run that waits for
 another's lock (and a state folder without locks), the launcher step and the
 operator command. Files left in the transfer folder that no record names
 (a removed person's, one whose records were deleted while the step waited)
-are counted and reported once, without names or contents, by the run that
-writes the marker, also after a run stopped part way; moved and not-moved
+are counted and reported once by the run that writes the marker, also after a
+run stopped part way: it lists the names the gateway gives (never another
+name, never contents) in a file beside the marker, names the first ones in
+its warning, and the warning's delete command, run by ``sh`` in an instance
+whose root holds a space, deletes exactly those and nothing while the marker
+is missing; moved and not-moved
 files (named by any one kind of record), files the 0.10 gateway reads at its
 start (of messages still ``accepted``, checked against the real adapter host
 service) and other files are not counted, a link is not followed, and a
@@ -58,6 +62,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -237,7 +243,7 @@ def _write(path: Path, data: bytes) -> Path:
     ]
 )
 def instance(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[_Instance]:
-    root = (tmp_path / "instance").resolve()
+    root = (tmp_path / "my instance").resolve()  # a space, so the warning's delete command must quote (C04 of F6)
     layout = InstanceLayout.at(root)
     sections = _sections(root)
     made = _Instance(root, layout, *_databases(tmp_path, request, sections))
@@ -624,7 +630,7 @@ def _assert_no_list(layout: InstanceLayout) -> None:
 
 
 def _plant_earlier_list(layout: InstanceLayout) -> Path:
-    """A list an earlier run left: one that reached the marker before it was deleted, or one that was stopped."""
+    """A list a run left: an earlier one's without its marker, or (a test writing the marker) another run's own."""
 
     path = layout.adapter_host_files_without_records_path
     _write(path, f"{_hex_name('earlier')}\n".encode())
@@ -645,21 +651,31 @@ def _opened_names(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return opened
 
 
-def _assert_reported(caplog: pytest.LogCaptureFixture, instance: _Instance, count: int) -> None:
+def _assert_reported(caplog: pytest.LogCaptureFixture, instance: _Instance, listed: list[str], *, unlisted: int = 0) -> str:
+    """The warning names the listed files and gives the delete advice of F6 of PR #150's review; returns it."""
+
     (warning,) = _events(caplog, "adapter_host_files_without_records")
     marker = instance.layout.adapter_host_files_upgrade_path
-    assert warning.endswith(f"folder={instance.transfer} files_without_records={count}")
-    assert "may delete" in warning and "while the instance is stopped" in warning
-    # Only files older than the marker, once the gateway has run since (F2 of PR #150's review).
-    assert f"last changed before the step's marker {marker} was written" in warning, "EVA-4: the marker path"
-    assert f"find {instance.transfer} -maxdepth 1 -type f -name 'adapter_upload_*' ! -newer {marker})" in warning
-    assert "only after the gateway has run on 0.10 since then" in warning
+    leftover_list = instance.layout.adapter_host_files_without_records_path
+    fields = f"folder={instance.transfer} files_without_records={len(listed) + unlisted} unlisted={unlisted}"
+    assert warning.endswith(f"{fields} list={leftover_list}")
+    shown = ", ".join(sorted(listed)[:10]) + (f" and {len(listed) - 10} more" if len(listed) > 10 else "")
+    assert f"Listed in {leftover_list} ({len(listed)} file(s), one name per line): {shown}. An admin" in warning
+    # C04 and C06: every path quoted, and nothing deleted while the marker is missing.
+    quoted = [shlex.quote(str(path)) for path in (marker, instance.transfer, leftover_list)]
+    command = "test -f {} && cd {} && xargs rm -f -- < {}".format(*quoted)
+    assert f"may delete exactly the listed files ({command}), keeping" in warning
+    assert "while the instance is stopped" in warning
+    assert f"only after the gateway has started on 0.10 since the step's marker {marker} was written" in warning, "C03"
+    assert "after such a run, restart the instance once before deleting" in warning, "C03: a list beside the team"
+    assert "! -newer" not in warning, "the list replaces the time limit"
     assert "never opens" not in warning, "0.10 reads the files of messages it had not handled"
     assert "another path under 0.9.13" in warning and "do not delete them" in warning, "C02"
     # Putting the folder back alone changes nothing: the step reads only upload_dir (F1 of PR #150's review).
     assert "set upload_dir to that path, delete the marker and restart" in warning
     assert "keeping every file named in the sources= field of an adapter_host_file_not_moved warning" in warning, "C03, C05"
-    assert STRAY_NAME not in warning and STRAY.decode() not in warning, "no names, no contents"
+    assert STRAY.decode() not in warning, "no contents"
+    return warning
 
 
 def test_files_no_record_names_are_counted_and_reported_once(instance: _Instance, monkeypatch, caplog) -> None:
@@ -684,7 +700,7 @@ def test_files_no_record_names_are_counted_and_reported_once(instance: _Instance
     assert result.finished and result.counts.files_without_records == 1
     assert STRAY_NAME not in opened, "the count opens no file"
     assert stray.read_bytes() == STRAY, "nothing is deleted"
-    _assert_reported(caplog, instance, 1)
+    _assert_reported(caplog, instance, [STRAY_NAME])
     (summary,) = _events(caplog, "adapter_host_files_upgraded")
     assert summary.endswith("files_without_records=1")
     assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())["files_without_records"] == 1
@@ -722,8 +738,7 @@ def test_files_whose_records_were_deleted_while_the_step_waited_are_counted(inst
 
     assert result.finished and result.counts.moved == 1 and result.counts.files_without_records == 1
     assert deleted.read_bytes() == b"x", "left where it is"
-    (warning,) = _events(caplog, "adapter_host_files_without_records")
-    assert warning.endswith(f"folder={instance.transfer} files_without_records=1")
+    _assert_reported(caplog, instance, [deleted.name])
     _assert_listed(instance.layout, [deleted.name])
 
 
@@ -850,11 +865,13 @@ _OTHER_NAMES = {
 
 
 @pytest.mark.parametrize("with_gateway_names", [True, False], ids=["beside_gateway_names", "only_other_names"])
-def test_only_names_of_the_gateways_form_are_listed(instance: _Instance, with_gateway_names) -> None:
-    """A1 of F6 (C02): a name the gateway did not give may be text someone chose, so it is counted, never listed.
+def test_only_names_of_the_gateways_form_are_listed(instance: _Instance, caplog, with_gateway_names) -> None:
+    """A1 of F6 (C02): a name the gateway did not give may be text someone chose, so it is counted, never shown.
 
     The gateway names each file ``adapter_upload_`` and a lowercase hex id,
-    matched in full. Only other names: no list is written.
+    matched in full. The warning names only those and says how many others
+    it leaves out and why. Only other names: no list is written and the
+    warning gives no delete advice.
     """
 
     others = []
@@ -867,15 +884,87 @@ def test_only_names_of_the_gateways_form_are_listed(instance: _Instance, with_ga
     for name in gateway_names:
         _write(instance.transfer / name, STRAY)
 
-    result = instance.run()
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
 
     assert result.finished and result.counts.files_without_records == len(_OTHER_NAMES) + len(gateway_names)
     assert instance.layout.adapter_host_files_upgrade_path.is_file()
     if gateway_names:
         _assert_listed(instance.layout, gateway_names)
+        # _assert_reported pins the names shown to exactly the gateway's ones.
+        warning = _assert_reported(caplog, instance, gateway_names, unlisted=len(_OTHER_NAMES))
     else:
         _assert_no_list(instance.layout)
+        (warning,) = _events(caplog, "adapter_host_files_without_records")
+        assert warning.endswith(f"files_without_records={len(_OTHER_NAMES)} unlisted={len(_OTHER_NAMES)} list=-")
+        assert "Listed in" not in warning and "xargs" not in warning and "may delete" not in warning
+    assert f"Not listed: {len(_OTHER_NAMES)} file(s) whose names are not ones the gateway gives" in warning
+    assert "may be text someone chose; this advice does not cover them" in warning
+    assert not [part for part in ("my notes", "ABCDEF", "\n", "\udcff") if part in warning], "no other name is shown"
     assert all(path.exists() for path in others), "nothing is deleted"
+
+
+def test_the_warning_names_the_first_files_and_says_where_the_rest_are(instance: _Instance, caplog) -> None:
+    """A1 of F6: the log line stays bounded; the list beside the marker holds every name."""
+
+    names = sorted(_hex_name(f"stray_{number}") for number in range(12))
+    for name in names:
+        _write(instance.transfer / name, STRAY)
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.finished and result.counts.files_without_records == 12
+    warning = _assert_reported(caplog, instance, names)
+    assert f"one name per line): {', '.join(names[:10])} and 2 more. An admin" in warning
+    assert names[10] not in warning and names[11] not in warning
+    _assert_listed(instance.layout, names)
+
+
+def test_the_delete_command_removes_exactly_the_listed_files_and_only_beside_the_marker(
+    instance: _Instance, caplog, tmp_path
+) -> None:
+    """A2, C04 and C06 of F6: the warning's command, run by ``sh`` as an administrator would paste it.
+
+    The instance root holds a space (the fixture's), so each path must be
+    quoted. The files a record keeps, a name of another form, a nested file,
+    a link and the orphan its turn names stay. Without the marker the list
+    is not valid, and the command deletes nothing.
+    """
+
+    assert " " in str(instance.root)
+    listed = [_write(instance.transfer / _hex_name(label), STRAY) for label in ("one", "two")]
+    kept_by_record = _write(instance.transfer / _hex_name("kept"), b"not the bytes its record names")
+    _record_named(instance, "att_kept", str(kept_by_record))
+    other_form = _write(instance.transfer / "adapter_upload_my notes", b"not a name the gateway gives")
+    nested = _write(instance.transfer / "sub" / _hex_name("nested"), b"in a folder")
+    outside = _write(tmp_path / "outside" / "target", b"outside the folder")
+    link = instance.transfer / _hex_name("link")
+    link.symlink_to(outside)
+    orphan = instance.transfer / "adapter_upload_orphan"
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.finished and result.counts.files_without_records == 3
+    (not_moved,) = [m for m in _events(caplog, "adapter_host_file_not_moved") if "attachment_id=att_kept" in m]
+    assert f" sources={kept_by_record} folder=" in not_moved
+    warning = _assert_reported(caplog, instance, [path.name for path in listed], unlisted=1)
+    command = re.search(r"may delete exactly the listed files \((.+?)\), keeping", warning).group(1)
+    marker = instance.layout.adapter_host_files_upgrade_path
+    aside = marker.rename(marker.with_name("marker-aside"))
+
+    refused = subprocess.run(["sh", "-c", command], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+
+    assert refused.returncode != 0 and all(path.read_bytes() == STRAY for path in listed), "C06: no marker, no delete"
+    aside.rename(marker)
+
+    done = subprocess.run(["sh", "-c", command], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+
+    assert done.returncode == 0, done.stderr
+    assert not any(path.exists() for path in listed), "exactly the listed files are gone"
+    assert all(path.is_file() for path in (kept_by_record, other_form, nested, orphan)), "everything else stays"
+    assert link.is_symlink() and outside.read_bytes() == b"outside the folder"
 
 
 def test_the_run_that_writes_the_marker_replaces_or_removes_an_earlier_list(instance: _Instance) -> None:
@@ -1214,6 +1303,8 @@ def test_a_run_that_finds_the_lock_held_waits_for_the_other(instance: _Instance,
         assert instance.files()["att_photo"] == str(instance.photo_source), "and has changed nothing"
         if other_run == "finished_the_step":
             instance.layout.adapter_host_files_upgrade_path.write_text("{}\n")
+            their_list = _plant_earlier_list(instance.layout)  # the list the finished run wrote beside its marker
+            theirs = their_list.read_bytes()
     finally:
         os.close(held)
         module_logger.removeHandler(seen)
@@ -1222,6 +1313,8 @@ def test_a_run_that_finds_the_lock_held_waits_for_the_other(instance: _Instance,
     (result,) = results
     if other_run == "finished_the_step":
         assert result.already_done and instance.files()["att_photo"] == str(instance.photo_source)
+        # C05 of F6: it removes an earlier list only after it saw no marker, inside the lock.
+        assert their_list.read_bytes() == theirs, "the finished run's list, which its warning points at, stays"
     else:
         assert result.finished and not result.already_done and result.counts.moved == 1
         assert instance.files()["att_photo"] == str(instance.photo_destination)
@@ -1260,6 +1353,12 @@ def test_the_run_holds_its_lock_from_find_to_the_marker(instance: _Instance, mon
     phases = ["find", "survey", "start", "handle", "forget_unmovable"] + (["_copy_into_place"] if cross_disk else [])
     for phase in phases:
         monkeypatch.setattr(upgrade_module._Step, phase, probed(phase, getattr(upgrade_module._Step, phase)))
+    # C05 of F6: the start's removal of an earlier list and the list's write hold the lock too.
+    _plant_earlier_list(instance.layout)
+    _write(instance.transfer / STRAY_NAME, STRAY)
+    list_steps = ["_remove_leftover_list", "_settle_leftover_list"]
+    for name in list_steps:
+        monkeypatch.setattr(upgrade_module, name, probed(name, getattr(upgrade_module, name)))
     real_write = upgrade_module._write_state_file
 
     def write(path, body):
@@ -1272,7 +1371,8 @@ def test_the_run_holds_its_lock_from_find_to_the_marker(instance: _Instance, mon
     result = instance.run()
 
     assert result.finished and result.counts.moved == 1
-    assert held_in == {phase: True for phase in [*phases, "marker"]}
+    assert held_in == {phase: True for phase in [*phases, *list_steps, "marker"]}
+    _assert_listed(instance.layout, [STRAY_NAME])
     assert not lock_is_held(), "the lock is released when the run ends"
 
 
@@ -1907,7 +2007,12 @@ def test_a_list_that_cannot_be_written_never_stops_the_start(instance: _Instance
     assert failed.endswith(f"list={listed} reason=ENOSPC: {os.strerror(errno.ENOSPC)}")
     assert "could not be written; a list still at that path is not this run's, so do not use it" in failed
     _assert_no_list(instance.layout)  # the earlier list was removed at the start, and no temporary file is left
-    assert _events(caplog, "adapter_host_files_without_records"), "the count is still reported"
+    # The count is still reported; only the names shown may go, and there is no command for a list that is not there.
+    (warning,) = _events(caplog, "adapter_host_files_without_records")
+    assert warning.endswith(f"folder={instance.transfer} files_without_records=1 unlisted=0 list=-")
+    assert f"The 1 file(s) with names the gateway gives: {STRAY_NAME}. The full list could not be written" in warning
+    assert "may delete exactly the files named here, keeping" in warning and "xargs" not in warning
+    assert "only after the gateway has started on 0.10 since the step's marker" in warning
 
 
 @pytest.mark.parametrize("fails", ["once", "always"])
@@ -2632,6 +2737,7 @@ def test_the_operator_command_runs_the_step_on_a_saved_instance(tmp_path: Path) 
     assert "event=adapter_host_files_upgraded moved=1" in completed.stderr
     assert "1 file(s) are left in the transfer folder that no record names" in completed.stdout
     assert "event=adapter_host_files_without_records " in completed.stderr
+    assert f"one name per line): {STRAY_NAME}. An administrator may delete exactly the listed files" in completed.stderr
     assert (config.layout.uploads_dir / "telegram_chat_7" / "att_photo.png").read_bytes() == CONTENT["att_photo"]
     assert config.layout.adapter_host_files_upgrade_path.is_file()
     _assert_listed(config.layout, [STRAY_NAME])

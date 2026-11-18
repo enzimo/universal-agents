@@ -696,9 +696,10 @@ class InstanceLayout:
         (``adapter_upload_`` and a hex id), never one a person may have chosen.
         Written by the run that writes the step's marker, just before it, so an
         administrator can delete exactly those files under the conditions the
-        step's warning gives; removed by every other run, so a list without
-        the marker beside it is never valid. Under ``state/``, so no agent
-        tool or sandboxed code can reach it."""
+        step's warning gives. Removed at the start of every later run that does
+        not find the marker, so a list without the marker beside it must not be
+        used; the warning's delete command checks for the marker first. Under
+        ``state/``, so no agent tool or sandboxed code can reach it."""
 
         return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_WITHOUT_RECORDS_FILENAME
 
