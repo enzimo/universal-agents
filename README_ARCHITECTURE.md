@@ -5268,8 +5268,22 @@ loss", and what the NATS login needs in the Docker guide's "Message host trust".
   boundary, and a subject is read twice. A page that does not hold it (keys before it
   were dropped by age between the two requests) starts the list over
   (`event=bucket_read_pages_shifted`); after three tries the read raises
-  `BucketKeyListShifted`. A cap on the subject count would lock a long-running team out
-  of its own session listings for good once its deleted keys reached it.
+  `BucketKeyListShifted`. The read sets no cap of its own on the subject count: a cap
+  would lock a long-running team out of its own session listings for good once its
+  deleted keys reached it.
+
+  One limit remains, in nats-py. The server sends a read's messages while the read is
+  still asking for the pages, and it is not held back: for a subscription with a
+  callback, nats-py answers flow control at once and keeps what the reader has not taken
+  in its own queue, at most 524,288 messages (or 256 MiB of values) per subscription.
+  It drops the rest and reports a slow consumer only to the connection's error callback
+  (one error line per message). So once one filter holds more than about 524,000
+  subjects, deleted keys included, the dropped keys never arrive and the read raises
+  `BucketReadTimedOut`: on nats-server 2.15.1, 500,001 subjects listed correctly in
+  4.6 seconds, and 560,001 failed after about 30 seconds (10 seconds of waiting plus the
+  repeated key-list reads), waiting for the 35,456 keys after the first 524,545. It fails
+  every time until the delete markers are removed, which is a follow-up. A watch that
+  falls that far behind after its first values misses the dropped changes.
 
   A failed read is never an empty bucket. On a failed listing the team services remove no
   placement as abandoned and open no second lead: the opening is refused (the agent host

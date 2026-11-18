@@ -45,6 +45,13 @@ that holds it joins the one before with nothing left out between them; a page th
 not (a key before it was dropped by age between the two requests) starts the list over,
 and after ``PAGE_ATTEMPTS`` tries the read raises ``BucketKeyListShifted``.
 
+The read sets no cap on the subject count, but one limit remains. The server sends the
+consumer's messages while the read is still asking for the pages, and nats-py holds at
+most 524,288 messages per subscription that the reader has not taken (``QUEUE_SIZE``).
+Once one filter holds more than about 524,000 subjects, delete markers included, the
+messages past that are dropped, their keys never arrive, and the read raises
+``BucketReadTimedOut``, each time, until the markers are removed (a follow-up).
+
 Subscriptions are nats-py ordered consumers with the settings its own watch uses, so a
 reader needs no permission beyond the contract's key-value read grants (an unnamed
 consumer, its information, its flow control, the stream's information). A key-value
@@ -78,9 +85,12 @@ FIRST_VALUES_SECONDS = 10.0
 # With keys still awaited, ask the stream which it still holds each time this much waiting has added up.
 QUIET_SECONDS = 1.0
 # Messages handed over by nats-py, kept in order for the reader (the size nats-py's watch uses).
-# A reader that falls behind slows the server instead of filling memory: nats-py passes a
-# message on only when this queue has room, and it answers the consumer's flow control only
-# once the messages before the server's request have been passed on, so the server waits.
+# It does not hold the server back: for a subscription with a callback, nats-py answers the
+# consumer's flow control as soon as it arrives and keeps what this queue cannot take yet in its
+# own subscription queue, at most 524,288 messages or 256 MiB of values. Past that it drops
+# messages and reports a slow consumer only to the connection's error callback. Before the first
+# values end, the read then raises ``BucketReadTimedOut``; after them, a watch misses those
+# changes, because nats-py's ordered consumer counts a dropped message as delivered.
 QUEUE_SIZE = 256
 # How many of the awaited keys a timed-out read names in its error.
 NAMED_KEYS = 5
