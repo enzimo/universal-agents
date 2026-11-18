@@ -3,9 +3,12 @@
 from __future__ import annotations
 import logging
 from typing import Any, Final, Optional
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from custom_messages.contracts.runtime_v1 import TRANSPORT_NATS
-from default_values import MAX_QUEUE_PARTITIONS, MIN_QUEUE_BYTES, TRANSPORT_DEFAULTS
+from default_values import (
+    MAX_QUEUE_MESSAGE_BYTES, MAX_QUEUE_PARTITIONS, MIN_QUEUE_BYTES, QUEUE_SENDERS_AT_CAP, TRANSPORT_DEFAULTS,
+)
+from runtime_settings.values import MAX_INT64, whole_number
 
 logger = logging.getLogger(__name__)
 
@@ -65,21 +68,49 @@ MIN_WARN_AT_PERCENT: Final = 10
 MAX_WARN_AT_PERCENT: Final = 99
 
 
-def _queue_setting_number(value: Any, *, name: str, least: int, most: Optional[int] = None) -> int:
-    """A whole number from ``least`` (to ``most``) for a ``transport.queues`` setting.
+def store_partition_count(config: dict[str, Any]) -> bool:
+    """Write this release's partition count into a saved file that holds none; whether it wrote it.
 
-    Accepts an int or a string of digits (environment-style YAML values); refuses true/false
-    and fractions, which pydantic's int coercion would otherwise accept or round.
+    The instance configuration's upgrade step 14 -> 15. The count is fixed when an
+    installation is created, but a file written before the setting existed holds none, so
+    its instance would take whatever the code's default is at each start; a later release
+    with another default would then ask for another count than its streams were created
+    with, and the installation authority would refuse to start. The launcher's upgrade
+    writes the upgraded mapping rather than saving through the model, so this step is what
+    puts the count in an upgraded instance's file. A value of the wrong type is left for
+    validation to refuse by name. The caller's mapping is not changed.
     """
 
-    if isinstance(value, str) and value.strip().isdigit():
-        value = int(value.strip())
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"{name} must be a whole number.")
-    if value < least or (most is not None and value > most):
-        bound = f"from {least} to {most}" if most is not None else f"at least {least}"
-        raise ValueError(f"{name} must be {bound}, not {value}.")
-    return value
+    section, group, key = PARTITION_COUNT_SETTING
+    transport = config.get(section)
+    transport = {} if transport is None else transport  # an empty section reads as none
+    queues = transport.get(group) if isinstance(transport, dict) else False
+    queues = {} if queues is None else queues
+    if not isinstance(queues, dict) or key in queues:
+        return False
+    count = TRANSPORT_DEFAULTS.queues_partitions.value
+    config[section] = {**transport, group: {**queues, key: count}}
+    logger.info("Stored the partition count in the instance configuration. event=config_partition_count_stored "
+                "setting=%s count=%s", ".".join(PARTITION_COUNT_SETTING), count)
+    return True
+
+
+def least_partition_bytes(per_subject_cap: int) -> int:
+    """The smallest partition byte limit at which ``per_subject_cap`` still keeps room for control messages.
+
+    The cap protects control messages only while a partition stream has room left once the
+    senders reach it: ``QUEUE_SENDERS_AT_CAP`` senders' waiting messages for one agent at the
+    cap, each a full-size message, plus one more sender's, so that agent's and its
+    neighbours' control messages still fit (contract README, "Stream sizes").
+    """
+
+    return (QUEUE_SENDERS_AT_CAP + 1) * per_subject_cap * MAX_QUEUE_MESSAGE_BYTES
+
+
+def most_per_subject_cap(partition_bytes: int) -> int:
+    """The largest per-subject cap a partition byte limit leaves room for (``least_partition_bytes``)."""
+
+    return partition_bytes // least_partition_bytes(1)
 
 
 class QueueByteLimits(BaseModel):
@@ -102,8 +133,8 @@ class QueueByteLimits(BaseModel):
     @field_validator("partition", "pool", "edge", "team_services", "dead_letter", mode="before")
     @classmethod
     def _at_least_one_frame(cls, value: Any, info: Any) -> int:
-        return _queue_setting_number(
-            value, name=f"transport.queues.max_bytes.{info.field_name}", least=MIN_QUEUE_BYTES
+        return whole_number(
+            value, name=f"transport.queues.max_bytes.{info.field_name}", least=MIN_QUEUE_BYTES, most=MAX_INT64
         )
 
 
@@ -128,21 +159,42 @@ class QueueSettings(BaseModel):
     @field_validator("warn_at_percent", mode="before")
     @classmethod
     def _warn_level(cls, value: Any) -> int:
-        return _queue_setting_number(
+        return whole_number(
             value, name="transport.queues.warn_at_percent", least=MIN_WARN_AT_PERCENT, most=MAX_WARN_AT_PERCENT
         )
 
     @field_validator("partitions", mode="before")
     @classmethod
     def _partition_count(cls, value: Any) -> int:
-        return _queue_setting_number(
-            value, name="transport.queues.partitions", least=1, most=MAX_QUEUE_PARTITIONS
-        )
+        return whole_number(value, name="transport.queues.partitions", least=1, most=MAX_QUEUE_PARTITIONS)
 
     @field_validator("max_messages_per_subject", mode="before")
     @classmethod
     def _per_subject_cap(cls, value: Any) -> int:
-        return _queue_setting_number(value, name="transport.queues.max_messages_per_subject", least=1)
+        return whole_number(value, name="transport.queues.max_messages_per_subject", least=1, most=MAX_INT64)
+
+    @model_validator(mode="after")
+    def _cap_leaves_room_for_control_messages(self) -> "QueueSettings":
+        """Refuse a partition limit and per-subject cap that together bring back FA-3's lockout.
+
+        Lowering ``max_bytes.partition`` alone (as the storage refusal suggests) or raising the
+        cap alone can let one agent's backlog fill its partition stream before the senders
+        reach the cap; then that agent's and its neighbours' control messages are refused.
+        """
+
+        cap, partition = self.max_messages_per_subject, self.max_bytes.partition
+        least = least_partition_bytes(cap)
+        if partition >= least:
+            return self
+        most = most_per_subject_cap(partition)
+        lower_cap = f", or lower transport.queues.max_messages_per_subject to {most} or less" if most else ""
+        raise ValueError(
+            f"transport.queues.max_bytes.partition ({partition:,} bytes) is too small for "
+            f"transport.queues.max_messages_per_subject ({cap}). A partition stream must hold "
+            f"{QUEUE_SENDERS_AT_CAP + 1} senders' waiting messages for one agent at that cap, at up to "
+            f"{MAX_QUEUE_MESSAGE_BYTES:,} bytes each ({least:,} bytes), so that one agent's backlog still leaves "
+            f"room for control messages. Raise transport.queues.max_bytes.partition to {least:,} or more{lower_cap}."
+        )
 
 
 class TransportSettings(BaseModel):

@@ -52,6 +52,16 @@ MIB = 1024 * 1024
 # them against the contract.
 MAX_QUEUE_PARTITIONS = 128
 MIN_QUEUE_BYTES = MIB
+# The largest message a protocol 1 work stream stores: a full-size frame with its headers
+# (every stream's max_message_bytes in the contract; checked by the same test).
+MAX_QUEUE_MESSAGE_BYTES = 263_168
+# The senders the per-subject cap (transport.queues.max_messages_per_subject) is sized for:
+# a gateway, the lead host, the team services and the scheduler, each with its own waiting
+# messages for one agent, since the stored subject names the sender. A partition stream must
+# hold their backlog at the cap with full-size messages plus one more sender's, so one busy
+# agent leaves room for its own and its neighbours' control messages (contract README,
+# "Stream sizes"; runtime_settings.transport.least_partition_bytes).
+QUEUE_SENDERS_AT_CAP = 4
 
 
 @dataclass(frozen=True)
@@ -164,7 +174,9 @@ class TransportDefaultValues:
     queues_max_bytes_partition: DefaultValue[int] = default_value(
         16 * MIB,
         "Byte limit of each of a team's partition streams (UA1_PART_<team>~<partition>), which hold "
-        "the inboxes and control queues of the partition's agents.",
+        "the inboxes and control queues of the partition's agents. It must hold QUEUE_SENDERS_AT_CAP + 1 "
+        "senders' waiting messages for one agent at queues_max_messages_per_subject, each of "
+        "MAX_QUEUE_MESSAGE_BYTES, so lower the cap together with it.",
         onboarding_overridable=False,
     )
     queues_max_bytes_pool: DefaultValue[int] = default_value(
@@ -205,7 +217,8 @@ class TransportDefaultValues:
     queues_max_messages_per_subject: DefaultValue[int] = default_value(
         8,
         "Most messages one sender may have waiting in one agent's inbox or control queue. A sender "
-        "over it is refused, so one busy queue leaves room in its partition stream for the others.",
+        "over it is refused, so one busy queue leaves room in its partition stream for the others. "
+        "Raise queues_max_bytes_partition together with it (see that setting).",
         onboarding_overridable=False,
     )
 

@@ -16,6 +16,31 @@ def _normalize_positive_float(value: Any, *, field_name: str) -> float:
     return parsed
 
 
+# The largest value NATS takes for a stream's byte limit or message counts (signed 64-bit).
+MAX_INT64 = 2**63 - 1
+
+
+def whole_number(value: Any, *, name: str, least: Optional[int] = None, most: Optional[int] = None) -> int:
+    """A setting's whole number, optionally from ``least`` to ``most``; every refusal names the setting.
+
+    Accepts an int or a string of ASCII digits (environment-style YAML values). Refuses
+    true/false and fractions, which pydantic's int coercion would accept or round, and
+    other digit characters such as ``²``, which ``str.isdigit`` passes but ``int`` cannot read.
+    """
+
+    if isinstance(value, str) and value.strip().isascii() and value.strip().isdecimal():
+        value = int(value.strip())
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a whole number.")
+    if (least is not None and value < least) or (most is not None and value > most):
+        if least is not None and most is not None:
+            bound = f"from {least} to {most}"
+        else:
+            bound = f"at least {least}" if least is not None else f"at most {most}"
+        raise ValueError(f"{name} must be {bound}, not {value}.")
+    return value
+
+
 def _normalize_positive_int(
     value: Any,
     *,

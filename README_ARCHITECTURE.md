@@ -5924,7 +5924,13 @@ The same rule now removes the ignored `agent.max_concurrent_top_level_tasks` set
 instance configuration 13 -> 14 and `config.yaml` 11 -> 12 drop it before validation or
 export, current-format files refuse it by name, and settings section version 11 removes it
 from older transfers (`RETIRED_CONCURRENCY_SETTING`). Worker pools control concurrency; the
-obsolete value had no effect.
+obsolete value had no effect. Instance configuration 14 -> 15 writes the protocol 1
+partition count (`transport.queues.partitions`) into a file that holds none
+(`runtime_settings.transport.store_partition_count`): the count is fixed when an
+installation is created, and the launcher's upgrade writes the upgraded settings as they
+are rather than saving them through the settings model, so without this step an upgraded
+instance would follow the code's default and a release with another default would stop
+its start.
 
 The watchdog, delegated-work progress notes and check-back timers find records by parents
 in the recovered task tree, rather than by the requester's earlier agent id. The check-back

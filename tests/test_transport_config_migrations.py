@@ -21,7 +21,7 @@ from config_loader import (
 
 def test_public_config_schema_versions_are_current() -> None:
     assert CONFIG_SCHEMA_VERSION == 12
-    assert INSTANCE_CONFIG_SCHEMA_VERSION == 14
+    assert INSTANCE_CONFIG_SCHEMA_VERSION == 15
 
 
 @pytest.mark.parametrize(
@@ -435,6 +435,7 @@ PINNED_0_9_CONFIG = Path(__file__).parent / "fixtures" / "pinned_memory" / "main
 
 
 CONCURRENCY_STEP = "13 -> 14: remove the obsolete per-agent concurrency setting; agent.max_concurrent_top_level_tasks removed"
+PARTITION_COUNT_STEP = "14 -> 15: store the protocol 1 partition count; transport.queues.partitions set to 96"
 
 
 def test_upgrading_the_pinned_old_instance_config_removes_the_retired_settings() -> None:
@@ -457,6 +458,7 @@ def test_upgrading_the_pinned_old_instance_config_removes_the_retired_settings()
     assert migrated["agent"]["max_queued_top_level_tasks"] == raw["agent"]["max_queued_top_level_tasks"]
     assert "12 -> 13: the presence stream was removed; transport.presence_max_age_seconds removed" in steps
     assert CONCURRENCY_STEP in steps
+    assert PARTITION_COUNT_STEP in steps and migrated["transport"]["queues"] == {"partitions": 96}
     assert raw["transport"]["presence_max_age_seconds"] == 600.0, "the caller's mapping is not changed"
     assert raw["agent"]["max_concurrent_top_level_tasks"] == 1, "the caller's mapping is not changed"
 
@@ -471,7 +473,12 @@ def test_upgrading_a_0_9_instance_config_file_removes_the_retired_settings_and_k
     assert (result.original_version, result.migrated_version) == (12, INSTANCE_CONFIG_SCHEMA_VERSION)
     assert any(step.startswith("12 -> 13: the presence stream was removed;") for step in result.applied_steps)
     assert CONCURRENCY_STEP in result.applied_steps
-    upgraded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert PARTITION_COUNT_STEP in result.applied_steps
+    text = path.read_text(encoding="utf-8")
+    upgraded = yaml.safe_load(text)
+    assert upgraded["transport"]["queues"] == {"partitions": 96}, "the count is in the file from the first 0.10 start"
+    partitions_line = next(line for line in text.splitlines() if line.strip().startswith("partitions:"))
+    assert "Fixed when the instance is created" in partitions_line
     backup = yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))
     assert "presence_max_age_seconds" not in upgraded["transport"]
     assert "max_concurrent_top_level_tasks" not in upgraded["agent"]
@@ -531,17 +538,17 @@ def test_current_files_naming_the_presence_setting_are_refused(tmp_path: Path) -
         )
 
 
-@pytest.mark.parametrize("migrate,previous,current", [
-    (_migrate_config_dict, 11, CONFIG_SCHEMA_VERSION),
-    (_migrate_instance_config_dict, 13, INSTANCE_CONFIG_SCHEMA_VERSION),
+@pytest.mark.parametrize("migrate,previous,current,later", [
+    (_migrate_config_dict, 11, CONFIG_SCHEMA_VERSION, {}),
+    (_migrate_instance_config_dict, 13, INSTANCE_CONFIG_SCHEMA_VERSION, {"transport": {"queues": {"partitions": 96}}}),
 ])
 def test_the_concurrency_upgrade_removes_the_obsolete_value_without_mutating_its_source(
-    tmp_path, migrate, previous, current,
+    tmp_path, migrate, previous, current, later,
 ):
     source = {"schema_version": previous, "agent": {
         "max_concurrent_top_level_tasks": 4, "max_queued_top_level_tasks": 22}}
     upgraded, steps = migrate(source, source_path=tmp_path / "config.yaml")
-    assert upgraded == {"schema_version": current, "agent": {"max_queued_top_level_tasks": 22}}
+    assert upgraded == {"schema_version": current, "agent": {"max_queued_top_level_tasks": 22}, **later}
     assert source["agent"]["max_concurrent_top_level_tasks"] == 4
     assert any("agent.max_concurrent_top_level_tasks removed" in step for step in steps)
 
@@ -553,3 +560,35 @@ def test_current_files_reject_the_retired_concurrency_setting(tmp_path):
     with pytest.raises(ValueError, match="agent.max_concurrent_top_level_tasks has been removed"):
         GatewayInstanceConfig.model_validate({"schema_version": INSTANCE_CONFIG_SCHEMA_VERSION,
             "instance_name": "test", "instance_root": str(tmp_path), **setting})
+
+
+# -- the protocol 1 partition count (message contract phase 3, step 2a) ----------------------
+
+
+@pytest.mark.parametrize(("transport", "expected"), [
+    (None, {"queues": {"partitions": 96}}),
+    ({"max_deliver": 5}, {"max_deliver": 5, "queues": {"partitions": 96}}),
+    ({"queues": None}, {"queues": {"partitions": 96}}),
+    ({"queues": {"max_bytes": {"pool": 64 * 1024 * 1024}}},
+     {"queues": {"max_bytes": {"pool": 64 * 1024 * 1024}, "partitions": 96}}),
+])
+def test_the_partition_count_upgrade_writes_the_default_into_a_file_without_one(tmp_path, transport, expected) -> None:
+    """The count is fixed when an installation is created, so it is in the file rather than left to the code."""
+
+    source = {"schema_version": 14, **({} if transport is None else {"transport": transport})}
+    before = yaml.safe_dump(source)
+
+    upgraded, steps = _migrate_instance_config_dict(source, source_path=tmp_path / "instance_config.yaml")
+
+    assert upgraded == {"schema_version": 15, "transport": expected}
+    assert steps == (PARTITION_COUNT_STEP,)
+    assert yaml.safe_dump(source) == before, "the caller's mapping is not changed"
+
+
+@pytest.mark.parametrize("transport", [{"queues": {"partitions": 64}}, {"queues": "many"}, "nats"])
+def test_the_partition_count_upgrade_keeps_a_stored_count_and_leaves_a_wrong_value_to_validation(tmp_path, transport) -> None:
+    upgraded, steps = _migrate_instance_config_dict({"schema_version": 14, "transport": transport},
+                                                    source_path=tmp_path / "instance_config.yaml")
+
+    assert upgraded == {"schema_version": 15, "transport": transport}
+    assert steps == ("14 -> 15: store the protocol 1 partition count",)
