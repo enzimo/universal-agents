@@ -444,8 +444,9 @@ async def test_the_authority_checks_the_mapping_under_its_own_grants_and_no_othe
         assert authority.errors.empty()
         # Another host can neither probe as the authority nor hear its probes.
         lead = await connect(stack, isolated_broker, "lead")
-        await lead.publish_refused(f"ua.v1.{PARTITION_PROBE_SCOPE}.{runtime}.ctl.agent.probe-1")
-        await lead.subscribe_refused(f"ua.v1.{PARTITION_PROBE_SCOPE}.{runtime}.ctl.agent.>")
+        for address in ("ctl.agent", "work.agent", "work.control"):
+            await lead.publish_refused(f"ua.v1.{PARTITION_PROBE_SCOPE}.{runtime}.{address}.probe-1")
+        await lead.subscribe_refused(f"ua.v1.{PARTITION_PROBE_SCOPE}.{runtime}.>")
 
 
 @pytest.mark.asyncio

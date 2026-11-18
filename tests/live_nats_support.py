@@ -339,7 +339,7 @@ def _check_shared_server_mapping(config: NatsTransportConfig) -> str | None:
         try:
             await check_partition_mapping(connection, sender=MAPPING_CHECK_SENDER, count=DEFAULT_PARTITION_COUNT)
         except PartitionMappingError as error:
-            return (f"The shared live-test NATS server {servers} cannot carry protocol 1 live control: {error} "
+            return (f"The shared live-test NATS server {servers} cannot carry protocol 1 traffic: {error} "
                     "Start it with the mappings: python scripts/write_nats_mapping_config.py <file>, then "
                     "nats-server -js -c <file> (CONTRIBUTING.md, live NATS tests).")
         finally:

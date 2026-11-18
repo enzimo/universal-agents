@@ -915,10 +915,13 @@ JetStream-backed delivery where configured. Verify:
   the instance's partition count (`transport.queues.partitions`, 96 unless
   chosen otherwise). An external server's operator adds them to the account the
   instance logs in to; `python scripts/write_nats_mapping_config.py FILE
-  --partitions N` writes the three lines. Before it serves, the installation
-  authority checks that the server applies them at the instance's count, and
-  otherwise stops the start (`event=installation_authority_start_refused`) with
-  the lines to add.
+  --partitions N` writes the three lines. In a NATS cluster whose accounts are
+  kept in the servers' configuration files, every server needs the lines: a
+  server maps only what its own clients publish. Before it serves, the
+  installation authority checks each line at the instance's count on the server
+  its connection is on, and otherwise stops the start
+  (`event=installation_authority_start_refused`) naming the lines that are
+  missing or wrong.
 
 Process-scoped consumers use this crash-cleanup delay:
 

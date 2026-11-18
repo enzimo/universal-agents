@@ -90,7 +90,7 @@ partitions:
   default_count: 96
   max_count: 128
   handover_seconds: 600   # a handover's step 2 ends this long after the released record's issued_at at the latest; tasks still held are handed back (README, "Credentials follow ownership")
-  probe_scope: _probe     # the mapping check's scope token, where a team id goes: the topology owner probes its own probe agents' live control addresses under it (README, "Partitions"); team ids cannot start with _
+  probe_scope: _probe     # the mapping check's scope token, where a team id goes: the topology owner probes its own probe agents' mapped addresses under it (README, "Partitions"); team ids cannot start with _
   account_mappings:
     "ua.v1.*.*.work.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
     "ua.v1.*.*.work.control.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.control.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"

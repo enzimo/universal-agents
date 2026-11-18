@@ -22,6 +22,7 @@ at the installation's count before it serves (``custom_transport.protocol1.mappi
 
 from __future__ import annotations
 
+import json
 from typing import Iterable, Optional
 
 from custom_messages.wire.kinds import (
@@ -68,6 +69,20 @@ def account_mappings(count: int) -> dict[str, str]:
     check_partition_count(count)
     return {source: target.replace(PARTITION_COUNT_TOKEN, str(count))
             for source, target in PARTITION_ACCOUNT_MAPPINGS.items()}
+
+
+def mapping_source(address: str) -> str:
+    """The source of the account mapping line for a mapped address: any team, sender and agent (``ua.v1.*.*.<address>``)."""
+
+    if address not in PARTITIONED_ADDRESSES:
+        raise ValueError(f"{address} is not an address the account maps to a partition")
+    return SUBJECT_PREFIX.format(team="*", sender="*") + "." + address.replace("{agent}", "*")
+
+
+def mapping_line(source: str, target: str) -> str:
+    """One mapping line as a server's configuration writes it, ``"source": "target"`` (JSON strings are valid there)."""
+
+    return f"{json.dumps(source)}: {json.dumps(target)}"
 
 
 def agent_partition(team: str, agent: str, count: int = DEFAULT_PARTITION_COUNT) -> int:

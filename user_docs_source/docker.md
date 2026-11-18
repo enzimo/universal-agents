@@ -272,8 +272,10 @@ deployment does not perform a rolling cluster upgrade. Also give every server
 69,632 bytes, which the included server gets automatically (see "Surviving a
 power loss" in the configuration guide). Add the partition mappings to the
 account the instance logs in to, at the instance's `transport.queues.partitions`
-(see "Message Broker" in the configuration guide): without them, the
-installation authority stops the start and names the lines to add.
+(see "Message Broker" in the configuration guide), on every server when the
+account is kept in the servers' configuration files: a server maps only what its
+own clients publish. Without them, the installation authority stops the start
+and names the lines to add.
 
 ### Keep the databases on local disk
 

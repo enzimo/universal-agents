@@ -4,8 +4,9 @@
   stores an agent's inbox and control publishes in the partition stream that
   ``custom_messages.wire.partitions`` computes, pending on the consumers the contract names,
   and delivers its live control requests with the partition token.
-- The mapping check (``custom_transport.protocol1.mapping_check``) passes on that server and
-  names a server without the mappings and one that maps with another count.
+- The mapping check (``custom_transport.protocol1.mapping_check``) passes on that server,
+  names a server without the mappings and one that maps with another count, and judges each
+  of an operator's hand-written lines by itself.
 
 Each test starts its own nats-server (``LIVE_TEST_NATS_SERVER``, or nats-server on PATH).
 The installation authority's grants for the check, under an operator-mode account, are in
@@ -20,7 +21,8 @@ from pathlib import Path
 import nats
 import pytest
 
-from custom_messages.wire.partitions import agent_partition, arrival_subject
+from custom_messages.wire.kinds import PARTITIONED_ADDRESSES
+from custom_messages.wire.partitions import account_mappings, agent_partition, arrival_subject, mapping_line, mapping_source
 from custom_messages.wire.queues import agent_consumers, team_queue_streams
 from custom_transport.protocol1.contract_files import transport
 from custom_transport.protocol1.mapping_check import OTHER_COUNT, UNMAPPED, PartitionMappingError, check_partition_mapping
@@ -98,9 +100,37 @@ def test_the_check_names_a_server_without_the_mappings_or_with_another_count(tmp
         try:
             with pytest.raises(PartitionMappingError) as refused:
                 await check_partition_mapping(nc, sender="authority", count=96)
-            assert refused.value.reason == reason
+            assert refused.value.problems == {mapping_source(address): reason for address in PARTITIONED_ADDRESSES}
         finally:
             await nc.close()
 
     with own_nats_server(nats_server(), tmp_path, partitions=server_maps_at) as url:
+        asyncio.run(scenario(url))
+
+
+def test_the_check_judges_each_mapping_line_by_itself(tmp_path: Path) -> None:
+    """An operator's hand-written lines: live control right, the inbox at another count, the control queue left out.
+
+    Before the check probed every line, this server passed, and an inbox publish was stored in
+    another partition's stream with nothing pending on the agent's consumer (C18).
+    """
+
+    inbox, control_queue, live_control = (mapping_source(address) for address in
+                                          ("work.agent.{agent}", "work.control.{agent}", "ctl.agent.{agent}"))
+    lines = {live_control: account_mappings(96)[live_control], inbox: account_mappings(64)[inbox]}
+    config = tmp_path / "hand-written.conf"
+    config.write_text("mappings {\n" + "".join(f"  {mapping_line(*line)}\n" for line in lines.items()) + "}\n",
+                      encoding="utf-8")
+
+    async def scenario(url: str) -> None:
+        nc = await nats.connect(url, allow_reconnect=False)
+        try:
+            with pytest.raises(PartitionMappingError) as refused:
+                await check_partition_mapping(nc, sender="authority", count=96, wait_seconds=1.0)
+            assert refused.value.problems == {inbox: OTHER_COUNT, control_queue: UNMAPPED}
+            assert f"the line for {inbox} maps with partition count 64" in str(refused.value)
+        finally:
+            await nc.close()
+
+    with own_nats_server(nats_server(), tmp_path, "-c", str(config)) as url:
         asyncio.run(scenario(url))

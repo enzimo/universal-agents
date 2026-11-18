@@ -819,18 +819,29 @@ refuses to start when its own setting and the bundle's count differ.
   count (the launcher writes them at every start), and receivers apply this rule: a host
   serving an agent's live control address subscribes to it with the agent's partition token.
 - **The mapping check.** Before it serves, the installation authority checks that the server
-  maps at the installation's count, since an external server's operator writes the mappings
-  by hand and a missing or wrong one would leave every agent's control requests unanswered.
-  It subscribes to its own probe addresses, `ua.v1.<probe scope>.<its runtime>.ctl.agent.>`
-  (`probe_scope` in `transport.yaml`, `_probe`; no team id starts with `_`, so no team's
-  receivers or streams see them), and publishes an unsigned message to the live control
-  address of a few probe agents, chosen so that every other count up to `max_count` gives at
-  least one of them another partition token. Each must arrive with the token the
-  installation's count gives. One that arrives without a token means the server applies no
-  mapping; another token means the server maps with another count; none within a few seconds
-  means the authority's login may not publish or subscribe there. Each refuses the start
-  with what to fix, and the mapping lines at the installation's count. Its generated grants
-  hold both probe subjects (`custom_transport.protocol1.mapping_check`).
+  maps every agent address at the installation's count, since an external server's operator
+  writes the three mapping lines by hand. A missing or wrong live control line leaves every
+  agent's control requests unanswered; a missing or wrong inbox or control-queue line would
+  store queued work in no partition stream, or in one whose host does not read that agent,
+  where it waits unread until the stream's `max_age`. It subscribes to its own probe
+  addresses, `ua.v1.<probe scope>.<its runtime>.>` (`probe_scope` in `transport.yaml`,
+  `_probe`; no team id starts with `_`, so no team's receivers see them, and no stream stores
+  them since every stream's subjects name a team), and publishes an unsigned message to each
+  mapped address (inbox, control queue and live control) of at least 16 probe agents, chosen
+  so that every other count up to `max_count` gives at least one of them another partition
+  token; the minimum catches a larger count too, a multiple of the installation's count
+  passing at most one check in 65,536. It judges each mapping line by its own probes, which
+  must all arrive with the token the installation's count gives: one that arrives without a
+  token means that line is missing; another token means it maps with another count; probes
+  of a line that never come back mean its target sends them elsewhere. When nothing comes
+  back at all, the authority's login may not publish or subscribe there, or the connection
+  was lost. Each refuses the start naming the failing lines, with the three lines at the
+  installation's count as a server's configuration writes them. Its generated grants hold the
+  probe subjects (`custom_transport.protocol1.mapping_check`). The check sees the server the
+  authority's connection is on: a server applies the mappings to what its own clients
+  publish, and a message arriving from another server of a cluster is not mapped again, so
+  with accounts kept in the servers' configuration files every server of a cluster needs the
+  lines (an account in a signed account record, operator mode, carries them to every server).
 - **Streams.** The inboxes and control queues of a team's agents in partition `p` are stored
   in `UA1_PART_<team>~<p>`, one stream per team and partition, each agent with its own two
   consumers there; worker pools in `UA1_POOL_WORK_<team>`. An agent with a long backlog fills

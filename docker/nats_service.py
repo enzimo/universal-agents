@@ -28,7 +28,7 @@ import subprocess
 import time
 from typing import Mapping, MutableMapping
 
-from custom_messages.wire.partitions import account_mappings
+from custom_messages.wire.partitions import account_mappings, mapping_line
 from env_secrets import PROCESS_NATS, environment_for
 
 
@@ -326,12 +326,10 @@ def mappings_block(partitions: int) -> str:
 
     At the top level it belongs to the server's global account, the one the bundled server's
     user logs in to; an external server's operator puts the same lines in the installation's
-    account. JSON string escaping is valid NATS configuration string syntax. ``ValueError``
-    for a count no installation may choose.
+    account. ``ValueError`` for a count no installation may choose.
     """
 
-    lines = "".join(f"  {json.dumps(source)}: {json.dumps(target)}\n"
-                    for source, target in sorted(account_mappings(partitions).items()))
+    lines = "".join(f"  {mapping_line(source, target)}\n" for source, target in sorted(account_mappings(partitions).items()))
     return "mappings {\n" + lines + "}\n"
 
 

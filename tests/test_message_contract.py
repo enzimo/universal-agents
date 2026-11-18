@@ -552,9 +552,8 @@ def test_the_account_maps_every_agent_address_to_its_partition_and_nothing_else(
     assert EXPORT.stored_subject("work.pool.{pool}", "*", TRANSPORT) == "ua.v1.{team}.*.work.pool.{pool}"
     assert EXPORT.publish_subject("work.control.{agent}", TRANSPORT) == "ua.v1.{team}.{self}.work.control.*.*"
     assert EXPORT.subscribe_subject("ctl.agent.{agent}", TRANSPORT) == "ua.v1.{team}.*.ctl.agent.*.{partition}"
-    # The mapping check probes the live control address, which no stream stores, under its own scope.
-    assert (EXPORT.probe_address(TRANSPORT), kinds.PARTITION_PROBE_ADDRESS) == ("ctl.agent.{agent}",) * 2
-    assert EXPORT.probe_grant(TRANSPORT) == "ua.v1._probe.{self}.ctl.agent.>"
+    # The mapping check probes every mapped address under its own scope, where no stream stores anything.
+    assert EXPORT.probe_grant(TRANSPORT) == "ua.v1._probe.{self}.>"
     assert kinds.PARTITION_ACCOUNT_MAPPINGS == partitions["account_mappings"]
 
 
@@ -668,7 +667,7 @@ def test_permissions_name_exact_receivers_and_publish_only_under_the_senders_own
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
         grants = consumer_grants() | management.get(role, set()) | buckets.get(role, set()) | blobs.get(role, set())
         # The topology owner's mapping check probes its own addresses under the probe scope (README, "Partitions").
-        probe = f"ua.v1.{kinds.PARTITION_PROBE_SCOPE}.{{self}}.ctl.agent.>"
+        probe = f"ua.v1.{kinds.PARTITION_PROBE_SCOPE}.{{self}}.>"
         probing = role == TRANSPORT["topology_owner"]
         assert (probe in document["publish"], probe in document["subscribe"]) == (probing, probing)
         for subject in document["publish"]:

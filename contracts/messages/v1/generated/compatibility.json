@@ -6,7 +6,7 @@
     "minors": "any; a newer minor's unknown optional fields are ignored"
   },
   "authority_token_domain": "universal-agents/authority-token/v1",
-  "contract_sha256": "d11921e0d89dc0959bf43836d06bcdb76b114934d1088588caeb007b9c336a3c",
+  "contract_sha256": "4c6bd9de584677e7ecc98d7b0d1f7deae621a10ab36b21c9b78de56b6d1d1d90",
   "kinds": [
     "access.decision",
     "access.request",

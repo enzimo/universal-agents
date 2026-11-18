@@ -1330,23 +1330,17 @@ def subscribe_subject(address: str, transport: dict[str, Any]) -> str:
     return subject.replace("{agent}", "*") if address in partitioned_addresses(transport) else subject
 
 
-def probe_address(transport: dict[str, Any]) -> str:
-    """The address the mapping check probes: the agents' live control address, which no stream stores."""
-
-    (address,) = [address for address in transport["classes"]["request_reply"]["addresses"]
-                  if audience_target(address) == "agent"]
-    return address
-
-
 def probe_grant(transport: dict[str, Any]) -> str:
     """The topology owner's publish and subscribe grant for the mapping check (README, "Partitions").
 
-    Its own probe agents' live control addresses under the probe scope, mapped (with the
-    partition token) or not, so the check also sees a server that does not map.
+    Every mapped address of its own probe agents under the probe scope (the inbox, the control
+    queue and live control), mapped (with the partition token) or not, so the check judges each
+    of the account's mapping lines and also sees a server that does not map. No stream stores
+    a subject under the probe scope, since every stream's subjects name a team id, so these are
+    plain messages.
     """
 
-    return f"{SUBJECT_ROOT}{transport['partitions']['probe_scope']}.{{self}}." + probe_address(transport).replace(
-        "{agent}", ">")
+    return f"{SUBJECT_ROOT}{transport['partitions']['probe_scope']}.{{self}}.>"
 
 
 def check_partitions(transport: dict[str, Any]) -> None:
@@ -2848,7 +2842,6 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"PARTITION_COUNT_TOKEN = {PARTITION_COUNT_TOKEN!r}\n"
         f"PARTITION_ACCOUNT_MAPPINGS = {dict(sorted(transport['partitions']['account_mappings'].items()))!r}\n"
         f"PARTITION_PROBE_SCOPE = {transport['partitions']['probe_scope']!r}\n"
-        f"PARTITION_PROBE_ADDRESS = {probe_address(transport)!r}\n"
         f"SINGLE_TEAM_ROLES = {tuple(transport['single_team_roles'])!r}\n"
         f"PARTITIONED_ADDRESSES = {tuple(sorted(partitioned_addresses(transport)))!r}\n"
         f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
