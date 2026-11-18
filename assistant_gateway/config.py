@@ -95,10 +95,12 @@ from runtime_settings.retired_concurrency import (
 )
 from runtime_settings.transport import (
     PARTITION_COUNT_SETTING,
+    REPLICAS_SETTING,
     TransportSettings,
     drop_retired_presence_setting,
     refuse_retired_presence_setting,
     store_partition_count,
+    write_zero_replicas_as_one,
 )
 from runtime_settings.values import whole_number
 from runtime_settings.voice import VoiceSettings
@@ -1558,13 +1560,17 @@ def _migrate_instance_config_dict(
     if version == 14:
         # The protocol 1 partition count is fixed when an installation is created, so it is
         # written into the file rather than left to the code's default
-        # (runtime_settings.transport.store_partition_count).
+        # (runtime_settings.transport.store_partition_count). A replica count of 0, which
+        # earlier releases read as one copy and this one refuses, is written as 1
+        # (runtime_settings.transport.write_zero_replicas_as_one).
         stored = store_partition_count(migrated)
         partitions = migrated["transport"]["queues"]["partitions"] if stored else None
+        replicas = write_zero_replicas_as_one(migrated)
         migrated["schema_version"] = 15
         applied_steps.append(
             "14 -> 15: store the protocol 1 partition count"
             + (f"; {'.'.join(PARTITION_COUNT_SETTING)} set to {partitions}" if stored else "")
+            + (f"; {'.'.join(REPLICAS_SETTING)} 0 set to 1" if replicas else "")
         )
         version = 15
 

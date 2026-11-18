@@ -20,7 +20,7 @@ from config_loader import (
 
 
 def test_public_config_schema_versions_are_current() -> None:
-    assert CONFIG_SCHEMA_VERSION == 12
+    assert CONFIG_SCHEMA_VERSION == 13
     assert INSTANCE_CONFIG_SCHEMA_VERSION == 15
 
 
@@ -510,6 +510,7 @@ def test_upgrading_a_config_yaml_removes_the_retired_settings_and_keeps_a_backup
         "11 -> 12: remove the obsolete per-agent concurrency setting; agent.max_concurrent_top_level_tasks removed"
         in result.applied_steps
     )
+    assert "12 -> 13: transport.replicas is 1 to 5" in result.applied_steps
     upgraded = yaml.safe_load(path.read_text(encoding="utf-8"))
     backup = yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))
     assert upgraded["transport"] == {"max_deliver": 5}
@@ -583,6 +584,41 @@ def test_the_partition_count_upgrade_writes_the_default_into_a_file_without_one(
     assert upgraded == {"schema_version": 15, "transport": expected}
     assert steps == (PARTITION_COUNT_STEP,)
     assert yaml.safe_dump(source) == before, "the caller's mapping is not changed"
+
+
+# -- a replica count of 0, which releases before 0.10 read as one copy (C24 of the step 2a run) -------
+
+
+@pytest.mark.parametrize(("migrate", "previous", "current", "step", "later"), [
+    (_migrate_config_dict, 12, 13, "12 -> 13: transport.replicas is 1 to 5", {}),
+    (_migrate_instance_config_dict, 14, 15, "14 -> 15: store the protocol 1 partition count; "
+     "transport.queues.partitions set to 96", {"queues": {"partitions": 96}}),
+])
+@pytest.mark.parametrize(("replicas", "upgraded_replicas"), [(0, 1), (0.0, 1), (3, 3), ("0", "0"), (False, False)])
+def test_a_saved_replica_count_of_0_is_written_as_1(tmp_path, migrate, previous, current, step, later, replicas,
+                                                    upgraded_replicas) -> None:
+    """Every stream was made with int(replicas or 1) copies, so 0 meant one; validation refuses it now."""
+
+    source = {"schema_version": previous, "transport": {"replicas": replicas}}
+    before = yaml.safe_dump(source)
+
+    upgraded, steps = migrate(source, source_path=tmp_path / "settings.yaml")
+
+    assert upgraded == {"schema_version": current, "transport": {"replicas": upgraded_replicas, **later}}
+    written = replicas is not False and replicas in (0, 0.0) and not isinstance(replicas, str)
+    assert steps[-1] == step + ("; transport.replicas 0 set to 1" if written else "")
+    assert yaml.safe_dump(source) == before, "the caller's mapping is not changed"
+
+
+def test_a_0_9_config_yaml_with_a_replica_count_of_0_loads_with_one_copy(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"schema_version": 10, "transport": {"replicas": 0}}), encoding="utf-8")
+
+    result = migrate_config_file(path)
+
+    assert "12 -> 13: transport.replicas is 1 to 5; transport.replicas 0 set to 1" in result.applied_steps
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["transport"] == {"replicas": 1}
+    assert yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))["transport"] == {"replicas": 0}
 
 
 @pytest.mark.parametrize("transport", [{"queues": {"partitions": 64}}, {"queues": "many"}, "nats"])

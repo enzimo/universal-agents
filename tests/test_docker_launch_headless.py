@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from runtime_settings.instance_layout import InstanceLayout
+from runtime_settings.transport import TransportSettings
 from assistant_gateway.config import (
     GatewayInstanceConfig,
     INSTANCE_CONFIG_SCHEMA_VERSION,
@@ -1543,12 +1544,12 @@ def _supervised_with_message_services(tmp_path: Path, monkeypatch, *, restart_te
         return {"lead-host": ExpectedHost("lead-host", "lead-host.0123", "AAAA", frozenset({"lead_host"}),
                                           frozenset({"team_test"}), frozenset({"researcher"}), limit)}
 
-    def start_authority(layout, command, env, *, cwd, stop_requested):
+    def start_authority(layout, command, env, *, cwd, timeout_seconds, stop_requested):
         listed = read_expected_hosts(layout.trust_expected_hosts_path)["lead-host"].session_limit
         events.append(f"start:authority:{env.get('REFRESHED', 'launch')}:limit={listed}")
         return _SupervisedProcess("authority", events)
 
-    def start_team_services(layout, command, env, *, cwd, stop_requested):
+    def start_team_services(layout, command, env, *, cwd, timeout_seconds, stop_requested):
         events.append(f"start:team-services:{env.get('REFRESHED', 'launch')}")
         if events.count("start:authority:installation authority:limit=5"):
             return restart_team_services(events, handlers)
@@ -1564,7 +1565,7 @@ def _supervised_with_message_services(tmp_path: Path, monkeypatch, *, restart_te
     monkeypatch.setattr("docker.launch_headless.time.sleep", lambda _seconds: None)
     monkeypatch.setattr("docker.launch_headless.signal.signal", handlers.__setitem__)
     monkeypatch.setattr("docker.launch_headless.pop_runtime_restart_request", lambda _path: next(requests, None))
-    services = message_hosts.MessageServices(InstanceLayout.at(tmp_path), hosts, lambda: 96, ["authority"], {},
+    services = message_hosts.MessageServices(InstanceLayout.at(tmp_path), hosts, TransportSettings, ["authority"], {},
                                              ["team-services"], {}, cwd=tmp_path)
     assert services.start() is True  # what the launcher does before it supervises
 
@@ -2252,13 +2253,13 @@ def test_the_authority_and_the_team_services_start_after_the_streams_each_ready_
     steps: list[tuple[str, object]] = []
     authority = _StandInProcess()
 
-    def start(layout, command, env, *, cwd, stop_requested):
+    def start(layout, command, env, *, cwd, timeout_seconds, stop_requested):
         steps.append(("authority", (layout, command, env)))
         return authority
 
     team_services = _StandInProcess()
 
-    def start_team_services(layout, command, env, *, cwd, stop_requested):
+    def start_team_services(layout, command, env, *, cwd, timeout_seconds, stop_requested):
         # The real one returns only once they serve (docker.message_hosts.start_team_services).
         steps.append(("team services", (command, env)))
         return team_services

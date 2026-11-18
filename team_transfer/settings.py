@@ -36,7 +36,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final, Iterator
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
 from runtime_settings.retired_concurrency import RETIRED_CONCURRENCY_SETTING
-from runtime_settings.transport import PARTITION_COUNT_SETTING, RETIRED_PRESENCE_SETTING
+from runtime_settings.transport import (
+    PARTITION_COUNT_SETTING,
+    REPLICAS_SETTING,
+    RETIRED_PRESENCE_SETTING,
+    zero_replicas_meant_one,
+)
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
     SECTION_UPGRADES,
@@ -701,13 +706,24 @@ __all__ = [
 # (RETIRED_CONCURRENCY_SETTING), which loaders before it ignored but left in saved
 # files, so any earlier export may carry it: the same step drops it. V12 added
 # transport.queues; an older export has none, so the new instance takes their defaults
-# and the same step reads version 11.
+# and the same step reads version 11. Version 12 also refuses transport.replicas 0, which
+# every earlier version read as one copy, so the same step writes it as 1.
 
 
-def _without_retired_settings(records: SectionRecords) -> SectionRecords:
+def _upgraded_settings(records: SectionRecords) -> SectionRecords:
+    """An older export's records as version 12 reads them: retired settings dropped, a replica count of 0 as 1."""
+
     retired = {RETIRED_PRESENCE_SETTING, RETIRED_CONCURRENCY_SETTING}
-    return [record for record in records if tuple(record.get("path", ())) not in retired]
+    upgraded: SectionRecords = []
+    for record in records:
+        path = tuple(record.get("path", ()))
+        if path in retired:
+            continue
+        if path == REPLICAS_SETTING and zero_replicas_meant_one(record.get("value")):
+            record = {**record, "value": 1}
+        upgraded.append(record)
+    return upgraded
 
 
 for _source in (5, 6, 7, 8, 9, 10, 11):
-    SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _without_retired_settings
+    SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _upgraded_settings

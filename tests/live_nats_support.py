@@ -157,7 +157,8 @@ class OwnedStreams:
       update drops metadata the caller did not send, but keeps the generation;
     - before an update of a name this test tried to create, a stream that still carries the
       token is recorded as well: a create retried after a lost reply looks the stream up
-      and updates it (``InstallationAuthority._ensure_bucket``), which would drop the token;
+      and updates it when its settings differ (``NatsStreamTopology.reconcile``), which would
+      drop the token;
     - at the end, a stream is deleted only when it carries the token or a recorded
       generation. A stream another client created, before or after, has neither, and stays.
 
@@ -181,7 +182,7 @@ class OwnedStreams:
 
     A side effect: while a stream carries the token, another client's create of it with the
     same settings also answers ``STREAM_NAME_IN_USE``. Product code looks a stream up before
-    creating it (``NatsStreamTopology.reconcile``, ``_ensure_bucket``), and this process's own
+    creating it (``NatsStreamTopology.reconcile``, ``QueueTopology.ensure``), and this process's own
     creates carry the same token, so only a separate process that looked the name up just
     before this test created it would see that.
     """

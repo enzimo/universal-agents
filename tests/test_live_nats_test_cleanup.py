@@ -167,8 +167,8 @@ async def test_a_stream_another_run_creates_between_the_look_up_and_the_create_s
         answered = await mine.jetstream().add_stream(config)  # the same settings: answered as without the recorder
         assert answered.config.name == "RACED"
         if afterwards == "a look-up and an update":
-            # What InstallationAuthority._ensure_bucket does when it runs again. The name is
-            # one this test tried, but the stream it updates is another run's: not claimed.
+            # What QueueTopology.ensure does when it runs again with changed settings. The name
+            # is one this test tried, but the stream it updates is another run's: not claimed.
             await mine.jetstream().stream_info("RACED")
             await mine.jetstream().update_stream(config)
 
@@ -203,8 +203,8 @@ async def test_a_create_whose_reply_was_lost_is_deleted(
         if afterwards == "the same create again":
             await jetstream.add_stream(config)
         elif afterwards == "a look-up and an update":
-            # What InstallationAuthority._ensure_bucket does when it runs again. The update
-            # drops the token, so only the generation recorded before it proves ownership.
+            # What QueueTopology.ensure does when it runs again with changed settings. The
+            # update drops the token, so only the generation recorded before it proves ownership.
             await jetstream.stream_info("LOST")
             await jetstream.update_stream(config)
             assert OWNER_METADATA_KEY not in ((await jetstream.stream_info("LOST")).config.metadata or {})

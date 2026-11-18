@@ -9,6 +9,11 @@ nats-server of its own, so a test chooses the server's storage and its partition
   does not own; a team made with another partition count refuses the start;
 - a store too small stops the start naming the stream and the setting, and a later start
   with lower limits finishes the team; no host can join meanwhile;
+- after NATS restarts with less storage than its streams set aside (the bundled server
+  measures its storage from the disk's free space at every start), the same settings still
+  serve and a changed limit is refused saying that lowering cannot help;
+- an account whose limits are kept per replica tier is checked against its tier, and one
+  that allows too few streams refuses the start before any change;
 - a full work stream refuses new messages and keeps its oldest; the per-subject cap keeps
   room for control messages (FA-3 of PR #151, with four senders at the cap and full-size
   messages); a lowered cap that would drop queued messages refuses the start.
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
@@ -34,13 +40,21 @@ from custom_transport.protocol1.bootstrap import read_bundle
 from custom_transport.protocol1 import host_keys
 from custom_transport.protocol1.contract_files import transport
 from docker.nats_service import mappings_block
-from installation_authority.queues import QueueTopology, StreamCapWouldDrop, StreamCountMismatch, StreamStorageRefused
+from installation_authority.queues import (
+    QueueTopology,
+    StreamAccountRefused,
+    StreamCapWouldDrop,
+    StreamCountMismatch,
+    StreamStorageRefused,
+)
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
 from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.transport import QueueSettings
+from tests.nats_operator_support import OperatorAccount
 from tests.own_nats_server import own_nats_server
 from tests.queue_limits_support import queue_limits
-from tests.test_live_installation_authority import prepare
+from tests.test_live_installation_authority import TEAM as AUTHORITY_TEAM
+from tests.test_live_installation_authority import prepare, start_authority, stop_authority
 from tests.test_live_message_contract import nats_server
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
@@ -151,7 +165,7 @@ def test_a_store_too_small_stops_the_start_naming_the_stream_and_a_later_start_w
         message = str(refused.value)
         assert "JetStream error 10047" in message and "(transport.queues.max_bytes.partition)" in message
         assert f"Team {TEAM}'s streams set aside 104,857,600 bytes at the current settings" in message
-        assert "The streams made so far stay; the next start finishes the team." in message
+        assert "The streams made so far stay; once the limits fit, the next start finishes the team." in message
         made = (await account(nc))["streams"]
         assert 0 < made < 100
         # The operator lowers the partition limit: the next start lowers what exists and makes the rest.
@@ -180,6 +194,78 @@ def test_no_host_can_join_while_the_streams_do_not_fit(tmp_path):
 
     run(tmp_path, scenario, max_file_store=40 * MIB)
     assert layout.trust_bootstrap_path.read_bytes() == before and read_bundle(layout.trust_bootstrap_path).records == ()
+
+
+def test_after_nats_restarts_with_less_storage_than_is_set_aside_the_same_settings_still_serve(tmp_path):
+    """C21 of the step 2a run: the bundled server's storage is three quarters of the disk's free space at each start.
+
+    A server whose storage is now below what its streams set aside keeps serving them and
+    takes new messages, but refuses every new or changed stream, a lowered limit too. So a
+    start that asks for no change serves, and a changed limit stops the start saying so.
+    ``max_file_store`` stands in for the disk.
+    """
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    prepare(layout)
+    stored = tmp_path / "nats"
+    stored.mkdir()
+
+    def authority_starts(room: int, **options: Any) -> None:
+        async def started(url: str) -> None:
+            async with AsyncExitStack() as stack:
+                await stop_authority(await start_authority(stack, url, layout, **options))
+
+        with own_nats_server(nats_server(), stored, "-c", str(server_config(stored, max_file_store=room))) as url:
+            asyncio.run(started(url))
+
+    authority_starts(300 * MIB)  # 100 streams of 1 MiB set aside
+    authority_starts(60 * MIB)  # the disk filled up: the same settings ask NATS for no change
+    with pytest.raises(StreamStorageRefused) as refused:
+        authority_starts(60 * MIB, queues=queue_limits(partition=MIB // 4))  # 28 MiB in all would fit 60 MiB
+    message = str(refused.value)
+    assert message.startswith(f"NATS refused to lower the limit of stream UA1_PART_{AUTHORITY_TEAM}~0: JetStream error "
+                              "10047, insufficient storage resources available.")
+    assert "Lowering a limit cannot help then." in message
+    assert "for 104,857,600 bytes set aside the disk needs about 139,810,134 bytes free at every start." in message
+    assert "Free disk space and restart the instance" in message
+    authority_starts(300 * MIB, queues=queue_limits(partition=MIB // 4))  # disk space freed, NATS restarted
+
+
+def _tiered_account(folder: Path, tiers: dict[str, dict[str, int]]) -> tuple[Path, OperatorAccount]:
+    """An operator-mode server's configuration whose installation account keeps its limits per replica tier."""
+
+    operator = OperatorAccount(transport()["partitions"]["account_mappings"], 96, jetstream_tiers=tiers)
+    config = folder / "nats.json"
+    config.write_text(json.dumps(operator.server_settings(folder)))
+    config.chmod(0o600)
+    return config, operator
+
+
+def test_an_account_with_limits_per_replica_tier_is_checked_against_its_tier(tmp_path):
+    """C22: the reply's top-level limits are 0 for such an account; the tier of the replica count holds them."""
+
+    config, operator = _tiered_account(tmp_path, {"R1": {"disk_storage": 4096 * MIB, "streams": 120}})
+
+    async def scenario(url: str) -> None:
+        nc = await nats.connect(url, allow_reconnect=False, **operator.user("authority", None).login())
+        try:
+            with pytest.raises(StreamAccountRefused, match="per replica tier \\(R1\\) and has none for R3"):
+                await topology(nc, queue_limits(replicas=3)).ensure([TEAM])
+            assert (await account(nc))["streams"] == 0
+            await topology(nc, queue_limits()).ensure([TEAM])  # 100 streams and 7 buckets
+            info = await account(nc)
+            assert info["limits"]["max_storage"] == 0 and info["tiers"]["R1"]["streams"] == 107
+            with pytest.raises(StreamAccountRefused) as refused:
+                await topology(nc, queue_limits()).ensure([TEAM, "team_more"])
+            assert str(refused.value).startswith(
+                "The NATS account's tier R1 allows 120 streams and holds 107; this start would add 102. A team needs "
+                "102 streams at partition count 96 (96 partition streams, 4 more and 2 buckets)")
+            assert (await account(nc))["streams"] == 107, "nothing was made"
+        finally:
+            await nc.close()
+
+    with own_nats_server(nats_server(), tmp_path, "-c", str(config)) as url:
+        asyncio.run(scenario(url))
 
 
 def test_a_full_work_stream_refuses_new_messages_and_keeps_its_oldest(tmp_path):

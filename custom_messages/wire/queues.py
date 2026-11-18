@@ -115,6 +115,13 @@ class QueueConsumer:
         return str(self.config["name"])
 
 
+def queue_streams_per_team(transport: Mapping[str, Any], count: int) -> int:
+    """How many work and dead-letter streams each team has at partition count ``count``."""
+
+    numbers = check_partition_count(count)
+    return sum(numbers if "{" + _PARTITION + "}" in template else 1 for template in transport["streams"])
+
+
 def team_queue_streams(transport: Mapping[str, Any], team: str, count: int) -> tuple[QueueStream, ...]:
     """Every work and dead-letter stream of ``team``: a ``{partition}`` stream once per partition.
 

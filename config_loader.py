@@ -54,7 +54,12 @@ from runtime_settings.worker_pools import move_worker_capacity_settings
 from runtime_settings.retired_concurrency import (
     drop_retired_concurrency_setting, refuse_retired_concurrency_setting,
 )
-from runtime_settings.transport import drop_retired_presence_setting, refuse_retired_presence_setting
+from runtime_settings.transport import (
+    REPLICAS_SETTING,
+    drop_retired_presence_setting,
+    refuse_retired_presence_setting,
+    write_zero_replicas_as_one,
+)
 from runtime_settings.values import (
     DEFAULT_AUTHORIZATION_CONFIG,
     _mapping_or_empty,
@@ -75,7 +80,7 @@ from runtime_settings.projection import (
 logger = logging.getLogger(__name__)
 
 
-CONFIG_SCHEMA_VERSION = 12
+CONFIG_SCHEMA_VERSION = 13
 
 
 DIRECTLY_COMPATIBLE_CONFIG_VERSIONS = {CONFIG_SCHEMA_VERSION}
@@ -407,6 +412,17 @@ def _migrate_config_dict(
             + ("; agent.max_concurrent_top_level_tasks removed" if removed else "")
         )
         version = 12
+
+    if version == 12:
+        # A replica count of 0, which earlier releases read as one copy and this one refuses,
+        # is written as 1 (runtime_settings.transport.write_zero_replicas_as_one).
+        written = write_zero_replicas_as_one(migrated)
+        migrated["schema_version"] = 13
+        applied_steps.append(
+            "12 -> 13: transport.replicas is 1 to 5"
+            + (f"; {'.'.join(REPLICAS_SETTING)} 0 set to 1" if written else "")
+        )
+        version = 13
 
     refuse_removed_access_settings(migrated)
     refuse_retired_presence_setting(migrated)

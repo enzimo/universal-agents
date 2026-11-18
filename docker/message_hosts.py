@@ -53,22 +53,23 @@ from custom_transport.protocol1.joining import HostProfile
 from installation_authority.expected_hosts import ExpectedHost, write_expected_hosts
 from installation_authority.service import AUTHORITY_RUNTIME
 from runtime_settings.instance_layout import InstanceLayout
+from runtime_settings.transport import TransportSettings
 from team_services.lock import LEASE
 from team_services.serving import forget_serving, serving_process
 
 LOGGER = logging.getLogger(__name__)
-# How long the authority may take to create one team's message streams when none exist yet:
-# 1.8 s measured on nats-server 2.15.1 (a stream per partition at the default 96 partitions,
-# four more and two consumers; store on a local disk, sync_interval always), with room for a
-# disk about 15 times slower. A start that finds them all reads them in 0.02 s.
+# How long the authority may take to create one team's message streams when none exist yet,
+# measured on nats-server 2.15.1 (a stream per partition at the default 96 partitions, four
+# more, the buckets and two consumers; sync_interval always, store on a local disk): 1.8 s
+# with one copy of each stream on one server; on three clustered servers sharing one disk,
+# 3.7 s with one copy and 20.7 s with three (transport.replicas). Each allowance leaves room
+# for a disk about 15 times slower; servers on separate machines add the network's part. A
+# start that finds every stream reads them in 0.02 s.
 STREAM_SETUP_SECONDS_PER_TEAM = 30.0
-# How long the authority may take to check the server's partition mapping, set up the topology
-# of the instance's one team (the launcher starts it for manager.team_id) and sign its records.
-AUTHORITY_READY_TIMEOUT_SECONDS = 60.0 + STREAM_SETUP_SECONDS_PER_TEAM
-# How long the team services may take to serve: after an unclean stop, the dead instance's lease
-# on the team's lock and the clock tolerance (team_services.lock), plus as long as the authority
-# may take, for starting and joining.
-TEAM_SERVICES_READY_TIMEOUT_SECONDS = LEASE.total_seconds() + CLOCK_SKEW_SECONDS + AUTHORITY_READY_TIMEOUT_SECONDS
+REPLICATED_STREAM_SETUP_SECONDS_PER_TEAM = 300.0
+# How long the authority may take, besides the streams, to check the server's partition
+# mapping and sign its records.
+AUTHORITY_START_SECONDS = 60.0
 # How often the launcher says what it still waits for.
 WAIT_REPORT_SECONDS = 10.0
 AUTHORITY_NAME = "installation authority"
@@ -241,8 +242,24 @@ def _wait_until_ready(process: subprocess.Popen[bytes], ready: Callable[[], bool
     return True
 
 
+def authority_ready_timeout(replicas: int) -> float:
+    """How long the authority may take to get ready: the mapping check, the streams of the instance's one team
+    (the launcher starts it for manager.team_id) with ``replicas`` copies each, and its records."""
+
+    return AUTHORITY_START_SECONDS + (STREAM_SETUP_SECONDS_PER_TEAM if replicas <= 1
+                                      else REPLICATED_STREAM_SETUP_SECONDS_PER_TEAM)
+
+
+def team_services_ready_timeout(replicas: int) -> float:
+    """How long the team services may take to serve: after an unclean stop, the dead instance's lease on the team's
+    lock and the clock tolerance (team_services.lock), plus as long as the authority may take, for starting and
+    joining."""
+
+    return LEASE.total_seconds() + CLOCK_SKEW_SECONDS + authority_ready_timeout(replicas)
+
+
 def start_installation_authority(layout: InstanceLayout, command: list[str], env: Mapping[str, str], *, cwd: Path,
-                                 timeout_seconds: float = AUTHORITY_READY_TIMEOUT_SECONDS,
+                                 timeout_seconds: float,
                                  stop_requested: Callable[[], bool] = _never) -> subprocess.Popen[bytes]:
     """Start the authority and wait until it signed its records; raise ``RuntimeError`` if it does not.
 
@@ -263,7 +280,7 @@ def start_installation_authority(layout: InstanceLayout, command: list[str], env
 
 
 def start_team_services(layout: InstanceLayout, command: list[str], env: Mapping[str, str], *, cwd: Path,
-                        timeout_seconds: float = TEAM_SERVICES_READY_TIMEOUT_SECONDS,
+                        timeout_seconds: float,
                         stop_requested: Callable[[], bool] = _never) -> subprocess.Popen[bytes]:
     """Start the team services and wait until they serve; raise ``RuntimeError`` if they do not.
 
@@ -293,9 +310,10 @@ class MessageServices:
     """The installation authority and the team services, which every other message host needs.
 
     ``start`` writes the trust folder with ``hosts()``, the hosts the launcher starts as
-    the saved configuration lists them now, and ``partitions()``, the saved partition count,
-    then starts the authority and the team services in that order, each once the one before
-    is ready. A restart of everything stops the
+    the saved configuration lists them now, and the saved partition count from
+    ``transport()``, the saved transport settings, then starts the authority and the team
+    services in that order, each once the one before is ready; how long it waits grows with
+    ``transport.replicas``. A restart of everything stops the
     other processes, then ``stop`` stops the team services and the authority, and ``start``
     runs again with each environment's copies of saved settings recomputed
     (``environment``), before the other processes start again (plan 13B.2).
@@ -303,7 +321,7 @@ class MessageServices:
 
     layout: InstanceLayout
     hosts: Callable[[], Mapping[str, ExpectedHost]]
-    partitions: Callable[[], int]
+    transport: Callable[[], TransportSettings]
     authority_command: list[str]
     authority_env: Mapping[str, str]
     team_services_command: list[str]
@@ -320,15 +338,19 @@ class MessageServices:
         ``ValueError`` when the trust folder or the saved configuration cannot be read.
         """
 
-        prepare_message_host_trust(self.layout, self.hosts(), partitions=self.partitions())
+        transport = self.transport()
+        prepare_message_host_trust(self.layout, self.hosts(), partitions=transport.queues.partitions)
         self.authority = start_installation_authority(self.layout, self.authority_command,
                                                       environment(self.authority_env, AUTHORITY_NAME), cwd=self.cwd,
+                                                      timeout_seconds=authority_ready_timeout(transport.replicas),
                                                       stop_requested=stop_requested)
         if stop_requested():
             return False
         self.team_services = start_team_services(self.layout, self.team_services_command,
                                                  environment(self.team_services_env, TEAM_SERVICES_NAME),
-                                                 cwd=self.cwd, stop_requested=stop_requested)
+                                                 cwd=self.cwd,
+                                                 timeout_seconds=team_services_ready_timeout(transport.replicas),
+                                                 stop_requested=stop_requested)
         return not stop_requested()
 
     def processes(self) -> tuple[tuple[str, subprocess.Popen[bytes]], ...]:

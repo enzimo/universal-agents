@@ -35,6 +35,8 @@ _PREFIX = {"operator": 14 << 3, "account": 0, "user": 20 << 3}
 # An account without limits, JetStream included (operator mode enables JetStream per account).
 _UNLIMITED = {"subs": -1, "data": -1, "payload": -1, "imports": -1, "exports": -1, "wildcards": True, "conn": -1,
               "leaf": -1, "mem_storage": -1, "disk_storage": -1, "streams": -1, "consumer": -1}
+# The JetStream limits of an account's claims, kept per replica tier when the account has tiers.
+_JETSTREAM_LIMITS = ("mem_storage", "disk_storage", "streams", "consumer")
 _SECONDS = re.compile(r"(\d+)s")
 _NANOSECONDS = 1_000_000_000
 
@@ -122,10 +124,14 @@ class OperatorAccount:
     """One installation's account in operator mode, with the partition mappings at ``partition_count``.
 
     A system account is required for JetStream in operator mode; no test logs in to it.
+    ``jetstream_tiers`` keeps the account's JetStream limits per replica tier instead, as hosted
+    NATS services set them (``{"R1": {"disk_storage": ..., "streams": ...}}``, the claims'
+    names; what a tier leaves out is unlimited).
     """
 
     mappings: Mapping[str, str]
     partition_count: int
+    jetstream_tiers: Optional[Mapping[str, Mapping[str, int]]] = None
     operator: NKey = field(default_factory=lambda: NKey("operator"))
     system: NKey = field(default_factory=lambda: NKey("account"))
     account: NKey = field(default_factory=lambda: NKey("account"))
@@ -136,8 +142,13 @@ class OperatorAccount:
 
         mappings = {source: [{"subject": target.replace("COUNT", str(self.partition_count)), "weight": 100}]
                     for source, target in self.mappings.items()}
+        limits: dict[str, Any] = dict(_UNLIMITED)
+        if self.jetstream_tiers is not None:
+            limits = {key: value for key, value in limits.items() if key not in _JETSTREAM_LIMITS}
+            limits["tiered_limits"] = {tier: {**{key: -1 for key in _JETSTREAM_LIMITS}, **values}
+                                       for tier, values in self.jetstream_tiers.items()}
         return encode_jwt(self.operator, self.account.public, "installation", {
-            "limits": _UNLIMITED, "signing_keys": [self.signing.public], "mappings": mappings,
+            "limits": limits, "signing_keys": [self.signing.public], "mappings": mappings,
             "type": "account", "version": 2})
 
     def user(self, name: str, permissions: Optional[Mapping[str, Any]]) -> NatsUser:

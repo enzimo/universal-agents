@@ -78,11 +78,9 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 import rfc8785
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from nats.js.api import StorageType, StreamConfig
 from nats.js.errors import KeyNotFoundError, NoKeysError, NotFoundError
 from pydantic import ValidationError
 
-from custom_messages.wire.buckets import TEAM_PLACEHOLDER, bucket_name, bucket_stream
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.frame import Receiver, VerifiedFrame, body_model, expected_idempotency_key
 from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, KINDS, PROTOCOL, SINGLE_TEAM_ROLES
@@ -122,7 +120,6 @@ CERTIFICATES_BUCKET = "UA1_CERTS"
 # common.schema.json "epoch".
 MAX_EPOCH = 2**53 - 1
 _INSTALLATION_ADDRESS = "_install.{sender}.svc"
-_STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -204,7 +201,6 @@ class InstallationAuthority:
         # The instance's agent types, read at each join of a host listed with agent_types_from_catalog.
         self.catalog_agent_types = catalog_agent_types
         self.queues = queues
-        self.replicas = queues.replicas
         self.live: Optional[LiveHost] = None
         self._nc: Any = None
         self._js: Any = None
@@ -323,40 +319,14 @@ class InstallationAuthority:
         return bundle
 
     async def ensure_topology(self, teams: Iterable[str]) -> None:
-        """Create what the contract's topology owner owns: every team's streams and team consumers, then the buckets.
+        """Create what the contract's topology owner owns: every team's streams, the buckets and the team consumers.
 
-        The streams first: their checks refuse a start before anything changes
-        (``queues.QueueTopology``).
+        One plan for all of them (``queues.QueueTopology``): its checks refuse a start before
+        anything changes, and a stream whose settings already match is not sent to NATS.
         """
 
-        spec = transport()
-        teams = tuple(teams)
-        await QueueTopology(self._nc, self._js, transport=spec, limits=self.queues, partitions=self.partitions,
+        await QueueTopology(self._nc, self._js, transport=transport(), limits=self.queues, partitions=self.partitions,
                             logger=self.logger).ensure(teams)
-        for bucket in spec["key_value"]:
-            for team in teams if TEAM_PLACEHOLDER in bucket else (None,):
-                await self._ensure_bucket(spec, bucket, team)
-
-    async def _ensure_bucket(self, spec: Mapping[str, Any], bucket: str, team: Optional[str]) -> None:
-        """Create or reconcile the contract's stream, without bucket-wide rollup or deletion.
-
-        The client's bucket-creation helper enables rollup headers, which would
-        let a writer of one key erase other keys. Bind it as a bucket only after
-        creating its stream with the contract's restrictions.
-        """
-
-        settings = bucket_stream(spec, bucket, team)
-        settings["storage"] = _STORAGE[settings["storage"]]
-        settings["num_replicas"] = self.replicas
-        config = StreamConfig(**settings)
-        try:
-            await self._js.stream_info(config.name)
-        except NotFoundError:
-            await self._js.add_stream(config=config)
-            self.logger.info("Created a key-value bucket. event=protocol1_bucket_created bucket=%s replicas=%s",
-                             bucket_name(bucket, team), self.replicas)
-        else:
-            await self._js.update_stream(config=config)
 
     async def _records(self) -> Any:
         return await self._js.key_value(CERTIFICATES_BUCKET)

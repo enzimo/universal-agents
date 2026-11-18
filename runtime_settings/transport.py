@@ -97,6 +97,37 @@ def store_partition_count(config: dict[str, Any]) -> bool:
     return True
 
 
+# Releases before 0.10 made every stream with ``int(replicas or 1)`` copies, so a saved 0
+# meant one copy. ``TransportSettings`` refuses 0 now, so that every stream the installation
+# authority creates has the count the settings name; the upgrade steps write what an older
+# file meant (instance configuration 14 -> 15, config.yaml 12 -> 13, and the team transfer's
+# settings section from versions before 12).
+REPLICAS_SETTING: Final = ("transport", "replicas")
+
+
+def zero_replicas_meant_one(value: Any) -> bool:
+    """Whether a saved ``transport.replicas`` is the 0 that releases before 0.10 read as one copy."""
+
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and value == 0
+
+
+def write_zero_replicas_as_one(config: dict[str, Any]) -> bool:
+    """Upgrade step: write a saved replica count of 0 as 1, the count it always meant; whether it did.
+
+    A value of another kind is left for validation to refuse by name. Callers pass a shallow
+    copy of the file's mapping; the ``transport`` section is copied before it is changed.
+    """
+
+    section, key = REPLICAS_SETTING
+    transport = config.get(section)
+    if not isinstance(transport, dict) or not zero_replicas_meant_one(transport.get(key)):
+        return False
+    config[section] = {**transport, key: 1}
+    logger.info("Wrote the saved replica count of 0 as 1, the count it always meant. "
+                "event=config_zero_replicas_written setting=%s", ".".join(REPLICAS_SETTING))
+    return True
+
+
 def least_partition_bytes(per_subject_cap: int) -> int:
     """The smallest partition byte limit at which ``per_subject_cap`` still keeps room for control messages.
 

@@ -25,6 +25,7 @@ from docker import message_hosts
 from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts
 from installation_authority.service import AUTHORITY_RUNTIME
 from runtime_settings.instance_layout import InstanceLayout
+from runtime_settings.transport import QueueSettings, TransportSettings
 from team_services import serving
 
 
@@ -218,7 +219,16 @@ def test_the_bounded_wait_covers_a_stopped_instances_lease() -> None:
     from custom_messages.wire.kinds import CLOCK_SKEW_SECONDS
     from team_services.lock import LEASE
 
-    assert message_hosts.TEAM_SERVICES_READY_TIMEOUT_SECONDS > LEASE.total_seconds() + CLOCK_SKEW_SECONDS + 30
+    assert message_hosts.team_services_ready_timeout(1) > LEASE.total_seconds() + CLOCK_SKEW_SECONDS + 30
+
+
+def test_the_wait_for_the_authority_grows_with_the_copies_of_each_stream() -> None:
+    """A team's first start took 1.8 s with one copy and 20.7 s with three (nats-server 2.15.1): a margin of 15 for both."""
+
+    assert message_hosts.authority_ready_timeout(1) - message_hosts.AUTHORITY_START_SECONDS >= 15 * 1.8
+    for replicas in (3, 5):
+        assert message_hosts.authority_ready_timeout(replicas) - message_hosts.AUTHORITY_START_SECONDS >= 14 * 20.7
+        assert message_hosts.team_services_ready_timeout(replicas) > message_hosts.authority_ready_timeout(replicas)
 
 
 def test_a_serving_file_of_an_earlier_or_another_process_does_not_count(tmp_path: Path) -> None:
@@ -305,7 +315,7 @@ def test_message_services_start_in_order_with_the_hosts_written_first_and_stop_i
     layout = InstanceLayout.at(tmp_path)
     events: list[str] = []
     limits = iter([2, 5])
-    counts = iter([96, 7])
+    transports = iter([TransportSettings(), TransportSettings(replicas=3, queues=QueueSettings(partitions=7))])
 
     def hosts() -> dict[str, ExpectedHost]:
         limit = next(limits)
@@ -314,31 +324,35 @@ def test_message_services_start_in_order_with_the_hosts_written_first_and_stop_i
                                           frozenset({"team_one"}), frozenset({"researcher"}), limit)}
 
     def start(name: str):
-        def started(layout_, command, env, *, cwd, stop_requested):
+        def started(layout_, command, env, *, cwd, timeout_seconds, stop_requested):
             listed = read_expected_hosts(layout_.trust_expected_hosts_path)["lead-host"].session_limit
             count = read_bundle(layout_.trust_bootstrap_path).partitions
-            events.append(f"start:{name}:{env['ROLE']}:hosts={listed}:partitions={count}")
+            events.append(f"start:{name}:{env['ROLE']}:hosts={listed}:partitions={count}:wait={timeout_seconds:.0f}")
             return FakeProcess(name, events)
         return started
 
     monkeypatch.setattr(message_hosts, "start_installation_authority", start("authority"))
     monkeypatch.setattr(message_hosts, "start_team_services", start("team-services"))
-    services = message_hosts.MessageServices(layout, hosts, lambda: next(counts), ["authority"], {"ROLE": "authority"},
-                                             ["team-services"], {"ROLE": "team-services"}, cwd=tmp_path)
+    services = message_hosts.MessageServices(layout, hosts, lambda: next(transports), ["authority"],
+                                             {"ROLE": "authority"}, ["team-services"], {"ROLE": "team-services"},
+                                             cwd=tmp_path)
+    one, three = (message_hosts.authority_ready_timeout(1), message_hosts.team_services_ready_timeout(1)), (
+        message_hosts.authority_ready_timeout(3), message_hosts.team_services_ready_timeout(3))
 
     assert services.start() is True
     assert [name for name, _ in services.processes()] == ["installation authority", "team services"]
     services.stop(lambda process, _name: process.terminate())
     assert services.processes() == ()
-    # Again, as a restart of everything does: the hosts and the partition count are read and written
-    # again first, and the environments get their copies of saved settings recomputed.
+    # Again, as a restart of everything does: the hosts and the transport settings are read and the
+    # partition count written again first, the waits follow the saved replica count, and the
+    # environments get their copies of saved settings recomputed.
     assert services.start(lambda env, process: {**env, "ROLE": f"{env['ROLE']}+{process}"}) is True
     assert events == [
-        "hosts:2", "start:authority:authority:hosts=2:partitions=96",
-        "start:team-services:team-services:hosts=2:partitions=96",
+        "hosts:2", f"start:authority:authority:hosts=2:partitions=96:wait={one[0]:.0f}",
+        f"start:team-services:team-services:hosts=2:partitions=96:wait={one[1]:.0f}",
         "stop:team-services", "stop:authority",
-        "hosts:5", "start:authority:authority+installation authority:hosts=5:partitions=7",
-        "start:team-services:team-services+team services:hosts=5:partitions=7",
+        "hosts:5", f"start:authority:authority+installation authority:hosts=5:partitions=7:wait={three[0]:.0f}",
+        f"start:team-services:team-services+team services:hosts=5:partitions=7:wait={three[1]:.0f}",
     ]
 
 
@@ -348,7 +362,7 @@ def test_a_stop_while_the_authority_starts_does_not_start_the_team_services(tmp_
     monkeypatch.setattr(message_hosts, "start_installation_authority",
                         lambda *_args, **_kwargs: FakeProcess("authority", events))
     monkeypatch.setattr(message_hosts, "start_team_services", lambda *_args, **_kwargs: pytest.fail("not started"))
-    services = message_hosts.MessageServices(layout, dict, lambda: 96, ["authority"], {}, ["team-services"], {},
+    services = message_hosts.MessageServices(layout, dict, TransportSettings, ["authority"], {}, ["team-services"], {},
                                              cwd=tmp_path)
     assert services.start(stop_requested=lambda: True) is False
     assert [name for name, _ in services.processes()] == ["installation authority"], "stopped with the others"

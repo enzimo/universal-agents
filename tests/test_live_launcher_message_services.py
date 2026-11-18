@@ -55,7 +55,7 @@ def services(broker: str, tmp_path: Path):
     started = message_hosts.MessageServices(
         config.layout,
         lambda: {TEAM_SERVICES_RUNTIME: message_hosts.expected_host(config.layout, team_services_profile(TEAM))},
-        lambda: GatewayInstanceConfig.load_for_process(config.config_path).transport.queues.partitions,
+        lambda: GatewayInstanceConfig.load_for_process(config.config_path).transport,
         message_hosts.build_installation_authority_command(config.config_path, repo_root=REPO),
         environment_for(PROCESS_INSTALLATION_AUTHORITY, env),
         message_hosts.build_team_services_command(config.config_path, repo_root=REPO),

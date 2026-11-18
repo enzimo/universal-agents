@@ -5930,7 +5930,11 @@ partition count (`transport.queues.partitions`) into a file that holds none
 installation is created, and the launcher's upgrade writes the upgraded settings as they
 are rather than saving them through the settings model, so without this step an upgraded
 instance would follow the code's default and a release with another default would stop
-its start.
+its start. The same step, `config.yaml` 12 -> 13 and the team transfer's settings
+conversion from versions before 12 write a saved `transport.replicas` of 0 as 1
+(`runtime_settings.transport.write_zero_replicas_as_one`): earlier releases made every
+stream with `int(replicas or 1)` copies, so 0 meant one, and the settings now accept only
+1 to 5 so that every stream the installation authority makes has the count they name.
 
 The watchdog, delegated-work progress notes and check-back timers find records by parents
 in the recovered task tree, rather than by the requester's earlier agent id. The check-back

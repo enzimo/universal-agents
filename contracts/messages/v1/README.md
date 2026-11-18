@@ -1199,26 +1199,48 @@ room: see "Control messages share their stream's room" below. These settings are
 `transport.yaml` names them, never their numbers.
 
 - **Limits are set aside when a stream is created.** NATS reserves a stream's whole byte
-  limit from the server's JetStream file storage (`max_file_store`, which a server that
-  does not set it derives from the free disk) and, in operator mode, from the account's
-  storage limit, when it creates the stream, not as the stream fills. A stream whose limit
-  does not fit what is left is refused with JetStream error code 10047 ("insufficient
-  storage resources"). The installation therefore sets aside the limits of every team's
-  streams: teams times each team's streams' limits. The account
-  information reports what is set aside (`reserved_storage`) and the account's limit
-  (`limits.max_storage`, -1 when only the server's own limit applies). Before it creates
-  or enlarges any stream, the authority checks that the new limits fit the account's
-  limit, and stops with a message naming the `transport.queues.max_bytes` entry to lower
-  when they do not. An account without a limit of its own reports none to check against,
-  so there the server's 10047 refusal is the check, and it stops the authority the same
-  way. The server can also refuse when the account's check passed, because other accounts
-  or other uses share the server's storage. A refusal partway through a team's streams
-  leaves the streams already made in place, with their limits still set aside, and the
-  team only partly set up. The authority's next run, after the operator lowers the
-  `max_bytes` entry it named, applies the lower limits to those streams (which gives back
-  the room they had set aside and drops nothing) and creates the missing ones, so running
-  it again finishes a team it stopped partway through. Defaults are measured against what
-  they set aside, not only against the expected backlog.
+  limit from the server's JetStream file storage (`max_file_store`) and, in operator mode,
+  from the account's storage limit, when it creates the stream, not as the stream fills. A
+  stream whose limit does not fit what is left is refused with JetStream error code 10047
+  ("insufficient storage resources"). The installation therefore sets aside the limits of
+  every team's streams: teams times each team's streams' limits. The account information
+  reports what is set aside (`reserved_storage`) and the account's limits
+  (`limits.max_storage`, -1 when only the server's own limit applies, and
+  `limits.max_streams`). Measured on nats-server 2.15.1, one server and three in a cluster:
+  an account with one set of limits counts every copy of a stream (`transport.replicas`)
+  against its storage limit but reports what is set aside once per stream; an account whose
+  limits are kept per replica tier (`R1`, `R3`, as hosted NATS services set them) reports
+  each tier under `tiers`, with top-level limits of 0, and counts a stream once in its tier;
+  a missing tier answers error 10120, and an account at its stream limit 10027. Before it
+  creates or changes any stream, the authority checks the account's limits (the tier of
+  `transport.replicas` when there are tiers, otherwise what is reported times the copies,
+  exact for the installation's own account, where every stream has that many copies): the
+  streams it would add against the stream limit (a team needs 100 streams and 2 buckets at
+  the default count, and the installation 5 buckets), and the new and enlarged limits
+  against the storage limit. It stops, changing nothing, with the totals and the setting to
+  change when they do not fit, and when the account has no tier for the replica count. An
+  account without a storage limit of its own reports none to check against, so there the
+  server's 10047 refusal is the check, and it stops the authority the same way, naming the
+  stream and the setting. The server can also refuse when the account's check passed,
+  because other accounts or other uses share the server's storage. A refusal partway
+  through a team's streams leaves the streams already made in place, with their limits
+  still set aside, and the team only partly set up. The authority's next run, after the
+  operator lowers the `max_bytes` entry it named, applies the lower limits to those streams
+  (which gives back the room they had set aside and drops nothing) and creates the missing
+  ones, so running it again finishes a team it stopped partway through. Defaults are
+  measured against what they set aside, not only against the expected backlog.
+- **The room is needed at every start of NATS.** A server that does not set
+  `max_file_store`, as the bundled one does not, gives JetStream three quarters of the
+  disk's free space, measured each time it starts (measured: 0.750). So the disk needs a
+  third more free space than the streams set aside, at the first start and at every later
+  one. A server that starts with less storage than its streams already set aside (or an
+  account whose limit was lowered below it) keeps serving those streams and takes new
+  messages, but refuses every new or changed stream with 10047, an unchanged update and a
+  lowered limit included, so lowering a limit cannot help then: only more room can, which
+  on the bundled server means freeing disk space and restarting the instance. A start that
+  asks NATS for no change still serves there, which is why every start changes only what
+  differs (below). The authority's refusals say which case applies and, without an account
+  limit, the free disk space the bundled server needs.
 - **Lowering a limit drops nothing.** A stream that holds more than a lowered byte limit keeps
   every message and refuses new ones until it falls below the limit. The per-subject cap is
   the exception: NATS drops the oldest messages of a subject above a lowered
@@ -1226,15 +1248,22 @@ room: see "Control messages share their stream's room" below. These settings are
   changing nothing, when a partition stream holds more on one subject than the lowered
   `transport.queues.max_messages_per_subject`, and names the stream and subject; the cap can
   be lowered once those queues drain.
-- **Every start checks before it changes.** The authority reads every stream it wants before
-  it changes any. A team's partition streams record the partition count they were made with
-  (metadata `ua.partitions`; the server's own `_nats.` keys are left aside), and a start with
-  another `transport.queues.partitions` is refused, changing nothing. It updates only a stream
-  whose settings differ in a field the contract sets, keeping metadata keys it does not own,
-  so a restart with the same settings changes nothing; it lowers limits before it creates or
-  enlarges streams, so the room they give back serves the others. Measured on nats-server
-  2.15.1 with the store on a local disk: a team's first start (every stream missing) takes
-  about 1.8 s, a later one 0.02 s.
+- **Every start checks before it changes.** The authority reads every stream it wants, the
+  buckets' streams included, before it changes any. A team's partition streams record the
+  partition count they were made with (metadata `ua.partitions`; the server's own `_nats.`
+  keys are left aside), and a start with another `transport.queues.partitions` is refused,
+  changing nothing. It updates only a stream whose settings differ in a field the contract
+  sets, keeping metadata keys it does not own, so a restart with the same settings sends NATS
+  no change and no account request; it lowers limits before it creates or enlarges streams,
+  so the room they give back serves the others. An update sends the stream's whole
+  configuration, so a setting an operator added by hand that the contract does not set (a
+  description, placement tags) goes back to the server's default when the authority next
+  changes that stream: the streams' settings are the authority's. Measured on nats-server
+  2.15.1 (sync_interval always): a team's first start (every stream missing) takes about
+  1.8 s with one copy of each stream on one server, a later one 0.02 s; on three clustered
+  servers sharing one disk, 3.7 s with one copy, 20.7 s with three, and 23.5 s to change a
+  team from one copy to three. The launcher waits up to 30 s per team for one copy and 300 s
+  for more (`docker.message_hosts`).
 - **The size warning** follows the rules of the existing storage warnings
   (`assistant_gateway.storage_capacity`), and the gateway runs it with them (`size_check` in
   `transport.yaml`). It already reads the account's JetStream usage for those warnings
