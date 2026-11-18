@@ -552,6 +552,10 @@ def test_the_account_maps_every_agent_address_to_its_partition_and_nothing_else(
     assert EXPORT.stored_subject("work.pool.{pool}", "*", TRANSPORT) == "ua.v1.{team}.*.work.pool.{pool}"
     assert EXPORT.publish_subject("work.control.{agent}", TRANSPORT) == "ua.v1.{team}.{self}.work.control.*.*"
     assert EXPORT.subscribe_subject("ctl.agent.{agent}", TRANSPORT) == "ua.v1.{team}.*.ctl.agent.*.{partition}"
+    # The mapping check probes the live control address, which no stream stores, under its own scope.
+    assert (EXPORT.probe_address(TRANSPORT), kinds.PARTITION_PROBE_ADDRESS) == ("ctl.agent.{agent}",) * 2
+    assert EXPORT.probe_grant(TRANSPORT) == "ua.v1._probe.{self}.ctl.agent.>"
+    assert kinds.PARTITION_ACCOUNT_MAPPINGS == partitions["account_mappings"]
 
 
 @pytest.mark.parametrize(
@@ -572,6 +576,11 @@ def test_the_account_maps_every_agent_address_to_its_partition_and_nothing_else(
          "account_mappings map exactly"),
         (lambda t: t["partitions"]["account_mappings"].update({"ua.v1.*.*.work.pool.*": "ua.v1.x"}),
          "account_mappings map exactly"),
+        (lambda t: t["partitions"].pop("probe_scope"), "the account mappings and the probe scope"),
+        # A probe scope a team id could take would reach that team's receivers and streams.
+        (lambda t: t["partitions"].update(probe_scope="team_probe"), "probe_scope is a token starting with _"),
+        (lambda t: t["partitions"].update(probe_scope="_install"), "other than installation_scope"),
+        (lambda t: t["partitions"].update(probe_scope="_pro.be"), "probe_scope is a token starting with _"),
     ],
 )
 def test_partition_settings_and_mappings_the_contract_cannot_keep_are_refused(change, problem) -> None:
@@ -658,13 +667,17 @@ def test_permissions_name_exact_receivers_and_publish_only_under_the_senders_own
     for role in REGISTRY["host_roles"]:
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
         grants = consumer_grants() | management.get(role, set()) | buckets.get(role, set()) | blobs.get(role, set())
+        # The topology owner's mapping check probes its own addresses under the probe scope (README, "Partitions").
+        probe = f"ua.v1.{kinds.PARTITION_PROBE_SCOPE}.{{self}}.ctl.agent.>"
+        probing = role == TRANSPORT["topology_owner"]
+        assert (probe in document["publish"], probe in document["subscribe"]) == (probing, probing)
         for subject in document["publish"]:
             if subject.startswith(("$JS.", "$KV.", "$O.")):
                 assert subject in grants, (role, subject)
-            else:
+            elif subject != probe:
                 assert subject.startswith(("ua.v1.{team}.{self}.", "ua.v1._install.{self}.")), (role, subject)
         assert document["subscribe"][0] == "_INBOX.{self}.>"
-        for subject in document["subscribe"][1:]:
+        for subject in (item for item in document["subscribe"][1:] if item != probe):
             prefix = "ua.v1._install.*." if subject.startswith("ua.v1._install.") else "ua.v1.{team}.*."
             # Only the sender slot is a wildcard, and the agent within a partition the host owns; every
             # other receiver id is a placeholder.

@@ -909,6 +909,16 @@ JetStream-backed delivery where configured. Verify:
   is set in `team.env` or the container's environment, for an external NATS
   deployment. With the bundled service on, it replaces `NATS_URL` and
   `NATS_SERVERS` with its own address.
+- The NATS account applies the partition mappings, which put every agent's
+  inbox, control queue and live control address in one of its team's
+  partitions. The bundled server's configuration gets them at every start, at
+  the instance's partition count (`transport.queues.partitions`, 96 unless
+  chosen otherwise). An external server's operator adds them to the account the
+  instance logs in to; `python scripts/write_nats_mapping_config.py FILE
+  --partitions N` writes the three lines. Before it serves, the installation
+  authority checks that the server applies them at the instance's count, and
+  otherwise stops the start (`event=installation_authority_start_refused`) with
+  the lines to add.
 
 Process-scoped consumers use this crash-cleanup delay:
 

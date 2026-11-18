@@ -89,6 +89,7 @@ from custom_messages.wire.trust import CERTIFICATE, AuthorityKey, HostCertificat
 from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.contract_files import transport
+from custom_transport.protocol1.mapping_check import PartitionMappingError, check_partition_mapping
 from custom_transport.protocol1.host_keys import AuthorityKeys, HostKeys
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.joining import AUTHORITY_SERVICE_ID, HostProfile
@@ -141,6 +142,10 @@ class AuthorityClockBehind(AuthorityStartRefused):
 
 class PartitionCountMismatch(AuthorityStartRefused):
     """The bootstrap bundle's partition count, which every host uses, is not the authority's setting."""
+
+
+class PartitionMappingRefused(AuthorityStartRefused):
+    """The NATS server does not map agents' addresses at the installation's partition count."""
 
 
 class AuthorityDisconnected(RuntimeError):
@@ -261,10 +266,15 @@ class InstallationAuthority:
 
         The bundle is written before the authority serves, so it holds the certificate
         of every reply; the launcher waits for it. Before anything changes, the bundle's
-        partition count must be the authority's (``PartitionCountMismatch``).
+        partition count must be the authority's (``PartitionCountMismatch``) and the NATS
+        server must map agents' addresses at that count (``PartitionMappingRefused``).
         """
 
         bundle = self._bundle_with_own_count()
+        try:
+            await check_partition_mapping(nc, sender=AUTHORITY_RUNTIME, count=self.partitions)
+        except PartitionMappingError as error:
+            raise PartitionMappingRefused(str(error)) from error
         self._nc = nc
         self._js = nc.jetstream()
         teams = sorted(set(teams))

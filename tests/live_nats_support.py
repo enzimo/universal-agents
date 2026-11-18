@@ -294,6 +294,75 @@ class OwnedStreams:
         return deleted
 
 
+# The shared server's partition mapping check: its outcome per server list, once per test process.
+_MAPPING_PROBLEMS: dict[tuple[str, ...], str | None] = {}
+# The sender slot of the check's probes on the shared server.
+MAPPING_CHECK_SENDER = "live-tests"
+
+
+def shared_server_mapping_problem(config: NatsTransportConfig) -> str | None:
+    """Why the shared live server cannot carry protocol 1 live control, or ``None`` when it can.
+
+    Hosts subscribe to an agent's live control address with its partition token, and the
+    installation authority refuses to start on a server that does not map agents' addresses
+    (contract README, "Partitions"). Tests against such a server would wait out their
+    requests, so ``tests/conftest.py`` fails every test marked ``nats`` at once with how to
+    start the server, after one check per server and test process
+    (``custom_transport.protocol1.mapping_check``, at the contract's default count). A server
+    that cannot be reached is not judged here: the test's own connection reports that.
+    """
+
+    key = tuple(config.servers)
+    if key not in _MAPPING_PROBLEMS:
+        _MAPPING_PROBLEMS[key] = _check_shared_server_mapping(config)
+    return _MAPPING_PROBLEMS[key]
+
+
+def _check_shared_server_mapping(config: NatsTransportConfig) -> str | None:
+    import nats
+
+    from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
+    from custom_transport.protocol1.mapping_check import PartitionMappingError, check_partition_mapping
+    from tests.live_nats_client import nats_connect_options
+
+    servers = _server_names(config.servers)
+    options = {**nats_connect_options(config), "allow_reconnect": False, "max_reconnect_attempts": 1,
+               "reconnect_time_wait": 0.5, "connect_timeout": 5}
+
+    async def check() -> str | None:
+        try:
+            connection = await nats.connect(**options)
+        except Exception as error:  # down, refused or no login: the test reports it itself
+            logger.warning("The shared live NATS server could not be reached for the partition mapping check. "
+                           "event=live_nats_mapping_check_skipped servers=%s error=%s", servers, _describe(error))
+            return None
+        try:
+            await check_partition_mapping(connection, sender=MAPPING_CHECK_SENDER, count=DEFAULT_PARTITION_COUNT)
+        except PartitionMappingError as error:
+            return (f"The shared live-test NATS server {servers} cannot carry protocol 1 live control: {error} "
+                    "Start it with the mappings: python scripts/write_nats_mapping_config.py <file>, then "
+                    "nats-server -js -c <file> (CONTRIBUTING.md, live NATS tests).")
+        finally:
+            await connection.close()
+        return None
+
+    results: list[str | None] = []
+
+    def run() -> None:  # on its own thread and event loop: fixtures run outside the test's loop
+        try:
+            results.append(asyncio.run(check()))
+        except Exception as error:
+            results.append(f"The partition mapping check on the shared live-test NATS server {servers} failed: "
+                           f"{_describe(error)}")
+
+    thread = threading.Thread(target=run, name="live-nats-mapping-check", daemon=True)
+    thread.start()
+    thread.join(30)
+    if not results:
+        return f"The partition mapping check on the shared live-test NATS server {servers} did not finish within 30 s."
+    return results[0]
+
+
 class _StoppedByTimeLimit(Exception):
     """``CLEANUP_TIMEOUT_SECONDS`` passed before the cleanup finished."""
 

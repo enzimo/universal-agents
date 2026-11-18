@@ -273,6 +273,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 env=local_nats_env,
                 logger=LOGGER,
                 cwd=PROJECT_ROOT,
+                partitions=int(load_runtime_config_file(args.config).get("transport.queues.partitions")),
             )
             os.environ.update(
                 {

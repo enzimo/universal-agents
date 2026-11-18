@@ -270,7 +270,10 @@ upgraded, and downgrading only to 2.14.7 or later. The included single-server
 deployment does not perform a rolling cluster upgrade. Also give every server
 `jetstream { sync_interval: always }` and a `max_control_line` of at least
 69,632 bytes, which the included server gets automatically (see "Surviving a
-power loss" in the configuration guide).
+power loss" in the configuration guide). Add the partition mappings to the
+account the instance logs in to, at the instance's `transport.queues.partitions`
+(see "Message Broker" in the configuration guide): without them, the
+installation authority stops the start and names the lines to add.
 
 ### Keep the databases on local disk
 

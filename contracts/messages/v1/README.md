@@ -815,8 +815,22 @@ refuses to start when its own setting and the bundle's count differ.
   another partition token, and the server stores or delivers it in that partition. Its
   receiver refuses it as `subject_mismatch`; a queued one waits unread until the stream's
   `max_age`, like work for an unknown agent, and counts against that stream's byte limit.
-  The bundled server applies no mapping yet, so today's receivers compare exact subjects; the
-  release that installs the mapping switches them to this rule.
+  The bundled server's generated configuration carries the mappings at the installation's
+  count (the launcher writes them at every start), and receivers apply this rule: a host
+  serving an agent's live control address subscribes to it with the agent's partition token.
+- **The mapping check.** Before it serves, the installation authority checks that the server
+  maps at the installation's count, since an external server's operator writes the mappings
+  by hand and a missing or wrong one would leave every agent's control requests unanswered.
+  It subscribes to its own probe addresses, `ua.v1.<probe scope>.<its runtime>.ctl.agent.>`
+  (`probe_scope` in `transport.yaml`, `_probe`; no team id starts with `_`, so no team's
+  receivers or streams see them), and publishes an unsigned message to the live control
+  address of a few probe agents, chosen so that every other count up to `max_count` gives at
+  least one of them another partition token. Each must arrive with the token the
+  installation's count gives. One that arrives without a token means the server applies no
+  mapping; another token means the server maps with another count; none within a few seconds
+  means the authority's login may not publish or subscribe there. Each refuses the start
+  with what to fix, and the mapping lines at the installation's count. Its generated grants
+  hold both probe subjects (`custom_transport.protocol1.mapping_check`).
 - **Streams.** The inboxes and control queues of a team's agents in partition `p` are stored
   in `UA1_PART_<team>~<p>`, one stream per team and partition, each agent with its own two
   consumers there; worker pools in `UA1_POOL_WORK_<team>`. An agent with a long backlog fills
@@ -1094,8 +1108,9 @@ of the account rather than a line per team and partition, which would grow with 
 reads the account's information (`$JS.API.INFO`, the storage check of "Stream sizes"),
 creates, updates, inspects and deletes streams, creates, inspects, lists and deletes their
 consumers (bucket watches that readers left behind among them), and reads and deletes
-single messages (a team's removal, and the old streams at an upgrade). This adds no power:
-it holds the account's signing key and could issue itself any permission.
+single messages (a team's removal, and the old streams at an upgrade). It also publishes
+and subscribes under the probe scope for the mapping check ("Partitions"). This adds no
+power: it holds the account's signing key and could issue itself any permission.
 
 **Withdrawing queued work.** The team services withdraw a task queued for one of their
 team's agents, worker pools or outside agents by deleting its message from one of the team's

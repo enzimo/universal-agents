@@ -28,6 +28,7 @@ import subprocess
 import time
 from typing import Mapping, MutableMapping
 
+from custom_messages.wire.partitions import account_mappings
 from env_secrets import PROCESS_NATS, environment_for
 
 
@@ -320,8 +321,22 @@ def contract_server_settings(path: Path = CONTRACT_TRANSPORT_PATH) -> tuple[dict
     return dict(server["jetstream"]), control_line, str(server["minimum_version"])
 
 
-def write_local_nats_server_config(service_root: Path, *, user: str, password: str) -> Path:
-    """Write the private server configuration: the password and the contract's server settings."""
+def mappings_block(partitions: int) -> str:
+    """The server configuration's top-level ``mappings`` block at ``partitions`` (contract README, "Partitions").
+
+    At the top level it belongs to the server's global account, the one the bundled server's
+    user logs in to; an external server's operator puts the same lines in the installation's
+    account. JSON string escaping is valid NATS configuration string syntax. ``ValueError``
+    for a count no installation may choose.
+    """
+
+    lines = "".join(f"  {json.dumps(source)}: {json.dumps(target)}\n"
+                    for source, target in sorted(account_mappings(partitions).items()))
+    return "mappings {\n" + lines + "}\n"
+
+
+def write_local_nats_server_config(service_root: Path, *, user: str, password: str, partitions: int) -> Path:
+    """Write the private server configuration: the password, the contract's server settings and the partition mappings."""
 
     jetstream, control_line, _minimum = contract_server_settings()
     config_path = service_root / _AUTH_DIR_NAME / _SERVER_CONFIG_FILE_NAME
@@ -337,7 +352,8 @@ def write_local_nats_server_config(service_root: Path, *, user: str, password: s
         f"max_control_line: {control_line}\n"
         "jetstream {\n"
         + "".join(f"  {key}: {json.dumps(value)}\n" for key, value in sorted(jetstream.items()))
-        + "}\n",
+        + "}\n"
+        + mappings_block(partitions),
     )
     return config_path
 
@@ -370,12 +386,15 @@ def start_local_nats(
     env: MutableMapping[str, str],
     logger: logging.Logger,
     cwd: Path,
+    partitions: int,
     service_root: Path | None = None,
 ) -> subprocess.Popen[bytes]:
-    """Start the local server with required authentication.
+    """Start the local server with required authentication and the partition mappings.
 
     ``env`` gains NATS_USER/NATS_PASSWORD when they were unset, so callers must
-    pass the same mapping they later give to runtime processes.
+    pass the same mapping they later give to runtime processes. ``partitions`` is the
+    saved ``transport.queues.partitions``; the installation authority checks the server
+    maps at its own count before it serves.
 
     A start that fails after launching the server (it timed out, its startup log
     could not be read, or it was interrupted) stops and reaps that server before
@@ -417,6 +436,7 @@ def start_local_nats(
         root,
         user=str(env[NATS_USER_ENV]),
         password=str(env[NATS_PASSWORD_ENV]),
+        partitions=partitions,
     )
 
     command = [

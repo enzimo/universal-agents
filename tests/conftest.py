@@ -161,6 +161,23 @@ def delete_streams_a_live_nats_test_created(
         yield ownership
 
 
+@pytest.fixture(autouse=True)
+def require_partition_mappings_on_the_shared_server(request: pytest.FixtureRequest) -> None:
+    """Fail a test marked ``nats`` at once when the shared live server does not map agents' addresses.
+
+    See ``tests.live_nats_support.shared_server_mapping_problem``; checked once per server.
+    """
+
+    if request.node.get_closest_marker("nats") is None:
+        return
+    from tests.live_nats_client import nats_transport_config_from_env
+    from tests.live_nats_support import shared_server_mapping_problem
+
+    problem = shared_server_mapping_problem(nats_transport_config_from_env())
+    if problem is not None:
+        pytest.fail(problem, pytrace=False)
+
+
 @pytest.fixture
 def commands_without_agent():
     """Let the shell and Python tools run commands with no agent behind them.

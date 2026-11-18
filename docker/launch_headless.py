@@ -3022,7 +3022,8 @@ def main() -> int:
     if local_nats_enabled_from_env(inherited_env, default=True):
         apply_local_nats_env(inherited_env)
         local_nats_process = start_local_nats(
-            env=inherited_env, logger=LOGGER, cwd=REPO_ROOT
+            env=inherited_env, logger=LOGGER, cwd=REPO_ROOT,
+            partitions=config.transport.queues.partitions,
         )
     else:
         # A configured choice, not a fault: the bundle launcher (docker/run_bundle.py)

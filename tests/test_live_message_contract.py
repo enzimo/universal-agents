@@ -44,7 +44,7 @@ from nats.nuid import NUID
 
 from custom_messages.wire import frame as wire_frame
 from custom_messages.wire.buckets import bucket_stream
-from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, KINDS
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, KINDS, PARTITION_PROBE_SCOPE
 from custom_messages.wire.partitions import (
     agent_partition,
     agent_record_key,
@@ -55,6 +55,7 @@ from custom_messages.wire.partitions import (
 )
 from custom_messages.wire.permissions import HostPlacement, host_permissions
 from custom_messages.wire.refusals import FrameRefused
+from custom_transport.protocol1.mapping_check import check_partition_mapping
 from tests import message_contract_support as fixtures
 from tests.live_nats_support import flush_fully
 from tests.nats_operator_support import NatsUser, OperatorAccount
@@ -430,6 +431,21 @@ async def test_the_server_stores_and_delivers_every_agent_in_the_partition_the_w
         stored = await js.publish(f"ua.v1.{TEAM}.lead-host-1.work.team", b"x")
         assert (await js.get_msg(stored.stream, stored.seq)).subject == f"ua.v1.{TEAM}.lead-host-1.work.team"
         assert admin.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_the_authority_checks_the_mapping_under_its_own_grants_and_no_other_host_may(isolated_broker) -> None:
+    """README, "Partitions", the mapping check: the topology owner's grants hold its probe addresses, mapped or not."""
+
+    runtime = HOSTS["authority"]["runtime"]
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        await check_partition_mapping(authority.nc, sender=runtime, count=COUNT)
+        assert authority.errors.empty()
+        # Another host can neither probe as the authority nor hear its probes.
+        lead = await connect(stack, isolated_broker, "lead")
+        await lead.publish_refused(f"ua.v1.{PARTITION_PROBE_SCOPE}.{runtime}.ctl.agent.probe-1")
+        await lead.subscribe_refused(f"ua.v1.{PARTITION_PROBE_SCOPE}.{runtime}.ctl.agent.>")
 
 
 @pytest.mark.asyncio

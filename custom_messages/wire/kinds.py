@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = '4539c5b56d49a9eb3bd454fc2815a370efb6f425c37769146511bf72c170666d'
+CONTRACT_SHA256 = 'd11921e0d89dc0959bf43836d06bcdb76b114934d1088588caeb007b9c336a3c'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -23,6 +23,10 @@ MAX_NESTING_DEPTH = 64
 CLOCK_SKEW_SECONDS = 8
 DEFAULT_PARTITION_COUNT = 96
 MAX_PARTITION_COUNT = 128
+PARTITION_COUNT_TOKEN = 'COUNT'
+PARTITION_ACCOUNT_MAPPINGS = {'ua.v1.*.*.ctl.agent.*': 'ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.ctl.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}', 'ua.v1.*.*.work.agent.*': 'ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}', 'ua.v1.*.*.work.control.*': 'ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.control.{{wildcard(3)}}.{{partition(COUNT,1,3)}}'}
+PARTITION_PROBE_SCOPE = '_probe'
+PARTITION_PROBE_ADDRESS = 'ctl.agent.{agent}'
 SINGLE_TEAM_ROLES = ('lead_host', 'worker_host', 'team_services', 'edge_adapter', 'scheduler')
 PARTITIONED_ADDRESSES = ('ctl.agent.{agent}', 'work.agent.{agent}', 'work.control.{agent}')
 REPLAY_LEDGER_RETENTION_SECONDS = 2592060

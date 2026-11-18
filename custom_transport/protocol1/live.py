@@ -18,6 +18,11 @@ chose, such as a JetStream API subject, would act with the receiver's rights. A
 request naming any other reply subject is dropped unanswered, before its handler
 runs, and logged (``protocol1_reply_subject_refused``).
 
+An agent's live control address is mapped to its partition (contract README,
+"Partitions"): the host subscribes to it with the agent's partition token at its trust
+store's count, and takes the token off the arrival subject before the frame's subject
+check, so a missing, extra or wrong token is refused as ``subject_mismatch``.
+
 Every frame is checked before a handler sees it; a handler receives only a
 ``VerifiedFrame``. Each request is checked and recorded as it arrives, then handled in
 a task of its own, so one slow handler does not hold the address (``serve``). An event
@@ -58,6 +63,7 @@ from custom_messages.wire.kinds import (
     SUBJECT_PREFIX,
 )
 from custom_messages.wire.models import Frame
+from custom_messages.wire.partitions import arrival_subject, signed_subject_of
 from custom_messages.wire.refusals import (
     HANDLER_FAILED,
     REFUSAL_AT_HEADER,
@@ -360,7 +366,7 @@ class LiveHost:
         for kind in side_by_side:
             _spec(kind)  # a misspelt kind fails here, not silently later
         served = _ServedAddress(receiver, handler, agent, side_by_side)
-        subject = serving_subject(address, receiver.team, receiver.id)
+        subject = arrival_subject(serving_subject(address, receiver.team, receiver.id), self.trust.store.partition_count)
 
         async def on_message(message: Any) -> None:
             try:
@@ -391,7 +397,8 @@ class LiveHost:
                 return
         try:
             now = self.clock()
-            verified = await self.verify(message.data, receiver=served.receiver, arrived_on=message.subject, now=now,
+            arrived_on = signed_subject_of(message.subject, self.trust.store.partition_count)
+            verified = await self.verify(message.data, receiver=served.receiver, arrived_on=arrived_on, now=now,
                                          replay=self.replay.lookup, headers=dict(message.headers or {}))
             self.replay.admit(verified, now)
         except FrameRefused as refused:

@@ -415,7 +415,8 @@
     "count_setting": "transport.queues.partitions",
     "default_count": 96,
     "handover_seconds": 600,
-    "max_count": 128
+    "max_count": 128,
+    "probe_scope": "_probe"
   },
   "peer_sender_slot": "x-{installation}",
   "pool_controller": {

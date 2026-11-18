@@ -648,7 +648,9 @@ def run_supervised_bundle(
 
     try:
         if bundled_nats_enabled:
-            nats = start_local_nats(env=runtime_env, logger=LOGGER, cwd=REPO_ROOT, service_root=_bundle_paths().nats_root)
+            nats = start_local_nats(env=runtime_env, logger=LOGGER, cwd=REPO_ROOT,
+                                    partitions=config.transport.queues.partitions,
+                                    service_root=_bundle_paths().nats_root)
         else:
             LOGGER.info("Local NATS is disabled; using configured external NATS endpoint(s).")
         seed_postgres_from_targets(postgres_targets)

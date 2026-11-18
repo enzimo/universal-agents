@@ -15,15 +15,23 @@ below serve tests and tools that work with the contract's default.
 The arrival suffix: a frame's signed ``subject`` is the unmapped one, so a receiver of a
 mapped address takes the partition token off the subject the frame arrived on, after checking
 it is the agent's partition, and compares the rest with the signed subject
-(``signed_subject_of``). The bundled server applies no mapping yet, so running receivers still
-compare exact subjects; the release that installs the mapping switches them to this.
+(``signed_subject_of``). The bundled server's configuration carries the mappings
+(``docker.nats_service``), and the installation authority checks that the server applies them
+at the installation's count before it serves (``custom_transport.protocol1.mapping_check``).
 """
 
 from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, MAX_PARTITION_COUNT, PARTITIONED_ADDRESSES, SUBJECT_PREFIX
+from custom_messages.wire.kinds import (
+    DEFAULT_PARTITION_COUNT,
+    MAX_PARTITION_COUNT,
+    PARTITION_ACCOUNT_MAPPINGS,
+    PARTITION_COUNT_TOKEN,
+    PARTITIONED_ADDRESSES,
+    SUBJECT_PREFIX,
+)
 from custom_messages.wire.models import PartitionOwnerState
 from custom_messages.wire.refusals import FrameRefused
 
@@ -48,6 +56,18 @@ def check_partition_count(count: int) -> int:
     if type(count) is not int or not 1 <= count <= MAX_PARTITION_COUNT:
         raise ValueError(f"a partition count is a whole number from 1 to {MAX_PARTITION_COUNT}, not {count!r}")
     return count
+
+
+def account_mappings(count: int) -> dict[str, str]:
+    """The account's subject mappings at ``count``: what a server applies (transport.yaml ``partitions.account_mappings``).
+
+    The bundled server's configuration carries them (``docker.nats_service``); an external
+    server's operator puts the same lines in the installation's account.
+    """
+
+    check_partition_count(count)
+    return {source: target.replace(PARTITION_COUNT_TOKEN, str(count))
+            for source, target in PARTITION_ACCOUNT_MAPPINGS.items()}
 
 
 def agent_partition(team: str, agent: str, count: int = DEFAULT_PARTITION_COUNT) -> int:

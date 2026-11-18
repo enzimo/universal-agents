@@ -46,12 +46,14 @@
     "$KV.UA1_CERTS.host.{installation}.>",
     "$KV.UA1_CERTS.revocations.{installation}",
     "$KV.UA1_HOSTS.{self}",
+    "ua.v1._probe.{self}.ctl.agent.>",
     "ua.v1.{team}.{self}.dlq.notice.*",
     "ua.v1.{team}.{self}.dlq.raw.*"
   ],
   "role": "installation_authority",
   "subscribe": [
     "_INBOX.{self}.>",
-    "ua.v1._install.*.svc"
+    "ua.v1._install.*.svc",
+    "ua.v1._probe.{self}.ctl.agent.>"
   ]
 }

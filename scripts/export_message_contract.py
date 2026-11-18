@@ -1281,7 +1281,9 @@ def check_transport(transport: dict[str, Any]) -> None:
 # the account mapping's last token computes, and the step max_count is a multiple of.
 PARTITION_SETTING = "transport.queues.partitions"
 PARTITION_PLACEHOLDER = "partition"
-PARTITION_FUNCTION = "{{partition(COUNT,1,3)}}"
+# The account mappings name the count by this token; a server's configuration has the installation's count there.
+PARTITION_COUNT_TOKEN = "COUNT"
+PARTITION_FUNCTION = "{{partition(" + PARTITION_COUNT_TOKEN + ",1,3)}}"
 PARTITION_COUNT_STEP = 32
 # A stream name that holds a partition joins it to its team with ~, which ids cannot hold.
 PARTITION_STREAM_PART = "{team}~{partition}"
@@ -1328,21 +1330,47 @@ def subscribe_subject(address: str, transport: dict[str, Any]) -> str:
     return subject.replace("{agent}", "*") if address in partitioned_addresses(transport) else subject
 
 
+def probe_address(transport: dict[str, Any]) -> str:
+    """The address the mapping check probes: the agents' live control address, which no stream stores."""
+
+    (address,) = [address for address in transport["classes"]["request_reply"]["addresses"]
+                  if audience_target(address) == "agent"]
+    return address
+
+
+def probe_grant(transport: dict[str, Any]) -> str:
+    """The topology owner's publish and subscribe grant for the mapping check (README, "Partitions").
+
+    Its own probe agents' live control addresses under the probe scope, mapped (with the
+    partition token) or not, so the check also sees a server that does not map.
+    """
+
+    return f"{SUBJECT_ROOT}{transport['partitions']['probe_scope']}.{{self}}." + probe_address(transport).replace(
+        "{agent}", ">")
+
+
 def check_partitions(transport: dict[str, Any]) -> None:
     """The partition count's setting and limits, and the account mappings that put each agent's addresses in its partition.
 
     The mappings must be exactly the ones the contract derives from the agent addresses: a
     mapping that missed one would leave its subjects unmapped, stored in no partition stream,
     and one that hashed other tokens would put an agent's queues where its host does not read.
+    The probe scope cannot be a team id or the installation scope, so a probe never reaches
+    a team's receivers or streams.
     """
 
     where = "transport.yaml partitions"
     spec = transport.get("partitions")
     if not isinstance(spec, dict) \
-            or set(spec) != {"count_setting", "default_count", "max_count", "handover_seconds", "account_mappings"} \
+            or set(spec) != {"count_setting", "default_count", "max_count", "handover_seconds", "account_mappings",
+                             "probe_scope"} \
             or spec["count_setting"] != PARTITION_SETTING:
         raise ContractError(f"{where}: names the setting {PARTITION_SETTING}, the default and largest counts, the "
-                            "handover deadline and the account mappings")
+                            "handover deadline, the account mappings and the probe scope")
+    probe = spec["probe_scope"]
+    if not isinstance(probe, str) or not re.fullmatch(r"_[a-z][a-z0-9_]*", probe) or probe == INSTALLATION_SCOPE:
+        raise ContractError(f"{where}: probe_scope is a token starting with _ (no team id can), other than "
+                            "installation_scope")
     handover = spec["handover_seconds"]
     if type(handover) is not int or not 2 * transport["clock_skew_seconds"] < handover <= 3600:
         # Bounded so a host never holds back a renewal its credential or certificate needs for long.
@@ -2400,6 +2428,9 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                 else:
                     subscribe.add(subscribe_subject(address, transport))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
+        if role == transport["topology_owner"]:
+            publish.add(probe_grant(transport))
+            subscribe.add(probe_grant(transport))
         if any("{agent}" in subject for subject in publish | subscribe):
             raise ContractError(f"{role}: generated grants name partitions, not agents (README, \"Partitions\")")
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
@@ -2814,6 +2845,10 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
         f"DEFAULT_PARTITION_COUNT = {transport['partitions']['default_count']!r}\n"
         f"MAX_PARTITION_COUNT = {transport['partitions']['max_count']!r}\n"
+        f"PARTITION_COUNT_TOKEN = {PARTITION_COUNT_TOKEN!r}\n"
+        f"PARTITION_ACCOUNT_MAPPINGS = {dict(sorted(transport['partitions']['account_mappings'].items()))!r}\n"
+        f"PARTITION_PROBE_SCOPE = {transport['partitions']['probe_scope']!r}\n"
+        f"PARTITION_PROBE_ADDRESS = {probe_address(transport)!r}\n"
         f"SINGLE_TEAM_ROLES = {tuple(transport['single_team_roles'])!r}\n"
         f"PARTITIONED_ADDRESSES = {tuple(sorted(partitioned_addresses(transport)))!r}\n"
         f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
