@@ -8,18 +8,21 @@ nats-server 2.15.1 under concurrent writers are in test_live_bucket_reads.py.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import aclosing
 from types import SimpleNamespace
 from typing import Any, Iterable, Optional, Union
 
+import nats
 import pytest
 from nats.errors import ConnectionClosedError, TimeoutError as NatsTimeoutError
 from nats.js.api import DeliverPolicy
+from nats.js.errors import NotFoundError
 
 from custom_transport.protocol1 import bucket_reads
 from custom_transport.protocol1.bucket_reads import (
-    BucketReadTimedOut, BucketTooLarge, KeyChange, list_keys, watch_keys,
+    BucketKeyListShifted, BucketReadTimedOut, KeyChange, list_keys, watch_keys,
 )
 from custom_transport.protocol1.state_records import StateRecords
 
@@ -43,16 +46,23 @@ class FakeSubscription:
 class FakeJetStream:
     """The two requests a bucket read makes; the test sends the subscription's messages itself.
 
-    Each stream information request takes the next reply; the last one repeats.
+    Each stream information request takes the next reply, the keys the stream holds at that
+    moment; the last one repeats. It answers as nats-server does: at most ``page_size``
+    subjects, sorted, from the request's offset, with how many there are in all.
     """
 
+    _prefix = "$JS.API"  # the parts of nats-py's JetStream context the read uses for that request
+    _timeout = 5.0
+
     def __init__(self, *replies: Reply, unsubscribe_error: Optional[BaseException] = None,
-                 bucket: str = BUCKET) -> None:
+                 bucket: str = BUCKET, page_size: int = 100_000) -> None:
         self.prefix = f"$KV.{bucket}."
         self.replies = list(replies)
+        self.page_size = page_size
         self.subscription = FakeSubscription(unsubscribe_error)
         self.subscribed: list[tuple[str, dict[str, Any]]] = []
         self.asked: list[tuple[str, Optional[str]]] = []
+        self.offsets: list[int] = []
         self.callback: Any = None
         self.answered = asyncio.Event()
 
@@ -61,14 +71,18 @@ class FakeJetStream:
         self.callback = options["cb"]
         return self.subscription
 
-    async def stream_info(self, stream: str, subjects_filter: Optional[str] = None) -> Any:
-        self.asked.append((stream, subjects_filter))
+    async def _api_request(self, subject: str, request: bytes, timeout: float) -> dict[str, Any]:
+        asked = json.loads(request)
+        self.asked.append((subject.removeprefix(f"{self._prefix}.STREAM.INFO."), asked["subjects_filter"]))
+        self.offsets.append(asked["offset"])
         reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         self.answered.set()
         if isinstance(reply, BaseException):
             raise reply
-        subjects = {f"{self.prefix}{key}": 1 for key in reply}
-        return SimpleNamespace(state=SimpleNamespace(subjects=subjects or None))
+        subjects = sorted(f"{self.prefix}{key}" for key in reply)
+        page = subjects[asked["offset"]:asked["offset"] + self.page_size]
+        return {"total": len(subjects), "offset": asked["offset"], "limit": self.page_size,
+                "state": {"subjects": dict.fromkeys(page, 1) or None}}
 
     async def send(self, key: str, value: bytes = b"v", *, headers: Optional[dict[str, str]] = None) -> None:
         await self.callback(SimpleNamespace(subject=f"{self.prefix}{key}", data=value, headers=headers))
@@ -149,13 +163,13 @@ async def test_messages_that_arrive_after_the_stream_answered_are_all_first_valu
 @pytest.mark.asyncio
 async def test_messages_sent_before_the_stream_answered_count_toward_the_first_values() -> None:
     js = FakeJetStream(["a", "b"])
-    original = js.stream_info
+    original = js._api_request
 
-    async def answer_after_a_message(stream: str, subjects_filter: Optional[str] = None) -> Any:
+    async def answer_after_a_message(subject: str, request: bytes, timeout: float) -> dict[str, Any]:
         await js.send("a")
-        return await original(stream, subjects_filter)
+        return await original(subject, request, timeout)
 
-    js.stream_info = answer_after_a_message  # type: ignore[method-assign]
+    js._api_request = answer_after_a_message  # type: ignore[method-assign]
     task = await listing(js)
     await js.send("b")
     assert await task == ["a", "b"]
@@ -288,10 +302,14 @@ def test_a_timed_out_read_names_the_first_awaited_keys_in_order() -> None:
 async def test_a_watch_whose_first_values_never_end_raises(short_waits: pytest.MonkeyPatch) -> None:
     short_waits.setattr(bucket_reads, "FIRST_VALUES_SECONDS", 0.05)
     js = FakeJetStream(["never"])
-    with pytest.raises(BucketReadTimedOut):
+
+    async def read() -> None:
         async with aclosing(watch_keys(js, BUCKET)) as changes:
             async for _change in changes:
                 pass
+
+    with pytest.raises(BucketReadTimedOut):
+        await asyncio.wait_for(read(), 2)  # a watch that stopped raising would wait for changes forever
     assert js.subscription.unsubscribed == 1
 
 
@@ -318,18 +336,122 @@ async def test_the_readers_own_time_between_changes_does_not_count_toward_the_de
     assert seen == [KeyChange("a", b"v"), KeyChange("b", b"v"), None]
 
 
+# -- the stream's key list, page by page (nats-server lists at most 100,000 subjects per reply) -------------
+
 @pytest.mark.asyncio
-async def test_a_reply_that_lists_as_many_subjects_as_the_server_allows_raises(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(bucket_reads, "MAX_SUBJECTS", 3)
-    js = FakeJetStream(["a", "b", "c"])
-    with pytest.raises(BucketTooLarge):
+async def test_a_key_list_longer_than_one_reply_is_read_in_pages_that_share_one_subject() -> None:
+    keys = ["a", "b", "c", "d", "e", "f", "g"]
+    js = FakeJetStream(keys, page_size=3)
+    task = await listing(js)
+    assert js.offsets == [0, 2, 4]  # a-c, c-e, e-g
+    for key in keys[:-1]:
+        await js.send(key)
+    await settle()
+    assert not task.done()  # g, on the last page, is awaited too
+    await js.send("g")
+    assert await task == keys
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_holds_every_subject_is_the_whole_list_even_at_the_servers_limit() -> None:
+    js = FakeJetStream(["a", "b", "c"], page_size=3)
+    task = await listing(js)
+    for key in ("a", "b", "c"):
+        await js.send(key)
+    assert await task == ["a", "b", "c"]
+    assert js.offsets == [0]
+
+
+@pytest.mark.asyncio
+async def test_a_key_written_before_a_page_boundary_between_two_pages_repeats_a_subject_and_skips_none() -> None:
+    # "0" is written between the first and second page and sorts first, so every later
+    # subject moves one place down the list: the second page starts one subject earlier.
+    js = FakeJetStream(["a", "b", "c", "d", "e"], ["0", "a", "b", "c", "d", "e"], page_size=3)
+    task = await listing(js)
+    assert js.offsets == [0, 2, 4]  # a-c, b-d, d-e: each page holds the one before's last subject
+    for key in ("a", "b", "c", "d"):
+        await js.send(key)
+    await settle()
+    assert not task.done()
+    await js.send("e")
+    assert await task == ["a", "b", "c", "d", "e"]
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_misses_the_one_before_s_last_subject_starts_the_list_over(
+        caplog: pytest.LogCaptureFixture) -> None:
+    # "a" is dropped by age between the first and second page. Pages that did not share a
+    # subject would go on at offset 3, past "d" (now at 2), and the listing would not await it.
+    js = FakeJetStream(["a", "b", "c", "d", "e"], ["b", "c", "d", "e"], page_size=3)
+    caplog.set_level(logging.INFO, logger=bucket_reads.__name__)
+    task = await listing(js)
+    assert js.offsets == [0, 2, 0, 2]  # a-c, then d-e lacks c: b-d, d-e
+    assert "event=bucket_read_pages_shifted" in caplog.text and "attempt=1 attempts=3" in caplog.text
+    for key in ("b", "c", "e"):
+        await js.send(key)
+    await settle()
+    assert not task.done()  # d is awaited
+    await js.send("d")
+    assert await task == ["b", "c", "e", "d"]
+
+
+@pytest.mark.asyncio
+async def test_a_key_list_that_loses_keys_between_pages_on_every_try_raises_and_unsubscribes(
+        caplog: pytest.LogCaptureFixture) -> None:
+    whole, shifted = ["a", "b", "c", "d", "e"], ["b", "c", "d", "e"]
+    js = FakeJetStream(whole, shifted, whole, shifted, whole, shifted, page_size=3)
+    caplog.set_level(logging.INFO, logger=bucket_reads.__name__)
+    with pytest.raises(BucketKeyListShifted) as raised:
         await list_keys(js, BUCKET)
+    assert (raised.value.bucket, raised.value.subject) == (BUCKET, f"{PREFIX}>")
+    assert len(js.offsets) == 2 * bucket_reads.PAGE_ATTEMPTS
+    assert caplog.text.count("event=bucket_read_pages_shifted") == bucket_reads.PAGE_ATTEMPTS
     assert js.subscription.unsubscribed == 1
 
 
-def test_the_subject_limit_is_the_servers() -> None:
-    assert bucket_reads.MAX_SUBJECTS == 100_000  # nats-server JSMaxSubjectDetails
+@pytest.mark.asyncio
+async def test_pages_too_short_to_share_a_subject_fail_the_read_instead_of_asking_forever() -> None:
+    js = FakeJetStream(["a", "b", "c"], page_size=1)
+    with pytest.raises(BucketKeyListShifted):
+        await asyncio.wait_for(list_keys(js, BUCKET), 2)
+
+
+class FakeConnection:
+    """A NATS connection that answers each request with the next reply, for nats-py's own JetStream context."""
+
+    def __init__(self, *replies: dict[str, Any]) -> None:
+        self.replies = list(replies)
+        self.requests: list[tuple[str, dict[str, Any], float]] = []
+
+    async def request(self, subject: str, payload: bytes, timeout: float) -> Any:
+        self.requests.append((subject, json.loads(payload), timeout))
+        return SimpleNamespace(data=json.dumps(self.replies.pop(0)).encode())
+
+
+@pytest.mark.asyncio
+async def test_the_key_list_is_asked_through_nats_py_s_own_jetstream_request() -> None:
+    """The read uses nats-py's private request helper (``stream_info`` sends no offset); this pins its use."""
+
+    first = {"total": 3, "offset": 0, "limit": 2,
+             "state": {"subjects": {f"{PREFIX}team_one.a": 1, f"{PREFIX}team_one.b": 1}}}
+    second = {"total": 3, "offset": 1, "limit": 2,
+              "state": {"subjects": {f"{PREFIX}team_one.b": 1, f"{PREFIX}team_one.c": 1}}}
+    connection = FakeConnection(first, second)
+    js = nats.js.JetStreamContext(connection, domain="hub")  # type: ignore[arg-type]
+    assert await bucket_reads._held_keys(js, BUCKET, f"{PREFIX}team_one.>") == {"team_one.a", "team_one.b", "team_one.c"}
+    assert connection.requests == [
+        (f"$JS.hub.API.STREAM.INFO.KV_{BUCKET}", {"subjects_filter": f"{PREFIX}team_one.>", "offset": 0}, 5),
+        (f"$JS.hub.API.STREAM.INFO.KV_{BUCKET}", {"subjects_filter": f"{PREFIX}team_one.>", "offset": 1}, 5),
+    ]
+    # A filter that matches nothing: the server leaves the subjects out and says none match.
+    connection = FakeConnection({"total": 0, "offset": 0, "limit": 0, "state": {"messages": 0}})
+    assert await bucket_reads._held_keys(nats.js.JetStreamContext(connection), BUCKET,  # type: ignore[arg-type]
+                                         f"{PREFIX}>") == set()
+    assert connection.requests[0][0] == f"$JS.API.STREAM.INFO.KV_{BUCKET}"
+    # A missing stream raises nats-py's own error, as stream_info does.
+    connection = FakeConnection({"error": {"code": 404, "err_code": 10059, "description": "stream not found"}})
+    with pytest.raises(NotFoundError):
+        await bucket_reads._held_keys(nats.js.JetStreamContext(connection), BUCKET, f"{PREFIX}>")  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -486,9 +608,11 @@ async def test_cancelling_a_task_that_reads_a_state_records_watch_unsubscribes_a
 
 
 @pytest.mark.asyncio
-async def test_a_state_records_listing_raises_instead_of_reading_a_failed_read_as_empty() -> None:
-    js = FakeJetStream(NatsTimeoutError(), bucket="UA1_PLACEMENT")
-    with pytest.raises(NatsTimeoutError):
+@pytest.mark.parametrize("error", [NatsTimeoutError(), NotFoundError(code=404, description="stream not found")])
+async def test_a_state_records_listing_raises_instead_of_reading_a_failed_read_as_empty(error: Exception) -> None:
+    # A missing bucket too: the test cleanup (protocol1_team_support) relies on NotFoundError reaching it.
+    js = FakeJetStream(error, bucket="UA1_PLACEMENT")
+    with pytest.raises(type(error)):
         await agent_records(js).keys("placement", "team_example.", team="team_example")
     js = FakeJetStream([], bucket="UA1_PLACEMENT")
     assert await agent_records(js).keys("placement", "team_example.", team="team_example") == []

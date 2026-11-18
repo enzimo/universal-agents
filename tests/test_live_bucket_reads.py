@@ -15,19 +15,23 @@ processes write. The keys of the first two groups are in the bucket for the whol
 so every listing and every watch's first values must hold them all; the deleted keys are
 never in the bucket during a read, so no listing may hold them and no watch may give them
 a value. Each test checks every read and reports how many of them were bad.
+
+The last test lists a team whose keys are mostly deleted and number more than one stream
+information reply can list (100,000 subjects, delete markers included).
 """
 
 from __future__ import annotations
 
 import asyncio
 import random
+import time
 from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from typing import AsyncIterator, Sequence
 
 import pytest
 from nats.js.api import StreamConfig
 
-from custom_messages.wire.buckets import bucket_stream
+from custom_messages.wire.buckets import bucket_stream, bucket_subject
 from custom_messages.wire.kinds import STATE_RECORDS
 from custom_transport.protocol1.state_records import StateRecords
 from tests.test_live_message_contract import STORAGE, TRANSPORT
@@ -51,6 +55,8 @@ ROUNDS = 500
 WRITERS = 4
 # How long one watch may take to say its first values are all given.
 WATCH_SECONDS = 10.0
+# More subjects than one stream information reply lists (nats-server's JSMaxSubjectDetails, 100,000).
+MANY = 100_005
 
 
 async def filled_bucket(stack: AsyncExitStack, url: str) -> StateRecords:
@@ -206,3 +212,41 @@ async def test_a_watch_gives_every_key_the_bucket_holds_before_it_says_caught_up
                     bad.append((round_number, given, HELD - given, valued - MAY_HOLD, 0))  # a watch may repeat a key
         assert written[0] > ROUNDS, "the writers barely wrote while the bucket was watched"
         assert not bad, bad_reads(bad, ROUNDS, "watches", written[0])
+
+
+async def publish_all(js, subjects: Sequence[str], **options) -> None:
+    """Publish to each subject, many at a time (the stream acknowledges each)."""
+
+    for start in range(0, len(subjects), 5000):
+        await asyncio.gather(*(js.publish(subject, **options) for subject in subjects[start:start + 5000]))
+
+
+@pytest.mark.asyncio
+async def test_a_listing_reads_a_key_list_longer_than_one_reply_deleted_keys_included(broker: str) -> None:  # noqa: F811
+    """A team whose placements were mostly deleted: each delete marker stays a subject of the stream.
+
+    Three keys hold a value: the first, one in the middle and the last, which sorts past the
+    first page of the stream's key list and is written last. A read that knew only the
+    first page would end its first values before the last key arrives.
+    """
+
+    async with AsyncExitStack() as stack:
+        owner = await connect(stack, broker, "owner")
+        js = owner.jetstream()
+        settings = bucket_stream(TRANSPORT, BUCKET)
+        await js.add_stream(config=StreamConfig(**{**settings, "storage": STORAGE[settings["storage"]]}))
+        keys = [f"{TEAM}.agent-{number:06d}" for number in range(MANY)]
+        held = {keys[0], keys[MANY // 2], keys[-1]}
+        await publish_all(js, [bucket_subject(BUCKET, key) for key in keys[:-1]], payload=b"placement")
+        await publish_all(js, [bucket_subject(BUCKET, key) for key in keys[:-1] if key not in held], payload=b"",
+                          headers={"KV-Operation": "DEL"})
+        await js.publish(bucket_subject(BUCKET, keys[-1]), b"placement")
+        info = await js.stream_info(f"KV_{BUCKET}", subjects_filter=bucket_subject(BUCKET, f"{TEAM}.>"))
+        assert info.state.messages == MANY and len(info.state.subjects or {}) == 100_000  # one reply's worth
+
+        reader = await connect(stack, broker, "reader")
+        records = StateRecords(reader.jetstream(), lambda: None, None)
+        started = time.monotonic()
+        listed = await records.keys(RECORD, f"{TEAM}.")
+        elapsed = time.monotonic() - started
+        assert sorted(listed) == sorted(held), f"listed {len(listed)} keys in {elapsed:.1f} s"

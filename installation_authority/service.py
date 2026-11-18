@@ -476,19 +476,24 @@ class InstallationAuthority:
 
         if self._nc is not None and self._nc.is_closed:
             raise AuthorityDisconnected("The installation authority's NATS connection closed and will not reconnect.")
-        steps: tuple[tuple[bool, Callable[[datetime], Any], str], ...] = (
-            (self._revocations_due(now), self._sign_revocations, "revocations_resign_failed"),
-            (self._own_certificate_due(now), self._renew_own_certificate, "authority_certificate_renewal_failed"),
-            (self._forget_due(now), self.forget, "authority_forget_failed"),
+        # When a failed step runs again: at the next check, or for the forgetting, which notes
+        # the day it ran before it starts, once its interval has passed.
+        next_check = f"in {int(UPKEEP_INTERVAL.total_seconds())} seconds"
+        steps: tuple[tuple[bool, Callable[[datetime], Any], str, str], ...] = (
+            (self._revocations_due(now), self._sign_revocations, "revocations_resign_failed", next_check),
+            (self._own_certificate_due(now), self._renew_own_certificate, "authority_certificate_renewal_failed",
+             next_check),
+            (self._forget_due(now), self.forget, "authority_forget_failed",
+             f"in {int(FORGET_INTERVAL.total_seconds() // 3600)} hours"),
         )
-        for due, step, event in steps:
+        for due, step, event, again in steps:
             if not due:
                 continue
             try:
                 await step(now)
             except Exception:
-                self.logger.exception("An authority upkeep step failed; it is tried again in %s seconds. event=%s "
-                                      "installation=%s", int(UPKEEP_INTERVAL.total_seconds()), event, self.installation)
+                self.logger.exception("An authority upkeep step failed; it is tried again %s. event=%s installation=%s",
+                                      again, event, self.installation)
 
     def _revocations_due(self, now: datetime) -> bool:
         if not self._revocations:

@@ -39,8 +39,7 @@ RELAYED_KINDS = ("tasks.list", "tasks.list_finished", "tasks.remove", "tasks.pur
 _CHANGE_KINDS = frozenset({"tasks.remove", "tasks.purge", "debug.dump"})
 _PLACEMENT_BUCKET = "UA1_PLACEMENT"
 AGENT_UNAVAILABLE_TEXT = "That agent is not running now. Refresh, and try again when it is."
-LEAD_LOOKUP_FAILED_TEXT = ("The team services could not look up the team lead just now. Nothing was sent; "
-                           "try again in a moment.")
+LEAD_LOOKUP_FAILED_TEXT = "The team lead could not be looked up just now. Nothing was sent; try again in a moment."
 RELAY_TIMEOUT_SECONDS = 10.0
 AGENT_SLOW_TEXT = "That agent did not answer in time. The command may still finish. Refresh to check its result."
 AGENT_REFUSED_TEXT = "That agent could not handle this request. Refresh and try again."

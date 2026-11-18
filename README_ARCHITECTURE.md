@@ -5255,8 +5255,21 @@ loss", and what the NATS login needs in the Docker guide's "Message host trust".
   or a later one. While keys are awaited, the read asks again after each second it spent
   waiting and stops waiting for keys the stream dropped by age (`UA1_HOSTS`,
   `UA1_AGENTS`; `event=bucket_read_keys_expired`). After 10 seconds spent waiting it
-  raises `BucketReadTimedOut`, and a stream that lists 100,000 subjects (the most one
-  reply holds) raises `BucketTooLarge`.
+  raises `BucketReadTimedOut`.
+
+  One stream information reply lists at most 100,000 subjects, sorted, from an offset the
+  request names, and says how many match. Deleted keys count, because their delete markers
+  stay: every worker launch leaves a placement key and a session key behind in
+  `UA1_PLACEMENT` and `UA1_CERTS`. nats-py's `stream_info` sends no offset, so the read
+  sends that request (`$JS.API.STREAM.INFO.<stream>`) itself, with an offset, through
+  nats-py's JetStream request helper, and reads the list page by page. Each page after
+  the first starts at the previous page's last subject. A page that holds that subject
+  joins the one before with nothing left out; a key written in between only moves the
+  boundary, and a subject is read twice. A page that does not hold it (keys before it
+  were dropped by age between the two requests) starts the list over
+  (`event=bucket_read_pages_shifted`); after three tries the read raises
+  `BucketKeyListShifted`. A cap on the subject count would lock a long-running team out
+  of its own session listings for good once its deleted keys reached it.
 
   A failed read is never an empty bucket. On a failed listing the team services remove no
   placement as abandoned and open no second lead: the opening is refused (the agent host

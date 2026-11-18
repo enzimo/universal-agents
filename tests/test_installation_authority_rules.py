@@ -10,6 +10,7 @@ tests/test_live_installation_authority.py.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 from datetime import timedelta
@@ -18,11 +19,18 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from nats.js.errors import KeyNotFoundError, NotFoundError
 
+from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.trust import kept_for
 from custom_transport.protocol1 import host_keys
+from custom_transport.protocol1.bootstrap import BootstrapBundle, write_bundle
+from custom_transport.protocol1.bucket_reads import BucketReadTimedOut
 from custom_transport.protocol1.live import utc_now
 from installation_authority import process as authority_process
+from installation_authority import service as authority_service
 from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts, write_expected_hosts
 from installation_authority.ledger import ISSUED_FILENAME, OUTCOME_RETENTION, IssueLedger
 from installation_authority.service import (
@@ -246,7 +254,155 @@ def test_a_failed_upkeep_step_is_logged_and_tried_again(tmp_path: Path, caplog) 
     asyncio.run(authority.upkeep(now))
     asyncio.run(authority.upkeep(now + timedelta(minutes=1)))
     assert len(attempts) == 2
-    assert caplog.text.count("event=revocations_resign_failed") == 2
+    assert caplog.text.count("it is tried again in 60 seconds. event=revocations_resign_failed") == 2
+
+
+# -- a listing of UA1_CERTS that fails (bucket_reads.list_keys) ------------------------------------
+# A failed listing is never read as an empty bucket: the authority does not start, issues no
+# certificate and deletes none.
+
+
+def failing_listings(monkeypatch: pytest.MonkeyPatch, *, fail_from: int = 1) -> list[str]:
+    """The authority's listings raise from call ``fail_from`` on (earlier ones find nothing); returns the prefixes asked."""
+
+    asked: list[str] = []
+
+    async def list_keys(_js: Any, bucket: str, prefix: str = "") -> list[str]:
+        asked.append(prefix)
+        if len(asked) >= fail_from:
+            raise BucketReadTimedOut(bucket, f"$KV.{bucket}.{prefix}>", [f"{prefix}1"], 0)
+        return []
+
+    monkeypatch.setattr(authority_service, "list_keys", list_keys)
+    return asked
+
+
+def issued_by(authority: InstallationAuthority) -> list[Any]:
+    """The certificate requests the authority signs from now on (recorded, not signed)."""
+
+    issued: list[Any] = []
+
+    async def issue(request: Any, **_options: Any) -> dict[str, Any]:
+        issued.append(request)
+        return {}
+
+    authority._issue = issue  # type: ignore[method-assign]
+    authority._revocations = {"body": {"revocation_epoch": 1}}
+    return issued
+
+
+class _Bucket:
+    """UA1_CERTS without a server: values by key, and the keys deleted."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+        self.deleted: list[str] = []
+
+    async def get(self, key: str) -> Any:
+        if key not in self.values:
+            raise KeyNotFoundError
+        return SimpleNamespace(value=self.values[key])
+
+    async def put(self, key: str, value: bytes) -> None:
+        self.values[key] = value
+
+    async def delete(self, key: str) -> None:
+        self.deleted.append(key)
+
+
+class _JetStream:
+    def __init__(self) -> None:
+        self.buckets: dict[str, _Bucket] = {}
+
+    async def stream_info(self, _name: str) -> Any:
+        raise NotFoundError
+
+    async def add_stream(self, config: Any) -> None:
+        pass
+
+    async def key_value(self, bucket: str) -> _Bucket:
+        return self.buckets.setdefault(bucket, _Bucket())
+
+
+class _Connection:
+    is_closed = False
+
+    def __init__(self) -> None:
+        self.js = _JetStream()
+        self.subscribed: list[str] = []
+
+    def jetstream(self) -> _JetStream:
+        return self.js
+
+    async def subscribe(self, subject: str, **_options: Any) -> None:
+        self.subscribed.append(subject)
+
+    async def flush(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("fail_from", [1, 2])  # its own newest certificate; the certificates it issued
+def test_an_authority_whose_certificate_listing_fails_does_not_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                     fail_from: int) -> None:
+    authority = authority_at(tmp_path)
+    write_bundle(authority.layout.trust_bootstrap_path,
+                 BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),)))
+    asked = failing_listings(monkeypatch, fail_from=fail_from)
+    nc = _Connection()
+    with pytest.raises(BucketReadTimedOut):
+        asyncio.run(authority.start(nc, teams=["team_one"]))
+    assert asked == [f"host.install_one.{AUTHORITY_RUNTIME}.", "host.install_one."][:fail_from]
+    assert nc.subscribed == []  # it never answered joins
+
+
+def test_a_join_whose_certificate_listing_fails_gets_no_certificate(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    authority = authority_at(tmp_path)
+    write_expected_hosts(authority.layout.trust_expected_hosts_path, {LISTED.runtime: LISTED})
+    failing_listings(monkeypatch)
+    issued = issued_by(authority)
+    verified = SimpleNamespace(raw={"body": join_body(nats_public_key="NATS1", profile_sha256="")})
+    with pytest.raises(BucketReadTimedOut):
+        asyncio.run(authority.answer_join(verified))  # type: ignore[arg-type]
+    assert issued == []
+
+
+def test_a_renewal_whose_certificate_listing_fails_gets_no_certificate(tmp_path: Path,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    authority = authority_at(tmp_path)
+    public_key = Ed25519PrivateKey.generate().public_key()
+    listed = dataclasses.replace(LISTED, public_key=b64url(public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)))
+    write_expected_hosts(authority.layout.trust_expected_hosts_path, {listed.runtime: listed})
+    failing_listings(monkeypatch)
+    issued = issued_by(authority)
+    authority.live = SimpleNamespace()  # type: ignore[assignment]  # serving: renewals reach it only then
+    held = certificate(key_id=listed.key_id, public_key=public_key, certificate_id="certificate-1", membership_epoch=1,
+                       nats_public_key="NATS1")
+    verified = SimpleNamespace(certificate=held, frame=SimpleNamespace(idempotency_key="renew-1"),
+                               raw={"body": {"profile_sha256": ""}})
+    with pytest.raises(BucketReadTimedOut):
+        asyncio.run(authority.answer_renew(verified))  # type: ignore[arg-type]
+    assert issued == []
+
+
+def test_a_failed_listing_deletes_no_certificate_and_the_forgetting_runs_again_the_next_day(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    authority = authority_at(tmp_path)
+    asked = failing_listings(monkeypatch)
+    nc = _Connection()
+    authority._nc, authority._js = nc, nc.js
+    authority._trust = SimpleNamespace(store=SimpleNamespace(forget=lambda _now: 0))  # type: ignore[assignment]
+    now = utc_now()
+    authority._revocations = {"issued_at": format_timestamp(now)}  # signed just now: only the forgetting is due
+    asyncio.run(authority.upkeep(now))
+    asyncio.run(authority.upkeep(now + timedelta(minutes=1)))
+    assert asked == ["host.install_one."]
+    assert nc.js.buckets["UA1_CERTS"].deleted == []
+    assert "it is tried again in 24 hours. event=authority_forget_failed" in caplog.text
+    later = now + timedelta(days=1)
+    authority._revocations = {"issued_at": format_timestamp(later)}
+    asyncio.run(authority.upkeep(later))
+    assert len(asked) == 2
 
 
 # -- the process -----------------------------------------------------------------------------------

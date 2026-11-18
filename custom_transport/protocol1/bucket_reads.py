@@ -33,8 +33,17 @@ What can still stop a key from arriving, and what the read does:
   up across messages, so other keys that keep changing do not put the question off.
 - After ``FIRST_VALUES_SECONDS`` spent waiting for messages, the read raises
   ``BucketReadTimedOut``. Callers treat a failed read as a failure, never as an empty bucket.
-- The server lists at most ``MAX_SUBJECTS`` subjects in one reply and nats-py reads no
-  paging fields, so a reply that large raises ``BucketTooLarge`` instead of being trusted.
+
+One stream information reply lists at most 100,000 subjects (nats-server's
+``JSMaxSubjectDetails``), sorted, from the offset the request names, and says how many
+match the filter (``total``). Deleted keys count: their delete markers stay in the stream,
+so a team's placement and session keys grow with every worker launch. nats-py's
+``stream_info`` sends no offset, so the read sends the same request itself through the
+JetStream context's request helper and reads the list page by page. Each page after the
+first starts at the previous page's last subject, so two pages share one subject. A page
+that holds it joins the one before with nothing left out between them; a page that does
+not (a key before it was dropped by age between the two requests) starts the list over,
+and after ``PAGE_ATTEMPTS`` tries the read raises ``BucketKeyListShifted``.
 
 Subscriptions are nats-py ordered consumers with the settings its own watch uses, so a
 reader needs no permission beyond the contract's key-value read grants (an unnamed
@@ -49,6 +58,7 @@ disconnection does not remove it.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from contextlib import aclosing
@@ -68,16 +78,16 @@ FIRST_VALUES_SECONDS = 10.0
 # With keys still awaited, ask the stream which it still holds each time this much waiting has added up.
 QUIET_SECONDS = 1.0
 # Messages handed over by nats-py, kept in order for the reader (the size nats-py's watch uses).
-# It does not hold the server back: nats-py answers the consumer's flow control as messages
-# arrive and keeps what the reader has not taken yet in its own subscription queue, up to its
-# limits per subscription (over 500,000 messages or 256 MiB), far above the product's buckets.
+# A reader that falls behind slows the server instead of filling memory: nats-py passes a
+# message on only when this queue has room, and it answers the consumer's flow control only
+# once the messages before the server's request have been passed on, so the server waits.
 QUEUE_SIZE = 256
 # How many of the awaited keys a timed-out read names in its error.
 NAMED_KEYS = 5
 # How long the server keeps a watch's consumer after its client stops answering (nats-py's default).
 WATCH_INACTIVE_SECONDS = 300.0
-# nats-server's JSMaxSubjectDetails: a stream information reply lists at most this many subjects.
-MAX_SUBJECTS = 100_000
+# How many times one read of the stream's key list starts over when two of its pages do not join.
+PAGE_ATTEMPTS = 3
 # KV-Operation values for a deleted or purged key, and the server's marker reasons that mean the same.
 _DELETIONS = frozenset({KV_DEL, KV_PURGE})
 _MARKER_DELETIONS = frozenset({"MaxAge", "Purge", "Remove"})
@@ -105,12 +115,12 @@ class BucketReadTimedOut(Exception):
         self.received = received
 
 
-class BucketTooLarge(Exception):
-    """The stream listed as many subjects as one reply can hold, so the list may be cut short."""
+class BucketKeyListShifted(Exception):
+    """The stream's key list lost keys between two of its pages on every try; the bucket's contents are unknown."""
 
     def __init__(self, bucket: str, subject: str) -> None:
-        super().__init__(f"Bucket {bucket} holds {MAX_SUBJECTS} or more keys under {subject}; "
-                         "one stream information reply cannot list them all.")
+        super().__init__(f"Reading the keys of bucket {bucket} ({subject}) failed: keys were dropped between two pages "
+                         f"of the stream's key list in each of {PAGE_ATTEMPTS} tries.")
         self.bucket = bucket
         self.subject = subject
 
@@ -132,9 +142,9 @@ async def watch_keys(js: Any, bucket: str, keys: str = ">", *,
 
     Yields ``None`` once, right after the first values (first of all when the bucket holds
     no key under ``keys``). With ``values=False`` the server sends headers only. Raises
-    ``BucketReadTimedOut`` or ``BucketTooLarge`` before the first values end, and whatever
-    the client raises for a failed request. The subscription is removed however the read
-    ends: finished, failed, closed or cancelled.
+    ``BucketReadTimedOut`` or ``BucketKeyListShifted`` before the first values end, and
+    whatever the client raises for a failed request. The subscription is removed however
+    the read ends: finished, failed, closed or cancelled.
     """
 
     subject = bucket_subject(bucket, keys)
@@ -206,14 +216,62 @@ async def list_keys(js: Any, bucket: str, prefix: str = "") -> list[str]:
 
 
 async def _held_keys(js: Any, bucket: str, subject: str) -> set[str]:
-    """The keys the bucket's stream holds under ``subject`` now, deletion markers included."""
+    """The keys the bucket's stream holds under ``subject`` now, deletion markers included.
 
-    info = await js.stream_info(bucket_stream_name(bucket), subjects_filter=subject)
-    subjects = info.state.subjects or {}
-    if len(subjects) >= MAX_SUBJECTS:
-        raise BucketTooLarge(bucket, subject)
+    Started over when two pages of the list do not join; raises ``BucketKeyListShifted``
+    after ``PAGE_ATTEMPTS`` tries.
+    """
+
     key_start = len(bucket_subject(bucket, ""))
-    return {held[key_start:] for held in subjects}
+    for attempt in range(1, PAGE_ATTEMPTS + 1):
+        subjects = await _stream_subjects(js, bucket_stream_name(bucket), subject)
+        if subjects is not None:
+            return {held[key_start:] for held in subjects}
+        _LOGGER.info("Keys were dropped between two pages of a stream's key list; the list is read again. "
+                     "event=bucket_read_pages_shifted bucket=%s subject=%s attempt=%d attempts=%d",
+                     bucket, subject, attempt, PAGE_ATTEMPTS)
+    raise BucketKeyListShifted(bucket, subject)
+
+
+async def _stream_subjects(js: Any, stream: str, subject: str) -> Optional[set[str]]:
+    """Every subject ``stream`` holds under ``subject``, read page by page; ``None`` when two pages did not join.
+
+    Each page is a sorted slice of the list as the stream held it when it answered. The next
+    page is asked from one subject before the end of this one, so a joined pair shares
+    ``last``. When the next page holds ``last``, it holds every subject the stream then held
+    from ``last`` to its own end, so the two pages hold every subject the stream held
+    through both requests from the first page's start to the second page's end (a key
+    written meanwhile before ``last`` moves it further down the list, which repeats subjects
+    but skips none). When it does not, ``last`` or keys before it were dropped, and the page
+    may begin past keys it should hold.
+    """
+
+    found: set[str] = set()
+    offset = 0
+    last: Optional[str] = None
+    while True:
+        page, total = await _subjects_page(js, stream, subject, offset)
+        if last is not None and last not in page:
+            return None
+        found.update(page)
+        if offset + len(page) >= total:  # this page reaches the end of the list it was cut from
+            return found
+        last = max(page)
+        offset += max(len(page) - 1, 1)  # one subject shared, and always forward: a one-subject page cannot join
+
+
+async def _subjects_page(js: Any, stream: str, subject: str, offset: int) -> tuple[dict[str, int], int]:
+    """The subjects ``stream`` holds under ``subject`` from ``offset`` on (one reply's worth), and how many match in all.
+
+    nats-py's ``stream_info`` sends no offset, so this sends the request it sends, with the
+    offset, through the context's own request helper: the same subject under the context's
+    API prefix (``$JS.API.STREAM.INFO.<stream>``, granted to every bucket reader), the same
+    time limit, and the same errors (``NotFoundError`` for a missing stream).
+    """
+
+    request = json.dumps({"subjects_filter": subject, "offset": offset}).encode()
+    reply = await js._api_request(f"{js._prefix}.STREAM.INFO.{stream}", request, timeout=js._timeout)
+    return (reply.get("state") or {}).get("subjects") or {}, int(reply.get("total") or 0)
 
 
 async def _still_held(js: Any, bucket: str, subject: str, awaited: set[str]) -> set[str]:
