@@ -573,6 +573,49 @@ def _log_ended_after_decline(session: BrokerAuthSession, logger: logging.Logger,
     )
 
 
+def _record_process_exit(session: BrokerAuthSession, exit_code: int, logger: logging.Logger) -> None:
+    """How a sign-in ended once its CLI process exited: success, error, or still declined.
+
+    A declined page stays declined and the broker stores nothing: Decline
+    stopped the process (``page_decline.decline_auth_session``) and is refused
+    once the process exited 0, so exit code 0 here means the CLI finished in the
+    moment before it was stopped and may have kept its own sign-in (logged).
+    """
+
+    status = session.state.get("status")
+    if status == SIGN_IN_STATUS_DECLINED:
+        _log_ended_after_decline(session, logger, exit_code=exit_code)
+        return
+    if status == "error":
+        return
+    if exit_code != 0:
+        session.state["status"] = "error"
+        reason, explanation = _explain_auth_process_exit(session)
+        session.state["failure_reason"] = reason
+        session.state["error"] = explanation
+        return
+    session.state["auth_stage"] = "credential_verification_and_storage"
+    finalized = _finalize_web_auth(session, logger)
+    if session.state.get("status") == SIGN_IN_STATUS_DECLINED:
+        # Declined while the sign-in was being stored: the page stays declined.
+        _log_ended_after_decline(session, logger, exit_code=exit_code)
+    elif finalized:
+        session.state["status"] = "success"
+        session.state["message"] = "Authentication completed successfully."
+    else:
+        session.state["status"] = "error"
+
+
+def _finalize_web_auth(session: BrokerAuthSession, logger: logging.Logger) -> bool:
+    """Store the sign-in the CLI finished, for the providers whose CLI keeps it itself."""
+
+    if session.provider == "github":
+        return _finalize_github_web_auth(session, logger)
+    if session.provider == "google":
+        return _finalize_google_web_auth(session, logger)
+    return True
+
+
 def _monitor_web_auth_process(
     *,
     session: BrokerAuthSession,
@@ -636,37 +679,7 @@ def _monitor_web_auth_process(
         exit_code = process.wait(timeout=1)
         session.state["exit_code"] = exit_code
         session.state.setdefault("completed_at", datetime.utcnow().isoformat() + "Z")
-        if session.state.get("status") == SIGN_IN_STATUS_DECLINED:
-            # The person declined the page, and Decline stopped this process
-            # (service._decline_auth_session). The page stays declined and the
-            # broker stores nothing. Decline is refused once the process exited
-            # 0, so exit code 0 here means the CLI finished in the moment before
-            # it was stopped and may have kept its own sign-in.
-            _log_ended_after_decline(session, logger, exit_code=exit_code)
-        elif session.state.get("status") != "error":
-            if exit_code == 0:
-                session.state["auth_stage"] = "credential_verification_and_storage"
-                finalized = (
-                    _finalize_github_web_auth(session, logger)
-                    if session.provider == "github"
-                    else _finalize_google_web_auth(session, logger)
-                    if session.provider == "google"
-                    else True
-                )
-                if session.state.get("status") == SIGN_IN_STATUS_DECLINED:
-                    # Declined while the sign-in was being stored: the page stays
-                    # declined, and the log says a sign-in may remain.
-                    _log_ended_after_decline(session, logger, exit_code=exit_code)
-                elif not finalized:
-                    session.state["status"] = "error"
-                else:
-                    session.state["status"] = "success"
-                    session.state["message"] = "Authentication completed successfully."
-            else:
-                session.state["status"] = "error"
-                reason, explanation = _explain_auth_process_exit(session)
-                session.state["failure_reason"] = reason
-                session.state["error"] = explanation
+        _record_process_exit(session, exit_code, logger)
     except Exception as exc:
         if session.state.get("status") != SIGN_IN_STATUS_DECLINED:
             session.state["status"] = "error"
