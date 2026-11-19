@@ -51,8 +51,6 @@ LOGGER = logging.getLogger(__name__)
 # and the full name in a tooltip, so more would only grow every list read.
 TITLE_MAX_CHARACTERS = 200
 ATTACHMENT_TITLE = "Attachment"
-# The row's second line shows about one line of the latest message.
-LAST_MESSAGE_MAX_CHARACTERS = 160
 # The furthest ahead a snooze may wake (the page offers up to next week, or a
 # picked time).
 SNOOZE_MAX_AHEAD = timedelta(days=366)
@@ -189,15 +187,19 @@ def first_message_title(record: WebChatThreadRecord) -> str | None:
 
 
 def last_message(record: WebChatThreadRecord) -> WebChatThreadMessage | None:
-    """The row's second line: the latest ordinary message, shortened, or its first file's name."""
+    """The latest ordinary message as the store cut it, or its first file's name.
+
+    The page makes the row's plain one-line snippet (``chat_thread_list.mjs``
+    ``plainSnippet``: Markdown markers out, whitespace collapsed, shortened),
+    for this text and for messages that arrive live alike, so one rule
+    decides what the line shows.
+    """
 
     if not record.last_message_role:
         return None
-    text = " ".join((record.last_message_text or "").split())
-    if not text:
+    text = record.last_message_text or ""
+    if not text.strip():
         text = _attachment_name(record.last_message_attachments_json, record.session_key, "latest") or ""
-    if len(text) > LAST_MESSAGE_MAX_CHARACTERS:
-        text = text[: LAST_MESSAGE_MAX_CHARACTERS - 1].rstrip() + "…"
     return WebChatThreadMessage(role=record.last_message_role, text=text, created_at=record.last_message_at)
 
 
@@ -307,7 +309,6 @@ __all__ = [
     "ATTACHMENT_TITLE",
     "DELIVERY_THREAD_NAMES",
     "InvalidThreadPlacement",
-    "LAST_MESSAGE_MAX_CHARACTERS",
     "NeedsYouReason",
     "SNOOZE_MAX_AHEAD",
     "ThreadListState",

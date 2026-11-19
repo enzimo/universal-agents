@@ -19,7 +19,6 @@ import pytest
 from assistant_gateway.application.person_maintenance import person_maintenance_session_key
 from assistant_gateway.application.proactive_delivery import proactive_session_key
 from assistant_gateway.application.web_chat_threads import (
-    LAST_MESSAGE_MAX_CHARACTERS,
     TITLE_MAX_CHARACTERS,
     InvalidThreadPlacement,
     NeedsYouReason,
@@ -301,14 +300,14 @@ def test_what_a_thread_waits_on_is_checked_in_order() -> None:
     assert needs_you_reason(_record(running_request_status="running")) is None
 
 
-def test_the_latest_message_line_is_collapsed_and_shortened() -> None:
+def test_the_latest_message_is_sent_as_stored_or_named_by_its_file() -> None:
+    """The page makes the plain one-line snippet (chat_thread_list.mjs plainSnippet, C15)."""
+
     assert last_message(_record()) is None
-    message = last_message(_record(last_message_role="assistant", last_message_text="All\n\n backups   done.", last_message_at=LATER))
-    assert message is not None and (message.role, message.text, message.created_at) == ("assistant", "All backups done.", LATER)
-    long = last_message(_record(last_message_role="user", last_message_text="word " * 100))
-    assert long is not None and len(long.text) == LAST_MESSAGE_MAX_CHARACTERS and long.text.endswith("…")
+    message = last_message(_record(last_message_role="assistant", last_message_text="**All**\n\n- done", last_message_at=LATER))
+    assert message is not None and (message.role, message.text, message.created_at) == ("assistant", "**All**\n\n- done", LATER)
     files = last_message(
-        _record(last_message_role="user", last_message_text="", last_message_attachments_json='[{"filename": "budget.xlsx"}]')
+        _record(last_message_role="user", last_message_text=" ", last_message_attachments_json='[{"filename": "budget.xlsx"}]')
     )
     assert files is not None and files.text == "budget.xlsx"
 

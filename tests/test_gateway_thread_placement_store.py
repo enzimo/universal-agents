@@ -10,6 +10,7 @@ and, with ``LIVE_TEST_POSTGRES_DSN``, on real PostgreSQL.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Iterator
 from itertools import count
@@ -30,6 +31,9 @@ from storage.config import StorageSettings, resolve_storage_settings
 from storage.gateway_state_repository import LAST_MESSAGE_SQL_CHARACTERS, create_gateway_state_repository
 from tests.test_gateway_question_store import _postgres_settings
 
+ORDINARY_ROWS = json.loads(
+    (Path(__file__).parent / "fixtures" / "web_chat_ordinary_messages.json").read_text(encoding="utf-8")
+)["rows"]
 ALICE = "alice"
 BOB = "bob"
 THREAD = "website:web-chat:alpha"
@@ -282,6 +286,29 @@ def test_the_latest_message_skips_cards_and_commands(settings) -> None:
     assert (record.last_message_role, record.last_message_text) == ("assistant", "All backups finished.")
     assert record.last_message_at is not None
     assert record.last_sequence == 4, "the last activity still counts every row"
+
+
+def test_the_shared_example_rows_are_ordinary_exactly_as_the_page_says(settings) -> None:
+    """The store and chat_thread_list.mjs read the same rows the same way (C08)."""
+
+    store = _Store(settings)
+    for index, row in enumerate(ORDINARY_ROWS):
+        key = f"example_{index}"
+        store.thread(key)
+        store.post(
+            row["content"],
+            role=row["role"],
+            session_key=key,
+            attachments=tuple(_attachment(name) for name in row.get("attachments", ())),
+        )
+    listed = store.listed()
+    for index, row in enumerate(ORDINARY_ROWS):
+        record = listed[f"example_{index}"]
+        assert (record.last_message_role is not None) is row["ordinary"], row
+        if row["ordinary"]:
+            assert record.last_message_text == row["content"], row
+        turns = store.repo.count_transcript_turns(owner_canonical_user_id=ALICE, session_key=f"example_{index}")
+        assert turns == (1 if row["ordinary"] else 0), row
 
 
 def test_an_attachment_only_message_is_the_latest_message(settings) -> None:
