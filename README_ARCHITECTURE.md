@@ -173,6 +173,25 @@ each. They run in parallel on as many workers as the team allows:
   (`custom_transport/nats_pull.py`). Before this, NATS pushed each task to a worker
   of its choice, a busy worker kept it in its private inbox, and the lead's pickup
   check failed tasks that were only waiting.
+- **An agent's consumers last as long as its id.** Each agent reads its
+  mailbox and its control queue through two consumers on the work stream. An id
+  set in configuration (`agent.agent_id`) is a lasting route, so its consumers
+  survive the process. Every other agent's consumers belong to its process:
+  deleted when it exits, expired by NATS after a crash
+  (`transport.process_consumer_inactive_threshold_seconds`). That includes
+  workers started from a start record (pool, scheduled, replacement and manual
+  starts), whose id `spawn_agent` sets but which is drawn for that one start
+  (`custom_agents/strands_agent.py`, `_direct_consumer_scope`). Until
+  2026-11-19 a set id alone made the consumers lasting. Every worker start left
+  two behind until the stream reached NATS 2.15's default of 1,000 consumers.
+  After that, every new worker crashed while creating its mailbox, and the pool
+  controller restarted it until the hourly start limit refused it. Once per process, before starting
+  any worker, the team lead deletes the consumers that gone started workers
+  left (`custom_agents/worker_consumer_cleanup.py`). It decides "gone" by the
+  one liveness rule (`custom_agents/agent_liveness.py`: start record, then
+  process) and only for owners with a start record, never by whether a
+  consumer is asking for messages, since a busy worker asks for none. Messages
+  still in a deleted mailbox stay in the work stream.
 - **One message never stops a receiver.** A message the receiving release cannot
   read (malformed, or a message type or value another release added or removed)
   is logged without its content (`event=nats_message_undecodable`, with its id,

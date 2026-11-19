@@ -8,12 +8,26 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from custom_transport.base import AGENT_CONSUMER_ROLES, AGENT_CONTROL_ROLE, AGENT_DIRECT_ROLE
 from custom_transport.nats_consumer_state import consumer_listening_state
 from custom_transport.nats_pull import CONSUMER_METADATA_SCHEMA
 from custom_transport.subjects import NatsSubjectMapper
 
 
 GENERATED_AGENT_ID_PATTERN = r"agent_id_[0-9a-f]{12}"
+
+
+@dataclass(frozen=True)
+class AgentConsumer:
+    """One agent's mailbox or control consumer found on the work stream."""
+
+    stream_name: str
+    consumer_name: str
+    owner_agent_id: str
+    consumer_role: str
+    consumer_scope: str
+    num_pending: int | None
+    num_ack_pending: int | None
 
 
 @dataclass(frozen=True)
@@ -267,24 +281,131 @@ class NatsConsumerReconciler:
             return None, None, None
         owner_agent_id = str(metadata.get("ua.owner_agent_id") or "").strip()
         consumer_role = str(metadata.get("ua.consumer_role") or "").strip()
-        expected_route = {
-            "agent_direct": (
-                self._mapper.work_stream_name(),
-                self._mapper.agent_work_subject(owner_agent_id),
-            ),
-            "presence_snapshot": (
+        if not owner_agent_id:
+            return None, None, None
+        if consumer_role in AGENT_CONSUMER_ROLES:
+            matches = self._is_agent_consumer(
+                stream_name=stream_name,
+                consumer_name=consumer_name,
+                filter_subject=filter_subject,
+                owner_agent_id=owner_agent_id,
+                consumer_role=consumer_role,
+            )
+        else:
+            matches = consumer_role == "presence_snapshot" and (stream_name, filter_subject) == (
                 self._mapper.presence_stream_name(),
                 f"{self._mapper.prefix}.presence.*",
-            ),
-        }.get(consumer_role)
-        if not owner_agent_id or expected_route != (stream_name, filter_subject):
-            return None, None, None
-        if (
-            consumer_role == "agent_direct"
-            and consumer_name != self._mapper.durable_name(f"agent_{owner_agent_id}")
-        ):
+            )
+        if not matches:
             return None, None, None
         return owner_agent_id, consumer_role, "managed"
+
+    def _is_agent_consumer(
+        self,
+        *,
+        stream_name: str,
+        consumer_name: str,
+        filter_subject: str,
+        owner_agent_id: str,
+        consumer_role: str,
+    ) -> bool:
+        """Whether a consumer is exactly the named agent's mailbox or control consumer."""
+
+        if consumer_role == AGENT_DIRECT_ROLE:
+            expected = (
+                self._mapper.agent_work_subject(owner_agent_id),
+                self._mapper.durable_name(f"agent_{owner_agent_id}"),
+            )
+        elif consumer_role == AGENT_CONTROL_ROLE:
+            expected = (
+                self._mapper.agent_control_subject(owner_agent_id),
+                self._mapper.durable_name(f"agent_{owner_agent_id}_control"),
+            )
+        else:
+            return False
+        return stream_name == self._mapper.work_stream_name() and (
+            filter_subject,
+            consumer_name,
+        ) == expected
+
+    async def agent_consumers(self) -> tuple[AgentConsumer, ...]:
+        """Every agent's mailbox and control consumer of this team on the work stream.
+
+        Lasting and process-owned ones alike, read from the consumers'
+        ownership metadata and checked against the names and subjects the agent
+        would use, so nothing else on the stream is ever listed. Whether an
+        owner is gone is not decided here (``custom_agents.worker_consumer_cleanup``).
+        """
+
+        stream_name = self._mapper.work_stream_name()
+        found: list[AgentConsumer] = []
+        for info in await self._list_consumers(stream_name):
+            config = getattr(info, "config", None)
+            metadata = dict(getattr(config, "metadata", None) or {})
+            if (
+                metadata.get("ua.managed") != "true"
+                or metadata.get("ua.schema") != CONSUMER_METADATA_SCHEMA
+                or metadata.get("ua.team_id") != self._mapper.team_id
+            ):
+                continue
+            owner_agent_id = str(metadata.get("ua.owner_agent_id") or "").strip()
+            consumer_role = str(metadata.get("ua.consumer_role") or "").strip()
+            consumer_name = str(getattr(info, "name", "") or "")
+            if consumer_role not in AGENT_CONSUMER_ROLES or not self._is_agent_consumer(
+                stream_name=stream_name,
+                consumer_name=consumer_name,
+                filter_subject=str(getattr(config, "filter_subject", "") or ""),
+                owner_agent_id=owner_agent_id,
+                consumer_role=consumer_role,
+            ):
+                continue
+            found.append(
+                AgentConsumer(
+                    stream_name=stream_name,
+                    consumer_name=consumer_name,
+                    owner_agent_id=owner_agent_id,
+                    consumer_role=consumer_role,
+                    consumer_scope=str(metadata.get("ua.consumer_scope") or ""),
+                    num_pending=self._optional_int(getattr(info, "num_pending", None)),
+                    num_ack_pending=self._optional_int(getattr(info, "num_ack_pending", None)),
+                )
+            )
+        return tuple(found)
+
+    async def delete_agent_consumers(
+        self, consumers: Iterable[AgentConsumer], *, reason: str
+    ) -> int:
+        """Delete these agent consumers; one already gone is skipped. Returns how many were deleted.
+
+        Messages a deleted mailbox still held stay in the work stream (work-queue
+        retention keeps unacknowledged messages), and a consumer created again
+        with the same name and filter delivers them.
+        """
+
+        deleted = 0
+        for consumer in consumers:
+            try:
+                await self._js.delete_consumer(consumer.stream_name, consumer.consumer_name)
+            except Exception as exc:
+                if self._is_consumer_not_found(exc):
+                    continue
+                raise
+            deleted += 1
+            self._logger.info(
+                "Deleted a gone agent's NATS consumer. "
+                "event=nats_agent_consumer_deleted stream_name=%s consumer_name=%s "
+                "consumer_role=%s consumer_scope=%s owner_agent_id=%s num_pending=%s "
+                "num_ack_pending=%s reason=%s",
+                consumer.stream_name,
+                consumer.consumer_name,
+                consumer.consumer_role,
+                consumer.consumer_scope,
+                consumer.owner_agent_id,
+                consumer.num_pending,
+                consumer.num_ack_pending,
+                reason,
+            )
+        return deleted
 
     def _legacy_identity(
         self,
@@ -303,7 +424,7 @@ class NatsConsumerReconciler:
             if subject_match:
                 agent_id = subject_match.group(1)
                 if consumer_name == self._mapper.durable_name(f"agent_{agent_id}"):
-                    return agent_id, "agent_direct"
+                    return agent_id, AGENT_DIRECT_ROLE
 
         for role, route_prefix, expected_stream, expected_filter in (
             (

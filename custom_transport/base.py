@@ -27,6 +27,13 @@ class ConsumerScope(StrEnum):
     ROUTE = "route"
 
 
+# The roles (``ua.consumer_role`` metadata) of an agent's own consumers on the
+# work stream: its mailbox and its control queue (custom_agents.strands_agent).
+AGENT_DIRECT_ROLE = "agent_direct"
+AGENT_CONTROL_ROLE = "agent_control"
+AGENT_CONSUMER_ROLES = frozenset({AGENT_DIRECT_ROLE, AGENT_CONTROL_ROLE})
+
+
 class FetchPolicy(StrEnum):
     """When a durable (pull) subscription asks NATS for its next message.
 

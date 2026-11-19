@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Optional
 
+from custom_agents.worker_consumer_cleanup import sweep_gone_worker_consumers_once
 from custom_agents.worker_pool_limits import PoolLimit, team_limit, type_limit, worker_pool_repository
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_worker_v1 import (
@@ -421,6 +422,9 @@ async def reconcile_worker_pools(agent: Any) -> None:
 
     if not getattr(agent, "is_team_lead", False) or agent._local_team_runtime is None:
         return
+    # Before any start: consumers that gone workers left can fill the work
+    # stream's consumer limit, and then every new worker crashes at start.
+    await sweep_gone_worker_consumers_once(agent)
     try:
         await WorkerPoolController(agent).reconcile()
     except Exception:

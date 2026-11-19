@@ -862,9 +862,12 @@ transport:
   process_consumer_inactive_threshold_seconds: 300
 ```
 
-Generated agent mailboxes are deleted during clean shutdown and expire after
-this delay when a process crashes. Explicit `agent.agent_id` mailboxes, team
-lead routes, named-worker queues, and gateway routes remain persistent. The
+Agent mailboxes and control queues are deleted during clean shutdown and
+expire after this delay when a process crashes. This includes every worker the
+runtime starts (pool, scheduled and manual starts). Explicit `agent.agent_id`
+mailboxes, team lead routes, named-worker queues, and gateway routes remain
+persistent. Releases before this fix kept started workers' consumers. The team
+lead deletes those once at start, after checking that their workers are gone. The
 runtime requires NATS Server 2.10 or newer for the consumer ownership metadata;
 the bundled image includes a newer pinned release.
 

@@ -5,7 +5,8 @@ type (``runtime_recovery``, for tasks and for deferred messages), a scheduled
 fire deciding whether another worker's unfinished run is still live
 (``scheduled_runtime``), the team lead starting a replacement for a dead owner
 (``orphaned_work_takeover``) and the stuck-task notices (``stuck_tasks``); the
-lead's pruning of status rows asks it too. All of them call ``owner_liveness``
+lead's pruning of status rows and its removal of gone workers' NATS consumers
+(``worker_consumer_cleanup``) ask it too. All of them call ``owner_liveness``
 or ``gone_owner_ids`` here, so they cannot disagree.
 
 The rule, strongest evidence first:
@@ -76,7 +77,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from functools import partial
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.liveness_observation import heartbeat_checks_deferred
@@ -110,6 +111,7 @@ class LivenessPurpose(StrEnum):
     STUCK_TASK_NOTICE = "stuck_task_notice"
     STATUS_ROW_PRUNE = "status_row_prune"
     CUSTODY_ADMISSION = "custody_admission"
+    CONSUMER_CLEANUP = "consumer_cleanup"
 
 
 class OwnerEvidence(StrEnum):
@@ -250,12 +252,13 @@ def lookup_owner_status(agent: Any, owner_agent_id: str) -> Optional[AgentStatus
     return _state_store(agent).get_by_id(owner_agent_id)
 
 
-def latest_launch(agent: Any, owner_agent_id: str) -> AgentLaunchV1 | None:
-    records = [
-        record
-        for record in AgentLaunchRepository(agent.task_manager.storage_settings).list(agent.team_id)
-        if record.agent_id == owner_agent_id
-    ]
+def latest_launch(
+    agent: Any, owner_agent_id: str, launches: Optional[Sequence[AgentLaunchV1]] = None
+) -> AgentLaunchV1 | None:
+    """The owner's newest start record; ``launches`` is the team's records when the caller read them already."""
+    if launches is None:
+        launches = AgentLaunchRepository(agent.task_manager.storage_settings).list(agent.team_id)
+    records = [record for record in launches if record.agent_id == owner_agent_id]
     return max(records, key=lambda record: record.created_at_utc) if records else None
 
 
@@ -296,8 +299,14 @@ def _heartbeat_evidence(agent: Any, status: Optional[AgentStatus], now: datetime
     return OwnerEvidence.HEARTBEAT_FRESH
 
 
-def _decide(agent: Any, owner_agent_id: str, status: Optional[AgentStatus], now: datetime) -> OwnerLiveness:
-    launch = latest_launch(agent, owner_agent_id)
+def _decide(
+    agent: Any,
+    owner_agent_id: str,
+    status: Optional[AgentStatus],
+    now: datetime,
+    launches: Optional[Sequence[AgentLaunchV1]] = None,
+) -> OwnerLiveness:
+    launch = latest_launch(agent, owner_agent_id, launches)
     if launch is not None:
         return OwnerLiveness(owner_agent_id, _launch_evidence(agent, launch), status, launch)
     process = _process_evidence(status)
@@ -372,29 +381,39 @@ def owner_liveness(
     scope: str = "",
     now: datetime | None = None,
     status: Optional[AgentStatus] = None,
+    launches: Optional[Sequence[AgentLaunchV1]] = None,
 ) -> OwnerLiveness:
     """Decide whether one owner is gone (module docstring); ``status`` skips a second read.
 
     ``scope`` names what the asking call covers (a schedule id for coalescing,
     nothing for the lead's whole-team passes); it only groups decision records.
+    ``launches`` is the team's start records when the caller read them already,
+    so a call about many owners reads them once.
     """
     moment = now or datetime.now(timezone.utc)
     known_status = status if status is not None else lookup_owner_status(agent, owner_agent_id)
-    decision = _decide(agent, owner_agent_id, known_status, moment)
+    decision = _decide(agent, owner_agent_id, known_status, moment, launches)
     _note_decision(agent, decision, purpose, scope)
     return decision
 
 
 async def gone_owner_ids(
-    agent: Any, owner_agent_ids: Iterable[str], *, purpose: LivenessPurpose, scope: str = ""
+    agent: Any,
+    owner_agent_ids: Iterable[str],
+    *,
+    purpose: LivenessPurpose,
+    scope: str = "",
+    launches: Optional[Sequence[AgentLaunchV1]] = None,
 ) -> list[str]:
-    """The owners among these that are gone, never this agent; ``scope`` as in ``owner_liveness``."""
+    """The owners among these that are gone, never this agent; ``scope`` and ``launches`` as in ``owner_liveness``."""
     moment = datetime.now(timezone.utc)
     decided = [owner for owner in dict.fromkeys(owner_agent_ids) if owner and owner != agent.id]
     gone = [
         owner
         for owner in decided
-        if owner_liveness(agent, owner, purpose=purpose, scope=scope, now=moment).gone
+        if owner_liveness(
+            agent, owner, purpose=purpose, scope=scope, now=moment, launches=launches
+        ).gone
     ]
     retain_decisions(agent, purpose, decided, scope=scope)
     return gone

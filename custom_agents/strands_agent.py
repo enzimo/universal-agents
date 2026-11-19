@@ -265,6 +265,8 @@ from custom_agents.pool_intake import mailbox_has_room, may_take_pool_task
 from custom_agents.provider_limits import handle_delegated_provider_limit
 from custom_agents.scheduled_runtime import PROVIDER_COOLDOWN_RETRY_MARKER
 from custom_transport.base import (
+    AGENT_CONTROL_ROLE,
+    AGENT_DIRECT_ROLE,
     ConsumerScope,
     FetchPolicy,
     InboundDelivery,
@@ -481,12 +483,35 @@ def _should_consume_broadcasts(
     return is_team_lead
 
 
-def _direct_consumer_scope(*, configured_fields: set[str]) -> ConsumerScope:
-    """Map configured identity lifetime to direct-mailbox ownership."""
+def _direct_consumer_scope(*, configured_fields: set[str], started_worker: bool) -> ConsumerScope:
+    """Map the agent id's lifetime to who owns its mailbox and control consumers.
 
+    An id set in the agent's configuration (``agent.agent_id``) is a lasting
+    route: its consumers survive the process, so the next process with that
+    id reads the same mailbox. A worker started from a start record (pool,
+    scheduled, replacement or manual start; ``spawn_agent``) also arrives with
+    its id set, but that id is drawn for that one start and never reused, so its
+    consumers belong to the process: deleted when it exits, expired by NATS
+    after a crash. Treating started workers as lasting routes left two
+    consumers on the work stream for every worker start, until the stream
+    reached NATS 2.15's default limit of 1,000 consumers and no agent could
+    start (2026-11-19).
+    """
+
+    if started_worker:
+        return ConsumerScope.PROCESS
     if "id" in configured_fields:
         return ConsumerScope.ROUTE
     return ConsumerScope.PROCESS
+
+
+def _agent_consumer_scope(agent: Any) -> ConsumerScope:
+    """``_direct_consumer_scope`` for this agent (``spawn_agent`` attaches the start record first)."""
+
+    return _direct_consumer_scope(
+        configured_fields=agent.model_fields_set,
+        started_worker=getattr(agent, "_worker_launch", None) is not None,
+    )
 
 
 async def _subscribe_manager_control_route(
@@ -501,8 +526,8 @@ async def _subscribe_manager_control_route(
         handler=agent.on_nats_delivery,
         durable_name=mapper.durable_name(f"agent_{agent.id}_control"),
         logical_route=agent.id,
-        consumer_scope=_direct_consumer_scope(configured_fields=agent.model_fields_set),
-        consumer_role="agent_control",
+        consumer_scope=_agent_consumer_scope(agent),
+        consumer_role=AGENT_CONTROL_ROLE,
         owner_agent_id=agent.id,
     )
     agent._logger.info("[%s] NATS control route ready for %s.", agent.id, agent.id)
@@ -1250,6 +1275,10 @@ class UniversalAgent(BaseModel):
     # Worker queues the pool controller made sure exist, and its latest view of
     # every pool (custom_agents.worker_pool_controller; read by inspect_worker_pools).
     _ensured_worker_queues: set[str] = PrivateAttr(default_factory=set)
+    # The team lead's one removal of gone started workers' NATS consumers per
+    # process, and when a failed one is tried again (custom_agents.worker_consumer_cleanup).
+    _worker_consumers_swept: bool = PrivateAttr(default=False)
+    _worker_consumer_sweep_retry_at: float = PrivateAttr(default=0.0)
     _worker_pool_snapshot: Dict[str, Any] = PrivateAttr(default_factory=dict)
     # While a model provider refuses calls, the worker holds its task, takes no
     # new work and retries after this monotonic time (custom_agents.provider_limits).
@@ -4922,10 +4951,8 @@ class UniversalAgent(BaseModel):
                 routing_key=self.id,
                 handler=self.on_nats_delivery,
                 durable_name=direct_durable,
-                consumer_scope=_direct_consumer_scope(
-                    configured_fields=self.model_fields_set
-                ),
-                consumer_role="agent_direct",
+                consumer_scope=_agent_consumer_scope(self),
+                consumer_role=AGENT_DIRECT_ROLE,
                 owner_agent_id=self.id,
                 # A mailbox stops asking while its deferred inbox is full.
                 ready=lambda: mailbox_has_room(self),

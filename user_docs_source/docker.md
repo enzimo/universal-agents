@@ -355,9 +355,12 @@ security boundaries, and verification steps.
 
 ### Remove abandoned JetStream consumers in Docker Swarm
 
-Older releases left generated agent consumers in NATS after every restart. If
-the account reaches its consumer limit, park the service as shown above and run
-the bundled reconciler inside the task container. The command starts only the
+Older releases left generated agent consumers in NATS after every restart,
+and releases before the started-worker fix left two for every worker they
+started. The team lead now deletes gone workers' consumers by itself when it
+starts (`event=worker_consumer_cleanup_done` in the log). If the account still
+reaches its consumer limit, park the service as shown above and run the bundled
+reconciler inside the task container. The command starts only the
 local NATS service, reads the existing JetStream data, and stops NATS before it
 returns.
 
