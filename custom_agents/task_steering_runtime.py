@@ -5,7 +5,9 @@ its next new tool call: ``RuntimeSteeringPlugin`` cancels that call with the
 guidance text. After each call to the agent that did not pause, the turn
 checks again before carrying out its decision: a fresh turn in
 ``custom_agents.sdk.strands.turn``, a resumed one in
-``_call_until_guidance_read``. The decision is not always a tool call
+``_call_until_guidance_read``. A call that paused is handed on without the
+check: a paused Strands agent takes only interrupt answers, so the guidance
+waits for the resumed turn. The decision is not always a tool call
 (providers that enforce structured output themselves answer Strands' forced
 decision as JSON text), so this check is what keeps a final answer from going
 out before the guidance is read. Guidance that arrives after it is found when
@@ -84,7 +86,7 @@ from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.prompt_context_sanitization import render_replied_message_lines
 from custom_agents.provider_error_runtime import ProviderTimeoutError, is_provider_timeout_error
 from custom_agents.sent_files_runtime import keep_sent_files
-from custom_agents.sdk.strands.paused_tool_calls import INTERRUPT_STOP_REASON, PausedToolCalls
+from custom_agents.sdk.strands.paused_tool_calls import PausedToolCalls, call_paused
 from custom_agents.sdk.strands.turn import late_guidance_instruction
 from custom_agents.sdk.strands.turn_tool_stop import (
     TURN_CANCELLED_REASON,
@@ -236,9 +238,12 @@ def _rotate_main_strands_agent(agent: Any, *, task_id: Optional[str], session_ow
         raise RuntimeError(
             "Could not isolate a live Strands interrupt from a new task turn."
         )
+    # No interrupted task ids: the old agent holds a pause no session will
+    # resume (a turn ended before saving it, or its task ended while it waited).
     agent._logger.warning(
         "[%s] Rotated the default Strands agent before a new turn because the "
-        "prior instance belongs to an interrupted session. "
+        "prior instance still holds an interrupt, kept by a paused session or "
+        "left by a pause no session will resume. "
         "event=strands_agent_rotated_after_interrupt task_id=%s "
         "interrupted_task_ids=%s previous_strands_agent_id=%s "
         "replacement_strands_agent_id=%s",
@@ -1267,7 +1272,7 @@ async def _call_until_guidance_read(
             callback_handler=session.callback_handler,
             logger=agent._logger,
         )
-        if getattr(result, "stop_reason", None) == INTERRUPT_STOP_REASON:
+        if call_paused(result):
             return result
         guidance = await consume_pending_proactive_guidance_message(agent, session.task_id)
         if not guidance:
@@ -1289,14 +1294,14 @@ async def _run_resumed_turn(
     response_blocks: list[dict[str, Any]],
     tool_stop: ToolStop,
 ) -> Optional[Any]:
-    """Answer the SDK interrupt, then apply the turn's decision to the task."""
+    """Answer the SDK interrupt, then apply the turn's decision (or its work session's yield) to the task."""
 
     task_id = session.task_id
     result = await _call_until_guidance_read(agent, session, response_blocks, tool_stop)
     result = agent.turn_executor._apply_agent_result_transformer(
         session.msg_content, result
     )
-    if getattr(result, "stop_reason", None) == "interrupt":
+    if call_paused(result):
         return await send_interrupt_request_for_result(
             agent,
             result=result,
@@ -1308,6 +1313,16 @@ async def _run_resumed_turn(
             full_prompt=session.full_prompt,
             start_notes=session.start_notes,
         )
+    # A fresh turn whose call paused left the work session's required-skill
+    # check to this turn (sdk.strands.turn._finalize_objective_work_invocation).
+    work_yield = await agent.turn_executor.yield_for_missing_work_skills(
+        msg_content=session.msg_content,
+        msg_meta=session.msg_meta,
+        task_id=task_id,
+        start_notes=session.start_notes,
+    )
+    if work_yield is not None:
+        return await _finish_resumed_turn(agent, session, steering, task_info, work_yield)
 
     outcome = agent.turn_executor.decode_result(
         result=result,
@@ -1343,6 +1358,15 @@ async def _run_resumed_turn(
         task_id=task_id, decision=outcome.decision, content=content, strands_agent=session.strands_agent,
         decision_tool_name=decision_tool_name,
     )
+    return await _finish_resumed_turn(agent, session, steering, task_info, content)
+
+
+async def _finish_resumed_turn(
+    agent: Any, session: StrandsInterruptedTurnSession, steering: TaskSteering, task_info: Any, content: Any
+) -> Any:
+    """Apply a resumed turn's result to its task and free its Strands agent for later turns."""
+
+    task_id = session.task_id
     await agent._apply_task_processing_result(task_id, task_info, content)
     agent._interrupted_turn_sessions.pop(task_id, None)
     _mark_strands_resumable(agent, resumed=session.strands)
@@ -1477,6 +1501,8 @@ async def send_interrupt_request_for_result(
                 "conversation_id": getattr(msg_meta, "conversation_id", None),
             },
         )
+    # Already set when the call paused (strands_parts.mark_paused), and kept by
+    # a resumed turn's parts since their first pause; the session holds them now.
     strands.replace_before_next_turn = True
     await agent.task_manager.operations_runtime.run(
         agent.task_manager.append_history_entry,

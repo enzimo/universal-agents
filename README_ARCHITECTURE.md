@@ -3136,6 +3136,32 @@ only: its tool use id started in a call to the agent that paused and has not
 finished since. One consequence: a change approved in the Inbox while guidance
 waits is applied before the model reads that guidance. To stop such a change,
 decline it in the Inbox or stop the request.
+A call that paused gets no check after it: a paused Strands agent accepts only
+interrupt answers and refuses a text prompt with a `TypeError`, so the turn
+hands the pause on (`send_interrupt_request_for_result`), and guidance accepted
+while the call ran, also inside the pausing tool, waits for the resumed turn.
+Why: until 2026-11-19 a fresh turn read that guidance and called the paused
+agent with it, so the pause was never saved, the task failed, and the agent
+stayed paused for every later turn on its lane until a restart. The turn also
+marks the agent for replacement as soon as its call returns paused
+(`custom_agents.strands_parts.mark_paused`), so a turn that ends after such a
+call but before saving the pause (a stop recorded as the call paused, an
+error while saving) leaves no stuck agent: the next turn gets a new one,
+logged as `event=strands_agent_rotated_after_interrupt` with no interrupted
+task on the main lane and as `event=parallel_lane_strands_agent_built` on a
+parallel lane. An Objective work-session turn keeps its pause too, at the
+session's limit or with a required skill not yet activated
+(`event=objective_work_boundary_after_pause`). The session records the usage
+up to the pause. The work after the resume is not counted against the
+session budget: each resumed call gets the turn's per-call turn and token
+allowance again, and the step's tool-call cap is not checked after a resume;
+counting resumed work and checking its limits is a follow-up. A required
+skill that is still missing stops the resumed turn before its decision is
+carried out, as it stops a fresh turn
+(`LLMTurnExecutor.yield_for_missing_work_skills`,
+`event=objective_work_session_yield_after_resume`). A session past its limit
+lets the resumed turn finish; its saved status then refuses the next plan
+step, so the session ends with the runtime's degraded checkpoint.
 An explicitly addressed receiver answers `STALE` for a missing task. The gateway
 holds guidance for that request until the lead admits its task, and retries
 with the same idempotency key. Guidance never becomes another root request.
