@@ -275,7 +275,6 @@ class _OpenedPage:
     url: str
     expires_at_utc: str
     watch: Callable[[], Awaitable[PageEnding]] = field(repr=False)
-    broker_session_id: str | None = None
     # An external step's words (what to do, where, and how to finish it).
     instructions: str = ""
 
@@ -709,7 +708,6 @@ class GatewayToolSetups:
             url=form.form_url,
             expires_at_utc=form.expires_at_utc,
             watch=watch,
-            broker_session_id=form.session_id,
         )
 
     # -- account links an approved access proposal asks for -------------------------
@@ -777,7 +775,6 @@ class GatewayToolSetups:
             ending,
             attempt=attempt,
             source=TOOL_SETUP_SOURCE_TASK,
-            broker_session_id=page.broker_session_id,
         )
 
     async def person_finished(
@@ -904,25 +901,44 @@ class GatewayToolSetups:
         *,
         attempt: int | None,
         source: str,
-        broker_session_id: str | None = None,
     ) -> bool:
-        """Claim the waiting record and send its one result; False when another path finished it."""
+        """Claim the waiting record with its one result and send it; False when another path finished it.
+
+        The result is built before the claim and stored by it, so a page that
+        ends while no team lead can be reached keeps its result in the record.
+        """
 
         record = self._setups.get_tool_setup(setup_request_id)
-        if record is None or not self._setups.finish_tool_setup(setup_request_id, status=ending.status):
+        if record is None or record.status != SETUP_STATUS_WAITING:
+            return False
+        result = self._result_for(record, ending, attempt=attempt, source=source)
+        if not self._setups.finish_tool_setup(setup_request_id, status=ending.status, result_json=result.model_dump_json()):
             return False
         if ending.status == TOOL_SETUP_COMPLETED and source == TOOL_SETUP_SOURCE_TASK:
             self.record_completed(
                 person_id=record.person_id, tool_id=record.tool_id, kind=record.kind,
                 owner=record.owner_kind, account_label=ending.account_label, source=SOURCE_SETUP_PAGE,
             )
+        await self._send(result, record.session_key, record.correlation_id, record.conversation_id)
+        await self._post_closing(record, ending, source)
+        return True
+
+    def _result_for(
+        self, record: ToolSetupRecord, ending: PageEnding, *, attempt: int | None, source: str
+    ) -> ToolSetupResultV1:
+        """The task's result for a page that ended, without any address (it is addressed when sent).
+
+        It never carries the broker session id: for an account link that id is
+        the form's bearer, and the record keeps this result.
+        """
+
         if attempt is None:
             attempt = sum(
                 1
                 for item in self._setups.list_tool_setups(parent_task_id=record.parent_task_id, tool_id=record.tool_id)
                 if item.kind == record.kind
             )
-        result = ToolSetupResultV1(
+        return ToolSetupResultV1(
             setup_request_id=record.setup_request_id,
             status=ending.status,
             parent_task_id=record.parent_task_id,
@@ -936,11 +952,7 @@ class GatewayToolSetups:
             reason_code=ending.reason_code,
             message=ending.message,
             link_id=ending.link_id if ending.status == TOOL_SETUP_COMPLETED else None,
-            broker_session_id=broker_session_id,
         )
-        await self._send(result, record.session_key, record.correlation_id, record.conversation_id)
-        await self._post_closing(record, ending, source)
-        return True
 
     async def _post_closing(self, record: ToolSetupRecord, ending: PageEnding, source: str) -> None:
         """One plain line in the page's chat, under the page's own id, so its card closes (logged).

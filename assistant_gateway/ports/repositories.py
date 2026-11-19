@@ -333,8 +333,8 @@ class ToolSetupRepository(Protocol):
 
     def get_tool_setup(self, setup_request_id: str) -> ToolSetupRecord | None: ...
 
-    def finish_tool_setup(self, setup_request_id: str, *, status: str) -> bool:
-        """Mark a waiting setup finished; False when it was already finished or is unknown."""
+    def finish_tool_setup(self, setup_request_id: str, *, status: str, result_json: str) -> bool:
+        """Mark a waiting setup finished and keep its unsent result; False when it was already finished or is unknown."""
         ...
 
     def list_tool_setups(
@@ -345,6 +345,14 @@ class ToolSetupRepository(Protocol):
         tool_id: str | None = None,
         parent_task_id: str | None = None,
     ) -> list[ToolSetupRecord]: ...
+
+    def list_unsent_tool_setup_results(self) -> list[ToolSetupRecord]:
+        """Finished setups whose result is still unsent, oldest ending first."""
+        ...
+
+    def mark_tool_setup_result(self, setup_request_id: str, *, state: str) -> bool:
+        """Move an unsent result to ``state`` (sent or unsendable); False when it was not unsent."""
+        ...
 
 
 @runtime_checkable
