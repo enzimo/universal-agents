@@ -4218,6 +4218,7 @@ async def _run_secure_tool_broker_service(
             web_chat_origin=(
                 web_chat_origin(config.internal_website_base_url)
                 if config.interactive_apps.internal_website.enabled
+                and config.interactive_apps.internal_website.web_chat_enabled
                 else None
             ),
         )

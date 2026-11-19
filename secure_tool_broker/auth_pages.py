@@ -7,13 +7,23 @@ import html
 import json
 import os
 from datetime import datetime, timezone
-from typing import Mapping
+from typing import Literal, Mapping
 from pathlib import Path
 
 from runtime_hosting.page_icon import favicon_link_tag
 from runtime_settings.appearance import dark_appearance_css_declarations
+from secure_tool_broker.page_view import current_view
 
 BROKER_APPEARANCE_ENV = "SECURE_TOOL_BROKER_APPEARANCE_JSON"
+
+# How a page shown as a card in Web Chat ended (page_assets/card_bridge.js tells
+# the chat). Only the handler that knows the session reached that state sets it:
+# a refusal, a failure or an "already used" page has none, so the card stays
+# and the person reads it.
+CardOutcome = Literal["finished", "declined"]
+CARD_OUTCOME_FINISHED: CardOutcome = "finished"
+CARD_OUTCOME_DECLINED: CardOutcome = "declined"
+_CARD_BRIDGE_PATH = Path(__file__).resolve().parent / "page_assets" / "card_bridge.js"
 
 BROKER_AUTH_THEME = """
 <style>
@@ -660,6 +670,53 @@ BROKER_AUTH_MESH_SCRIPT = """
 """
 
 
+# The card view: the page inside a Web Chat card. No header and no background
+# mesh; one opaque surface the chat card's border sits around, compact type, and
+# a height that follows the content (the bridge reports it to the chat).
+BROKER_CARD_THEME = """
+<style>
+  :root { --card-bg: #ffffff; }
+  :root[data-color-mode="dark"] { --card-bg: #11171b; }
+  html, body.card-view {
+    min-height: 0;
+    height: auto;
+    background: var(--card-bg);
+  }
+  body.card-view { margin: 0; line-height: 1.5; font-size: 0.9375rem; }
+  body.card-view main {
+    max-width: none;
+    margin: 0;
+    padding: 0.85rem 1rem 1rem;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  body.card-view .content-panel { padding: 0.5rem 0; }
+  body.card-view .content-panel:first-child { padding-top: 0; }
+  body.card-view .eyebrow { margin-bottom: 0.25rem; font-size: 0.6875rem; }
+  body.card-view h1 { font-size: 1.0625rem; font-weight: 650; }
+  body.card-view h2 { margin-bottom: 0.5rem; font-size: 0.9375rem; }
+  body.card-view h3 { margin-top: 0.75rem; font-size: 0.875rem; }
+  body.card-view .lede { font-size: 0.9375rem; }
+  body.card-view p + p { margin-top: 0.5rem; }
+  body.card-view form { gap: 0.65rem; margin-top: 0.65rem; }
+  body.card-view input,
+  body.card-view textarea,
+  body.card-view select { max-width: none; padding: 0.5rem 0.65rem; }
+  body.card-view textarea { min-height: 6rem; }
+  body.card-view .secret-input-row { max-width: none; }
+  body.card-view button,
+  body.card-view .button { min-height: 2.15rem; padding: 0.4rem 0.95rem; border-radius: 8px; }
+  body.card-view .step { padding-bottom: 0.6rem; }
+  body.card-view .note,
+  body.card-view .status { padding: 0.6rem 0.75rem; }
+</style>
+"""
+
+
 def _ua_logo_data_uri() -> str:
     logo_path = (
         Path(__file__).resolve().parent.parent
@@ -834,6 +891,10 @@ def _broker_markdown_script() -> str:
 
 
 def render_close_page_button(label: str = "Close Page") -> str:
+    """A full page's button that closes its tab; nothing in a card, which the chat closes."""
+
+    if current_view().card:
+        return ""
     escaped_label = html.escape(label)
     return (
         "<div class=\"page-actions\">"
@@ -843,7 +904,17 @@ def render_close_page_button(label: str = "Close Page") -> str:
     )
 
 
+def close_page_script() -> str:
+    """Closes a full page's tab when the page ended; nothing in a card (its outcome tells the chat)."""
+
+    return "" if current_view().card else "<script>window.close();</script>"
+
+
 def render_session_countdown(expires_at: datetime, *, label: str = "Session expires in") -> str:
+    """The page's expiry countdown; a card has none, since the chat card shows it."""
+
+    if current_view().card:
+        return ""
     normalized_expires_at = expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=timezone.utc)
     expires_at_attr = html.escape(normalized_expires_at.isoformat(), quote=True)
     remaining_html = html.escape(session_remaining_text(normalized_expires_at))
@@ -965,7 +1036,43 @@ def render_credential_input(
     )
 
 
-def render_broker_auth_page(title: str, body: str, *, script: str = "") -> str:
+def _card_bridge_script() -> str:
+    try:
+        return f"<script>\n{_CARD_BRIDGE_PATH.read_text(encoding='utf-8')}\n</script>"
+    except OSError:
+        # Without the bridge the chat hears nothing and offers the page in its own tab.
+        return ""
+
+
+def _render_card_view(title: str, body: str, *, script: str, card_outcome: CardOutcome | None) -> str:
+    """The page as a Web Chat card (secure_tool_broker.page_view): content, bridge, no header or mesh."""
+
+    view = current_view()
+    appearance = _broker_appearance_from_env()
+    color_mode = "light" if str(appearance.get("color_mode") or "").strip().lower() == "light" else "dark"
+    outcome_attr = f' data-card-outcome="{card_outcome}"' if card_outcome else ""
+    return (
+        f'<!doctype html><html lang="en" data-color-mode="{color_mode}" '
+        f'data-card-parent-origin="{html.escape(view.parent_origin or "", quote=True)}"{outcome_attr}><head>'
+        '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{html.escape(title)}</title>{runtime_theme_css_from_appearance(appearance)}"
+        f"{BROKER_AUTH_THEME}{BROKER_CARD_THEME}</head>"
+        f'<body class="card-view"><main>{body}</main>'
+        f"{_broker_markdown_script()}{script}{_card_bridge_script()}</body></html>"
+    )
+
+
+def render_broker_auth_page(
+    title: str, body: str, *, script: str = "", card_outcome: CardOutcome | None = None
+) -> str:
+    """A broker page in the view of the current request (secure_tool_broker.page_view).
+
+    ``card_outcome`` is set only by a handler that knows the page reached that
+    end (stored, linked, signed in, declined); the card view then tells the chat.
+    """
+
+    if current_view().card:
+        return _render_card_view(title, body, script=script, card_outcome=card_outcome)
     countdown_script = SESSION_COUNTDOWN_SCRIPT if "data-session-countdown" in body else ""
     runtime_theme = runtime_theme_css_from_appearance(_broker_appearance_from_env())
     return (

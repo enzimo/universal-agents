@@ -30,7 +30,10 @@ from custom_messages.contracts.mcp_v1 import (
     MCPInvocationResponseV1,
 )
 from secure_tool_broker.auth_pages import (
+    CARD_OUTCOME_DECLINED,
+    CARD_OUTCOME_FINISHED,
     SECRET_INPUT_TOGGLE_SCRIPT,
+    CardOutcome,
     render_broker_auth_page,
     render_credential_input,
     render_close_page_button,
@@ -46,6 +49,8 @@ from secure_tool_broker.auth_flows import (
 )
 from secure_tool_broker.access_gate import BrokerAccessGate
 from secure_tool_broker.account_links import (
+    STATUS_CREATED as ACCOUNT_LINK_CREATED,
+    STATUS_DECLINED as ACCOUNT_LINK_DECLINED,
     STATUS_PENDING as ACCOUNT_LINK_PENDING,
     STATUS_UNAVAILABLE as ACCOUNT_LINK_UNAVAILABLE,
     AccountLinkRefused,
@@ -434,14 +439,26 @@ def _error_page(exc: web.HTTPException) -> web.Response:
     )
 
 
-def _account_link_page(title: str, heading: str, text: str, *, status: int = 200) -> web.Response:
+# How an ended account link form ended, for the Web Chat card; other statuses
+# (refused, failed) leave the card up so the person reads why.
+_ACCOUNT_LINK_CARD_OUTCOMES: dict[str, CardOutcome] = {
+    ACCOUNT_LINK_CREATED: CARD_OUTCOME_FINISHED,
+    ACCOUNT_LINK_DECLINED: CARD_OUTCOME_DECLINED,
+}
+
+
+def _account_link_page(
+    title: str, heading: str, text: str, *, status: int = 200, card_outcome: CardOutcome | None = None
+) -> web.Response:
     """A one-message page of the account link form (result, refusal, used)."""
 
     body = (
         '<section class="content-panel"><p class="eyebrow">Account link</p>'
         f"<h1>{html.escape(heading)}</h1><p>{html.escape(text)}</p>{render_close_page_button()}</section>"
     )
-    return web.Response(text=render_broker_auth_page(title, body), content_type="text/html", status=status)
+    return web.Response(
+        text=render_broker_auth_page(title, body, card_outcome=card_outcome), content_type="text/html", status=status
+    )
 
 
 def _claim_account_link_submission(
@@ -1359,7 +1376,10 @@ class SecureToolBrokerService:
         session = self._get_account_link_session(session_id)
         if session.status != ACCOUNT_LINK_PENDING:
             return _account_link_page(
-                "Account link", session.status.replace("_", " ").capitalize(), "This one-time form was already used."
+                "Account link",
+                session.status.replace("_", " ").capitalize(),
+                "This one-time form was already used.",
+                card_outcome=_ACCOUNT_LINK_CARD_OUTCOMES.get(session.status),
             )
         try:
             tool = linkable_tool(self._access_gate.catalog, session.request, self._access_gate.account_sharing())
@@ -1378,7 +1398,7 @@ class SecureToolBrokerService:
         return web.Response(
             text=render_broker_auth_page(
                 "Link an account",
-                render_form(session_id, session, tool, choices, used_by=used_by),
+                render_form(session, tool, choices, used_by=used_by),
                 script=SECRET_INPUT_TOGGLE_SCRIPT,
             ),
             content_type="text/html",
@@ -1405,6 +1425,7 @@ class SecureToolBrokerService:
             "Account link result",
             session.status.replace("_", " ").capitalize(),
             f"{sentence} {ACCOUNT_LINK_CLOSE_TEXT}",
+            card_outcome=_ACCOUNT_LINK_CARD_OUTCOMES.get(session.status),
         )
 
     @staticmethod
@@ -1974,7 +1995,7 @@ class SecureToolBrokerService:
                 f"{render_close_page_button()}"
                 "</section>"
             )
-            return render_broker_auth_page("Credential Deletion Complete", body)
+            return render_broker_auth_page("Credential Deletion Complete", body, card_outcome=CARD_OUTCOME_FINISHED)
         body = (
             '<section class="content-panel">'
             '<p class="eyebrow">Secure Credential Collection</p>'
@@ -1984,7 +2005,7 @@ class SecureToolBrokerService:
             f"{render_close_page_button()}"
             "</section>"
         )
-        return render_broker_auth_page("Credential Submission Complete", body)
+        return render_broker_auth_page("Credential Submission Complete", body, card_outcome=CARD_OUTCOME_FINISHED)
 
     async def _handle_submit_credential_collection_form(
         self, request: web.Request
@@ -2924,7 +2945,7 @@ class SecureToolBrokerService:
                 "</section>"
             )
             return web.Response(
-                text=render_broker_auth_page("Bitwarden restart unlock saved", body),
+                text=render_broker_auth_page("Bitwarden restart unlock saved", body, card_outcome=CARD_OUTCOME_FINISHED),
                 content_type="text/html",
             )
         if provider == "google" and session.method == GOOGLE_TEAM_CLIENT_METHOD:
@@ -2938,7 +2959,7 @@ class SecureToolBrokerService:
                 "</section>"
             )
             return web.Response(
-                text=render_broker_auth_page("Google sign-in app stored", body),
+                text=render_broker_auth_page("Google sign-in app stored", body, card_outcome=CARD_OUTCOME_FINISHED),
                 content_type="text/html",
             )
         self._logger.info("%s broker auth form completed successfully.", provider)
@@ -2952,7 +2973,7 @@ class SecureToolBrokerService:
         )
         return web.Response(
             text=render_broker_auth_page(
-                f"{display_name} authentication complete", success_body
+                f"{display_name} authentication complete", success_body, card_outcome=CARD_OUTCOME_FINISHED
             ),
             content_type="text/html",
         )

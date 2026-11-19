@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from secure_tool_broker.auth_pages import (
     render_broker_auth_page,
+    CARD_OUTCOME_FINISHED,
     render_close_page_button,
     render_markdown_text,
     render_session_countdown,
@@ -870,6 +871,7 @@ class GitHubWebAuthFlow:
             "GitHub Broker Web Auth",
             body,
             script=copy_script + (sign_in_wait_script() if status not in {"success", "error"} else ""),
+            card_outcome=CARD_OUTCOME_FINISHED if status == "success" else None,
         )
 
     def status_payload(self, session: BrokerAuthSession) -> dict[str, Any]:
@@ -1298,7 +1300,12 @@ class GoogleWebAuthFlow:
                 "</form>"
                 f"</section>{output_html}"
             )
-        return render_broker_auth_page("Google Broker Web Auth", body, script=script)
+        return render_broker_auth_page(
+            "Google Broker Web Auth",
+            body,
+            script=script,
+            card_outcome=CARD_OUTCOME_FINISHED if status == "success" else None,
+        )
 
     def status_payload(self, session: BrokerAuthSession) -> dict[str, Any]:
         payload = session_status_payload(session)

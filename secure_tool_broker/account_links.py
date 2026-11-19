@@ -325,7 +325,7 @@ def _confirmation(text: str) -> str:
     )
 
 
-def _stored_credential_form(action: str, tool: ToolDefinitionV1, choices: list[dict[str, str]]) -> str:
+def _stored_credential_form(tool: ToolDefinitionV1, choices: list[dict[str, str]]) -> str:
     """The part of the page that links a credential the owner already stored (only when one fits)."""
 
     if not choices:
@@ -337,7 +337,9 @@ def _stored_credential_form(action: str, tool: ToolDefinitionV1, choices: list[d
     )
     return (
         '<section class="content-panel"><h2>Use a stored credential</h2>'
-        f'<form method="post" action="{action}">'
+        # No action: the form posts to the page's own address, query included,
+        # so a card (?view=card) stays a card.
+        '<form method="post">'
         '<label for="credential_key">Stored credential</label>'
         f'<select id="credential_key" name="credential_key" required>{options}</select>'
         f"{_confirmation(f'Link this credential to {tool.display_name} as described above.')}"
@@ -345,7 +347,7 @@ def _stored_credential_form(action: str, tool: ToolDefinitionV1, choices: list[d
     )
 
 
-def _new_credential_form(action: str, tool: ToolDefinitionV1, request: AccountLinkRequestV1) -> str:
+def _new_credential_form(tool: ToolDefinitionV1, request: AccountLinkRequestV1) -> str:
     """The part of the page that stores a new credential and links it in the same submission.
 
     A separate form, so its required inputs do not block linking a stored
@@ -369,7 +371,7 @@ def _new_credential_form(action: str, tool: ToolDefinitionV1, request: AccountLi
         '<section class="content-panel"><h2>Add a new credential</h2>'
         f"<p>Type the values {html.escape(tool.display_name)} needs. The broker saves them in "
         f"{_collection_words(request)} and links them in the same step. Nothing already stored is replaced.</p>"
-        f'<form method="post" action="{action}">'
+        '<form method="post">'
         f'<input type="hidden" name="{CREDENTIAL_SOURCE_FIELD}" value="{NEW_CREDENTIAL}">'
         f"{inputs}"
         f"{_confirmation(f'Save this credential and link it to {tool.display_name} as described above.')}"
@@ -378,7 +380,6 @@ def _new_credential_form(action: str, tool: ToolDefinitionV1, request: AccountLi
 
 
 def render_form(
-    session_id: str,
     session: AccountLinkSession,
     tool: ToolDefinitionV1,
     choices: list[dict[str, str]],
@@ -398,7 +399,6 @@ def render_form(
     how = "".join(f"<li>{_describe_injection(item)}</li>" for item in tool.credential_injections)
     if tool.tool_id in FIXED_CLI_FIELDS:
         how += f"<li>The <code>{FIXED_CLI_FIELDS[tool.tool_id]}</code> field, used by the broker only</li>"
-    action = f"/account-link/{html.escape(session_id, quote=True)}"
     return (
         '<section class="content-panel"><p class="eyebrow">Account link</p>'
         f"<h1>Link an account to {html.escape(tool.display_name)}?</h1>"
@@ -410,8 +410,8 @@ def render_form(
         "<p>Linking an account gives nobody access. People and agents still need access to "
         f"{html.escape(tool.display_name)} to use it, and the credential value never leaves the broker.</p>"
         f"{render_session_countdown(session.expires_at, label='This form expires in')}</section>"
-        f"{_stored_credential_form(action, tool, choices)}"
-        f"{_new_credential_form(action, tool, request)}"
+        f"{_stored_credential_form(tool, choices)}"
+        f"{_new_credential_form(tool, request)}"
     )
 
 

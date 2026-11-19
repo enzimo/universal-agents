@@ -64,6 +64,9 @@ from access_control.people import team_export_refusal
 from runtime_settings.instance_layout import InstanceLayout
 from secure_tool_broker.auth_pages import (
     SECRET_INPUT_TOGGLE_SCRIPT,
+    CARD_OUTCOME_DECLINED,
+    CARD_OUTCOME_FINISHED,
+    close_page_script,
     render_broker_auth_page,
     render_credential_input,
 )
@@ -430,7 +433,7 @@ class TeamExportFlow:
         _EXPORTS.drop_unstarted(session, datetime.now(timezone.utc))
         status = str(session.state.get(_STATUS) or STATUS_CREATED)
         if status == STATUS_CLOSED:
-            return _closed_page()
+            return _closed_page(exported=isinstance(session.state.get(_RESULT), dict))
         if status == STATUS_EXPORTING:
             page = _intro_panel(closable=False) + _exporting_panel()
             return render_broker_auth_page(self.display_name, page, script=_WAIT_SCRIPT)
@@ -654,13 +657,19 @@ def _restarted_panel() -> str:
     )
 
 
-def _closed_page() -> str:
+def _closed_page(*, exported: bool) -> str:
     body = (
         '<section class="content-panel"><p class="eyebrow">Team export</p><h1>This page is closed.</h1>'
         f"<p>If this tab stays open, close it yourself. Run {_e(UPGRADE_COMMAND)} when you need another export.</p>"
         "</section>"
     )
-    return render_broker_auth_page("Team export", body, script="<script>window.close();</script>")
+    # Closed before any export ran, the card reads as declined; after a result, as finished.
+    return render_broker_auth_page(
+        "Team export",
+        body,
+        script=close_page_script(),
+        card_outcome=CARD_OUTCOME_FINISHED if exported else CARD_OUTCOME_DECLINED,
+    )
 
 
 # The export button says it is working and cannot be sent twice (ui/DESIGN.md, broker pages).
@@ -697,7 +706,8 @@ _WAIT_SCRIPT = """
       if (response.ok) {
         const payload = await response.json();
         if (payload.status !== "__EXPORTING__") {
-          window.location.replace(window.location.pathname);
+          // Keep the query: the card view (?view=card) must stay a card.
+          window.location.replace(window.location.pathname + window.location.search);
           return;
         }
       }
