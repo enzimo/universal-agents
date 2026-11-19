@@ -20,7 +20,7 @@ from team_transfer.crypto import new_key_derivation
 from team_transfer.errors import TransferError
 from team_transfer.service import export_source, export_team, import_team
 from team_transfer.settings import SettingsSection
-from team_transfer.team_ids import new_team_ids
+from team_transfer.team_ids import TeamIds, new_team_ids
 from tests.pinned_memory_support import new_instance
 from tests.test_onboarding_team_import import _onboarding
 from tests.test_team_transfer_control import GOOD_BUNDLE
@@ -79,9 +79,24 @@ def test_a_team_id_over_24_characters_is_refused_before_the_import_writes_anythi
 def test_a_team_id_over_24_characters_is_imported_under_a_new_id(tmp_path: Path) -> None:
     target = tmp_path / "new"
 
-    _import(_export(tmp_path, TOO_LONG), target, dry_run=False, new_team_id=FITS, sections=(SettingsSection(),))
+    _import(_export(tmp_path, TOO_LONG), target, dry_run=False, new_team_id=FITS)
 
     assert f"team_id: {FITS}" in (target / "instance_config.yaml").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("new_id", ["t" * 25, "team research", ""])
+def test_the_import_refuses_a_new_team_id_that_does_not_fit_before_writing_anything(tmp_path: Path, new_id: str) -> None:
+    """The service checks the id it writes, also one that did not come through new_team_ids (a review folder, a receipt)."""
+
+    target = tmp_path / "new"
+    with TransferReader.open(_export(tmp_path, TOO_LONG), PASSPHRASE) as reader:
+        with pytest.raises(TransferError) as refused:
+            import_team(reader.with_team_ids(TeamIds(TOO_LONG, new_id)), target, dry_run=False, sections=SECTIONS)
+
+    message = str(refused.value)
+    assert f"The team id {new_id!r}" in message
+    assert TOO_LONG not in message, "the export's own id is not the one checked"
+    assert not target.exists() or not any(target.iterdir())
 
 
 def test_an_agent_type_over_24_characters_is_still_refused_when_the_team_gets_a_new_id(tmp_path: Path) -> None:

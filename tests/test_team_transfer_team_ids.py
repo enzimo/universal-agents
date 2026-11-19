@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -90,9 +91,12 @@ def test_a_section_without_a_registered_rename_is_refused_under_a_new_id() -> No
     with pytest.raises(TransferError, match="cannot be imported under a new team id"):
         renamed_records("not_a_section", records, IDS)
     assert renamed_records("not_a_section", records, TeamIds.unchanged(OLD)) is records
-    import team_transfer.registry  # noqa: F401 - sections register their renames as they load
+    from team_transfer.registry import TRANSFER_SECTIONS  # sections register their renames as they load
 
-    assert {"settings", "people", "pinned_memory", "skills", "team_tools", "operator_secrets"} <= set(TEAM_ID_RENAMES)
+    # Every section decides how its records name the team; these register theirs with the schedules (checkpoint 3)
+    # and with MCP servers, procedures and credentials (checkpoint 4), and this set is then empty.
+    pending = {"schedules", "mcp", "procedures", "broker_credentials"}
+    assert {section.name for section in TRANSFER_SECTIONS} - set(TEAM_ID_RENAMES) == pending
 
 
 def test_settings_built_from_the_team_id_follow_it_and_a_third_teams_value_stays() -> None:
@@ -108,6 +112,25 @@ def test_settings_built_from_the_team_id_follow_it_and_a_third_teams_value_stays
 
     assert [record["value"] for record in renamed] == [NEW, f"{NEW}_alpha_custom", OTHER, f"We are {OLD}."]
     assert records[0]["value"] == OLD
+
+
+def test_the_note_lists_only_settings_the_import_kept_with_the_old_id_in_them() -> None:
+    from team_transfer.settings import SettingV1, _naming_the_old_team_id
+
+    ids = TeamIds("_team", "x_team")  # the old id fails only for its first character: the new one contains it
+    exported = [
+        {"path": ["transport", "subject_prefix"], "value": "_team"},
+        {"path": ["gateway", "response_queue_name"], "value": "q__team"},
+        {"path": ["user", "initial_context"], "value": "We are _team."},
+    ]
+    settings = [SettingV1.model_validate(record) for record in TEAM_ID_RENAMES["settings"](exported, ids)]
+
+    notes = _naming_the_old_team_id(
+        settings, ids, {".".join(record["path"]): record["value"] for record in exported}
+    )
+
+    assert settings[0].value == "x_team"
+    assert sorted(notes) == ["gateway.response_queue_name", "user.initial_context"], "the renamed prefix is not listed"
 
 
 # -- the suggestion and the explanation ----------------------------------------------------
@@ -171,38 +194,77 @@ def test_a_requested_new_id_is_checked_like_a_typed_onboarding_id() -> None:
         new_team_ids(NEW, OTHER)
 
 
-def _receipt(layout: InstanceLayout, body: dict[str, Any] | str) -> None:
+MAC = "a" * 64
+
+
+def _manifest(team_id: str = OLD, mac: str = MAC) -> Any:
+    """The two manifest fields target_team_ids reads."""
+
+    return SimpleNamespace(team_id=team_id, mac=mac)
+
+
+def _instance(layout: InstanceLayout, receipt: dict[str, Any] | str | None = None, *, unfinished: bool = False) -> None:
+    """A root that holds an instance, with the receipt and the unfinished-import marker asked for."""
+
     layout.instance_config_path.parent.mkdir(parents=True, exist_ok=True)
     layout.instance_config_path.write_text("schema_version: 1\n", encoding="utf-8")
     layout.team_import_receipt_path.parent.mkdir(parents=True, exist_ok=True)
-    layout.team_import_receipt_path.write_text(body if isinstance(body, str) else json.dumps(body), encoding="utf-8")
+    if receipt is not None:
+        text = receipt if isinstance(receipt, str) else json.dumps(receipt)
+        layout.team_import_receipt_path.write_text(text, encoding="utf-8")
+    if unfinished:
+        layout.team_import_marker_path.write_text("{}", encoding="utf-8")
 
 
 def test_later_steps_take_the_id_the_first_import_recorded(tmp_path: Path) -> None:
     fresh = InstanceLayout.at(tmp_path / "fresh")
-    assert target_team_ids(OLD, fresh, NEW) == IDS
-    assert target_team_ids(NEW, fresh, None) == TeamIds.unchanged(NEW)
+    assert target_team_ids(_manifest(), fresh, NEW) == IDS
+    assert target_team_ids(_manifest(NEW), fresh, None) == TeamIds.unchanged(NEW)
 
     renamed = InstanceLayout.at(tmp_path / "renamed")
-    _receipt(renamed, {"source_mac": "m", "team_id": NEW, "records": {}})
-    assert recorded_team_id(renamed, OLD) == NEW
-    assert target_team_ids(OLD, renamed, None) == IDS
-    assert target_team_ids(OLD, renamed, NEW) == IDS
+    _instance(renamed, {"source_mac": MAC, "team_id": NEW, "records": {}})
+    assert target_team_ids(_manifest(), renamed, None) == IDS
+    assert target_team_ids(_manifest(), renamed, NEW) == IDS
     with pytest.raises(TransferError) as refused:
-        target_team_ids(OLD, renamed, OTHER)
+        target_team_ids(_manifest(), renamed, OTHER)
     assert f"gave the team the id {NEW!r}" in str(refused.value) and f"{OTHER!r} was asked for" in str(refused.value)
 
     older = InstanceLayout.at(tmp_path / "older")
-    _receipt(older, {"source_mac": "m", "records": {}})  # before receipts recorded the id: it was kept
-    assert target_team_ids(NEW, older, None) == TeamIds.unchanged(NEW)
+    _instance(older, {"source_mac": MAC, "records": {}})  # before receipts recorded the id: it was kept
+    assert target_team_ids(_manifest(NEW), older, None) == TeamIds.unchanged(NEW)
+    assert recorded_team_id({"source_mac": MAC}, NEW) == NEW
+    with pytest.raises(TransferError, match="names no valid team id"):
+        recorded_team_id({"team_id": ""}, OLD)
+
+
+def test_a_folder_no_finished_import_from_this_backup_created_is_refused_with_the_true_reason(tmp_path: Path) -> None:
+    # A first import under a new id that stopped after writing settings: the marker is there, no receipt.
+    unfinished = InstanceLayout.at(tmp_path / "unfinished")
+    _instance(unfinished, unfinished=True)
+    with pytest.raises(TransferError, match="did not finish") as refused:
+        target_team_ids(_manifest(), unfinished, NEW)
+    assert "For a failed first import, use a fresh root" in str(refused.value)
+    assert "Leave the new team id out" not in str(refused.value)
+
+    # The 0.9 instance itself, named by mistake instead of a fresh folder.
+    in_place = InstanceLayout.at(tmp_path / "in_place")
+    _instance(in_place)
+    with pytest.raises(TransferError) as refused:
+        target_team_ids(_manifest(), in_place, NEW)
+    assert str(refused.value).startswith(f"{in_place.root} holds an instance that no import from this backup created")
+    assert "a team is given a new team id, goes into a fresh instance root" in str(refused.value)
+
+    # Another backup's import: its recorded id is never used.
+    other_backup = InstanceLayout.at(tmp_path / "other_backup")
+    _instance(other_backup, {"source_mac": "b" * 64, "team_id": OTHER, "records": {}})
+    for requested in (None, OTHER):
+        with pytest.raises(TransferError, match="earlier import used a different backup"):
+            target_team_ids(_manifest(), other_backup, requested)
 
     broken = InstanceLayout.at(tmp_path / "broken")
-    _receipt(broken, "{")
+    _instance(broken, "{")
     with pytest.raises(TransferError, match="cannot be read"):
-        recorded_team_id(broken, OLD)
-    _receipt(broken, {"team_id": ""})
-    with pytest.raises(TransferError, match="names no valid team id"):
-        recorded_team_id(broken, OLD)
+        target_team_ids(_manifest(), broken, None)
 
 
 # -- an import under a new id ------------------------------------------------------------------
@@ -277,12 +339,34 @@ def test_settings_people_and_team_memory_are_imported_under_the_new_id(tmp_path:
     assert check_ids_before_upgrade(checked, lambda: checked.manager_storage_settings) is None
 
 
+def test_a_setting_with_the_old_id_that_this_version_stores_differently_keeps_both_notes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import team_transfer.settings as settings_section
+
+    kept_by_loader = settings_section._kept_by_loader
+
+    def changed_too(*args: Any, **kwargs: Any) -> tuple[dict[str, str], dict[str, str]]:
+        dropped, changed = kept_by_loader(*args, **kwargs)
+        return dropped, {**changed, "user.initial_context": "this version stored it as 'x'"}
+
+    monkeypatch.setattr(settings_section, "_kept_by_loader", changed_too)
+    with TransferReader.open(_export(tmp_path), PASSPHRASE) as opened:
+        plan, _context = plan_import(opened.with_team_ids(IDS), tmp_path / "new", sections=(SettingsSection(),))
+
+    [noted] = [record for record in plan.records if record.key == "user.initial_context"]
+    assert noted.reason == (
+        f"it names the export's team id {OLD!r}, and this instance's team id is {NEW!r}; the import leaves the old id "
+        "in it, so check it; this version stored it as 'x'"
+    )
+
+
 def test_a_later_batch_reads_under_the_recorded_id_and_a_reader_under_the_old_one_is_refused(tmp_path: Path) -> None:
     export, target = _export(tmp_path), tmp_path / "new"
     with TransferReader.open(export, PASSPHRASE) as opened:
         import_team(opened.with_team_ids(IDS), target, dry_run=False, sections=SECTIONS)
 
-        later = target_team_ids(OLD, InstanceLayout.at(target), None)
+        later = target_team_ids(opened.manifest, InstanceLayout.at(target), None)
         plan, _context = plan_import(opened.with_team_ids(later), target, sections=SECTIONS, allow_existing=True)
         assert later == IDS and plan.records == []
         assert {record.reason for record in plan.skipped_records} == {"already imported"}
@@ -290,6 +374,21 @@ def test_a_later_batch_reads_under_the_recorded_id_and_a_reader_under_the_old_on
         with pytest.raises(TransferError) as refused:
             plan_import(opened, target, sections=SECTIONS, allow_existing=True)
     assert str(refused.value) == f"The target instance is team {NEW}, and this import is for team {OLD}: they are different teams."
+
+
+def test_a_failed_first_import_under_a_new_id_is_named_when_it_is_run_again(tmp_path: Path, monkeypatch) -> None:
+    export, target = _export(tmp_path), tmp_path / "new"
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("the people step failed")
+
+    monkeypatch.setattr(PeopleSection, "apply", fail)
+    with TransferReader.open(export, PASSPHRASE) as opened:
+        with pytest.raises(RuntimeError, match="the people step failed"):
+            import_team(opened.with_team_ids(IDS), target, dry_run=False, sections=SECTIONS)
+        assert (target / "instance_config.yaml").is_file(), "settings were written before the failure"
+        with pytest.raises(TransferError, match="did not finish"):
+            target_team_ids(opened.manifest, InstanceLayout.at(target), NEW)
 
 
 def test_the_reader_takes_ids_only_for_its_own_team(tmp_path: Path) -> None:

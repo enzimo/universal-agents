@@ -53,6 +53,7 @@ from team_transfer.sections import (
     SectionExport,
     SectionFiles,
     SectionRecords,
+    read_section_records,
 )
 from team_transfer.team_ids import TeamIds
 
@@ -185,9 +186,14 @@ class SettingsSection:
         )
         context.scratch[_CONFIG_KEY] = config
         replaced = _replaced_by_destination(settings, destination, root)
-        named = _naming_the_old_team_id(settings, context.team_ids)
+        named = _naming_the_old_team_id(settings, context.team_ids, _exported_values(context))
+        notes = {
+            dotted: "; ".join(note for note in (named.get(dotted), changed.get(dotted)) if note)
+            for dotted in {*named, *changed}
+        }
+        # A setting the destination replaced is not imported, so its own note is the only one.
         return [
-            self._outcome(setting, refused, {**named, **changed, **replaced})
+            self._outcome(setting, refused, {**notes, **replaced})
             for setting in settings
         ]
 
@@ -287,12 +293,17 @@ def _destination_settings(context: ImportContext) -> dict[tuple[str, ...], Any]:
     return values
 
 
-def _naming_the_old_team_id(settings: list[SettingV1], team_ids: TeamIds) -> dict[str, str]:
+def _naming_the_old_team_id(
+    settings: list[SettingV1], team_ids: TeamIds, exported: dict[str, Any]
+) -> dict[str, str]:
     """Carried settings that still name the export's team id under a new one, with the note shown for each.
 
     Only the settings the runtime builds from the team id are renamed (``_TEAM_NAMED_SETTINGS``);
-    any other value naming the old id may be a name the operator chose, so it is imported as it
-    is and the person importing checks it, never changed silently.
+    any other value naming the old id may be a name the operator chose, so it is imported with
+    the old id in it and the person importing checks it, never changed silently. A setting the
+    rename changed is not listed, even when its new value contains the old id (an old id
+    ``_team`` and a new id ``x_team``): the note would say the opposite of what happened.
+    ``exported`` holds each setting's value as exported (``_exported_values``).
     """
 
     if not team_ids.renamed:
@@ -300,11 +311,39 @@ def _naming_the_old_team_id(settings: list[SettingV1], team_ids: TeamIds) -> dic
     return {
         setting.dotted: (
             f"it names the export's team id {team_ids.exported!r}, and this instance's team id is "
-            f"{team_ids.imported!r}; the import keeps the value as it is, so check it"
+            f"{team_ids.imported!r}; the import leaves the old id in it, so check it"
         )
         for setting in settings
-        if _names(setting.value, team_ids.exported)
+        if not _renamed_by_the_import(setting, team_ids, exported) and _names(setting.value, team_ids.exported)
     }
+
+
+def _exported_values(context: ImportContext) -> dict[str, Any]:
+    """Each carried setting's value as exported, before the team-id rename; empty when the team keeps its id."""
+
+    if not context.team_ids.renamed:
+        return {}
+    records = read_section_records(
+        context.reader,
+        SettingsSection.name,
+        SettingsSection.schema_version,
+        team_ids=TeamIds.unchanged(context.team_ids.exported),
+    )
+    return {SettingV1.model_validate(record).dotted: record.get("value") for record in records}
+
+
+def _renamed_by_the_import(setting: SettingV1, team_ids: TeamIds, exported: dict[str, Any]) -> bool:
+    """Whether the team-id rename made this setting's value from the exported one.
+
+    A value the person importing replaced in the review counts only when it is still exactly
+    what the rename made of the exported value.
+    """
+
+    separators = _TEAM_NAMED_SETTINGS.get(setting.path)
+    if separators is None or setting.dotted not in exported:
+        return False
+    before = exported[setting.dotted]
+    return bool(before != setting.value and team_ids.rename(before, *separators) == setting.value)
 
 
 def _names(value: Any, text: str) -> bool:

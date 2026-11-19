@@ -517,8 +517,8 @@ def _apply_import(
     require_empty_postgres(context)
     if context.team_ids.renamed:
         logger.info(
-            "The team is imported under a new team id. event=team_transfer_new_team_id team_id=%s "
-            "imported_team_id=%s root=%s",
+            "The team is imported under a new team id. event=team_transfer_new_team_id team_id=%r "
+            "imported_team_id=%r root=%s",
             context.team_ids.exported,
             context.team_ids.imported,
             layout.root,

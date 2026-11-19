@@ -35,6 +35,15 @@ store). A file from a store that held two (two link forms finished at once
 before the index existed) has its older link refused with the newer one
 named; the newer one is the one that was in use.
 
+When the import gives the team a new team id (owner's decision 103,
+``team_transfer.team_ids``), every record follows it as it is read: the
+``team_id`` of each record, the owner of a team account link, and each subject
+that names the team (a team subject is the id itself; role, agent type and
+schedule subjects are ``<team>/<name>``) in ``subject``, ``delegate_to``,
+``granted_by``, ``revoked_by``, ``registered_by``, ``removed_by`` and
+``created_by``. Agent and person subjects and every record id hold no team id
+and stay. A record or subject of another team keeps its id.
+
 Each record travels as its own versioned contract (``GrantV1``,
 ``DataFolderRecordV1``, ``AccountLinkV1``, ``PersonSettingsV1``) with its id,
 times and provenance, validated by this version's model and written by the
@@ -61,11 +70,12 @@ from typing import Any, Callable, ClassVar
 import yaml
 from pydantic import BaseModel, Field, JsonValue
 
-from custom_messages.contracts.access_v2 import MODEL_KEYS_SHARING_SUBJECT
+from custom_messages.contracts.access_v2 import MODEL_KEYS_SHARING_SUBJECT, LinkOwnerKind, SubjectKind
 from secure_tools.chat_commands import ACCOUNTS_SHARE, accounts_command
 from team_transfer.format import TransferModel
 from team_transfer.errors import TransferError
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -74,6 +84,7 @@ from team_transfer.sections import (
     SectionFiles,
     SectionRecords,
 )
+from team_transfer.team_ids import TeamIds
 
 logger = logging.getLogger(__name__)
 
@@ -790,5 +801,49 @@ def _rename_operations(records: SectionRecords) -> SectionRecords:
         converted.append(raw)
     return converted
 
+
+# Subject kinds whose id names the team (``access_control.entities``): a team subject is the
+# team id itself; role, agent type and schedule subjects are ``<team>/<name>``. Agent and
+# person subjects name no team.
+_TEAM_SUBJECT_KINDS: frozenset[str] = frozenset(
+    kind.value for kind in (SubjectKind.TEAM, SubjectKind.ROLE, SubjectKind.AGENT_TYPE, SubjectKind.SCHEDULE)
+)
+# Fields holding one subject, and the field holding several (``GrantV1.delegate_to``).
+_SUBJECT_FIELDS: tuple[str, ...] = ("subject", "granted_by", "revoked_by", "registered_by", "removed_by", "created_by")
+_SUBJECT_LIST_FIELD = "delegate_to"
+
+
+def _renamed_subject(subject: Any, team_ids: TeamIds) -> Any:
+    """A subject reference under the new team id; a subject of another team, or of no team, unchanged."""
+
+    if not isinstance(subject, dict) or subject.get("kind") not in _TEAM_SUBJECT_KINDS:
+        return subject
+    return {**subject, "id": team_ids.rename(subject.get("id"), "/")}
+
+
+def _renamed_access(records: SectionRecords, team_ids: TeamIds) -> SectionRecords:
+    """The access records under a new team id (the module docstring lists what follows it)."""
+
+    renamed = []
+    for raw in records:
+        document = raw.get("document")
+        if isinstance(document, dict):
+            changed = dict(team_ids.renamed_fields(document, ("team_id",)))
+            for name in _SUBJECT_FIELDS:
+                if name in changed:
+                    changed[name] = _renamed_subject(changed[name], team_ids)
+            if isinstance(changed.get(_SUBJECT_LIST_FIELD), list):
+                changed[_SUBJECT_LIST_FIELD] = [
+                    _renamed_subject(subject, team_ids) for subject in changed[_SUBJECT_LIST_FIELD]
+                ]
+            # A team account link belongs to its own team (AccountLinkV1); a person's names the person.
+            if raw.get("kind") == AccessKind.ACCOUNT_LINK.value and changed.get("owner_kind") == LinkOwnerKind.TEAM.value:
+                changed["owner_id"] = team_ids.rename(changed.get("owner_id"))
+            raw = {**raw, "document": changed}
+        renamed.append(raw)
+    return renamed
+
+
+TEAM_ID_RENAMES[AccessSection.name] = _renamed_access
 
 __all__ = ["AccessKind", "AccessRecordV1", "AccessSection", "RENAMED_OPERATIONS", "known_agent_types"]

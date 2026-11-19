@@ -13,9 +13,10 @@ How:
   import behaves exactly as without it.
 - Where it is chosen: onboarding's Import page and ``--new-team-id`` choose it for a first
   import into a fresh root (``new_team_ids``). After that the id comes from what the first
-  import recorded: its receipt (``state/team-import/receipt.json``, ``recorded_team_id``) for
-  later batches and credentials, and the review folder for an import of a prepared review
-  (``target_team_ids``).
+  import recorded: its receipt (``state/team-import/receipt.json``, read only through
+  ``batches.import_receipt``, which also checks it came from the same backup;
+  ``recorded_team_id``) for later batches and credentials, and the review folder for an
+  import of a prepared review (``target_team_ids``).
 - Where it is applied: ``TransferReader.with_team_ids`` gives the open file the chosen ids, and
   ``sections.read_section_records`` renames each section's records right after its version
   step, through the rename the section registers in ``sections.TEAM_ID_RENAMES``. The review,
@@ -31,7 +32,6 @@ How:
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Iterable
@@ -40,6 +40,7 @@ from team_transfer.errors import TransferError
 
 if TYPE_CHECKING:
     from runtime_settings.instance_layout import InstanceLayout
+    from team_transfer.format import TransferManifestV1
 
 LOGGER = logging.getLogger(__name__)
 
@@ -88,6 +89,17 @@ class TeamIds:
             if value.startswith(head):
                 return self.imported + separator + value[len(head) :]
         return value
+
+    def rename_after(self, head: str, value: Any, *separators: str) -> Any:
+        """``value`` with ``rename`` applied to what follows ``head``; anything else unchanged.
+
+        For an id that names the team after a fixed head, such as the team lead's scope
+        ``manager_scope:<team>:<agent type>`` (head ``manager_scope:``, separator ``:``).
+        """
+
+        if not self.renamed or not isinstance(value, str) or not value.startswith(head):
+            return value
+        return head + self.rename(value[len(head) :], *separators)
 
     def rename_derived(self, value: Any, derive: Callable[[str], str]) -> Any:
         """``derive(new id)`` when ``value`` is ``derive(export's id)``; ``value`` unchanged otherwise.
@@ -179,46 +191,45 @@ def new_team_ids(exported: str, requested: str | None) -> TeamIds:
     return TeamIds(exported, chosen)
 
 
-def recorded_team_id(layout: "InstanceLayout", exported: str) -> str:
-    """The team id the first import into ``layout`` gave the team, from its receipt.
+def recorded_team_id(receipt: dict[str, Any], exported: str) -> str:
+    """The team id the first import gave the team, from its receipt (``batches.import_receipt``).
 
-    The export's id when there is no receipt yet or the receipt predates this field (an
-    import that kept the id). The caller still checks the receipt belongs to this backup
-    (``batches.previous_records``) and the instance is this team (``service._import_context``).
+    The export's id for a receipt from before this field (an import that kept the id).
     """
 
-    path = layout.team_import_receipt_path
-    if not path.is_file():
+    if RECEIPT_TEAM_ID not in receipt:
         return exported
-    try:
-        saved = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise TransferError(f"The import receipt {path} cannot be read: {exc}") from exc
-    if not isinstance(saved, dict) or RECEIPT_TEAM_ID not in saved:
-        return exported
-    recorded = saved[RECEIPT_TEAM_ID]
+    recorded = receipt[RECEIPT_TEAM_ID]
     if not isinstance(recorded, str) or not recorded:
-        raise TransferError(f"The import receipt {path} names no valid team id.")
+        raise TransferError("The import receipt names no valid team id.")
     return recorded
 
 
-def target_team_ids(exported: str, layout: "InstanceLayout", requested: str | None) -> TeamIds:
-    """The ids an import into ``layout`` reads under, before any review is opened.
+def target_team_ids(manifest: "TransferManifestV1", layout: "InstanceLayout", requested: str | None) -> TeamIds:
+    """The ids an import of the export with ``manifest`` into ``layout`` reads under, before any review is opened.
 
-    A fresh root (no ``instance_config.yaml``): ``new_team_ids``. A root an earlier batch
-    imported into: the id its first import recorded; a requested id must be that one, so a
-    value the tool already has is never asked again and a different one is refused naming both.
+    A fresh root (no ``instance_config.yaml``): ``new_team_ids``. A root that holds an
+    instance: only one a finished first import from this same backup created
+    (``runtime_guard.require_finished_import`` and ``batches.import_receipt``, which a later
+    batch checks too), read under the id that import recorded. A requested id must be that
+    one, so a value the tool already has is never asked again and a different one is refused
+    naming both. Each refusal says what the folder really holds: an unfinished import, an
+    instance no import from this backup created, or another backup's import.
     """
 
     if not layout.instance_config_path.is_file():
-        return new_team_ids(exported, requested)
-    recorded = recorded_team_id(layout, exported)
+        return new_team_ids(manifest.team_id, requested)
+    from team_transfer.batches import import_receipt
+    from team_transfer.runtime_guard import require_finished_import
+
+    require_finished_import(layout)
+    recorded = recorded_team_id(import_receipt(layout, manifest), manifest.team_id)
     if requested is not None and requested.strip() != recorded:
         raise TransferError(
             f"This instance's first import gave the team the id {recorded!r}, and later batches keep it; "
             f"{requested.strip()!r} was asked for. Leave the new team id out."
         )
-    return TeamIds(exported, recorded)
+    return TeamIds(manifest.team_id, recorded)
 
 
 __all__ = [
