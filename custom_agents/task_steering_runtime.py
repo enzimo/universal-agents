@@ -5,7 +5,9 @@ its next new tool call: ``RuntimeSteeringPlugin`` cancels that call with the
 guidance text. After each call to the agent that did not pause, the turn
 checks again before carrying out its decision: a fresh turn in
 ``custom_agents.sdk.strands.turn``, a resumed one in
-``_call_until_guidance_read``. The decision is not always a tool call
+``_call_until_guidance_read``. A call that paused is handed on without the
+check: a paused Strands agent takes only interrupt answers, so the guidance
+waits for the resumed turn. The decision is not always a tool call
 (providers that enforce structured output themselves answer Strands' forced
 decision as JSON text), so this check is what keeps a final answer from going
 out before the guidance is read. Guidance that arrives after it is found when

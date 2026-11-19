@@ -1772,7 +1772,8 @@ No profile budget resets per model turn. `active_seconds` is the total
 wall-clock window for one session. `turns` counts model cycles across the
 session. `total_tokens` accumulates input plus output tokens across those
 cycles, including repeated prompt and tool-schema input. `tool_calls` counts
-all tool calls across the session. The checkpoint fields reserve subsets of
+the session's tool calls. One exception applies to all three counts: work
+after a paused call resumes is not counted yet (see below). The checkpoint fields reserve subsets of
 those totals, and the runtime withholds them from material work. If a safe boundary is reached
 without a checkpoint, it uses the reserve for a narrow checkpoint-only model
 invocation and falls back to a deterministic degraded checkpoint only if that
@@ -1780,6 +1781,17 @@ pass cannot persist the handoff. Input, output, total, and cache token usage are
 stored separately for tuning. Suggestion rules, the required skill list,
 default-profile selection, activity snapshot emission, and checkpoint retention
 are policy-wide rather than per-profile.
+
+A step can pause while it waits for a person, for example for an access
+decision or a setup step. Such a step keeps its pause even when the session
+reaches its limit or a required skill is not yet activated. The session
+records the usage up to the pause. The work after the person answers is not
+yet counted against the session budget: it runs within the limits the step's
+model turn started with, so a pause resumed at the limit can use up to one
+more turn's allowance. When that step finishes, a session past its limit does
+not start the next plan step and records a checkpoint instead; a required
+skill that is still missing stops the session at the end of its next model
+turn.
 
 The same policy file owns `custom_profiles`; these controls are deliberately
 separate from the main runtime config. The built-in envelope enables one-time

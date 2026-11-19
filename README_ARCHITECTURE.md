@@ -3136,6 +3136,25 @@ only: its tool use id started in a call to the agent that paused and has not
 finished since. One consequence: a change approved in the Inbox while guidance
 waits is applied before the model reads that guidance. To stop such a change,
 decline it in the Inbox or stop the request.
+A call that paused gets no check after it: a paused Strands agent accepts only
+interrupt answers and refuses a text prompt with a `TypeError`, so the turn
+hands the pause on (`send_interrupt_request_for_result`), and guidance accepted
+while the call ran, also inside the pausing tool, waits for the resumed turn.
+Why: until 2026-11-19 a fresh turn read that guidance and called the paused
+agent with it, so the pause was never saved, the task failed, and the agent
+stayed paused for every later turn on its lane until a restart. The turn also
+marks the agent for replacement as soon as its call pauses
+(`custom_agents.strands_parts.mark_paused`), so a turn that ends before saving
+the pause (a stop recorded as the call paused, an error while saving) leaves
+no stuck agent: the next turn gets a new one and logs
+`event=strands_agent_rotated_after_interrupt` with no interrupted task. An
+Objective work-session turn keeps its pause too, at the session's limit or
+with a required skill not yet activated
+(`event=objective_work_boundary_after_pause`). The session records the usage
+up to the pause; the work after the resume is not yet counted against the
+session budget and runs within the limits the turn started with. The
+session's saved status then refuses the next plan step, and a missing skill
+is caught at the end of the session's next fresh turn.
 An explicitly addressed receiver answers `STALE` for a missing task. The gateway
 holds guidance for that request until the lead admits its task, and retries
 with the same idempotency key. Guidance never becomes another root request.

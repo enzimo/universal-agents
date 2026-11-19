@@ -389,9 +389,11 @@ def _remember_context_assembly(assembly: AssembledContext) -> None:
 def late_guidance_instruction(guidance: str) -> str:
     """What the model reads for guidance that arrived after a call to the agent, before its decision was carried out.
 
-    A fresh turn appends it to its prompt and calls the model again (below); a
-    resumed turn sends it as the next prompt of the same conversation
-    (``task_steering_runtime._run_resumed_turn``).
+    A fresh turn appends it to its prompt and calls the model again
+    (``LLMTurnExecutor._reinvoke_for_late_guidance``); a resumed turn sends it
+    as the next prompt of the same conversation
+    (``task_steering_runtime._call_until_guidance_read``). Neither reads
+    guidance after a call that paused.
     """
 
     return (
