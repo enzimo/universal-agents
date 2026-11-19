@@ -3584,10 +3584,10 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
         "window.UAChatDelivery.buildTimeline("
     )
     durable_message_index = render_messages_source.index(
-        "messageList.appendChild(createMessageBubble(item.value, thread));"
+        "nodes.push(createMessageBubble(item.value, thread));"
     )
     transient_notice_index = render_messages_source.index(
-        "messageList.appendChild(createTransientItemCard(thread, item.value));"
+        "nodes.push(createTransientItemCard(thread, item.value));"
     )
     scroll_index = render_messages_source.index(
         "shellState.transcriptView.restore(viewport, {"
@@ -3615,7 +3615,8 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
     assert "pendingHumanInteractionId" not in script
     assert "pendingPermissionHandoffToken" not in script
     assert 'threadList.innerHTML = "";' in script
-    assert 'messageList.innerHTML = "";' in script
+    # The conversation is placed around live broker card frames, never emptied (broker_card.mjs).
+    assert "replaceChildrenKeeping(list, nodes, live)" in script
     assert 'commandLines.join(" ")' not in script
     assert "function commandDefinition(line)" in script
     assert 'typeof line !== "object"' in script
@@ -3626,7 +3627,7 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
     assert '"command-guide-doc-link"' in script
     assert '"command-guide-token " + tokenClass' in script
     assert '.replace(/\\|/g, " | ")' in script
-    assert "messageList.appendChild(createWelcomeGuidance());" in script
+    assert "nodes.push(createWelcomeGuidance());" in script
     assert 'uiElement("aside", "message-guidance")' in script
     assert ".message-guidance {" in styles
     assert ".command-guide-token.is-option {" in styles

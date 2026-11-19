@@ -35,6 +35,7 @@ export class FakeElement extends EventTarget {
   }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null; }
+  hasAttribute(name) { return this.attributes.has(name); }
   removeAttribute(name) { this.attributes.delete(name); }
   append(...nodes) { nodes.forEach(node => this.appendChild(node)); }
   appendChild(node) {

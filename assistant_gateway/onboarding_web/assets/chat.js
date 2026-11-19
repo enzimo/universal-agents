@@ -19,11 +19,14 @@ import { createActivityMesh } from "./activity_mesh.mjs";
 import { createTeamActivity } from "./team_activity.mjs";
 import { createSettingsClient } from "./settings_support.mjs";
 import { createChatSubmission } from "./chat_submission.mjs";
+import { brokerCardElement, createBrokerCards, replaceChildrenKeeping } from "./broker_card.mjs";
 
 function mountPage() {
 "use strict";
 const lifecycle = createPageLifecycle(window);
 const requestClient = createRequestClient(window, lifecycle);
+// Broker pages shown inside their chat cards as sandboxed frames (broker_card.mjs).
+const brokerCards = createBrokerCards({ browser: window, document, lifecycle });
 // Read Inbox and Access links before anything checks the address: they only
 // choose a panel to open after sign-in, so the address goes back to plain chat
 // and a reload stays on the chat.
@@ -54,7 +57,7 @@ const attention = createChatAttention({
 });
 const appearance = createAppearance({ appearanceState, sharedState, lifecycle, requestClient, operations: { handleUnauthorizedResponse: (...args) => authentication.handleUnauthorizedResponse(...args) } });
 const diagnostics = createDiagnostics({ diagnosticsState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args) } });
-const authentication = createAuthentication({ authenticationState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args), clearOptimisticDeliveries: (...args) => clearOptimisticDeliveries(...args), clearPendingAttachments: (...args) => clearPendingAttachments(...args), configurePrincipalState: (...args) => configurePrincipalState(...args), fetchSessions: (...args) => fetchSessions(...args), loadObjectives: (...args) => runtime_views.loadObjectives(...args), parseApiResponse: (...args) => parseApiResponse(...args), refreshContextDumpStatus: (...args) => diagnostics.refreshContextDumpStatus(...args), renderMessages: (...args) => renderMessages(...args), renderSettingsAppearance: (...args) => appearance.renderSettingsAppearance(...args), renderThreads: (...args) => renderThreads(...args), setAssistantName: (name) => setAssistantName(sharedState, document, name), showSignIn: () => signInGreeting.show(), stopSignIn: () => signInGreeting.stop(), startLiveEvents: () => { liveEvents.start(); activityMesh.start(); sharedState.settingsControls.startInboxCount(); }, stopLiveEvents: () => { liveEvents.stop(); attention.clear(); activityMesh.stop(); teamActivity.clear(); }, setObjectivesStatus: (...args) => runtime_views.setObjectivesStatus(...args) } });
+const authentication = createAuthentication({ authenticationState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args), clearOptimisticDeliveries: (...args) => clearOptimisticDeliveries(...args), clearPendingAttachments: (...args) => clearPendingAttachments(...args), configurePrincipalState: (...args) => configurePrincipalState(...args), fetchSessions: (...args) => fetchSessions(...args), loadObjectives: (...args) => runtime_views.loadObjectives(...args), parseApiResponse: (...args) => parseApiResponse(...args), refreshContextDumpStatus: (...args) => diagnostics.refreshContextDumpStatus(...args), renderMessages: (...args) => renderMessages(...args), renderSettingsAppearance: (...args) => appearance.renderSettingsAppearance(...args), renderThreads: (...args) => renderThreads(...args), setAssistantName: (name) => setAssistantName(sharedState, document, name), showSignIn: () => signInGreeting.show(), stopSignIn: () => signInGreeting.stop(), startLiveEvents: () => { liveEvents.start(); activityMesh.start(); sharedState.settingsControls.startInboxCount(); }, stopLiveEvents: () => { liveEvents.stop(); attention.clear(); activityMesh.stop(); teamActivity.clear(); brokerCards.closeAll(); }, setObjectivesStatus: (...args) => runtime_views.setObjectivesStatus(...args) } });
 const runtime_views = createRuntimeViews({ runtime_viewsState, sharedState, lifecycle, requestClient, operations: { ensureRuntimeControlsSession: (...args) => authentication.ensureRuntimeControlsSession(...args), formatShortLocalTimestamp: (...args) => formatShortLocalTimestamp(...args), parseApiResponse: (...args) => parseApiResponse(...args), timestampElement: (...args) => timestampElement(...args), uiElement: (...args) => uiElement(...args) } });
 // The team's live status, carried by every live page and shown by the
 // activity mesh, Settings → Team and the Tasks view (team_activity.mjs).
@@ -2232,6 +2235,14 @@ function stopTransientCountdown() {
 
 function replaceTransientActionWithExpiredState(countdown) {
     var notice = countdown.closest(".message-transient-notice");
+    if (notice && notice.hasAttribute("data-broker-card")) {
+      // An expired broker card closes its frame and keeps the expired line (no Dismiss).
+      var itemId = notice.getAttribute("data-item-id") || "";
+      setBrokerCardState(activeThread(), itemId, "expired");
+      brokerCards.close(itemId);
+      lifecycle.timeout(renderMessages, 0);
+      return;
+    }
     var actions = notice && notice.querySelector(".message-transient-actions");
     if (!actions) {
       return;
@@ -2278,7 +2289,29 @@ function updateTransientCountdown() {
     return shouldContinue;
   }
 
+function setBrokerCardState(thread, itemId, state) {
+    if (!thread || !itemId) {
+      return;
+    }
+    thread.brokerCardStates = thread.brokerCardStates || new Map();
+    thread.brokerCardStates.set(itemId, state);
+  }
+
 function createTransientItemCard(thread, item) {
+    if (item.frameUrl) {
+      // A broker page: shown inside the card (broker_card.mjs), never with Dismiss.
+      return brokerCardElement({
+        document: document,
+        cards: brokerCards,
+        item: item,
+        state: thread.brokerCardStates ? thread.brokerCardStates.get(item.itemId) || "" : "",
+        expiredMessage: shellState.expiredSecureFormMessage,
+        onState: function (state) {
+          setBrokerCardState(thread, item.itemId, state);
+          renderMessages();
+        },
+      });
+    }
     var transientNotice = document.createElement("div");
     transientNotice.className = "message-transient-notice";
     transientNotice.setAttribute("data-item-id", item.itemId);
@@ -2341,7 +2374,10 @@ function renderMessages(options) {
     var thread = activeThread();
     // The switch shows the selected thread's setting.
     renderParallelSwitch();
-    sharedState.messageList.innerHTML = "";
+    // Built first, then placed: a live broker card stays in the page while the
+    // rest is replaced around it, because a frame that leaves the page reloads
+    // and loses what was typed (broker_card.mjs replaceChildrenKeeping).
+    var nodes = [];
     var errorThread = thread && thread.transientError ? thread : null;
     var errorNotice = errorThread ? errorThread.transientError : sharedState.historyHydrationError;
     if (errorNotice) {
@@ -2367,9 +2403,9 @@ function renderMessages(options) {
         }
       });
       errorBanner.appendChild(retryButton);
-      sharedState.messageList.appendChild(errorBanner);
+      nodes.push(errorBanner);
     }
-    sharedState.messageList.appendChild(createWelcomeGuidance());
+    nodes.push(createWelcomeGuidance());
     if (thread && thread.hasMoreHistory && thread.historyBeforeCursor) {
       var earlierButton = document.createElement("button");
       earlierButton.type = "button";
@@ -2379,7 +2415,7 @@ function renderMessages(options) {
       lifecycle.listen(earlierButton, "click", function () {
         loadEarlierHistory();
       });
-      sharedState.messageList.appendChild(earlierButton);
+      nodes.push(earlierButton);
     }
     if (thread) {
       window.UAChatDelivery.buildTimeline(
@@ -2387,11 +2423,25 @@ function renderMessages(options) {
         thread.transientItems
       ).forEach(function (item) {
         if (item.kind === "transient_item") {
-          sharedState.messageList.appendChild(createTransientItemCard(thread, item.value));
+          nodes.push(createTransientItemCard(thread, item.value));
           return;
         }
-        sharedState.messageList.appendChild(createMessageBubble(item.value, thread));
+        nodes.push(createMessageBubble(item.value, thread));
       });
+    }
+    // Frames of cards no longer shown (the item left, another thread is open) close here.
+    brokerCards.retainOnly(nodes.filter(function (node) {
+      return node.hasAttribute && node.hasAttribute("data-broker-frame");
+    }).map(function (node) {
+      return node.getAttribute("data-item-id");
+    }));
+    var list = sharedState.messageList;
+    var live = new Set(nodes.filter(function (node) { return node.parentNode === list; }));
+    if (!replaceChildrenKeeping(list, nodes, live)) {
+      console.warn(
+        "Web Chat rebuilt the conversation around open secure pages; their forms reloaded.",
+        Array.from(live).map(function (node) { return node.getAttribute("data-item-id"); })
+      );
     }
     var shouldRunTransientCountdown = updateTransientCountdown();
     if (shouldRunTransientCountdown && shellState.transientCountdownTimer === 0) {

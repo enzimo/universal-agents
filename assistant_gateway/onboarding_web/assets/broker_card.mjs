@@ -188,3 +188,100 @@ export function replaceChildrenKeeping(container, nodes, keep) {
   }
   return true;
 }
+
+// How a broker card stands in the chat after its frame closed. The card keeps
+// this state while its item stays in the conversation, so a re-render shows
+// the same line instead of a new frame.
+export const BROKER_CARD_FINISHED = "finished";
+export const BROKER_CARD_DECLINED = "declined";
+export const BROKER_CARD_UNAVAILABLE = "unavailable";
+export const BROKER_CARD_EXPIRED = "expired";
+// The one line a closed card keeps. True whether a task waits on the page or a
+// person opened it with a command.
+export const BROKER_CARD_NOTES = Object.freeze({
+  [BROKER_CARD_FINISHED]: "Done. This secure page is closed.",
+  [BROKER_CARD_DECLINED]: "Declined. Nothing was saved.",
+  [BROKER_CARD_UNAVAILABLE]: "This secure page could not be shown here. Open it in its own tab.",
+});
+export const OPEN_IN_OWN_TAB_LABEL = "Open in its own tab";
+
+function element(document, tagName, className, text) {
+  const node = document.createElement(tagName);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function notice(document, item, extraClass) {
+  const node = element(document, "div", `message-transient-notice broker-card ${extraClass}`.trim());
+  node.setAttribute("data-item-id", item.itemId);
+  node.setAttribute("data-broker-card", "");
+  if (item.createdAt) node.setAttribute("data-created-at", item.createdAt);
+  return node;
+}
+
+function openInOwnTab(document, item) {
+  const link = element(document, "a", "button secondary small message-transient-open broker-card-open", OPEN_IN_OWN_TAB_LABEL);
+  link.setAttribute("href", item.url);
+  link.setAttribute("target", "_blank");
+  link.setAttribute("rel", "noopener noreferrer");
+  return link;
+}
+
+function countdown(document, item) {
+  if (!item.expiresAtUtc) return [];
+  const label = element(document, "span", "broker-card-expires", "expires in");
+  const value = element(document, "span", "message-transient-countdown");
+  value.setAttribute("data-expires-at", item.expiresAtUtc);
+  value.setAttribute("role", "status");
+  return [label, value];
+}
+
+/**
+ * The chat element of one broker page item.
+ *
+ * - ``state`` finished or declined: the one-line note; expired: ``expiredMessage``;
+ * - unavailable (the frame never reported): the reason, the line saying so,
+ *   "Open in its own tab" and the countdown;
+ * - otherwise the live card: the reason, the sandboxed frame and a footer with
+ *   the countdown and "Open in its own tab". An open card is reused as is.
+ *
+ * Decline is inside the frame (the broker's own button), so the card has no
+ * Dismiss. ``onState`` receives finished, declined or unavailable.
+ */
+export function brokerCardElement({ document, cards, item, state, expiredMessage, onState }) {
+  if (state === BROKER_CARD_FINISHED || state === BROKER_CARD_DECLINED || state === BROKER_CARD_EXPIRED) {
+    const closed = notice(document, item, "is-closed");
+    closed.appendChild(element(document, "p", "broker-card-note", state === BROKER_CARD_EXPIRED ? expiredMessage : BROKER_CARD_NOTES[state]));
+    return closed;
+  }
+  if (state === BROKER_CARD_UNAVAILABLE) {
+    const linked = notice(document, item, "is-unavailable");
+    linked.appendChild(element(document, "pre", "", item.content));
+    linked.appendChild(element(document, "p", "broker-card-note", BROKER_CARD_NOTES[BROKER_CARD_UNAVAILABLE]));
+    const actions = element(document, "div", "message-transient-actions broker-card-footer");
+    actions.append(openInOwnTab(document, item), ...countdown(document, item));
+    linked.appendChild(actions);
+    return linked;
+  }
+  const live = cards.live(item.itemId);
+  if (live) return live;
+  const card = notice(document, item, "is-framed");
+  card.setAttribute("data-broker-frame", "");
+  if (item.content) card.appendChild(element(document, "p", "broker-card-reason", item.content));
+  const host = element(document, "div", "broker-card-frame-host");
+  card.appendChild(host);
+  const footer = element(document, "div", "message-transient-actions broker-card-footer");
+  footer.append(...countdown(document, item), openInOwnTab(document, item));
+  card.appendChild(footer);
+  const frame = cards.open({
+    itemId: item.itemId,
+    frameUrl: item.frameUrl,
+    title: item.label,
+    element: card,
+    onOutcome: (outcome) => onState(outcome),
+    onUnavailable: () => onState(BROKER_CARD_UNAVAILABLE),
+  });
+  host.appendChild(frame);
+  return card;
+}

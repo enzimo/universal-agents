@@ -5,15 +5,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  BROKER_CARD_NOTES,
   CARD_FRAME_SANDBOX,
   FIRST_MESSAGE_AFTER_LOAD_MS,
   LOAD_LIMIT_MS,
   MIN_FRAME_HEIGHT,
+  OPEN_IN_OWN_TAB_LABEL,
+  brokerCardElement,
   createBrokerCards,
   isCardMessage,
   replaceChildrenKeeping,
 } from "../assistant_gateway/onboarding_web/assets/broker_card.mjs";
-import { fakeDocument } from "./fake_dom.mjs";
+import { buttonLabels, byClass, byTag, fakeDocument } from "./fake_dom.mjs";
 
 const FRAME_URL = "https://broker.example.test/credential-collection/s1?view=card";
 
@@ -200,4 +203,111 @@ test("re-rendering keeps a live card in the page and places the rest around it",
   assert.equal(card.parentNode, list);
   assert.equal(before.parentNode, null);
   assert.equal(after.parentNode, null);
+});
+
+test("when kept cards would have to move, the list is rebuilt and the caller is told", () => {
+  const document = fakeDocument();
+  const make = (name) => Object.assign(document.createElement("div"), { name });
+
+  const reordered = document.createElement("div");
+  const first = make("first card");
+  const second = make("second card");
+  reordered.append(first, second);
+  const swapped = [second, make("message"), first];
+  assert.equal(replaceChildrenKeeping(reordered, swapped, new Set([first, second])), false);
+  assert.deepEqual(reordered.children.map((node) => node.name), ["second card", "message", "first card"]);
+
+  const elsewhere = document.createElement("div");
+  const card = make("card from another list");
+  const list = document.createElement("div");
+  list.append(make("old"));
+  const nodes = [make("message"), card];
+  assert.equal(replaceChildrenKeeping(list, nodes, new Set([card])), false);
+  assert.deepEqual(list.children.map((node) => node.name), ["message", "card from another list"]);
+  assert.equal(elsewhere.children.length, 0);
+});
+
+// -- the card element the chat shows --------------------------------------------------
+
+const ITEM = {
+  itemId: "tool_setup:req-9",
+  label: "Choose your account for Portainer",
+  content: "To list your stacks, choose your Portainer account.",
+  url: "https://broker.example.test/account-link/s9",
+  frameUrl: "https://broker.example.test/account-link/s9?view=card",
+  expiresAtUtc: "2026-11-19T16:00:00Z",
+  createdAt: "2026-11-19T15:30:00Z",
+};
+
+function cardHarness() {
+  const h = harness();
+  const states = [];
+  const render = (state) =>
+    brokerCardElement({
+      document: h.document,
+      cards: h.cards,
+      item: ITEM,
+      state,
+      expiredMessage: "This secure form link has expired.",
+      onState: (next) => states.push(next),
+    });
+  return { ...h, states, render };
+}
+
+test("an open broker card is the frame with the reason, countdown and Open in its own tab, and no Dismiss", () => {
+  const { render } = cardHarness();
+  const card = render("");
+  assert.ok(card.hasAttribute("data-broker-frame"));
+  assert.equal(card.getAttribute("data-item-id"), ITEM.itemId);
+  const [frame] = byTag(card, "iframe");
+  assert.equal(frame.getAttribute("src"), ITEM.frameUrl);
+  assert.equal(frame.getAttribute("sandbox"), CARD_FRAME_SANDBOX);
+  assert.equal(byClass(card, "broker-card-reason")[0].textContent, ITEM.content);
+  const [open] = byTag(card, "a");
+  assert.equal(open.textContent, OPEN_IN_OWN_TAB_LABEL);
+  assert.equal(open.getAttribute("href"), ITEM.url, "its own tab opens the full page, not the card view");
+  assert.equal(open.getAttribute("target"), "_blank");
+  assert.equal(open.getAttribute("rel"), "noopener noreferrer");
+  assert.equal(byClass(card, "message-transient-countdown")[0].getAttribute("data-expires-at"), ITEM.expiresAtUtc);
+  assert.deepEqual(buttonLabels(card), [], "Decline is inside the frame; the card has no Dismiss");
+});
+
+test("a re-render reuses the open card instead of loading a second frame", () => {
+  const { render, cards } = cardHarness();
+  const first = render("");
+  assert.equal(render(""), first);
+  assert.deepEqual(cards.openItemIds(), [ITEM.itemId]);
+});
+
+test("the frame's outcome and silence reach the chat as card states", () => {
+  const finished = cardHarness();
+  const [frame] = byTag(finished.render(""), "iframe");
+  frame.contentWindow = { name: "card frame" };
+  finished.post(frame.contentWindow, { type: "ua-broker-card", outcome: "finished" });
+  assert.deepEqual(finished.states, ["finished"]);
+
+  const silent = cardHarness();
+  const [quiet] = byTag(silent.render(""), "iframe");
+  quiet.dispatchEvent(new Event("load"));
+  silent.fire(FIRST_MESSAGE_AFTER_LOAD_MS);
+  assert.deepEqual(silent.states, ["unavailable"]);
+});
+
+test("a closed card is one line, and an unavailable one offers its own tab", () => {
+  const { render, cards } = cardHarness();
+  for (const [state, line] of [
+    ["finished", BROKER_CARD_NOTES.finished],
+    ["declined", BROKER_CARD_NOTES.declined],
+    ["expired", "This secure form link has expired."],
+  ]) {
+    const closed = render(state);
+    assert.equal(closed.textContent, line);
+    assert.equal(byTag(closed, "iframe").length, 0);
+    assert.equal(byTag(closed, "a").length, 0);
+  }
+  const unavailable = render("unavailable");
+  assert.equal(byTag(unavailable, "iframe").length, 0);
+  assert.ok(unavailable.textContent.includes(BROKER_CARD_NOTES.unavailable));
+  assert.equal(byTag(unavailable, "a")[0].getAttribute("href"), ITEM.url);
+  assert.deepEqual(cards.openItemIds(), [], "no closed or unavailable card opens a frame");
 });
