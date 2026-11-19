@@ -22,7 +22,7 @@ from runtime_settings.instance_layout import InstanceLayout
 from storage.pinned_memory_repository import COREMEM_BANK, create_pinned_memory_repository
 from team_transfer.container import TransferFileError, TransferReader
 from team_transfer.crypto import new_key_derivation
-from team_transfer.errors import TransferError
+from team_transfer.errors import NewTeamIdRefused, TransferError
 from team_transfer.people import PeopleSection
 from team_transfer.pinned_memory import PinnedMemorySection
 from team_transfer.sections import TEAM_ID_RENAMES, RecordOutcome, renamed_records
@@ -184,14 +184,17 @@ def test_the_explanation_says_what_is_wrong_with_the_id() -> None:
 def test_a_requested_new_id_is_checked_like_a_typed_onboarding_id() -> None:
     assert new_team_ids(OLD, None) == TeamIds.unchanged(OLD)
     assert new_team_ids(OLD, f"  {NEW} ") == IDS
-    with pytest.raises(TransferError, match="The new team id is empty"):
+    # An id another one would replace: the page shows these by the id field.
+    with pytest.raises(NewTeamIdRefused, match="The new team id is empty"):
         new_team_ids(OLD, "  ")
-    with pytest.raises(TransferError, match="is 25 characters long"):
+    with pytest.raises(NewTeamIdRefused, match="is 25 characters long"):
         new_team_ids(OLD, "t" * 25)
-    with pytest.raises(TransferError, match="has characters protocol 1 does not allow"):
+    with pytest.raises(NewTeamIdRefused, match="has characters protocol 1 does not allow"):
         new_team_ids(OLD, "team research")
-    with pytest.raises(TransferError, match=f"The export's team id {NEW!r} fits this version, so the team keeps it"):
+    # No new id at all is the fix here, not another one.
+    with pytest.raises(TransferError, match=f"The export's team id {NEW!r} fits this version, so the team keeps it") as kept:
         new_team_ids(NEW, OTHER)
+    assert not isinstance(kept.value, NewTeamIdRefused)
 
 
 MAC = "a" * 64
@@ -257,9 +260,12 @@ def test_a_folder_no_finished_import_from_this_backup_created_is_refused_with_th
     # Another backup's import: its recorded id is never used.
     other_backup = InstanceLayout.at(tmp_path / "other_backup")
     _instance(other_backup, {"source_mac": "b" * 64, "team_id": OTHER, "records": {}})
-    for requested in (None, OTHER):
-        with pytest.raises(TransferError, match="earlier import used a different backup"):
+    for requested in (None, OTHER, NEW):
+        with pytest.raises(TransferError, match="earlier import used a different backup") as refused:
             target_team_ids(_manifest(), other_backup, requested)
+        # An owner who named an instance an earlier import created (onboarding's Import since 0.9.3)
+        # instead of a fresh folder learns where a first import, and so a new team id, goes.
+        assert "a team is given a new team id, goes into a fresh instance root" in str(refused.value)
 
     broken = InstanceLayout.at(tmp_path / "broken")
     _instance(broken, "{")

@@ -41,7 +41,9 @@ def import_receipt(layout: "InstanceLayout", manifest: TransferManifestV1) -> di
         raise TransferError(f"The import receipt {path} cannot be read: {exc}") from exc
     if not isinstance(saved, dict) or saved.get("source_mac") != manifest.mac:
         raise TransferError(
-            "This instance's earlier import used a different backup. Use that same transfer file."
+            "This instance's earlier import used a different backup. Use that same transfer file for later "
+            "batches. A first import, which is also where a team is given a new team id, goes into a fresh "
+            "instance root."
         )
     return saved
 

@@ -47,7 +47,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field, JsonValue
 
-from team_transfer.errors import TransferError
+from team_transfer.errors import NewTeamIdRefused
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
     TEAM_ID_RENAMES,
@@ -297,7 +297,7 @@ def _renamed_knowledge(records: SectionRecords, team_ids: TeamIds) -> SectionRec
         row = raw.get("row")
         if isinstance(row, dict):
             if team_ids.renamed and row.get("team_id") == team_ids.imported:
-                raise TransferError(
+                raise NewTeamIdRefused(
                     f"This export's knowledge holds pages of another team whose id is {team_ids.imported!r}, the new "
                     "team id asked for, so the two teams' pages would become one team's. Choose another new team id."
                 )

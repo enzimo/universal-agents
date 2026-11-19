@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from team_transfer.container import TransferReader
-from team_transfer.errors import TransferError
+from team_transfer.errors import NewTeamIdRefused
 from team_transfer.format import SectionDocumentV1
 from team_transfer.registry import TRANSFER_SECTIONS
 from team_transfer.sections import ImportContext, RecordOutcome, renamed_records, upgrade_records
@@ -173,7 +173,7 @@ def test_knowledge_rows_of_the_team_follow_the_new_id_and_another_teams_rows_kee
 def test_a_new_id_another_teams_knowledge_already_has_is_refused() -> None:
     records = [{"table": "page", "row": {"team_id": OLD}}, {"table": "page", "row": {"team_id": NEW}}]
 
-    with pytest.raises(TransferError, match=f"another team whose id is {NEW!r}, the new team id asked for"):
+    with pytest.raises(NewTeamIdRefused, match=f"another team whose id is {NEW!r}, the new team id asked for"):
         renamed_records("knowledge", records, IDS)
     assert renamed_records("knowledge", records, TeamIds(OLD, "team_free"))[1]["row"]["team_id"] == NEW
 
@@ -250,14 +250,29 @@ def test_access_imported_under_a_new_id_belongs_to_the_new_team(tmp_path: Path) 
     assert store.profile_choice(NEW, "usr_ben") == ("standard", "person")
 
 
+def _knowledge_shared_with(tmp_path: Path, other_team: str) -> Path:
+    """The knowledge test's old instance, whose store also holds one team page of ``other_team``."""
+
+    from dataclasses import replace
+
+    from knowledge_base.service import DraftInput
+    from tests.test_team_transfer_knowledge import _actor, _knowledge_service, _old_instance
+
+    config_path = _old_instance(tmp_path)
+    _knowledge_service(config_path).write(
+        replace(_actor("sys"), team_id=other_team), "team/theirs", DraftInput(title="Theirs", body="Their own page.")
+    )
+    return config_path
+
+
 def test_knowledge_imported_under_a_new_id_is_the_new_teams(tmp_path: Path) -> None:
     from dataclasses import replace
 
     from assistant_gateway.config import GatewayInstanceConfig
     from storage.knowledge_repository import KNOWLEDGE_TRANSFER_TABLES, create_knowledge_repository
-    from tests.test_team_transfer_knowledge import SECTIONS, _actor, _knowledge_service, _old_instance
+    from tests.test_team_transfer_knowledge import SECTIONS, _actor, _knowledge_service
 
-    plan, target = _import(tmp_path, _old_instance(tmp_path), SECTIONS)
+    plan, target = _import(tmp_path, _knowledge_shared_with(tmp_path, OTHER), SECTIONS)
 
     refused = [r.reason for r in plan.records if r.section == "knowledge" and r.outcome is RecordOutcome.REFUSED]
     assert refused and all("usr_stranger, who is not imported" in reason for reason in refused), "as without a new id"
@@ -265,10 +280,24 @@ def test_knowledge_imported_under_a_new_id_is_the_new_teams(tmp_path: Path) -> N
         GatewayInstanceConfig.load(target / "instance_config.yaml").manager_storage_settings
     )
     for table in KNOWLEDGE_TRANSFER_TABLES:
-        assert {row["team_id"] for row in repository.export_rows(table)} <= {NEW}, table
+        assert {row["team_id"] for row in repository.export_rows(table)} <= {NEW, OTHER}, table
+    pages = repository.export_rows("knowledge_pages")
+    assert [row["slug"] for row in pages if row["team_id"] == OTHER] == ["theirs"], "another team's page keeps its id"
+    assert OLD not in {row["team_id"] for row in pages}
     copied = _knowledge_service(target / "instance_config.yaml")
     merged = copied.read(replace(_actor("sys"), team_id=NEW), "team/deploying")
     assert (merged.page.reference(), merged.redirected_from) == ("team/deploy", "team/deploying")
+    assert copied.read(replace(_actor("sys"), team_id=OTHER), "team/theirs").page.title == "Theirs"
+
+
+def test_an_import_under_the_id_of_another_team_in_the_knowledge_is_refused_before_writing(tmp_path: Path) -> None:
+    from tests.test_team_transfer_knowledge import SECTIONS
+
+    with pytest.raises(NewTeamIdRefused) as refused:
+        _import(tmp_path, _knowledge_shared_with(tmp_path, NEW), SECTIONS)
+
+    assert "Choose another new team id" in str(refused.value)
+    assert not (tmp_path / "new").exists(), "nothing is written"
 
 
 def test_objectives_imported_under_a_new_id_are_the_new_team_leads(tmp_path: Path) -> None:

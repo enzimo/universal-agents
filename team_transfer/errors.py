@@ -7,4 +7,13 @@ class TransferError(RuntimeError):
     """The export or import cannot go ahead; the message says what to do."""
 
 
-__all__ = ["TransferError"]
+class NewTeamIdRefused(TransferError):
+    """The new team id asked for cannot be used, and another one can (``team_transfer.team_ids``).
+
+    Raised for a typed id the rule refuses and for an id another team in the export already has,
+    so onboarding's Import page shows the message by the id field and keeps what was typed,
+    and the command line can tell it from a failure another id would not fix.
+    """
+
+
+__all__ = ["NewTeamIdRefused", "TransferError"]

@@ -36,7 +36,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
-from team_transfer.errors import TransferError
+from team_transfer.errors import NewTeamIdRefused, TransferError
 
 if TYPE_CHECKING:
     from runtime_settings.instance_layout import InstanceLayout
@@ -163,8 +163,9 @@ def new_team_ids(exported: str, requested: str | None) -> TeamIds:
 
     ``requested`` is None when no new id was asked for. A new id is given only to a team whose
     id does not fit (owner's answer, 2026-11-19), and it must pass the rule onboarding applies
-    to a typed team id (``onboarding_engine.team_id_answer``). Raises ``TransferError`` with
-    what to do; nothing has been written then.
+    to a typed team id (``onboarding_engine.team_id_answer``). Raises ``NewTeamIdRefused`` for an
+    id another one would replace and ``TransferError`` for a new id asked for a team that keeps
+    its own, each with what to do; nothing has been written then.
     """
 
     from custom_messages.wire.ids import TEAM_ID
@@ -173,7 +174,7 @@ def new_team_ids(exported: str, requested: str | None) -> TeamIds:
         return TeamIds.unchanged(exported)
     typed = requested.strip()
     if not typed:
-        raise TransferError(
+        raise NewTeamIdRefused(
             f"The new team id is empty. Type one of at most {TEAM_ID.cap} letters, digits, '-' and '_', "
             "starting with a letter or digit."
         )
@@ -187,7 +188,7 @@ def new_team_ids(exported: str, requested: str | None) -> TeamIds:
     try:
         chosen = team_id_answer(typed, "")
     except ValueError as exc:
-        raise TransferError(str(exc)) from exc
+        raise NewTeamIdRefused(str(exc)) from exc
     return TeamIds(exported, chosen)
 
 
