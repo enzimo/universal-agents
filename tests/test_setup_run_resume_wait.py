@@ -268,3 +268,112 @@ async def test_without_a_live_turn_two_resumes_at_once_queue_the_task_once(lead,
     resumes = [entry for entry in manager.get_task_history_entries(TASK, limit=None)
                if (entry.details or {}).get("event") == "tool_setup_run_resume"]
     assert len(resumes) == 1
+
+
+# -- answers a paused turn cannot take (A3) ---------------------------------------------------
+
+RESULT = {"status": "ready", "tools": [{"tool_id": "cli:github", "ready": True}]}
+
+
+def queue_another_task(agent: SimpleNamespace) -> None:
+    """Other work already waits in the queue, so 'at the front' means something."""
+
+    assert agent.task_manager.add_task(
+        Task(task_id="other", task_type=MessageMetaType.REQUEST), MessageHeader(from_agent_id="gateway"), MessageMeta(),
+        owner_person_id=None,
+    )
+    assert list(agent.task_manager.task_state.task_queue) == ["other"]
+
+
+def resumed_from_note(agent: SimpleNamespace, note_start: str) -> None:
+    """The no-live-turn path: note, runnable, at the front of the queue, record removed, once."""
+
+    manager = agent.task_manager
+    assert record_of(agent) is None
+    assert manager.get_task_info(TASK).state == ProgressState.ACCEPTED
+    assert list(manager.task_state.task_queue) == [TASK, "other"]
+    assert manager.read_runtime_resume_directive(TASK).startswith(note_start)
+
+
+@pytest.mark.asyncio
+async def test_a_held_answer_whose_paused_turn_is_gone_resumes_the_task_from_a_note(lead, woken, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(tool_setup_run_runtime, "outcome_for", lambda agent, run: RESULT)
+    pause_on_setup(lead)
+    await tool_setup_run_runtime.advance(lead, "run-1")
+    queue_another_task(lead)
+    lead._interrupted_turn_sessions.clear()  # the paused turn ended after its answer was held
+    seen = stub_turn(monkeypatch, lead)
+
+    with caplog.at_level(logging.WARNING):
+        assert await resume_interrupted_task_turn(lead, TASK) is None
+
+    assert seen == [], "no turn to resume"
+    resumed_from_note(lead, tool_setup_run_runtime.RUN_ENDED_NOTE)
+    assert '"status": "ready"' in lead.task_manager.read_runtime_resume_directive(TASK)
+    assert "event=tool_setup_answer_not_taken" in caplog.text and "why=paused_turn_gone" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_answer_the_sdk_cannot_take_resumes_the_task_from_a_note_and_drops_the_turn(
+    lead, woken, monkeypatch, caplog
+) -> None:
+    monkeypatch.setattr(tool_setup_run_runtime, "outcome_for", lambda agent, run: RESULT)
+    monkeypatch.setattr(task_steering_runtime, "_build_interrupt_response_blocks", lambda session, steering: [])
+    pause_on_setup(lead)
+    await tool_setup_run_runtime.advance(lead, "run-1")
+    queue_another_task(lead)
+    session = lead._interrupted_turn_sessions[TASK]
+    seen = stub_turn(monkeypatch, lead)
+
+    with caplog.at_level(logging.WARNING):
+        assert await resume_interrupted_task_turn(lead, TASK) is None
+
+    assert seen == []
+    resumed_from_note(lead, tool_setup_run_runtime.RUN_ENDED_NOTE)
+    assert TASK not in lead._interrupted_turn_sessions and session.strands.replace_before_next_turn
+    assert "why=answer_not_converted" in caplog.text and "event=tool_setup_paused_turn_dropped" in caplog.text
+    events = [(entry.details or {}).get("event") for entry in lead.task_manager.get_task_history_entries(TASK, limit=None)]
+    assert "task_steering_interrupt_response_empty" in events and "tool_setup_run_resume" in events
+
+
+@pytest.mark.asyncio
+async def test_a_held_answer_for_a_run_that_is_not_stored_resumes_saying_so(lead, woken, monkeypatch, caplog) -> None:
+    pause_on_setup(lead)
+    await tool_setup_run_runtime.advance(lead, "run-1")
+    queue_another_task(lead)
+    # The answer names a run the store does not have (its row is gone).
+    record_human_interaction_blocker(lead.task_manager, TASK, {**record_of(lead), "run_id": "run-gone"})
+    lead._pending_interrupt_responses[TASK] = answer("i1", "run-gone")
+    lead._interrupted_turn_sessions.clear()
+
+    with caplog.at_level(logging.WARNING):
+        await resume_interrupted_task_turn(lead, TASK)
+
+    resumed_from_note(lead, tool_setup_run_runtime.RUN_NOT_FOUND_NOTE)
+    assert "event=tool_setup_run_not_found" in caplog.text and "run_id=run-gone" in caplog.text
+
+
+def text_answer() -> TaskSteering:
+    return TaskSteering(
+        steering_id="answer-1", steering_type=TaskSteeringType.INTERRUPT_RESPONSE, target_task_id=TASK,
+        guidance_text="Use the work account.", status=TaskSteeringStatus.PENDING,
+    )
+
+
+@pytest.mark.parametrize("branch", ["paused_turn_gone", "answer_not_converted"])
+@pytest.mark.asyncio
+async def test_other_answers_keep_their_handling_in_those_branches(lead, woken, monkeypatch, branch) -> None:
+    access = {"kind": ACCESS_REQUEST_BLOCKER, "access_request_id": "req-1", "interrupt_id": "i1"}
+    record_human_interaction_blocker(lead.task_manager, TASK, access)
+    lead._pending_interrupt_responses[TASK] = text_answer()
+    if branch == "answer_not_converted":
+        lead._interrupted_turn_sessions[TASK] = SimpleNamespace(
+            task_id=TASK, interrupts=[SimpleNamespace(interrupt_id="i1")], strands=SimpleNamespace(replace_before_next_turn=True)
+        )
+        monkeypatch.setattr(task_steering_runtime, "_build_interrupt_response_blocks", lambda session, steering: [])
+
+    await resume_interrupted_task_turn(lead, TASK)
+
+    assert record_of(lead) == access
+    assert lead.task_manager.get_task_info(TASK).state == ProgressState.WAITING
+    assert not lead.task_manager.task_state.task_queue and not woken

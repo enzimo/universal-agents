@@ -38,6 +38,12 @@ code:
   before the record is removed; a restart between the two saves the same
   note again, which is not added twice. Both decisions are made under the
   run's lock, after reading the record again, so a task is resumed once.
+- **Answers a paused turn cannot take** (``resume_without_paused_turn``): the
+  paused turn ended after its answer was held, or the answer could not be
+  given to the SDK. The task then resumes from the note too, so the answer
+  is not lost with the turn; a paused turn that can never take its answer is
+  dropped. A run that is not stored resumes the task with a note saying the
+  setup was not found (``_resume_missing_run``).
 
 The run and the task blocker are stored, so both processes can restart
 during the wait. Nothing here grants access or reads a credential.
@@ -585,6 +591,100 @@ async def _answer_paused_turn(agent: Any, run: ToolSetupRunV1) -> bool:
     return True
 
 
+# The note a task resumes from when the run its record names is not stored.
+RUN_NOT_FOUND_NOTE = (
+    "The tool setup this task paused for could not be found, so its result is unknown. Continue the task: "
+    "use a tool only if your context lists it as ready, otherwise call set_up_tools again or tell the person "
+    "plainly what is not set up."
+)
+
+
+def _setup_answer(steering: TaskSteering) -> tuple[str, str] | None:
+    """The (interrupt id, run id) of a ``set_up_tools`` answer (``_answer_paused_turn``), or None for any other."""
+
+    for item in steering.interrupt_responses or []:
+        response = item.get("response")
+        if isinstance(response, dict) and response.get("kind") == TOOL_SETUP_RUN_RESPONSE_KIND and response.get("run_id"):
+            return str(item.get("interrupt_id") or ""), str(response["run_id"])
+    return None
+
+
+def _drop_paused_turn(agent: Any, task_id: str, interrupt_id: str, *, why: str) -> None:
+    """Forget the task's paused turn when it waits on ``interrupt_id`` but can never take its answer (logged).
+
+    Its Strands agent is not reused (``replace_before_next_turn``); the task's
+    next turn starts afresh from its note. Left in place, a later answer
+    would be handed to it again.
+    """
+
+    sessions = getattr(agent, "_interrupted_turn_sessions", {})
+    session = sessions.get(task_id)
+    if session is None or not any(item.interrupt_id == interrupt_id for item in session.interrupts):
+        return
+    sessions.pop(task_id, None)
+    session.strands.replace_before_next_turn = True
+    logger.warning(
+        "Dropped a paused turn that cannot take its setup answer. event=tool_setup_paused_turn_dropped "
+        "task_id=%s interrupt_id=%s why=%s",
+        task_id,
+        interrupt_id,
+        why,
+    )
+
+
+async def resume_without_paused_turn(agent: Any, task_id: str, steering: TaskSteering, *, why: str) -> bool:
+    """A ``set_up_tools`` answer its paused turn could not take: resume the task from a note (module docstring).
+
+    ``why`` is ``paused_turn_gone`` or ``answer_not_converted``
+    (``task_steering_runtime._resume_interrupted_task_turn``). Returns False,
+    doing nothing, for any other answer, which keeps its own handling.
+    """
+
+    answer = _setup_answer(steering)
+    if answer is None:
+        return False
+    interrupt_id, run_id = answer
+    logger.warning(
+        "A paused turn could not take its setup answer; the task resumes from a note. "
+        "event=tool_setup_answer_not_taken task_id=%s run_id=%s why=%s",
+        task_id,
+        run_id,
+        why,
+    )
+    _drop_paused_turn(agent, task_id, interrupt_id, why=why)
+    run = await _load(agent, run_id)
+    if run is None or run.task_id != task_id:
+        return await _resume_missing_run(agent, task_id, run_id)
+    return await _resume(agent, run, None, None)
+
+
+async def _resume_missing_run(agent: Any, task_id: str, run_id: str) -> bool:
+    """The run the task's record names is not stored: resume the task saying the setup was not found (logged).
+
+    A paused turn still waiting on it is dropped: its answer can never come,
+    and ``set_up_tools`` would quietly plan a new run if it were answered.
+    """
+
+    manager = agent.task_manager
+    async with _lock(agent, run_id):
+        blocker = await manager.operations_runtime.run(partial(get_human_interaction_blocker, manager), task_id)
+        if blocker is None or not is_setup_run_blocker(blocker, run_id):
+            return False
+        _drop_paused_turn(agent, task_id, str(blocker.get("interrupt_id") or ""), why="setup_run_not_found")
+        resumed = await _resume_from_note(
+            agent, task_id, run_id, RUN_NOT_FOUND_NOTE,
+            history="The tool setup was not found; the task resumes.", event="tool_setup_run_not_found",
+        )
+    if resumed:
+        logger.warning(
+            "The setup run a task waited for is not stored; the task resumes without its result. "
+            "event=tool_setup_run_not_found run_id=%s task_id=%s",
+            run_id,
+            task_id,
+        )
+    return resumed
+
+
 async def _resume_from_note(agent: Any, task_id: str, run_id: str, note: str, *, history: str, event: str) -> bool:
     """Queue the task at the front with a note its next turn reads; True when this call removed the record.
 
@@ -619,6 +719,7 @@ __all__ = [
     "on_access_decided",
     "on_setup_result",
     "outcome_for",
+    "resume_without_paused_turn",
     "run_repository",
     "send_setup_request",
 ]

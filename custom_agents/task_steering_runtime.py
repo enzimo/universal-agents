@@ -1145,6 +1145,19 @@ def _structured_answers(
     return answers
 
 
+async def _answer_not_taken(agent: Any, task_id: str, steering: TaskSteering, *, why: str) -> None:
+    """An answer no paused turn can take: a ``set_up_tools`` answer resumes its task from a note.
+
+    Its record would otherwise keep the task waiting with nothing left to
+    resume it (``tool_setup_run_runtime.resume_without_paused_turn``). Other
+    answers keep their handling here.
+    """
+
+    from custom_agents.tool_setup_run_runtime import resume_without_paused_turn
+
+    await resume_without_paused_turn(agent, task_id, steering, why=why)
+
+
 async def resume_interrupted_task_turn(agent: Any, task_id: str) -> Optional[Any]:
     """Resume an in-memory Strands interrupt and apply the resulting task output.
 
@@ -1160,6 +1173,8 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
     session = agent._interrupted_turn_sessions.get(task_id)
     steering = agent._pending_interrupt_responses.pop(task_id, None)
     if session is None or steering is None:
+        if steering is not None:
+            await _answer_not_taken(agent, task_id, steering, why="paused_turn_gone")
         return None
 
     task_info = await agent.task_manager.operations_runtime.run(
@@ -1185,6 +1200,7 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
                 "steering_id": steering.steering_id,
             },
         )
+        await _answer_not_taken(agent, task_id, steering, why="answer_not_converted")
         return None
 
     work.strands = session.strands
