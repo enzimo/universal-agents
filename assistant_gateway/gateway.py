@@ -198,7 +198,7 @@ from assistant_gateway.http_secure_broker import HttpGatewaySecureBroker
 from assistant_gateway.onboarding_account_keys import OnboardingAccountKeyHandover
 from assistant_gateway.installed_procedures import GatewayInstalledProcedures
 from assistant_gateway.mcp_controls import GatewayMCPControls
-from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
+from assistant_gateway.nats_manager_runtime import HANDLING_RETRY_DELAY_SECONDS, NatsGatewayManagerRuntime
 from assistant_gateway.person_departure import build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCommandParser
 from assistant_gateway.ports.repositories import (
@@ -777,6 +777,9 @@ class UserGateway:
                 recovery_discovery_timeout_seconds=(
                     MANAGER_RECOVERY_DISCOVERY_TIMEOUT_SECONDS
                 ),
+                # A leftover reply is retried as the response receiver retries a message.
+                leftover_attempts=int(config.transport.max_deliver or 1),
+                leftover_retry_seconds=HANDLING_RETRY_DELAY_SECONDS,
             ),
             clock=self._clock,
             id_generator=self._id_generator,
@@ -1125,6 +1128,7 @@ class UserGateway:
             on_manager_available=self.manager_transitions.handle_available,
             on_manager_unavailable=self.manager_transitions.handle_unavailable,
             on_agent_presence=_agent_presence_observer(self.team_presence, self._thread_guidance),
+            on_leftover_lost=self._response_coordinator.fail_lost_credential_request,
         )
         self._interactive_submission_service = GatewayInteractiveSubmissionService(
             settings=GatewayInteractiveSubmissionSettings(
@@ -1412,6 +1416,9 @@ class UserGateway:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks = []
+        # Before the page watches stop: a leftover passed on later could open a
+        # page that nothing watches (reply_leftovers).
+        await self._manager_client.stop_leftover_passes()
         await self._credential_workflow.close()
         self._credential_handoffs.clear()
         await self._activity_notices.close()

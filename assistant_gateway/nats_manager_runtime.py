@@ -16,7 +16,14 @@ from custom_transport.base import (
     TransportPublishOptions,
 )
 from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAdapter, NatsTransportConfig
+from custom_transport.nats_pull import UNHANDLED_RETURN_DELAY_SECONDS
 from custom_transport.subjects import NatsSubjectMapper
+
+# How long the response receiver waits before it offers again a message whose
+# handling failed. A message left on a closed reply wait is retried on the same
+# schedule (assistant_gateway.application.reply_leftovers), so the gateway reads
+# it here: the gateway itself does not import the transport.
+HANDLING_RETRY_DELAY_SECONDS = UNHANDLED_RETURN_DELAY_SECONDS
 
 
 @dataclass(frozen=True)
