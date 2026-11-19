@@ -273,6 +273,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 env=local_nats_env,
                 logger=LOGGER,
                 cwd=PROJECT_ROOT,
+                # For the server's partition mappings; config.yaml may leave the setting at its default.
+                partitions=int(load_runtime_config_file(args.config).get(
+                    "transport.queues.partitions", TRANSPORT_DEFAULTS.queues_partitions.value)),
             )
             os.environ.update(
                 {

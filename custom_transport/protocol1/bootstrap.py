@@ -2,14 +2,22 @@
 
 It holds what a host needs before it has a certificate of its own:
 - the installation's id and its authority public keys, the root of every trust check;
+- the installation's partition count (``transport.queues.partitions``, README
+  "Partitions"), which the host's trust store takes, so every process computes agents'
+  partitions with the same count;
 - trust records: the certificates of the installation authority's hosts, so the host can
   check the authority's join reply, and the newest revocations record.
 
-The launcher writes the authority keys when it creates them; the installation
-authority adds its own certificate and the current revocations record whenever it
-signs new ones. The authority keys are the root of trust: whoever can change the file
-can name other keys, so it lives in the owner-only trust folder and only the launcher
-and the installation authority write it. The records it carries are verified against
+The launcher writes the authority keys when it creates them and the partition count from
+the saved settings at every start, before any host starts; the installation authority
+adds its own certificate and the current revocations record whenever it signs new ones
+and keeps the count. Every bundle holds the count: no release wrote one without it, so a
+bundle that lacks it is refused like a damaged one, and the launcher writes a new one at
+the next start (the authority signs its records again from its own folder).
+
+The authority keys are the root of trust: whoever can change the file can name other
+keys, so it lives in the owner-only trust folder and only the launcher and the
+installation authority write it. The records it carries are verified against
 those keys like any other copy, so where a record is stored adds no trust. The NATS
 credential of the pre-join permission set joins the bundle in phase 3, with per-host
 NATS users.
@@ -27,6 +35,7 @@ from typing import Any, Iterable, Mapping, Optional
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from custom_messages.wire.encoding import b64url_decode
+from custom_messages.wire.partitions import check_partition_count
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import AuthorityKey, TrustStore
 from custom_transport.protocol1.private_files import write_private_file
@@ -47,15 +56,24 @@ class BootstrapBundle:
     installation: str
     authority_keys: tuple[tuple[str, str], ...]
     records: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
+    partitions: int = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        check_partition_count(self.partitions)
 
     def anchors(self) -> list[AuthorityKey]:
         return [AuthorityKey(self.installation, key_id, Ed25519PublicKey.from_public_bytes(b64url_decode(public_key)))
                 for key_id, public_key in self.authority_keys]
 
-    def trust_store(self, now: datetime) -> TrustStore:
-        """A trust store holding the bundle's authority keys and the records that still verify at ``now``."""
+    def empty_trust_store(self) -> TrustStore:
+        """A trust store holding the bundle's authority keys and partition count, and no records yet."""
 
-        store = TrustStore(self.installation, self.anchors())
+        return TrustStore(self.installation, self.anchors(), partition_count=self.partitions)
+
+    def trust_store(self, now: datetime) -> TrustStore:
+        """A trust store holding the bundle's authority keys, its partition count and the records that verify at ``now``."""
+
+        store = self.empty_trust_store()
         self.add_to(store, now)
         return store
 
@@ -82,9 +100,9 @@ class BootstrapBundle:
         return taken
 
     def with_records(self, records: Iterable[Mapping[str, Any]]) -> "BootstrapBundle":
-        """The bundle with ``records`` instead of its current ones (the authority's newest)."""
+        """The bundle with ``records`` instead of its current ones (the authority's newest); the rest is kept."""
 
-        return BootstrapBundle(self.installation, self.authority_keys, tuple(records))
+        return BootstrapBundle(self.installation, self.authority_keys, tuple(records), partitions=self.partitions)
 
 
 def read_bundle(path: Path) -> BootstrapBundle:
@@ -101,8 +119,11 @@ def read_bundle(path: Path) -> BootstrapBundle:
         records = tuple(document.get("records", ()))
         if not keys or any(not isinstance(record, dict) or record.get("record") not in _RECORD_ORDER for record in records):
             raise BootstrapError(f"The bootstrap bundle {path} names no authority key or holds an unknown record.")
-        return BootstrapBundle(str(document["installation"]), keys, records)
-    except (KeyError, TypeError) as error:
+        if "partitions" not in document:
+            raise BootstrapError(f"The bootstrap bundle {path} holds no partition count. The launcher writes a new "
+                                 "bundle at every start; restart the instance.")
+        return BootstrapBundle(str(document["installation"]), keys, records, partitions=document["partitions"])
+    except (KeyError, TypeError, ValueError) as error:
         raise BootstrapError(f"The bootstrap bundle {path} is damaged: {error}") from error
 
 
@@ -112,6 +133,7 @@ def write_bundle(path: Path, bundle: BootstrapBundle) -> None:
     document = {
         "version": _BUNDLE_VERSION,
         "installation": bundle.installation,
+        "partitions": bundle.partitions,
         "authority_keys": [{"key_id": key_id, "public_key": public_key} for key_id, public_key in bundle.authority_keys],
         "records": list(bundle.records),
     }

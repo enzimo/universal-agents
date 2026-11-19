@@ -18,6 +18,8 @@ from team_transfer.crypto import new_key_derivation
 from team_transfer.sections import SECTION_UPGRADES, ExportSource, RecordOutcome, SectionExport, SectionFiles
 from team_transfer.service import TransferError, export_source, export_team, import_team
 from team_transfer.settings import INSTANCE_ROOT_TOKEN, SettingsSection, SettingV1
+from default_values import MIB
+from runtime_settings.transport import PARTITION_COUNT_SETTING, QueueSettings
 from tests.pinned_memory_support import new_instance
 
 PASSPHRASE = "correct horse battery staple"
@@ -151,7 +153,7 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
-@pytest.mark.parametrize("exported_version", [5, 6, 7, 8, 9, 10])
+@pytest.mark.parametrize("exported_version", [5, 6, 7, 8, 9, 10, 11])
 def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defaults(
     tmp_path: Path, exported_version: int
 ) -> None:
@@ -164,7 +166,9 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
     import keeps the review turned off beside the team's other skill installation choices.
     Version 10 is this branch's pre-release export after step 7d. Every earlier version
     may still carry the ignored agent.max_concurrent_top_level_tasks, which version 11
-    removed, so the conversion drops it too.
+    removed, so the conversion drops it too. Version 11 predates transport.queues, so the
+    imported instance takes their defaults. Every earlier version read transport.replicas 0 (and
+    "0") as one copy, which version 12 refuses: the conversion writes it as 1.
     """
 
     from assistant_gateway.config import GatewayInstanceConfig
@@ -188,6 +192,8 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
                 records.append(SettingV1(path=SEMANTIC_REVIEW + ("mode",), value="task_model"))
                 records.append(SettingV1(path=SEMANTIC_REVIEW + ("max_input_bytes",), value=524288))
             records.append(SettingV1(path=("agent", "max_concurrent_top_level_tasks"), value=4))
+            # Read as one copy before 0.10; a quoted 0 too, which 0.9's int field read (DI-1 of PR 152's review).
+            records.append(SettingV1(path=("transport", "replicas"), value="0" if exported_version % 2 else 0))
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
     path, _config = _old_instance(tmp_path)
@@ -219,6 +225,65 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
         if exported_version >= 9
         else {"mode": "off", "max_input_bytes": 262144}
     )
+    assert imported.transport.queues == QueueSettings()
+    assert outcomes["transport.replicas"].outcome is RecordOutcome.IMPORT and imported.transport.replicas == 1
+
+
+def _queue_choices(config: Any) -> None:
+    config.transport.queues.max_bytes.partition = 32 * MIB
+    config.transport.queues.max_bytes.dead_letter = 64 * MIB
+    config.transport.queues.warn_at_percent = 70
+    config.transport.queues.max_messages_per_subject = 4
+    config.transport.queues.partitions = 64
+
+
+def test_queue_choices_move_with_the_team_but_the_partition_count_stays(tmp_path: Path) -> None:
+    """The partition count is fixed when an instance is created, so the new instance keeps its own;
+    the stream sizes, the warning level and the per-subject cap are the team's choices and travel."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    path, _config = _old_instance(tmp_path, _queue_choices)
+    out = _export(tmp_path, path)
+
+    assert {record.dotted: record.value for record in _records(out)} == {
+        "transport.queues.max_bytes.partition": 32 * MIB,
+        "transport.queues.max_bytes.dead_letter": 64 * MIB,
+        "transport.queues.warn_at_percent": 70,
+        "transport.queues.max_messages_per_subject": 4,
+    }
+    target = tmp_path / "new"
+    plan = _import(out, target, dry_run=False)
+
+    assert not plan.by_outcome(RecordOutcome.REFUSED)
+    queues = GatewayInstanceConfig.load(target / "instance_config.yaml").transport.queues
+    assert (queues.max_bytes.partition, queues.max_bytes.dead_letter) == (32 * MIB, 64 * MIB)
+    assert (queues.warn_at_percent, queues.max_messages_per_subject) == (70, 4)
+    assert queues.partitions == QueueSettings().partitions
+
+
+def test_a_carried_partition_count_is_refused_with_its_reason(tmp_path: Path) -> None:
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    class Crafted(SettingsSection):
+        def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
+            records = [
+                SettingV1(path=PARTITION_COUNT_SETTING, value=64),
+                SettingV1(path=("transport", "queues", "warn_at_percent"), value=70),
+            ]
+            return SectionExport(records=[record.model_dump(mode="json") for record in records])
+
+    path, _config = _old_instance(tmp_path)
+    target = tmp_path / "new"
+
+    plan = _import(_export(tmp_path, path, Crafted()), target, dry_run=False)
+
+    outcomes = {record.key: record for record in plan.records}
+    assert outcomes["transport.queues.partitions"].outcome is RecordOutcome.REFUSED
+    assert "fixed when an instance is created" in outcomes["transport.queues.partitions"].reason
+    assert outcomes["transport.queues.warn_at_percent"].outcome is RecordOutcome.IMPORT
+    queues = GatewayInstanceConfig.load(target / "instance_config.yaml").transport.queues
+    assert (queues.partitions, queues.warn_at_percent) == (QueueSettings().partitions, 70)
 
 
 def test_a_selected_skill_semantic_review_moves_with_the_team(tmp_path: Path) -> None:

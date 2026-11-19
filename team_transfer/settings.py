@@ -36,7 +36,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final, Iterator
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
 from runtime_settings.retired_concurrency import RETIRED_CONCURRENCY_SETTING
-from runtime_settings.transport import RETIRED_PRESENCE_SETTING
+from runtime_settings.transport import (
+    PARTITION_COUNT_SETTING,
+    REPLICAS_SETTING,
+    RETIRED_PRESENCE_SETTING,
+    upgraded_replicas,
+)
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
     SECTION_UPGRADES,
@@ -63,6 +68,13 @@ _DERIVED_SETTINGS: Final = frozenset(
         ("instance_name",),
         ("gateway", "team_id"),
     }
+)
+# Fixed when an installation is created (runtime_settings.transport): the destination keeps
+# its own count, because another count puts queued work in other streams and a later batch
+# carrying one would stop the destination's start.
+_INSTALLATION_SETTINGS: Final = frozenset({PARTITION_COUNT_SETTING})
+_INSTALLATION_SETTING_REASON: Final = (
+    "the partition count is fixed when an instance is created; this instance keeps its own"
 )
 _CONFIG_KEY: Final = "settings.config"
 _MAX_VALIDATION_ROUNDS: Final = 50
@@ -96,7 +108,9 @@ class SettingsSection:
     # 9: optional skill semantic-review settings joined workspace.skill_installation (0.9 releases, from main).
     # 10: transport.presence_max_age_seconds left it (the presence stream was removed, message contract step 7d).
     # 11: agent.max_concurrent_top_level_tasks left it (earlier loaders kept the ignored key in saved files).
-    schema_version: ClassVar[int] = 11
+    # 12: transport.queues (protocol 1 stream sizes, the size warning's level, the per-subject cap and the
+    #     partition count) joined it; the partition count is not carried (_INSTALLATION_SETTINGS).
+    schema_version: ClassVar[int] = 12
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -121,7 +135,7 @@ class SettingsSection:
                 mode="json"
             )
             for path, value in changed_settings(saved, baseline)
-            if path not in _DERIVED_SETTINGS
+            if path not in _DERIVED_SETTINGS and path not in _INSTALLATION_SETTINGS
         ]
         return SectionExport(records=records)
 
@@ -313,6 +327,9 @@ def _applied(
             continue
         if setting.path in {RETIRED_CONCURRENCY_SETTING, RETIRED_PRESENCE_SETTING}:
             refused[setting.dotted] = "this version no longer has this setting"
+            continue
+        if setting.path in _INSTALLATION_SETTINGS:
+            refused[setting.dotted] = _INSTALLATION_SETTING_REASON
             continue
         problem = _later_storage_problem(setting, base, context) or _set_path(
             candidate, setting.path, _under_root(setting.value, root)
@@ -687,13 +704,27 @@ __all__ = [
 # had neither the presence setting nor the semantic-review settings, so the
 # same step reads it. V11 removed agent.max_concurrent_top_level_tasks
 # (RETIRED_CONCURRENCY_SETTING), which loaders before it ignored but left in saved
-# files, so any earlier export may carry it: the same step drops it.
+# files, so any earlier export may carry it: the same step drops it. V12 added
+# transport.queues; an older export has none, so the new instance takes their defaults
+# and the same step reads version 11. Version 12 also takes only a whole number from 1 to 5
+# for transport.replicas, so the same step writes what earlier versions read as their count
+# (0, which they read as one copy, "3", 1.0, true; runtime_settings.transport.upgraded_replicas).
 
 
-def _without_retired_settings(records: SectionRecords) -> SectionRecords:
+def _upgraded_settings(records: SectionRecords) -> SectionRecords:
+    """An older export's records as version 12 reads them: retired settings dropped, a replica count as a whole number."""
+
     retired = {RETIRED_PRESENCE_SETTING, RETIRED_CONCURRENCY_SETTING}
-    return [record for record in records if tuple(record.get("path", ())) not in retired]
+    upgraded: SectionRecords = []
+    for record in records:
+        path = tuple(record.get("path", ()))
+        if path in retired:
+            continue
+        if path == REPLICAS_SETTING and (count := upgraded_replicas(record.get("value"))) is not None:
+            record = {**record, "value": count}
+        upgraded.append(record)
+    return upgraded
 
 
-for _source in (5, 6, 7, 8, 9, 10):
-    SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _without_retired_settings
+for _source in (5, 6, 7, 8, 9, 10, 11):
+    SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _upgraded_settings

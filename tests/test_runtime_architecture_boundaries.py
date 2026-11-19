@@ -832,9 +832,14 @@ def test_large_facades_cannot_grow(
 # subscribes to NATS, and nothing creates a deliver group (the push consumer
 # shape that handed work to busy agents). Protocol 1's live module subscribes only
 # to request/reply and event addresses (custom_transport.protocol1.live.serve), which
-# hold no queued work; its queued kinds are pulled like today's.
+# hold no queued work; its queued kinds are pulled like today's. Bucket reads subscribe
+# with ordered consumers to key-value buckets (listings and watches of state records),
+# which hold state, never work. The partition mapping check holds one subscription to its
+# own probe addresses while it waits for them, and no stream stores those
+# (custom_transport.protocol1.mapping_check).
 NATS_SUBSCRIBERS = {"custom_transport/nats_adapter.py", "custom_transport/nats_pull.py",
-                    "custom_transport/protocol1/live.py"}
+                    "custom_transport/protocol1/live.py", "custom_transport/protocol1/bucket_reads.py",
+                    "custom_transport/protocol1/mapping_check.py"}
 # The names a raw NATS connection or JetStream context goes by; ``nats_connection`` is the
 # adapter's property that hands the connection to the protocol 1 kernel.
 NATS_CLIENT_NAMES = ("_js", "js", "jetstream", "_nc", "nc", "nats_client", "nats_connection")
@@ -848,9 +853,10 @@ NATS_CLIENT_CALLS = frozenset({
 # The only modules that use a raw NATS handle at all (plan 13B.6). Everything else goes
 # through them, so the flush before sending (custom_transport.send_barrier), the
 # requester's-inbox rule for answers and the pull-only rule each live in one place. A
-# key-value watch is an ordered push subscription on state, never work; it is reachable
-# only through a bucket these modules bind. A module that needs a raw handle is added
-# here in the same change, with its reason.
+# key-value watch or listing is an ordered push subscription on state, never work; the
+# product reads buckets that way only through bucket_reads, which decides itself where a
+# read's first values end (README_ARCHITECTURE.md "Bucket reads"). A module that needs a
+# raw handle is added here in the same change, with its reason.
 NATS_CLIENT_MODULES = {
     "custom_transport/nats_adapter.py": "the transport adapter: publishing, delivery, object store",
     "custom_transport/nats_pull.py": "pull consumers for queued work",
@@ -858,8 +864,11 @@ NATS_CLIENT_MODULES = {
     "custom_transport/nats_topology.py": "creates and updates the streams",
     "custom_transport/protocol1/live.py": "protocol 1 requests, replies and served addresses",
     "custom_transport/protocol1/state_records.py": "protocol 1 signed records in key-value buckets",
+    "custom_transport/protocol1/bucket_reads.py": "key-value listings and watches that cannot end early",
     "custom_transport/protocol1/joining.py": "a host's join request, signed before it has a certificate",
+    "custom_transport/protocol1/mapping_check.py": "the partition mapping check: unsigned probes on its own probe addresses",
     "installation_authority/service.py": "the topology owner's buckets, and the certificates it keeps in UA1_CERTS",
+    "installation_authority/queues.py": "the topology owner's work and dead-letter streams and team consumers",
     "team_services/lock.py": "the team services' single-instance lock in UA1_LOCKS, an unsigned lease",
 }
 
@@ -937,6 +946,76 @@ def test_the_raw_nats_handle_check_sees_each_way_in(source: str) -> None:
                and isinstance(node.func, ast.Attribute) and node.func.attr in NATS_CLIENT_CALLS
                and node.func.attr != "jetstream"]
     assert _handle_name(call.func.value) in NATS_CLIENT_NAMES
+
+
+# nats-py's bucket reads that end their first values on the consumer's pending count, which
+# can end them early while other processes write (README_ARCHITECTURE.md "Bucket reads").
+# The product lists and watches buckets only through custom_transport.protocol1.bucket_reads.
+# Only NATS_CLIENT_MODULES can bind a bucket (the raw handle check above), so only they are
+# searched, and there any call named keys, watch, watchall or history is refused: awaited,
+# wrapped (asyncio.wait_for, gather, create_task) or kept to await later. None of them needs
+# a dictionary's keys(); iterating the dictionary gives the same. Elsewhere
+# ``await records.keys(...)`` is StateRecords', which reads through bucket_reads.
+NATS_PY_BUCKET_READS = frozenset({"keys", "watch", "watchall", "history"})
+
+
+def _nats_py_bucket_reads(tree: ast.AST) -> list[tuple[int, str]]:
+    return [(node.lineno, node.func.attr) for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in NATS_PY_BUCKET_READS]
+
+
+def _no_keys_error_uses(tree: ast.AST) -> list[int]:
+    """Lines that name nats-py's NoKeysError: imported, imported under another name, or read as an attribute."""
+
+    return [node.lineno for node in ast.walk(tree)
+            if (isinstance(node, ast.Name) and node.id == "NoKeysError")
+            or (isinstance(node, ast.Attribute) and node.attr == "NoKeysError")
+            or (isinstance(node, (ast.Import, ast.ImportFrom))
+                and any(alias.name.rsplit(".", 1)[-1] == "NoKeysError" for alias in node.names))]
+
+
+def test_buckets_are_listed_and_watched_only_through_bucket_reads() -> None:
+    offenders: list[str] = []
+    for path in _production_python_files():
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if relative in NATS_CLIENT_MODULES:
+            offenders += [f"{relative}:{line} {name}" for line, name in _nats_py_bucket_reads(tree)]
+        # nats-py raises NoKeysError when its listing ends at the marker with no key; reading
+        # it as an empty bucket was how a listing that ended early became "no keys". No
+        # production code names it at all.
+        offenders += [f"{relative}:{line} NoKeysError" for line in _no_keys_error_uses(tree)]
+    assert offenders == []
+
+
+@pytest.mark.parametrize(("source", "found"), [
+    ("keys = await bucket.keys()", ["keys"]),
+    ("watcher = await (await js.key_value('UA1_AGENTS')).watch('team_one.>')", ["watch"]),
+    ("entries = await self._records().history('host.install_one.lead-host-1.1')", ["history"]),
+    ("everything = await kv.watchall(include_history=True)", ["watchall"]),
+    ("keys = await asyncio.wait_for(bucket.keys(), 5)", ["keys"]),
+    ("following = asyncio.create_task(bucket.watch(prefix))", ["watch"]),
+    ("await asyncio.gather(certs.keys(), hosts.keys())", ["keys", "keys"]),
+    ("reading = bucket.keys(); await reading", ["keys"]),
+    ("names = sorted(handlers.keys())", ["keys"]),  # a dictionary's too: iterate it instead
+    ("keys = await list_keys(js, 'UA1_AGENTS', 'team_one.')", []),
+    ("async for change in bucket_reads.watch_keys(js, 'UA1_HOSTS'): pass", []),
+])
+def test_the_bucket_read_check_sees_each_way_in(source: str, found: list[str]) -> None:
+    tree = ast.parse(f"async def read():\n    {source}\n")
+    assert [name for _line, name in _nats_py_bucket_reads(tree)] == found
+
+
+@pytest.mark.parametrize(("source", "found"), [
+    ("from nats.js.errors import NoKeysError", 1),
+    ("from nats.js.errors import NoKeysError as Empty", 1),
+    ("import nats.js.errors\ntry:\n    pass\nexcept nats.js.errors.NoKeysError:\n    keys = []", 1),
+    ("from nats.js import errors\ntry:\n    pass\nexcept (errors.NoKeysError, errors.NotFoundError):\n    keys = []", 1),
+    ("from nats.js.errors import NotFoundError", 0),
+])
+def test_the_no_keys_error_check_sees_each_way_in(source: str, found: int) -> None:
+    assert len(_no_keys_error_uses(ast.parse(source))) == found
 
 
 # Who may write Objective records. A new record is inserted (creation and the

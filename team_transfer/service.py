@@ -38,6 +38,7 @@ from team_transfer.format import (
     TransferManifestV1,
 )
 from team_transfer.private_files import write_private_json
+from team_transfer.protocol1_ids import require_protocol1_ids
 from team_transfer.runtime_guard import import_writer, require_finished_import
 from team_transfer.sections import (
     DestinationChoices,
@@ -314,6 +315,9 @@ def _import_context(reader, target_root, sections, allow_existing):
     )
     if not allow_existing or not layout.instance_config_path.is_file():
         require_fresh_target(layout)
+        # The import creates this version's team: ids it cannot carry are refused now, not by
+        # the launcher once everything is written (team_transfer.protocol1_ids).
+        require_protocol1_ids(reader)
         return context, {}
     from assistant_gateway.config import GatewayInstanceConfig
     from team_transfer.batches import previous_records

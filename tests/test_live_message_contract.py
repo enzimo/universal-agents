@@ -30,7 +30,7 @@ import shutil
 import string
 import subprocess
 import time
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,7 +44,7 @@ from nats.nuid import NUID
 
 from custom_messages.wire import frame as wire_frame
 from custom_messages.wire.buckets import bucket_stream
-from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, KINDS
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, KINDS, PARTITION_PROBE_SCOPE
 from custom_messages.wire.partitions import (
     agent_partition,
     agent_record_key,
@@ -55,10 +55,14 @@ from custom_messages.wire.partitions import (
 )
 from custom_messages.wire.permissions import HostPlacement, host_permissions
 from custom_messages.wire.refusals import FrameRefused
+from custom_transport.protocol1.bucket_reads import KeyChange, list_keys, watch_keys
+from custom_transport.protocol1.mapping_check import check_partition_mapping
+from installation_authority.queues import QueueTopology
 from tests import message_contract_support as fixtures
 from tests.live_nats_support import flush_fully
 from tests.nats_operator_support import NatsUser, OperatorAccount
 from tests.own_nats_server import own_nats_server
+from tests.queue_limits_support import queue_limits
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts/messages/v1"
@@ -433,6 +437,22 @@ async def test_the_server_stores_and_delivers_every_agent_in_the_partition_the_w
 
 
 @pytest.mark.asyncio
+async def test_the_authority_checks_the_mapping_under_its_own_grants_and_no_other_host_may(isolated_broker) -> None:
+    """README, "Partitions", the mapping check: the topology owner's grants hold its probe addresses, mapped or not."""
+
+    runtime = HOSTS["authority"]["runtime"]
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        await check_partition_mapping(authority.nc, sender=runtime, count=COUNT)
+        assert authority.errors.empty()
+        # Another host can neither probe as the authority nor hear its probes.
+        lead = await connect(stack, isolated_broker, "lead")
+        for address in ("ctl.agent", "work.agent", "work.control"):
+            await lead.publish_refused(f"ua.v1.{PARTITION_PROBE_SCOPE}.{runtime}.{address}.probe-1")
+        await lead.subscribe_refused(f"ua.v1.{PARTITION_PROBE_SCOPE}.{runtime}.>")
+
+
+@pytest.mark.asyncio
 async def test_a_sender_may_pick_the_partition_token_and_the_receiver_refuses_it(isolated_broker) -> None:
     """README, "Partitions", the arrival suffix: NATS checks grants after mapping, so it cannot stop this.
 
@@ -568,6 +588,26 @@ async def test_the_topology_owner_sets_up_streams_and_the_team_services_withdraw
         await services.publish_refused(f"$JS.API.STREAM.MSG.GET.{consumer_stream('agent_inbox', 'team_other', 0)}")
         assert await owner.delete_consumer(consumer_stream("pool"), consumer_name("pool", pool="researcher"))
         assert authority.errors.empty() and services.errors.empty() and lead.errors.empty() and worker.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_the_authority_sets_up_every_teams_streams_and_team_consumers_under_its_own_grants(isolated_broker) -> None:
+    """README, "Who sets up the streams": what installation_authority.queues asks of the server, in operator mode."""
+
+    team = "team_grants"
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        nc = authority.nc
+        # Creating every stream reads each one and the account's storage first.
+        await QueueTopology(nc, nc.jetstream(), transport=TRANSPORT, limits=queue_limits(), partitions=COUNT).ensure([team])
+        # A lowered cap reads the partition streams' subjects; an enlarged limit updates the stream.
+        await QueueTopology(nc, nc.jetstream(), transport=TRANSPORT, limits=queue_limits(cap=4, pool=2 << 20),
+                            partitions=COUNT).ensure([team])
+        assert (await nc.jetstream().stream_info(f"UA1_POOL_WORK_{team}")).config.max_bytes == 2 << 20
+        assert authority.errors.empty()
+        # No other host sets up a stream.
+        lead = await connect(stack, isolated_broker, "lead")
+        await lead.publish_refused(f"$JS.API.STREAM.CREATE.UA1_PART_{team}~0")
 
 
 @pytest.mark.asyncio
@@ -958,6 +998,12 @@ async def test_hosts_write_only_their_own_records_and_read_every_bucket(isolated
 
         assert await asyncio.wait_for(first_value(), timeout=2) == b"liveness"
         await watch.stop()
+        # The product reads buckets through bucket_reads, which also asks for the stream's
+        # information under the read's filter: a host's read grants cover that too.
+        assert await list_keys(worker.nc.jetstream(), "UA1_HOSTS") == ["worker-host-1"]
+        async with aclosing(watch_keys(worker.nc.jetstream(), "UA1_HOSTS", "worker-host-1")) as changes:
+            assert await asyncio.wait_for(anext(changes), 2) == KeyChange("worker-host-1", b"liveness")
+            assert await asyncio.wait_for(anext(changes), 2) is None
         # Agent records live under their partition; the host writes those of its own partitions only.
         agents = await worker.nc.jetstream().key_value("UA1_AGENTS")
         await agents.put(agent_record_key(TEAM, "researcher-2", COUNT), b"idle")
@@ -1044,6 +1090,10 @@ async def test_bucket_readers_watch_through_unnamed_consumers_and_read_only_thei
         # It reads its own team's bucket.
         with pytest.raises(nats.js.errors.KeyNotFoundError):
             await (await other.nc.jetstream().key_value("UA1_TEAM_VIEW_team_other")).get("team_other.objective.o9")
+        # The product's listings (bucket_reads) work under each host's own login.
+        assert await list_keys(worker.nc.jetstream(), f"UA1_TEAM_VIEW_{TEAM}", f"{TEAM}.") == [f"{TEAM}.objective.o1"]
+        assert await list_keys(other.nc.jetstream(), "UA1_TEAM_VIEW_team_other") == []
+        assert "worker-host-1" in await list_keys(lead.nc.jetstream(), "UA1_HOSTS")
 
         # The edge adapter keeps peers' copies only; the team services sign sessions of their own installation only.
         for subject in (f"$KV.UA1_CERTS.revocations.{INSTALLATION}", f"$KV.UA1_CERTS.host.{INSTALLATION}.lead-host-1.1",

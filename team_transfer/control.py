@@ -49,8 +49,8 @@ from runtime_settings.instance_layout import (
     TEAM_COMPOSITION_FILENAME,
     TEAM_TEMPLATES_FILENAME,
 )
-from team_transfer.container import TransferFileError, iter_files
-from team_transfer.format import TransferModel
+from team_transfer.container import TransferFileError, TransferReader, iter_files
+from team_transfer.format import TransferModel, section_files_prefix
 from team_transfer.sections import (
     ExportSource,
     ImportContext,
@@ -59,6 +59,7 @@ from team_transfer.sections import (
     SectionExport,
     SectionFiles,
     SectionRecords,
+    read_section_records,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,12 @@ def _kind_of(relative: PurePosixPath) -> tuple[str, ControlKind]:
     }:
         return str(relative), ControlKind.OBJECTIVE_PROFILE
     return str(relative), ControlKind.OTHER
+
+
+# The units that define agent types: definition files, bundles and the team lead's specialists.
+_DEFINING_KINDS: Final = frozenset(
+    {ControlKind.AGENT_DEFINITIONS, ControlKind.AGENT_BUNDLE, ControlKind.SPECIALIST}
+)
 
 
 def _owned_elsewhere(relative: PurePosixPath) -> bool:
@@ -260,13 +267,7 @@ def _accepted_agent_types(units, accepted, shadow, context):
     paths = [
         shadow / unit.unit
         for unit in units
-        if unit.unit in accepted
-        and unit.kind
-        in {
-            ControlKind.AGENT_DEFINITIONS,
-            ControlKind.AGENT_BUNDLE,
-            ControlKind.SPECIALIST,
-        }
+        if unit.unit in accepted and unit.kind in _DEFINING_KINDS
     ]
     known = set(load_agent_catalog(paths, include_configured=False).agent_types)
     if context.existing:
@@ -274,6 +275,35 @@ def _accepted_agent_types(units, accepted, shadow, context):
 
         known.update(known_agent_types(context))
     return known
+
+
+def defined_agent_types(reader: TransferReader) -> list[tuple[str, str]]:
+    """The agent types the export's control units define, each with its unit (``control/<unit>``).
+
+    Read with this version's loader from a temporary copy, as the section's plan reads them,
+    selected or not. A unit the loader cannot read is left out: the plan refuses it with the
+    loader's reason, so it is never imported. Used by the import's id check
+    (``team_transfer.protocol1_ids``) before anything is written.
+    """
+
+    from custom_agents.agent_catalog import load_agent_catalog
+
+    records = read_section_records(reader, ControlSection.name, ControlSection.schema_version)
+    found: list[tuple[str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="ua-control-types-") as scratch:
+        shadow = Path(scratch) / "control"
+        for record in records:
+            unit = ControlUnitV1.model_validate(record)
+            if unit.kind not in _DEFINING_KINDS:
+                continue
+            for entry in unit.files:
+                _write(shadow, entry.path, reader.read_member(section_files_prefix(ControlSection.name) + entry.path))
+            try:
+                agent_types = load_agent_catalog([shadow / unit.unit], include_configured=False).agent_types
+            except Exception:  # noqa: BLE001 - the plan refuses this unit with the loader's own reason
+                continue
+            found.extend((agent_type, f"control/{unit.unit}") for agent_type in agent_types)
+    return found
 
 
 def _check_control_references(unit, decision, known, shadow):

@@ -204,8 +204,12 @@ jobs:
         run: cargo build --locked --workspace
       - name: Install dependencies
         run: python -m pip install --require-hashes -r requirements-dev.lock.txt
+      - name: Write the partition mappings for the live NATS server
+        # Protocol 1 hosts subscribe to agents' live control addresses with the partition
+        # token, and the installation authority refuses a server without the mappings.
+        run: python scripts/write_nats_mapping_config.py "$RUNNER_TEMP/nats-config/server.conf"
       - name: Start NATS with JetStream
-        run: python .github/runner/start_service.py nats
+        run: python .github/runner/start_service.py nats --config "$RUNNER_TEMP/nats-config/server.conf"
       - name: Provide the NATS server binary for isolated permission checks
         # The alpine image keeps the server in /usr/local/bin. Its own folder keeps
         # it from shadowing anything else, and the variable makes the live

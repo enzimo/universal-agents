@@ -348,6 +348,22 @@ has the subscription, and the test fails now and then. One `flush()` is not
 enough in nats-py 2.16.0; the helper's docstring explains why. Durable consumers
 and messages sent on the subscribing connection itself need no wait.
 
+Live tests share one long-lived NATS server (`NATS_URL`), which must apply the
+account's partition mappings at the contract's default count, as the bundled
+server does: protocol 1 hosts subscribe to an agent's live control address with
+its partition token, and the installation authority refuses to start on a
+server without them. Write a configuration file with them and start the server
+with it:
+
+```bash
+.venv/bin/python scripts/write_nats_mapping_config.py /path/to/server.conf
+nats-server -js -c /path/to/server.conf
+```
+
+Every test marked `nats` checks this once per run and fails at once, saying
+how to fix it, when the shared server does not map agents' addresses. A test's
+own server (`tests.own_nats_server`) gets the mappings by default.
+
 Live tests share one long-lived NATS server, and a stream left there stays
 until someone deletes it (a shared test server once ran out of storage after
 about 1,500). Mark every test that creates streams, key-value buckets or object

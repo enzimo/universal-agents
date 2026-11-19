@@ -483,9 +483,55 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
         (lambda t: t["queues"].pop("warn_at_percent_setting"), "names the settings"),
         (lambda t: t["queues"].update(warn_at_percent_default=100), "from 1 to 99"),
         (lambda t: t.pop("queues"), "names the settings"),
+        (lambda t: t["queues"].pop("max_messages_per_subject_setting"), "names the settings"),
     ],
 )
 def test_stream_sizes_that_would_drop_messages_or_name_no_setting_are_refused(change, problem) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    change(transport)
+    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+        EXPORT.check_transport(transport)
+
+
+def test_the_partition_streams_cap_each_senders_waiting_messages_per_agent_from_the_settings() -> None:
+    """Review point FA-3 of PR #151: one agent's backlog must leave room for its partition's control messages."""
+
+    setting = "transport.queues.max_messages_per_subject"
+    assert TRANSPORT["queues"]["max_messages_per_subject_setting"] == setting
+    capped = {name: (stream.get("max_msgs_per_subject_setting"), stream.get("max_msgs_per_subject"),
+                     stream.get("discard_new_per_subject", False)) for name, stream in TRANSPORT["streams"].items()}
+    assert capped == {
+        "UA1_PART_{team}~{partition}": (setting, None, True),
+        "UA1_POOL_WORK_{team}": (None, None, False), "UA1_EDGE_WORK_{team}": (None, None, False),
+        "UA1_TEAM_WORK_{team}": (None, None, False),
+        "UA1_DLQ_{team}": (None, 1, False),  # a retried set-aside replaces its copy
+    }
+
+
+PART = "UA1_PART_{team}~{partition}"
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (lambda t: t["streams"][PART].pop("max_msgs_per_subject_setting"), f"stream {PART} stores agents' queues"),
+        (lambda t: t["streams"][PART].update(max_msgs_per_subject_setting="transport.queues.cap"),
+         f"stream {PART} stores agents' queues"),
+        (lambda t: t["streams"][PART].update(max_msgs_per_subject=16), "from transport.queues.max_messages_per_subject alone"),
+        # At the cap NATS would drop the agent's oldest queued message instead of refusing the sender.
+        (lambda t: t["streams"][PART].pop("discard_new_per_subject"), "discard_new_per_subject: true"),
+        (lambda t: t["streams"][PART].update(discard_new_per_subject="yes"), "discard_new_per_subject: true"),
+        (lambda t: t["streams"]["UA1_POOL_WORK_{team}"].update(discard_new_per_subject=True),
+         "UA1_POOL_WORK_{team} sets discard_new_per_subject only with its cap from"),
+        # With its fixed cap of 1 a retried set-aside would be refused instead of replacing its copy.
+        (lambda t: t["streams"]["UA1_DLQ_{team}"].update(discard_new_per_subject=True),
+         "UA1_DLQ_{team} sets discard_new_per_subject only with its cap from"),
+        (lambda t: t["streams"]["UA1_POOL_WORK_{team}"].update(
+            max_msgs_per_subject_setting="transport.queues.cap", discard_new_per_subject=True),
+         "UA1_POOL_WORK_{team} takes its per-subject cap from transport.queues.max_messages_per_subject alone"),
+    ],
+)
+def test_a_per_subject_cap_that_misses_agents_queues_or_drops_their_messages_is_refused(change, problem) -> None:
     transport = copy.deepcopy(TRANSPORT)
     change(transport)
     with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
@@ -506,6 +552,9 @@ def test_the_account_maps_every_agent_address_to_its_partition_and_nothing_else(
     assert EXPORT.stored_subject("work.pool.{pool}", "*", TRANSPORT) == "ua.v1.{team}.*.work.pool.{pool}"
     assert EXPORT.publish_subject("work.control.{agent}", TRANSPORT) == "ua.v1.{team}.{self}.work.control.*.*"
     assert EXPORT.subscribe_subject("ctl.agent.{agent}", TRANSPORT) == "ua.v1.{team}.*.ctl.agent.*.{partition}"
+    # The mapping check probes every mapped address under its own scope, where no stream stores anything.
+    assert EXPORT.probe_grant(TRANSPORT) == "ua.v1._probe.{self}.>"
+    assert kinds.PARTITION_ACCOUNT_MAPPINGS == partitions["account_mappings"]
 
 
 @pytest.mark.parametrize(
@@ -526,6 +575,11 @@ def test_the_account_maps_every_agent_address_to_its_partition_and_nothing_else(
          "account_mappings map exactly"),
         (lambda t: t["partitions"]["account_mappings"].update({"ua.v1.*.*.work.pool.*": "ua.v1.x"}),
          "account_mappings map exactly"),
+        (lambda t: t["partitions"].pop("probe_scope"), "the account mappings and the probe scope"),
+        # A probe scope a team id could take would reach that team's receivers and streams.
+        (lambda t: t["partitions"].update(probe_scope="team_probe"), "probe_scope is a token starting with _"),
+        (lambda t: t["partitions"].update(probe_scope="_install"), "other than installation_scope"),
+        (lambda t: t["partitions"].update(probe_scope="_pro.be"), "probe_scope is a token starting with _"),
     ],
 )
 def test_partition_settings_and_mappings_the_contract_cannot_keep_are_refused(change, problem) -> None:
@@ -612,13 +666,17 @@ def test_permissions_name_exact_receivers_and_publish_only_under_the_senders_own
     for role in REGISTRY["host_roles"]:
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
         grants = consumer_grants() | management.get(role, set()) | buckets.get(role, set()) | blobs.get(role, set())
+        # The topology owner's mapping check probes its own addresses under the probe scope (README, "Partitions").
+        probe = f"ua.v1.{kinds.PARTITION_PROBE_SCOPE}.{{self}}.>"
+        probing = role == TRANSPORT["topology_owner"]
+        assert (probe in document["publish"], probe in document["subscribe"]) == (probing, probing)
         for subject in document["publish"]:
             if subject.startswith(("$JS.", "$KV.", "$O.")):
                 assert subject in grants, (role, subject)
-            else:
+            elif subject != probe:
                 assert subject.startswith(("ua.v1.{team}.{self}.", "ua.v1._install.{self}.")), (role, subject)
         assert document["subscribe"][0] == "_INBOX.{self}.>"
-        for subject in document["subscribe"][1:]:
+        for subject in (item for item in document["subscribe"][1:] if item != probe):
             prefix = "ua.v1._install.*." if subject.startswith("ua.v1._install.") else "ua.v1.{team}.*."
             # Only the sender slot is a wildcard, and the agent within a partition the host owns; every
             # other receiver id is a placeholder.
@@ -2553,7 +2611,7 @@ def test_a_join_of_another_contract_is_still_checked_for_its_signature_time_and_
 def test_the_generated_code_names_the_contract_digest() -> None:
     record = json.loads((CONTRACT / "generated" / "compatibility.json").read_text(encoding="utf-8"))
     assert kinds.CONTRACT_SHA256 == record["contract_sha256"]
-    assert wire_trust.TrustStore("install_example", []).contract_sha256 == kinds.CONTRACT_SHA256
+    assert wire_trust.TrustStore("install_example", [], partition_count=96).contract_sha256 == kinds.CONTRACT_SHA256
 
 
 def test_a_certificate_names_its_connection_class_and_a_remote_hosts_tools() -> None:
@@ -3814,7 +3872,7 @@ def test_frame_omission_is_preserved_and_null_is_not_an_absent_value() -> None:
     b'{"text":"\\ud800"}',
 ])
 def test_hostile_json_is_refused_before_key_lookup(data: bytes) -> None:
-    assert refusal(data, signed_example(), trust=TrustStore("install_example", [])).code == "malformed"
+    assert refusal(data, signed_example(), trust=TrustStore("install_example", [], partition_count=96)).code == "malformed"
 
 
 def test_str_naive_times_and_foreign_trust_stores_are_programming_errors() -> None:
@@ -3828,7 +3886,7 @@ def test_str_naive_times_and_foreign_trust_stores_are_programming_errors() -> No
     with pytest.raises(ValueError, match="time zone"):
         verify_frame(data, **dict(arguments, now=fixtures.NOW.replace(tzinfo=None)))
     with pytest.raises(ValueError, match="installation"):
-        verify_frame(data, **dict(arguments, trust=TrustStore("install_peer", [])))
+        verify_frame(data, **dict(arguments, trust=TrustStore("install_peer", [], partition_count=96)))
     assert verify_frame(bytearray(data), **arguments).frame.message_id == frame["message_id"]
 
 
@@ -3847,7 +3905,7 @@ def test_nesting_limit_counts_containers_but_not_escaped_string_content() -> Non
 def test_impossible_calendar_times_are_malformed_before_authentication(field: str) -> None:
     frame = signed_example()
     frame[field] = "2026-02-30T04:30:00.000Z"
-    refused = refusal(fixtures.resign(frame), frame, trust=TrustStore("install_example", []))
+    refused = refusal(fixtures.resign(frame), frame, trust=TrustStore("install_example", [], partition_count=96))
     assert (refused.code, refused.at) == ("malformed", f"/{field}")
 
 

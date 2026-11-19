@@ -7,9 +7,12 @@ may load settings while the marker exists. Child processes receive no permit.
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Iterator
+from typing import Final, Iterator
 
 from team_transfer.errors import TransferError
+
+# Logged when a start is refused because the team's import did not finish.
+IMPORT_UNFINISHED_EVENT: Final = "team_import_unfinished"
 
 _WRITING_ROOT: ContextVar[Path | None] = ContextVar(
     "team_transfer_writing_root", default=None

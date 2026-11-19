@@ -36,12 +36,20 @@ from docker.launch_headless import (
     RuntimeLayoutError,
     build_process_env,
     ensure_instance_config_ready_for_headless_launch,
+    protocol1_id_check_refusal,
     resolve_env_file_path,
     terminate_process,
     use_process_timezone,
     validate_runtime_layout,
 )
 from env_secrets import PROCESS_POSTGRES, environment_for, materialize_secret_file_envs
+from instance_upgrades.protocol1_ids import (
+    CHECK_FAILED_EVENT,
+    Protocol1IdCheckFailed,
+    check_due,
+    load_saved_for_check,
+)
+from storage.config import PostgresStorageSettings, StorageSettings
 from storage.postgres_connection import (
     BUNDLED_POSTGRES_ADDRESS_ENV,
     postgres_dsn_at,
@@ -494,6 +502,67 @@ def _wait_for_postgres_pm_ready(
     raise RuntimeError(f"Timed out waiting for Postgres postmaster readiness; last status: {last_status}")
 
 
+def _admin_dsn(database: str) -> str:
+    """The bundled PostgreSQL's administrator on ``database``, which needs no password inside the container."""
+
+    return f"postgresql://{POSTGRES_USER}@{INTERNAL_POSTGRES_HOST}:{INTERNAL_POSTGRES_PORT}/{database}"
+
+
+def id_check_storage(config: GatewayInstanceConfig, runtime_env: Mapping[str, str]) -> StorageSettings | None:
+    """The team's store for the id check, read before seeding; None when its database does not exist yet.
+
+    A PostgreSQL store is read as the bundle's administrator: before seeding, the team's
+    role may not exist yet, or may still have a password the configuration has since
+    changed. SQLite is read from its file.
+    """
+
+    settings = config.resolve_manager_storage_settings(env=runtime_env)
+    if settings.backend != "postgres" or not settings.postgres_dsn:
+        return settings
+    import psycopg
+
+    database = _bundle_postgres_target(settings.postgres_dsn).database_name
+    with psycopg.connect(_admin_dsn("postgres"), autocommit=True) as conn:
+        exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database,)).fetchone()
+    if exists is None:
+        return None
+    return StorageSettings(backend=settings.backend, postgres=PostgresStorageSettings(dsn=_admin_dsn(database)))
+
+
+def check_ids_then_upgrade_config(config: GatewayInstanceConfig, runtime_env: Mapping[str, str]) -> str | None:
+    """The id check, then the configuration file's upgrade (``instance_upgrades.protocol1_ids``); the refusal, or None.
+
+    Runs once the bundled PostgreSQL answers and before NATS, seeding or the launcher start,
+    so a refused start changes nothing: not the file, not a store, not the message server.
+    Once the check passed (its record exists), later starts only upgrade the file, unless a
+    startup agent type does not fit, which stops them without reading the store.
+    """
+
+    try:
+        due = check_due(config)
+    except ValueError as exc:
+        return (
+            f"The check that every id fits protocol 1 could not read the settings in {config.config_path}, so "
+            f"nothing was changed (event={CHECK_FAILED_EVENT}): {exc}"
+        )
+    if due:
+
+        def find_store() -> StorageSettings | None:
+            try:
+                return id_check_storage(config, runtime_env)
+            except Exception as exc:  # noqa: BLE001 - fail closed: the check cannot read the store
+                raise Protocol1IdCheckFailed(f"The bundled PostgreSQL could not be reached: {exc}") from exc
+
+        refusal = protocol1_id_check_refusal(config, find_store)
+        if refusal:
+            return refusal
+    try:
+        ensure_instance_config_ready_for_headless_launch(config.config_path)
+    except InstanceConfigFileError as exc:
+        return str(exc)
+    return None
+
+
 def seed_postgres_from_targets(targets: Sequence[BundlePostgresTarget]) -> None:
     if not targets:
         LOGGER.info("Bundle runtime has no Postgres storage targets; skipping Postgres database seeding.")
@@ -504,7 +573,7 @@ def seed_postgres_from_targets(targets: Sequence[BundlePostgresTarget]) -> None:
     except ImportError as exc:  # pragma: no cover - dependency is expected in normal runtime
         raise RuntimeError("psycopg is required to seed bundled Postgres.") from exc
 
-    admin_dsn = f"postgresql://{POSTGRES_USER}@{INTERNAL_POSTGRES_HOST}:{INTERNAL_POSTGRES_PORT}/postgres"
+    admin_dsn = _admin_dsn("postgres")
     with psycopg.connect(admin_dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
             for target in targets:
@@ -535,9 +604,7 @@ def seed_postgres_from_targets(targets: Sequence[BundlePostgresTarget]) -> None:
                         )
                     )
                 LOGGER.info("Ensuring pgvector extension in %s", redact_postgres_dsn(target.dsn))
-                admin_target_dsn = (
-                    f"postgresql://{POSTGRES_USER}@{INTERNAL_POSTGRES_HOST}:{INTERNAL_POSTGRES_PORT}/{target.database_name}"
-                )
+                admin_target_dsn = _admin_dsn(target.database_name)
                 with psycopg.connect(admin_target_dsn, autocommit=True) as conn:
                     with conn.cursor() as cur:
                         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -647,8 +714,15 @@ def run_supervised_bundle(
     signal.signal(signal.SIGINT, _handle_signal)
 
     try:
+        # Before anything changes; stored ids may be in the bundled PostgreSQL, which runs by now.
+        refusal = check_ids_then_upgrade_config(config, runtime_env)
+        if refusal:
+            LOGGER.error("Bundle launch refused. %s", refusal)
+            return 2
         if bundled_nats_enabled:
-            nats = start_local_nats(env=runtime_env, logger=LOGGER, cwd=REPO_ROOT, service_root=_bundle_paths().nats_root)
+            nats = start_local_nats(env=runtime_env, logger=LOGGER, cwd=REPO_ROOT,
+                                    partitions=config.transport.queues.partitions,
+                                    service_root=_bundle_paths().nats_root)
         else:
             LOGGER.info("Local NATS is disabled; using configured external NATS endpoint(s).")
         seed_postgres_from_targets(postgres_targets)
@@ -712,12 +786,14 @@ def main() -> int:
         raise SystemExit(f"No such instance config: {config_path}")
 
     try:
-        ensure_instance_config_ready_for_headless_launch(config_path)
-        # Only the saved file: the bundle adds its own details to the launcher's
-        # environment below and never writes them into any file.
-        config = GatewayInstanceConfig.load_saved(config_path)
-    except InstanceConfigFileError as exc:
-        LOGGER.error("Bundle launch refused. %s", exc)
+        # Only the saved file, upgraded in memory: the file itself is upgraded only after the
+        # id check passed (run_supervised_bundle). Startup agent types protocol 1 cannot carry
+        # are set aside so that check names them with every other id and refuses; nothing
+        # starts with them missing (protocol1_ids.load_saved_for_check). The bundle adds its
+        # own details to the launcher's environment below and never writes them into any file.
+        config = load_saved_for_check(config_path)
+    except ValueError as exc:  # the file or settings this version refuses, with their reason
+        LOGGER.error("Bundle launch refused. The settings in %s cannot be read: %s", config_path, exc)
         return 2
     try:
         validate_runtime_layout(config)

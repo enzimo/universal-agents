@@ -415,7 +415,8 @@
     "count_setting": "transport.queues.partitions",
     "default_count": 96,
     "handover_seconds": 600,
-    "max_count": 128
+    "max_count": 128,
+    "probe_scope": "_probe"
   },
   "peer_sender_slot": "x-{installation}",
   "pool_controller": {
@@ -424,6 +425,7 @@
   },
   "queues": {
     "max_bytes_setting": "transport.queues.max_bytes",
+    "max_messages_per_subject_setting": "transport.queues.max_messages_per_subject",
     "size_kinds": [
       "partition",
       "pool",
@@ -481,10 +483,12 @@
     },
     "UA1_PART_{team}~{partition}": {
       "discard": "new",
+      "discard_new_per_subject": true,
       "duplicate_window_seconds": 120,
       "max_age_seconds": 604860,
       "max_consumers": 1024,
       "max_message_bytes": 263168,
+      "max_msgs_per_subject_setting": "transport.queues.max_messages_per_subject",
       "retention": "workqueue",
       "size_kind": "partition",
       "storage": "file",

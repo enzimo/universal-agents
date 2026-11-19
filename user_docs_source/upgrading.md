@@ -143,10 +143,73 @@ supported, because it may not read what a newer one saved.
     folder it has no permission to read): startup stops with a message
     naming the folder. Fix it and restart; the step goes on where it
     stopped.
+- **From 0.9: ids that fit message addresses.** 0.10 carries the team id,
+  each agent type and each agent's id in its message addresses, which allow at
+  most 24 characters for a team id or an agent type and 32 for an agent id
+  (letters, digits, `-` and `_`, starting with a letter or digit). At its first
+  start, before it changes anything, 0.10 checks the team id
+  (`gateway.team_id`), the agent types and the ids of agents that still have
+  running tasks, waiting messages or handed-back tasks. If one does not fit, it
+  stops with a message naming each id and what to do
+  (`event=protocol1_ids_over_caps`). Nothing has changed then, so you can start
+  0.9 again:
+  - **A team id over 24 characters:** this instance cannot run 0.10 with that
+    team id. Keep running 0.9.x. A team transfer keeps the team id, so it does
+    not help here: onboarding's Import, and `assistant_cli team import` into a
+    fresh folder, refuse such an export when they open it, before they write
+    anything (`event=team_import_ids_over_caps`). They refuse an export with an
+    agent type over 24 characters the same way; rename it on 0.9 as below and
+    export again.
+  - **An agent type over 24 characters:** on 0.9, rename it in the file the
+    message names and everywhere the instance names it:
+    `gateway.startup_agents` in `instance_config.yaml` and the team roster
+    (`control/TEAM_AGENTS.yaml`). For a specialist the team lead created,
+    remove it and have it created again under a shorter name. Then start 0.10.
+  - **An agent id over 32 characters:** on 0.9, let that agent's tasks finish
+    or stop them, and let the team lead deal with tasks it handed back. Then
+    start 0.10.
+
+  When every id fits, 0.10 records it in `state/upgrades/protocol1-ids.json`
+  and does not check again for that team id. Agents of a type added later with
+  a name that is too long cannot join the team's messages, and the Status page
+  says why. A startup agent (`gateway.startup_agents`) with such a type stops
+  the start instead, with a message naming that entry
+  (`event=protocol1_startup_agent_types_over_cap`): remove the entry or change
+  it to a shorter type, then start again. Do not go back to 0.9 then, since
+  0.10 has already run on the instance. The record is written before 0.10
+  creates its message streams, so if 0.10 then refuses to start (for example
+  for room, below) and you go back to 0.9, delete
+  `state/upgrades/protocol1-ids.json` too, so that the next 0.10 start checks
+  the ids again.
+
+  Upgrade from 0.9 by starting 0.10, not with `assistant_cli.py
+  migrate-config`: the start checks the ids before it upgrades
+  `instance_config.yaml`, and `migrate-config` does not. 0.9 cannot read an
+  upgraded file. If you ran `migrate-config` first and the start then stops at
+  this check, the message names the backup to put back
+  (`instance_config.yaml.bak.v12`) before you start 0.9 again. Services you
+  start yourself with the `assistant_cli.py run-*` commands run no id check:
+  start the instance once with the launcher first (the Docker image, or
+  `docker/launch_headless.py`), which checks the ids and then upgrades the
+  file.
+- **From 0.9: room for the message streams.** At its first start 0.10 creates
+  each team's new message streams, and the NATS server sets each stream's
+  whole size limit aside on its storage at once: about 2.1 GiB per team at the
+  default `transport.queues.max_bytes`
+  ([Storage notices](configuration.md#storage-notices)). The included NATS
+  server gives its streams three quarters of the disk's free space, measured
+  at each start, so keep about 3 GiB free on the instance's disk for each
+  team, at this start and every later one. When the room is not there, the
+  start stops before anything is served and names the stream, the limit it
+  asked for and the `transport.queues.max_bytes` entry. Do what the message
+  says (free disk space, or lower that limit), then start again; streams
+  already made stay and the next start finishes the rest.
 - **From 0.9 with an external NATS server:** prepare the server first. 0.10
   needs NATS Server 2.15.1 or later with two server settings
   ([Surviving a power loss](configuration.md#surviving-a-power-loss)), and more
-  from its NATS login ([Message host trust](docker.md#message-host-trust)). The
+  from its NATS login ([Message host trust](docker.md#message-host-trust)): the
+  partition mappings ([Message Broker](configuration.md#message-broker)) and
+  room for each team's streams, as above. The
   runtime reports a server that is too old only for the NATS server it
   includes, so check an external server yourself.
 - **PostgreSQL:** an instance that keeps its data in PostgreSQL gets the same
@@ -183,9 +246,11 @@ supported, because it may not read what a newer one saved.
 
 On its first start, the new version adds what it needs to the tables the old
 one created and logs each addition (`event=storage_column_added`). If your
-`instance_config.yaml` or `config.yaml` is from an older format, startup offers
-to upgrade it or names the `assistant_cli.py migrate-config` command. If
-something from the old version cannot carry over, startup says what to do.
+`instance_config.yaml` or `config.yaml` is from an older format, the launcher
+upgrades it; services you start yourself offer to upgrade it or name the
+`assistant_cli.py migrate-config` command. From 0.9, let the launcher do it,
+after its id check (above). If something from the old version cannot carry
+over, startup says what to do.
 
 A memory, Knowledge page or topic command sent from 0.9 just before the upgrade
 that was still waiting when the new version started is not carried out. You get

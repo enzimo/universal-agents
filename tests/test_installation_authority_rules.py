@@ -10,6 +10,7 @@ tests/test_live_installation_authority.py.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 from datetime import timedelta
@@ -18,11 +19,18 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from nats.js.errors import KeyNotFoundError, NotFoundError
 
+from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.trust import kept_for
 from custom_transport.protocol1 import host_keys
+from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
+from custom_transport.protocol1.bucket_reads import BucketReadTimedOut
 from custom_transport.protocol1.live import utc_now
 from installation_authority import process as authority_process
+from installation_authority import service as authority_service
 from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts, write_expected_hosts
 from installation_authority.ledger import ISSUED_FILENAME, OUTCOME_RETENTION, IssueLedger
 from installation_authority.service import (
@@ -30,11 +38,15 @@ from installation_authority.service import (
     AuthorityDisconnected,
     CertificateRequest,
     InstallationAuthority,
+    PartitionCountMismatch,
     RevocationsUnverified,
     _denial,
     _renewal_refusal,
 )
 from runtime_settings.instance_layout import InstanceLayout
+from runtime_settings.transport import QueueSettings
+from custom_transport.protocol1.contract_files import transport
+from tests.queue_limits_support import TEST_QUEUE_LIMITS
 
 LISTED = ExpectedHost("worker-host-1", "worker.key1", "PUBLIC1", frozenset({"worker_host"}), frozenset({"team_one"}),
                       frozenset({"researcher"}), 4)
@@ -195,11 +207,49 @@ def test_receivers_and_writers_forget_a_certificate_at_the_same_time() -> None:
 # -- the authority without a server ----------------------------------------------------------------
 
 
-def authority_at(tmp_path: Path) -> InstallationAuthority:
+def authority_at(tmp_path: Path, *, partitions: int = 96) -> InstallationAuthority:
     layout = InstanceLayout.at(tmp_path / "instance")
     authority, _ = host_keys.ensure_authority_keys(layout, "install_one")
     keys, _ = host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
-    return InstallationAuthority(layout, authority, keys)
+    return InstallationAuthority(layout, authority, keys, partitions=partitions, queues=TEST_QUEUE_LIMITS)
+
+
+class _NoServer:
+    """A NATS connection the authority must not touch: the count check comes before anything else."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"the authority used its NATS connection ({name}) before refusing")
+
+
+def test_the_authority_refuses_to_start_when_the_bundles_partition_count_is_not_its_own(tmp_path: Path) -> None:
+    """Hosts compute agents' partitions with the bundle's count, the authority with its setting."""
+
+    authority = authority_at(tmp_path, partitions=96)
+    path = authority.layout.trust_bootstrap_path
+    write_bundle(path, BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),),
+                                       partitions=7))
+    before = path.read_bytes()
+
+    with pytest.raises(PartitionCountMismatch) as refused:
+        asyncio.run(authority.start(_NoServer(), teams=["team_one"]))
+
+    assert "holds partition count 7, but this authority's transport.queues.partitions is 96" in str(refused.value)
+    assert "restart the instance" in str(refused.value)
+    assert path.read_bytes() == before
+    assert not (authority.layout.host_trust_dir(AUTHORITY_RUNTIME) / ISSUED_FILENAME).exists()
+
+
+def test_the_authority_keeps_the_bundles_partition_count_when_it_writes_its_records(tmp_path: Path) -> None:
+    authority = authority_at(tmp_path, partitions=7)
+    path = authority.layout.trust_bootstrap_path
+    write_bundle(path, BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),),
+                                       partitions=7))
+    authority._own, authority._revocations = {"record": "certificate"}, {"record": "revocations"}
+
+    authority._publish_bundle()
+
+    assert read_bundle(path).partitions == 7
+    assert [record["record"] for record in read_bundle(path).records] == ["certificate", "revocations"]
 
 
 def test_a_stored_certificate_is_handed_back_only_for_the_same_keys_while_newest(tmp_path: Path) -> None:
@@ -246,7 +296,164 @@ def test_a_failed_upkeep_step_is_logged_and_tried_again(tmp_path: Path, caplog) 
     asyncio.run(authority.upkeep(now))
     asyncio.run(authority.upkeep(now + timedelta(minutes=1)))
     assert len(attempts) == 2
-    assert caplog.text.count("event=revocations_resign_failed") == 2
+    assert caplog.text.count("it is tried again in 60 seconds. event=revocations_resign_failed") == 2
+
+
+# -- a listing of UA1_CERTS that fails (bucket_reads.list_keys) ------------------------------------
+# A failed listing is never read as an empty bucket: the authority does not start, issues no
+# certificate and deletes none.
+
+
+def failing_listings(monkeypatch: pytest.MonkeyPatch, *, fail_from: int = 1) -> list[str]:
+    """The authority's listings raise from call ``fail_from`` on (earlier ones find nothing); returns the prefixes asked."""
+
+    asked: list[str] = []
+
+    async def list_keys(_js: Any, bucket: str, prefix: str = "") -> list[str]:
+        asked.append(prefix)
+        if len(asked) >= fail_from:
+            raise BucketReadTimedOut(bucket, f"$KV.{bucket}.{prefix}>", [f"{prefix}1"], 0)
+        return []
+
+    monkeypatch.setattr(authority_service, "list_keys", list_keys)
+    return asked
+
+
+def issued_by(authority: InstallationAuthority) -> list[Any]:
+    """The certificate requests the authority signs from now on (recorded, not signed)."""
+
+    issued: list[Any] = []
+
+    async def issue(request: Any, **_options: Any) -> dict[str, Any]:
+        issued.append(request)
+        return {}
+
+    authority._issue = issue  # type: ignore[method-assign]
+    authority._revocations = {"body": {"revocation_epoch": 1}}
+    return issued
+
+
+class _Bucket:
+    """UA1_CERTS without a server: values by key, and the keys deleted."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+        self.deleted: list[str] = []
+
+    async def get(self, key: str) -> Any:
+        if key not in self.values:
+            raise KeyNotFoundError
+        return SimpleNamespace(value=self.values[key])
+
+    async def put(self, key: str, value: bytes) -> None:
+        self.values[key] = value
+
+    async def delete(self, key: str) -> None:
+        self.deleted.append(key)
+
+
+class _JetStream:
+    def __init__(self) -> None:
+        self.buckets: dict[str, _Bucket] = {}
+
+    async def stream_info(self, _name: str) -> Any:
+        raise NotFoundError
+
+    async def add_stream(self, config: Any) -> None:
+        pass
+
+    async def key_value(self, bucket: str) -> _Bucket:
+        return self.buckets.setdefault(bucket, _Bucket())
+
+
+class _Connection:
+    is_closed = False
+
+    def __init__(self) -> None:
+        self.js = _JetStream()
+        self.subscribed: list[str] = []
+
+    def jetstream(self) -> _JetStream:
+        return self.js
+
+    async def subscribe(self, subject: str, **_options: Any) -> None:
+        self.subscribed.append(subject)
+
+    async def flush(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("fail_from", [1, 2])  # its own newest certificate; the certificates it issued
+def test_an_authority_whose_certificate_listing_fails_does_not_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                     fail_from: int) -> None:
+    authority = authority_at(tmp_path)
+    write_bundle(authority.layout.trust_bootstrap_path,
+                 BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),),
+                                 partitions=authority.partitions))
+
+    async def nothing(*_args: Any, **_options: Any) -> None:
+        return None
+
+    # The partition mapping check and the teams' streams come before the listings and need a
+    # real server; their own tests cover them (test_partition_mapping_check, the live queue tests).
+    monkeypatch.setattr(authority_service, "check_partition_mapping", nothing)
+    monkeypatch.setattr(authority, "ensure_topology", nothing)
+    asked = failing_listings(monkeypatch, fail_from=fail_from)
+    nc = _Connection()
+    with pytest.raises(BucketReadTimedOut):
+        asyncio.run(authority.start(nc, teams=["team_one"]))
+    assert asked == [f"host.install_one.{AUTHORITY_RUNTIME}.", "host.install_one."][:fail_from]
+    assert nc.subscribed == []  # it never answered joins
+
+
+def test_a_join_whose_certificate_listing_fails_gets_no_certificate(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    authority = authority_at(tmp_path)
+    write_expected_hosts(authority.layout.trust_expected_hosts_path, {LISTED.runtime: LISTED})
+    failing_listings(monkeypatch)
+    issued = issued_by(authority)
+    verified = SimpleNamespace(raw={"body": join_body(nats_public_key="NATS1", profile_sha256="")})
+    with pytest.raises(BucketReadTimedOut):
+        asyncio.run(authority.answer_join(verified))  # type: ignore[arg-type]
+    assert issued == []
+
+
+def test_a_renewal_whose_certificate_listing_fails_gets_no_certificate(tmp_path: Path,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    authority = authority_at(tmp_path)
+    public_key = Ed25519PrivateKey.generate().public_key()
+    listed = dataclasses.replace(LISTED, public_key=b64url(public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)))
+    write_expected_hosts(authority.layout.trust_expected_hosts_path, {listed.runtime: listed})
+    failing_listings(monkeypatch)
+    issued = issued_by(authority)
+    authority.live = SimpleNamespace()  # type: ignore[assignment]  # serving: renewals reach it only then
+    held = certificate(key_id=listed.key_id, public_key=public_key, certificate_id="certificate-1", membership_epoch=1,
+                       nats_public_key="NATS1")
+    verified = SimpleNamespace(certificate=held, frame=SimpleNamespace(idempotency_key="renew-1"),
+                               raw={"body": {"profile_sha256": ""}})
+    with pytest.raises(BucketReadTimedOut):
+        asyncio.run(authority.answer_renew(verified))  # type: ignore[arg-type]
+    assert issued == []
+
+
+def test_a_failed_listing_deletes_no_certificate_and_the_forgetting_runs_again_the_next_day(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    authority = authority_at(tmp_path)
+    asked = failing_listings(monkeypatch)
+    nc = _Connection()
+    authority._nc, authority._js = nc, nc.js
+    authority._trust = SimpleNamespace(store=SimpleNamespace(forget=lambda _now: 0))  # type: ignore[assignment]
+    now = utc_now()
+    authority._revocations = {"issued_at": format_timestamp(now)}  # signed just now: only the forgetting is due
+    asyncio.run(authority.upkeep(now))
+    asyncio.run(authority.upkeep(now + timedelta(minutes=1)))
+    assert asked == ["host.install_one."]
+    assert nc.js.buckets["UA1_CERTS"].deleted == []
+    assert "it is tried again in 24 hours. event=authority_forget_failed" in caplog.text
+    later = now + timedelta(days=1)
+    authority._revocations = {"issued_at": format_timestamp(later)}
+    asyncio.run(authority.upkeep(later))
+    assert len(asked) == 2
 
 
 # -- the process -----------------------------------------------------------------------------------
@@ -267,14 +474,19 @@ class _Adapter:
 def _config(tmp_path: Path) -> Any:
     return SimpleNamespace(layout=InstanceLayout.at(tmp_path), instance_name="test",
                            manager=SimpleNamespace(team_id="team_one"),
-                           transport=SimpleNamespace(replicas=1, nats_servers=["nats://127.0.0.1:1"], nats_url=None,
+                           transport=SimpleNamespace(replicas=3, nats_servers=["nats://127.0.0.1:1"], nats_url=None,
                                                      subject_prefix="team", nats_user=None, nats_password=None,
-                                                     credentials_file=None))
+                                                     credentials_file=None,
+                                                     queues=QueueSettings(partitions=7, max_bytes={"pool": 5 << 20})))
 
 
-def _run_with(monkeypatch, tmp_path: Path, authority: Any) -> None:
+def _run_with(monkeypatch, tmp_path: Path, authority: Any, made: dict[str, Any] | None = None) -> None:
+    def make(*_args: Any, **kwargs: Any) -> Any:
+        (made if made is not None else {}).update(kwargs)
+        return authority
+
     monkeypatch.setattr(authority_process, "NatsTransportAdapter", _Adapter)
-    monkeypatch.setattr(authority_process, "InstallationAuthority", lambda *_args, **_kwargs: authority)
+    monkeypatch.setattr(authority_process, "InstallationAuthority", make)
     monkeypatch.setattr(authority_process, "load_authority_keys", lambda _layout: None)
     monkeypatch.setattr(authority_process, "load_host_keys", lambda _layout, _runtime: None)
     asyncio.run(authority_process.run_installation_authority(_config(tmp_path)))
@@ -286,11 +498,18 @@ def test_the_process_exits_with_a_reason_when_it_cannot_start_safely(tmp_path: P
             raise RevocationsUnverified("Restore the instance's trust folder.")
 
     caplog.set_level(logging.ERROR)
+    made: dict[str, Any] = {}
     with pytest.raises(SystemExit) as exited:
-        _run_with(monkeypatch, tmp_path, Refusing())
+        _run_with(monkeypatch, tmp_path, Refusing(), made)
     assert exited.value.code == 1
     assert "event=installation_authority_start_refused reason=RevocationsUnverified" in caplog.text
     assert "Restore the instance's trust folder." in caplog.text
+    assert made["partitions"] == 7  # the saved transport.queues.partitions
+    # The streams' limits are the saved transport.queues and transport.replicas.
+    queues = made["queues"]
+    assert (queues.max_bytes["pool"], queues.max_bytes["partition"], queues.max_messages_per_subject, queues.replicas) \
+        == (5 << 20, QueueSettings().max_bytes.partition, QueueSettings().max_messages_per_subject, 3)
+    assert set(queues.max_bytes) == set(transport()["queues"]["size_kinds"])
 
 
 def test_the_process_exits_when_its_upkeep_stops(tmp_path: Path, monkeypatch, caplog) -> None:
@@ -301,10 +520,32 @@ def test_the_process_exits_when_its_upkeep_stops(tmp_path: Path, monkeypatch, ca
         async def keep_current(self) -> None:
             raise AuthorityDisconnected("closed")
 
+        async def follow_placements(self, stop: asyncio.Event) -> None:
+            await stop.wait()
+
     with pytest.raises(SystemExit) as exited:
         _run_with(monkeypatch, tmp_path, Disconnecting())
     assert exited.value.code == 1
     assert "event=installation_authority_upkeep_stopped" in caplog.text
+
+
+def test_the_process_exits_when_it_stops_following_placements(tmp_path: Path, monkeypatch, caplog) -> None:
+    """It opens failed watches again itself, so ending before the stop is an error of its own."""
+
+    class LosingPlacements:
+        async def start(self, _nc: Any, *, teams: Any) -> None:
+            pass
+
+        async def keep_current(self) -> None:
+            await asyncio.Event().wait()
+
+        async def follow_placements(self, stop: asyncio.Event) -> None:
+            raise RuntimeError("the consumers could not be listed")
+
+    with pytest.raises(SystemExit) as exited:
+        _run_with(monkeypatch, tmp_path, LosingPlacements())
+    assert exited.value.code == 1
+    assert "event=installation_authority_placements_stopped error=the consumers could not be listed" in caplog.text
 
 
 @pytest.mark.parametrize("changed", ["key_id", "public_key", "expired", "absent"])

@@ -429,7 +429,7 @@ def normalize_onboarding_answers(raw_answers: Mapping[str, Any], template: Any) 
         slug = _slugify(assistant_name or "assistant")
         instance_name = f"instance_{slug}"
     instance_root = str(raw_answers.get("instance_root") or default_instance_root(instance_name)).strip()
-    team_id = str(raw_answers.get("team_id") or raw_answers.get("runtime_team_id") or f"team_{_slugify(assistant_name)}").strip()
+    team_id = team_id_answer(raw_answers.get("team_id") or raw_answers.get("runtime_team_id"), assistant_name)
     appearance_payload = raw_answers.get("appearance") or raw_answers.get("ui", {}).get("onboarding", {}).get("appearance", {})
     secrets_source = normalize_secrets_source(
         raw_answers.get("secrets_source"),
@@ -1340,6 +1340,28 @@ def _user_supplied_env_keys(answers: Mapping[str, Any], source_env_file_path: st
         if source_env_path.exists():
             keys.update(parse_env_file(source_env_path))
     return keys
+
+
+def team_id_answer(typed: Any, assistant_name: str) -> str:
+    """The team id to write: the typed one if protocol 1 can carry it, else ``team_<assistant name>`` cut to fit.
+
+    Messages carry the team id in their addresses (``custom_messages.wire.ids``), so a team
+    id that does not fit would stop the instance's first start (``instance_upgrades.protocol1_ids``).
+    A derived id is cut to the cap; a typed one is refused with the reason (``ValueError``),
+    since the person chose it. Both onboarding routes use it: the page
+    (``normalize_onboarding_answers``; its suggestion, ``composedTeamId``, is derived the same
+    way) and the command-line onboarding (``assistant_cli._collect_onboarding_answers``).
+    """
+
+    from custom_messages.wire.ids import TEAM_ID
+
+    team_id = str(typed or "").strip()
+    if not team_id:
+        return (f"team_{_slugify(assistant_name)}"[: TEAM_ID.cap]).rstrip("_")
+    problem = TEAM_ID.problem(team_id)
+    if problem is not None:
+        raise ValueError(f"The team id {team_id!r} {problem}. Messages carry it in their addresses.")
+    return team_id
 
 
 def _slugify(value: str) -> str:

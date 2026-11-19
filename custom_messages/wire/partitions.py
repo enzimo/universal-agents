@@ -8,20 +8,31 @@ the partition computed here is the stream NATS stores the agent's messages in. H
 whole partitions, and the keys of agent records and partition ownership records name them.
 
 The count is fixed when an installation is created (``transport.queues.partitions``, default
-``DEFAULT_PARTITION_COUNT``). Until the step that adds that setting, callers use the default.
+``DEFAULT_PARTITION_COUNT``). The launcher writes it into the bootstrap bundle, and every
+host computes with its trust store's count (``TrustStore.partition_count``); the defaults
+below serve tests and tools that work with the contract's default.
 
 The arrival suffix: a frame's signed ``subject`` is the unmapped one, so a receiver of a
 mapped address takes the partition token off the subject the frame arrived on, after checking
 it is the agent's partition, and compares the rest with the signed subject
-(``signed_subject_of``). The bundled server applies no mapping yet, so running receivers still
-compare exact subjects; the release that installs the mapping switches them to this.
+(``signed_subject_of``). The bundled server's configuration carries the mappings
+(``docker.nats_service``), and the installation authority checks that the server applies them
+at the installation's count before it serves (``custom_transport.protocol1.mapping_check``).
 """
 
 from __future__ import annotations
 
+import json
 from typing import Iterable, Optional
 
-from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, MAX_PARTITION_COUNT, PARTITIONED_ADDRESSES, SUBJECT_PREFIX
+from custom_messages.wire.kinds import (
+    DEFAULT_PARTITION_COUNT,
+    MAX_PARTITION_COUNT,
+    PARTITION_ACCOUNT_MAPPINGS,
+    PARTITION_COUNT_TOKEN,
+    PARTITIONED_ADDRESSES,
+    SUBJECT_PREFIX,
+)
 from custom_messages.wire.models import PartitionOwnerState
 from custom_messages.wire.refusals import FrameRefused
 
@@ -46,6 +57,32 @@ def check_partition_count(count: int) -> int:
     if type(count) is not int or not 1 <= count <= MAX_PARTITION_COUNT:
         raise ValueError(f"a partition count is a whole number from 1 to {MAX_PARTITION_COUNT}, not {count!r}")
     return count
+
+
+def account_mappings(count: int) -> dict[str, str]:
+    """The account's subject mappings at ``count``: what a server applies (transport.yaml ``partitions.account_mappings``).
+
+    The bundled server's configuration carries them (``docker.nats_service``); an external
+    server's operator puts the same lines in the installation's account.
+    """
+
+    check_partition_count(count)
+    return {source: target.replace(PARTITION_COUNT_TOKEN, str(count))
+            for source, target in PARTITION_ACCOUNT_MAPPINGS.items()}
+
+
+def mapping_source(address: str) -> str:
+    """The source of the account mapping line for a mapped address: any team, sender and agent (``ua.v1.*.*.<address>``)."""
+
+    if address not in PARTITIONED_ADDRESSES:
+        raise ValueError(f"{address} is not an address the account maps to a partition")
+    return SUBJECT_PREFIX.format(team="*", sender="*") + "." + address.replace("{agent}", "*")
+
+
+def mapping_line(source: str, target: str) -> str:
+    """One mapping line as a server's configuration writes it, ``"source": "target"`` (JSON strings are valid there)."""
+
+    return f"{json.dumps(source)}: {json.dumps(target)}"
 
 
 def agent_partition(team: str, agent: str, count: int = DEFAULT_PARTITION_COUNT) -> int:

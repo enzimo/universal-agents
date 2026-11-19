@@ -9,6 +9,8 @@ from pathlib import Path
 
 LABEL = "com.universalagents.ci.job"
 LOG = logging.getLogger("ua.ci.service")
+# Where a NATS configuration file is mounted in the container; beside, not over, the image's own.
+NATS_CONFIG_IN_CONTAINER = "/etc/ua-nats/server.conf"
 
 
 def docker(*args):
@@ -17,14 +19,32 @@ def docker(*args):
     )
 
 
-def start(service):
+def nats_image_args(config):
+    """The NATS container's image and arguments, with ``config`` mounted read-only when given.
+
+    The live tests need the server to apply the partition mappings
+    (scripts/write_nats_mapping_config.py writes them).
+    """
+    if config is None:
+        return ["nats:2.15.1-alpine", "--jetstream"]
+    return [
+        "--volume",
+        f"{Path(config).resolve()}:{NATS_CONFIG_IN_CONTAINER}:ro",
+        "nats:2.15.1-alpine",
+        "-c",
+        NATS_CONFIG_IN_CONTAINER,
+        "--jetstream",
+    ]
+
+
+def start(service, config=None):
     job_id = os.environ["UA_CI_ID"]
     name = os.environ[
         "NATS_DOCKER_CONTAINER" if service == "nats" else "UA_CI_POSTGRES"
     ]
     container_port = 4222 if service == "nats" else 5432
     image_args = (
-        ["nats:2.15.1-alpine", "--jetstream"]
+        nats_image_args(config)
         if service == "nats"
         else [
             "--env",
@@ -95,6 +115,9 @@ def start(service):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("service", choices=("nats", "postgres"))
+    parser.add_argument("--config", help="A NATS server configuration file to start with (nats only).")
     args = parser.parse_args()
+    if args.config and args.service != "nats":
+        parser.error("--config is for the nats service")
     logging.basicConfig(level=logging.INFO)
-    start(args.service)
+    start(args.service, args.config)

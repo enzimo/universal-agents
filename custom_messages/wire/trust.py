@@ -67,7 +67,6 @@ from custom_messages.wire.kinds import (
     CERTIFICATE_OVERLAP_SECONDS,
     CLOCK_SKEW_SECONDS,
     CONTRACT_SHA256,
-    DEFAULT_PARTITION_COUNT,
     INSTALLATION_SCOPE,
     KINDS,
     MAX_FRAME_BYTES,
@@ -328,13 +327,14 @@ class _Held(NamedTuple):
 class TrustStore:
     """One receiver's view of who may sign what. Not shared between installations."""
 
-    def __init__(self, installation: str, authority_keys: Iterable[AuthorityKey], *,
-                 contract_sha256: str = CONTRACT_SHA256, partition_count: int = DEFAULT_PARTITION_COUNT) -> None:
+    def __init__(self, installation: str, authority_keys: Iterable[AuthorityKey], *, partition_count: int,
+                 contract_sha256: str = CONTRACT_SHA256) -> None:
         """``contract_sha256`` is the contract this receiver runs; by default the one its code was generated from.
 
-        ``partition_count`` is the installation's, which agent records' and partition ownership
-        records' keys follow (README, "Partitions"); the contract's default until the setting
-        that holds it exists.
+        ``partition_count`` is the installation's (``transport.queues.partitions``), which agent
+        records' and partition ownership records' keys follow (README, "Partitions"). Hosts
+        take it from the bootstrap bundle (``custom_transport.protocol1.bootstrap``); it has no
+        default, so no store guesses a count the installation does not use.
         """
 
         self.installation = installation

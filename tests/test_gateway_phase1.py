@@ -226,6 +226,9 @@ class _FakeGatewayManagerRuntime:
     async def jetstream_usage(self) -> None:
         return None
 
+    async def team_streams(self, team: str) -> None:
+        return None
+
     async def put_object(self, **kwargs):
         self.put_calls.append(dict(kwargs))
         return SimpleNamespace(name=kwargs.get("object_name"))

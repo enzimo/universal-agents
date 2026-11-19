@@ -104,9 +104,13 @@ class PersistentTrustStore:
 
     @classmethod
     def open(cls, bundle: BootstrapBundle, folder: Path, now: datetime) -> "PersistentTrustStore":
-        """The bundle's trust, with the records this host kept before it restarted added before the bundle's."""
+        """The bundle's trust, with the records this host kept before it restarted added before the bundle's.
 
-        persistent = cls(TrustStore(bundle.installation, bundle.anchors()), folder / TRUST_STATE_FILENAME)
+        The store takes the bundle's partition count; a bundle without one raises
+        ``BootstrapError`` before anything is read or written.
+        """
+
+        persistent = cls(bundle.empty_trust_store(), folder / TRUST_STATE_FILENAME)
         kept = persistent._read_file()
         persistent._block_lists = dict(kept.block_lists)
         bundle.add_to(persistent.store, now, record_types=(_AGREEMENT,))

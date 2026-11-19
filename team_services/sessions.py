@@ -286,7 +286,8 @@ class SessionService:
         so a team-services restart cannot forget the lead. A restarting lead host closes its
         earlier sessions before opening a new one (AgentProcessHost._close_earlier_sessions);
         silence alone is not a close. A record that does not verify may be a lead's, so the
-        caller refuses the lead instead of counting it as absent (module docstring).
+        caller refuses the lead instead of counting it as absent (module docstring). A
+        listing that fails raises, so no lead opens on an unknown bucket.
         """
 
         prefix = f"session.{self.installation}.{team}."
@@ -455,7 +456,9 @@ class SessionService:
         Opening writes placement before session because the session names its KV
         revision. The shared mutation lock keeps this scan outside that write gap.
         Finish every session read before deleting anything: a failed read is not
-        evidence that a session is missing. The placement CAS protects newer work.
+        evidence that a session is missing. A listing that fails raises
+        (``custom_transport.protocol1.bucket_reads``), so nothing is removed and the next
+        pass looks again. The placement CAS protects newer work.
         """
         candidates = []
         for key in await self._placement_keys(team):

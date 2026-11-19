@@ -43,6 +43,30 @@ BUILTIN_OBJECTIVE_EXECUTION_POLICY_URI = "builtin://objective-execution/default"
 # The largest step for people's storage notices (gateway.storage_warnings.person_step_gb):
 # ten terabytes; a larger step is almost certainly a typing mistake.
 MAX_STORAGE_WARNING_STEP_GB = 10_000
+# One mebibyte, the unit of the protocol 1 streams' byte limits (transport.queues.max_bytes).
+MIB = 1024 * 1024
+# The contract's largest partition count and the least a queue byte limit may be: one NATS
+# message at the server's largest payload, so a full-size frame always fits an empty stream.
+# Kept here rather than imported from the generated contract (custom_messages.wire.kinds),
+# which is too large to load with every configuration; tests/test_queue_settings.py checks
+# them against the contract.
+MAX_QUEUE_PARTITIONS = 128
+MIN_QUEUE_BYTES = MIB
+# The largest message a protocol 1 work stream stores: a full-size frame with its headers
+# (every stream's max_message_bytes in the contract; checked by the same test).
+MAX_QUEUE_MESSAGE_BYTES = 263_168
+# How many senders at the per-subject cap (transport.queues.max_messages_per_subject) a
+# partition stream keeps room beside. The stored subject names the sender, so each running
+# host that may send to an agent's queues is a sender of its own: every gateway, worker host
+# and edge adapter, the lead host, the team services and the scheduler (six roles in the
+# generated permissions), and their number grows with the team's hosts. A partition stream
+# must hold this many senders' backlog for one agent at the cap with full-size messages plus
+# one more sender's, which is room for that agent's and its neighbours' control messages.
+# It guarantees that room only while at most this many senders are at the cap with
+# messages of the largest size; with more, the stream relies on smaller real messages and
+# on the size warning (contract README, "Stream sizes";
+# runtime_settings.transport.least_partition_bytes).
+QUEUE_SENDERS_AT_CAP = 4
 
 
 @dataclass(frozen=True)
@@ -144,6 +168,62 @@ class TransportDefaultValues:
     credentials_file: DefaultValue[Optional[str]] = default_value(
         None,
         "Optional NATS user credentials file path.",
+        onboarding_overridable=False,
+    )
+    # transport.queues: the protocol 1 work and dead-letter streams of every team
+    # (contracts/messages/v1/README.md, "Stream sizes" and "Partitions"). NATS sets each
+    # stream's whole byte limit aside when it creates the stream, so a team reserves
+    # partitions x partition + pool + edge + team_services + dead_letter (2.125 GiB at
+    # these defaults). The byte limits and the per-subject cap are measured on
+    # nats-server 2.15.1 (the contract README gives the numbers).
+    queues_max_bytes_partition: DefaultValue[int] = default_value(
+        16 * MIB,
+        "Byte limit of each of a team's partition streams (UA1_PART_<team>~<partition>), which hold "
+        "the inboxes and control queues of the partition's agents. It must hold QUEUE_SENDERS_AT_CAP + 1 "
+        "senders' waiting messages for one agent at queues_max_messages_per_subject, each of "
+        "MAX_QUEUE_MESSAGE_BYTES, so lower the cap together with it.",
+        onboarding_overridable=False,
+    )
+    queues_max_bytes_pool: DefaultValue[int] = default_value(
+        128 * MIB,
+        "Byte limit of a team's worker pool stream (UA1_POOL_WORK_<team>).",
+        onboarding_overridable=False,
+    )
+    queues_max_bytes_edge: DefaultValue[int] = default_value(
+        128 * MIB,
+        "Byte limit of a team's edge stream (UA1_EDGE_WORK_<team>), which holds work for people's "
+        "chat routes and outside agents.",
+        onboarding_overridable=False,
+    )
+    queues_max_bytes_team_services: DefaultValue[int] = default_value(
+        256 * MIB,
+        "Byte limit of a team's team-services stream (UA1_TEAM_WORK_<team>), which holds the copies "
+        "of every task, result and handback the team services record.",
+        onboarding_overridable=False,
+    )
+    queues_max_bytes_dead_letter: DefaultValue[int] = default_value(
+        128 * MIB,
+        "Byte limit of a team's dead-letter stream (UA1_DLQ_<team>), which holds set-aside copies "
+        "and notices.",
+        onboarding_overridable=False,
+    )
+    queues_warn_at_percent: DefaultValue[int] = default_value(
+        80,
+        "Administrators get an Inbox notice and the Status page shows a problem when a team's work "
+        "or dead-letter stream holds this percent of its byte limit.",
+        onboarding_overridable=False,
+    )
+    queues_partitions: DefaultValue[int] = default_value(
+        96,
+        "How many partition streams each team has; every agent belongs to one. Fixed when the "
+        "installation is created: another count would put queued work in other streams.",
+        onboarding_overridable=False,
+    )
+    queues_max_messages_per_subject: DefaultValue[int] = default_value(
+        8,
+        "Most messages one sender may have waiting in one agent's inbox or control queue. A sender "
+        "over it is refused, so one busy queue leaves room in its partition stream for the others. "
+        "Raise queues_max_bytes_partition together with it (see that setting).",
         onboarding_overridable=False,
     )
 

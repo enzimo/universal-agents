@@ -44,7 +44,8 @@ needs_nats_server = pytest.mark.skipif(shutil.which("nats-server") is None, reas
 def _start(tmp_path: Path) -> subprocess.Popen[bytes]:
     # Like the launcher, pass a full environment without NATS credentials.
     env = {key: value for key, value in os.environ.items() if not key.startswith("NATS_")}
-    return nats_service.start_local_nats(env=env, logger=_LOGGER, cwd=tmp_path, service_root=tmp_path / "nats")
+    return nats_service.start_local_nats(env=env, logger=_LOGGER, cwd=tmp_path, partitions=96,
+                                         service_root=tmp_path / "nats")
 
 
 def _refusal(tmp_path: Path) -> str:
@@ -257,8 +258,11 @@ def test_the_consumer_check_stops_its_local_server_when_the_check_fails(
         stopped_at_exit(server, name="stand-in for the check's local nats-server"),
     ):
 
-        def start_local_nats(*, env: dict[str, str], **_kwargs: object) -> subprocess.Popen[bytes]:
+        started: dict[str, object] = {}
+
+        def start_local_nats(*, env: dict[str, str], **kwargs: object) -> subprocess.Popen[bytes]:
             env.update({"NATS_USER": "check", "NATS_PASSWORD": "secret"})
+            started.update(kwargs)
             return server
 
         async def failing_check(**_kwargs: object) -> None:
@@ -266,8 +270,11 @@ def test_the_consumer_check_stops_its_local_server_when_the_check_fails(
 
         monkeypatch.setattr(reconciler, "start_local_nats", start_local_nats)
         monkeypatch.setattr(reconciler, "reconcile_nats_consumers", failing_check)
+        # The saved settings' partition count, for the server's mappings.
+        monkeypatch.setattr(reconciler, "load_runtime_config_file", lambda _path: {"transport.queues.partitions": 7})
 
         assert reconciler.main(["--start-local-nats"]) == 1
+        assert started["partitions"] == 7
         # Stopped and reaped by main(); this test never polls it.
         assert server.returncode == -signal.SIGTERM
     assert "event=nats_consumer_reconciliation_failed" in caplog.text
