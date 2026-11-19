@@ -76,7 +76,7 @@ BROKER_AUTH_THEME = """
     --danger: #b91c1c;
     --danger-text: #7f1d1d;
     --danger-low: rgba(185, 28, 28, 0.10);
-    --content-width: 50rem;
+    --content-width: 44rem;
   }
   :root[data-color-mode="dark"] {
     color-scheme: dark;
@@ -108,7 +108,7 @@ BROKER_AUTH_THEME = """
     font-family: Figtree, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: var(--bg);
     color: var(--text);
-    line-height: 1.75;
+    line-height: 1.6;
   }
   a { color: var(--accent-high); text-underline-offset: 3px; overflow-wrap: anywhere; }
   a:hover { color: var(--text-strong); }
@@ -148,13 +148,13 @@ BROKER_AUTH_THEME = """
     background: var(--broker-chip-bg, var(--surface));
     font-size: 0.875rem;
   }
-  main { max-width: var(--content-width); margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
-  .content-panel { padding: 1.5rem 0; }
+  main { max-width: var(--content-width); margin: 0 auto; padding: 1.5rem 1.5rem 2rem; }
+  .content-panel { padding: 1rem 0; }
   .content-panel + .content-panel { border-top: 1px solid var(--line); }
   .eyebrow {
-    margin: 0 0 0.75rem;
+    margin: 0 0 0.5rem;
     color: var(--accent-high);
-    font-size: 0.8125rem;
+    font-size: 0.75rem;
     font-weight: 700;
     letter-spacing: 0.05em;
     line-height: 1.4;
@@ -166,12 +166,12 @@ BROKER_AUTH_THEME = """
     letter-spacing: 0;
     line-height: 1.2;
   }
-  h1 { margin: 0; max-width: 16ch; font-size: 2.625rem; }
-  h2 { margin: 0 0 1rem; font-size: 2rem; }
-  h3 { margin: 1.2rem 0 0.5rem; font-size: 1.25rem; }
+  h1 { margin: 0; max-width: 16ch; font-size: 1.5rem; }
+  h2 { margin: 0 0 0.75rem; font-size: 1.2rem; }
+  h3 { margin: 1rem 0 0.5rem; font-size: 1.05rem; }
   p { margin: 0; }
   p + p { margin-top: 1rem; }
-  .lede { max-width: 46rem; color: var(--text); font-size: 1.125rem; }
+  .lede { max-width: 46rem; color: var(--text); font-size: 1rem; }
   .note, .status {
     border-left: 0.25rem solid var(--accent);
     background: var(--accent-low);
@@ -334,10 +334,10 @@ BROKER_AUTH_THEME = """
     align-items: center;
     justify-content: center;
     width: fit-content;
-    min-height: 2.5rem;
-    padding: 0.55rem 1.1rem;
+    min-height: 2.25rem;
+    padding: 0.45rem 1rem;
     border: 1px solid var(--accent-high);
-    border-radius: 999rem;
+    border-radius: 8px;
     background: var(--accent-high);
     color: var(--bg);
     font: inherit;
@@ -492,7 +492,7 @@ BROKER_AUTH_THEME = """
     -webkit-backdrop-filter: blur(24px) saturate(140%);
   }
   main {
-    margin-top: 2rem;
+    margin-top: 1.5rem;
     border: 1px solid var(--line);
     border-radius: 10px;
     background: var(--surface);
@@ -536,10 +536,34 @@ BROKER_AUTH_THEME = """
     .site-header { padding: 0.65rem 1rem; }
     .search-chip { display: none; }
     main { padding: 1.5rem 1rem 3rem; }
-    h1 { max-width: none; font-size: 2rem; }
-    h2 { font-size: 1.625rem; }
+    h1 { max-width: none; font-size: 1.35rem; }
+    h2 { font-size: 1.15rem; }
     .secret-input-row { align-items: stretch; }
   }
+  /* The footer of an open form, in a card and on a full page: where the values
+     go, and the page's Decline as a quiet text button. */
+  .page-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--line);
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+  }
+  .page-footer form { display: block; margin: 0; }
+  .page-footer button.decline-action {
+    min-height: 0;
+    padding: 0.2rem 0.4rem;
+    border: 0;
+    background: none;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  .page-footer button.decline-action:hover,
+  .page-footer button.decline-action:focus-visible { color: var(--text-strong); text-decoration: underline; }
 </style>
 """
 
@@ -712,7 +736,8 @@ BROKER_CARD_THEME = """
   body.card-view main {
     max-width: none;
     margin: 0;
-    padding: 0.85rem 1rem 1rem;
+    /* The chat card around the frame has its own padding; a little room keeps focus rings visible. */
+    padding: 0.25rem 0.25rem 0.35rem;
     border: 0;
     border-radius: 0;
     background: transparent;
@@ -739,28 +764,8 @@ BROKER_CARD_THEME = """
   body.card-view .step { padding-bottom: 0.6rem; }
   body.card-view .note,
   body.card-view .status { padding: 0.6rem 0.75rem; }
-  .card-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    margin-top: 0.75rem;
-    padding-top: 0.6rem;
-    border-top: 1px solid var(--line);
-    color: var(--text-muted);
-    font-size: 0.8125rem;
-  }
-  .card-footer form { display: block; margin: 0; }
-  .card-footer button.decline-action {
-    min-height: 0;
-    padding: 0.2rem 0.4rem;
-    border: 0;
-    background: none;
-    color: var(--text-muted);
-    font-weight: 600;
-  }
-  .card-footer button.decline-action:hover,
-  .card-footer button.decline-action:focus-visible { color: var(--text-strong); text-decoration: underline; }
+  /* The card's footer says where the values go; the page's own sentence about it is left out. */
+  body.card-view .broker-note { display: none; }
 </style>
 """
 
@@ -1115,6 +1120,12 @@ def _decline_form(class_name: str) -> str:
     )
 
 
+def _page_footer() -> str:
+    """An open form's footer: where the values go, and Decline; the same in a card and on a full page."""
+
+    return f'<div class="page-footer"><span>{html.escape(CARD_BROKER_NOTE)}</span>{_decline_form("decline-action")}</div>'
+
+
 def _render_card_view(
     title: str, body: str, *, script: str, card_outcome: CardOutcome | None, decline: bool
 ) -> str:
@@ -1122,12 +1133,12 @@ def _render_card_view(
 
     view = current_view()
     appearance = _broker_appearance_from_env()
-    color_mode = "light" if str(appearance.get("color_mode") or "").strip().lower() == "light" else "dark"
+    color_mode = view.color_mode or (
+        "light" if str(appearance.get("color_mode") or "").strip().lower() == "light" else "dark"
+    )
     outcome_attr = f' data-card-outcome="{card_outcome}"' if card_outcome else ""
     footer = (
-        f'<div class="card-footer"><span>{html.escape(CARD_BROKER_NOTE)}</span>{_decline_form("decline-action")}</div>'
-        if decline
-        else ""
+        _page_footer() if decline else ""
     )
     return (
         f'<!doctype html><html lang="en" data-color-mode="{color_mode}" '
@@ -1159,11 +1170,7 @@ def render_broker_auth_page(
     if current_view().card:
         return _render_card_view(title, body, script=script, card_outcome=card_outcome, decline=decline)
     if decline:
-        body += (
-            '<section class="content-panel">'
-            f'<div class="page-actions">{_decline_form("secondary-action")}</div>'
-            '<p class="close-page-help">Decline ends this page without saving anything.</p></section>'
-        )
+        body += _page_footer()
     countdown_script = SESSION_COUNTDOWN_SCRIPT if "data-session-countdown" in body else ""
     runtime_theme = runtime_theme_css_from_appearance(_broker_appearance_from_env())
     return (

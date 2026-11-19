@@ -29,6 +29,16 @@
 export const CARD_MESSAGE_TYPE = "ua-broker-card";
 export const CARD_FRAME_SANDBOX = "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox";
 export const CARD_OUTCOMES = Object.freeze(["finished", "declined"]);
+// The person's light or dark mode, sent so the card matches the chat (secure_tools/broker_pages.py).
+export const CARD_COLOR_MODE_PARAM = "mode";
+
+/** The card view address with the chat's color mode, when it is light or dark. */
+export function withColorMode(frameUrl, mode) {
+  if (mode !== "light" && mode !== "dark") return frameUrl;
+  const url = new URL(frameUrl);
+  url.searchParams.set(CARD_COLOR_MODE_PARAM, mode);
+  return url.href;
+}
 // Heights the chat gives a frame: never so small a page cannot show its first
 // line, never taller than most of the window (a long page scrolls inside).
 export const MIN_FRAME_HEIGHT = 64;
@@ -220,8 +230,22 @@ function notice(document, item, extraClass) {
   return node;
 }
 
+// The card's one line about the page: the first line of the item's text, which
+// is the task's own reason (tool_setup) or what the page is for (sign-ins). The
+// rest of that text is the "goes to the secure broker" note, which the page's
+// own footer already says once.
+function reasonLine(item) {
+  return String(item.content || "").split("\n")[0].trim();
+}
+
+function reason(document, item) {
+  const line = reasonLine(item);
+  return line ? [element(document, "p", "broker-card-reason", line)] : [];
+}
+
 function openInOwnTab(document, item) {
-  const link = element(document, "a", "button secondary small message-transient-open broker-card-open", OPEN_IN_OWN_TAB_LABEL);
+  // A quiet text link beside the countdown: the page's own buttons stay the loudest controls.
+  const link = element(document, "a", "message-transient-open broker-card-open", OPEN_IN_OWN_TAB_LABEL);
   link.setAttribute("href", item.url);
   link.setAttribute("target", "_blank");
   link.setAttribute("rel", "noopener noreferrer");
@@ -230,11 +254,11 @@ function openInOwnTab(document, item) {
 
 function countdown(document, item) {
   if (!item.expiresAtUtc) return [];
-  const label = element(document, "span", "broker-card-expires", "expires in");
+  // The chat's countdown timer fills it ("9:59 remaining", credential_controls.js).
   const value = element(document, "span", "message-transient-countdown");
   value.setAttribute("data-expires-at", item.expiresAtUtc);
   value.setAttribute("role", "status");
-  return [label, value];
+  return [value];
 }
 
 /**
@@ -257,10 +281,10 @@ export function brokerCardElement({ document, cards, item, state, expiredMessage
   }
   if (state === BROKER_CARD_UNAVAILABLE) {
     const linked = notice(document, item, "is-unavailable");
-    linked.appendChild(element(document, "pre", "", item.content));
+    linked.append(...reason(document, item));
     linked.appendChild(element(document, "p", "broker-card-note", BROKER_CARD_NOTES[BROKER_CARD_UNAVAILABLE]));
     const actions = element(document, "div", "message-transient-actions broker-card-footer");
-    actions.append(openInOwnTab(document, item), ...countdown(document, item));
+    actions.append(...countdown(document, item), openInOwnTab(document, item));
     linked.appendChild(actions);
     return linked;
   }
@@ -268,15 +292,16 @@ export function brokerCardElement({ document, cards, item, state, expiredMessage
   if (live) return live;
   const card = notice(document, item, "is-framed");
   card.setAttribute("data-broker-frame", "");
-  if (item.content) card.appendChild(element(document, "p", "broker-card-reason", item.content));
+  card.append(...reason(document, item));
   const host = element(document, "div", "broker-card-frame-host");
   card.appendChild(host);
   const footer = element(document, "div", "message-transient-actions broker-card-footer");
   footer.append(...countdown(document, item), openInOwnTab(document, item));
   card.appendChild(footer);
+  const root = document.documentElement;
   const frame = cards.open({
     itemId: item.itemId,
-    frameUrl: item.frameUrl,
+    frameUrl: withColorMode(item.frameUrl, root ? root.getAttribute("data-color-mode") : ""),
     title: item.label,
     element: card,
     onOutcome: (outcome) => onState(outcome),

@@ -29,6 +29,7 @@ from runtime_settings.appearance import (  # noqa: E402
 from assistant_gateway.application.website_application import WebAppearanceV1  # noqa: E402
 from custom_messages.contracts.status_v1 import StatusSeverity  # noqa: E402
 from runtime_settings.network import compose_public_base_url  # noqa: E402
+from secure_tools.broker_pages import card_view_url  # noqa: E402
 from assistant_gateway.application.command_help import (  # noqa: E402
     build_web_chat_command_guide_payload,
     build_web_chat_help,
@@ -56,6 +57,8 @@ PUBLIC_VERSION = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 # reconnects when nothing arrives for 15 (chat_live_events.mjs).
 PREVIEW_STREAM_HEARTBEAT_SECONDS = 2
 PREVIEW_THREADS_REVISION = "preview-threads:1"
+# The card --broker-page adds to the preview conversation (a running broker's page).
+PREVIEW_BROKER_PAGE_ID = "preview-broker-page"
 
 
 class PreviewRequestHandler(SimpleHTTPRequestHandler):
@@ -1029,8 +1032,36 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             "threads_revision": PREVIEW_THREADS_REVISION,
             "busy_session_keys": [],
             "team_activity": {"members": self._preview_members()},
-            "transient_actions": [],
+            "transient_actions": self._preview_transient_actions(),
         }
+
+    def _preview_transient_actions(self) -> list[dict[str, object]]:
+        """A broker page card when the preview was started with --broker-page (a running broker's form)."""
+
+        page = getattr(self.server, "preview_broker_page", None)
+        if not isinstance(page, dict):
+            return []
+        return [
+            {
+                "session_key": WEB_CHAT_PREVIEW_SESSION_KEY,
+                "kind": "tool_setup",
+                "item_id": f"tool_setup:{PREVIEW_BROKER_PAGE_ID}",
+                "request_id": PREVIEW_BROKER_PAGE_ID,
+                "correlation_id": PREVIEW_BROKER_PAGE_ID,
+                "session_sequence": 1,
+                "created_at_utc": page["created_at_utc"],
+                "content": (
+                    "To list your stacks, I need your Portainer API token.\n"
+                    "What you enter goes straight to the secure broker, never to the agent."
+                ),
+                "action": {
+                    "label": "Store your Portainer API token",
+                    "url": page["url"],
+                    "expires_at_utc": page["expires_at_utc"],
+                    "frame_url": card_view_url(str(page["url"])),
+                },
+            }
+        ]
 
     def _write_preview_event_stream(self) -> None:
         """Server-sent events like the gateway's stream, until the browser closes it.
@@ -1406,6 +1437,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Open the preview URL in the default browser.",
     )
     parser.add_argument(
+        "--broker-page",
+        default="",
+        help=(
+            "Address of a running broker's page (for example a credential collection form) to show "
+            "as a card in the Web Chat preview; the broker must allow this preview's address to frame it."
+        ),
+    )
+    parser.add_argument(
         "--export-dir",
         default=str(Path.home() / "Downloads"),
         help="Directory for one-time appearance exports.",
@@ -1426,6 +1465,7 @@ def serve(
     asset_root: Path,
     export_dir: Path,
     open_browser: bool = False,
+    broker_page: str = "",
 ) -> int:
     if not asset_root.is_dir():
         raise SystemExit(f"Preview asset directory does not exist: {asset_root}")
@@ -1438,6 +1478,17 @@ def serve(
             f"Unable to bind onboarding aesthetic preview on {host}:{port}: {exc}"
         ) from exc
 
+    if broker_page:
+        now = datetime.now(timezone.utc)
+        setattr(
+            httpd,
+            "preview_broker_page",
+            {
+                "url": broker_page,
+                "created_at_utc": now.isoformat(),
+                "expires_at_utc": datetime.fromtimestamp(now.timestamp() + 15 * 60, timezone.utc).isoformat(),
+            },
+        )
     actual_host, actual_port = httpd.server_address[:2]
     url = f"http://{_display_host(str(actual_host))}:{actual_port}/"
     print(f"Onboarding aesthetic preview listening on {url}")
@@ -1469,6 +1520,7 @@ def main() -> int:
         asset_root=Path(args.asset_root).expanduser().resolve(),
         export_dir=Path(args.export_dir).expanduser().resolve(),
         open_browser=bool(args.open),
+        broker_page=str(args.broker_page or "").strip(),
     )
 
 

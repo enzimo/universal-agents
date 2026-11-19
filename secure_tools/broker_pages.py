@@ -30,6 +30,10 @@ BROKER_PAGE_PREFIXES = ("/auth/", "/credential-collection/", "/account-link/")
 
 CARD_VIEW_PARAM = "view"
 CARD_VIEW_VALUE = "card"
+# Web Chat adds the person's light or dark mode, so the card matches the chat
+# around it (the broker's own setting is the team's default).
+CARD_COLOR_MODE_PARAM = "mode"
+CARD_COLOR_MODES = frozenset({"light", "dark"})
 # The sandbox of the card view's Content-Security-Policy and of the iframe Web
 # Chat builds (assistant_gateway/onboarding_web/assets/broker_card.js).
 CARD_FRAME_SANDBOX = "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
@@ -91,6 +95,8 @@ def _is_ipv6(host: str) -> bool:
 
 __all__ = [
     "BROKER_PAGE_PREFIXES",
+    "CARD_COLOR_MODES",
+    "CARD_COLOR_MODE_PARAM",
     "CARD_FRAME_SANDBOX",
     "CARD_VIEW_PARAM",
     "CARD_VIEW_VALUE",

@@ -44,6 +44,8 @@ from aiohttp import web
 from secure_tool_broker.defaults import AUTH_PAGE_STATUS_ROUTE
 from secure_tools.broker_pages import (
     BROKER_PAGE_PREFIXES,
+    CARD_COLOR_MODE_PARAM,
+    CARD_COLOR_MODES,
     CARD_FRAME_SANDBOX,
     CARD_VIEW_PARAM,
     CARD_VIEW_VALUE,
@@ -63,6 +65,8 @@ class PageView:
 
     card: bool = False
     parent_origin: str | None = None
+    # The chat's light or dark mode for a card (CARD_COLOR_MODE_PARAM), or "" for the broker's own.
+    color_mode: str = ""
 
 
 FULL_PAGE = PageView()
@@ -143,7 +147,12 @@ def page_view_middleware(parent_origin: str | None, *, error_page: ErrorPage) ->
         if _is_status_route(request):
             return await _status_answer(request, handler, card_view_on=parent_origin is not None)
         card = parent_origin is not None and request.query.get(CARD_VIEW_PARAM) == CARD_VIEW_VALUE
-        view = PageView(card=True, parent_origin=parent_origin) if card else FULL_PAGE
+        mode = request.query.get(CARD_COLOR_MODE_PARAM, "")
+        view = (
+            PageView(card=True, parent_origin=parent_origin, color_mode=mode if mode in CARD_COLOR_MODES else "")
+            if card
+            else FULL_PAGE
+        )
         headers = card_view_headers(parent_origin) if card and parent_origin else full_page_headers()
         token = _CURRENT_VIEW.set(view)
         try:

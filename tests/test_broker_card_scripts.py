@@ -23,7 +23,8 @@ def test_broker_card_scripts():
 def test_the_chat_frame_uses_the_brokers_sandbox_tokens():
     """One sandbox for the card view's own policy and Web Chat's iframe (secure_tools.broker_pages)."""
 
-    from secure_tools.broker_pages import CARD_FRAME_SANDBOX
+    from secure_tools.broker_pages import CARD_COLOR_MODE_PARAM, CARD_FRAME_SANDBOX
 
     module = (Path(__file__).parents[1] / "assistant_gateway/onboarding_web/assets/broker_card.mjs").read_text()
     assert f'export const CARD_FRAME_SANDBOX = "{CARD_FRAME_SANDBOX}";' in module
+    assert f'export const CARD_COLOR_MODE_PARAM = "{CARD_COLOR_MODE_PARAM}";' in module

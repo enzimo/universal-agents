@@ -1709,7 +1709,7 @@ class SecureToolBrokerService:
   <section class="content-panel">
     <p class="eyebrow">Secure Credential Deletion</p>
     <h1>Delete credential for {html.escape(service_name)}.</h1>
-    <p class="lede">This form will delete the selected credential from the secure broker store after you confirm below. Agents receive only redacted deletion metadata.</p>
+    <p class="lede broker-note">This form will delete the selected credential from the secure broker store after you confirm below. Agents receive only redacted deletion metadata.</p>
   </section>
   <section class="content-panel">
     <p>Credential key: <code>{html.escape(credential_key)}</code></p>
@@ -1840,7 +1840,7 @@ class SecureToolBrokerService:
   <section class="content-panel">
     <p class="eyebrow">Secure Credential Collection</p>
     <h1>Submit credentials for {html.escape(service_name)}.</h1>
-    <p class="lede">This form sends sensitive fields directly to the secure broker. Agents receive only redacted completion metadata.</p>
+    <p class="lede broker-note">This form sends sensitive fields directly to the secure broker. Agents receive only redacted completion metadata.</p>
     {signup_html}
   </section>
   <section class="content-panel">
@@ -2463,7 +2463,7 @@ class SecureToolBrokerService:
   <section class="content-panel">
     <p class="eyebrow">GitHub</p>
     <h1>Authenticate broker-owned GitHub CLI access.</h1>
-    <p class="lede">This form submits a GitHub token directly to the secure tool broker. The token is not returned to the agent.</p>
+    <p class="lede broker-note">This form submits a GitHub token directly to the secure tool broker. The token is not returned to the agent.</p>
   </section>
   <section class="content-panel">
     <div class="note">For GitHub Projects v2 board access, the token must include <code>read:project</code> along with repository and organization scopes.</div>

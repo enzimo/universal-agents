@@ -15,6 +15,7 @@ import {
   createBrokerCards,
   isCardMessage,
   replaceChildrenKeeping,
+  withColorMode,
 } from "../assistant_gateway/onboarding_web/assets/broker_card.mjs";
 import { buttonLabels, byClass, byTag, fakeDocument } from "./fake_dom.mjs";
 
@@ -232,7 +233,8 @@ test("when kept cards would have to move, the list is rebuilt and the caller is 
 const ITEM = {
   itemId: "tool_setup:req-9",
   label: "Choose your account for Portainer",
-  content: "To list your stacks, choose your Portainer account.",
+  // The shape tool_setup sends: the task's reason, then the broker note.
+  content: "To list your stacks, choose your Portainer account.\nWhat you enter goes straight to the secure broker, never to the agent.",
   url: "https://broker.example.test/account-link/s9",
   frameUrl: "https://broker.example.test/account-link/s9?view=card",
   expiresAtUtc: "2026-11-19T16:00:00Z",
@@ -262,13 +264,23 @@ test("an open broker card is the frame with the reason, countdown and Open in it
   const [frame] = byTag(card, "iframe");
   assert.equal(frame.getAttribute("src"), ITEM.frameUrl);
   assert.equal(frame.getAttribute("sandbox"), CARD_FRAME_SANDBOX);
-  assert.equal(byClass(card, "broker-card-reason")[0].textContent, ITEM.content);
+  assert.equal(
+    byClass(card, "broker-card-reason")[0].textContent,
+    "To list your stacks, choose your Portainer account.",
+    "only the reason: the page's own footer says where the values go",
+  );
   const [open] = byTag(card, "a");
   assert.equal(open.textContent, OPEN_IN_OWN_TAB_LABEL);
   assert.equal(open.getAttribute("href"), ITEM.url, "its own tab opens the full page, not the card view");
   assert.equal(open.getAttribute("target"), "_blank");
   assert.equal(open.getAttribute("rel"), "noopener noreferrer");
-  assert.equal(byClass(card, "message-transient-countdown")[0].getAttribute("data-expires-at"), ITEM.expiresAtUtc);
+  const [countdown] = byClass(card, "message-transient-countdown");
+  assert.equal(countdown.getAttribute("data-expires-at"), ITEM.expiresAtUtc);
+  // The chat's timer fills the countdown; the footer then reads as one quiet line.
+  countdown.textContent = "9:59 remaining";
+  const [footer] = byClass(card, "broker-card-footer");
+  assert.equal(footer.textContent, `9:59 remaining${OPEN_IN_OWN_TAB_LABEL}`);
+  assert.ok(!open.className.includes("button"), "Open in its own tab is a text link, not a button");
   assert.deepEqual(buttonLabels(card), [], "Decline is inside the frame; the card has no Dismiss");
 });
 
@@ -309,5 +321,20 @@ test("a closed card is one line, and an unavailable one offers its own tab", () 
   assert.equal(byTag(unavailable, "iframe").length, 0);
   assert.ok(unavailable.textContent.includes(BROKER_CARD_NOTES.unavailable));
   assert.equal(byTag(unavailable, "a")[0].getAttribute("href"), ITEM.url);
+  assert.equal(
+    byClass(unavailable, "broker-card-reason")[0].textContent,
+    "To list your stacks, choose your Portainer account.",
+    "the same reason line as the open card",
+  );
+  assert.equal(byTag(unavailable, "pre").length, 0);
   assert.deepEqual(cards.openItemIds(), [], "no closed or unavailable card opens a frame");
+});
+
+test("the card asks for the chat's light or dark mode", () => {
+  const h = cardHarness();
+  h.document.documentElement = h.document.createElement("html");
+  h.document.documentElement.setAttribute("data-color-mode", "light");
+  const [frame] = byTag(h.render(""), "iframe");
+  assert.equal(frame.getAttribute("src"), `${ITEM.frameUrl}&mode=light`);
+  assert.equal(withColorMode(ITEM.frameUrl, "sepia"), ITEM.frameUrl, "only light or dark");
 });

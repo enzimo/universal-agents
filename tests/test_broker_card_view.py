@@ -386,3 +386,13 @@ def test_a_missing_bridge_is_logged_and_read_once(monkeypatch, tmp_path, caplog)
         assert caplog.text.count("event=broker_card_bridge_missing") == 1
     finally:
         auth_pages._card_bridge_script.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_a_card_takes_the_chats_light_or_dark_mode(deployment) -> None:
+    client, _origin = deployment
+    path = await _collection_page(client)
+    light = await (await client.get(card_view_url(path) + "&mode=light")).text()
+    assert 'data-color-mode="light"' in light
+    odd = await (await client.get(card_view_url(path) + "&mode=sepia")).text()
+    assert 'data-color-mode="sepia"' not in odd
