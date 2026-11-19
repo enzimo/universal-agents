@@ -16,11 +16,13 @@ GitHub account, so `/link cli:github team` only says so. The GitHub API tool
 link your own token with `/link http:github`; `/link http:github team` replies
 "GitHub API uses only each person's own account."
 
-In Web Chat, the authentication notice has an **Open** button. Select it to
-open the secure broker form in a new tab or window. The long authentication URL
-is hidden behind that link; credentials entered in the form are not sent to
-the agent. The link disappears when you dismiss it or refresh Web Chat. Run the
-command again if you need a new link. The CLI prints a URL you can open instead.
+In Web Chat, the secure broker's page appears inside the chat, in the
+sign-in card; **Open in its own tab** opens it in a new tab instead. The long
+authentication URL stays hidden; credentials entered in the page are not sent
+to the chat or the agent. **Decline** ends the page without signing in. The
+card disappears when the page ends or when you refresh Web Chat. Run the
+command again if you need a new page. Other chats and the CLI give you a link
+to open instead.
 
 ## Browser Auth
 

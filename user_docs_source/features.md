@@ -715,8 +715,14 @@ it lacks, and opens every page in your chat at once:
 > I need you to sign in to GitHub so I can list the repos you can access in
 > GitHub. **Sign in to GitHub**
 
-The page opens in a new tab; what you enter goes straight to the secure broker,
-never to the agent. When everything is done, the task carries on by itself,
+In Web Chat the page appears inside the chat, in its card: you fill it in
+there, and what you enter goes straight to the secure broker, never to the chat
+or the agent. **Open in its own tab** opens the same page in a new tab, which
+helps for long forms (switching to another chat thread reloads a page shown in
+the chat, so anything typed but not sent is cleared). **Decline** at the bottom
+of the page ends it without saving anything and tells the waiting task. In
+other chats (Telegram, Signal and the rest) the message holds a link that opens
+the page in a new tab. When everything is done, the task carries on by itself,
 for example "Signed in to GitHub as exampleuser. Checking your repositories now."
 You can also finish the same step yourself with `/link <tool_id>` (or
 `/auth google team_client`) while the task waits; the task hears about it the
@@ -830,8 +836,9 @@ message saying how it ended, in Web Chat, Telegram, Discord and the other chats:
   Check **Settings → Access → By Tool** (its **Accounts** row names who owns
   each linked account and who linked it) or `/auth status` for sign-ins.
 
-In Web Chat the **Open account link form** or **Open** card disappears when
-that message arrives. While the page is open, chat history keeps only a line
+In Web Chat the page itself shows inside its card, and the card disappears
+when that message arrives (it shrinks to "Done." or "Declined." as soon as the
+page ends). While the page is open, chat history keeps only a line
 such as "Account link form opened for mcp:crawl4ai (the team's account)."; the
 page's address is never saved. The card lives only in the browser tab that ran
 `/link`, so refreshing the page removes it, and the result message still

@@ -3322,6 +3322,87 @@ still pass the credential-shape check. The broker derives identity from
 the signed task context and chooses the credential from the tool's account link
 on every use.
 
+### Broker pages inside Web Chat cards
+
+When Web Chat needs a credential, sign-in, account link, model key or the
+`/upgrade` passphrase, the broker's own page appears inside the conversation as
+a card instead of in a new tab (owner's request, 2026-11-19). Every other
+channel (Telegram, Signal and the rest) still gets the plain link. The chat
+page, the gateway, agents and models still never see what is typed.
+
+- **One page, two views.** Each broker page (`/auth/...`,
+  `/credential-collection/...`, `/account-link/...`) has its full page and its
+  card view, the same address with `?view=card`
+  (`secure_tools/broker_pages.py`, `secure_tool_broker/page_view.py`). The full
+  page sends `frame-ancestors 'none'` and `X-Frame-Options: DENY`. The card
+  view sends `frame-ancestors <Web Chat origin>; sandbox allow-scripts
+  allow-forms allow-popups allow-popups-to-escape-sandbox` and never
+  `allow-same-origin`. Both send `Referrer-Policy: no-referrer`, so a link out
+  of a page never carries its private address. The broker derives the Web Chat
+  origin from the existing public-address settings
+  (`network.public_origin` with the internal website's public port), only when
+  the internal website and Web Chat are on, and rebuilds it from checked parts
+  (`policy_origin`) so a setting can never add a directive. Without it every
+  request gets the full page (`event=broker_card_view_off` at startup).
+- **Why a sandboxed frame.** Behind a reverse proxy the broker is path-routed
+  on the chat's own address, so a plain frame would be same-origin with the
+  chat page and its script could read the form. The sandbox in the response
+  itself, not only on Web Chat's iframe, gives the page an opaque origin
+  however it is framed. The rejected alternative, a gateway form that posts to
+  the broker, would put the secret in the chat page.
+- **What stays the same.** The private link in the address, the one-time claim
+  (`secure_tool_broker/form_claims.py`), expiry, and the per-submission standing
+  checks of `/auth model` and `/upgrade` are unchanged. Forms posted from the
+  card arrive with `Origin: null`, which the broker never checked: a `null`
+  origin cannot tell the card from another sandboxed page, so the private link
+  remains the check, and a cross-site post without it gets 404. The sign-in
+  status route answers `Access-Control-Allow-Origin: null` (no credentials,
+  errors included) so the page's own polling works inside the card; it still
+  needs the private link and returns nothing secret. Page errors render as
+  broker pages; the status route keeps plain errors.
+- **The bridge.** In the card view the broker inlines
+  `secure_tool_broker/page_assets/card_bridge.js`. It posts to the Web Chat
+  origin only `{type, height}` and, when the handler marked a confirmed end,
+  `{type, outcome: finished|declined}`. It reads no field and listens to no
+  message. Refusals, failures, "already used" pages and pages with a next step
+  (Bitwarden's "restart the broker now") carry no outcome, so the card stays
+  readable. Web Chat (`assets/broker_card.mjs`) builds the iframe with the same
+  sandbox, accepts a message only from that card's own frame and only in those
+  two shapes, clamps the height (at most 70% of the window; a longer page
+  scrolls inside), and falls back to "Open in its own tab" when a loaded frame
+  says nothing for 3 seconds or a frame does not load in 20. It adds the
+  chat's light or dark mode (`&mode=`) so the card matches; a card keeps the
+  mode it opened with until it is opened again. The chat's
+  Content-Security-Policy allows framing only the broker's checked public
+  origin (`frame-src`, `website_support.web_chat_csp`).
+- **Keeping what was typed.** An iframe that leaves the page reloads.
+  `renderMessages` builds the conversation and places it around open cards
+  (`replaceChildrenKeeping`) instead of emptying the list, and warns in the
+  console with the item ids when it has to rebuild. A card's frame closes when
+  its item leaves, when another thread is shown, at expiry and on sign-out. A
+  thread switch therefore reloads a half-filled form; long forms can use "Open
+  in its own tab" (accepted trade-off: keeping hidden frames per thread would
+  need one live message list per thread).
+- **Decline.** Every open form a person or task waits on has a Decline button
+  of its own (a separate form with only `ua_decline`, so no typed value travels
+  with it, `secure_tool_broker/page_decline.py`) and goes through the same
+  one-time claim. Credential forms end as `credential_declined` (a status in
+  the `credential.form.result` contract; the agent answers without asking to
+  try again), account links as `account_link_declined`, sign-ins as `declined`
+  with their `gh`/`gog` process stopped; the process monitor then stores
+  nothing. A Decline from a stale second view is ignored once the page ended or
+  its process already finished signing in. `/auth model` and `/upgrade` keep
+  their own Close. A declined sign-in or account link ends the task's wait as
+  `TOOL_SETUP_DECLINED`, so the same page is not offered again in that task. A
+  declined credential form in a task that continues (`continue_task`) relies
+  on the resume instruction alone not to ask again: nothing in the gateway
+  refuses a second form for the same key in that task yet (follow-up proposed
+  to the lead).
+- **What is left.** A script running in the chat page (an injected script) can
+  still show a fake form of its own or open the full page in a new window; it
+  cannot read what the person types into the genuine broker frame, however it
+  frames the card view.
+
 ## Deterministic execution and managed processes
 
 Agent-produced code crosses a promotion boundary before it can become durable

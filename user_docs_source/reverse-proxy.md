@@ -245,6 +245,18 @@ After changing public URL or port settings in an existing
 `instance_config.yaml`, restart the Universal Agents service so every child
 process receives the same advertised URLs.
 
+## Broker Pages Inside Web Chat
+
+Web Chat shows the broker's pages inside the chat, framed and sandboxed. The
+broker sends its own framing headers: the full page refuses to be framed, and
+the card view (`?view=card`) may be framed only by the Web Chat's address
+(`network.public_origin` with the website's public port). Do not add your own
+`X-Frame-Options` or `Content-Security-Policy` headers to the broker's paths
+at the proxy, and do not strip the broker's. If a card shows "This secure page
+could not be shown here", the frame was refused: check that people open Web
+Chat at the configured public address and that the proxy passes the broker's
+headers unchanged. The person can still use **Open in its own tab**.
+
 ## Path Prefixes and Separate Broker Hostnames
 
 A broker prefix such as `https://assistant.example.com/broker` is not currently
@@ -274,9 +286,10 @@ After deploying or restarting the stack:
    begins with `https://assistant.example.com/auth/`.
 5. Start a secure credential-collection flow and confirm its generated URL
    begins with `https://assistant.example.com/credential-collection/`.
-6. Send `/link http:github` in chat and open the form link. Its
-   `/account-link/...` URL must render the broker's account link form; form
-   submission must reach the same broker.
+6. Send `/link http:github` in Web Chat. The broker's account link form must
+   appear inside the chat card (its `/account-link/...?view=card` address), and
+   **Open in its own tab** must open the same form; form submission must reach
+   the same broker.
 
 If Web Chat renders without styles or cannot authenticate, confirm the fallback
 website router also forwards root assets and `/api/...`. If broker forms return

@@ -269,7 +269,14 @@ onboarding's server, titled **Choose what to import**, with these differences:
   exception is the coder-critic work report (see Generated Sites).
 - Standalone credential and broker auth pages must match the same frosted
   visual language and embedded static mesh, even when the main website service
-  is not running.
+  is not running. Since 2026-11-19 they use the compact card look of their Web
+  Chat cards: one card on the mesh, a small eyebrow, a 1.5rem heading, compact
+  fields, 8 px buttons, and, on every open form, the same footer as the card
+  view: "Goes straight to the secure broker, not to the chat or agents." on the
+  left and **Decline** as a quiet text button on the right. The card view of a
+  page (`?view=card`) drops the header, mesh and countdown and keeps that
+  footer; the long-lived `/auth model` and `/upgrade` pages keep their own
+  **Close** instead of Decline.
 - The broker's account link form states whose account it is, a **Used by**
   line naming the agents that may use the tool, where the credential goes and
   how it is sent. It then offers two parts, each a small form with its own
@@ -1958,12 +1965,33 @@ its history. Steps with linked requests cannot use this correction.
   appear in a dismissible, copyable memory-only notice in the same ordered chat
   timeline as durable messages. Place the notice immediately after its safe
   durable System receipt. Refresh intentionally removes the secret notice.
-- Broker sign-in pages from `/link <tool>` (GitHub, Google, X) and `/auth`
-  (team sign-in apps, password managers) use the memory-only **Open** link control,
-  never a copyable raw-URL notice. Open the secure form in a separate tab with
-  `noopener noreferrer`; show the broker expiry countdown when supplied.
-  Dismiss or refresh removes the link. Authentication status remains available
-  through `/auth status`.
+- **Broker pages appear inside the chat** (owner's choice "Option A",
+  2026-11-19). Every page of the secure broker the chat sends a person to (a
+  credential form, credential deletion, an account link, a `/link` or `/auth`
+  sign-in including the team sign-in apps, the `/auth model` pages and the
+  `/upgrade` passphrase page) is shown as a card in the conversation: the
+  broker's own page in a sandboxed frame (`assets/broker_card.mjs`), never a
+  copyable raw-URL notice and never a form the chat page draws itself. The card
+  has, top to bottom: one muted line with the task's reason (the first line
+  of the card's text), the framed page with the broker's own footer ("Goes
+  straight to the secure broker, not to the chat or agents." and a quiet
+  **Decline**), then one quiet right-aligned line: the `m:ss remaining`
+  countdown and **Open in its own tab** as an underlined text link (it opens
+  the full page with `noopener noreferrer`). Say where the values go once: the
+  card view hides the page's own sentence about it. The card is a calm
+  neutral surface (white in light mode, `#11171b` in dark mode, the same as the
+  frame's own background), not the amber notice of other memory-only items,
+  and it has no Dismiss: Decline inside the frame ends the page. When the page
+  finishes or is declined the card shrinks to one line ("Done. This secure
+  page is closed." or "Declined. Nothing was saved."). At expiry the frame
+  closes and the existing expired line stays. A frame that never reports
+  becomes "This secure page could not be shown here. Open it in its own tab."
+  with the link and countdown. The frame follows the page's height up to 70%
+  of the window; a longer page scrolls inside. The card follows the chat's
+  light or dark mode when it opens and keeps it until opened again. A thread
+  switch reloads a half-filled form (say so in user docs; long forms can use
+  **Open in its own tab**). Other channels keep the plain link.
+  Authentication status remains available through `/auth status`.
 - Credential collection, deletion, manual-signup collection, and tool setup
   pages a task asks for (kind `tool_setup`: a sign-in, an account link form,
   the team's sign-in app, or a step done outside Universal Agents) use the
@@ -1979,16 +2007,19 @@ its history. Steps with linked requests cannot use this correction.
   "You finished the account link for Portainer yourself, so this page is no
   longer needed.", or after **Mark Done** "You marked the Gitea setup step
   'Create a Gitea token' done." A page offered again gets a new card that this
-  line never closes. Show an explicit frosted **Open**
-  action in the same ordered chat timeline as durable messages. Use the
+  line never closes. A step outside Universal Agents (a vendor's website)
+  keeps an explicit frosted **Open** link card; a broker page shows as the card
+  described above. Place either in the same ordered chat timeline as durable
+  messages. Use the
   gateway-owned `session_sequence` plus an in-memory subsequence so the action
   follows the safe System receipt created with it and remains before every
   later message. Do not use displayed wall-clock timestamps as the canonical
   sort key. Use concise descriptive copy and the action label as the visible
-  link; never print the bearer URL as text. Open it in a separate tab with
-  `noopener noreferrer`, and display a working `m:ss` countdown from the broker
-  expiry. At expiry, remove the Open action and countdown, show a clear local
-  expired status, and keep manual Dismiss available. Keep the inert card until a
+  link; never print the bearer URL as text. Open a link card's page in a
+  separate tab with `noopener noreferrer`, and display a working `m:ss`
+  countdown from the broker expiry. At expiry, remove the Open action and
+  countdown, show a clear local expired status, and keep manual Dismiss
+  available on link cards (broker page cards have none). Keep the inert card until a
   correlated terminal result arrives because a submission claimed before expiry
   may still finish. Remove the card after either a successful or failed terminal
   result. Multiple pending actions retain independent positions, countdowns, and
