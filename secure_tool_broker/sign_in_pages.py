@@ -127,7 +127,7 @@ def sign_in_wait_script() -> str:
         deviceCode.textContent = payload.user_code;
         if (copyButton) copyButton.disabled = false;
       }
-      if (payload.status === "success" || payload.status === "error") {
+      if (payload.status === "success" || payload.status === "error" || payload.status === "declined") {
         stopPolling();
         // Navigate with GET once, including when this page was rendered by a form POST.
         window.location.replace(window.location.href);

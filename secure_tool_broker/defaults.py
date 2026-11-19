@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 DEFAULT_BIND_HOST = "0.0.0.0"
@@ -93,3 +94,26 @@ def card_view_url(url: str) -> str:
     query = [(name, value) for name, value in parse_qsl(parts.query, keep_blank_values=True) if name != CARD_VIEW_PARAM]
     query.append((CARD_VIEW_PARAM, CARD_VIEW_VALUE))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+# -- How a broker page ended ----------------------------------------------------------
+#
+# A sign-in page's status (its own status route; the gateway's watchers read it
+# in assistant_gateway.application.tool_setup and link_results): one of these
+# ends the page. "declined" means the person chose Decline on the page.
+SIGN_IN_STATUS_SUCCESS = "success"
+SIGN_IN_STATUS_ERROR = "error"
+SIGN_IN_STATUS_DECLINED = "declined"
+SIGN_IN_FINAL_STATUSES = frozenset({SIGN_IN_STATUS_SUCCESS, SIGN_IN_STATUS_ERROR, SIGN_IN_STATUS_DECLINED})
+# A credential collection or deletion form the person declined (the
+# SecureCredentialCollectionResult status the waiting task receives).
+CREDENTIAL_DECLINED_STATUS = "credential_declined"
+# The hidden field of a page's Decline form (auth_pages.render_broker_auth_page).
+# Decline is its own small form, so no value typed into the page travels with it.
+DECLINE_FIELD = "ua_decline"
+DECLINE_VALUE = "yes"
+
+
+def is_decline(form: Mapping[str, object]) -> bool:
+    """Whether a submitted page form is its Decline button."""
+
+    return str(form.get(DECLINE_FIELD) or "").strip().lower() == DECLINE_VALUE

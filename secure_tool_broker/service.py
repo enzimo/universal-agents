@@ -70,6 +70,10 @@ from secure_tool_broker.team_export_page import add_team_export_routes
 from secure_tool_broker.defaults import (
     AUTH_PAGE_STATUS_ROUTE,
     BROKER_PAGE_PREFIXES,
+    CREDENTIAL_DECLINED_STATUS,
+    SIGN_IN_FINAL_STATUSES,
+    SIGN_IN_STATUS_DECLINED,
+    is_decline,
     ONBOARDING_ACCOUNT_KEYS_ROUTE,
     PERSON_CREDENTIAL_DELETION_ROUTE,
     TRANSFER_ROUTE_PREFIX,
@@ -447,6 +451,21 @@ _ACCOUNT_LINK_CARD_OUTCOMES: dict[str, CardOutcome] = {
 }
 
 
+def _declined_page(eyebrow: str) -> str:
+    """The page a person declined: closed, nothing saved; a card tells the chat it was declined.
+
+    The words hold whether a task waits on the page or the person opened it with a command.
+    """
+
+    body = (
+        f'<section class="content-panel"><p class="eyebrow">{html.escape(eyebrow)}</p>'
+        "<h1>You declined this page.</h1>"
+        "<p>Nothing was saved, and the page is closed. If an agent asked for it, it is told.</p>"
+        f"{render_close_page_button()}</section>"
+    )
+    return render_broker_auth_page("Declined", body, card_outcome=CARD_OUTCOME_DECLINED)
+
+
 def _account_link_page(
     title: str, heading: str, text: str, *, status: int = 200, card_outcome: CardOutcome | None = None
 ) -> web.Response:
@@ -646,7 +665,7 @@ def _google_client_form(session: BrokerAuthSession) -> str:
     <button type="submit">Store the team's app</button>
   </form>
 </section>"""
-    return render_broker_auth_page("Google sign-in app", body)
+    return render_broker_auth_page("Google sign-in app", body, decline=True)
 
 
 async def _submit_google_form(session: BrokerAuthSession, form: Any, *, team_id: str) -> ToolResult:
@@ -1400,6 +1419,7 @@ class SecureToolBrokerService:
                 "Link an account",
                 render_form(session, tool, choices, used_by=used_by),
                 script=SECRET_INPUT_TOGGLE_SCRIPT,
+                decline=True,
             ),
             content_type="text/html",
         )
@@ -1412,7 +1432,9 @@ class SecureToolBrokerService:
         # claim and the worker that releases it.
         store = self._account_link_store()
         catalog = self._access_gate.catalog
-        confirmed = str(form.get("confirm") or "").strip().lower() == "yes"
+        # Decline (or a form sent without its confirmation) links nothing: finish_account_link declines.
+        declined = is_decline(form)
+        confirmed = not declined and str(form.get("confirm") or "").strip().lower() == "yes"
         choice = read_choice(form)
         _claim_account_link_submission(session, prune_expired=self._prune_account_link_sessions)
         session.used = True
@@ -1421,6 +1443,16 @@ class SecureToolBrokerService:
         sentence = await _run_claimed_form_thread(
             session, finish_account_link, session, store, catalog, confirmed=confirmed, choice=choice
         )
+        if declined:
+            self._logger.info(
+                "A person declined an account link form. event=account_link_declined tool_id=%s owner_kind=%s "
+                "person_id=%s session_id_prefix=%s",
+                session.request.tool_id,
+                session.request.owner_kind.value,
+                session.request.person_id,
+                session_id[:12],
+            )
+            return web.Response(text=_declined_page("Account link"), content_type="text/html")
         return _account_link_page(
             "Account link result",
             session.status.replace("_", " ").capitalize(),
@@ -1830,7 +1862,7 @@ class SecureToolBrokerService:
     </form>
   </section>"""
         return render_broker_auth_page(
-            "Secure Credential Deletion", body, script=SECRET_INPUT_TOGGLE_SCRIPT
+            "Secure Credential Deletion", body, script=SECRET_INPUT_TOGGLE_SCRIPT, decline=True
         )
 
     @staticmethod
@@ -1952,7 +1984,7 @@ class SecureToolBrokerService:
     </form>
   </section>"""
         return render_broker_auth_page(
-            "Secure Credential Collection", body, script=SECRET_INPUT_TOGGLE_SCRIPT
+            "Secure Credential Collection", body, script=SECRET_INPUT_TOGGLE_SCRIPT, decline=True
         )
 
     async def _handle_credential_collection_form(
@@ -1962,7 +1994,7 @@ class SecureToolBrokerService:
         session = self._get_credential_collection_session(session_id)
         if session.used:
             return web.Response(
-                text=self._credential_collection_success_html(session),
+                text=self._credential_collection_ended_html(session),
                 content_type="text/html",
             )
         _require_credential_collection_submission_available(session)
@@ -1970,6 +2002,40 @@ class SecureToolBrokerService:
             text=self._render_credential_collection_form(session),
             content_type="text/html",
         )
+
+    @staticmethod
+    def _credential_collection_ended_html(session: CredentialCollectionSession) -> str:
+        """A used form's page: declined, or how it succeeded."""
+
+        if session.status == CREDENTIAL_DECLINED_STATUS:
+            deletion = SecureToolBrokerService._is_credential_deletion_request(session.request_payload)
+            return _declined_page("Secure Credential Deletion" if deletion else "Secure Credential Collection")
+        return SecureToolBrokerService._credential_collection_success_html(session)
+
+    def _decline_credential_collection(self, session_id: str, session: CredentialCollectionSession) -> web.Response:
+        """The person declined the form: it ends with nothing stored or deleted, and the task is told."""
+
+        _claim_credential_collection_submission(session, prune_expired=self._prune_credential_collection_sessions)
+        try:
+            session.status = CREDENTIAL_DECLINED_STATUS
+            session.result = {
+                "status": "declined",
+                "content": {
+                    "status": CREDENTIAL_DECLINED_STATUS,
+                    "message": "The person declined the form; nothing was stored or deleted.",
+                },
+            }
+            session.used = True
+        finally:
+            _finish_form_submission(session)
+        self._logger.info(
+            "A person declined a credential form. event=credential_collection_declined credential_key=%s "
+            "flow=%s session_id_prefix=%s",
+            session.request_payload.get("credential_key"),
+            session.request_payload.get("flow") or "collect",
+            session_id[:12],
+        )
+        return web.Response(text=self._credential_collection_ended_html(session), content_type="text/html")
 
     @staticmethod
     def _credential_collection_success_html(
@@ -2013,12 +2079,15 @@ class SecureToolBrokerService:
         session_id = str(request.match_info["session_id"] or "").strip()
         session = self._get_credential_collection_session(session_id)
         if session.used:
+            # Already stored, deleted or declined: a second answer changes nothing.
             return web.Response(
-                text=self._credential_collection_success_html(session),
+                text=self._credential_collection_ended_html(session),
                 content_type="text/html",
             )
         _require_credential_collection_submission_available(session)
         form = await request.post()
+        if is_decline(form):
+            return self._decline_credential_collection(session_id, session)
         if self._is_credential_deletion_request(session.request_payload):
             if str(form.get("confirm_delete") or "").strip().lower() not in {
                 "yes",
@@ -2465,7 +2534,11 @@ class SecureToolBrokerService:
     async def _handle_auth_form(self, request: web.Request) -> web.Response:
         provider = str(request.match_info["provider"] or "").strip().lower()
         session_id = str(request.match_info["session_id"] or "").strip()
-        session = self._get_auth_session(provider, session_id)
+        session = self._find_auth_session(provider, session_id)
+        if session.state.get("status") == SIGN_IN_STATUS_DECLINED:
+            return web.Response(text=_declined_page(self._auth_display_name(provider)), content_type="text/html")
+        if session.used:
+            raise web.HTTPGone(text="Auth session has already been used.")
         _require_auth_form_available(session)
         flow = get_auth_flow(provider, session.method)
         if flow is not None:
@@ -2541,10 +2614,39 @@ class SecureToolBrokerService:
             {
                 "provider": session.provider,
                 "method": session.method,
-                "status": status if status in {"success", "error"} else "pending",
+                "status": status if status in SIGN_IN_FINAL_STATUSES else "pending",
                 "expires_at": session.expires_at.isoformat(),
             }
         )
+
+    @staticmethod
+    def _auth_display_name(provider: str) -> str:
+        return AUTH_PROVIDER_DISPLAY_NAMES.get(provider, provider.title())
+
+    async def _decline_auth_session(self, session_id: str, session: BrokerAuthSession, flow: Any) -> web.Response:
+        """The person declined a sign-in page: it ends as declined and its sign-in process stops.
+
+        "declined" is set before the process is stopped, so the process monitor
+        (auth_flows._monitor_web_auth_process) leaves it and stores nothing.
+        """
+
+        _claim_auth_form_submission(session, prune_expired=self._prune_auth_sessions)
+        session.state["status"] = SIGN_IN_STATUS_DECLINED
+        session.state["message"] = "The person declined this page."
+        session.used = True
+        if flow is None:
+            _finish_form_submission(session)
+        else:
+            # Stopping a sign-in process can wait a few seconds; the claim is released when it is done.
+            await _run_claimed_form_thread(session, self._run_as_owner, session.owner_canonical_user_id, flow.cleanup, session)
+        self._logger.info(
+            "A person declined a sign-in page. event=broker_auth_session_declined provider=%s method=%s "
+            "session_id_prefix=%s",
+            session.provider,
+            session.method,
+            session_id[:12],
+        )
+        return web.Response(text=_declined_page(self._auth_display_name(session.provider)), content_type="text/html")
 
     @staticmethod
     def _github_auth_form(session: BrokerAuthSession) -> str:
@@ -2571,7 +2673,7 @@ class SecureToolBrokerService:
     </form>
   </section>"""
         return render_broker_auth_page(
-            "GitHub Broker Auth", body, script=SECRET_INPUT_TOGGLE_SCRIPT
+            "GitHub Broker Auth", body, script=SECRET_INPUT_TOGGLE_SCRIPT, decline=True
         )
 
     @staticmethod
@@ -2696,7 +2798,7 @@ class SecureToolBrokerService:
       <button type="submit">Import Google Tokens</button>
     </form>
   </section>"""
-        return render_broker_auth_page("Google Broker Auth", body)
+        return render_broker_auth_page("Google Broker Auth", body, decline=True)
 
     @staticmethod
     def _bitwarden_auth_form(session: BrokerAuthSession) -> str:
@@ -2757,7 +2859,7 @@ class SecureToolBrokerService:
     </form>
   </section>"""
         return render_broker_auth_page(
-            "Bitwarden Broker Auth", body, script=SECRET_INPUT_TOGGLE_SCRIPT
+            "Bitwarden Broker Auth", body, script=SECRET_INPUT_TOGGLE_SCRIPT, decline=True
         )
 
     async def _handle_submit_auth_form(self, request: web.Request) -> web.Response:
@@ -2766,6 +2868,9 @@ class SecureToolBrokerService:
         session = self._get_auth_session(provider, session_id)
         _require_auth_form_available(session)
         flow = get_auth_flow(provider, session.method)
+        form = await request.post()
+        if is_decline(form):
+            return await self._decline_auth_session(session_id, session, flow)
         if flow is not None:
             submit = getattr(flow, "submit", None)
             if submit is None:
@@ -2774,7 +2879,6 @@ class SecureToolBrokerService:
                     allowed_methods=("GET",),
                     text="This auth flow is completed through the external browser page.",
                 )
-            form = await request.post()
             _claim_auth_form_submission(
                 session,
                 prune_expired=self._prune_auth_sessions,
@@ -2791,7 +2895,6 @@ class SecureToolBrokerService:
             return web.Response(text=flow.render(session), content_type="text/html")
         if provider not in INTERACTIVE_AUTH_FORM_PROVIDERS:
             raise web.HTTPBadRequest(text=f"Unsupported auth provider: {provider}")
-        form = await request.post()
         _claim_auth_form_submission(
             session,
             prune_expired=self._prune_auth_sessions,
@@ -2897,7 +3000,7 @@ class SecureToolBrokerService:
         session.used = True
         # Read by the status route, which the gateway's /link watcher polls.
         session.state["status"] = "success" if result.status == "success" else "error"
-        display_name = AUTH_PROVIDER_DISPLAY_NAMES.get(provider, provider.title())
+        display_name = self._auth_display_name(provider)
         if result.status != "success":
             details = self._auth_failure_details(result)
             self._logger.warning(
@@ -2945,7 +3048,8 @@ class SecureToolBrokerService:
                 "</section>"
             )
             return web.Response(
-                text=render_broker_auth_page("Bitwarden restart unlock saved", body, card_outcome=CARD_OUTCOME_FINISHED),
+                # No outcome: the person still has to restart the broker, and only this page says so.
+                text=render_broker_auth_page("Bitwarden restart unlock saved", body),
                 content_type="text/html",
             )
         if provider == "google" and session.method == GOOGLE_TEAM_CLIENT_METHOD:

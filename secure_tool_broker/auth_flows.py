@@ -25,6 +25,7 @@ from secure_tool_broker.auth_pages import (
     render_session_countdown,
 )
 from secure_tool_broker.credential_state import credential_owner_environment
+from secure_tool_broker.defaults import SIGN_IN_STATUS_DECLINED
 from secure_tool_broker.credential_state_store import (
     credential_state_backend_mode,
     read_credential_state,
@@ -613,7 +614,19 @@ def _monitor_web_auth_process(
         exit_code = process.wait(timeout=1)
         session.state["exit_code"] = exit_code
         session.state.setdefault("completed_at", datetime.utcnow().isoformat() + "Z")
-        if session.state.get("status") != "error":
+        if session.state.get("status") == SIGN_IN_STATUS_DECLINED:
+            # The person declined the page, and Decline stopped this process
+            # (service._decline_auth_session). The page stays declined and nothing
+            # is stored, even when the process had already finished the sign-in
+            # (exit code 0): a declined sign-in never becomes the person's.
+            logger.info(
+                "A declined sign-in's process ended; nothing was stored. event=broker_auth_process_ended_after_decline "
+                "provider=%s method=%s exit_code=%s",
+                session.provider,
+                session.method,
+                exit_code,
+            )
+        elif session.state.get("status") != "error":
             if exit_code == 0:
                 session.state["auth_stage"] = "credential_verification_and_storage"
                 if session.provider == "github" and not _finalize_github_web_auth(session, logger):
@@ -629,8 +642,9 @@ def _monitor_web_auth_process(
                 session.state["failure_reason"] = reason
                 session.state["error"] = explanation
     except Exception as exc:
-        session.state["status"] = "error"
-        session.state["error"] = redact_text(str(exc))
+        if session.state.get("status") != SIGN_IN_STATUS_DECLINED:
+            session.state["status"] = "error"
+            session.state["error"] = redact_text(str(exc))
         logger.exception(
             "Broker auth process monitor failed. provider=%s method=%s",
             session.provider,
@@ -872,6 +886,7 @@ class GitHubWebAuthFlow:
             body,
             script=copy_script + (sign_in_wait_script() if status not in {"success", "error"} else ""),
             card_outcome=CARD_OUTCOME_FINISHED if status == "success" else None,
+            decline=status not in {"success", "error"},
         )
 
     def status_payload(self, session: BrokerAuthSession) -> dict[str, Any]:
@@ -1305,6 +1320,7 @@ class GoogleWebAuthFlow:
             body,
             script=script,
             card_outcome=CARD_OUTCOME_FINISHED if status == "success" else None,
+            decline=status not in {"success", "error"},
         )
 
     def status_payload(self, session: BrokerAuthSession) -> dict[str, Any]:

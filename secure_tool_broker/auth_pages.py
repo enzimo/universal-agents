@@ -5,21 +5,27 @@ from __future__ import annotations
 import base64
 import html
 import json
+import logging
 import os
+from functools import cache
 from datetime import datetime, timezone
 from typing import Literal, Mapping
 from pathlib import Path
 
 from runtime_hosting.page_icon import favicon_link_tag
 from runtime_settings.appearance import dark_appearance_css_declarations
+from secure_tool_broker.defaults import DECLINE_FIELD, DECLINE_VALUE
 from secure_tool_broker.page_view import current_view
 
+LOGGER = logging.getLogger(__name__)
 BROKER_APPEARANCE_ENV = "SECURE_TOOL_BROKER_APPEARANCE_JSON"
 
 # How a page shown as a card in Web Chat ended (page_assets/card_bridge.js tells
-# the chat). Only the handler that knows the session reached that state sets it:
-# a refusal, a failure or an "already used" page has none, so the card stays
-# and the person reads it.
+# the chat, which then shrinks the card to one line). Only the handler that knows
+# the session reached that state sets it, and "finished" only when the person has
+# nothing left to do or read there: a refusal, a failure, an "already used" page
+# or one with a next step (Bitwarden's "restart the broker now") has none, so
+# the card stays up.
 CardOutcome = Literal["finished", "declined"]
 CARD_OUTCOME_FINISHED: CardOutcome = "finished"
 CARD_OUTCOME_DECLINED: CardOutcome = "declined"
@@ -713,6 +719,28 @@ BROKER_CARD_THEME = """
   body.card-view .step { padding-bottom: 0.6rem; }
   body.card-view .note,
   body.card-view .status { padding: 0.6rem 0.75rem; }
+  .card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--line);
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+  }
+  .card-footer form { display: block; margin: 0; }
+  .card-footer button.decline-action {
+    min-height: 0;
+    padding: 0.2rem 0.4rem;
+    border: 0;
+    background: none;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  .card-footer button.decline-action:hover,
+  .card-footer button.decline-action:focus-visible { color: var(--text-strong); text-decoration: underline; }
 </style>
 """
 
@@ -1036,43 +1064,86 @@ def render_credential_input(
     )
 
 
+@cache
 def _card_bridge_script() -> str:
+    """The bridge, read once per broker process."""
+
     try:
         return f"<script>\n{_CARD_BRIDGE_PATH.read_text(encoding='utf-8')}\n</script>"
-    except OSError:
-        # Without the bridge the chat hears nothing and offers the page in its own tab.
+    except OSError as exc:
+        # Without the bridge the chat hears nothing and offers each page in its own tab.
+        LOGGER.warning(
+            "The card bridge script could not be read; Web Chat cards will offer their page in its own tab. "
+            "event=broker_card_bridge_missing path=%s error=%s",
+            _CARD_BRIDGE_PATH,
+            type(exc).__name__,
+        )
         return ""
 
 
-def _render_card_view(title: str, body: str, *, script: str, card_outcome: CardOutcome | None) -> str:
+# Shown beside Decline in a card: where what the person types goes.
+CARD_BROKER_NOTE = "Goes straight to the secure broker, not to the chat or agents."
+
+
+def _decline_form(class_name: str) -> str:
+    """The page's Decline: its own form, so no typed value is sent, posting to the page's own address."""
+
+    return (
+        '<form method="post">'
+        f'<input type="hidden" name="{DECLINE_FIELD}" value="{DECLINE_VALUE}">'
+        f'<button type="submit" class="{class_name}">Decline</button></form>'
+    )
+
+
+def _render_card_view(
+    title: str, body: str, *, script: str, card_outcome: CardOutcome | None, decline: bool
+) -> str:
     """The page as a Web Chat card (secure_tool_broker.page_view): content, bridge, no header or mesh."""
 
     view = current_view()
     appearance = _broker_appearance_from_env()
     color_mode = "light" if str(appearance.get("color_mode") or "").strip().lower() == "light" else "dark"
     outcome_attr = f' data-card-outcome="{card_outcome}"' if card_outcome else ""
+    footer = (
+        f'<div class="card-footer"><span>{html.escape(CARD_BROKER_NOTE)}</span>{_decline_form("decline-action")}</div>'
+        if decline
+        else ""
+    )
     return (
         f'<!doctype html><html lang="en" data-color-mode="{color_mode}" '
         f'data-card-parent-origin="{html.escape(view.parent_origin or "", quote=True)}"{outcome_attr}><head>'
         '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{html.escape(title)}</title>{runtime_theme_css_from_appearance(appearance)}"
         f"{BROKER_AUTH_THEME}{BROKER_CARD_THEME}</head>"
-        f'<body class="card-view"><main>{body}</main>'
+        f'<body class="card-view"><main>{body}{footer}</main>'
         f"{_broker_markdown_script()}{script}{_card_bridge_script()}</body></html>"
     )
 
 
 def render_broker_auth_page(
-    title: str, body: str, *, script: str = "", card_outcome: CardOutcome | None = None
+    title: str,
+    body: str,
+    *,
+    script: str = "",
+    card_outcome: CardOutcome | None = None,
+    decline: bool = False,
 ) -> str:
     """A broker page in the view of the current request (secure_tool_broker.page_view).
 
     ``card_outcome`` is set only by a handler that knows the page reached that
     end (stored, linked, signed in, declined); the card view then tells the chat.
+    ``decline`` adds the page's Decline button (an open form that someone is
+    waiting on); the page's POST handler ends the page when it is used.
     """
 
     if current_view().card:
-        return _render_card_view(title, body, script=script, card_outcome=card_outcome)
+        return _render_card_view(title, body, script=script, card_outcome=card_outcome, decline=decline)
+    if decline:
+        body += (
+            '<section class="content-panel">'
+            f'<div class="page-actions">{_decline_form("secondary-action")}</div>'
+            '<p class="close-page-help">Decline ends this page without saving anything.</p></section>'
+        )
     countdown_script = SESSION_COUNTDOWN_SCRIPT if "data-session-countdown" in body else ""
     runtime_theme = runtime_theme_css_from_appearance(_broker_appearance_from_env())
     return (

@@ -357,3 +357,32 @@ async def test_an_error_page_in_a_card_has_no_outcome(deployment) -> None:
     missing = await client.get(card_view_url("/credential-collection/unknown"))
     assert missing.status == 404
     assert _outcome(await missing.text()) is None
+
+
+@pytest.mark.asyncio
+async def test_a_page_with_a_next_step_stays_up(deployment, monkeypatch) -> None:
+    """Bitwarden's saved restart unlock says to restart the broker; only this page says so."""
+
+    client, _origin = deployment
+    saved = ToolResult(
+        status="success",
+        content={"action": "pending_restart_unlock.saved", "pending_file": "pending.json", "expires_at_epoch": 0},
+    )
+    monkeypatch.setattr("secure_tool_broker.service.save_bitwarden_restart_unlock_request", lambda **_kwargs: saved)
+    path = card_view_url(await _sign_in_page(client, "bitwarden", "form"))
+    page = await (await client.post(path, data={"master_password": "pw", "submit_mode": "defer_restart"})).text()
+    assert "Restart the broker or container now" in page
+    assert _outcome(page) is None
+
+
+def test_a_missing_bridge_is_logged_and_read_once(monkeypatch, tmp_path, caplog) -> None:
+    from secure_tool_broker import auth_pages
+
+    auth_pages._card_bridge_script.cache_clear()
+    monkeypatch.setattr(auth_pages, "_CARD_BRIDGE_PATH", tmp_path / "missing.js")
+    try:
+        assert auth_pages._card_bridge_script() == ""
+        assert auth_pages._card_bridge_script() == ""
+        assert caplog.text.count("event=broker_card_bridge_missing") == 1
+    finally:
+        auth_pages._card_bridge_script.cache_clear()

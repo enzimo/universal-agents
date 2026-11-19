@@ -382,12 +382,15 @@ def _callback_params(address: str) -> dict[str, str]:
     return {key: values[key][0] for key in ("code", "state", "error", "error_description") if values.get(key)}
 
 
-def _page(heading: str, body: str, *, script: str = "", card_outcome: CardOutcome | None = None) -> str:
+def _page(
+    heading: str, body: str, *, script: str = "", card_outcome: CardOutcome | None = None, decline: bool = False
+) -> str:
     return render_broker_auth_page(
         "X sign-in",
         f'<section class="content-panel"><p class="eyebrow">X</p><h1>{heading}</h1>{body}</section>',
         script=script,
         card_outcome=card_outcome,
+        decline=decline,
     )
 
 
@@ -537,7 +540,7 @@ class XWebSignInFlow:
             '<textarea id="redirect_url" name="redirect_url" required rows="4" autocomplete="off"></textarea></p>'
             '<button type="submit">Finish sign-in</button></form>'
         )
-        return _page("Sign in to X", body, script=sign_in_wait_script())
+        return _page("Sign in to X", body, script=sign_in_wait_script(), decline=True)
 
     def status_payload(self, session: Any) -> dict[str, Any]:
 
@@ -594,7 +597,12 @@ class XTeamClientFlow:
             )
         if status == STATUS_ERROR:
             return _page("The X sign-in app was not stored.", render_markdown_text(str(session.state.get("error") or "")))
-        return _page("Set the team's X sign-in app.", self._form_body(session), script=SECRET_INPUT_TOGGLE_SCRIPT + _CALLBACK_PREFILL_SCRIPT)
+        return _page(
+            "Set the team's X sign-in app.",
+            self._form_body(session),
+            script=SECRET_INPUT_TOGGLE_SCRIPT + _CALLBACK_PREFILL_SCRIPT,
+            decline=True,
+        )
 
     @staticmethod
     def _form_body(session: Any) -> str:
