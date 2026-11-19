@@ -46,10 +46,11 @@ gateway's response route is handled one message at a time, so while such a
 message waits, replies for every other chat wait behind it, as they do while a
 message is handled on arrival. The wait therefore gives up after
 ``LEFTOVER_ORDER_WAIT_SECONDS`` with a warning, and the message goes on out of
-order rather than hold every person's replies. While a leftover is tried
-again after a failure (see "Failures"), later messages for its request do not
-wait at all: it has lost its place, as a message that fails on arrival does.
-So one pass holds the route at most once. Two cases are not ordered,
+order rather than hold every person's replies. Later messages for the request
+then do not wait for that pass again: one has already gone ahead of it. Nor do
+they wait while a leftover is tried again after a failure (see "Failures"): it
+has lost its place, as a message that fails on arrival does. So one pass holds
+the route at most once, for at most the bound. Two cases are not ordered,
 because nothing a person sees depends on it:
 
 - a message that a newly opened wait of the same request takes goes to that
@@ -118,6 +119,12 @@ NOT_PASSED_ON_ARRIVAL_UNKNOWN = "arrival_unknown"
 # The gateway is stopping (ReplyLeftovers.stop).
 NOT_PASSED_ON_GATEWAY_STOPPING = "gateway_stopping"
 
+# Why a later message did not wait for its request's leftovers
+# (event=gateway_reply_leftover_order_wait_skipped reason=...): one of them is
+# being tried again after a failure, or a message already went ahead of them.
+ORDER_WAIT_SKIPPED_RETRYING = "retrying"
+ORDER_WAIT_SKIPPED_ALREADY_OVERTAKEN = "already_overtaken"
+
 # How long a message that no wait takes waits for its request's leftovers
 # before it goes on out of order (module docstring, "Order"). While it waits,
 # the response route waits too, so it is kept short. The longest broker call a
@@ -184,6 +191,9 @@ class _Pass:
     # True while its leftover in hand is tried again after a failure: later
     # messages for the request do not wait for it (ReplyLeftovers.passed_on).
     retrying: bool = False
+    # True once a later message stopped waiting for this pass and went ahead:
+    # its order is already broken, so later messages do not wait for it again.
+    overtaken: bool = False
 
 
 class ReplyLeftovers:
@@ -249,18 +259,18 @@ class ReplyLeftovers:
         if not correlation_id or (latest := self._latest.get(correlation_id)) is None:
             return
         passes = [batch for batch in self._passes.values() if batch.correlation_id == correlation_id]
-        if any(batch.retrying for batch in passes):
-            # A leftover that failed has lost its place, as a message that fails
-            # on arrival does, so later messages do not wait through its retries.
-            # A pass therefore holds the response route at most once.
+        if (skipped := _order_wait_skipped(passes)) is not None:
             self._logger.debug(
-                "Not waiting for a request's leftover messages while one is tried again. "
-                "event=gateway_reply_leftover_order_wait_skipped correlation_id=%s reason=retrying",
+                "Not waiting for a request's leftover messages. "
+                "event=gateway_reply_leftover_order_wait_skipped correlation_id=%s reason=%s",
                 correlation_id,
+                skipped,
             )
             return
         done, _ = await asyncio.wait({latest}, timeout=LEFTOVER_ORDER_WAIT_SECONDS)
         if not done:
+            for batch in passes:
+                batch.overtaken = True
             self._logger.warning(
                 "Stopped waiting for a request's leftover messages; the next message goes on out of order. "
                 "event=gateway_reply_leftover_order_wait_expired correlation_id=%s pending=%s waited_seconds=%s",
@@ -425,6 +435,22 @@ def _fields(batch: _Pass, leftover: Leftover) -> tuple[str, ...]:
         _content_id(content),
         leftover.route.value if leftover.route is not None else "-",
     )
+
+
+def _order_wait_skipped(passes: Sequence[_Pass]) -> str | None:
+    """Why a later message need not wait for these passes, or None when it waits.
+
+    A leftover being tried again has lost its place, as a message that fails on
+    arrival does; and once a message went ahead of a pass, its order is already
+    broken. Either way, waiting would only hold the response route again, so a
+    pass holds it at most once, for at most ``LEFTOVER_ORDER_WAIT_SECONDS``.
+    """
+
+    if any(batch.retrying for batch in passes):
+        return ORDER_WAIT_SKIPPED_RETRYING
+    if any(batch.overtaken for batch in passes):
+        return ORDER_WAIT_SKIPPED_ALREADY_OVERTAKEN
+    return None
 
 
 def _content_id(content: object) -> str:

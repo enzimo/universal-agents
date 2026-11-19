@@ -165,7 +165,7 @@ async def test_a_leftover_setup_page_that_fails_to_open_is_tried_again_or_refuse
     monkeypatch.setattr(handoffs, "try_present", flaky_present)
 
     await _live_reply_with_two_pages(gateway, envelope)
-    await leftovers.passed_on(CHAT_REQUEST)
+    await _passed_on(gateway._manager_client, CHAT_REQUEST)
 
     setups = gateway.state_store.tool_setup_repository
     if opening == "fails_once":
@@ -452,9 +452,14 @@ def _notice(text: str) -> MessageEnvelope:
 
 
 async def _passed_on(client, correlation_id: str = CORRELATION) -> None:
-    """Wait until the request's leftovers have been passed on (the wait a later arrival uses)."""
+    """Wait until the request's passes have ended.
 
-    await client._leftovers.passed_on(correlation_id)
+    Not ``passed_on``: that is the order wait a later message uses, which is
+    bounded and returns at once for a pass that is retrying or was overtaken.
+    """
+
+    while (latest := client._leftovers._latest.get(correlation_id)) is not None:
+        await asyncio.wait({latest})
 
 
 @pytest.mark.asyncio
@@ -749,6 +754,35 @@ async def test_a_later_arrival_stops_waiting_for_leftovers_after_the_bound(monke
     chat.release.set()
     await _passed_on(client)
     assert chat.handled == [later, other, first, second]
+
+
+@pytest.mark.asyncio
+async def test_a_pass_holds_the_route_at_most_once_when_its_leftovers_are_slow(monkeypatch, caplog) -> None:
+    """Slow leftovers that never fail, such as a wave of pages each opening through the broker."""
+
+    from assistant_gateway.application import reply_leftovers
+
+    monkeypatch.setattr(reply_leftovers, "LEFTOVER_ORDER_WAIT_SECONDS", 0.1)
+    caplog.set_level(logging.DEBUG, logger="test.gateway.manager_client")
+    slow, behind = _notice("Opening slowly."), _notice("Also slow, behind it.")
+    later, final, other = _notice("Sent after the close."), _notice("The final reply."), _for_another_request("Next chat.")
+    chat = _Chat(hold=slow)
+    client = _client_for(chat)
+    await _leave(client, slow, behind)
+
+    for envelope in (later, final, other):
+        await client.handle_response(envelope)
+
+    # The first later message waited once and went ahead; the next did not wait again.
+    assert chat.handled == [later, final, other]
+    expired = [record for record in caplog.records if "event=gateway_reply_leftover_order_wait_expired" in record.message]
+    assert len(expired) == 1
+    assert (
+        f"event=gateway_reply_leftover_order_wait_skipped correlation_id={CORRELATION} reason=already_overtaken"
+    ) in caplog.text
+    chat.release.set()
+    await _passed_on(client)
+    assert chat.handled == [later, final, other, slow, behind]
 
 
 @pytest.mark.asyncio
