@@ -62,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from functools import partial
 from typing import Any
@@ -798,8 +799,6 @@ async def resume_ended_setup_runs(agent: Any, *, now: float | None = None, at_st
     the run's lock, and at worst adds one needless warning); and startup
     wakes the drain itself once it is ready, so recovery only queues tasks.
     """
-
-    import time
 
     moment = time.monotonic() if now is None else now
     if moment < getattr(agent, "_setup_run_check_after", 0.0):
