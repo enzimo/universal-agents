@@ -1,0 +1,162 @@
+// Browser checks for Web Chat's thread list against the aesthetic preview:
+//   node web_chat_thread_list_probe.cjs <base url> [screenshot folder]
+// The preview serves sample threads in every section (preview_web_chat_threads.py).
+// Checks A1 (layout and rows in view), A8 (menu by right-click, keyboard and long
+// press; Rename and Delete), A9 (hover preview) and the review points on narrow
+// screens (C22), waiting labels (C24) and the card over the open chat (C30).
+// Prints the cases it checked as JSON; throws on a failure.
+const assert = require("node:assert/strict");
+const path = require("node:path");
+const { chromium } = require("playwright");
+
+const SESSION_COOKIE = { name: "ua_web_chat_session", value: "dev-preview-session" };
+
+async function openChat(browser, baseUrl, viewport, options = {}) {
+  const context = await browser.newContext({ viewport, colorScheme: "dark", ...options });
+  await context.addCookies([{ ...SESSION_COOKIE, url: baseUrl }]);
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", error => errors.push(String(error)));
+  const writes = [];
+  page.on("request", request => {
+    if (request.method() !== "GET" && request.url().includes("/api/web-chat/sessions/")) {
+      writes.push([request.method(), new URL(request.url()).pathname, request.postData()]);
+    }
+  });
+  await page.goto(baseUrl + "/webchat");
+  await page.waitForSelector(".thread-section");
+  await page.waitForTimeout(400);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  return { context, page, errors, writes };
+}
+
+// What lies fully inside the thread list's visible box.
+function inView(page) {
+  return page.evaluate(() => {
+    const list = document.querySelector("#thread-list").getBoundingClientRect();
+    const inside = node => {
+      const box = node.getBoundingClientRect();
+      return box.height > 0 && box.top >= list.top - 1 && box.bottom <= list.bottom + 1;
+    };
+    return {
+      listHeight: Math.round(list.height),
+      twoLineRows: [...document.querySelectorAll(".thread-row")].filter(row => inside(row) && row.querySelector(".thread-detail")).length,
+      rows: [...document.querySelectorAll(".thread-row")].filter(inside).length,
+      headers: [...document.querySelectorAll(".thread-section-header")].filter(inside).map(header => header.querySelector(".thread-section-label").textContent),
+      cutWaiting: [...document.querySelectorAll(".thread-detail.is-waiting")].filter(line => line.scrollWidth > line.clientWidth).map(line => line.textContent),
+    };
+  });
+}
+
+(async () => {
+  const [baseUrl, shots = "."] = process.argv.slice(2);
+  const checked = [];
+  const browser = await chromium.launch({ headless: true });
+  try {
+    // A1: the app fills the window with ~6 px gaps; at least 8 two-line rows
+    // and the Snoozed and Dismissed headers in view without scrolling.
+    const wide = await openChat(browser, baseUrl, { width: 1280, height: 880 });
+    const app = await wide.page.evaluate(() => {
+      const box = document.querySelector(".chat-app").getBoundingClientRect();
+      const side = document.querySelector(".chat-sidebar").getBoundingClientRect();
+      const main = document.querySelector(".chat-main").getBoundingClientRect();
+      return { top: box.top, height: box.height, gap: main.left - side.right, scroll: document.documentElement.scrollHeight - innerHeight };
+    });
+    assert.equal(app.height, 868, "the app fills the window less 6 px on each side");
+    assert.equal(app.top, 6);
+    assert.equal(Math.round(app.gap), 6);
+    const wideView = await inView(wide.page);
+    assert.ok(wideView.twoLineRows >= 8, JSON.stringify(wideView));
+    for (const header of ["Needs you", "Pinned", "Recent", "Snoozed", "Dismissed"]) assert.ok(wideView.headers.includes(header), header);
+    assert.deepEqual(wideView.cutWaiting, [], "waiting labels fit their line (C24)");
+    await wide.page.screenshot({ path: path.join(shots, "thread-list-1280x880.png") });
+    checked.push(`1280x880: ${wideView.twoLineRows} two-line rows and all five headers in view, app 868 px tall, 6 px gaps`);
+
+    // A8: right-click, arrows into Snooze's choices, Escape back to the row.
+    await wide.page.click('.thread-row[data-session-key="website:web-chat:offsite"] .thread-button', { button: "right" });
+    assert.equal(await wide.page.locator(".thread-menu").count(), 1);
+    assert.deepEqual(await wide.page.locator(".thread-menu .thread-menu-label").allTextContents(),
+      ["Pin to top", "Snooze", "Dismiss", "Rename", "Delete"]);
+    await wide.page.keyboard.press("ArrowDown");
+    await wide.page.keyboard.press("ArrowRight");
+    await wide.page.waitForTimeout(150);
+    await wide.page.screenshot({ path: path.join(shots, "thread-menu.png") });
+    assert.ok(await wide.page.evaluate(() => Boolean(document.activeElement.closest(".thread-menu.is-submenu"))));
+    await wide.page.keyboard.press("Escape");
+    await wide.page.keyboard.press("Escape");
+    assert.equal(await wide.page.evaluate(() => document.activeElement.closest(".thread-row")?.dataset.sessionKey), "website:web-chat:offsite");
+    // The keyboard: Shift+F10 on the focused row, then Pin.
+    await wide.page.keyboard.press("Shift+F10");
+    await wide.page.keyboard.press("Enter");
+    await wide.page.waitForTimeout(400);
+    assert.equal(await wide.page.locator('.thread-section.is-pinned .thread-row[data-session-key="website:web-chat:offsite"]').count(), 1);
+    // Rename and Delete from the menu.
+    await wide.page.click('.thread-row[data-session-key="website:web-chat:backup"] .thread-button', { button: "right" });
+    await wide.page.click('.thread-menu-item:has-text("Rename")');
+    await wide.page.waitForSelector(".thread-rename-input:focus");
+    await wide.page.keyboard.press("Control+A");
+    await wide.page.keyboard.type("Backup job retries");
+    await wide.page.keyboard.press("Enter");
+    await wide.page.click('.thread-row[data-session-key="website:web-chat:contracts"] .thread-button', { button: "right" });
+    await wide.page.click('.thread-menu-item:has-text("Delete")');
+    await wide.page.waitForTimeout(400);
+    assert.equal(await wide.page.locator('.thread-row[data-session-key="website:web-chat:contracts"]').count(), 0);
+    const writes = wide.writes.map(([method, pathname, body]) => [method, decodeURIComponent(pathname), body && JSON.parse(body)]);
+    assert.deepEqual(writes, [
+      ["PATCH", "/api/web-chat/sessions/website:web-chat:offsite", { thread_action: "pin" }],
+      ["PATCH", "/api/web-chat/sessions/website:web-chat:backup", { session_alias: "Backup job retries" }],
+      ["POST", "/api/web-chat/sessions/website:web-chat:contracts/archive", null],
+    ]);
+    checked.push("menu: right-click, arrows, Escape back to the row, Shift+F10 pin, Rename and Delete");
+
+    // A9: the hover card after ~400 ms with at most 4 two-line turns.
+    await wide.page.hover('.thread-row[data-session-key="website:web-chat:weekly"] .thread-button');
+    await wide.page.mouse.move(700, 600);
+    const hoverTarget = '.thread-row[data-session-key="website:web-chat:offsite"] .thread-button';
+    await wide.page.hover(hoverTarget);
+    await wide.page.waitForTimeout(250);
+    assert.equal(await wide.page.locator(".thread-preview").count(), 0, "nothing before about 400 ms");
+    await wide.page.waitForTimeout(600);
+    const card = await wide.page.evaluate(() => ({
+      turns: [...document.querySelectorAll(".thread-preview-turn")].length,
+      lines: [...document.querySelectorAll(".thread-preview-text")].map(text => Math.round(text.getBoundingClientRect().height / parseFloat(getComputedStyle(text).lineHeight))),
+      count: document.querySelector(".thread-preview-count")?.textContent,
+    }));
+    assert.ok(card.turns > 0 && card.turns <= 4, JSON.stringify(card));
+    assert.ok(card.lines.every(lines => lines <= 2), JSON.stringify(card));
+    assert.equal(card.count, "4 turns");
+    await wide.page.screenshot({ path: path.join(shots, "thread-hover.png") });
+    checked.push(`hover: ${card.turns} turns of at most two lines after 400 ms, '${card.count}'`);
+
+    // C30: clicking a row opens it and no card comes back over it.
+    await wide.page.click(hoverTarget);
+    await wide.page.waitForTimeout(1000);
+    assert.equal(await wide.page.locator(".thread-preview").count(), 0);
+    checked.push("no card over the chat just opened");
+    assert.deepEqual(wide.errors, []);
+    await wide.context.close();
+
+    // Narrow screens (C22) with touch: rows in view, a long press opens the
+    // menu, and touch never shows the hover card.
+    const narrow = await openChat(browser, baseUrl, { width: 390, height: 844 }, { hasTouch: true, isMobile: true });
+    const narrowView = await inView(narrow.page);
+    assert.ok(narrowView.rows >= 2 && narrowView.headers.length >= 1, JSON.stringify(narrowView));
+    assert.deepEqual(narrowView.cutWaiting, []);
+    const row = await narrow.page.locator(".thread-row .thread-button").first().boundingBox();
+    const cdp = await narrow.context.newCDPSession(narrow.page);
+    const point = { x: row.x + 40, y: row.y + 10 };
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    await narrow.page.waitForTimeout(700);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await narrow.page.waitForTimeout(200);
+    assert.equal(await narrow.page.locator(".thread-menu").count(), 1, "a long press opens the menu");
+    assert.equal(await narrow.page.locator(".thread-preview").count(), 0, "touch never shows the hover card");
+    await narrow.page.screenshot({ path: path.join(shots, "thread-list-390x844.png") });
+    assert.deepEqual(narrow.errors, []);
+    checked.push(`390x844: ${narrowView.rows} rows and ${narrowView.headers.length} headers in view, long press opens the menu`);
+    await narrow.context.close();
+  } finally {
+    await browser.close();
+  }
+  console.log(JSON.stringify(checked));
+})().catch(error => { console.error(error); process.exitCode = 1; });

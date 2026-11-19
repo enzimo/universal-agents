@@ -17,7 +17,7 @@ from assistant_gateway.application.gateway_application import (
     GatewaySession,
 )
 from assistant_gateway.application.transcript_service import TranscriptCursorError
-from assistant_gateway.application.web_chat_threads import InvalidThreadPlacement
+from assistant_gateway.application.web_chat_threads import InvalidThreadPlacement, thread_list_payload
 from assistant_gateway.application.website_application import (
     WEB_CHAT_THREAD_LIST_LIMIT,
     GatewaySessionAliasConflict,
@@ -81,40 +81,7 @@ class WebsiteConversationHandlers:
             limit=WEB_CHAT_THREAD_LIST_LIMIT,
             include_last_message=True,
         )
-        # `title` is the thread's fixed name (web_chat_threads); null until
-        # its first ordinary message, and the page shows "New Chat" then.
-        # `parallel_thread` is its Run concurrently setting; whether a request
-        # is open, which locks that switch, rides on every event page.
-        # The rest draws the row: its latest ordinary message, when anything
-        # was last posted and that message's sequence (sent back with snooze
-        # and dismiss), what it waits on from the person, and where the person
-        # placed it (web_chat_threads.thread_list_state).
-        sessions = [
-            {
-                "session_key": thread.session_key,
-                "session_alias": thread.session_alias,
-                "conversation_id": thread.conversation_id,
-                "title": thread.title,
-                "updated_at": thread.updated_at,
-                "parallel_thread": thread.parallel_thread,
-                "last_message": (
-                    {
-                        "role": thread.last_message.role,
-                        "text": thread.last_message.text,
-                        "created_at": thread.last_message.created_at,
-                    }
-                    if thread.last_message is not None
-                    else None
-                ),
-                "last_activity_at": thread.last_activity_at,
-                "last_sequence": thread.last_sequence,
-                "needs_you": thread.needs_you.value if thread.needs_you else None,
-                "pinned": thread.pinned,
-                "list_state": thread.list_state.value if thread.list_state else None,
-                "snoozed_until": thread.snoozed_until,
-            }
-            for thread in listed
-        ]
+        sessions = [thread_list_payload(thread) for thread in listed]
         return web.json_response(
             {
                 "status": "ok",

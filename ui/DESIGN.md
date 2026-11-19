@@ -1827,16 +1827,49 @@ its history. Steps with linked requests cannot use this correction.
   from an earlier sign-in or invalidated history revision. Cursor resets
   invalidate cached history and reload only the active thread; metadata-only
   refreshes must not advance the event cursor or rewind older-page navigation.
-- Thread history includes a New Chat button plus per-thread rename and archive
-  icon buttons. Archive hides a thread from the active list without implying
-  permanent transcript deletion. Keep the history label and its scrollable
-  thread list together as the sidebar's flexible region so rows stay
-  top-anchored immediately below the label rather than drifting toward the
-  account controls.
+- Web Chat fills the browser window's height, with about 6 px around and
+  between its panes (owner's request, 2026-11-19: more threads in view; it
+  was capped at 1100 px with 12-16 px gaps). The sidebar keeps 10 px padding
+  and 8 px between its parts, and the activity mesh stays above the account
+  area. Below 900 px the sidebar is `min(460px, 60vh)` tall so its list keeps
+  a few rows; a max-height alone left the list 0 px tall there.
+- The thread list sits below New Chat as the sidebar's flexible, scrolling
+  region, in sections (`chat_thread_list.mjs`): **Needs you** (a highlighted
+  box in attention gold, Ember in dark mode, for threads waiting on the
+  person), **Pinned**, **Recent**, then **Snoozed** and **Dismissed**. Each
+  header is a button with the section's count and a chevron; it opens and
+  closes its rows in place and keeps focus. Snoozed and Dismissed start
+  collapsed; the person's choices are kept in this browser. Needs you,
+  Pinned, Snoozed and Dismissed show only when they hold a thread.
+- Each thread row has two lines: the title, a **Woke** pill when a snooze
+  ended and the person has not opened the thread yet, and the time since the
+  last message (now, 5m, 3h, 2d, 3w, 1y); then what the thread waits on
+  (gold/Ember, at most about 28 characters so part 2's agent trail fits
+  before it, with the full sentence as its title) or the latest message as
+  "You: ..." or "<assistant name>: ...". The snippet is plain text: no
+  Markdown markers, inline code as written, never a system card or a slash
+  command. Ages move on once a minute in place.
+- Rename and Delete live in the row's menu, not on the row. The menu opens
+  with a right-click, a long press on touch screens, or the context-menu key
+  or Shift+F10 on a focused row (`chat_thread_menu.mjs`): Pin to top or
+  Unpin, Snooze (For 1 hour, Until this evening before 5 PM, Until tomorrow,
+  Until next week, each with its time; then Pick a time... and the note
+  **Comes back early if the team posts.**), Dismiss or Restore, Rename and
+  Delete (danger color). It is a compact frosted list placed where it opened
+  with Snooze's choices beside it; arrow keys, Home and End move through it,
+  Escape closes it and gives focus back to the row. Pick a time opens a small
+  labelled dialog with a date and time field, Snooze and Cancel. Delete keeps
+  the archive behaviour: it hides the thread without deleting its messages.
+  While renaming, the row shows the name field with Save and Cancel icons;
+  Enter saves and Escape cancels.
+- A mouse resting on a row for about 400 ms shows a hover card beside it
+  (`chat_thread_preview.mjs`): the title and "last message 1d ago", the last
+  four turns with who and when, each cut to two lines, and the turn count.
+  Never on touch, never for the chat already open, never under an open menu.
 - Opening or refreshing Web Chat must not create a conversation. Restore an
   existing selection when available; otherwise, once the server has answered
-  with no thread, show one selected, unsaved "New Chat" row (no rename or
-  archive; choosing it focuses the composer) and an empty composer (owner's
+  with no thread, show one selected, unsaved "New Chat" row (no menu;
+  choosing it focuses the composer) and an empty composer (owner's
   request, 2026-10-09). New Chat and the first submitted message explicitly
   create a conversation, which replaces that row.
   Opening Settings during sign-in waits for the saved-thread lookup before
@@ -1857,8 +1890,8 @@ its history. Steps with linked requests cannot use this correction.
   something has arrived in them, as "Updates" and "Memory review". They used
   to show as two empty "New Chat" rows on a newly set-up Web Chat, and the
   first message went into the memory-review thread.
-- Thread rows show a compact active-reply indicator between the truncated
-  thread title and rename/delete actions while the agent is still replying.
+- Thread rows show a compact active-reply indicator at the left of the row
+  while the agent is still replying.
 - The active-reply pulse must remain clearly visible after its thread loses the
   active-row backdrop. Keep the pulse at 78% opacity or higher and use scale
   plus a stronger blue halo to convey motion on an unfocused row.
@@ -1874,8 +1907,8 @@ its history. Steps with linked requests cannot use this correction.
   solid dot: green for ordinary unread replies, gold/yellow when the reply
   needs user attention such as an error or recoverable runtime-pause choice.
 - Truncated thread titles show their full title in a custom frosted tooltip
-  after one second of hover or focus; do not rely on native browser title
-  tooltips for this.
+  after one second of keyboard focus; mouse users see it in the hover card.
+  Do not rely on native browser title tooltips for this.
 - The Web Chat sidebar header places the brand/UA lockup on the left and a
   compact Settings cog on the far right. The cog uses the same frosted control
   treatment as other icon buttons, has an accessible name, and opens Settings;

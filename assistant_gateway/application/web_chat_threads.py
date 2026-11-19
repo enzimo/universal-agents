@@ -305,6 +305,41 @@ def web_chat_thread(
     )
 
 
+
+def thread_list_payload(thread: WebChatThread) -> dict[str, object]:
+    """One row of the sessions route's ``sessions`` list, as the page reads it.
+
+    ``title`` is the thread's fixed name (``None`` until named; the page shows
+    "New Chat"). ``parallel_thread`` is its Run concurrently setting; whether
+    a request is open, which locks that switch, rides on every event page. The
+    rest draws the row: its latest ordinary message as stored (the page makes
+    the plain snippet), when anything was last posted and that message's
+    sequence (sent back with snooze and dismiss), what it waits on from the
+    person, and where the person placed it. The aesthetic preview builds its
+    sample rows through this too.
+    """
+
+    message = thread.last_message
+    return {
+        "session_key": thread.session_key,
+        "session_alias": thread.session_alias,
+        "conversation_id": thread.conversation_id,
+        "title": thread.title,
+        "updated_at": thread.updated_at,
+        "parallel_thread": thread.parallel_thread,
+        "last_message": (
+            {"role": message.role, "text": message.text, "created_at": message.created_at}
+            if message is not None
+            else None
+        ),
+        "last_activity_at": thread.last_activity_at,
+        "last_sequence": thread.last_sequence,
+        "needs_you": thread.needs_you.value if thread.needs_you else None,
+        "pinned": thread.pinned,
+        "list_state": thread.list_state.value if thread.list_state else None,
+        "snoozed_until": thread.snoozed_until,
+    }
+
 __all__ = [
     "ATTACHMENT_TITLE",
     "DELIVERY_THREAD_NAMES",
@@ -321,6 +356,7 @@ __all__ = [
     "needs_you_reason",
     "snooze_wake_time",
     "thread_kind",
+    "thread_list_payload",
     "thread_list_state",
     "web_chat_thread",
 ]

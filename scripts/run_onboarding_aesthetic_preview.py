@@ -39,6 +39,7 @@ from assistant_gateway.application.workspace_text_presentation import (  # noqa:
 from assistant_gateway.onboarding_web import provider_test as provider_test_runtime  # noqa: E402
 from custom_agents.agent_catalog import get_onboarding_agent_catalog  # noqa: E402
 from scripts import preview_knowledge, preview_web_chat_samples  # noqa: E402
+from scripts.preview_web_chat_threads import PreviewThreads  # noqa: E402
 
 DEFAULT_ASSET_ROOT = REPO_ROOT / "assistant_gateway" / "onboarding_web" / "assets"
 EXPORT_FILENAME = "universal_agents_onboarding_appearance.json"
@@ -55,7 +56,6 @@ PUBLIC_VERSION = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 # The real live updates stream sends a page every 2 seconds; Web Chat
 # reconnects when nothing arrives for 15 (chat_live_events.mjs).
 PREVIEW_STREAM_HEARTBEAT_SECONDS = 2
-PREVIEW_THREADS_REVISION = "preview-threads:1"
 
 
 class PreviewRequestHandler(SimpleHTTPRequestHandler):
@@ -170,14 +170,17 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.UNAUTHORIZED, "Web Chat session is invalid or expired."
                 )
                 return
+            now = datetime.now(timezone.utc)
             self._write_json(
                 {
                     "status": "ok",
-                    "sessions": [self._preview_session_payload()],
+                    # The development thread, then sample threads in every
+                    # section of the list (preview_web_chat_threads).
+                    "sessions": [self._preview_session_payload(), *self._preview_threads().rows(now)],
                     "event_cursor": self._preview_event_cursor(),
                     # The live updates carry the same revision, so Web Chat
                     # reloads the thread list only when it changes.
-                    "threads_revision": PREVIEW_THREADS_REVISION,
+                    "threads_revision": self._preview_threads().revision(now),
                 }
             )
             return
@@ -186,6 +189,16 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
                 self._write_json_error(
                     HTTPStatus.UNAUTHORIZED, "Web Chat session is invalid or expired."
                 )
+                return
+            sample_key = urllib_parse.unquote(route.removeprefix("/api/web-chat/sessions/").removesuffix("/messages"))
+            if self._preview_threads().owns(sample_key):
+                limit = self._query_value("limit", "50")
+                page = self._preview_threads().history(
+                    sample_key,
+                    limit=int(limit) if limit.isdigit() else 50,
+                    turn_count=self._query_value("turn_count", "") == "1",
+                )
+                self._write_json({**(page or {}), "event_cursor": self._preview_event_cursor()})
                 return
             self._write_json(
                 {
@@ -339,6 +352,10 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.UNAUTHORIZED, "Web Chat session is invalid or expired."
                 )
                 return
+            # A sample thread leaves the list; the development thread stays.
+            self._preview_threads().archive(
+                urllib_parse.unquote(route.removeprefix("/api/web-chat/sessions/").removesuffix("/archive"))
+            )
             self._write_json({"status": "ok", "dev_preview": True})
             return
         if route == "/api/web-chat/chat":
@@ -436,6 +453,16 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
                 return
             payload = self._read_json_payload("thread rename payload")
             if payload is None:
+                return
+            if "thread_action" in payload:
+                # Pin, snooze, dismiss and restore change the samples in memory.
+                refusal = self._preview_threads().place(
+                    urllib_parse.unquote(route.removeprefix("/api/web-chat/sessions/")), payload, datetime.now(timezone.utc)
+                )
+                if refusal:
+                    self._write_json_error(HTTPStatus.BAD_REQUEST, refusal)
+                    return
+                self._write_json({"status": "ok", "thread_action": payload["thread_action"], "dev_preview": True})
                 return
             session_alias = str(
                 payload.get("session_alias") or payload.get("title") or ""
@@ -568,6 +595,13 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             "title": "Development Preview",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    def _preview_threads(self) -> PreviewThreads:
+        threads = getattr(self.server, "preview_threads", None)
+        if not isinstance(threads, PreviewThreads):
+            threads = PreviewThreads(datetime.now(timezone.utc))
+            setattr(self.server, "preview_threads", threads)
+        return threads
 
     def _preview_messages(self) -> list[dict[str, object]]:
         messages = getattr(self.server, "web_chat_preview_messages", None)
@@ -1026,7 +1060,7 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             "messages": messages[start:],
             "next_cursor": self._preview_event_cursor(),
             "has_more": False,
-            "threads_revision": PREVIEW_THREADS_REVISION,
+            "threads_revision": self._preview_threads().revision(datetime.now(timezone.utc)),
             "busy_session_keys": [],
             "team_activity": {"members": self._preview_members()},
             "transient_actions": [],
