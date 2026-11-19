@@ -112,17 +112,22 @@ def _ordinary_message_sql(alias: str, bind: str) -> str:
     command the person typed, and with text or an attachment. The thread
     list's latest message, the hover preview's turn count and (with an
     extra ``role = 'user'``) the thread's naming message share it, so one
-    rule decides what a turn is. The command prefix is a bind (``/%``)
-    because PostgreSQL drivers read a literal percent sign as a placeholder.
+    rule decides what a turn is; the page applies the same rule
+    (``chat_thread_list.mjs`` ``isOrdinaryMessage``). Its three binds are
+    ``_ORDINARY_MESSAGE_PARAMS``: the characters trimmed (the page's, not
+    only spaces as plain LTRIM would) and the command prefix (bound because
+    PostgreSQL drivers read a literal percent sign as a placeholder).
     """
 
     return f"""{alias}.role <> 'system'
-              AND NOT ({alias}.role = 'user' AND LTRIM({alias}.content) LIKE {bind})
-              AND (TRIM({alias}.content) <> '' OR {alias}.attachment_references_json <> '[]')"""
+              AND NOT ({alias}.role = 'user' AND LTRIM({alias}.content, {bind}) LIKE {bind})
+              AND (LTRIM({alias}.content, {bind}) <> '' OR {alias}.attachment_references_json <> '[]')"""
 
 
-# The bound value of _ordinary_message_sql's command prefix.
-_COMMAND_PREFIX_PATTERN = "/%"
+# What _ordinary_message_sql trims, as the page does: space, tab, newline, return.
+_MESSAGE_WHITESPACE = " \t\n\r"
+# The bound values of one _ordinary_message_sql condition, in order.
+_ORDINARY_MESSAGE_PARAMS = (_MESSAGE_WHITESPACE, "/%", _MESSAGE_WHITESPACE)
 
 # How much of a thread's latest message the thread list reads: transcript
 # content can be a megabyte, and the page shows one shortened line of it.
@@ -1993,14 +1998,15 @@ class _RelationalGatewayStateRepository:
                 s.session_key
             LIMIT {bind}
         """
-        command = _COMMAND_PREFIX_PATTERN
+        ordinary = _ORDINARY_MESSAGE_PARAMS
         owner = owner_canonical_user_id
-        params: list[Any] = [command, command, RUN_STATE_RUNNING, PendingQueryStatus.OPEN.value]
+        # The naming message's condition is read twice (its text and files).
+        params: list[Any] = [*ordinary, *ordinary, RUN_STATE_RUNNING, PendingQueryStatus.OPEN.value]
         # The setup pages' and credential forms' person, bound so each
         # subquery runs once per query.
         params.extend([TOOL_SETUP_STATUS_WAITING, owner, owner, ThreadHiddenAs.SNOOZED.value])
         if include_last_message:
-            params.append(command)
+            params.extend(ordinary)
         params.extend([channel_name, chat_id, owner, limit])
         with self._connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
@@ -3909,7 +3915,7 @@ class _RelationalGatewayStateRepository:
                 WHERE t.owner_canonical_user_id = {bind} AND t.session_key = {bind}
                   AND {_ordinary_message_sql("t", bind)}
                 """,
-                (owner_canonical_user_id, session_key, _COMMAND_PREFIX_PATTERN),
+                (owner_canonical_user_id, session_key, *_ORDINARY_MESSAGE_PARAMS),
             ).fetchone()
         return int(row[0]) if row else 0
 

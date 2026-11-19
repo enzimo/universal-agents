@@ -115,11 +115,14 @@ export function formatThreadAge(timestamp, now) {
 // a system card or command reply, not a slash command, with text or a file.
 export function isOrdinaryMessage(message) {
   const role = String(message.role || "");
-  const content = String(message.content || "");
+  // Trimmed of the same characters the store trims (_MESSAGE_WHITESPACE).
+  const content = String(message.content || "").replace(LEADING_MESSAGE_WHITESPACE, "");
   if (role === "system") return false;
-  if (role === "user" && content.trimStart().startsWith("/")) return false;
-  return Boolean(content.trim() || attachmentsOf(message).length);
+  if (role === "user" && content.startsWith("/")) return false;
+  return Boolean(content || attachmentsOf(message).length);
 }
+
+const LEADING_MESSAGE_WHITESPACE = /^[ \t\n\r]+/;
 
 function attachmentsOf(message) {
   return Array.isArray(message.attachments) ? message.attachments : [];
@@ -129,8 +132,12 @@ function attachmentsOf(message) {
 // heading, list or quote prefixes, or fences; a link shows its text.
 export function plainSnippet(text) {
   let plain = String(text || "").slice(0, SNIPPET_SOURCE_CHARACTERS);
+  // Fences go first; inline code is set aside so the emphasis rules never
+  // change what Markdown shows as written (`__init__.py`).
+  const code = [];
   plain = plain
     .replace(/```[^\n`]*\n?/g, " ")
+    .replace(/`([^`\n]+)`/g, (_match, inner) => CODE_MARK + (code.push(inner) - 1) + CODE_MARK)
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/^[ \t]*#{1,6}[ \t]+/gm, "")
@@ -139,13 +146,20 @@ export function plainSnippet(text) {
     .replace(/(\*\*|__|~~)(?=\S)([\s\S]*?\S)\1/g, "$2")
     .replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?!\w)/g, "$1$2")
     .replace(/(^|[^\w])_(?=\S)([^_\n]*?\S)_(?!\w)/g, "$1$2")
-    .replace(/`+/g, "");
+    .replace(/`+/g, "")
+    .replace(CODE_PLACEHOLDER, (_match, index) => code[Number(index)]);
   plain = plain.split(/\s+/).filter(Boolean).join(" ");
-  if (plain.length > SNIPPET_MAX_CHARACTERS) {
-    plain = plain.slice(0, SNIPPET_MAX_CHARACTERS - 1).trimEnd() + "…";
+  // Cut by characters as people see them, so an emoji is never split.
+  const characters = Array.from(plain);
+  if (characters.length > SNIPPET_MAX_CHARACTERS) {
+    plain = characters.slice(0, SNIPPET_MAX_CHARACTERS - 1).join("").trimEnd() + "…";
   }
   return plain;
 }
+
+// Marks an inline code span set aside by plainSnippet (a private-use character).
+const CODE_MARK = "\uE000";
+const CODE_PLACEHOLDER = /\uE000(\d+)\uE000/g;
 
 // The row's snippet for one message, or null when it is not ordinary.
 export function messageSnippet(message) {
@@ -176,9 +190,9 @@ export function snoozeChoices(now, formatHint) {
   const choices = [{ id: "hour", label: "For 1 hour", until: new Date(now.getTime() + 60 * 60 * 1000) }];
   if (now.getHours() < 17) choices.push({ id: "evening", label: "Until this evening", until: at(0, 18) });
   choices.push({ id: "tomorrow", label: "Until tomorrow", until: at(1, 9) });
-  // Next Monday, never today.
+  // Next Monday, never today; on a Sunday that is tomorrow, offered once.
   const daysToMonday = ((8 - now.getDay()) % 7) || 7;
-  choices.push({ id: "next_week", label: "Until next week", until: at(daysToMonday, 9) });
+  if (daysToMonday > 1) choices.push({ id: "next_week", label: "Until next week", until: at(daysToMonday, 9) });
   return choices.map(choice => ({ ...choice, hint: choice.id === "hour" ? "" : formatHint(choice.until, now) }));
 }
 
@@ -207,7 +221,8 @@ export function createSectionCollapse(storage, key) {
 }
 
 // Draw the sections into `container`: a header button with the count that
-// collapses its rows, then each row from `renderRow(thread)`.
+// collapses its rows in place, then each row from `renderRow(thread)`.
+// `onToggle(id, collapsed)` is optional and only tells the caller.
 export function renderThreadSections({ document, container, groups, collapse, renderRow, onToggle }) {
   container.replaceChildren();
   groups.forEach(group => {
@@ -231,9 +246,13 @@ export function renderThreadSections({ document, container, groups, collapse, re
     rows.className = "thread-section-rows";
     rows.hidden = collapsed;
     group.threads.forEach(thread => rows.appendChild(renderRow(thread)));
+    // Opening or closing a section changes nothing else, so it happens in
+    // place: the header keeps keyboard focus (plan review C18).
     header.addEventListener("click", () => {
-      collapse.toggle(group.id);
-      onToggle(group.id);
+      const nowCollapsed = collapse.toggle(group.id);
+      rows.hidden = nowCollapsed;
+      header.setAttribute("aria-expanded", nowCollapsed ? "false" : "true");
+      if (onToggle) onToggle(group.id, nowCollapsed);
     });
     section.append(header, rows);
     container.appendChild(section);

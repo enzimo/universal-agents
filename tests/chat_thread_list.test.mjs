@@ -78,20 +78,23 @@ test("sections render with counts, and Snoozed and Dismissed start collapsed and
     thread("f", { listState: LIST_STATE.DISMISSED }),
   ]);
   const toggled = [];
-  const draw = () => renderThreadSections({
+  renderThreadSections({
     document, container, groups, collapse,
     renderRow: item => Object.assign(document.createElement("div"), { className: "thread-row", textContent: item.id }),
-    onToggle: id => { toggled.push(id); draw(); },
+    onToggle: (id, collapsed) => toggled.push([id, collapsed]),
   });
-  draw();
   const headers = byClass(container, "thread-section-header");
   assert.deepEqual(headers.map(header => header.textContent), ["Needs you1", "Pinned1", "Recent1", "Snoozed1", "Dismissed2"]);
   assert.deepEqual(headers.map(header => header.getAttribute("aria-expanded")), ["true", "true", "true", "false", "false"]);
   assert.deepEqual(byClass(container, "thread-section-rows").map(rows => rows.hidden), [false, false, false, true, true]);
   assert.equal(headers[4].getAttribute("aria-label"), "Dismissed, 2 chats");
 
+  headers[4].focus();
   headers[4].click();
-  assert.deepEqual(toggled, [THREAD_SECTION.DISMISSED]);
+  assert.deepEqual(toggled, [[THREAD_SECTION.DISMISSED, false]]);
+  assert.equal(byClass(container, "thread-section-header")[4], headers[4], "the section opens in place");
+  assert.equal(document.activeElement, headers[4], "the header keeps keyboard focus");
+  assert.equal(headers[4].getAttribute("aria-expanded"), "true");
   assert.equal(byClass(container, "thread-section-rows")[4].hidden, false);
   // A reload in the same browser keeps the choice.
   const again = createSectionCollapse(storage, "ua.webchat.sections.owner");
@@ -164,6 +167,8 @@ test("snooze choices are worked out in local time; this evening only before 5 PM
 
   const evening = snoozeChoices(new Date(2026, 10, 19, 17, 5), hint);
   assert.deepEqual(evening.map(choice => choice.id), ["hour", "tomorrow", "next_week"]);
+  const sunday = snoozeChoices(new Date(2026, 10, 22, 10, 0), hint);
+  assert.deepEqual(sunday.map(choice => choice.id), ["hour", "evening", "tomorrow"], "on a Sunday tomorrow is next week");
   const monday = snoozeChoices(new Date(2026, 10, 23, 8, 0), hint).find(choice => choice.id === "next_week");
   assert.equal(monday.until.getDate(), 30, "on a Monday, next week is the following Monday");
 });

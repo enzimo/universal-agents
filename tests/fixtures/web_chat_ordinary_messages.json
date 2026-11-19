@@ -1,17 +1,98 @@
 {
   "about": "Example transcript rows for the thread list's one ordinary-message rule (storage _ordinary_message_sql, chat_thread_list.mjs isOrdinaryMessage) and the row's plain snippet (plainSnippet). Python checks which rows are ordinary in the real store; the page's tests check the same rows and their snippets.",
   "rows": [
-    {"role": "user", "content": "Please check the backups", "ordinary": true, "snippet": "Please check the backups"},
-    {"role": "assistant", "content": "All backups finished.", "ordinary": true, "snippet": "All backups finished."},
-    {"role": "user", "content": "/status", "ordinary": false},
-    {"role": "user", "content": "   /help me", "ordinary": false},
-    {"role": "assistant", "content": "/tmp is full", "ordinary": true, "snippet": "/tmp is full"},
-    {"role": "system", "content": "Status: idle", "ordinary": false},
-    {"role": "user", "content": "   ", "ordinary": false},
-    {"role": "user", "content": "", "attachments": ["budget.xlsx"], "ordinary": true, "snippet": "budget.xlsx"},
-    {"role": "assistant", "content": "**Done.** I updated `config.yaml`:\n```yaml\nkey: 1\n```", "ordinary": true, "snippet": "Done. I updated config.yaml: key: 1"},
-    {"role": "assistant", "content": "## Weekly report\n\n- All 14 hosts healthy\n- Disk on *nas-2* at 81%", "ordinary": true, "snippet": "Weekly report All 14 hosts healthy Disk on nas-2 at 81%"},
-    {"role": "assistant", "content": "See [the shortlist](https://example.com/offsite) in team_offsite_notes.md", "ordinary": true, "snippet": "See the shortlist in team_offsite_notes.md"},
-    {"role": "user", "content": "Can you  find\n\nthree venues?", "ordinary": true, "snippet": "Can you find three venues?"}
+    {
+      "role": "user",
+      "content": "Please check the backups",
+      "ordinary": true,
+      "snippet": "Please check the backups"
+    },
+    {
+      "role": "assistant",
+      "content": "All backups finished.",
+      "ordinary": true,
+      "snippet": "All backups finished."
+    },
+    {
+      "role": "user",
+      "content": "/status",
+      "ordinary": false
+    },
+    {
+      "role": "user",
+      "content": "   /help me",
+      "ordinary": false
+    },
+    {
+      "role": "assistant",
+      "content": "/tmp is full",
+      "ordinary": true,
+      "snippet": "/tmp is full"
+    },
+    {
+      "role": "system",
+      "content": "Status: idle",
+      "ordinary": false
+    },
+    {
+      "role": "user",
+      "content": "   ",
+      "ordinary": false
+    },
+    {
+      "role": "user",
+      "content": "",
+      "attachments": [
+        "budget.xlsx"
+      ],
+      "ordinary": true,
+      "snippet": "budget.xlsx"
+    },
+    {
+      "role": "assistant",
+      "content": "**Done.** I updated `config.yaml`:\n```yaml\nkey: 1\n```",
+      "ordinary": true,
+      "snippet": "Done. I updated config.yaml: key: 1"
+    },
+    {
+      "role": "assistant",
+      "content": "## Weekly report\n\n- All 14 hosts healthy\n- Disk on *nas-2* at 81%",
+      "ordinary": true,
+      "snippet": "Weekly report All 14 hosts healthy Disk on nas-2 at 81%"
+    },
+    {
+      "role": "assistant",
+      "content": "See [the shortlist](https://example.com/offsite) in team_offsite_notes.md",
+      "ordinary": true,
+      "snippet": "See the shortlist in team_offsite_notes.md"
+    },
+    {
+      "role": "user",
+      "content": "Can you  find\n\nthree venues?",
+      "ordinary": true,
+      "snippet": "Can you find three venues?"
+    },
+    {
+      "role": "user",
+      "content": "\n/status",
+      "ordinary": false
+    },
+    {
+      "role": "user",
+      "content": "\n\n",
+      "ordinary": false
+    },
+    {
+      "role": "assistant",
+      "content": "I updated `__init__.py` and `_helpers_`. Renamed `__all__` in **web_chat_threads.py**",
+      "ordinary": true,
+      "snippet": "I updated __init__.py and _helpers_. Renamed __all__ in web_chat_threads.py"
+    },
+    {
+      "role": "assistant",
+      "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀 and more",
+      "ordinary": true,
+      "snippet": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀…"
+    }
   ]
 }
