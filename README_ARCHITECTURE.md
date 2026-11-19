@@ -3343,7 +3343,11 @@ page, the gateway, agents and models still never see what is typed.
   (`network.public_origin` with the internal website's public port), only when
   the internal website and Web Chat are on, and rebuilds it from checked parts
   (`policy_origin`) so a setting can never add a directive. Without it every
-  request gets the full page (`event=broker_card_view_off` at startup).
+  request gets the full page. Diagnosis: `event=broker_card_view_origin` or
+  `event=broker_card_view_off` at broker start, `broker_card_view_origin_unusable`
+  and the gateway's `web_chat_broker_frame_origin_unusable` for an address that
+  cannot go into a header, `broker_card_bridge_missing`, and the browser console
+  warning naming a card that fell back to its own tab.
 - **Why a sandboxed frame.** Behind a reverse proxy the broker is path-routed
   on the chat's own address, so a plain frame would be same-origin with the
   chat page and its script could read the form. The sandbox in the response
@@ -3355,9 +3359,10 @@ page, the gateway, agents and models still never see what is typed.
   checks of `/auth model` and `/upgrade` are unchanged. Forms posted from the
   card arrive with `Origin: null`, which the broker never checked: a `null`
   origin cannot tell the card from another sandboxed page, so the private link
-  remains the check, and a cross-site post without it gets 404. The sign-in
-  status route answers `Access-Control-Allow-Origin: null` (no credentials,
-  errors included) so the page's own polling works inside the card; it still
+  remains the check, and a cross-site post without it gets 404. While the card
+  view is on, the sign-in status route answers a request whose `Origin` is
+  `null` with `Access-Control-Allow-Origin: null` (no credentials, errors
+  included) so the page's own polling works inside the card; it still
   needs the private link and returns nothing secret. Page errors render as
   broker pages; the status route keeps plain errors.
 - **The bridge.** In the card view the broker inlines

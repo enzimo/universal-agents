@@ -257,6 +257,19 @@ could not be shown here", the frame was refused: check that people open Web
 Chat at the configured public address and that the proxy passes the broker's
 headers unchanged. The person can still use **Open in its own tab**.
 
+These log lines say why cards are not shown:
+
+- the broker's start-up line `event=broker_card_view_origin` names the Web Chat
+  address allowed to show cards; `event=broker_card_view_off` means cards are off
+  (Web Chat or the internal website is off);
+- `event=broker_card_view_origin_unusable` (broker) and
+  `event=web_chat_broker_frame_origin_unusable` (gateway) mean the configured
+  public address could not be used in the browser's security header;
+- `event=broker_card_bridge_missing` (broker) means the page script that tells
+  the chat about the card is missing from the installation;
+- in the browser's console, "A secure page could not be shown in its chat card"
+  names the card that fell back to its own tab.
+
 ## Path Prefixes and Separate Broker Hostnames
 
 A broker prefix such as `https://assistant.example.com/broker` is not currently

@@ -652,24 +652,25 @@ sensitive values only through those broker forms or through configured env /
 secret files, not in normal chat. GitHub, Google and X sign-ins belong to the
 person who made them: agents use them only for that person's work.
 
-When an agent asks you to store or delete a credential, Web Chat shows a
-dismissible **Open secure credential form** action with a live expiry countdown.
-A setup page an agent asks for (see
-[When an agent needs a tool set up](#when-an-agent-needs-a-tool-set-up)) shows
-its own **Open** action the same way; the pages that open after the first one
-come back after a refresh until each ends (a gateway restart removes them).
-A credential form's action is available only in the browser response that
-starts the workflow; it stays at its original position in the chat timeline
-and disappears as soon as the form ends: the chat then shows one line saying
-how it ended, such as
+When an agent asks you to store or delete a credential, the secure form appears
+inside the chat, in its card: the reason on top, the broker's form, and a line
+with the time left and **Open in its own tab**. **Decline** at the bottom of the
+form ends it without storing or deleting anything. A setup page an agent asks
+for (see [When an agent needs a tool set up](#when-an-agent-needs-a-tool-set-up))
+appears the same way; the pages that open after the first one come back after a
+refresh until each ends (a gateway restart removes them). A credential form's
+card is available only in the browser response that starts the workflow; it
+stays at its original position in the chat timeline. When the form ends, the
+card shrinks to one line ("Done." or "Declined."), and the chat then shows one
+line saying how it ended, such as
 "The secure form for `bifrost_virtual_key` is done: the credential was
 stored.", while the agent goes on with its task.
 If the gateway loses the form's status, it closes the card and says it cannot
 confirm whether anything was stored or changed. A delayed or failed send to
-the agent does not keep the card open. The action is intentionally absent after
-refresh and from saved transcript history. At expiry, Web Chat replaces the Open action
-and countdown with an inert expiry notice while it waits for the matching result.
-Dismiss remains available. If the form expired before submission, start the
+the agent does not keep the card open. The card is intentionally absent after
+refresh and from saved transcript history. At expiry, the form closes and the
+card keeps one line saying the link expired while it waits for the matching
+result. If the form expired before submission, start the
 credential request again. If its result is unknown, check the stored credential
 before trying again. Manual account-signup forms include
 a separate validated link to create the account before returning to store its
