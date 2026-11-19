@@ -112,6 +112,8 @@ _MOVE_UNDER_A_NEW_TEAM_ID: Final = (
     "with /upgrade. Then set up a fresh 0.10 instance and choose Import in onboarding, which asks for a new team id "
     "(on the command line: assistant_cli team review with --new-team-id, then team import)."
 )
+# How the other ids' lines end when the team id does not fit, so all lines lead to the same export.
+_THEN_EXPORT: Final = "Then export the team with /upgrade as described for the team id above."
 _IMPORT_UNDER_A_NEW_TEAM_ID: Final = (
     f"Give the team a new team id of at most {TEAM_ID.cap} letters, digits, '-' and '_' as it is imported: "
     "onboarding's Import asks for one, and on the command line assistant_cli team review (or team import --dry-run) "
@@ -423,19 +425,23 @@ def refusal_message(found: Sequence[IdOverCap], *, upgraded_note: str | None = N
     ]
     if upgraded_note:
         lines.append(upgraded_note)
+    # An instance whose team id does not fit cannot run this version at all (its team moves under a
+    # new id), so the other ids are fixed on 0.9.x before that export, not before another start.
+    then = (
+        _THEN_EXPORT if any(item.rule_what == TEAM_ID.what for item in found) else "Then start this version again."
+    )
     for item in found:
         if item.rule_what == TEAM_ID.what:
             lines.append(f"- The team id {item.value!r} {item.problem}. {_MOVE_UNDER_A_NEW_TEAM_ID}")
         elif item.rule_what == AGENT_TYPE.what:
             lines.append(
-                f"- The agent type {item.value!r}{_where(item)} {item.problem}. On 0.9.x, {_RENAME_AGENT_TYPE} Then "
-                "start this version again."
+                f"- The agent type {item.value!r}{_where(item)} {item.problem}. On 0.9.x, {_RENAME_AGENT_TYPE} {then}"
             )
         else:
             lines.append(
                 f"- The agent id {item.value!r} {item.problem}. It is stored with {', '.join(item.found_in)}. "
                 "On 0.9.x, let that agent's tasks finish or stop them, and let the team lead deal with tasks it "
-                "handed back, so these records go. Then start this version again."
+                f"handed back, so these records go. {then}"
             )
     return "\n".join(lines)
 

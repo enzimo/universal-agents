@@ -207,10 +207,21 @@ def test_each_id_just_over_its_cap_stops_the_start_and_says_what_to_do(tmp_path,
         f"- The agent id '{OVER_ID_CAP}' is 33 characters long; protocol 1 allows at most 32. It is stored with "
         "its running tasks, its running tasks' saved progress, messages waiting for it, the tasks it holds, tasks "
         "it handed back that the team lead has not dealt with yet. On 0.9.x, let that agent's tasks finish or stop "
-        "them, and let the team lead deal with tasks it handed back, so these records go. Then start this version "
-        "again."
+        "them, and let the team lead deal with tasks it handed back, so these records go. Then export the team "
+        "with /upgrade as described for the team id above."
     )
+    # This instance cannot run 0.10 at all, so no line says to start it again.
+    assert lines[2].endswith("Then export the team with /upgrade as described for the team id above.")
+    assert "start this version again" not in message
     assert len(lines) == 4  # the ids at their caps are not named
+    # With a team id that fits, the same two ids are fixed on 0.9.x and this version is started again.
+    fits = tmp_path / "fits"
+    fits.mkdir()
+    config, storage = _config(fits, types=(OVER_TYPE_CAP,)), _sqlite(fits)
+    _write_sqlite(storage, OVER_ID_CAP)
+    alone = check_ids_before_upgrade(config, lambda: storage)
+    assert alone is not None and [line.rsplit(". ", 1)[1] for line in alone.splitlines()[1:]] == [
+        "Then start this version again."] * 2
     assert f"event=protocol1_ids_over_caps team_id={long_team}" in caplog.text
 
 

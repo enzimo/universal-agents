@@ -16,7 +16,14 @@ rules:
 - the loopback page sends credentials to the running broker through
   ``store_credentials`` after the instance import. Onboarding instead leaves
   them for the first start through ``prepare_credentials``, before the
-  instance's unfinished-import marker can be removed.
+  instance's unfinished-import marker can be removed;
+- a closed session (``close``) refuses every later change, validation and
+  import. Onboarding closes an opening's session when the export is opened
+  again, because the newer opening may prepare the review again under another
+  team id in the same folder: a write of the earlier session accepted before
+  then (its body still arriving, or waiting behind a validation) would
+  otherwise land in the newer review, with a value built from the earlier id.
+  The loopback page keeps one session per process and never closes it.
 
 The page never receives secret values: operator secrets show their names and
 credentials their key and owner only (``_public_record``).
@@ -25,6 +32,7 @@ credentials their key and owner only (``_public_record``).
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Callable
 
 from pydantic import Field
@@ -36,6 +44,8 @@ from team_transfer.review import ReviewFiles, ReviewRecordV1, text_digest
 from team_transfer.sections import DestinationChoices, PlannedRecord, RecordOutcome
 from team_transfer.service import default_sections, import_team, plan_import
 from team_transfer.titles import record_title, section_title
+
+LOGGER = logging.getLogger(__name__)
 
 CREDENTIAL_SECTION = "broker_credentials"
 # Prepares or stores selected credentials; returns one
@@ -84,6 +94,31 @@ class ReviewSession:
         self._destination = destination
         self._validated_digest: str | None = None
         self._gate = asyncio.Lock()
+        # Why the session was closed, set by ``close`` under the gate; every step below checks
+        # it right after taking the gate and refuses with it.
+        self._closed: str | None = None
+
+    async def close(self, reason: str) -> None:
+        """Refuse every later change, validation and import of this review with ``reason``.
+
+        Taken under the gate, so a step already holding it (a validation, a save) finishes
+        first, and every step that takes it afterwards is refused. Once this returns, nothing
+        of this session writes into the review folder or reads the export again, so the
+        caller may close the reader and let another session replace the folder.
+        """
+
+        async with self._gate:
+            self._closed = reason
+
+    def _require_open(self, step: str) -> None:
+        if self._closed is not None:
+            LOGGER.warning(
+                "A review step arrived after its review was closed and was refused. "
+                "event=team_transfer_review_step_after_close step=%s review_folder=%s",
+                step,
+                self.files.root.name,
+            )
+            raise TransferError(self._closed)
 
     # -- reading -----------------------------------------------------------------
 
@@ -113,6 +148,7 @@ class ReviewSession:
         """A changed destination changes the plan, so it needs a new validation."""
 
         async with self._gate:
+            self._require_open("set_destination")
             self._destination = destination
             self._validated_digest = None
 
@@ -121,6 +157,7 @@ class ReviewSession:
     async def update(self, payload: ReviewUpdateV1) -> dict[str, Any]:
         files = self.files
         async with self._gate:
+            self._require_open("update")
             records = list(files.review.records)
             index = next(
                 (
@@ -171,6 +208,7 @@ class ReviewSession:
     async def validate(self) -> dict[str, Any]:
         files = self.files
         async with self._gate:
+            self._require_open("validate")
             snapshot = files.snapshot()
             arguments = self._arguments(snapshot)
             plan, context = await asyncio.to_thread(
@@ -201,6 +239,7 @@ class ReviewSession:
     async def apply(self, payload: ReviewApplyV1) -> dict[str, Any]:
         files = self.files
         async with self._gate:
+            self._require_open("apply")
             snapshot = files.snapshot()
             if (
                 not self._validated_digest

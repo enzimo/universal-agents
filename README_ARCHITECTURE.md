@@ -5282,11 +5282,15 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   reads the new records, so an id a section refuses leaves the saved review
   as it was), so it runs only before the opening has a review, while every
   review route of that opening refuses; another id needs the export opened
-  again. A review write accepted on an earlier opening of the same export can
-  still change an edited text or the saved review in the folder afterwards,
-  but it cannot import anything unconfirmed or unvalidated: a schedule's text
-  must equal the confirmed text, and the import refuses texts changed after
-  validation (the validated digest). An import
+  again. Opening the export again first closes the earlier opening's review
+  session under that session's lock (`ReviewSession.close`), then its reader,
+  before the newer opening gets its token. A review write of the earlier
+  opening accepted before then (its body still arriving, or waiting behind
+  its validation) either finishes first, in the folder the newer opening then
+  keeps or prepares again, or is refused. So a settings save built from the
+  earlier id (such as `gateway.response_queue_name`) never reaches the newer
+  review, where the import would carry it with no note, and the reader is
+  never closed under a running validation. An import
   whose request was accepted for an export opened again before its body
   arrived is refused, so no import runs beside that step.
 - **One planner, nothing silently dropped.** Every record is imported, imported

@@ -30,7 +30,12 @@ are renamed for the team id the import writes (``team_transfer.team_ids``),
 through the rename each section registers in ``TEAM_ID_RENAMES`` beside its
 version steps. Every section registers one, ``holds_no_team_id`` when its
 records name no team, so a new section must decide; a section without one is
-refused under a new id rather than imported with the old one.
+refused under a new id rather than imported with the old one. The registration
+covers records, not the files a section carries: a carried file that names the
+team is the section's own responsibility, renamed as it is written (the
+control section's specialist ``provisioning.json``, ``ImportContext.team_ids``),
+and the end-to-end tests that search every file of the new instance for the
+old id are the guard against a file kind that is missed.
 """
 
 from __future__ import annotations

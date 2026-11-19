@@ -70,6 +70,36 @@ async def _review(client: TestClient, headers: dict[str, str]) -> dict[str, Any]
     return await (await client.get("/api/team-import/review", headers=headers)).json()
 
 
+def _text_of(review: dict[str, Any], key: str) -> str:
+    return next(record["text"] for record in review["records"] if record["key"] == key)
+
+
+async def _import_all_this_version_takes(client: TestClient, headers: dict[str, str], review: dict[str, Any]) -> None:
+    """The every-section team's records but what this version refuses for any team, schedules confirmed, imported."""
+
+    import tests.test_team_import_new_team_id_cli as cli_tests
+
+    for record in review["records"]:
+        selected = (record["section"], record["key"]) not in cli_tests.REFUSED_FOR_ANY_TEAM
+        body: dict[str, Any] = {"section": record["section"], "key": record["key"], "selected": selected}
+        if selected and record["section"] == "schedules" and record["text"] is not None:
+            body.update(text=record["text"], confirmed=True)
+        saved = await client.post("/api/team-import/record", json=body, headers=headers)
+        assert saved.status == 200, (body, await saved.json())
+    validation = await (await client.post("/api/team-import/validate", json={}, headers=headers)).json()
+    assert validation["valid"], validation
+    imported = await client.post("/api/team-import/import", json={"digest": validation["digest"]}, headers=headers)
+    assert imported.status == 200, await imported.json()
+    await asyncio.sleep(0.6)
+
+
+async def _until(condition: Any, timeout: float = 10.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not condition():
+        assert asyncio.get_running_loop().time() < deadline, "timed out"
+        await asyncio.sleep(0.01)
+
+
 @pytest.mark.asyncio
 async def test_a_long_team_id_moves_through_onboardings_import_under_a_new_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -125,6 +155,10 @@ async def test_a_long_team_id_moves_through_onboardings_import_under_a_new_id(
         # Given the suggestion instead: the review is prepared again, everything selected.
         assert (await _choose(client, headers, NEW))[1] == {
             "page": "/team-import", "team_id": NEW, "restarted_review": True}
+        # Continue pressed again after a lost reply: the same id, read as the id step reads it, gets the
+        # same answer and prepares nothing again; another id is still refused above.
+        assert await _choose(client, headers, f" {NEW}") == (
+            200, {"page": "/team-import", "team_id": NEW, "restarted_review": False})
         review = await _review(client, headers)
         assert (review["team_id"], review["imported_team_id"]) == (OLD, NEW)
         assert all(record["selected"] for record in review["records"])
@@ -325,18 +359,7 @@ async def test_every_section_moves_through_the_page_under_a_new_id(
         assert [needle for needle in needles if _names(shown, needle)] == []
 
         # Everything but what this version refuses for any team, as on the command line.
-        for record in review["records"]:
-            selected = (record["section"], record["key"]) not in cli_tests.REFUSED_FOR_ANY_TEAM
-            body: dict[str, Any] = {"section": record["section"], "key": record["key"], "selected": selected}
-            if selected and record["section"] == "schedules" and record["text"] is not None:
-                body.update(text=record["text"], confirmed=True)
-            saved = await client.post("/api/team-import/record", json=body, headers=headers)
-            assert saved.status == 200, (body, await saved.json())
-        validation = await (await client.post("/api/team-import/validate", json={}, headers=headers)).json()
-        assert validation["valid"], validation
-        imported = await client.post("/api/team-import/import", json={"digest": validation["digest"]}, headers=headers)
-        assert imported.status == 200, await imported.json()
-        await asyncio.sleep(0.6)
+        await _import_all_this_version_takes(client, headers, review)
 
     config = GatewayInstanceConfig.load_saved(root / "instance_config.yaml")
     assert config.gateway.team_id == NEW
@@ -349,3 +372,115 @@ async def test_every_section_moves_through_the_page_under_a_new_id(
     assert cli_tests._files_naming(root, needles) == []
     assert _stored_naming(root, needles) == []
     assert _stored_naming(root, (NEW,))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timing", ["body still arriving", "waiting behind a validation"])
+async def test_a_save_accepted_on_an_earlier_opening_never_reaches_the_newer_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, timing: str
+) -> None:
+    """A settings save of an earlier opening cannot put a value built from its id into the newer review.
+
+    Opening the export again closes the earlier opening's review session under its lock, then its
+    reader, before the newer opening gets its token. The save is for ``gateway.response_queue_name``,
+    whose text the earlier opening built from its id; it was accepted (past the token check) before the
+    export was opened again:
+
+    - its body still arriving: it is refused, and the newer review keeps the value built from its id;
+    - complete, waiting for the session's lock behind that opening's validation: the newer opening waits
+      too, the validation still reads an open export, and the save finishes first, in the folder the
+      newer opening's id step then prepares again.
+
+    Either way the import writes both settings built from the team id with the newer id, not the earlier.
+    """
+
+    import json
+    import threading
+
+    import assistant_gateway.onboarding_web.team_import as team_import
+    import team_transfer.review_session as review_session
+    import tests.test_team_import_new_team_id_cli as cli_tests
+
+    out, _secret, _derived, _registry = cli_tests._exported_every_section(tmp_path, monkeypatch)
+    root = _copied(out, tmp_path)
+    service = _onboarding(root)
+    queue_key = "gateway.response_queue_name"
+
+    # Set once the save is past the token check, before it reads its body.
+    save_started = asyncio.Event()
+    handle_record = team_import.TeamImport._record
+
+    async def noting_record(self: Any, request: Any, opened: Any) -> Any:
+        save_started.set()
+        return await handle_record(self, request, opened)
+
+    monkeypatch.setattr(team_import.TeamImport, "_record", noting_record)
+
+    # The earlier opening's validation, held after it took the lock and before it reads the export.
+    planning, release = threading.Event(), threading.Event()
+    plan_import = review_session.plan_import
+
+    def held_plan(*args: Any, **kwargs: Any) -> Any:
+        if not planning.is_set():
+            planning.set()
+            release.wait(10)
+        return plan_import(*args, **kwargs)
+
+    async with TestClient(TestServer(service.build_app())) as client:
+        earlier, _question = await _open(client)
+        assert (await _choose(client, earlier, OTHER))[0] == 200
+        earlier_review = await _review(client, earlier)
+        earlier_text = _text_of(earlier_review, queue_key)
+        assert f"{OTHER}_alpha_custom" in earlier_text
+        payload = json.dumps({"section": "settings", "key": queue_key, "selected": True, "text": earlier_text}).encode()
+        body_sent = asyncio.Event()
+        validating = None
+        if timing == "body still arriving":
+
+            async def arriving() -> Any:
+                yield payload[:5]
+                await body_sent.wait()
+                yield payload[5:]
+
+            data: Any = arriving()
+        else:
+            await _confirm_schedules(client, earlier, earlier_review)  # so the validation reaches the planner
+            monkeypatch.setattr(review_session, "plan_import", held_plan)
+            validating = asyncio.create_task(client.post("/api/team-import/validate", json={}, headers=earlier))
+            assert await asyncio.to_thread(planning.wait, 10), await (await validating).json()
+            data = payload
+        late = asyncio.create_task(client.post(
+            "/api/team-import/record", data=data, headers={**earlier, "Content-Type": "application/json"}))
+        await asyncio.wait_for(save_started.wait(), 10)
+        await asyncio.sleep(0.05)  # the save waits for its body, or for the lock
+
+        opening_again = asyncio.create_task(_open(client))
+        if validating is not None:
+            # The earlier opening is detached at once; the newer one waits for its validation to finish.
+            await _until(lambda: service.team_import._open is None)
+            await asyncio.sleep(0.05)
+            assert not opening_again.done()
+            release.set()
+            validated = await validating
+            assert validated.status == 200 and (await validated.json())["records"], "it read an open export"
+        newer, _question = await opening_again
+        assert await _choose(client, newer, NEW) == (
+            200, {"page": "/team-import", "team_id": NEW, "restarted_review": True})
+        newer_text = _text_of(await _review(client, newer), queue_key)
+        assert f"{NEW}_alpha_custom" in newer_text
+
+        body_sent.set()
+        answered = await late
+        if validating is None:
+            assert (answered.status, await answered.json()) == (400, {
+                "error": "This review was closed because the export was opened again. Continue on the newest page."})
+            assert "event=team_transfer_review_step_after_close step=update" in caplog.text
+        else:
+            assert (answered.status, await answered.json()) == (200, {"saved": True}), "it finished first"
+        review = await _review(client, newer)
+        assert _text_of(review, queue_key) == newer_text
+        await _import_all_this_version_takes(client, newer, review)
+
+    config = GatewayInstanceConfig.load_saved(root / "instance_config.yaml")
+    assert (config.gateway.team_id, config.transport.subject_prefix, config.gateway.response_queue_name) == (
+        NEW, NEW, f"{NEW}_alpha_custom")

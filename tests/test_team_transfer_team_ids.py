@@ -104,11 +104,15 @@ def test_settings_built_from_the_team_id_follow_it_and_a_third_teams_value_stays
         {"path": ["gateway", "response_queue_name"], "value": f"{OLD}_alpha_custom"},
         {"path": ["transport", "subject_prefix"], "value": OTHER},
         {"path": ["user", "initial_context"], "value": f"We are {OLD}."},
+        # The subject prefix's own separators, '.' and '_'.
+        {"path": ["transport", "subject_prefix"], "value": f"{OLD}.prod"},
+        {"path": ["transport", "subject_prefix"], "value": f"{OLD}_prod"},
     ]
 
     renamed = rename(records, IDS)
 
-    assert [record["value"] for record in renamed] == [NEW, f"{NEW}_alpha_custom", OTHER, f"We are {OLD}."]
+    assert [record["value"] for record in renamed] == [
+        NEW, f"{NEW}_alpha_custom", OTHER, f"We are {OLD}.", f"{NEW}.prod", f"{NEW}_prod"]
     assert records[0]["value"] == OLD
 
 

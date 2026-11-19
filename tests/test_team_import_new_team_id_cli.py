@@ -156,9 +156,12 @@ def _old_team(tmp_path: Path, registry: Any, monkeypatch: pytest.MonkeyPatch) ->
     )
     from custom_agents.providers.mcp_connections import MCPConnectionAdministration
     from custom_agents.providers.mcp_hosting import MCPHostingAdministration
+    from custom_messages.contracts.routing_v1 import MessageHeader
+    from access_control.account_sharing import TeamAccountSharing
     from custom_messages.contracts.access_v2 import (
         AccessLevel,
         AccountLinkV1,
+        AccountSharing,
         DataFolderRecordV1,
         GrantV1,
         LinkOwnerKind,
@@ -218,8 +221,16 @@ def _old_team(tmp_path: Path, registry: Any, monkeypatch: pytest.MonkeyPatch) ->
     create_gateway_state_repository(config.state_storage_settings).upsert_scheduled_target(
         scheduled_job_id=maintenance.schedule_id, session_key="sess_ana", conversation_id="conv_maintenance",
         owner_canonical_user_id="usr_ana")
+    # A person's schedule that replies through the old gateway's route, as a 0.9 person's schedule does.
+    route = f"{OLD}_alpha_user_gateway"
+    replying = schedule_tests._schedule("sched_reply", "usr_ana", claim_team_id=OLD, payload_header=MessageHeader(
+        from_agent_id=route, to_routing_path=f"{OLD}_TeamArchitect", response_routing_key=route))
+    replying.payload_meta.gateway_context.task_context = ContextSigner.from_value(ISSUER_GATEWAY, old_key).issue(
+        team_id=OLD, person_id="usr_ana", person_roles=("owner",), schedule_id=replying.schedule_id)
+    store.add(replying)
 
-    # Access: grants to a person, the lead's type, the team and a role; a data folder; the team's account link.
+    # Access: grants to a person, the lead's type, the team and a role; a data folder; the team's account link
+    # and its choice for model keys.
     owner = SubjectRefV1(kind=SubjectKind.USER, id="usr_ana")
     access = AccessRepository(config.manager_storage_settings)
     datasets = tmp_path / "datasets"
@@ -239,6 +250,7 @@ def _old_team(tmp_path: Path, registry: Any, monkeypatch: pytest.MonkeyPatch) ->
     access.create_link(AccountLinkV1(
         link_id="link_x_team", team_id=OLD, tool_id="cli:x", owner_kind=LinkOwnerKind.TEAM, owner_id=OLD,
         credential_key="x_team", created_by=owner, created_at_utc=NOW))
+    TeamAccountSharing(access, OLD, now=lambda: NOW).choose_model_keys(AccountSharing.PRIVATE, by="usr_ana")
 
     # An objective of the team lead, team memory (two facts) and knowledge with a merged page.
     create_objective_repository(config.manager_storage_settings).insert_objective(
@@ -304,7 +316,8 @@ def _files_naming(root: Path, needles: tuple[str, ...]) -> list[str]:
 
 
 def test_a_long_team_id_moves_through_the_command_line_under_a_new_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], every_section: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture, every_section: Any
 ) -> None:
     import team_transfer.review_web as review_web
     from assistant_gateway.config import GatewayInstanceConfig
@@ -312,6 +325,7 @@ def test_a_long_team_id_moves_through_the_command_line_under_a_new_id(
     from custom_agents.installed_permissions import InstalledPermissionService, resolve_installed_permission_paths
     from custom_agents.internal_improvement_runtime import internal_improvement_schedule_id
     from custom_agents.schedule_store import ScheduleStore
+    from custom_messages.contracts.access_v2 import AccountSharing
     from instance_upgrades.protocol1_ids import check_ids_before_upgrade, load_saved_for_check
     from mcp_control.registry import MCPConnectionStore, reconcile_instance_mcp_connections, resolve_mcp_connection_paths
     from runtime_settings.instance_layout import InstanceLayout
@@ -368,6 +382,8 @@ def test_a_long_team_id_moves_through_the_command_line_under_a_new_id(
     _run_cli("import", *common, "--review", str(review))
     printed = capsys.readouterr().out
     assert f"Team {OLD} was imported as {NEW}.\n" in printed
+    # The team lead's objectives were renamed into its new scope as they were read, not moved there afterwards.
+    assert "event=team_transfer_objective_scope_changed" not in caplog.text
 
     # Nothing in the new instance names the old id or an id the old instance derived from it; only the
     # import report, the history of where the team came from, does. The same search finds each of them in
@@ -392,6 +408,8 @@ def test_a_long_team_id_moves_through_the_command_line_under_a_new_id(
     access = AccessRepository(config.manager_storage_settings)
     assert {grant.grant_id for grant in access.list_team(NEW)} == {"g_person", "g_lead", "g_team", "g_role"}
     assert [link.owner_id for link in access.list_links(NEW)] == [NEW]
+    assert [(sharing.team_id, sharing.sharing) for sharing in access.team_account_sharing(NEW)] == [
+        (NEW, AccountSharing.PRIVATE)]
     assert [folder.name for folder in access.data_folders(NEW)] == ["datasets"]
     specialist = layout.control_dir / "agent_bundles" / "team_lead_generated" / "Approved" / "provisioning.json"
     assert GeneratedAgentProvisioningRecordV1.model_validate_json(specialist.read_text()).team_id == NEW
@@ -400,6 +418,9 @@ def test_a_long_team_id_moves_through_the_command_line_under_a_new_id(
     store = ScheduleStore(storage_settings=config.manager_storage_settings, default_cron_timezone="UTC")
     maintenance_id = internal_improvement_schedule_id(NEW)
     assert store.get_scheduled_message("sched_daily").claim_team_id == NEW
+    header = store.get_scheduled_message("sched_reply").payload_header
+    assert (header.from_agent_id, header.to_routing_path, header.response_routing_key) == (
+        f"{NEW}_alpha_user_gateway", f"{NEW}_TeamArchitect", f"{NEW}_alpha_user_gateway")
     assert store.get_scheduled_message(maintenance_id).interval_ms == 7 * 3600 * 1000
     assert store.worker_records.get_binding("sched_worker", team_id=NEW) is not None
     assert WorkerPoolRepository(config.manager_storage_settings).list_limits(NEW)

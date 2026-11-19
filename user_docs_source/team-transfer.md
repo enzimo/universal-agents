@@ -136,7 +136,9 @@ still finish, so check `exports/`.
    refuses is shown under the field with the reason. To choose another id
    later, open the export again: the field then starts with the id you chose,
    keeping it keeps your selections and edits, and another id starts the
-   review again with everything selected.
+   review again with everything selected. A page you opened the export on
+   before then saves nothing more: it says the review was closed, so continue
+   on the newest page.
 6. **Choose what to import.** Records are grouped by kind and shown by name:
    people, schedules, memories, knowledge pages and so on. Everything starts
    selected; unselect what you don't want. Settings, memories and schedules can
@@ -319,9 +321,11 @@ kept as they were:
   listed for you to check.
 - Schedules' signed contexts name the old id, so they are not carried; the
   import and the new instance's first start sign them again.
-- Agent types, agent ids, person ids, schedule ids and grant ids keep theirs.
-  An agent type over 24 characters is still refused; rename it on the old
-  instance and export again.
+- Agent types, agent ids, person ids, grant ids and your schedules' ids keep
+  theirs. Ids the team builds from its own id follow the new one: the
+  built-in maintenance schedule's id and name, and a hosted MCP server's id
+  and address. An agent type over 24 characters is still refused; rename it
+  on the old instance and export again.
 - An external NATS server whose permissions name the old team id must be
   updated for the new one ([An external NATS server](#an-external-nats-server)).
 

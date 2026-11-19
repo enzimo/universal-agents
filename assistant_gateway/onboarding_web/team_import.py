@@ -39,13 +39,15 @@ Why these choices:
   fit are still refused when the export is opened. Each opening chooses the id
   once: preparing the review under another id replaces the review folder, so
   it happens only before this opening has a review, while no review route of
-  this opening can use the folder. One exception remains: a review write
-  accepted on an earlier opening of the same export (its body still arriving,
-  or waiting behind that session's validation) can still change an edited text
-  or the saved review in the folder afterwards. It cannot import anything
-  unconfirmed or unvalidated: a schedule's text must equal the text that was
-  confirmed, and the import refuses a review whose texts changed after
-  validation (the validated digest). The review folder is fixed per export,
+  this opening can use the folder. An earlier opening of the same export
+  cannot use it either: opening the export again closes the earlier opening's
+  review session (``ReviewSession.close``) before the newer opening gets its
+  token, and a review write of that session accepted before then (its body
+  still arriving, or waiting behind its validation) is refused, or finishes
+  first in the folder the newer opening then keeps or prepares again. Without
+  this, a late settings save would put a value built from the earlier id,
+  such as ``gateway.response_queue_name``, into the newer review, and the
+  import would carry it with no note. The review folder is fixed per export,
   so opening the export again offers the id chosen before; another id
   prepares the review again
   (``prepare_review(restart_for_another_id=True)``), because a team id cannot
@@ -98,6 +100,11 @@ _TEAM_ID_CHOSEN = (
     "onboarding's Let's Begin step."
 )
 _IMPORT_RUNNING = "An import is running. Wait for it to finish."
+# Why an opening's review session was closed (``TeamImport._close_open``), answered to a request
+# of that opening that was accepted before.
+_REVIEW_REPLACED = "This review was closed because the export was opened again. Continue on the newest page."
+_REVIEW_IMPORTED = "This review was closed because its team was imported."
+_SERVICE_STOPPING = "This review was closed because onboarding is stopping."
 _TYPE_TEAM_ID = f"Type the new team id: at most {TEAM_ID.cap} letters, digits, '-' and '_'."
 
 
@@ -174,9 +181,23 @@ class TeamImport:
         app.router.add_post(f"{API_PREFIX}/import", self._guarded(self._import))
 
     async def close(self, _app: web.Application | None = None) -> None:
-        if self._open is not None:
-            self._open.reader.close()
-            self._open = None
+        await self._close_open(_SERVICE_STOPPING)
+
+    async def _close_open(self, reason: str) -> None:
+        """Close the open export: detach it, close its review session, then its reader.
+
+        Detached first, so a request of this opening that arrives meanwhile gets the 403 the
+        token check gives. The session is closed under its gate, so a step of it already
+        running (a validation reading the export, a save) finishes first and every later one
+        is refused with ``reason``; only then is the reader closed, never under a validation.
+        """
+
+        opened, self._open = self._open, None
+        if opened is None:
+            return
+        if opened.session is not None:
+            await opened.session.close(reason)
+        opened.reader.close()
 
     # -- before opening ----------------------------------------------------------------
 
@@ -223,7 +244,9 @@ class TeamImport:
                 # An import started in another tab while this one was opening.
                 opened.reader.close()
                 return _error(_IMPORT_RUNNING, status=409)
-            await self.close()
+            # Before this opening gets its token, so the earlier opening's review steps accepted
+            # before now finish first or are refused, never after this opening chose its id.
+            await self._close_open(_REVIEW_REPLACED)
             self._open = opened
         manifest = opened.reader.manifest
         self._logger.info(
@@ -261,13 +284,13 @@ class TeamImport:
         """The new team id for an export whose id does not fit; the review is prepared under it.
 
         Once per opening. The review routes refuse until the review exists, and this step
-        refuses once it does (another id needs the export opened again), so nothing else on
-        this opening uses the review folder while it is prepared here. A review write accepted
-        on an earlier opening of this export can still land in the folder later; the confirmed
-        schedule texts and the validated digest keep it from importing anything nobody
-        confirmed or validated (module docstring). No import runs meanwhile either: an import
-        needs a review, opening this export was refused while one ran, and an import on an
-        export opened before this one is refused (``_import``).
+        refuses another id once it does (another id needs the export opened again), so nothing
+        else on this opening uses the review folder while it is prepared here. The same id
+        again, such as Continue pressed again after a lost reply, gets the same answer. An
+        earlier opening of this export cannot write into the folder either: its review
+        session was closed before this opening got its token (``_close_open``). No import
+        runs meanwhile: an import needs a review, opening this export was refused while one
+        ran, and an import on an export opened before this one is refused (``_import``).
         """
 
         team_id = await _typed_team_id(request)
@@ -283,6 +306,9 @@ class TeamImport:
             if self._open is not opened:
                 return _error(_OPEN_AGAIN, status=403)
             if opened.session is not None:
+                chosen = opened.session.files.reader.team_ids.imported
+                if _typed_the_same(opened, team_id, chosen):
+                    return _json({"page": PAGE_PATH, "team_id": chosen, "restarted_review": False})
                 return _error(_TEAM_ID_CHOSEN, status=409)
             try:
                 files, previous = await asyncio.to_thread(_review_under_new_id, layout, opened, team_id)
@@ -374,7 +400,7 @@ class TeamImport:
             completion = await asyncio.to_thread(_completion, layout, opened)
         finally:
             self._importing = False
-        await self.close()
+        await self._close_open(_REVIEW_IMPORTED)
         _remove_import_files(opened, self._logger)
         restarting = self._on_imported(completion)
         ids = session.files.reader.team_ids
@@ -431,6 +457,15 @@ def _team_id_question(reader: TransferReader, review_dir: Path) -> dict[str, Any
         "suggestion": chosen_before or suggested_team_id(exported),
         "chosen_before": chosen_before,
     }
+
+
+def _typed_the_same(opened: _OpenImport, typed: str, chosen: str) -> bool:
+    """Whether ``typed`` is the id this opening's review was prepared under, read as the id step reads it."""
+
+    try:
+        return new_team_ids(opened.reader.manifest.team_id, typed).imported == chosen
+    except TransferError:
+        return False
 
 
 async def _typed_team_id(request: web.Request) -> str | None:
