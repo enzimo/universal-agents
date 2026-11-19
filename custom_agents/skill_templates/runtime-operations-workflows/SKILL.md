@@ -362,8 +362,10 @@ original install command with all its options plus `--replace`), after reading
 the skipped releases' Breaking Changes and the page's limits (from 0.9.3 or
 earlier the team transfer is the way; from 0.9.6 or earlier, schedule changes
 waiting in the Inbox are decided first; from 0.9 to 0.10, the team id and agent
-types must fit 24 characters and waiting agent ids 32 (a team transfer keeps
-them, so its import refuses such an export too), each team needs about 3 GiB
+types must fit 24 characters and waiting agent ids 32 (an instance keeps its
+team id, so a team whose id does not fit moves through the team transfer under
+a new team id the owner chooses at import; a team transfer keeps agent types,
+so rename a long one on 0.9 before exporting), each team needs about 3 GiB
 free on the disk for its message streams, an external NATS server gets its
 partition mappings, room and an account consumer limit of 4,096 or none first,
 and the first start goes through the launcher, not `migrate-config`, so the id
@@ -383,7 +385,9 @@ can be read by anyone who has the file, so it must stay private.
 A team not started by the launcher uses `assistant_cli team export` on the host
 instead. Then stop the old instance, start the new release on an empty data
 folder, copy the export into its `import/` folder and choose **Import a team
-export** on onboarding's Let's Begin step; stored sign-ins and keys move at the first start,
+export** on onboarding's Let's Begin step (when the export's team id does not
+fit this version, the page asks for a new team id; the host-command path takes
+`--new-team-id` on `team review`); stored sign-ins and keys move at the first start,
 before agents or Web Chat initialize. A temporary broker or credential-store
 failure stops startup and keeps the encrypted handover for the next start;
 `team finish-import --config <instance_config.yaml>` retries it by hand. A failed

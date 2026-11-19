@@ -17,7 +17,13 @@ from typing import Any
 from aiohttp import web
 from pydantic import BaseModel, ConfigDict, Field
 
-from secure_tool_broker.credential_transfer import CredentialOutcomeV1, credential_index, export_credentials, import_credentials
+from secure_tool_broker.credential_transfer import (
+    CredentialOutcomeV1,
+    credential_index,
+    export_credentials,
+    import_credentials,
+    renamed_credential_owners,
+)
 from secure_tool_broker.defaults import CREDENTIAL_TRANSFER_EXPORT_ROUTE, CREDENTIAL_TRANSFER_IMPORT_ROUTE
 
 BROKER_CREDENTIALS_SECTION = "broker_credentials"
@@ -47,6 +53,9 @@ class CredentialExportResultV1(_Model):
 
 class CredentialImportRequestV1(_Model):
     team_id: str = Field(min_length=1, max_length=120)
+    # The export's team id when the import gave the team a new one (``team_transfer.team_ids``):
+    # the export's team-owned records are then stored under ``team_id``. None: the export's is ``team_id``.
+    source_team_id: str | None = Field(default=None, min_length=1, max_length=240)
     encryption_key_b64: str = Field(min_length=1, max_length=200, repr=False)
     ciphertext_b64: str = Field(repr=False)
     selected_keys: tuple[str, ...] | None = None
@@ -79,9 +88,16 @@ def encrypt_records(request: CredentialExportRequestV1, records: list[dict[str, 
 
 
 def decrypt_records(request: CredentialImportRequestV1) -> list[dict[str, Any]]:
+    """The request's records at this version, the export's team owner filed under ``request.team_id``.
+
+    The same two steps as ``team_transfer.sections.read_section_records``: the version step, then
+    the team id the import gave the team (``renamed_credential_owners``).
+    """
+
     from team_transfer.crypto import decrypt_with_key
     from team_transfer.format import SectionDocumentV1
     from team_transfer.sections import upgrade_records
+    from team_transfer.team_ids import TeamIds
 
     plaintext = decrypt_with_key(base64.b64decode(request.ciphertext_b64, validate=True), _key(request.encryption_key_b64))
     document = SectionDocumentV1.model_validate_json(plaintext)
@@ -90,7 +106,8 @@ def decrypt_records(request: CredentialImportRequestV1) -> list[dict[str, Any]]:
             f"This broker reads {BROKER_CREDENTIALS_SECTION} version {BROKER_CREDENTIALS_SCHEMA_VERSION}, "
             f"not {document.section} version {document.schema_version}."
         )
-    return upgrade_records(document, BROKER_CREDENTIALS_SCHEMA_VERSION)
+    team_ids = TeamIds(request.source_team_id or request.team_id, request.team_id)
+    return renamed_credential_owners(upgrade_records(document, BROKER_CREDENTIALS_SCHEMA_VERSION), team_ids)
 
 
 async def _payload(request: web.Request) -> Any:
@@ -142,7 +159,9 @@ def add_transfer_routes(app: web.Application, *, team_id: str) -> None:
                                            reason="review only; nothing stored")
                         for entry in credential_index(records)]
         else:
-            outcomes = await asyncio.to_thread(import_credentials, records, team_id=payload.team_id)
+            outcomes = await asyncio.to_thread(
+                import_credentials, records, team_id=payload.team_id, source_team_id=payload.source_team_id
+            )
         return web.json_response(CredentialImportResultV1(outcomes=tuple(outcomes)).model_dump(mode="json"))
 
     app.router.add_post(CREDENTIAL_TRANSFER_EXPORT_ROUTE, export_handler)

@@ -15,6 +15,7 @@ import pytest
 
 from access_control.identity import ISSUER_GATEWAY, ContextSigner, generate_signing_key, public_entry, verify_keys_value
 from custom_agents.heartbeat_store import HeartbeatStore
+from custom_agents.local_schedule_policy import local_schedule_service_id
 from custom_agents.schedule_execution_identity import execution_digest
 from custom_agents.schedule_management import (
     ScheduleMutationAuthorityMode,
@@ -151,7 +152,7 @@ def _binding(store: ScheduleStore, schedule_id: str, **fields: Any) -> None:
     binding = ScheduleWorkerBindingV1(
         schedule_id=schedule_id, team_id=TEAM, owner_canonical_user_id="usr_ana", target_agent_type=WORKER,
         definition_digest="d" * 64, execution_digest=execution_digest(stored, "d" * 64), revision=1,
-        policy=ScheduleWorkerPolicySpecV1(), actor_principal_id="lead", authority_mode="agreement", **fields,
+        policy=ScheduleWorkerPolicySpecV1(), **{"actor_principal_id": "lead", "authority_mode": "agreement", **fields},
     )
     permit = build_schedule_mutation_permit(
         schedule=stored, operation="update", authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
@@ -164,7 +165,11 @@ def _binding(store: ScheduleStore, schedule_id: str, **fields: Any) -> None:
 
 
 def _workers_and_pools(config: Any, store: ScheduleStore) -> None:
-    _binding(store, "sched_worker", blocked_reason="agent_definition_changed")
+    # Set up by the runtime itself, as install_schedule_default does for a person's schedule nobody set up.
+    _binding(
+        store, "sched_worker", blocked_reason="agent_definition_changed",
+        actor_principal_id=local_schedule_service_id(TEAM), authority_mode="runtime_default",
+    )
     _binding(store, "sched_sys_worker")
     pools = WorkerPoolRepository(config.manager_storage_settings)
     later = datetime.now(timezone.utc) + timedelta(days=2)

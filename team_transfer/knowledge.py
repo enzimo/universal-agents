@@ -24,6 +24,13 @@ Why these choices:
 - Each row is checked with this version's own column list and record
   converters, so a value this version would refuse (an unknown space or
   status) is listed, not written.
+- When the import gives the team a new team id (owner's decision 103,
+  ``team_transfer.team_ids``), a row whose ``team_id`` is the export's id gets
+  the new one as it is read, so record keys (a redirect's includes the team id)
+  are the new ones everywhere. The export reads every row of each table, so a
+  store two teams shared holds rows of another team: they keep their id. If
+  such a row already names the new id, the import refuses that id before
+  anything is written, because the two teams' pages would become one team's.
 - A later batch keeps what the destination already has: a page whose name is
   already taken there is refused and listed. Selected links must still appear
   in the retained page's current text, so later batches cannot restore links
@@ -40,8 +47,10 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field, JsonValue
 
+from team_transfer.errors import NewTeamIdRefused
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -50,6 +59,7 @@ from team_transfer.sections import (
     SectionFiles,
     SectionRecords,
 )
+from team_transfer.team_ids import TeamIds
 
 logger = logging.getLogger(__name__)
 
@@ -275,5 +285,27 @@ class KnowledgeSection:
         )
 
 
+
+def _renamed_knowledge(records: SectionRecords, team_ids: TeamIds) -> SectionRecords:
+    """The rows under a new team id: the export's team's rows get it; another team's rows keep theirs.
+
+    Refuses the new id when a row of another team already has it (module docstring).
+    """
+
+    renamed = []
+    for raw in records:
+        row = raw.get("row")
+        if isinstance(row, dict):
+            if team_ids.renamed and row.get("team_id") == team_ids.imported:
+                raise NewTeamIdRefused(
+                    f"This export's knowledge holds pages of another team whose id is {team_ids.imported!r}, the new "
+                    "team id asked for, so the two teams' pages would become one team's. Choose another new team id."
+                )
+            raw = {**raw, "row": team_ids.renamed_fields(row, ("team_id",))}
+        renamed.append(raw)
+    return renamed
+
+
+TEAM_ID_RENAMES[KnowledgeSection.name] = _renamed_knowledge
 
 __all__ = ["KnowledgeSection", "KnowledgeTable", "KnowledgeTransferRecordV1", "record_key"]

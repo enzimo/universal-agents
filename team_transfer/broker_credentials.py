@@ -17,6 +17,16 @@ After the import, each person whose sign-ins or keys moved gets an Inbox notice
 naming the owner who exported the team (owner's decision 2026-10-05). The
 notice id is derived from the export, so running the import again does not
 repeat it.
+
+Under a new team id (owner's decision 103, ``team_transfer.team_ids``): the
+credentials are stored after the first import, so their team id is the one
+that import recorded in its receipt, whichever way the file is opened. The
+broker, which alone decrypts the records, files the export's team-owned
+records under its own team (``CredentialImportRequestV1.source_team_id``,
+``secure_tool_broker.credential_transfer.renamed_credential_owners``, also
+this section's registered rename, which the review applies to the unencrypted
+index). The notices belong to the new team; their ids stay derived from the
+export.
 """
 
 from __future__ import annotations
@@ -32,8 +42,10 @@ from typing import Any, ClassVar, Mapping
 
 from pydantic import BaseModel
 
+from secure_tool_broker.credential_transfer import renamed_credential_owners
 from team_transfer.errors import TransferError
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -42,6 +54,8 @@ from team_transfer.sections import (
     SectionRecords,
     encrypted_member,
 )
+from team_transfer.team_id_choice import recorded_team_ids
+from team_transfer.team_ids import TeamIds
 
 logger = logging.getLogger(__name__)
 
@@ -274,14 +288,17 @@ def import_credential_bundle(
 
     manifest = bundle.manifest
     config = GatewayInstanceConfig.load_for_process(config_path)
-    if config.gateway.team_id != manifest.team_id:
+    # The id the first import recorded, however the file was opened (team import-credentials, the
+    # review, onboarding's hand-over), so it is never asked for again (module docstring).
+    team_ids = recorded_team_ids(config.layout, manifest)
+    if config.gateway.team_id != team_ids.imported:
         raise TransferError(
-            f"This instance is team {config.gateway.team_id}; the file is team {manifest.team_id}."
+            f"This instance is team {config.gateway.team_id}; the file is {team_ids.describe()}."
         )
     from team_transfer.settings import _require_storage_connection, storage_environment
 
     # previous_records reads only the manifest, which the bundle carries.
-    context = ImportContext(bundle, config.layout.root, config.layout, {})
+    context = ImportContext(bundle, config.layout.root, config.layout, {}, team_ids=team_ids)
     context.scratch["settings.postgres_dsn"] = _require_storage_connection(
         config, config.layout
     )
@@ -291,7 +308,7 @@ def import_credential_bundle(
 
             with read_only_repositories():
                 return _import_with_config(
-                    bundle, config, selected_keys=selected_keys, dry_run=True
+                    bundle, config, team_ids, selected_keys=selected_keys, dry_run=True
                 )
         from team_transfer.batches import import_lock, previous_records
         from team_transfer.private_files import write_private_json
@@ -306,7 +323,7 @@ def import_credential_bundle(
             if not pending:
                 return CredentialImportReport(outcomes=[], notified=[])
             report = _import_with_config(
-                bundle, config, selected_keys=pending, dry_run=False
+                bundle, config, team_ids, selected_keys=pending, dry_run=False
             )
             value = json.loads(
                 config.layout.team_import_receipt_path.read_text(encoding="utf-8")
@@ -319,7 +336,9 @@ def import_credential_bundle(
             return report
 
 
-def _import_with_config(bundle, config, *, selected_keys, dry_run):
+def _import_with_config(
+    bundle: CredentialBundle, config: Any, team_ids: TeamIds, *, selected_keys: list[str] | None, dry_run: bool
+) -> CredentialImportReport:
     from secure_tool_broker.defaults import CREDENTIAL_TRANSFER_IMPORT_ROUTE
 
     manifest = bundle.manifest
@@ -327,7 +346,8 @@ def _import_with_config(bundle, config, *, selected_keys, dry_run):
         broker_endpoint(config, config.layout),
         CREDENTIAL_TRANSFER_IMPORT_ROUTE,
         {
-            "team_id": manifest.team_id,
+            "team_id": team_ids.imported,
+            "source_team_id": team_ids.exported,
             "encryption_key_b64": base64.b64encode(bundle.encryption_key).decode(
                 "ascii"
             ),
@@ -380,7 +400,8 @@ def _notify(config: Any, manifest: Any, person_id: str) -> bool:
     ).hexdigest()[:24]
     notice = AccessNoticeV1(
         notice_id=f"notice_credentials_imported_{digest}",
-        team_id=manifest.team_id,
+        # This instance's team (the id the import gave it); the notice id stays derived from the export.
+        team_id=config.gateway.team_id,
         kind=AccessNoticeKind.CREDENTIALS_IMPORTED,
         recipient_person_id=person_id,
         title="Your sign-ins and keys moved to this instance",
@@ -396,6 +417,11 @@ def _notify(config: Any, manifest: Any, person_id: str) -> bool:
             notice
         )
     )
+
+
+# The broker renames the decrypted records (``credential_transfer_api.decrypt_records``); the
+# review renames the unencrypted index with the same function through this registry.
+TEAM_ID_RENAMES[SECTION_NAME] = renamed_credential_owners
 
 
 __all__ = [

@@ -96,8 +96,11 @@ def write_credential_handover(reader: Any, layout: Any, selected_keys: Sequence[
     )
     path: Path = layout.team_import_credentials_path
     write_private_json(path, handover.model_dump(mode="json"))
+    # team_id is the team the instance will be (the id the import wrote); exported_team_id is the export's.
     logger.info(
-        "Credentials left for the first start. event=team_import_credentials_handed_over team_id=%s count=%s",
+        "Credentials left for the first start. event=team_import_credentials_handed_over team_id=%s "
+        "exported_team_id=%r count=%s",
+        reader.team_ids.imported,
         bundle.manifest.team_id,
         len(keys),
     )
@@ -171,7 +174,9 @@ def import_handed_over_credentials(
     refused = [outcome for outcome in report.outcomes if not outcome.get("imported")]
     path.unlink()
     logger.info(
-        "Handed-over credentials imported. event=team_import_credentials_imported team_id=%s stored=%s refused=%s",
+        "Handed-over credentials imported. event=team_import_credentials_imported team_id=%s exported_team_id=%r "
+        "stored=%s refused=%s",
+        config.gateway.team_id,
         bundle.manifest.team_id,
         len(report.outcomes) - len(refused),
         len(refused),
@@ -181,11 +186,12 @@ def import_handed_over_credentials(
 
 def _record_outcomes(config: Any, bundle: CredentialBundle, report: CredentialImportReport) -> None:
     refused = [outcome for outcome in report.outcomes if not outcome.get("imported")]
-    _write_report(config.layout, bundle, report)
+    _write_report(config, bundle, report)
     if refused:
         logger.warning(
             "Some handed-over credentials were not stored. event=team_import_credentials_refused "
-            "team_id=%s refused=%s",
+            "team_id=%s exported_team_id=%r refused=%s",
+            config.gateway.team_id,
             bundle.manifest.team_id,
             ",".join(str(outcome.get("key")) for outcome in refused),
         )
@@ -236,12 +242,15 @@ def _with_retries(
     )
 
 
-def _write_report(layout: Any, bundle: CredentialBundle, report: CredentialImportReport) -> None:
+def _write_report(config: Any, bundle: CredentialBundle, report: CredentialImportReport) -> None:
     manifest = bundle.manifest
     write_private_json(
-        layout.team_import_dir
+        config.layout.team_import_dir
         / f"credentials-{datetime.now(timezone.utc):%Y%m%dT%H%M%S.%fZ}.json",
         {
+            # The team the credentials were stored for (the id the import gave it, checked by
+            # import_credential_bundle); ``source.team_id`` is the export's, where they came from.
+            "team_id": config.gateway.team_id,
             "source": {
                 "team_id": manifest.team_id,
                 "exported_at_utc": manifest.exported_at_utc,
@@ -280,7 +289,8 @@ def _tell_exporter(config: Any, bundle: CredentialBundle, refused: list[dict[str
         AccessRepository(config.manager_storage_settings).create_notice_if_absent(
             AccessNoticeV1(
                 notice_id=f"notice_credentials_refused_{digest}",
-                team_id=manifest.team_id,
+                # This instance's team (the id the import gave it); the notice id stays derived from the export.
+                team_id=config.gateway.team_id,
                 kind=AccessNoticeKind.CREDENTIALS_IMPORTED,
                 recipient_person_id=owner,
                 title="Some sign-ins and keys did not move",

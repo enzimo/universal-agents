@@ -6,24 +6,50 @@ import json
 import os
 import fcntl
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from team_transfer.errors import TransferError
+from team_transfer.format import TransferManifestV1
 from team_transfer.sections import ExportSource, ImportContext
 from team_transfer.selection import keyed_records
+from team_transfer.team_ids import RECEIPT_TEAM_ID
+
+if TYPE_CHECKING:
+    from runtime_settings.instance_layout import InstanceLayout
+
+
+def import_receipt(layout: "InstanceLayout", manifest: TransferManifestV1) -> dict[str, Any]:
+    """The receipt of the first import into ``layout``, refused unless it came from this backup.
+
+    The one place that reads where an instance's import came from, so later batches
+    (``previous_records``), the credentials and the team id they read under
+    (``team_id_choice.target_team_ids``) agree on what the folder holds. The caller checks the
+    import finished (``runtime_guard.require_finished_import``) where that matters: the
+    receipt is written while the unfinished-import marker still exists.
+    """
+
+    path = layout.team_import_receipt_path
+    if not path.is_file():
+        raise TransferError(
+            f"{layout.root} holds an instance that no import from this backup created: it has no import receipt. "
+            "Later batches go only into the instance a first import from this same backup created. A first "
+            "import, which is also where a team is given a new team id, goes into a fresh instance root."
+        )
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise TransferError(f"The import receipt {path} cannot be read: {exc}") from exc
+    if not isinstance(saved, dict) or saved.get("source_mac") != manifest.mac:
+        raise TransferError(
+            "This instance's earlier import used a different backup. Use that same transfer file for later "
+            "batches. A first import, which is also where a team is given a new team id, goes into a fresh "
+            "instance root."
+        )
+    return saved
 
 
 def previous_records(context: ImportContext) -> dict[str, set[str]]:
-    path = context.layout.team_import_receipt_path
-    if not path.is_file():
-        raise TransferError(
-            "Later batches require a completed team import from this backup."
-        )
-    receipt = json.loads(path.read_text(encoding="utf-8"))
-    if receipt.get("source_mac") != context.reader.manifest.mac:
-        raise TransferError(
-            "This instance's earlier import used a different backup. Use that same transfer file."
-        )
+    receipt = import_receipt(context.layout, context.reader.manifest)
     return {section: set(keys) for section, keys in receipt["records"].items()}
 
 
@@ -121,7 +147,7 @@ def receipt(context: ImportContext, imported: dict[str, list[str]]) -> dict[str,
         source = ExportSource(
             config,
             context.layout,
-            context.reader.manifest.team_id,
+            context.team_id,
             context.reader.manifest.instance_name,
         )
         records = (
@@ -132,6 +158,9 @@ def receipt(context: ImportContext, imported: dict[str, list[str]]) -> dict[str,
         initial_control = keyed_records("control", records)
     return {
         "source_mac": context.reader.manifest.mac,
+        # The id the team was imported under; later batches and the credentials keep it
+        # (team_transfer.team_id_choice.recorded_team_id).
+        RECEIPT_TEAM_ID: context.team_id,
         "initial_control": initial_control,
         "records": {
             section: sorted(

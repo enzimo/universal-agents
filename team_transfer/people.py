@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field, JsonValue
 
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -47,6 +48,7 @@ from team_transfer.sections import (
     SectionExport,
     SectionFiles,
     SectionRecords,
+    holds_no_team_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -229,7 +231,7 @@ class PeopleSection:
     ) -> None:
         outcomes = {record.key: record.outcome for record in plan}
         repository = _gateway_repository(_gateway_storage(context.layout))
-        team_id = context.reader.manifest.team_id
+        team_id = context.team_id
         for raw in records:
             person = PersonV1.model_validate(raw)
             outcome = outcomes.get(person.person_id)
@@ -375,6 +377,9 @@ def _appearance_problem(appearance: Optional[dict[str, Any]]) -> str:
         return f"their appearance is reset to the default; this version refuses it: {exc.errors()[0]['msg']}"
     return ""
 
+
+# People's records name no team; each membership is written with ``ImportContext.team_id``.
+TEAM_ID_RENAMES[PeopleSection.name] = holds_no_team_id
 
 __all__ = [
     "ChatAccountV1",

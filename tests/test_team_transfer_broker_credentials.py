@@ -64,7 +64,8 @@ def _use_sealbox(fake: _FakeSealboxCli, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def _store_team_api_key(
-    credential_key: str = "search_api", value: str = STORED_API_KEY, *, item_id: str | None = None
+    credential_key: str = "search_api", value: str = STORED_API_KEY, *, item_id: str | None = None,
+    team_id: str = TEST_TEAM,
 ) -> None:
     """Save an API key the way the broker's form does: the value goes into Sealbox."""
 
@@ -79,7 +80,7 @@ def _store_team_api_key(
     }
     if item_id is not None:
         request["item_id"] = item_id
-    result = collect_credential(request, {"api_key": value}, scope=CredentialOwnerScope.team(TEST_TEAM))
+    result = collect_credential(request, {"api_key": value}, scope=CredentialOwnerScope.team(team_id))
     assert result.status == "success", result.error
 
 
@@ -273,6 +274,94 @@ async def test_large_credential_export_can_be_imported_with_individual_selection
     folder = _owner_folder(CredentialOwnerV1(kind="person", owner_id="usr_ana"))
     assert (folder / "bitwarden" / "large_cache").read_bytes() == b"x" * 700_000
     assert read_credential_state("github.token", owner_id="usr_ana") is None
+
+
+@pytest.mark.asyncio
+async def test_the_export_teams_records_are_stored_under_the_brokers_team_when_the_import_gave_it_a_new_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner's decision 103: a 0.9 team whose id does not fit is imported under a new one."""
+
+    from secure_tool_broker.credential_catalog import ResolvedCredentialField, resolve_secret_field
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.credential_state import credential_owner_context
+    from secure_tool_broker.credential_state_store import read_credential_state
+    from secure_tool_broker.credential_templates import resolve_template_overrides_path
+    from secure_tool_broker.credential_transfer import CredentialOwnerV1, _owner_folder, export_credentials
+    from secure_tool_broker.model_keys import TEAM_SCOPE, ModelKeyStore
+    from team_transfer.crypto import canonical_json, encrypt_with_key
+    from team_transfer.format import SectionDocumentV1
+
+    exported_team = "team_research_assistant_pro"
+    team = {"kind": "team", "owner_id": exported_team}
+
+    def team_folder(team_id: str) -> Path:
+        folder = _owner_folder(CredentialOwnerV1(kind="team", owner_id=team_id))
+        assert folder is not None
+        return folder
+
+    # The kinds the broker stores with the most steps, exported by a broker of the export's team: an API key
+    # kept in Sealbox (catalog entry, its secret under an item id derived from the owner), a file in the
+    # team's credentials folder (a folder named from the owner) and the template overrides.
+    monkeypatch.setenv("TEAM_INSTANCE_NAME", "transfer-test")
+    _use_store(tmp_path / "old", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    _store_team_api_key(team_id=exported_team)
+    (team_folder(exported_team) / "bitwarden").mkdir(parents=True)
+    (team_folder(exported_team) / "bitwarden" / "session").write_text(BW_SESSION)
+    resolve_template_overrides_path().write_text("schema_version: 1\ntemplates: {}\n")
+    stored_kinds = [r for r in export_credentials(exported_team, [])
+                    if r["kind"] in {"catalog_entry", "owner_file", "template_overrides"}]
+    assert sorted(r["kind"] for r in stored_kinds) == ["catalog_entry", "owner_file", "template_overrides"]
+    records = [
+        {"kind": "stored_value", "owner": team, "name": "x.team_app", "value": X_APP},
+        {"kind": "model_key", "owner": team, "entry": {
+            "address": "https://api.openai.com/v1", "kind": "openai", "key": MODEL_KEY,
+            "saved_at": "2026-09-01T00:00:00Z", "saved_by_person_id": "usr_ana"}},
+        *stored_kinds,
+        {"kind": "stored_value", "owner": {"kind": "team", "owner_id": "team_other"}, "name": "x.sign_in", "value": "other"},
+        {"kind": "stored_value", "owner": {"kind": "person", "owner_id": "usr_ana"}, "name": "github.sign_in",
+         "value": GITHUB_TOKEN},
+    ]
+    team_keys = ("team/stored_value/x.team_app", "team/model_key/https://api.openai.com/v1",
+                 "team/catalog_entry/search_api", "team/owner_file/bitwarden/session",
+                 "team/template_overrides/credential_template_overrides")
+    document = SectionDocumentV1(section="broker_credentials", schema_version=2, records=records)
+    ciphertext = base64.b64encode(encrypt_with_key(canonical_json(document.model_dump(mode="json")), KEY)).decode()
+    body = {"team_id": TEST_TEAM, "encryption_key_b64": KEY_B64, "ciphertext_b64": ciphertext}
+    operator = {"Authorization": f"Bearer {caller_token(CALLER_OPERATOR)}"}
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate())
+
+    async def imported(store: Path, **fields: str) -> dict[str, dict]:
+        _use_store(store, monkeypatch)
+        _use_sealbox(_FakeSealboxCli(), monkeypatch)
+        async with TestClient(TestServer(service.build_app())) as client:
+            response = await client.post(CREDENTIAL_TRANSFER_IMPORT_ROUTE, json={**body, **fields}, headers=operator)
+            assert response.status == 200, await response.text()
+            return {outcome["key"]: outcome for outcome in (await response.json())["outcomes"]}
+
+    # Without the export's id (an import that kept it), its team's records belong to another team, as before.
+    kept = await imported(tmp_path / "kept")
+    assert {kept[key]["reason"] for key in team_keys} == {"it belongs to another team"}
+    assert kept["person:usr_ana/stored_value/github.sign_in"]["imported"]
+
+    renamed = await imported(tmp_path / "renamed", source_team_id=exported_team)
+    for key in team_keys:
+        assert renamed[key]["imported"] and renamed[key]["owner"] == {"kind": "team", "owner_id": TEST_TEAM}, key
+    other = renamed["team/stored_value/x.sign_in"]
+    assert (other["imported"], other["reason"], other["owner"]["owner_id"]) == (
+        False, "it belongs to another team", "team_other"), "only the export's own team follows the new id"
+    assert renamed["person:usr_ana/stored_value/github.sign_in"]["imported"]
+    # Checked first: reading a team's model keys below creates its (empty) folder.
+    assert not team_folder(exported_team).exists(), "nothing is filed under the export's team"
+    assert (team_folder(TEST_TEAM) / "bitwarden" / "session").read_text() == BW_SESSION
+    with credential_owner_context(TEST_TEAM, scope_kind="team"):
+        assert read_credential_state("x.oauth_client_json") == X_APP
+    [entry] = ModelKeyStore(TEST_TEAM, scope=TEAM_SCOPE).entries()
+    assert entry.key == MODEL_KEY and not ModelKeyStore(exported_team, scope=TEAM_SCOPE).entries()
+    resolved = resolve_secret_field("search_api", "api_key", scope=CredentialOwnerScope.team(TEST_TEAM))
+    assert isinstance(resolved, ResolvedCredentialField) and resolved.value == STORED_API_KEY
+    assert resolve_template_overrides_path().read_text() == "schema_version: 1\ntemplates: {}\n"
 
 
 def test_previous_credential_schema_is_converted_inside_the_broker(monkeypatch):

@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field, JsonValue
 
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -40,6 +41,7 @@ from team_transfer.sections import (
     SectionExport,
     SectionFiles,
     SectionRecords,
+    holds_no_team_id,
 )
 
 if TYPE_CHECKING:
@@ -164,7 +166,7 @@ class PinnedMemorySection:
             create_pinned_memory_repository(config.manager_storage_settings),
             planned,
             memory_config=memory_config(config),
-            team_id=context.reader.manifest.team_id,
+            team_id=context.team_id,
         )
         no_room = [
             _fact_key(fact.fact)
@@ -201,6 +203,8 @@ def _document(
     return PinnedMemoryExportV1(
         exported_at_utc=manifest.exported_at_utc,
         source_instance=manifest.instance_name,
+        # Where the facts came from: the export's id. Nothing stores it; the planner and the
+        # writer use only the id the import writes (``context.team_id``).
         source_team_id=manifest.team_id,
         facts=[
             ExportedFactV1.model_validate(
@@ -231,12 +235,15 @@ def _plan(records: SectionRecords, context: ImportContext) -> list["PlannedFact"
     return plan_import(
         _document(records, context),
         existing_rows=existing_rows,
-        team_id=context.reader.manifest.team_id,
+        team_id=context.team_id,
         targets=PersonTargets(
             explicit={person: person for person in people}, known=None
         ),
         memory_config=memory_config(planned_config(context)),
     )
 
+
+# Facts name no team; the team's facts are written to ``ImportContext.team_id``.
+TEAM_ID_RENAMES[PinnedMemorySection.name] = holds_no_team_id
 
 __all__ = ["PinnedMemoryFactRecordV1", "PinnedMemorySection", "memory_config"]

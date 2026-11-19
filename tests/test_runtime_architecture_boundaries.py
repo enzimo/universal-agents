@@ -280,6 +280,10 @@ def _has_dependency_path(graph: dict[str, set[str]], source: str, target: str) -
         ("secure_tool_broker.xurl_executor", "secure_tool_broker.hub_cli_executor"),
         ("custom_agents.runtime_setting_registry", "custom_agents.runtime_settings_service"),
         ("assistant_gateway.adapter_host.service", "storage.adapter_host_repository"),
+        # Every transfer section imports the team id mapping, and the gateway's /upgrade command
+        # reaches the sections; choosing the id (onboarding's rule, the receipt) lives apart.
+        ("team_transfer.team_ids", "assistant_gateway.onboarding_engine"),
+        ("team_transfer.sections", "team_transfer.team_id_choice"),
     ),
 )
 def test_resolved_runtime_import_cycles_cannot_return(

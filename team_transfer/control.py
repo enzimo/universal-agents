@@ -12,7 +12,13 @@ runtime's own rule (``custom_agents.generated_agent_runtime``): the record is
 ready, belongs to this team and names this agent type, ``agent.yaml`` still
 has the SHA-256 that was approved, and its default tools are the approved
 ones. The approval reference inside the record is kept as it is; nothing at
-runtime looks it up in the Inbox.
+runtime looks it up in the Inbox. When the import gives the team a new team id
+(owner's decision 103, ``team_transfer.team_ids``), the record is the one
+control file that names the team: it is written naming the new id, the way the
+provisioning service writes it, and checked with the runtime's rule as
+rewritten. Its ``plan_digest`` stays: it is the digest of the plan people
+approved in the old instance, and nothing checks it again. The unit records
+themselves name only paths and the digests of the carried bytes.
 
 Files travel as units: one file, or a whole agent bundle folder (a bundle's
 prompt files belong with its definition). Each unit is checked with this
@@ -51,7 +57,9 @@ from runtime_settings.instance_layout import (
 )
 from team_transfer.container import TransferFileError, TransferReader, iter_files
 from team_transfer.format import TransferModel, section_files_prefix
+from team_transfer.team_ids import TeamIds
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -59,6 +67,7 @@ from team_transfer.sections import (
     SectionExport,
     SectionFiles,
     SectionRecords,
+    holds_no_team_id,
     read_section_records,
 )
 
@@ -186,10 +195,7 @@ class ControlSection:
             for unit in units:
                 for entry in unit.files:
                     _write(shadow, entry.path, self._data(context, entry))
-            planned = [
-                self._check(unit, shadow, context.reader.manifest.team_id)
-                for unit in units
-            ]
+            planned = [self._check(unit, shadow, context.team_id) for unit in units]
             accepted = {
                 record.key
                 for record in planned
@@ -210,12 +216,14 @@ class ControlSection:
             return planned
 
     def _data(self, context: ImportContext, entry: ControlFileV1) -> bytes:
+        """A carried file's bytes, checked against its record, as the import writes them (``_as_imported``)."""
+
         data = context.file(self.name, entry.path)
         if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.sha256:
             raise TransferFileError(
                 f"The control file {entry.path} does not match its record."
             )
-        return data
+        return _as_imported(entry.path, data, context.team_ids)
 
     def _check(self, unit: ControlUnitV1, shadow: Path, team_id: str) -> PlannedRecord:
         if unit.kind is ControlKind.OTHER:
@@ -288,7 +296,11 @@ def defined_agent_types(reader: TransferReader) -> list[tuple[str, str]]:
 
     from custom_agents.agent_catalog import load_agent_catalog
 
-    records = read_section_records(reader, ControlSection.name, ControlSection.schema_version)
+    # Agent types do not depend on the team id, so the export's own records are read.
+    records = read_section_records(
+        reader, ControlSection.name, ControlSection.schema_version,
+        team_ids=TeamIds.unchanged(reader.manifest.team_id),
+    )
     found: list[tuple[str, str]] = []
     with tempfile.TemporaryDirectory(prefix="ua-control-types-") as scratch:
         shadow = Path(scratch) / "control"
@@ -389,6 +401,37 @@ def _check_agent_definitions(path: Path, _shadow: Path) -> None:
     load_agent_catalog([path], include_configured=False)
 
 
+def _as_imported(path: str, data: bytes, team_ids: TeamIds) -> bytes:
+    """A carried control file as the import writes it under ``team_ids``.
+
+    Under a new team id a specialist's ``provisioning.json`` names the new team, which the
+    runtime checks against the instance's own (``generated_agent_runtime``); it is written as
+    the provisioning service writes it (``canonical_contract_json``). A record this version
+    cannot read, or one that names another team, is left as it is, and the plan refuses it with
+    the runtime's reason, as it does without a new id. Every other file is unchanged.
+    """
+
+    parts = PurePosixPath(path).parts
+    specialist_record = (
+        len(parts) == 4
+        and parts[:2] == (AGENT_BUNDLES_DIRNAME, GENERATED_AGENT_BUNDLES_DIRNAME)
+        and parts[3] == _SPECIALIST_RECORD
+    )
+    if not team_ids.renamed or not specialist_record:
+        return data
+    from custom_agents.generated_agent_runtime import GeneratedAgentProvisioningRecordV1
+    from custom_messages.contracts.common_v1 import canonical_contract_json
+
+    try:
+        record = GeneratedAgentProvisioningRecordV1.model_validate_json(data)
+    except ValueError:
+        return data
+    team_id = team_ids.rename(record.team_id)
+    if team_id == record.team_id:
+        return data
+    return (canonical_contract_json(record.model_copy(update={"team_id": team_id})) + "\n").encode("utf-8")
+
+
 def _check_specialist(bundle: Path, team_id: str) -> None:
     """The runtime's rule for a generated specialist (``generated_agent_runtime``), applied before import."""
 
@@ -428,5 +471,10 @@ _CHECKS: dict[ControlKind, Callable[[Path, Path], Any]] = {
     ControlKind.AGENT_BUNDLE: _check_agent_definitions,
     ControlKind.OBJECTIVE_PROFILE: _check_objective_profile,
 }
+
+# The unit records name only paths and the digests of the carried bytes; the one file naming
+# the team, a specialist's provisioning record, follows a new team id as it is read
+# (``ControlSection._data``).
+TEAM_ID_RENAMES[ControlSection.name] = holds_no_team_id
 
 __all__ = ["ControlFileV1", "ControlKind", "ControlSection", "ControlUnitV1"]

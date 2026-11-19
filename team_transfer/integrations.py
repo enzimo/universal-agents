@@ -23,6 +23,19 @@ Procedures: installed definitions travel. Each is usable only while its
 handler's descriptor and input-schema digests match this build (the same rule
 ``InstalledPermissionService.invoke`` applies), so a definition whose handler
 changed is refused and listed rather than carried as dead weight.
+
+Under a new team id (owner's decision 103, ``team_transfer.team_ids``): a
+connection's ``descriptor.team_id``, a hosted server definition's ``team_id``
+and a procedure definition's ``team_id`` name the team. Each document's digest
+covers that field, so it is computed again with the owning model's own
+``build``; a hosted server's id is built from its digest, so it changes too,
+and so does the ``source_locator`` of the connection that serves it (the
+hosting service and the broker find one from the other by that text). A
+connection id stays: the registry never derives it again for an existing
+record, operation levels and the static baseline name it, and nothing at run
+time compares it with the team. Approvals stay as they were given. A document
+this version's model refuses is left as exported (the planner refuses it with
+the model's reason, as today), and another team's document keeps its values.
 """
 
 from __future__ import annotations
@@ -37,6 +50,7 @@ from pydantic import BaseModel, Field, JsonValue
 
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -45,6 +59,7 @@ from team_transfer.sections import (
     SectionFiles,
     SectionRecords,
 )
+from team_transfer.team_ids import TeamIds
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +305,95 @@ class ProceduresSection:
             len(accepted),
             len(plan) - len(accepted),
         )
+
+
+# -- under a new team id (module docstring) -------------------------------------------------
+
+
+def _readable(raw: dict[str, Any], model: type[BaseModel], section: str) -> Any:
+    """``raw``'s document as this version's ``model``; None, logged, when the model refuses it."""
+
+    try:
+        return model.model_validate(raw.get("document"))
+    except ValueError as exc:
+        logger.warning(
+            "A record the import cannot read keeps its exported team id. "
+            "event=team_transfer_integration_rename_skipped section=%s record_id=%s error=%s",
+            section,
+            raw.get("record_id", raw.get("definition_id")),
+            exc,
+        )
+        return None
+
+
+def _renamed_hosted(raw: dict[str, Any], team_ids: TeamIds, hosted_ids: dict[str, str]) -> dict[str, Any]:
+    """A hosted server definition under the new team id; its new id is added to ``hosted_ids``."""
+
+    from mcp_control.hosting import MCPHostedServerDefinitionV1
+
+    definition = _readable(raw, MCPHostedServerDefinitionV1, McpSection.name)
+    if definition is None or team_ids.rename(definition.team_id) == definition.team_id:
+        return raw
+    values = definition.model_dump(mode="python", exclude={"schema_version", "hosted_server_id", "definition_digest"})
+    renamed = MCPHostedServerDefinitionV1.build(**{**values, "team_id": team_ids.rename(definition.team_id)})
+    hosted_ids[definition.hosted_server_id] = renamed.hosted_server_id
+    return {**raw, "record_id": renamed.hosted_server_id, "document": renamed.model_dump(mode="json", exclude_none=True)}
+
+
+def _renamed_connection(raw: dict[str, Any], team_ids: TeamIds, hosted_ids: dict[str, str]) -> dict[str, Any]:
+    """A connection of the team under the new team id, naming its hosted server by the server's new id."""
+
+    from mcp_control.hosting import hosted_source_locator
+    from mcp_control.registry import MCPConnectionRecordV1
+
+    connection = _readable(raw, MCPConnectionRecordV1, McpSection.name)
+    if connection is None or team_ids.rename(connection.descriptor.team_id) == connection.descriptor.team_id:
+        return raw
+    locators = {hosted_source_locator(old): hosted_source_locator(new) for old, new in hosted_ids.items()}
+    locator = connection.descriptor.source_locator
+    descriptor = {
+        **connection.descriptor.model_dump(mode="python"),
+        "team_id": team_ids.rename(connection.descriptor.team_id),
+        "source_locator": locators.get(locator, locator),
+    }
+    values = connection.model_dump(mode="python", exclude={"record_digest", "operation_catalog_sha256"})
+    renamed = MCPConnectionRecordV1.build(**{**values, "descriptor": descriptor})
+    return {**raw, "document": renamed.model_dump(mode="json", exclude_none=True)}
+
+
+def _renamed_mcp(records: SectionRecords, team_ids: TeamIds) -> SectionRecords:
+    """The ``mcp`` records under the new team id; hosted servers first, so connections find their new ids."""
+
+    hosted_ids: dict[str, str] = {}
+    renamed = [
+        _renamed_hosted(raw, team_ids, hosted_ids) if raw.get("kind") == McpKind.HOSTED.value else raw
+        for raw in records
+    ]
+    return [
+        _renamed_connection(raw, team_ids, hosted_ids) if raw.get("kind") == McpKind.CONNECTION.value else raw
+        for raw in renamed
+    ]
+
+
+def _renamed_procedures(records: SectionRecords, team_ids: TeamIds) -> SectionRecords:
+    """Installed procedure definitions of the team under the new team id (the definition id stays)."""
+
+    from custom_messages.contracts.installed_permissions_v1 import InstalledPermissionDefinitionV1
+
+    renamed = []
+    for raw in records:
+        definition = _readable(raw, InstalledPermissionDefinitionV1, ProceduresSection.name)
+        if definition is not None and team_ids.rename(definition.team_id) != definition.team_id:
+            rebuilt = InstalledPermissionDefinitionV1.build(
+                {**definition.model_dump(mode="python"), "team_id": team_ids.rename(definition.team_id)}
+            )
+            raw = {**raw, "document": rebuilt.model_dump(mode="json")}
+        renamed.append(raw)
+    return renamed
+
+
+TEAM_ID_RENAMES[McpSection.name] = _renamed_mcp
+TEAM_ID_RENAMES[ProceduresSection.name] = _renamed_procedures
 
 
 __all__ = ["McpKind", "McpRecordV1", "McpSection", "ProcedureRecordV1", "ProceduresSection", "accepted_mcp_tool_definitions"]

@@ -1,4 +1,19 @@
-"""Private, editable review files bound to one authenticated backup and target."""
+"""Private, editable review files bound to one authenticated backup, target and team id.
+
+The team id: a review records the id its records are read under (``ImportReviewV1.team_id``,
+``team_transfer.team_ids``): the export's own, or the new id a first import gives a team whose
+id does not fit (owner's decision 103). It is chosen once, when the review is prepared
+(``prepare_review``: the requested new id for a fresh target, the receipt's id for a target a
+first import created). After that the review folder is its source: ``ReviewFiles.open`` reads
+the export under the recorded id and refuses a caller that requires another one, so a
+reviewed import, a later batch and the review page all write the same id.
+
+The one exception is onboarding's Import, whose review folder is fixed per export
+(``runtime/team-import/review/<signature>``): an owner who chose an id and opens the export again
+may still correct it before the import (``prepare_review(restart_for_another_id=True)``), since a
+team id cannot be changed afterwards. The page offers the saved id first
+(``saved_review_team_id``). On the command line the operator names another review folder instead.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +26,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import Field
@@ -20,8 +35,14 @@ from access_control import safe_open
 from team_transfer.editable_yaml import load_editable_yaml
 from team_transfer.errors import TransferError
 from team_transfer.format import TransferModel
-from team_transfer.sections import read_section_records
+from team_transfer.sections import read_section_records, renamed_records
 from team_transfer.selection import keyed_records
+from team_transfer.team_id_choice import new_team_ids, target_team_ids
+from team_transfer.team_ids import TeamIds
+
+if TYPE_CHECKING:
+    from team_transfer.container import TransferReader
+    from team_transfer.format import TransferManifestV1
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,6 +59,9 @@ class ImportReviewV1(TransferModel):
     schema_version: int = 1
     source_mac: str
     target_root: str
+    # The team id the records are read and imported under; a review saved before this field
+    # (None) was prepared under the export's own id.
+    team_id: str | None = None
     records: list[ReviewRecordV1] = Field(default_factory=list)
 
 
@@ -77,22 +101,35 @@ def archive_records(reader) -> dict[str, dict[str, dict[str, Any]]]:
         if section.after_start:
             path = f"files/{section.name}/index.json"
             if path in reader.members_under(f"files/{section.name}/"):
-                index = json.loads(reader.read_member(path))
+                # Owners as the broker stores them under the reader's team id (its registered rename).
+                index = renamed_records(section.name, json.loads(reader.read_member(path)), reader.team_ids)
                 found[section.name] = {entry["key"]: entry for entry in index}
                 if len(found[section.name]) != len(index):
                     raise TransferError("The credential index carries duplicate keys.")
             continue
         found[section.name] = keyed_records(
             section.name,
-            read_section_records(reader, section.name, section.schema_version),
+            read_section_records(reader, section.name, section.schema_version, team_ids=reader.team_ids),
         )
     return found
 
 
 def prepare_review(
-    reader, target_root: str | Path, directory: str | Path
+    reader,
+    target_root: str | Path,
+    directory: str | Path,
+    *,
+    new_team_id: str | None = None,
+    restart_for_another_id: bool = False,
 ) -> "ReviewFiles":
-    """Publish a complete review once; failed writes leave its name available."""
+    """Publish a complete review once; failed writes leave its name available.
+
+    ``new_team_id`` is the id an owner asked for (onboarding's Import, ``--new-team-id``). A
+    new review takes its team id from ``target_team_ids`` and, for a fresh target, refuses ids
+    this version cannot carry (``protocol1_ids``) before writing anything. A review that exists
+    keeps the id it recorded; a different ``new_team_id`` is refused, unless
+    ``restart_for_another_id`` (onboarding's Import) asks to prepare the review again under it.
+    """
 
     root = _review_directory(directory)
     root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -101,7 +138,9 @@ def prepare_review(
     with _initialization_lock(root.parent):
         if safe_open.entry_status(root.parent, (root.name,)) is not None:
             if safe_open.entry_status(root.parent, (root.name, "review.json")) is not None:
-                return ReviewFiles.open(reader, root, target_root=target_root)
+                if restart_for_another_id and _asks_for_another_id(reader, root, new_team_id):
+                    return _restart_review(reader, target_root, root, new_team_id)
+                return ReviewFiles.open(reader, root, target_root=target_root, team_id=new_team_id)
             # Old initialization wrote the target folder before review.json. Only
             # a folder without that completion record may be discarded on retry.
             safe_open.remove_directory(root.parent, (root.name,))
@@ -111,7 +150,80 @@ def prepare_review(
                 root,
                 reader.manifest.mac,
             )
-        return _initialize_review(reader, target_root, root)
+        return _initialize_review(_reader_for_new_review(reader, target_root, new_team_id), target_root, root)
+
+
+def _reader_for_new_review(
+    reader: "TransferReader", target_root: str | Path, new_team_id: str | None
+) -> "TransferReader":
+    """``reader`` under the ids a new review records, checked before the review is written."""
+
+    from runtime_settings.instance_layout import InstanceLayout
+    from team_transfer.protocol1_ids import require_protocol1_ids
+
+    layout = InstanceLayout.at(target_root)
+    chosen = reader.with_team_ids(target_team_ids(reader.manifest, layout, new_team_id))
+    if not layout.instance_config_path.is_file():
+        # A fresh target: this version's team is created from the review, so ids it cannot
+        # carry are refused now, naming how to give the team a new id.
+        require_protocol1_ids(chosen)
+    return chosen
+
+
+def saved_review_team_id(manifest: "TransferManifestV1", directory: str | Path) -> str | None:
+    """The team id a review saved in ``directory`` for this export recorded; None when there is none.
+
+    Read without building the records, for onboarding's Import, which offers the id chosen before
+    in place of the suggestion. A review that cannot be read or belongs to another backup counts
+    as none here; opening it gives the reason.
+    """
+
+    root = _review_directory(directory)
+    try:
+        review = ImportReviewV1.model_validate_json(safe_open.read_bytes(root.parent, (root.name, "review.json")))
+    except (OSError, ValueError):
+        return None
+    if review.schema_version != 1 or review.source_mac != manifest.mac:
+        return None
+    return review.team_id or manifest.team_id
+
+
+def _asks_for_another_id(reader: "TransferReader", root: Path, new_team_id: str | None) -> bool:
+    saved = saved_review_team_id(reader.manifest, root)
+    return new_team_id is not None and saved is not None and new_team_id.strip() != saved
+
+
+def _restart_review(
+    reader: "TransferReader", target_root: str | Path, root: Path, new_team_id: str | None
+) -> "ReviewFiles":
+    """Onboarding's review prepared again under another new team id; its selections and edits start again.
+
+    They cannot be carried: record keys can hold the team id (a knowledge redirect, the
+    maintenance schedule). The new review's records are read first, so an id the rule or a
+    section refuses leaves the saved review as it was.
+    """
+
+    previous = saved_review_team_id(reader.manifest, root)
+    chosen = _reader_for_new_review(reader, target_root, new_team_id)
+    archive = archive_records(chosen)
+    safe_open.remove_directory(root.parent, (root.name,))
+    LOGGER.info(
+        "Prepared an import review again under another team id; its selections start again. "
+        "event=team_transfer_review_restarted directory=%s source_mac=%s team_id=%s previous_team_id=%r",
+        root,
+        reader.manifest.mac,
+        chosen.team_ids.imported,
+        previous,
+    )
+    return _initialize_review(chosen, target_root, root, archive)
+
+
+def _recorded_team_ids(exported: str, recorded: str | None) -> TeamIds:
+    """The ids a saved review recorded, checked by the rule a typed new id passes."""
+
+    if recorded is None or recorded == exported:
+        return TeamIds.unchanged(exported)
+    return new_team_ids(exported, recorded)
 
 
 def _review_directory(directory: str | Path) -> Path:
@@ -130,8 +242,9 @@ def _initialization_lock(parent: Path):
         os.close(descriptor)
 
 
-def _initialize_review(reader, target_root: str | Path, root: Path) -> "ReviewFiles":
-    archive = archive_records(reader)
+def _initialize_review(reader, target_root: str | Path, root: Path, archive=None) -> "ReviewFiles":
+    if archive is None:
+        archive = archive_records(reader)
     staging = Path(tempfile.mkdtemp(prefix=f".{root.name}.init-", dir=root.parent))
     try:
         files = _write_review(reader, target_root, staging, archive)
@@ -162,6 +275,7 @@ def _write_review(reader, target_root: str | Path, root: Path, archive) -> "Revi
     review = ImportReviewV1(
         source_mac=reader.manifest.mac,
         target_root=str(Path(target_root).expanduser().resolve()),
+        team_id=reader.team_ids.imported,
         records=records,
     )
     files = ReviewFiles(reader, root, review, archive)
@@ -178,7 +292,13 @@ class ReviewFiles:
         self._texts: dict[str, str] | None = None
 
     @classmethod
-    def open(cls, reader, directory: str | Path, *, target_root=None):
+    def open(cls, reader, directory: str | Path, *, target_root=None, team_id: str | None = None):
+        """The saved review, its records read under the team id it recorded (``files.reader``).
+
+        ``team_id`` is a new team id the owner asked for again (``--new-team-id``, onboarding's
+        Import); a review recorded under another id is refused naming both.
+        """
+
         root = _review_directory(directory)
         review = ImportReviewV1.model_validate_json(
             safe_open.read_bytes(root.parent, (root.name, "review.json"))
@@ -192,6 +312,13 @@ class ReviewFiles:
             and Path(review.target_root) != Path(target_root).expanduser().resolve()
         ):
             raise TransferError("This review belongs to a different target instance.")
+        ids = _recorded_team_ids(reader.manifest.team_id, review.team_id)
+        if team_id is not None and team_id.strip() != ids.imported:
+            raise TransferError(
+                f"This review was prepared to import the team as {ids.imported!r}, and {team_id.strip()!r} was asked "
+                "for. Leave the new team id out to keep the review's, or prepare a new review folder for another id."
+            )
+        reader = reader.with_team_ids(ids)
         archive = archive_records(reader)
         if (
             any(record.section == "broker_credentials" for record in review.records)

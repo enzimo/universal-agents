@@ -535,7 +535,7 @@ sharedState.state = {
     beginImportMessage: "",
     beginImportSkipped: [],
     // Let's Begin > Import a team export (app_team_import.mjs).
-    teamImport: { loaded: false, loading: false, exports: [], importDir: "", problem: "", selected: "", message: "", failed: false, opening: false },
+    teamImport: { loaded: false, loading: false, exports: [], importDir: "", problem: "", selected: "", message: "", failed: false, opening: false, question: null, newTeamId: "", teamIdError: "", choosing: false },
     secretsFromEnvironment: window.localStorage.getItem(sharedState.SECRETS_FROM_ENVIRONMENT_STORAGE_KEY) === "true",
     sourceEnvFilename: "",
     sourceEnvContent: "",

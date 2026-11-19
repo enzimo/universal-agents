@@ -64,6 +64,7 @@ from pydantic import BaseModel, Field
 from team_transfer.errors import TransferError
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -71,6 +72,7 @@ from team_transfer.sections import (
     SectionExport,
     SectionFiles,
     SectionRecords,
+    holds_no_team_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -578,5 +580,8 @@ def _write_private(path: Path, text: str) -> None:
         handle.write(text)
     os.chmod(path, 0o600)
 
+
+# Operator secrets are names and values that name no team.
+TEAM_ID_RENAMES[OperatorSecretsSection.name] = holds_no_team_id
 
 __all__ = ["OperatorSecretV1", "OperatorSecretsSection", "SecretKind"]

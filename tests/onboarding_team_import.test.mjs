@@ -89,6 +89,81 @@ test("a wrong passphrase is reported and the person can try again", async () => 
   assert.equal(buttons(f.panel())["Open export"].disabled, false);
 });
 
+// A team whose id this version cannot carry (owner's decision 103). The explanation and the
+// refusal below are the sentences the server sends (team_transfer.team_id_choice, onboarding_engine).
+const QUESTION = {
+  exported_team_id: "team_research_assistant_pro",
+  explanation: "This version's messages (protocol 1) carry the team id in their addresses, and this team's id 'team_research_assistant_pro' is 27 characters long; protocol 1 allows at most 24. Choose a new team id: the team is imported under it, and the export file stays as it is.",
+  suggestion: "team_research_assistant",
+  chosen_before: null,
+};
+const REFUSED_ID = "The team id 'team research' has characters protocol 1 does not allow; it allows letters, digits, '-' and '_', starting with a letter or digit. Messages carry it in their addresses.";
+const teamIdInput = panel => byTag(panel, "input").find(input => input.id === "team-import-team-id");
+
+async function askedForTeamId(f, question = QUESTION) {
+  await listed(f, { import_dir: "/data/import", problem: "", exports: [EXPORT] });
+  buttons(f.panel())["Open export"].click();
+  await answer(f.requests, "/api/team-import/open", jsonResponse({ token: "tok en", page: "/team-import", team_id_question: question }));
+  await settle();
+}
+
+test("a team id this version cannot carry is asked for, starting from the suggestion", async () => {
+  const f = panelFixture();
+  await askedForTeamId(f);
+
+  const panel = f.panel();
+  assert.deepEqual(f.visited, [], "the review waits for the new id");
+  assert.ok(panel.textContent.includes(QUESTION.explanation), "the explanation is shown as the server words it");
+  assert.equal(teamIdInput(panel).value, "team_research_assistant");
+  assert.equal(buttons(panel)["Open export"], undefined, "the export is open");
+  const input = teamIdInput(panel);
+  input.value = "research_team";
+  input.dispatchEvent(new Event("input"));
+
+  buttons(f.panel())["Continue"].click();
+  const sent = await answer(f.requests, "/api/team-import/team-id", jsonResponse({ page: "/team-import", team_id: "research_team" }));
+  await settle();
+
+  assert.deepEqual(sent.body, { team_id: "research_team" });
+  assert.equal(sent.headers["X-Transfer-Token"], "tok en");
+  assert.deepEqual(f.visited, ["/team-import#tok%20en"]);
+});
+
+test("a refused new team id shows by the field and keeps what was typed", async () => {
+  const f = panelFixture();
+  await askedForTeamId(f);
+  const input = teamIdInput(f.panel());
+  input.value = "team research";
+  input.dispatchEvent(new Event("input"));
+
+  buttons(f.panel())["Continue"].click();
+  await answer(f.requests, "/api/team-import/team-id", jsonResponse({
+    error: REFUSED_ID, field: "team_id" }, 400));
+  await settle();
+
+  const panel = f.panel();
+  const error = byTag(panel, "p").find(node => node.id === "team-import-team-id-error");
+  assert.ok(error && error.classList.contains("field-error") && error.getAttribute("role") === "alert");
+  assert.equal(error.textContent, `This id was not used. ${REFUSED_ID}`);
+  assert.equal(teamIdInput(panel).value, "team research");
+  assert.equal(teamIdInput(panel).getAttribute("aria-invalid"), "true");
+  assert.deepEqual(f.visited, []);
+  assert.equal(buttons(panel)["Continue"].disabled, false, "the person can correct it and try again");
+});
+
+test("an id chosen when the export was opened before is offered, saying what another id does", async () => {
+  const f = panelFixture();
+  await askedForTeamId(f, { ...QUESTION, suggestion: "research_team", chosen_before: "research_team" });
+
+  const panel = f.panel();
+  assert.equal(teamIdInput(panel).value, "research_team");
+  assert.match(panel.textContent, /You chose research_team when you opened this export before\. Keep it to keep the selections and edits you made; another id starts the review again with everything selected\./);
+
+  buttons(panel)["Choose another export"].click();
+  assert.equal(teamIdInput(f.panel()), undefined);
+  assert.equal(buttons(f.panel())["Open export"].disabled, false, "back to the export list");
+});
+
 test("export sizes read in plain units", () => {
   assert.equal(formatExportSize(512), "1 KB");
   assert.equal(formatExportSize(5 * 1024 * 1024), "5.0 MB");

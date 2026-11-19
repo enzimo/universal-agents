@@ -26,6 +26,11 @@ Why these choices:
   is refused, as is a policy whose objective or installed profile is refused.
 - An objective that was being deleted is refused: its deletion would not
   finish in the new instance.
+- When the import gives the team a new team id (owner's decision 103,
+  ``team_transfer.team_ids``), an objective's ``team_id`` and the team lead's
+  scope in every record (``manager_scope:<team>:<agent type>``) follow it as
+  the records are read, so the review and the plan show what is written. A
+  record of another team keeps its id and is refused as before.
 
 The Objective work schedules these policies run travel in the ``schedules``
 section, which comes after this one and checks that their objective arrived.
@@ -42,6 +47,7 @@ from pydantic import BaseModel, Field, JsonValue
 
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -50,6 +56,7 @@ from team_transfer.sections import (
     SectionFiles,
     SectionRecords,
 )
+from team_transfer.team_ids import TeamIds
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +149,7 @@ class ObjectivesSection:
     # -- import ----------------------------------------------------------------
 
     def plan(self, records: SectionRecords, context: ImportContext) -> list[PlannedRecord]:
-        known = _Known(people=context.accepted("people"), team_id=context.reader.manifest.team_id)
+        known = _Known(people=context.accepted("people"), team_id=context.team_id)
         for key in context.baseline_keys.get(self.name, ()):
             kind, record_id = key.split("/", 1)
             known.accept(ObjectiveKind(kind), record_id)
@@ -295,5 +302,33 @@ class _Writer:
             )
         return record.model_copy(update={"owner_agent_id": self.scope})
 
+
+def _renamed_objectives(records: SectionRecords, team_ids: TeamIds) -> SectionRecords:
+    """The records under a new team id: an objective's ``team_id`` and the team lead's scope in each record.
+
+    The writer moves every record to the new instance's scope anyway (``_Writer``); renaming
+    here makes the review and the plan show that scope. A scope of another team, or an owner
+    that is not a scope (refused by ``_scope_problem``), is left as it is.
+    """
+
+    from custom_agents.durable_owner_scope import MANAGER_SCOPE_PREFIX
+
+    renamed = []
+    for raw in records:
+        document = raw.get("document")
+        if isinstance(document, dict):
+            changed = dict(document)
+            if "owner_agent_id" in changed:
+                changed["owner_agent_id"] = team_ids.rename_after(
+                    f"{MANAGER_SCOPE_PREFIX}:", changed["owner_agent_id"], ":"
+                )
+            if raw.get("kind") == ObjectiveKind.OBJECTIVE.value and "team_id" in changed:
+                changed["team_id"] = team_ids.rename(changed["team_id"])
+            raw = {**raw, "document": changed}
+        renamed.append(raw)
+    return renamed
+
+
+TEAM_ID_RENAMES[ObjectivesSection.name] = _renamed_objectives
 
 __all__ = ["ObjectiveKind", "ObjectiveTransferRecordV1", "ObjectivesSection", "owner_scope"]

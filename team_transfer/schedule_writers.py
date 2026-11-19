@@ -73,7 +73,7 @@ class ScheduleWriter:
         config = planned_config(context)
         storage = config.manager_storage_settings
         return cls(
-            team_id=context.reader.manifest.team_id,
+            team_id=context.team_id,
             store=ScheduleStore(
                 storage_settings=storage, default_cron_timezone=config.user.timezone
             ),

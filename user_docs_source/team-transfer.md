@@ -128,15 +128,25 @@ still finish, so check `exports/`.
 4. **On Let's Begin, choose Import a team export.** Choose the file, type its
    passphrase and select **Open export**. A wrong passphrase is refused; try
    again.
-5. **Choose what to import.** Records are grouped by kind and shown by name:
+5. **If the page asks for a new team id, choose one.** This happens only when
+   the team's id does not fit this version (see
+   [A team id this version cannot carry](#a-team-id-this-version-cannot-carry)).
+   The page says why, and the **New team id** field starts with the old id cut
+   to fit; change it if you like and select **Continue**. An id the page
+   refuses is shown under the field with the reason. To choose another id
+   later, open the export again: the field then starts with the id you chose,
+   keeping it keeps your selections and edits, and another id starts the
+   review again with everything selected. A page you opened the export on
+   before then saves nothing more; continue on the newest page.
+6. **Choose what to import.** Records are grouped by kind and shown by name:
    people, schedules, memories, knowledge pages and so on. Everything starts
    selected; unselect what you don't want. Settings, memories and schedules can
    be edited as in the host-command review below. Open each selected schedule,
    check it, and confirm it.
-6. **Choose where secrets come from.** It starts with the old instance's choice.
+7. **Choose where secrets come from.** It starts with the old instance's choice.
    Turn on **Secrets come from the environment** when every secret reaches the
    container as an environment variable or Docker secret, as in Docker Swarm.
-7. **Validate, then select Import and start the team.** Onboarding writes the
+8. **Validate, then select Import and start the team.** Onboarding writes the
    instance and the container starts the team. The page opens Web Chat when it
    is ready.
 
@@ -277,6 +287,46 @@ marker that blocks every runtime entry point. For a failed first import, use a
 fresh root and empty databases. For a failed later batch, restore the pre-batch
 root and database backups before retrying. Removing the marker does not repair
 partially written records.
+
+## A team id this version cannot carry
+
+This version carries the team id in every message address, so a team id may
+have at most 24 characters: letters, digits, `-` and `_`, starting with a
+letter or digit. Older versions made the team id from the assistant's name with
+no limit, so an older team's id may not fit. Such a team moves to a fresh
+instance under a new team id; an instance cannot change its own id.
+
+- **In onboarding's Import**, the page asks for the new id when you open the
+  export (step 5 of [Import during onboarding](#import-during-onboarding)).
+- **On the command line**, `team review` and `team import --dry-run` refuse
+  such an export and name the option: add `--new-team-id <id>`. The review
+  folder records the id, so `team import --review <folder>` uses it without
+  the option, and a different `--new-team-id` is refused. Later batches and
+  `team import-credentials` take the id from the first import's receipt.
+
+The new id is checked as onboarding checks a typed team id, before anything is
+written, and it may not be an id another team already uses in the team's
+knowledge. The team is imported under it: its settings, people, access, account
+links, knowledge, objectives, memory, schedules, MCP servers, procedures and
+stored sign-ins all belong to the new id. The review page names both ids,
+and the command line's summary says "Team X was imported as Y". The export
+file stays as it is. Some things are
+kept as they were:
+
+- Text you wrote, such as a schedule's instructions, `SOUL.md` or a grant's
+  reason, is kept as written, even where it mentions the old id. A setting
+  whose value mentions the old id, other than the message prefix and the
+  gateway's reply queue (which follow the new id), is imported as it is and
+  listed for you to check.
+- Schedules' signed contexts name the old id, so they are not carried; the
+  import and the new instance's first start sign them again.
+- Agent types, agent ids, person ids, grant ids and your schedules' ids keep
+  theirs. Ids the team builds from its own id follow the new one: the
+  built-in maintenance schedule's id and name, and a hosted MCP server's id
+  and address. An agent type over 24 characters is still refused; rename it
+  on the old instance and export again.
+- An external NATS server whose permissions name the old team id must be
+  updated for the new one ([An external NATS server](#an-external-nats-server)).
 
 ## An external NATS server
 

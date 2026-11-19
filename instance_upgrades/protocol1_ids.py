@@ -104,6 +104,21 @@ _RENAME_AGENT_TYPE: Final = (
     f"({CONTROL_DIRNAME}/{TEAM_COMPOSITION_FILENAME}). For a specialist the team lead created, remove it and have it "
     "created again under the shorter name."
 )
+# How a team whose id does not fit moves to this version (owner's decision 103): its id cannot change in
+# place, but an import into a fresh instance gives it a new one (team_transfer.team_ids).
+_MOVE_UNDER_A_NEW_TEAM_ID: Final = (
+    "An instance keeps its team id, so this instance cannot run 0.10, but its team can move to a fresh 0.10 "
+    "instance under a new team id: start 0.9.x again, update it to the latest 0.9.x release and export the team "
+    "with /upgrade. Then set up a fresh 0.10 instance and choose Import in onboarding, which asks for a new team id "
+    "(on the command line: assistant_cli team review with --new-team-id, then team import)."
+)
+# How the other ids' lines end when the team id does not fit, so all lines lead to the same export.
+_THEN_EXPORT: Final = "Then export the team with /upgrade as described for the team id above."
+_IMPORT_UNDER_A_NEW_TEAM_ID: Final = (
+    f"Give the team a new team id of at most {TEAM_ID.cap} letters, digits, '-' and '_' as it is imported: "
+    "onboarding's Import asks for one, and on the command line assistant_cli team review (or team import --dry-run) "
+    "takes it with --new-team-id."
+)
 # The newest instance_config.yaml schema version 0.9.x reads (0.9.13): a newer saved file was
 # upgraded for this version before the check ran, and 0.9.x refuses it.
 LAST_09_CONFIG_SCHEMA_VERSION: Final = 12
@@ -410,22 +425,23 @@ def refusal_message(found: Sequence[IdOverCap], *, upgraded_note: str | None = N
     ]
     if upgraded_note:
         lines.append(upgraded_note)
+    # An instance whose team id does not fit cannot run this version at all (its team moves under a
+    # new id), so the other ids are fixed on 0.9.x before that export, not before another start.
+    then = (
+        _THEN_EXPORT if any(item.rule_what == TEAM_ID.what for item in found) else "Then start this version again."
+    )
     for item in found:
         if item.rule_what == TEAM_ID.what:
-            lines.append(
-                f"- The team id {item.value!r} {item.problem}. This instance cannot run 0.10 with that team id: "
-                "keep running 0.9.x."
-            )
+            lines.append(f"- The team id {item.value!r} {item.problem}. {_MOVE_UNDER_A_NEW_TEAM_ID}")
         elif item.rule_what == AGENT_TYPE.what:
             lines.append(
-                f"- The agent type {item.value!r}{_where(item)} {item.problem}. On 0.9.x, {_RENAME_AGENT_TYPE} Then "
-                "start this version again."
+                f"- The agent type {item.value!r}{_where(item)} {item.problem}. On 0.9.x, {_RENAME_AGENT_TYPE} {then}"
             )
         else:
             lines.append(
                 f"- The agent id {item.value!r} {item.problem}. It is stored with {', '.join(item.found_in)}. "
                 "On 0.9.x, let that agent's tasks finish or stop them, and let the team lead deal with tasks it "
-                "handed back, so these records go. Then start this version again."
+                f"handed back, so these records go. {then}"
             )
     return "\n".join(lines)
 
@@ -433,9 +449,11 @@ def refusal_message(found: Sequence[IdOverCap], *, upgraded_note: str | None = N
 def import_refusal_message(found: Sequence[IdOverCap]) -> str:
     """Why a team export cannot be imported into this version, one sentence per id; nothing was written.
 
-    The import keeps the export's team id and agent types (``team_transfer.protocol1_ids``),
-    so the advice is for the instance the export came from, which runs 0.9.x. Lines carry no
-    list marks: onboarding's Import page shows the message as one paragraph.
+    The import keeps the export's agent types (``team_transfer.protocol1_ids``), so the advice
+    for one is for the instance the export came from, which runs 0.9.x. A team id that does not
+    fit is given a new one as the team is imported (``team_transfer.team_ids``), so its advice
+    names how to ask for one. Lines carry no list marks: onboarding's Import page shows the
+    message as one paragraph.
     """
 
     lines = [
@@ -444,10 +462,7 @@ def import_refusal_message(found: Sequence[IdOverCap]) -> str:
     ]
     for item in found:
         if item.rule_what == TEAM_ID.what:
-            lines.append(
-                f"The team id {item.value!r} {item.problem}. A team keeps its id when it moves, and this version has "
-                "no way yet to give a team a shorter one, so this export cannot be imported into it."
-            )
+            lines.append(f"The team id {item.value!r} {item.problem}. {_IMPORT_UNDER_A_NEW_TEAM_ID}")
         else:
             lines.append(
                 f"The agent type {item.value!r}{_where(item)} {item.problem}. On the instance this export came from, "

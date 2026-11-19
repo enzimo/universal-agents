@@ -26,7 +26,7 @@ import logging
 import os
 import stat
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, Iterator
 
@@ -49,6 +49,7 @@ from team_transfer.format import (
     TransferManifestV1,
     section_member,
 )
+from team_transfer.team_ids import TeamIds
 
 logger = logging.getLogger(__name__)
 
@@ -236,12 +237,30 @@ def _entry(name: str) -> zipfile.ZipInfo:
 
 @dataclass
 class TransferReader:
-    """An opened, verified transfer file. Use ``open`` as a context manager."""
+    """An opened, verified transfer file. Use ``open`` as a context manager.
+
+    ``team_ids`` are the ids its records are read under: the export's own unless an import
+    gives the team a new id (``with_team_ids``; ``team_transfer.team_ids``).
+    """
 
     path: Path
     manifest: TransferManifestV1
     keys: TransferKeys = field(repr=False)
     _archive: zipfile.ZipFile = field(repr=False)
+    _team_ids: TeamIds | None = field(default=None, repr=False)
+
+    @property
+    def team_ids(self) -> TeamIds:
+        return self._team_ids or TeamIds.unchanged(self.manifest.team_id)
+
+    def with_team_ids(self, team_ids: TeamIds) -> "TransferReader":
+        """The same open file, its records read under ``team_ids``; closing either closes both."""
+
+        if team_ids.exported != self.manifest.team_id:
+            raise TransferFileError(
+                f"The team ids are for team {team_ids.exported}, but this file is team {self.manifest.team_id}."
+            )
+        return replace(self, _team_ids=team_ids)
 
     @classmethod
     def open(cls, path: str | Path, passphrase: str) -> "TransferReader":

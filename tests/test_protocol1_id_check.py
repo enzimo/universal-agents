@@ -190,8 +190,14 @@ def test_each_id_just_over_its_cap_stops_the_start_and_says_what_to_do(tmp_path,
     assert message is not None and not config.layout.protocol1_ids_check_path.exists()
     lines = message.splitlines()
     assert "event=protocol1_ids_over_caps" in lines[0] and "This start changed nothing" in lines[0]
-    assert lines[1] == (f"- The team id '{long_team}' is 25 characters long; protocol 1 allows at most 24. This "
-                        "instance cannot run 0.10 with that team id: keep running 0.9.x.")
+    assert lines[1] == (
+        f"- The team id '{long_team}' is 25 characters long; protocol 1 allows at most 24. An instance keeps its team "
+        "id, so this instance cannot run 0.10, but its team can move to a fresh 0.10 instance under a new team id: "
+        "start 0.9.x again, update it to the latest 0.9.x release and export the team with /upgrade. Then set up a "
+        "fresh 0.10 instance and choose Import in onboarding, which asks for a new team id (on the command line: "
+        "assistant_cli team review with --new-team-id, then team import)."
+    )
+    assert "keep running 0.9.x" not in message
     assert lines[2].startswith(f"- The agent type '{OVER_TYPE_CAP}' (defined in {tmp_path / 'agents.yaml'}) is 25 "
                                "characters long; protocol 1 allows at most 24. On 0.9.x, rename it")
     assert ("in the file that defines it and everywhere the instance names it: gateway.startup_agents in the "
@@ -201,10 +207,21 @@ def test_each_id_just_over_its_cap_stops_the_start_and_says_what_to_do(tmp_path,
         f"- The agent id '{OVER_ID_CAP}' is 33 characters long; protocol 1 allows at most 32. It is stored with "
         "its running tasks, its running tasks' saved progress, messages waiting for it, the tasks it holds, tasks "
         "it handed back that the team lead has not dealt with yet. On 0.9.x, let that agent's tasks finish or stop "
-        "them, and let the team lead deal with tasks it handed back, so these records go. Then start this version "
-        "again."
+        "them, and let the team lead deal with tasks it handed back, so these records go. Then export the team "
+        "with /upgrade as described for the team id above."
     )
+    # This instance cannot run 0.10 at all, so no line says to start it again.
+    assert lines[2].endswith("Then export the team with /upgrade as described for the team id above.")
+    assert "start this version again" not in message
     assert len(lines) == 4  # the ids at their caps are not named
+    # With a team id that fits, the same two ids are fixed on 0.9.x and this version is started again.
+    fits = tmp_path / "fits"
+    fits.mkdir()
+    config, storage = _config(fits, types=(OVER_TYPE_CAP,)), _sqlite(fits)
+    _write_sqlite(storage, OVER_ID_CAP)
+    alone = check_ids_before_upgrade(config, lambda: storage)
+    assert alone is not None and [line.rsplit(". ", 1)[1] for line in alone.splitlines()[1:]] == [
+        "Then start this version again."] * 2
     assert f"event=protocol1_ids_over_caps team_id={long_team}" in caplog.text
 
 
@@ -448,7 +465,7 @@ def test_the_bundle_refuses_a_long_team_id_before_it_upgrades_the_file_or_starts
 
     _unchanged(path, before)
     assert started.calls == []
-    assert "Bundle launch refused." in caplog.text and "keep running 0.9.x" in caplog.text
+    assert "Bundle launch refused." in caplog.text and "under a new team id: start 0.9.x again" in caplog.text
 
 
 def test_the_bundle_leaves_the_file_to_the_check_before_postgresql_starts(tmp_path, monkeypatch) -> None:

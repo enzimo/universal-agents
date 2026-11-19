@@ -652,6 +652,52 @@ async def test_browser_schedule_confirmation_requires_the_exact_reviewed_text(ba
     assert record.confirmed_digest is None
 
 
+@pytest.mark.asyncio
+async def test_a_closed_review_session_refuses_every_later_step_with_its_reason(backup, caplog):
+    """Each of the four steps checks the closed mark, not only the save.
+
+    Onboarding's Import closes a replaced opening's session (``ReviewSession.close``) so
+    nothing it accepted earlier writes into, validates or imports the newer review. Through
+    the page only a late save can still reach a closed session today, but the rule is the
+    shared class's, so each step is checked here on its own.
+    """
+    import logging
+    import re
+
+    from team_transfer.review_session import ReviewApplyV1, ReviewSession, ReviewUpdateV1
+    from team_transfer.sections import DestinationChoices
+
+    reader, target, directory = backup
+    files = prepare_review(reader, target, directory)
+    session = ReviewSession(files)
+    record = next(row for row in files.review.records if row.key == "schedule/sched_first")
+    saved_review = (directory / "review.json").read_bytes()
+    saved_text = files.text(record)
+    reason = "This review was closed because the export was opened again."
+    await session.close(reason)
+
+    steps = {
+        "update": lambda: session.update(ReviewUpdateV1(
+            section=record.section, key=record.key, selected=not record.selected,
+            text=saved_text + "\n")),
+        "set_destination": lambda: session.set_destination(
+            DestinationChoices(secrets_source="environment")),
+        "validate": session.validate,
+        "apply": lambda: session.apply(ReviewApplyV1(digest="any")),
+    }
+    caplog.set_level(logging.WARNING, logger="team_transfer.review_session")
+    for step, call in steps.items():
+        caplog.clear()
+        with pytest.raises(TransferError, match=re.escape(reason)):
+            await call()
+        assert f"event=team_transfer_review_step_after_close step={step} " in caplog.text
+
+    assert (directory / "review.json").read_bytes() == saved_review
+    assert files.text(record) == saved_text
+    assert session.destination is None
+    assert not (target / "instance_config.yaml").exists()
+
+
 @pytest.mark.parametrize(
     "section",
     [section.name for section in default_sections() if not section.after_start],

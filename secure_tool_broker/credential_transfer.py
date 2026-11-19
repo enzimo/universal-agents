@@ -38,9 +38,12 @@ import hashlib
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, ContextManager, Literal
+from typing import TYPE_CHECKING, Any, Callable, ContextManager, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from team_transfer.team_ids import TeamIds
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +142,26 @@ class CredentialOutcomeV1(_Model):
     imported: bool
     reason: str = ""
     retryable: bool = False
+
+
+def renamed_credential_owners(records: list[dict[str, Any]], team_ids: "TeamIds") -> list[dict[str, Any]]:
+    """``records`` with the export's team as owner filed under the team id the import gave it.
+
+    The ``broker_credentials`` section's rename under a new team id (owner's decision 103,
+    ``team_transfer.team_ids``). Only a team owner names the team: a person owner names the
+    person, and keys, values and owner-file paths name no team (the team's folder is derived from
+    the owner when the record is stored). Another team's owner keeps its id, so ``_import_record``
+    still refuses it. Index entries (``credential_index``) carry the same ``owner``, so the review
+    shows the owner the broker stores under. The input is not changed.
+    """
+
+    renamed = []
+    for raw in records:
+        owner = raw.get("owner")
+        if isinstance(owner, dict) and owner.get("kind") == TEAM_OWNER:
+            raw = {**raw, "owner": {**owner, "owner_id": team_ids.rename(owner.get("owner_id"))}}
+        renamed.append(raw)
+    return renamed
 
 
 def owners(team_id: str, person_ids: list[str]) -> list[CredentialOwnerV1]:
@@ -309,8 +332,14 @@ def _export_owner_files(owner: CredentialOwnerV1) -> list[OwnerFileV1]:
 # -- import ----------------------------------------------------------------------------
 
 
-def import_credentials(records: list[dict[str, Any]], *, team_id: str) -> list[CredentialOutcomeV1]:
-    """Store every record for its owner; one outcome per record, values never included."""
+def import_credentials(
+    records: list[dict[str, Any]], *, team_id: str, source_team_id: str | None = None
+) -> list[CredentialOutcomeV1]:
+    """Store every record for its owner; one outcome per record, values never included.
+
+    ``source_team_id`` is the export's team id, only logged: ``decrypt_records`` already filed
+    that team's records under ``team_id`` (``renamed_credential_owners``).
+    """
 
     outcomes = []
     for raw in records:
@@ -318,8 +347,9 @@ def import_credentials(records: list[dict[str, Any]], *, team_id: str) -> list[C
         outcomes.append(_import_record(record, team_id))
     logger.warning(
         "Stored credentials imported from a team transfer. event=credentials_transfer_imported team_id=%s "
-        "imported=%s refused=%s",
+        "source_team_id=%r imported=%s refused=%s",
         team_id,
+        source_team_id or team_id,
         sum(1 for outcome in outcomes if outcome.imported),
         sum(1 for outcome in outcomes if not outcome.imported),
     )
@@ -610,4 +640,5 @@ __all__ = [
     "import_credentials",
     "owners",
     "owners_with_imports",
+    "renamed_credential_owners",
 ]

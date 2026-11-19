@@ -49,7 +49,7 @@ def _carried(out: Path) -> dict[str, str]:
     """The operator secrets an export file carries, by name."""
 
     with TransferReader.open(out, PASSPHRASE) as reader:
-        records = read_section_records(reader, "operator_secrets", OperatorSecretsSection.schema_version)
+        records = read_section_records(reader, "operator_secrets", OperatorSecretsSection.schema_version, team_ids=reader.team_ids)
     return {record["name"]: record["value"] for record in records}
 
 
@@ -77,7 +77,7 @@ def test_operator_secrets_travel_encrypted_and_generated_keys_are_made_fresh(tmp
     with TransferReader.open(out, PASSPHRASE) as reader:
         from team_transfer.sections import read_section_records
 
-        carried = {r["name"]: r["value"] for r in read_section_records(reader, "operator_secrets", OperatorSecretsSection.schema_version)}
+        carried = {r["name"]: r["value"] for r in read_section_records(reader, "operator_secrets", OperatorSecretsSection.schema_version, team_ids=reader.team_ids)}
     assert carried["OPENAI_API_KEY"] == MODEL_KEY, "the instance's team.env, not the operator's own shell"
     assert "ACCESS_GATEWAY_SIGNING_KEY" not in carried
 
