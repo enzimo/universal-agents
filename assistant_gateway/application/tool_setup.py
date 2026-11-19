@@ -273,11 +273,21 @@ class ResendPass:
     """What one pass over the kept results did (``GatewayToolSetups.resend_kept_results``).
 
     ``stopped`` is why the pass stopped before the end (no team lead known, or
-    a failed publish); the results after that stay kept for the next pass.
+    a failed publish), and ``failed`` that it stopped on an unexpected error
+    (logged); the results after that stay kept for the next pass.
     """
 
     sent: int
     stopped: SendOutcome | None = None
+    failed: bool = False
+
+    @property
+    def reason(self) -> str:
+        """Why the pass stopped, for log lines: a ``SendOutcome`` value, ``error`` or ``-``."""
+
+        if self.stopped is not None:
+            return self.stopped.value
+        return "error" if self.failed else "-"
 
 
 @dataclass(frozen=True)
@@ -1191,13 +1201,32 @@ class GatewayToolSetups:
         return sending
 
     async def _send_pass(self) -> ResendPass:
+        """One pass; it never raises, so a page's ending still posts its closing line (critique C07).
+
+        An unexpected error (a database error, for example) is logged with the
+        row it happened on and stops the pass; that row stays kept and the
+        next pass tries it again.
+        """
+
         sent = 0
-        for record in self._setups.list_unsent_tool_setup_results():
-            outcome = await self._send_kept(record)
-            if outcome is SendOutcome.SENT:
-                sent += 1
-            elif outcome is not None:
-                return ResendPass(sent=sent, stopped=outcome)
+        record: ToolSetupRecord | None = None
+        try:
+            for record in self._setups.list_unsent_tool_setup_results():
+                outcome = await self._send_kept(record)
+                if outcome is SendOutcome.SENT:
+                    sent += 1
+                elif outcome is not None:
+                    return ResendPass(sent=sent, stopped=outcome)
+        except Exception as error:  # noqa: BLE001 - the result stays kept; the next pass sends it
+            self._logger.error(
+                "Sending kept setup page results stopped on an error; the result stays kept for the next pass. "
+                "event=gateway_tool_setup_resend_failed setup_request_id=%s task_id=%s error_type=%s",
+                record.setup_request_id if record is not None else "-",
+                record.parent_task_id if record is not None else "-",
+                type(error).__name__,
+                exc_info=error,
+            )
+            return ResendPass(sent=sent, failed=True)
         return ResendPass(sent=sent)
 
     async def _send_kept(self, record: ToolSetupRecord) -> SendOutcome | None:
@@ -1239,9 +1268,18 @@ class GatewayToolSetups:
         )
 
     def _log_if_kept(self, record: ToolSetupRecord, sending: ResendPass) -> None:
-        """Log once, when its page ends, that a result is kept for later and why."""
+        """Log once, when its page ends, that a result is kept for later and why; never raises."""
 
-        stored = self._setups.get_tool_setup(record.setup_request_id)
+        try:
+            stored = self._setups.get_tool_setup(record.setup_request_id)
+        except Exception:  # noqa: BLE001 - the page already ended; its closing line still follows
+            self._logger.exception(
+                "Could not read whether a setup page's result was sent. event=gateway_tool_setup_result_unreadable "
+                "setup_request_id=%s task_id=%s",
+                record.setup_request_id,
+                record.parent_task_id,
+            )
+            return
         if stored is None or not stored.result_unsent:
             return
         self._logger.warning(
@@ -1253,7 +1291,7 @@ class GatewayToolSetups:
             record.tool_id,
             record.kind,
             stored.status,
-            sending.stopped.value if sending.stopped is not None else "-",
+            sending.reason,
         )
 
     def _retry_later(self) -> None:

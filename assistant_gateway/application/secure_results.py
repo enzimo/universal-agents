@@ -12,14 +12,18 @@ moment, and its NATS message id names that lead
 (``secure_result:<kind>:<result id>:<lead id>``): NATS drops a repeated id
 for its duplicate window (600 seconds), so a result sent again to a
 replacement lead must not reuse the id of the copy sent to the old one, while
-a retry to the same lead still counts as a repeat. When no lead is known, or
-the publish fails (NATS disconnected), nothing about the chat request changes
-and the caller keeps the result: a credential form's watcher retries it, and a
-setup page's record keeps it until a lead is back
-(``tool_setup.GatewayToolSetups.resend_kept_results``). Before, the publisher
-wrote ``manager_unavailable`` onto the chat request, which counts as finished
-although its task still ran, so the other setup pages' cards disappeared and
-later pages were refused (incident 2026-11-14 follow-up).
+a retry to the same lead still counts as a repeat. When no lead is known the
+chat request is left as it was; when a lead is known the request is recorded
+as waiting for the result before the publish (so a fast reply is never
+overwritten), and a publish that then fails (NATS disconnected) leaves it
+waiting for a result that is still kept. Either way the caller keeps the
+result, and the chat request never gets a finished status from it: a
+credential form's watcher retries it, and a setup page's record keeps it
+until a lead is back (``tool_setup.GatewayToolSetups.resend_kept_results``).
+Before, the publisher wrote ``manager_unavailable`` onto the chat request,
+which counts as finished although its task still ran, so the other setup
+pages' cards disappeared and later pages were refused (incident 2026-11-14
+follow-up).
 
 "Sent" means the result was accepted into the queue of the lead known then.
 A lead that stops before the gateway notices (the liveness check) can still
@@ -108,9 +112,10 @@ class SecureResultPublisher:
     ) -> SendOutcome:
         """Send the result to the team lead known now (module docstring); a failure is logged, never raised.
 
-        Only a send that reaches a lead records that the chat request waits
-        for the resumed task's reply, before the publish, so a fast reply
-        cannot be overwritten by it.
+        When a lead is known, the chat request is recorded as waiting for the
+        resumed task's reply before the publish, so a fast reply cannot be
+        overwritten by it; a failed publish leaves that waiting status (never a
+        finished one) while the caller keeps the result.
         """
 
         manager_id = self._manager_client.manager_id

@@ -1111,6 +1111,8 @@ class UserGateway:
             targets=self._delivery_preferences,
             proactive_sessions=self.proactive_delivery,
             maintenance=self._maintenance_schedules,
+            # Sent on every team-lead-available transition (tool_setup.resend_kept_results).
+            kept_results=self._credential_workflow.tool_setups,
             manager=self._manager_client,
             responses=self._response_coordinator,
             event_output=self._event_output,

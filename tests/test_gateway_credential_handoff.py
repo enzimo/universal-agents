@@ -16,13 +16,16 @@ from aiohttp.test_utils import TestClient, TestServer
 from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
 from assistant_gateway.application.ports import GatewaySecureBrokerRefusal
+from assistant_gateway.application.request_service import request_task_ended
 from assistant_gateway.application.tool_setup import PageEnding
+from assistant_gateway.domain.request_state import RequestRecord
 from assistant_gateway.interactive_apps.website_handlers.workflows import WebsiteWorkflowHandlers
-from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1
+from custom_messages.contracts.control_v1 import AgentStatus
+from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1, ToolSetupResultV1
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.task_v1 import TaskSteering, TaskSteeringInterruptRecord
 from custom_messages.contracts.tool_setup_spec_v1 import ExternalSetupStepV1
-from custom_messages.enums import TaskSteeringType
+from custom_messages.enums import ControlType, MessageMetaType, TaskSteeringType
 from custom_messages.contracts.routing_v1 import (
     MessageHeader,
     MessageMeta,
@@ -706,3 +709,133 @@ async def test_a_cards_lifetime_follows_whether_it_holds_a_bearer_link(handoff, 
         assert card.expires_at > opened_at + timedelta(hours=47)
     else:
         assert opened_at + timedelta(minutes=30) < card.expires_at <= datetime.now(timezone.utc) + timedelta(minutes=31)
+
+
+# A page ending while the team lead is away (review of the 2026-11-14 incident fixes) ------
+
+
+def _thread_request(gateway: UserGateway) -> None:
+    """The chat request as Web Chat records it: a thread request whose run is running."""
+
+    gateway.state_store.record_request(
+        correlation_id=CHAT_REQUEST,
+        session_key="session_binding",
+        request_kind="interactive",
+        request_text="bind a credential",
+        conversation_id="conversation_binding",
+        followup_to_task_id=None,
+        status="waiting_for_permission",
+        owner_canonical_user_id=gateway.config.user.canonical_user_id,
+        active_task_id="task_binding",
+        run_state="running",
+    )
+
+
+async def _lead_announces(gateway: UserGateway, lead_id: str) -> None:
+    """A team lead's presence status reaches the gateway (the way a lead comes back)."""
+
+    status = AgentStatus(
+        self_id=lead_id,
+        team_id=gateway.config.manager.team_id,
+        named_agent_type=gateway.config.manager.named_agent_type,
+        is_paused=False,
+        is_executing=False,
+        has_execution_capacity=True,
+        is_busy=False,
+        is_exiting=False,
+        name="manager",
+        agent_role="manager",
+        last_seen_at=datetime.now(timezone.utc).isoformat(),
+        status_type=MessageMetaType.RESPONSE,
+        info_type=ControlType.STATUS_REQUEST_BASIC,
+    )
+    await gateway._manager_client.apply_manager_status(status, source="presence")
+
+
+def _setup_results(transport) -> list[tuple[str, str, str | None]]:
+    """Each setup result sent: its page, the lead's queue and the NATS message id."""
+
+    return [
+        (envelope.msg_content.setup_request_id, routing_key, envelope.msg_header.idempotency_key)
+        for envelope, routing_key in transport.durable
+        if isinstance(envelope.msg_content, ToolSetupResultV1)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_page_ending_while_the_team_lead_is_away_reaches_the_next_lead_and_keeps_the_other_cards(
+    handoff, caplog
+):
+    gateway, envelope, _create, transport = handoff
+    caplog.set_level(logging.INFO)
+    _thread_request(gateway)
+    setups = gateway._credential_workflow.tool_setups
+    setups.guide = _Steps()
+    gateway.manager_transitions.start()
+    gateway._maintenance_schedules.ensure_all = AsyncMock()  # type: ignore[method-assign]
+    await _open_through_the_live_reply(gateway, _outside_step(envelope, "tool_setup_req_first", "http:registrar_one"))
+    assert await gateway._credential_handoffs.try_present(
+        _outside_step(envelope, "tool_setup_req_sibling", "http:registrar_two")
+    )
+
+    # The team lead stops while the person's chat still waits for its reply: the
+    # liveness check clears the route, and the unavailable transition fails that wait.
+    async with gateway._manager_client.response_channel(CHAT_REQUEST):
+        await gateway._manager_client.mark_manager_unavailable(reason="the team lead stopped")
+    request = gateway.state_store.get_request(CHAT_REQUEST)
+    assert (request.status, request.run_state) == ("manager_unavailable", "running")
+
+    assert await setups.external_step_done(
+        "tool_setup_req_first", person_id=gateway.config.user.canonical_user_id, step_title="Create a key"
+    )
+
+    assert _setup_results(transport) == []
+    assert gateway.state_store.tool_setup_repository.get_tool_setup("tool_setup_req_first").result_state == "unsent"
+    assert gateway.state_store.get_request(CHAT_REQUEST).run_state == "running"
+    assert _listed(gateway) == ["tool_setup_req_sibling"] == _on_workflow_page(gateway), "the task still runs"
+    assert "reason=task_ended" not in caplog.text
+
+    await _lead_announces(gateway, "manager_replacement")
+
+    assert _setup_results(transport) == [
+        (
+            "tool_setup_req_first",
+            "manager_replacement",
+            "secure_result:tool_setup_result:tool_setup_req_first:manager_replacement",
+        )
+    ]
+    assert gateway.state_store.tool_setup_repository.get_tool_setup("tool_setup_req_first").result_state == "sent"
+    # The new lead's next page for the task opens beside the sibling.
+    later = _page(envelope, "tool_setup_req_later", tool_id="http:registrar_one")
+    later.msg_header.from_agent_id = "manager_replacement"
+    assert await gateway._credential_handoffs.try_present(later) is True
+    assert _listed(gateway) == ["tool_setup_req_sibling", "tool_setup_req_later"]
+
+    await _lead_announces(gateway, "manager_third")
+
+    assert len(_setup_results(transport)) == 1, "a result is sent once"
+
+
+def _request(*, status: str, run_state: str | None) -> RequestRecord:
+    return RequestRecord(
+        correlation_id=CHAT_REQUEST, session_key="session_binding", request_kind="interactive",
+        request_text="bind a credential", conversation_id="conversation_binding", followup_to_task_id=None,
+        created_at="2026-11-19T10:00:00+00:00", status=status, run_state=run_state,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "run_state", "ended"),
+    [
+        ("manager_unavailable", "running", False),
+        ("completed", "running", False),
+        ("waiting_for_credential", "finished", True),
+        ("manager_unavailable", None, True),
+        ("delivered", None, True),
+        ("waiting_for_credential_result", None, False),
+    ],
+)
+def test_a_threads_run_state_decides_whether_its_task_ended(status, run_state, ended):
+    """Thread requests end with their run; other rows at a terminal status (card removal and page admission)."""
+
+    assert request_task_ended(_request(status=status, run_state=run_state)) is ended

@@ -1350,6 +1350,8 @@ async def test_a_result_kept_under_one_lead_is_sent_to_the_next_under_its_own_me
     gateway._manager_client._manager_id = None
     await _until(lambda: setups._retries.count == 0)
     assert _setups(gateway).get_tool_setup("tool_setup_req_old").result_state == "unsent"
+    # The failed publish to the known lead left the chat request waiting for the result, never finished.
+    assert gateway.state_store.get_request(CHAT_REQUEST).status == "waiting_for_credential_result"
 
     gateway._manager_client._manager_id = "manager_replacement"
     assert (await setups.resend_kept_results()).sent == 1
@@ -1437,3 +1439,43 @@ async def test_a_page_ending_while_another_send_waits_is_sent_once_after_it(flak
         "tool_setup_req_second",
     ]
     assert {record.result_state for record in _setups(gateway).list_tool_setups(parent_task_id=TASK)} == {"sent"}
+
+
+@pytest.mark.asyncio
+async def test_an_error_while_sending_still_closes_the_card_and_keeps_the_result(
+    chat_setup_gateway, monkeypatch, caplog
+) -> None:
+    """A database error in a send pass is logged; the page's closing line still posts (critique C07)."""
+
+    import sqlite3
+
+    gateway, _broker, transport, events = chat_setup_gateway
+    setups = gateway._credential_workflow.tool_setups
+    requests = gateway._credential_workflow._publisher._request_service
+    original_record = requests.record
+    calls = 0
+
+    def record_failing_once(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_record(**kwargs)
+
+    monkeypatch.setattr(requests, "record", record_failing_once)
+    _waiting_record(gateway, "cli:github", "sign_in", "person")
+
+    with caplog.at_level("INFO"):
+        assert await setups.recover_unwatched() == 1
+
+    assert [closing.correlation_id for closing in _closings(events)] == ["tool_setup_req_old"]
+    assert _setup_results(transport) == []
+    assert _setups(gateway).get_tool_setup("tool_setup_req_old").result_state == "unsent"
+    [failed] = [record for record in caplog.records if "event=gateway_tool_setup_resend_failed" in record.getMessage()]
+    assert "setup_request_id=tool_setup_req_old task_id=task_link error_type=OperationalError" in failed.getMessage()
+    assert "reason=error" in _kept_lines(caplog)[0]
+    assert "event=gateway_tool_setup_recovery_failed" not in caplog.text
+
+    assert (await setups.resend_kept_results()).sent == 1
+    [(result, _queue, _message_id)] = _setup_results(transport)
+    assert result.setup_request_id == "tool_setup_req_old"
