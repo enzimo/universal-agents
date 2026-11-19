@@ -275,6 +275,60 @@ async def test_large_credential_export_can_be_imported_with_individual_selection
     assert read_credential_state("github.token", owner_id="usr_ana") is None
 
 
+@pytest.mark.asyncio
+async def test_the_export_teams_records_are_stored_under_the_brokers_team_when_the_import_gave_it_a_new_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner's decision 103: a 0.9 team whose id does not fit is imported under a new one."""
+
+    from secure_tool_broker.credential_state import credential_owner_context
+    from secure_tool_broker.credential_state_store import read_credential_state
+    from secure_tool_broker.model_keys import TEAM_SCOPE, ModelKeyStore
+    from team_transfer.crypto import canonical_json, encrypt_with_key
+    from team_transfer.format import SectionDocumentV1
+
+    exported_team = "team_research_assistant_pro"
+    team = {"kind": "team", "owner_id": exported_team}
+    records = [
+        {"kind": "stored_value", "owner": team, "name": "x.team_app", "value": X_APP},
+        {"kind": "model_key", "owner": team, "entry": {
+            "address": "https://api.openai.com/v1", "kind": "openai", "key": MODEL_KEY,
+            "saved_at": "2026-09-01T00:00:00Z", "saved_by_person_id": "usr_ana"}},
+        {"kind": "stored_value", "owner": {"kind": "team", "owner_id": "team_other"}, "name": "x.sign_in", "value": "other"},
+        {"kind": "stored_value", "owner": {"kind": "person", "owner_id": "usr_ana"}, "name": "github.sign_in",
+         "value": GITHUB_TOKEN},
+    ]
+    document = SectionDocumentV1(section="broker_credentials", schema_version=2, records=records)
+    ciphertext = base64.b64encode(encrypt_with_key(canonical_json(document.model_dump(mode="json")), KEY)).decode()
+    body = {"team_id": TEST_TEAM, "encryption_key_b64": KEY_B64, "ciphertext_b64": ciphertext}
+    operator = {"Authorization": f"Bearer {caller_token(CALLER_OPERATOR)}"}
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate())
+
+    async def imported(store: Path, **fields: str) -> dict[str, dict]:
+        _use_store(store, monkeypatch)
+        async with TestClient(TestServer(service.build_app())) as client:
+            response = await client.post(CREDENTIAL_TRANSFER_IMPORT_ROUTE, json={**body, **fields}, headers=operator)
+            assert response.status == 200, await response.text()
+            return {outcome["key"]: outcome for outcome in (await response.json())["outcomes"]}
+
+    # Without the export's id (an import that kept it), its team's records belong to another team, as before.
+    kept = await imported(tmp_path / "kept")
+    assert kept["team/stored_value/x.team_app"]["reason"] == "it belongs to another team"
+    assert kept["person:usr_ana/stored_value/github.sign_in"]["imported"]
+
+    renamed = await imported(tmp_path / "renamed", source_team_id=exported_team)
+    for key in ("team/stored_value/x.team_app", "team/model_key/https://api.openai.com/v1"):
+        assert renamed[key]["imported"] and renamed[key]["owner"] == {"kind": "team", "owner_id": TEST_TEAM}, key
+    other = renamed["team/stored_value/x.sign_in"]
+    assert (other["imported"], other["reason"], other["owner"]["owner_id"]) == (
+        False, "it belongs to another team", "team_other"), "only the export's own team follows the new id"
+    assert renamed["person:usr_ana/stored_value/github.sign_in"]["imported"]
+    with credential_owner_context(TEST_TEAM, scope_kind="team"):
+        assert read_credential_state("x.oauth_client_json") == X_APP
+    [entry] = ModelKeyStore(TEST_TEAM, scope=TEAM_SCOPE).entries()
+    assert entry.key == MODEL_KEY and not ModelKeyStore(exported_team, scope=TEAM_SCOPE).entries()
+
+
 def test_previous_credential_schema_is_converted_inside_the_broker(monkeypatch):
     from secure_tool_broker import credential_transfer_api as api
     from team_transfer.crypto import canonical_json, encrypt_with_key

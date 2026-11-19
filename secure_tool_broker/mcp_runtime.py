@@ -49,6 +49,8 @@ from mcp_control import sdk_compat
 from mcp_control.operation_levels import normalize_hints, record_discovered_hints
 from mcp_control.hosting import (
     MCPHostedServerStore,
+    hosted_server_id_of,
+    hosted_source_locator,
     resolve_hosted_broker_config,
     resolve_mcp_hosting_paths,
 )
@@ -295,7 +297,7 @@ class BrokerMCPRuntime:
     ) -> dict[str, Any]:
         """Resolve trusted config, then insert the linked account's credential."""
         if record.descriptor.source.value == "hosted":
-            hosted_server_id = record.descriptor.source_locator.removeprefix("hosted:")
+            hosted_server_id = hosted_server_id_of(record.descriptor.source_locator)
             await self.hosting.ensure_running(hosted_server_id)
             source_config = resolve_hosted_broker_config(
                 self.config,
@@ -388,7 +390,7 @@ class BrokerMCPRuntime:
             record = self.store.get(key[0])
             if (
                 record is not None
-                and record.descriptor.source_locator == f"hosted:{hosted_server_id}"
+                and record.descriptor.source_locator == hosted_source_locator(hosted_server_id)
             ):
                 await client.close()
                 self._clients.pop(key, None)

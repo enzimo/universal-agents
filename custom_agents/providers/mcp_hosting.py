@@ -27,6 +27,7 @@ from mcp_control.hosting import (
     HostedMCPToolDefinitionV1,
     MCPHostedServerDefinitionV1,
     MCPHostedServerStore,
+    hosted_source_locator,
     resolve_mcp_hosting_paths,
     start_failure_sentence,
 )
@@ -174,7 +175,7 @@ class MCPHostingAdministration:
         descriptor = descriptor_from_server_config(
             raw,
             source=MCPConnectionSource.HOSTED,
-            source_locator=f"hosted:{definition.hosted_server_id}",
+            source_locator=hosted_source_locator(definition.hosted_server_id),
             team_id=definition.team_id,
             owner_canonical_user_id=definition.owner_canonical_user_id,
         )
@@ -238,7 +239,7 @@ class MCPHostingAdministration:
         if definition.lifecycle == HostedMCPLifecycle.RUNNING:
             raise PermissionError("Stop the hosted MCP server before recoverable removal.")
         for connection in self.connection_store.list_records():
-            if connection.descriptor.source_locator == f"hosted:{hosted_server_id}":
+            if connection.descriptor.source_locator == hosted_source_locator(hosted_server_id):
                 # A disabled connection leaves the catalog, so grants on its
                 # tool give nobody anything.
                 self.connection_store.update_lifecycle(

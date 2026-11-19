@@ -10,7 +10,10 @@ offered only for an id that does not fit, which ``test_team_transfer_team_ids`` 
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +63,9 @@ def _documents_valid_for_this_version(name: str, records: list[dict[str, Any]]) 
     from team_transfer.knowledge import KnowledgeTable, _row_problem
 
     section = {section.name: section for section in TRANSFER_SECTIONS}[name]
+    if name == "broker_credentials":  # its model is the decrypted document's (BrokerCredentialsDocumentV1)
+        section.record_model.model_validate({"records": records})
+        return
     access_models = {
         "grant": GrantV1, "data_folder": DataFolderRecordV1, "account_link": AccountLinkV1,
         "person_settings": PersonSettingsV1, "account_sharing": AccountSharingV1,
@@ -79,9 +85,8 @@ def _documents_valid_for_this_version(name: str, records: list[dict[str, Any]]) 
 def test_the_previous_releases_records_follow_a_new_team_id() -> None:
     fixtures = json.loads(FIXTURES.read_text())
     sections = {section.name: section for section in TRANSFER_SECTIONS}
-    covered = {"settings", "control", "operator_secrets", "access", "knowledge", "schedules"}
-    # The broker renames its credentials itself (checkpoint 4).
-    assert set(fixtures) - covered == {"broker_credentials"}
+    covered = {"settings", "control", "operator_secrets", "access", "knowledge", "schedules", "broker_credentials"}
+    assert set(fixtures) == covered
 
     for name in sorted(covered):
         converted = upgrade_records(SectionDocumentV1.model_validate(fixtures[name]), sections[name].schema_version)
@@ -404,6 +409,132 @@ def test_a_schedule_the_rename_cannot_read_keeps_the_exported_id_and_is_logged(
     assert renamed[2] == target and renamed[3]["document"]["team_id"] == NEW
 
 
+def _hosted(team_id: str, server_name: str = "echo", lifecycle: str = "stopped") -> Any:
+    from mcp_control.hosting import MCPHostedServerDefinitionV1
+
+    return MCPHostedServerDefinitionV1.build(
+        server_name=server_name, purpose="Return an attested copy of reviewed arguments.",
+        owner_canonical_user_id="usr_ana", team_id=team_id, target_agent_types=("TeamArchitect",),
+        tools=({"name": "echo", "description": "Echo.", "input_schema": {"type": "object"},
+                "behavior": "echo_arguments"},),
+        bind_host="127.0.0.1", port=41000, lifecycle=lifecycle,
+        created_at_utc=datetime(2026, 9, 1, tzinfo=timezone.utc), installed_by_principal_id="usr_admin",
+    )
+
+
+def _connection(team_id: str, name: str, *, source: Any = None, locator: str | None = None) -> Any:
+    from custom_messages.contracts.access_v2 import ChangeApprovalMode, ChangeApprovalRecordV1
+    from mcp_control.registry import (
+        MCPConnectionLifecycle,
+        MCPConnectionRecordV1,
+        MCPConnectionSource,
+        MCPOperationDefinitionV1,
+        _new_record,
+        descriptor_from_server_config,
+    )
+
+    descriptor = descriptor_from_server_config(
+        {"name": name, "transport": "streamable_http", "server_url": f"https://{name}.example.test/mcp"},
+        source=source or MCPConnectionSource.STATIC_GLOBAL, source_locator=locator or f"agent.external_mcp_servers.{name}",
+        team_id=team_id, owner_canonical_user_id="usr_ana",
+    )
+    approval = ChangeApprovalRecordV1(mode=ChangeApprovalMode.PERSON_APPROVAL, approved_by="usr_admin",
+                                      approved_at_utc=datetime(2026, 9, 2, tzinfo=timezone.utc))
+    record = _new_record(descriptor, lifecycle=MCPConnectionLifecycle.ACTIVE, target_agent_types=("TeamArchitect",),
+                         approval=approval)
+    operations = (MCPOperationDefinitionV1.build(operation_name="search", input_schema={"type": "object"}),)
+    values = record.model_dump(mode="python", exclude={"record_digest", "operation_catalog_sha256"})
+    return MCPConnectionRecordV1.build(**{**values, "operations": operations})
+
+
+def _mcp_record(kind: str, record_id: str, model: Any, **fields: Any) -> dict[str, Any]:
+    return {"kind": kind, "record_id": record_id, "document": model.model_dump(mode="json", exclude_none=True), **fields}
+
+
+def test_mcp_servers_follow_the_new_id_with_their_digests_and_the_hosted_servers_id(caplog: pytest.LogCaptureFixture) -> None:
+    from mcp_control.hosting import MCPHostedServerDefinitionV1, hosted_source_locator
+    from mcp_control.registry import MCPConnectionRecordV1, MCPConnectionSource
+
+    hosted, other_hosted = _hosted(OLD), _hosted(OTHER, "other_echo")
+    served = _connection(OLD, "echo", source=MCPConnectionSource.HOSTED, locator=hosted_source_locator(hosted.hosted_server_id))
+    static, other = _connection(OLD, "docs"), _connection(OTHER, "theirs")
+    levels = {"connection_id": static.connection_id, "operations": {}}
+    tampered = _mcp_record("connection", "mcp_conn_bad", _connection(OLD, "bad"))
+    tampered["document"]["record_digest"] = "0" * 64
+    records = [
+        # The connection comes before its hosted server here: hosted servers are renamed first.
+        _mcp_record("connection", served.connection_id, served),
+        _mcp_record("connection", static.connection_id, static, levels=levels),
+        _mcp_record("connection", other.connection_id, other),
+        tampered,
+        _mcp_record("hosted", hosted.hosted_server_id, hosted),
+        _mcp_record("hosted", other_hosted.hosted_server_id, other_hosted),
+        {"kind": "static_baseline", "record_id": "static-baseline", "document": {"connection_ids": [static.connection_id]}},
+    ]
+    exported = json.loads(json.dumps(records))
+
+    with caplog.at_level("WARNING", logger="team_transfer.integrations"):
+        renamed = renamed_records("mcp", records, IDS)
+
+    assert records == exported, "the records read from the file are not changed"
+    new_hosted = MCPHostedServerDefinitionV1.model_validate(renamed[4]["document"])
+    assert new_hosted.team_id == NEW and new_hosted.hosted_server_id == _hosted(NEW).hosted_server_id
+    assert renamed[4]["record_id"] == new_hosted.hosted_server_id != hosted.hosted_server_id
+    assert (new_hosted.created_at_utc, new_hosted.installed_by_principal_id) == (
+        hosted.created_at_utc, hosted.installed_by_principal_id), "only the team, its digest and id change"
+
+    new_served = MCPConnectionRecordV1.model_validate(renamed[0]["document"])
+    assert new_served.descriptor.team_id == NEW
+    assert new_served.descriptor.source_locator == hosted_source_locator(new_hosted.hosted_server_id)
+    assert (renamed[0]["record_id"], new_served.connection_id) == (served.connection_id, served.connection_id)
+    assert new_served.descriptor.source_config_sha256 == served.descriptor.source_config_sha256
+    assert (new_served.approval, new_served.operations) == (served.approval, served.operations)
+    assert new_served.record_digest == new_served.calculate_digest() != served.record_digest
+
+    new_static = MCPConnectionRecordV1.model_validate(renamed[1]["document"])
+    assert (new_static.descriptor.team_id, new_static.descriptor.source_locator) == (NEW, static.descriptor.source_locator)
+    assert renamed[1]["levels"] == levels
+    assert renamed[2] == records[2] and renamed[5] == records[5], "another team's server keeps its values"
+    assert renamed[6] == records[6], "the static baseline names no team"
+    assert renamed[3] == tampered, "left as exported: the planner refuses it with the model's reason"
+    assert "event=team_transfer_integration_rename_skipped section=mcp record_id=mcp_conn_bad" in caplog.text
+
+    ours = [renamed[index] for index in (0, 1, 4, 6)]
+    assert _naming(ours, OLD) == [] and _naming(ours, hosted.hosted_server_id) == []
+
+
+def test_procedures_follow_the_new_id_and_keep_their_definition_id(tmp_path: Path) -> None:
+    from custom_messages.contracts.installed_permissions_v1 import InstalledPermissionDefinitionV1
+    from tests.test_installed_permissions import HANDLER_ID
+    from tests.test_team_transfer_integrations import _registry
+
+    handler = _registry(tmp_path, "registry").require(HANDLER_ID)
+    descriptor = handler.descriptor
+
+    def procedure(team_id: str, name: str) -> dict[str, Any]:
+        definition_id = f"installed_permission.{HANDLER_ID}.{hashlib.sha256(name.encode()).hexdigest()[:16]}"
+        return {"definition_id": definition_id, "document": InstalledPermissionDefinitionV1.build({
+            "definition_id": definition_id, "proposal_id": f"installed_permission_proposal_{name}",
+            "installed_at_utc": datetime(2026, 9, 1, tzinfo=timezone.utc), "installed_by_principal_id": "usr_admin",
+            "team_id": team_id, "owner_canonical_user_id": "usr_ana", "handler_id": HANDLER_ID,
+            "handler_descriptor_digest": handler.descriptor_digest, "input_schema_digest": handler.input_schema_digest,
+            "display_name": descriptor.display_name, "description": descriptor.description,
+            "impact_description": descriptor.impact_description, "risk": descriptor.risk,
+            "manager_delegable": descriptor.manager_delegable,
+        }).model_dump(mode="json")}
+
+    ours, theirs, tampered = procedure(OLD, "ours"), procedure(OTHER, "theirs"), procedure(OLD, "bad")
+    tampered["document"]["definition_digest"] = "0" * 64
+
+    renamed = renamed_records("procedures", [ours, theirs, tampered], IDS)
+
+    definition = InstalledPermissionDefinitionV1.model_validate(renamed[0]["document"])
+    assert (definition.team_id, definition.definition_id) == (NEW, ours["definition_id"])
+    assert definition.definition_digest == definition.calculate_digest() != ours["document"]["definition_digest"]
+    assert renamed[1] == theirs and renamed[2] == tampered
+    assert _naming(renamed[0], OLD) == []
+
+
 # -- imports under a new id ------------------------------------------------------------------
 
 
@@ -547,6 +678,95 @@ def test_a_specialist_imported_under_a_new_id_names_the_new_team_and_passes_the_
     assert checked["team_id"] == NEW
 
 
+def _names(text: str, needle: str) -> bool:
+    """Whether ``text`` holds ``needle`` as a whole id: not inside a longer word (``team_a`` in ``team_alpha``).
+
+    A separator after it still counts, so routes (``team_a_TeamArchitect``) and subjects (``team_a/x``) are found.
+    """
+
+    return re.search(rf"(?<![A-Za-z0-9]){re.escape(needle)}(?![A-Za-z0-9])", text) is not None
+
+
+def _files_naming(root: Path, needles: tuple[str, ...], *, leaving_out: Path) -> list[str]:
+    """Each file under ``root`` (SQLite stores and ``leaving_out`` aside) that names one of ``needles``."""
+
+    found = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.is_relative_to(leaving_out) or path.read_bytes()[:16] == b"SQLite format 3\x00":
+            continue
+        text = path.read_bytes().decode("utf-8", "replace")
+        found += [f"{path.relative_to(root)}: {needle}" for needle in needles if _names(text, needle)]
+    return found
+
+
+def test_mcp_servers_and_procedures_imported_under_a_new_id_are_the_new_teams(tmp_path: Path) -> None:
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_agents.installed_permissions import InstalledPermissionService, resolve_installed_permission_paths
+    from custom_agents.providers.mcp_connections import MCPConnectionAdministration
+    from custom_agents.providers.mcp_hosting import MCPHostingAdministration
+    from mcp_control.hosting import MCPHostedServerStore, hosted_source_locator, resolve_mcp_hosting_paths
+    from mcp_control.registry import (
+        MCPConnectionLifecycle,
+        MCPConnectionStore,
+        reconcile_instance_mcp_connections,
+        resolve_mcp_connection_paths,
+    )
+    from runtime_settings.instance_layout import InstanceLayout
+    from team_transfer.integrations import McpSection, ProceduresSection
+    from team_transfer.settings import SettingsSection
+    from tests.pinned_memory_support import new_instance
+    from tests.test_team_transfer_integrations import DOCS, _install_procedure, _registry
+
+    # The old instance: a configured server approved at its first start, a hosted server a person installed
+    # (which activated its connection) and an installed procedure.
+    path, config = new_instance(tmp_path / "old", "alpha", OLD)
+    config.mcp.static_reconciliation.upgrade_mode = "grandfather_current"
+    config.agent.external_mcp_servers = [DOCS]
+    config.mcp.hosting.enabled = True
+    config.save(path)
+    [docs] = reconcile_instance_mcp_connections(config)
+    hosted = MCPHostedServerStore(resolve_mcp_hosting_paths(config)).save(_hosted(OLD, lifecycle="pending"))
+    installed = MCPHostingAdministration(config).install(
+        hosted.hosted_server_id, approval=MCPConnectionAdministration.person_approval("usr_admin"))
+    registry = _registry(tmp_path, "registry")
+    definition_id = _install_procedure(config.instance_root_path, registry, OLD)
+    new_hosted_id = _hosted(NEW).hosted_server_id
+
+    plan, target = _import(tmp_path, path, (SettingsSection(), McpSection(), ProceduresSection(registry)))
+
+    assert {(r.section, r.key): r.outcome for r in plan.records if r.section in {"mcp", "procedures"}} == {
+        ("mcp", f"connection/{docs.connection_id}"): RecordOutcome.IMPORT,
+        ("mcp", f"connection/{installed['connection_id']}"): RecordOutcome.IMPORT,
+        ("mcp", f"hosted/{new_hosted_id}"): RecordOutcome.IMPORT,
+        ("mcp", "static_baseline/static-baseline"): RecordOutcome.IMPORT,
+        ("procedures", definition_id): RecordOutcome.IMPORT,
+    }
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    connections = MCPConnectionStore(resolve_mcp_connection_paths(target))
+    before = {record.connection_id: record.record_digest for record in connections.list_records()}
+    assert set(before) == {docs.connection_id, installed["connection_id"]}, "connection ids are kept"
+    assert {record.descriptor.team_id for record in connections.list_records()} == {NEW}
+    assert connections.require(installed["connection_id"]).descriptor.source_locator == hosted_source_locator(new_hosted_id)
+    [definition] = MCPHostedServerStore(resolve_mcp_hosting_paths(imported)).list_definitions()
+    assert (definition.hosted_server_id, definition.team_id) == (new_hosted_id, NEW)
+
+    # The new instance's startup reconciliation recognises the carried records and adds none.
+    reconcile_instance_mcp_connections(imported)
+    assert {record.connection_id: record.record_digest for record in connections.list_records()} == before
+
+    # The procedure is the new team's, and its handler still matches.
+    procedures = InstalledPermissionService(paths=resolve_installed_permission_paths(target), registry=registry)
+    [listed] = procedures.list_installed(team_id=NEW)
+    assert (listed["definition_id"], listed["handler_registration_valid"]) == (definition_id, True)
+    assert procedures.list_installed(team_id=OLD) == []
+
+    assert _files_naming(target, (OLD, hosted.hosted_server_id), leaving_out=InstanceLayout.at(target).team_import_dir) == []
+
+    # Removing the hosted server by its new id finds its imported connection: its tool leaves the catalog.
+    MCPHostingAdministration(imported).remove(new_hosted_id, by="usr_admin")
+    assert connections.require(installed["connection_id"]).lifecycle is MCPConnectionLifecycle.DISABLED
+
+
 def _stored_naming(root: Path, needles: tuple[str, ...]) -> list[str]:
     """Each stored value in the SQLite files under ``root`` that names one of ``needles``."""
 
@@ -563,7 +783,7 @@ def _stored_naming(root: Path, needles: tuple[str, ...]) -> list[str]:
                 for row in database.execute(f'SELECT * FROM "{table}"'):
                     for value in row:
                         text = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
-                        found += [f"{path.name} {table}: {needle}" for needle in needles if needle in text]
+                        found += [f"{path.name} {table}: {needle}" for needle in needles if _names(text, needle)]
     return found
 
 
@@ -738,3 +958,116 @@ def test_a_schedule_this_version_cannot_read_gets_the_same_outcome_under_a_new_i
     assert renamed["schedule/sched_worker"][1].startswith("this version refuses it")
     assert renamed["worker_binding/sched_worker"] == (RecordOutcome.REFUSED, "its schedule sched_worker is not imported")
     assert _stored_naming(tmp_path / "new", (OLD,)) == []
+
+
+async def _serving_broker(team_id: str, root_token: str, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A real broker app of team ``team_id`` on a loopback port; the transfer code reaches it over HTTP."""
+
+    from aiohttp.test_utils import TestServer
+
+    from secure_tool_broker.service import SecureToolBrokerService
+    from tests.broker_access_support import open_gate
+
+    server = TestServer(SecureToolBrokerService(token=root_token, access_gate=open_gate(team_id=team_id)).build_app(),
+                        host="127.0.0.1")
+    await server.start_server()
+    monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", str(server.make_url("")).rstrip("/"))
+    return server
+
+
+@pytest.mark.asyncio
+async def test_credentials_stored_after_an_import_under_a_new_id_are_the_new_teams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from assistant_gateway.config import GatewayInstanceConfig
+    from internal_credentials import parse_env_file
+    from model_providers.endpoints import EndpointKind
+    from runtime_settings.instance_layout import InstanceLayout
+    from secure_tool_broker.credential_state import credential_owner_context
+    from secure_tool_broker.credential_state_store import read_credential_state, write_credential_state
+    from secure_tool_broker.model_keys import TEAM_SCOPE, ModelKeyStore, StoredModelKey
+    from storage.access_repository import AccessRepository
+    from storage.gateway_state_repository import create_gateway_state_repository
+    from team_transfer.broker_credentials import BrokerCredentialsSection
+    from team_transfer.credential_handover import import_handed_over_credentials, write_credential_handover
+    from team_transfer.crypto import new_key_derivation
+    from team_transfer.people import PeopleSection
+    from team_transfer.review import archive_records
+    from team_transfer.service import export_source, export_team, import_team
+    from team_transfer.settings import SettingsSection
+    from tests.pinned_memory_support import new_instance
+    from tests.test_team_transfer_broker_credentials import MODEL_KEY, X_APP, _use_store
+
+    sections = (SettingsSection(), PeopleSection(), BrokerCredentialsSection())
+    passphrase = "correct horse battery staple"
+    # The old instance's broker holds the team's app settings and model key and two of Ana's sign-ins.
+    path, config = new_instance(tmp_path / "old", "alpha", OLD)
+    (path.parent / "team.env").write_text("SECURE_TOOL_BROKER_TOKEN=old-broker-root\n")
+    people = create_gateway_state_repository(config.state_storage_settings)
+    people.create_gateway_user(canonical_user_id="usr_ana", display_name="Ana", timezone="UTC")
+    people.create_team_membership(canonical_user_id="usr_ana", team_id=OLD, role="owner")
+    _use_store(tmp_path / "old_store", monkeypatch)
+    with credential_owner_context(OLD, scope_kind="team"):
+        assert write_credential_state("x.oauth_client_json", X_APP).status == "success"
+    ModelKeyStore(OLD, scope=TEAM_SCOPE).save(StoredModelKey(
+        address="https://api.openai.com/v1", kind=EndpointKind.OPENAI, key=MODEL_KEY,
+        saved_at=datetime(2026, 9, 1, tzinfo=timezone.utc), saved_by_person_id="usr_ana"))
+    assert write_credential_state("github.token", "old-github-sign-in", owner_id="usr_ana").status == "success"
+    assert write_credential_state("x.sign_in_json", '{"token": "ana-x"}', owner_id="usr_ana").status == "success"
+    out = tmp_path / "team.uatransfer"
+    broker = await _serving_broker(OLD, "old-broker-root", monkeypatch)
+    try:
+        await asyncio.to_thread(export_team, export_source(path), out, passphrase, owner_person_id="usr_ana",
+                                sections=sections, key_derivation=new_key_derivation(opslimit=1, memlimit=8192))
+    finally:
+        await broker.close()
+
+    # The first import gives the team its new id; the credentials wait for the new instance's broker.
+    target = tmp_path / "new"
+    with TransferReader.open(out, passphrase) as reader:
+        renamed_reader = reader.with_team_ids(IDS)
+        import_team(renamed_reader, target, dry_run=False, sections=sections)
+        index = archive_records(renamed_reader)["broker_credentials"]
+        kept_index = archive_records(reader)["broker_credentials"]
+        write_credential_handover(renamed_reader, InstanceLayout.at(target), sorted(index))
+    # The review shows the team's credentials as the new team's, under the same keys.
+    assert set(index) == set(kept_index)
+    assert {entry["owner"]["owner_id"] for entry in index.values() if entry["owner"]["kind"] == "team"} == {NEW}
+    assert {entry["owner"]["owner_id"] for entry in kept_index.values() if entry["owner"]["kind"] == "team"} == {OLD}
+
+    # The first start: the new broker (team NEW) already holds a sign-in Ana made since, which is kept.
+    _use_store(tmp_path / "new_store", monkeypatch)
+    assert write_credential_state("github.token", "new-github-sign-in", owner_id="usr_ana").status == "success"
+    broker = await _serving_broker(NEW, parse_env_file(target / "team.env")["SECURE_TOOL_BROKER_TOKEN"], monkeypatch)
+    try:
+        report = await asyncio.to_thread(
+            import_handed_over_credentials, str(target / "instance_config.yaml"), retry_delays=(0.0,))
+    finally:
+        await broker.close()
+
+    assert report is not None
+    outcomes = {outcome["key"]: outcome for outcome in report.outcomes}
+    assert {key for key, outcome in outcomes.items() if not outcome["imported"]} == {
+        "person:usr_ana/stored_value/github.sign_in"}
+    assert {outcome["owner"]["owner_id"] for outcome in outcomes.values() if outcome["owner"]["kind"] == "team"} == {NEW}
+    with credential_owner_context(NEW, scope_kind="team"):
+        assert read_credential_state("x.oauth_client_json") == X_APP
+    assert [entry.key for entry in ModelKeyStore(NEW, scope=TEAM_SCOPE).entries()] == [MODEL_KEY]
+    assert read_credential_state("github.token", owner_id="usr_ana") == "new-github-sign-in"
+
+    # Ana's notices (what moved, and, as the exporting owner, what did not) are the new team's.
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    notices = AccessRepository(imported.manager_storage_settings)
+    assert {notice.title for notice, _read in notices.notices_for(NEW, person_id="usr_ana", roles=())} == {
+        "Your sign-ins and keys moved to this instance", "Some sign-ins and keys did not move"}
+    assert notices.notices_for(OLD, person_id="usr_ana", roles=()) == []
+    [credentials_report] = InstanceLayout.at(target).team_import_dir.glob("credentials-*.json")
+    written = json.loads(credentials_report.read_text())
+    assert (written["team_id"], written["source"]["team_id"]) == (NEW, OLD), "stored for the new team, from the export's"
+
+    assert _stored_naming(target, (OLD,)) == [] and _stored_naming(tmp_path / "new_store", (OLD,)) == []
+    import_files = InstanceLayout.at(target).team_import_dir
+    assert _files_naming(target, (OLD,), leaving_out=import_files) == []
+    assert _files_naming(tmp_path / "new_store", (OLD,), leaving_out=import_files) == []

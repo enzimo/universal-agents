@@ -20,7 +20,7 @@ from access_control import safe_open
 from team_transfer.editable_yaml import load_editable_yaml
 from team_transfer.errors import TransferError
 from team_transfer.format import TransferModel
-from team_transfer.sections import read_section_records
+from team_transfer.sections import read_section_records, renamed_records
 from team_transfer.selection import keyed_records
 
 LOGGER = logging.getLogger(__name__)
@@ -77,7 +77,8 @@ def archive_records(reader) -> dict[str, dict[str, dict[str, Any]]]:
         if section.after_start:
             path = f"files/{section.name}/index.json"
             if path in reader.members_under(f"files/{section.name}/"):
-                index = json.loads(reader.read_member(path))
+                # Owners as the broker stores them under the reader's team id (its registered rename).
+                index = renamed_records(section.name, json.loads(reader.read_member(path)), reader.team_ids)
                 found[section.name] = {entry["key"]: entry for entry in index}
                 if len(found[section.name]) != len(index):
                     raise TransferError("The credential index carries duplicate keys.")

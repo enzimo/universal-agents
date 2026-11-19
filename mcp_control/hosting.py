@@ -35,6 +35,11 @@ HOSTED_MCP_SCHEMA_VERSION = 1
 # (``HostedMCPStartError``): "temporarily unavailable", with this reason code.
 HOSTED_MCP_START_FAILED = "hosted_mcp_start_failed"
 HOSTED_MCP_START_FAILED_STATUS = 503
+# How a hosted server's connection record names the server (``MCPConnectionDescriptorV1.source_locator``):
+# this prefix and the hosted server id. The hosting service finds the connection by it when it
+# installs or removes the server, the broker finds the server of a connection by it, and the team
+# transfer maps it when the team gets a new id (``team_transfer.integrations``).
+_HOSTED_SOURCE_LOCATOR_PREFIX = "hosted:"
 _NAME = re.compile(r"[a-z][a-z0-9_.-]{0,119}\Z")
 _TOOL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,127}\Z")
 
@@ -84,6 +89,18 @@ class HostedMCPToolDefinitionV1(BaseModel):
         elif self.static_response is not None:
             raise ValueError("Only static_response behavior accepts static_response data.")
         return self
+
+
+def hosted_source_locator(hosted_server_id: str) -> str:
+    """The ``source_locator`` of the connection record that serves the hosted server ``hosted_server_id``."""
+
+    return f"{_HOSTED_SOURCE_LOCATOR_PREFIX}{hosted_server_id}"
+
+
+def hosted_server_id_of(source_locator: str) -> str:
+    """The hosted server id a hosted connection's ``source_locator`` names."""
+
+    return source_locator.removeprefix(_HOSTED_SOURCE_LOCATOR_PREFIX)
 
 
 class MCPHostedServerDefinitionV1(BaseModel):
@@ -500,6 +517,8 @@ __all__ = [
     "MCPHostedServerDefinitionV1",
     "MCPHostedServerStore",
     "MCPHostingPaths",
+    "hosted_server_id_of",
+    "hosted_source_locator",
     "resolve_hosted_broker_config",
     "resolve_mcp_hosting_paths",
     "start_failure_sentence",

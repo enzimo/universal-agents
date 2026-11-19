@@ -15,7 +15,7 @@ How:
   import into a fresh root (``new_team_ids``). After that the id comes from what the first
   import recorded: its receipt (``state/team-import/receipt.json``, read only through
   ``batches.import_receipt``, which also checks it came from the same backup;
-  ``recorded_team_id``) for later batches and credentials, and the review folder for an
+  ``recorded_team_ids``) for later batches and credentials, and the review folder for an
   import of a prepared review (``target_team_ids``).
 - Where it is applied: ``TransferReader.with_team_ids`` gives the open file the chosen ids, and
   ``sections.read_section_records`` renames each section's records right after its version
@@ -206,6 +206,20 @@ def recorded_team_id(receipt: dict[str, Any], exported: str) -> str:
     return recorded
 
 
+def recorded_team_ids(layout: "InstanceLayout", manifest: "TransferManifestV1") -> TeamIds:
+    """The export's team id and the one the first import into ``layout`` recorded in its receipt.
+
+    ``batches.import_receipt`` refuses a root without a receipt and a receipt of another backup.
+    Later batches (``target_team_ids``) and the credentials stored after the first start
+    (``broker_credentials.import_credential_bundle``) read the export under these ids, so the id
+    chosen once is never asked for again.
+    """
+
+    from team_transfer.batches import import_receipt
+
+    return TeamIds(manifest.team_id, recorded_team_id(import_receipt(layout, manifest), manifest.team_id))
+
+
 def target_team_ids(manifest: "TransferManifestV1", layout: "InstanceLayout", requested: str | None) -> TeamIds:
     """The ids an import of the export with ``manifest`` into ``layout`` reads under, before any review is opened.
 
@@ -220,17 +234,16 @@ def target_team_ids(manifest: "TransferManifestV1", layout: "InstanceLayout", re
 
     if not layout.instance_config_path.is_file():
         return new_team_ids(manifest.team_id, requested)
-    from team_transfer.batches import import_receipt
     from team_transfer.runtime_guard import require_finished_import
 
     require_finished_import(layout)
-    recorded = recorded_team_id(import_receipt(layout, manifest), manifest.team_id)
-    if requested is not None and requested.strip() != recorded:
+    recorded = recorded_team_ids(layout, manifest)
+    if requested is not None and requested.strip() != recorded.imported:
         raise TransferError(
-            f"This instance's first import gave the team the id {recorded!r}, and later batches keep it; "
+            f"This instance's first import gave the team the id {recorded.imported!r}, and later batches keep it; "
             f"{requested.strip()!r} was asked for. Leave the new team id out."
         )
-    return TeamIds(manifest.team_id, recorded)
+    return recorded
 
 
 __all__ = [
@@ -238,6 +251,7 @@ __all__ = [
     "TeamIds",
     "new_team_ids",
     "recorded_team_id",
+    "recorded_team_ids",
     "suggested_team_id",
     "target_team_ids",
     "team_id_explanation",
