@@ -42,6 +42,11 @@ class GatewayTransientAction:
     # The page's own id (a setup request id), when one chat request shows several
     # pages; Web Chat closes the card when a message with this correlation ends it.
     request_id: str | None = None
+    # A page of the secure broker (sign-in, credential form, account link,
+    # /auth model, /upgrade). Web Chat shows it inside the card, framed and
+    # sandboxed (secure_tools.broker_pages); any other link (an outside setup
+    # step on a vendor's site, the workflow page) stays a link.
+    broker_page: bool = False
 
 
 @dataclass(frozen=True)

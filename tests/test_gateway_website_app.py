@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from secure_tools.broker_pages import card_view_url
+
 from tests.browser_assets import module_source
 
 import asyncio
@@ -124,6 +126,7 @@ def _website_environment(
         config_path=config.config_path.resolve(),
         base_url=config.internal_website_base_url,
         public_origin=config.network.public_origin,
+        broker_public_base_url=config.secure_tool_broker_public_base_url,
         assistant_display_name=config.assistant.display_name,
         appearance=config.ui.onboarding.appearance.model_dump(mode="json"),
         activity_collector_base_url=(
@@ -1020,6 +1023,8 @@ async def test_web_chat_broker_auth_uses_memory_only_open_action(
         "label": "Open",
         "url": login_url,
         "expires_at_utc": expires_at,
+        # A broker page also carries its card view for Web Chat's frame.
+        "frame_url": card_view_url(login_url),
     }
     assert login_url not in transient["content"]
     assert login_url not in json.dumps(payload["messages"])
@@ -1096,6 +1101,7 @@ async def test_web_chat_link_command_uses_memory_only_open_action(
         "label": "Open account link form",
         "url": form_url,
         "expires_at_utc": expires_at,
+        "frame_url": card_view_url(form_url),
     }
     assert transient["content"].startswith(
         "Link an account to http:portainer (your own account)."
@@ -1777,6 +1783,8 @@ async def test_web_chat_shell_protects_permission_ui_from_framing_and_caching(
     assert response.headers["X-Frame-Options"] == "DENY"
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
     assert "script-src 'self'" in response.headers["Content-Security-Policy"]
+    # The chat frames the broker's card views: its public origin, nothing broader (A8).
+    assert f"frame-src 'self' {config.secure_tool_broker_public_base_url}" in response.headers["Content-Security-Policy"]
     assert 'id="chat-settings-overlay"' in markup
     assert '<h2 id="settings-dialog-title">Settings</h2>' in markup
     assert 'id="settings-inbox-tab"' in markup

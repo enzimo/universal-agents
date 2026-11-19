@@ -10,6 +10,7 @@ from assistant_gateway.application.command_help import (
 )
 from assistant_gateway.application.transient_presentation import GatewayTransientAction
 from assistant_gateway.application.commands.account_link import ACCOUNT_LINK_COMMAND
+from secure_tools.broker_pages import card_view_url
 from secure_tools.chat_commands import UPGRADE_COMMAND
 from assistant_gateway.domain.message_types import ACCOUNT_LINK_COMMAND_MESSAGE_TYPE, TEAM_EXPORT_COMMAND_MESSAGE_TYPE
 from assistant_gateway.application.gateway_application import (
@@ -46,6 +47,23 @@ from .off_loop import off_loop
 from .operations import WebsiteConversationHandlersOperations
 from .event_stream import stream_events
 
+
+def transient_action_fields(action: GatewayTransientAction) -> dict[str, Any]:
+    """The browser's view of a memory-only action: its label, address and expiry.
+
+    A broker page also gets ``frame_url``, its card view, which Web Chat shows
+    inside the conversation in a sandboxed frame (assets/broker_card.js); ``url``
+    stays the full page for "Open in its own tab" and for every other link.
+    """
+
+    fields: dict[str, Any] = {
+        "label": action.label,
+        "url": action.url,
+        "expires_at_utc": action.expires_at_utc,
+    }
+    if action.broker_page and action.url:
+        fields["frame_url"] = card_view_url(action.url)
+    return fields
 
 class WebsiteConversationHandlers:
     """Own conversation HTTP behavior with explicit state and bound operations."""
@@ -223,11 +241,7 @@ class WebsiteConversationHandlers:
                         "session_sequence": item.anchor.session_sequence,
                         "created_at_utc": item.anchor.created_at_utc,
                         "content": item.action.description,
-                        "action": {
-                            "label": item.action.label,
-                            "url": item.action.url,
-                            "expires_at_utc": item.action.expires_at_utc,
-                        },
+                        "action": transient_action_fields(item.action),
                     }
                     for item in actions
                 ],
@@ -909,11 +923,7 @@ class WebsiteConversationHandlers:
             "session_sequence": anchor.session_sequence,
             "created_at_utc": anchor.model_dump(mode="json")["created_at_utc"],
             "content": action.description,
-            "action": {
-                "label": action.label,
-                "url": action.url,
-                "expires_at_utc": action.expires_at_utc,
-            },
+            "action": transient_action_fields(action),
         }
         if action.request_id:
             payload["request_id"] = action.request_id

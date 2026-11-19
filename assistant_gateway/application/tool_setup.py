@@ -1125,6 +1125,8 @@ class GatewayToolSetups:
             expires_at_utc=page.expires_at_utc,
             receipt=page.receipt,
             request_id=request.setup_request_id,
+            # Every setup page is a broker page except a step outside Universal Agents.
+            broker_page=request.kind != TOOL_SETUP_EXTERNAL_STEP,
         )
         return GatewayResponse(
             correlation_id=correlation_id,

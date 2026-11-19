@@ -382,6 +382,7 @@ class GatewayCredentialWorkflow:
                 expires_at_utc=broker_session.expires_at,
                 # The form's own id: its closing line closes exactly this card.
                 request_id=request_content.credential_request_id,
+                broker_page=True,
             ),
         )
 

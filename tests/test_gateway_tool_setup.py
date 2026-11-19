@@ -161,10 +161,13 @@ async def test_account_link_page_opens_for_the_task_person_and_reports_the_link(
         "Open *Choose your account for Portainer*:"
     )
     assert form_url in response.text
+    # Channels without cards (Telegram, Signal and the rest) get the full page's link, never the card view (A9).
+    assert "view=card" not in response.text
     assert form_url not in (response.transcript_text or "")
     action = response.transient_action
     assert action is not None and action.kind == "tool_setup"
     assert action.label == "Choose your account for Portainer" and action.url == form_url
+    assert action.broker_page
     assert "Linking an account gives nobody access by itself." in action.description
     assert gateway.state_store.get_request(CHAT_REQUEST).status == "waiting_for_credential"
     [waiting] = _setups(gateway).list_tool_setups(status="waiting")
@@ -210,6 +213,7 @@ async def test_sign_in_page_opens_and_reports_the_account_signed_in_with(setup_g
     }
     assert response.transient_action.label == "Sign in to X"
     assert response.transient_action.url == f"{PUBLIC_BROKER_BASE}/auth/x/v1.signed_session"
+    assert response.transient_action.broker_page, "Web Chat shows the sign-in inside the card"
     assert "never to the agent" in response.transient_action.description
 
     broker.sign_in_status["x"] = {"status": "success", "username": "exampleuser"}
@@ -575,6 +579,7 @@ async def test_an_external_step_shows_the_catalogs_words_and_ends_when_marked_do
     assert "generate a token that can read repositories" in response.text
     assert "Mark done on the workflow page: /workflows/access_flow_gitea" in response.text
     assert response.transient_action.url == "https://gitea.example.com/user/settings/applications"
+    assert not response.transient_action.broker_page, "a vendor's site is never framed; it stays a link"
     # Chat history keeps the whole step in the catalog's words, never the task's reason.
     assert response.transcript_text == (
         "Setup step for Gitea shown: Create a Gitea token. In Gitea, open Settings, then Applications, "
