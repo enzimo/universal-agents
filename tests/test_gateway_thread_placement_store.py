@@ -166,6 +166,34 @@ def test_pinning_brings_a_thread_back_from_snooze_but_snoozing_keeps_the_pin(set
     assert (pinned.pinned, pinned.hidden_as, pinned.hidden_until, pinned.hidden_at_sequence) == (True, None, None, None)
 
 
+def test_unpinning_keeps_a_snooze(settings) -> None:
+    store = _Store(settings)
+    store.thread()
+    seen = store.post("hello")
+    store.repo.set_session_pinned(THREAD, pinned=True)
+    store.repo.set_session_hidden(
+        THREAD, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until="2030-01-01T09:00:00+00:00", seen_sequence=seen
+    )
+    store.repo.set_session_pinned(THREAD, pinned=False)
+    record = store.one()
+    assert (record.pinned, record.hidden_as, record.hidden_until, record.hidden_at_sequence) == (
+        False, "snoozed", "2030-01-01T09:00:00+00:00", seen
+    )
+
+
+def test_a_snooze_needs_a_wake_time_and_a_dismiss_keeps_none(settings) -> None:
+    store = _Store(settings)
+    store.thread()
+    with pytest.raises(ValueError):
+        store.repo.set_session_hidden(THREAD, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until=None, seen_sequence=0)
+    assert store.one().hidden_as is None
+    store.repo.set_session_hidden(
+        THREAD, hidden_as=ThreadHiddenAs.DISMISSED, hidden_until="2030-01-01T09:00:00+00:00", seen_sequence=0
+    )
+    record = store.one()
+    assert (record.hidden_as, record.hidden_until) == ("dismissed", None)
+
+
 def test_hiding_records_the_smaller_of_what_the_page_saw_and_what_the_thread_holds(settings) -> None:
     store = _Store(settings)
     store.thread()
@@ -410,6 +438,7 @@ def test_an_open_credential_form_is_found_until_it_ends(settings) -> None:
 def test_turns_count_ordinary_messages_of_the_owners_thread_only(settings) -> None:
     store = _Store(settings)
     store.thread()
+    store.post("   ")
     store.post("Please check the backups")
     store.post("Done.", role="assistant")
     store.post("/status")

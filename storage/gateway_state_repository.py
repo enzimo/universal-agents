@@ -105,6 +105,25 @@ _SESSION_COLUMNS = (
     "owner_canonical_user_id, parallel_thread"
 )
 
+def _ordinary_message_sql(alias: str, bind: str) -> str:
+    """The SQL condition for an ordinary transcript row: what the thread list counts as a turn.
+
+    Not a system row (cards, command replies, status lines), not a slash
+    command the person typed, and with text or an attachment. The thread
+    list's latest message, the hover preview's turn count and (with an
+    extra ``role = 'user'``) the thread's naming message share it, so one
+    rule decides what a turn is. The command prefix is a bind (``/%``)
+    because PostgreSQL drivers read a literal percent sign as a placeholder.
+    """
+
+    return f"""{alias}.role <> 'system'
+              AND NOT ({alias}.role = 'user' AND LTRIM({alias}.content) LIKE {bind})
+              AND (TRIM({alias}.content) <> '' OR {alias}.attachment_references_json <> '[]')"""
+
+
+# The bound value of _ordinary_message_sql's command prefix.
+_COMMAND_PREFIX_PATTERN = "/%"
+
 # How much of a thread's latest message the thread list reads: transcript
 # content can be a megabyte, and the page shows one shortened line of it.
 LAST_MESSAGE_SQL_CHARACTERS = 400
@@ -259,7 +278,7 @@ class GatewayStateRepository(
     def list_web_chat_threads(
         self,
         *,
-        owner_canonical_user_id: str | None,
+        owner_canonical_user_id: str,
         channel_name: str,
         chat_id: str,
         limit: int,
@@ -1849,7 +1868,7 @@ class _RelationalGatewayStateRepository:
     def list_web_chat_threads(
         self,
         *,
-        owner_canonical_user_id: str | None,
+        owner_canonical_user_id: str,
         channel_name: str,
         chat_id: str,
         limit: int,
@@ -1886,14 +1905,10 @@ class _RelationalGatewayStateRepository:
             FROM gateway_transcript_messages t
             WHERE t.session_key = s.session_key
               AND t.role = 'user'
-              AND LTRIM(t.content) NOT LIKE {bind}
-              AND (TRIM(t.content) <> '' OR t.attachment_references_json <> '[]')
+              AND {_ordinary_message_sql("t", bind)}
             ORDER BY t.session_sequence
             LIMIT 1
         """
-        # The person whose setup pages and forms count: bound when the
-        # caller names one, so the subquery runs once; else each row's owner.
-        person = bind if owner_canonical_user_id is not None else "s.owner_canonical_user_id"
         if include_last_message:
             last_message_columns = f"""
                 lm.role AS last_message_role,
@@ -1906,9 +1921,7 @@ class _RelationalGatewayStateRepository:
             LEFT JOIN gateway_transcript_messages lm ON lm.message_id = (
                 SELECT t.message_id FROM gateway_transcript_messages t
                 WHERE t.session_key = s.session_key
-                  AND t.role <> 'system'
-                  AND NOT (t.role = 'user' AND LTRIM(t.content) LIKE {bind})
-                  AND (TRIM(t.content) <> '' OR t.attachment_references_json <> '[]')
+                  AND {_ordinary_message_sql("t", bind)}
                 ORDER BY t.session_sequence DESC
                 LIMIT 1
             )"""
@@ -1947,11 +1960,11 @@ class _RelationalGatewayStateRepository:
                 ) AS has_open_question,
                 s.session_key IN (
                     SELECT ts.session_key FROM gateway_tool_setups ts
-                    WHERE ts.status = {bind} AND ts.person_id = {person}
+                    WHERE ts.status = {bind} AND ts.person_id = {bind}
                 ) AS has_waiting_setup,
                 s.session_key IN (
                     SELECT cc.session_key FROM gateway_credential_collections cc
-                    WHERE cc.person_id = {person}
+                    WHERE cc.person_id = {bind}
                 ) AS has_waiting_credential_form,
                 s.pinned,
                 s.hidden_as,
@@ -1968,25 +1981,21 @@ class _RelationalGatewayStateRepository:
             WHERE s.status = 'active'
               AND s.channel_name = {bind}
               AND s.chat_id = {bind}
-              {"AND s.owner_canonical_user_id = " + bind if owner_canonical_user_id is not None else ""}
+              AND s.owner_canonical_user_id = {bind}
             ORDER BY
                 s.pinned DESC,
                 CASE WHEN q.updated_at_utc > s.updated_at THEN q.updated_at_utc ELSE s.updated_at END DESC
             LIMIT {bind}
         """
-        command = "/%"
+        command = _COMMAND_PREFIX_PATTERN
+        owner = owner_canonical_user_id
         params: list[Any] = [command, command, RUN_STATE_RUNNING, PendingQueryStatus.OPEN.value]
-        params.append(TOOL_SETUP_STATUS_WAITING)
-        if owner_canonical_user_id is not None:
-            # The setup pages' and credential forms' person.
-            params.extend([owner_canonical_user_id, owner_canonical_user_id])
-        params.append(ThreadHiddenAs.SNOOZED.value)
+        # The setup pages' and credential forms' person, bound so each
+        # subquery runs once per query.
+        params.extend([TOOL_SETUP_STATUS_WAITING, owner, owner, ThreadHiddenAs.SNOOZED.value])
         if include_last_message:
             params.append(command)
-        params.extend([channel_name, chat_id])
-        if owner_canonical_user_id is not None:
-            params.append(owner_canonical_user_id)
-        params.append(limit)
+        params.extend([channel_name, chat_id, owner, limit])
         with self._connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
         records = []
@@ -2533,6 +2542,12 @@ class _RelationalGatewayStateRepository:
         back instead of being hidden with it.
         """
 
+        hidden_as = ThreadHiddenAs(hidden_as)
+        if hidden_as is ThreadHiddenAs.SNOOZED and not hidden_until:
+            raise ValueError("A snoozed thread needs the time it wakes.")
+        if hidden_as is ThreadHiddenAs.DISMISSED:
+            # A dismissed thread comes back on a new message, never at a time.
+            hidden_until = None
         bind = self._dialect.bind
         current = """COALESCE((
             SELECT q.last_session_sequence FROM gateway_transcript_session_sequences q
@@ -2548,7 +2563,7 @@ class _RelationalGatewayStateRepository:
                     hidden_at_sequence = CASE WHEN {bind} < {current} THEN {bind} ELSE {current} END
                 WHERE session_key = {bind} AND status = 'active'
                 """,
-                (ThreadHiddenAs(hidden_as).value, hidden_until, seen, seen, session_key),
+                (hidden_as.value, hidden_until, seen, seen, session_key),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -2929,9 +2944,9 @@ class _RelationalGatewayStateRepository:
                 f"""
                 UPDATE gateway_tool_setups
                    SET status = {bind}, finished_at = {bind}
-                 WHERE setup_request_id = {bind} AND status = 'waiting'
+                 WHERE setup_request_id = {bind} AND status = {bind}
                 """,
-                (status, utc_now_iso(), setup_request_id),
+                (status, utc_now_iso(), setup_request_id, TOOL_SETUP_STATUS_WAITING),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -3875,21 +3890,20 @@ class _RelationalGatewayStateRepository:
     def count_transcript_turns(self, *, owner_canonical_user_id: str, session_key: str) -> int:
         """How many ordinary messages one person's thread holds (Web Chat's hover preview).
 
-        Ordinary means what the thread list's snippet counts: no system cards
-        and no slash commands. Counted only when a page asks for it, since
-        it reads every row of the thread.
+        Ordinary is ``_ordinary_message_sql``, the rule the thread list's
+        snippet uses. Counted only when a page asks for it, since it reads
+        every row of the thread.
         """
 
         bind = self._dialect.bind
         with self._connect() as conn:
             row = conn.execute(
                 f"""
-                SELECT COUNT(*) FROM gateway_transcript_messages
-                WHERE owner_canonical_user_id = {bind} AND session_key = {bind}
-                  AND role <> 'system'
-                  AND NOT (role = 'user' AND LTRIM(content) LIKE {bind})
+                SELECT COUNT(*) FROM gateway_transcript_messages t
+                WHERE t.owner_canonical_user_id = {bind} AND t.session_key = {bind}
+                  AND {_ordinary_message_sql("t", bind)}
                 """,
-                (owner_canonical_user_id, session_key, "/%"),
+                (owner_canonical_user_id, session_key, _COMMAND_PREFIX_PATTERN),
             ).fetchone()
         return int(row[0]) if row else 0
 

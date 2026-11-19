@@ -291,7 +291,7 @@ class GatewayStateStore:
     def list_web_chat_threads(
         self,
         *,
-        owner_canonical_user_id: str | None,
+        owner_canonical_user_id: str,
         channel_name: str,
         chat_id: str,
         limit: int,
