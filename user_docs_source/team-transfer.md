@@ -137,8 +137,7 @@ still finish, so check `exports/`.
    later, open the export again: the field then starts with the id you chose,
    keeping it keeps your selections and edits, and another id starts the
    review again with everything selected. A page you opened the export on
-   before then saves nothing more: it says the review was closed, so continue
-   on the newest page.
+   before then saves nothing more; continue on the newest page.
 6. **Choose what to import.** Records are grouped by kind and shown by name:
    people, schedules, memories, knowledge pages and so on. Everything starts
    selected; unselect what you don't want. Settings, memories and schedules can
