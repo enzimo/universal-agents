@@ -30,6 +30,7 @@ import {
   renderThreadSections,
   threadDetail,
 } from "./chat_thread_list.mjs";
+import { THREAD_MENU_ACTION, attachThreadMenuTriggers, createThreadMenu } from "./chat_thread_menu.mjs";
 
 function mountPage() {
 "use strict";
@@ -231,6 +232,15 @@ appearanceState.settingsAppearanceStatus = document.getElementById("settings-app
 sharedState.threadList = document.getElementById("thread-list");
 // Each row's time since its last message moves on once a minute.
 lifecycle.interval(refreshThreadAges, 60 * 1000);
+// One menu for every row, keyed by the thread's session key (chat_thread_menu.mjs).
+shellState.threadMenu = createThreadMenu({
+  document, window, lifecycle,
+  onAction: (...args) => threadMenuAction(...args),
+  focusRow: sessionKey => {
+    var button = threadRowButton(sessionKey);
+    if (button) button.focus();
+  },
+});
 
 diagnosticsState.debugContextControls = document.getElementById("debug-context-controls");
 
@@ -1251,14 +1261,6 @@ function revealPassword(input, button) {
     shellState.credentialControls.toggleReveal(input, button);
   }
 
-function trashIconMarkup() {
-    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="m19 6-1 14H6L5 6"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>';
-  }
-
-function pencilIconMarkup() {
-    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m18 2 4 4-12 12-5 1 1-5L18 2Z"></path><path d="m14 6 4 4"></path></svg>';
-  }
-
 function checkIconMarkup() {
     return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20 6-11 11-5-5"></path></svg>';
   }
@@ -1886,7 +1888,44 @@ function threadRow(thread) {
       ensureActiveThreadHistory();
     });
     row.appendChild(button);
+    // Right-click, long press, the context-menu key or Shift+F10 open its menu.
+    attachThreadMenuTriggers(row, function (point) {
+      openThreadMenu(thread, point);
+    }, { lifecycle: lifecycle, window: window });
     return row;
+  }
+
+function openThreadMenu(thread, point) {
+    if (!thread.persisted || !thread.sessionKey) {
+      return;
+    }
+    hideThreadTitleTooltip();
+    shellState.threadMenu.open({
+      sessionKey: thread.sessionKey,
+      title: fullThreadTitle(thread),
+      pinned: thread.pinned,
+      listState: thread.listState,
+    }, point);
+  }
+
+// What a menu choice does. The thread is looked up again by its session key:
+// the list may have been drawn again, or the thread archived elsewhere.
+function threadMenuAction(sessionKey, action, detail) {
+    var thread = threadForSession(sessionKey);
+    if (!thread) {
+      return;
+    }
+    if (action === THREAD_MENU_ACTION.RENAME) {
+      sharedState.editingThreadId = thread.id;
+      sharedState.renameDraft = null;
+      renderThreads();
+    } else if (action === THREAD_MENU_ACTION.DELETE) {
+      archiveThread(thread.id);
+    } else if (action === THREAD_MENU_ACTION.SNOOZE) {
+      changeThreadPlacement(thread, action, { snooze_until: detail.until.toISOString() });
+    } else {
+      changeThreadPlacement(thread, action);
+    }
   }
 
 function threadActivityIndicator(thread) {
