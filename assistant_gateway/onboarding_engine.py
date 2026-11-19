@@ -1371,7 +1371,7 @@ def shortened_team_id(value: str) -> str:
     ``-`` are dropped (the id must start with a letter or digit), the id is cut to the cap and
     trailing ``_`` and ``-`` are dropped; ``team`` when nothing is left. The result always fits.
     Used for the id onboarding derives from the assistant's name and for the new id onboarding's
-    Import suggests for a 0.9 team whose id does not fit (``team_transfer.team_ids``), so both
+    Import suggests for a 0.9 team whose id does not fit (``team_transfer.team_id_choice``), so both
     are cut the same way.
     """
 

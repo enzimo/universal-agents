@@ -30,16 +30,24 @@ Why these choices:
   from the old instance's choice, because the new host may differ.
 - **Clean-up.** After a successful import the copied export and its review
   folder are deleted; the original stays wherever it was exported.
-- **A team id this version cannot carry** (owner's decision 103,
-  ``team_transfer.team_ids``). Opening such an export prepares no review: the
+- **A team id this version cannot carry** (owner's decision 103;
+  ``team_transfer.team_id_choice`` chooses the id, ``team_transfer.team_ids``
+  maps it). Opening such an export prepares no review: the
   reply carries a question (why the id does not fit, and a suggested new id),
   and ``POST /api/team-import/team-id`` prepares the review under the id the
   owner confirms, checked like a typed onboarding id. Agent types that do not
   fit are still refused when the export is opened. Each opening chooses the id
   once: preparing the review under another id replaces the review folder, so
-  it happens only before this opening has a review, while no review route can
-  use the folder. The review folder is fixed per export, so opening the export
-  again offers the id chosen before; another id prepares the review again
+  it happens only before this opening has a review, while no review route of
+  this opening can use the folder. One exception remains: a review write
+  accepted on an earlier opening of the same export (its body still arriving,
+  or waiting behind that session's validation) can still change an edited text
+  or the saved review in the folder afterwards. It cannot import anything
+  unconfirmed or unvalidated: a schedule's text must equal the text that was
+  confirmed, and the import refuses a review whose texts changed after
+  validation (the validated digest). The review folder is fixed per export,
+  so opening the export again offers the id chosen before; another id
+  prepares the review again
   (``prepare_review(restart_for_another_id=True)``), because a team id cannot
   be changed after the import.
 """
@@ -253,8 +261,11 @@ class TeamImport:
         """The new team id for an export whose id does not fit; the review is prepared under it.
 
         Once per opening. The review routes refuse until the review exists, and this step
-        refuses once it does (another id needs the export opened again), so nothing else uses
-        the review folder while it is prepared here. No import runs meanwhile either: an import
+        refuses once it does (another id needs the export opened again), so nothing else on
+        this opening uses the review folder while it is prepared here. A review write accepted
+        on an earlier opening of this export can still land in the folder later; the confirmed
+        schedule texts and the validated digest keep it from importing anything nobody
+        confirmed or validated (module docstring). No import runs meanwhile either: an import
         needs a review, opening this export was refused while one ran, and an import on an
         export opened before this one is refused (``_import``).
         """

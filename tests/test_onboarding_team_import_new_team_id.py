@@ -33,7 +33,7 @@ from team_transfer.credential_handover import import_handed_over_credentials
 from team_transfer.team_id_choice import team_id_explanation
 from tests.test_onboarding_team_import import GITHUB_TOKEN, PASSPHRASE, _confirm_schedules, _onboarding
 from tests.test_team_transfer_broker_credentials import _use_store
-from tests.test_team_transfer_team_id_renames import _files_naming, _stored_naming
+from tests.test_team_transfer_team_id_renames import _files_naming, _names, _stored_naming
 
 OLD = "team_research_assistant_pro"  # 27 characters, as 0.9's onboarding built it
 NEW = "team_research_assistant"  # the suggestion
@@ -215,7 +215,7 @@ async def test_an_id_another_team_in_the_knowledge_already_has_is_refused_by_the
 async def test_each_opening_chooses_the_id_once_and_an_older_opening_cannot_import(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Preparing the review under another id replaces its folder, so nothing else may use it then.
+    """Preparing the review under another id replaces its folder, so nothing on this opening may use it then.
 
     The review routes refuse until the opening has its review, and the id step refuses once it
     has one. Two id steps sent at once: the second waits for the first and is refused. An
@@ -291,3 +291,61 @@ async def test_each_opening_chooses_the_id_once_and_an_older_opening_cannot_impo
     assert (status, body["error"]) == (400, "disk full") and "field" not in body, body
     assert ("event=onboarding_team_import_team_id_failed file_name=team.uatransfer "
             f"exported_team_id={TOO_LONG!r} error_type=OSError") in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_every_section_moves_through_the_page_under_a_new_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The command-line test's every-section team, sent through the page's routes instead.
+
+    Both paths read the records under the chosen ids at the same point, but the page has its own
+    opening, review session, validation and hand-over; this checks that they pass the chosen id on
+    to every section. Credentials are left out here: the first test covers their hand-over.
+    """
+
+    import tests.test_team_import_new_team_id_cli as cli_tests
+    from instance_upgrades.protocol1_ids import check_ids_before_upgrade, load_saved_for_check
+
+    out, _secret, derived, _registry = cli_tests._exported_every_section(tmp_path, monkeypatch)
+    needles = (OLD, *derived.values())
+    root = _copied(out, tmp_path)
+
+    async with TestClient(TestServer(_onboarding(root).build_app())) as client:
+        headers, question = await _open(client)
+        assert question["suggestion"] == NEW
+        assert (await _choose(client, headers, NEW))[0] == 200
+        review = await _review(client, headers)
+        assert (review["team_id"], review["imported_team_id"]) == (OLD, NEW)
+        assert sorted({record["section"] for record in review["records"]}) == [
+            "access", "control", "knowledge", "mcp", "objectives", "people", "pinned_memory", "procedures",
+            "schedules", "settings"]
+        # No record key or title on the page names the old id or one derived from it.
+        shown = " ".join(f"{record['key']} {record.get('title') or ''}" for record in review["records"])
+        assert [needle for needle in needles if _names(shown, needle)] == []
+
+        # Everything but what this version refuses for any team, as on the command line.
+        for record in review["records"]:
+            selected = (record["section"], record["key"]) not in cli_tests.REFUSED_FOR_ANY_TEAM
+            body: dict[str, Any] = {"section": record["section"], "key": record["key"], "selected": selected}
+            if selected and record["section"] == "schedules" and record["text"] is not None:
+                body.update(text=record["text"], confirmed=True)
+            saved = await client.post("/api/team-import/record", json=body, headers=headers)
+            assert saved.status == 200, (body, await saved.json())
+        validation = await (await client.post("/api/team-import/validate", json={}, headers=headers)).json()
+        assert validation["valid"], validation
+        imported = await client.post("/api/team-import/import", json={"digest": validation["digest"]}, headers=headers)
+        assert imported.status == 200, await imported.json()
+        await asyncio.sleep(0.6)
+
+    config = GatewayInstanceConfig.load_saved(root / "instance_config.yaml")
+    assert config.gateway.team_id == NEW
+    assert {grant.grant_id for grant in AccessRepository(config.manager_storage_settings).list_team(NEW)} == {
+        "g_person", "g_lead", "g_team", "g_role"}
+    checked = load_saved_for_check(root / "instance_config.yaml")
+    assert check_ids_before_upgrade(checked, lambda: checked.manager_storage_settings) is None
+    # No file (the import reports aside) or stored value names the old id or a derived one; the same search finds
+    # the new id.
+    assert cli_tests._files_naming(root, needles) == []
+    assert _stored_naming(root, needles) == []
+    assert _stored_naming(root, (NEW,))

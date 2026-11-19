@@ -8,7 +8,7 @@ passphrase from the broker (``team_transfer.requested_export``).
 
 ``--new-team-id`` (``review``, and ``import --dry-run`` without a review) gives a
 team whose id this version cannot carry a new one for its first import into a
-fresh root (owner's decision 103, ``team_transfer.team_ids``). After that the
+fresh root (owner's decision 103, ``team_transfer.team_id_choice``). After that the
 tool already has the id: the review folder records it for ``import --review``,
 and the first import's receipt for later batches and ``import-credentials``, so
 the option is never needed again and a different one is refused.

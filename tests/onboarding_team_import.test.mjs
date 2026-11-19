@@ -90,7 +90,7 @@ test("a wrong passphrase is reported and the person can try again", async () => 
 });
 
 // A team whose id this version cannot carry (owner's decision 103). The explanation and the
-// refusal below are the sentences the server sends (team_transfer.team_ids, onboarding_engine).
+// refusal below are the sentences the server sends (team_transfer.team_id_choice, onboarding_engine).
 const QUESTION = {
   exported_team_id: "team_research_assistant_pro",
   explanation: "This version's messages (protocol 1) carry the team id in their addresses, and this team's id 'team_research_assistant_pro' is 27 characters long; protocol 1 allows at most 24. Choose a new team id: the team is imported under it, and the export file stays as it is.",

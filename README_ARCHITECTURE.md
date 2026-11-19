@@ -5281,7 +5281,12 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   review folder (`prepare_review(restart_for_another_id=True)`, which first
   reads the new records, so an id a section refuses leaves the saved review
   as it was), so it runs only before the opening has a review, while every
-  review route refuses; another id needs the export opened again. An import
+  review route of that opening refuses; another id needs the export opened
+  again. A review write accepted on an earlier opening of the same export can
+  still change an edited text or the saved review in the folder afterwards,
+  but it cannot import anything unconfirmed or unvalidated: a schedule's text
+  must equal the confirmed text, and the import refuses texts changed after
+  validation (the validated digest). An import
   whose request was accepted for an export opened again before its body
   arrived is refused, so no import runs beside that step.
 - **One planner, nothing silently dropped.** Every record is imported, imported
