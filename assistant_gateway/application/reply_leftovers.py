@@ -21,14 +21,15 @@ message came in (``ArrivalRoute``):
   refused and the task is sent a failure. Credential forms fail closed.
   Replies, questions, notifications and statuses are delivered, and a late
   guidance answer settles its held copy.
-- the operational subject: an agent status is applied, and anything else is
-  dropped, as on arrival. Agents' messages to each other carry the request's
-  correlation too, and are never shown to a person.
+- the operational subject: dropped, as on arrival. Agents' messages to each
+  other carry the request's correlation too, and are never shown to a person.
+- on either route, an agent status message is ignored, as on arrival: who
+  leads and who is live comes from the team's records (``team_view``).
 - the gateway's own notice (``queue_response`` with ``ArrivalRoute.GATEWAY``):
   not passed on. Had it come after the close, nothing would have queued it.
 
-What already happened when the message first arrived (the agent presence
-observation and the trace line in ``handle_response``) is not repeated.
+What already happened when the message first arrived (the trace line in
+``handle_response``) is not repeated.
 
 The leftovers are passed on oldest first, in a task of their own that starts
 when the wait closes. Running there means a cancelled or timed-out waiter is
@@ -153,7 +154,7 @@ class ReplyWait:
     queue: asyncio.Queue[MessageEnvelope]
     # id(envelope) -> (envelope, route). Holding the envelope keeps its id from
     # being reused while it is recorded. The record lives only as long as the
-    # wait, which its caller bounds (request, guidance or discovery timeout).
+    # wait, which its caller bounds (request, question, guidance or control timeout).
     _arrivals: dict[int, tuple[MessageEnvelope, ArrivalRoute]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -363,8 +364,8 @@ class ReplyLeftovers:
                 *_fields(batch, leftover),
             )
             return
-        # Every agent answers the gateway's discovery request and only the first
-        # answer ends that wait, so a leftover agent status is routine.
+        # An agent status is ignored wherever it arrives (the team's records say who
+        # is live), so a leftover one is routine and logged at debug level.
         routine = isinstance(leftover.envelope.msg_content, AgentStatus)
         self._logger.log(
             logging.DEBUG if routine else logging.INFO,

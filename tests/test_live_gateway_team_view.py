@@ -305,8 +305,10 @@ async def _running_gateway(stack: AsyncExitStack, config, transitions: list):
         transitions.append(("unavailable", transition.manager_id))
         await gateway.manager_transitions.handle_unavailable(transition)
 
-    gateway._manager_client.bind_inbound_handlers(on_unsolicited=gateway.inbound_messages.handle,
-                                                  on_manager_available=available, on_manager_unavailable=unavailable)
+    gateway._manager_client.bind_inbound_handlers(
+        on_unsolicited=gateway.inbound_messages.handle, on_manager_available=available,
+        on_manager_unavailable=unavailable,
+        on_leftover_lost=gateway._response_coordinator.fail_lost_credential_request)
     stack.push_async_callback(gateway.close)
     await gateway.connect(start_services=False)
     return gateway

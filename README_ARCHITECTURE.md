@@ -3619,10 +3619,12 @@ first, as if it had arrived after the close:
 - one from the response route takes the path of a message that nothing waits
   for: a late setup page opens, forms fail closed, replies and notifications
   are delivered, and late guidance answers settle their held copy;
-- one from the operational subject only updates an agent status or is dropped;
+- one from the operational subject is dropped;
 - the gateway's own notice is not passed on.
 
-The presence observation that ran on arrival is not repeated.
+On either route an agent status message is ignored, as it is on arrival: the
+gateway learns who leads and who is live only from the team's records
+(`assistant_gateway.team_view`).
 
 A message that nothing waits for, and that arrives while its request's
 leftovers are being passed on, waits for them, so it cannot overtake them. The

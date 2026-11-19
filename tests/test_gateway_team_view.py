@@ -18,6 +18,7 @@ import pytest
 
 from assistant_gateway import team_view
 from assistant_gateway.application.manager_client import GatewayManagerClient, GatewayManagerClientSettings
+from assistant_gateway.application.reply_leftovers import ArrivalRoute
 from assistant_gateway.team_view import GatewayTeamView, TeamLeadFollower
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.wire.refusals import FrameRefused
@@ -593,7 +594,7 @@ class Following:
             await service.handle_unavailable(transition)
 
         self.client.bind_inbound_handlers(on_unsolicited=AsyncMock(), on_manager_available=self.available.append,
-                                          on_manager_unavailable=unavailable)
+                                          on_manager_unavailable=unavailable, on_leftover_lost=AsyncMock())
         self.follower = TeamLeadFollower(self.view, self.client, service, check_seconds=0.02)
         return failed
 
@@ -721,9 +722,11 @@ async def test_a_lead_on_another_contract_keeps_the_waiting_replies_until_it_lea
         assert following.waiting.failed == []
 
         reply = SimpleNamespace(msg_content=None)
-        assert await following.client.queue_response("corr_answered", reply)
-        following.client.unregister_response_channel("corr_answered")  # the person got the lead's answer
+        assert await following.client.queue_response("corr_answered", reply, route=ArrivalRoute.RESPONSE)
+        # The person got the lead's answer: read, then the wait closes, as a real waiter does (a message still
+        # queued when a wait closes is passed on, reply_leftovers).
         assert answered.get_nowait() is reply
+        following.client.unregister_response_channel("corr_answered")
 
         reader.publish(reasons={"lead_1": "exiting"})
         await until(lambda: following.waiting.failed != [])
@@ -901,9 +904,10 @@ def _gateway(tmp_path, monkeypatch, reader: Reader, *, saved: Optional[str] = "m
         seen.append(("unavailable", transition.manager_id))
         await gateway.manager_transitions.handle_unavailable(transition)
 
-    gateway._manager_client.bind_inbound_handlers(on_unsolicited=gateway.inbound_messages.handle,
-                                                  on_manager_available=available,
-                                                  on_manager_unavailable=unavailable)
+    gateway._manager_client.bind_inbound_handlers(
+        on_unsolicited=gateway.inbound_messages.handle, on_manager_available=available,
+        on_manager_unavailable=unavailable,
+        on_leftover_lost=gateway._response_coordinator.fail_lost_credential_request)
     gateway.manager_transitions.set_hooks(on_manager_unavailable=lambda: hooks.append("pause"),
                                           on_manager_available=lambda: hooks.append("resume"))
     gateway._maintenance_schedules.ensure_all = AsyncMock()

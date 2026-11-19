@@ -24,7 +24,6 @@ import asyncio
 import dataclasses
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -505,62 +504,49 @@ async def test_leftovers_get_the_handling_of_the_way_they_came_in(caplog, way_in
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way_in", ["operational", "response"])
-async def test_a_leftover_agent_status_is_applied_without_noting_presence_again(way_in) -> None:
-    """The team lead answers discovery twice (it is asked again every second); the first answer ends the wait.
+async def test_a_leftover_agent_status_is_ignored_as_on_arrival(caplog, way_in) -> None:
+    """An agent status left on a closed wait is dropped the way one is dropped on arrival.
 
-    Both ways in note presence on arrival (``_notify_agent_presence``); neither may note it again for the leftover.
+    On release/0.10 the gateway learns who leads and who is live only from the team's records
+    (``assistant_gateway.team_view``), so a status message changes nothing and is shown to nobody
+    (``GatewayManagerClient._drop_agent_status``). This replaces main's test that a leftover status is
+    applied without noting presence again: release/0.10 has no presence observer and no discovery.
     """
 
-    runtime = _FakeManagerRuntime()
-    runtime.connected = True
-    presence: list = []
+    caplog.set_level(logging.DEBUG, logger="test.gateway.manager_client")
+    unsolicited: list[MessageEnvelope] = []
     available: list = []
-    client = _client(runtime, settings=_settings(manager_id=None), presence=presence, available=available)
-    seen = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
-
-    def answer(at: datetime) -> MessageEnvelope:
-        request = runtime.operational[-1][0]
-        return MessageEnvelope(
-            msg_content=AgentStatus(
-                self_id="manager_1",
-                team_id="team_test",
-                named_agent_type="TeamArchitect",
-                status_type=MessageMetaType.RESPONSE,
-                info_type=ControlType.STATUS_REQUEST_BASIC,
-                is_paused=False,
-                is_executing=False,
-                has_execution_capacity=True,
-                is_busy=False,
-                name="manager",
-                agent_role="manager",
-                last_seen_at=at.isoformat(),
-            ),
-            msg_header=MessageHeader(from_agent_id="manager_1"),
-            msg_meta=MessageMeta(msg_correlation_id=request.msg_meta.msg_correlation_id),
-        )
-
+    client = _client(_FakeManagerRuntime(), unsolicited=unsolicited, available=available)
+    status = _envelope(
+        AgentStatus(
+            self_id="lead_2",
+            team_id="team_test",
+            named_agent_type="TeamArchitect",
+            status_type=MessageMetaType.RESPONSE,
+            info_type=ControlType.STATUS_REQUEST_BASIC,
+            is_paused=False,
+            is_executing=False,
+            has_execution_capacity=True,
+            is_busy=False,
+            name="manager",
+            agent_role="manager",
+        ),
+        from_agent_id="lead_2",
+    )
     receive = getattr(client, f"handle_{way_in}")
+    ignored = f"event=gateway_agent_status_message_ignored source={way_in} agent_id=lead_2"
 
-    async def both_answers(_request: MessageEnvelope) -> None:
-        await receive(answer(seen))
-        await receive(answer(seen + timedelta(seconds=1)))
+    # A status carries no task id, so it is queued on the request's general wait.
+    async with client.response_channel(CORRELATION):
+        await receive(status)
+    await _passed_on(client)
+    assert caplog.text.count(ignored) == 1
 
-    runtime.operational_publish_hook = both_answers
+    await receive(status)  # The same status arriving with no wait open.
 
-    assert await client.discover_manager_id(timeout_seconds=1.0) == "manager_1"
-    assert client.manager_id is None  # Discovery itself only reports the id.
-    await _passed_on(client, runtime.operational[-1][0].msg_meta.msg_correlation_id)
-
-    # Each status was noted once, when it arrived.
-    assert [(status.last_seen_at, source) for status, _at, source in presence] == [
-        (seen.isoformat(), way_in),
-        ((seen + timedelta(seconds=1)).isoformat(), way_in),
-    ]
-    # The leftover answer was applied as a late status, as it would have been a moment later.
+    assert caplog.text.count(ignored) == 2
+    assert unsolicited == [] and available == []
     assert client.manager_id == "manager_1"
-    assert [(transition.manager_id, transition.source) for transition in available] == [
-        ("manager_1", f"{way_in}_unmatched")
-    ]
 
 
 # A3: every way a wait ends ---------------------------------------------------------------
