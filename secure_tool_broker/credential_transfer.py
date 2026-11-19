@@ -332,8 +332,14 @@ def _export_owner_files(owner: CredentialOwnerV1) -> list[OwnerFileV1]:
 # -- import ----------------------------------------------------------------------------
 
 
-def import_credentials(records: list[dict[str, Any]], *, team_id: str) -> list[CredentialOutcomeV1]:
-    """Store every record for its owner; one outcome per record, values never included."""
+def import_credentials(
+    records: list[dict[str, Any]], *, team_id: str, source_team_id: str | None = None
+) -> list[CredentialOutcomeV1]:
+    """Store every record for its owner; one outcome per record, values never included.
+
+    ``source_team_id`` is the export's team id, only logged: ``decrypt_records`` already filed
+    that team's records under ``team_id`` (``renamed_credential_owners``).
+    """
 
     outcomes = []
     for raw in records:
@@ -341,8 +347,9 @@ def import_credentials(records: list[dict[str, Any]], *, team_id: str) -> list[C
         outcomes.append(_import_record(record, team_id))
     logger.warning(
         "Stored credentials imported from a team transfer. event=credentials_transfer_imported team_id=%s "
-        "imported=%s refused=%s",
+        "source_team_id=%s imported=%s refused=%s",
         team_id,
+        source_team_id or team_id,
         sum(1 for outcome in outcomes if outcome.imported),
         sum(1 for outcome in outcomes if not outcome.imported),
     )

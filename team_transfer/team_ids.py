@@ -13,10 +13,11 @@ How:
   import behaves exactly as without it.
 - Where it is chosen: onboarding's Import page and ``--new-team-id`` choose it for a first
   import into a fresh root (``new_team_ids``). After that the id comes from what the first
-  import recorded: its receipt (``state/team-import/receipt.json``, read only through
-  ``batches.import_receipt``, which also checks it came from the same backup;
-  ``recorded_team_ids``) for later batches and credentials, and the review folder for an
-  import of a prepared review (``target_team_ids``).
+  choice recorded: the review folder (``review.ImportReviewV1.team_id``, read by
+  ``review.ReviewFiles.open``) for an import of a prepared review, and the first import's
+  receipt (``state/team-import/receipt.json``, read only through ``batches.import_receipt``,
+  which also checks it came from the same backup; ``recorded_team_ids``) for later batches
+  and credentials. ``target_team_ids`` decides the ids of a new review or a dry run from both.
 - Where it is applied: ``TransferReader.with_team_ids`` gives the open file the chosen ids, and
   ``sections.read_section_records`` renames each section's records right after its version
   step, through the rename the section registers in ``sections.TEAM_ID_RENAMES``. The review,

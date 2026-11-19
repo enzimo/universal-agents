@@ -72,6 +72,18 @@
     "target_root": {
       "title": "Target Root",
       "type": "string"
+    },
+    "team_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Team Id"
     }
   },
   "required": [

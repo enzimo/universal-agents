@@ -159,7 +159,9 @@ def add_transfer_routes(app: web.Application, *, team_id: str) -> None:
                                            reason="review only; nothing stored")
                         for entry in credential_index(records)]
         else:
-            outcomes = await asyncio.to_thread(import_credentials, records, team_id=payload.team_id)
+            outcomes = await asyncio.to_thread(
+                import_credentials, records, team_id=payload.team_id, source_team_id=payload.source_team_id
+            )
         return web.json_response(CredentialImportResultV1(outcomes=tuple(outcomes)).model_dump(mode="json"))
 
     app.router.add_post(CREDENTIAL_TRANSFER_EXPORT_ROUTE, export_handler)

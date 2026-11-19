@@ -5,6 +5,13 @@ The passphrase is typed at a prompt, or read from a file with
 the command line, where other processes could read it. ``export-requested``
 is the supervisor's export for an owner's ``/upgrade``: it collects the
 passphrase from the broker (``team_transfer.requested_export``).
+
+``--new-team-id`` (``review``, and ``import --dry-run`` without a review) gives a
+team whose id this version cannot carry a new one for its first import into a
+fresh root (owner's decision 103, ``team_transfer.team_ids``). After that the
+tool already has the id: the review folder records it for ``import --review``,
+and the first import's receipt for later batches and ``import-credentials``, so
+the option is never needed again and a different one is refused.
 """
 
 from __future__ import annotations
@@ -96,6 +103,7 @@ def add_team_parsers(subparsers: Any) -> None:
     review.add_argument(
         "--env", default=None, help="Optional .env file with the new database settings"
     )
+    _new_team_id_argument(review)
     _passphrase_argument(review)
 
     load = commands.add_parser(
@@ -123,6 +131,7 @@ def add_team_parsers(subparsers: Any) -> None:
     load.add_argument(
         "--env", default=None, help="Optional .env file with the new database settings"
     )
+    _new_team_id_argument(load)
     _passphrase_argument(load)
 
     credentials = commands.add_parser(
@@ -161,6 +170,18 @@ def add_team_parsers(subparsers: Any) -> None:
     requested.add_argument("--config", required=True, help="The running instance's instance_config.yaml")
     requested.add_argument("--export-id", required=True, help="The request's export id")
     requested.add_argument("--owner", required=True, metavar="PERSON_ID", help="The owner who asked for it")
+
+
+def _new_team_id_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--new-team-id",
+        default=None,
+        metavar="ID",
+        help=(
+            "A new team id for a team whose id this version cannot carry (at most 24 letters, digits, '-' and '_'), "
+            "for the first import into a fresh root. Later steps take it from the review folder or the import receipt."
+        ),
+    )
 
 
 def _passphrase_argument(parser: argparse.ArgumentParser) -> None:
@@ -253,14 +274,16 @@ def _inspect(args: argparse.Namespace) -> None:
 
 def _import(args: argparse.Namespace) -> None:
     passphrase = read_passphrase(args.passphrase_file, confirm=False)
-    with TransferReader.open(args.input_path, passphrase) as reader:
+    with TransferReader.open(args.input_path, passphrase) as opened:
         arguments = {}
         if args.review:
             from team_transfer.review import ReviewFiles
 
+            # The review folder recorded the team id; a different --new-team-id is refused.
             files = ReviewFiles.open(
-                reader, args.review, target_root=args.instance_root
+                opened, args.review, target_root=args.instance_root, team_id=args.new_team_id
             ).snapshot()
+            reader = files.reader
             choices, overrides = files.choices(require_confirmation=not args.dry_run)
             arguments = dict(
                 choices=choices,
@@ -272,6 +295,12 @@ def _import(args: argparse.Namespace) -> None:
             raise TransferError(
                 "Open `assistant_cli team review` first, then import with --review pointing to its folder."
             )
+        else:
+            from runtime_settings.instance_layout import InstanceLayout
+            from team_transfer.team_ids import target_team_ids
+
+            ids = target_team_ids(opened.manifest, InstanceLayout.at(args.instance_root), args.new_team_id)
+            reader = opened.with_team_ids(ids)
         plan = import_team(
             reader, args.instance_root, dry_run=bool(args.dry_run), **arguments
         )
@@ -287,12 +316,21 @@ def _import_credentials(args: argparse.Namespace) -> None:
     with TransferReader.open(args.input_path, passphrase) as reader:
         from assistant_gateway.config import GatewayInstanceConfig
         from team_transfer.review import ReviewFiles
+        from team_transfer.team_ids import recorded_team_ids
 
         config = GatewayInstanceConfig.load_saved(args.config)
+        # The id the first import gave the team, from its receipt; the review must be for that id.
+        recorded = recorded_team_ids(config.layout, reader.manifest)
         files = ReviewFiles.open(reader, args.review, target_root=config.layout.root)
+        if files.reader.team_ids != recorded:
+            raise TransferError(
+                f"This review was prepared to import the team as {files.reader.team_ids.imported!r}, and this "
+                f"instance's first import gave it the id {recorded.imported!r}. Prepare a new review folder for "
+                "this instance with `assistant_cli team review`; it takes the instance's id."
+            )
         choices, _overrides = files.choices(require_confirmation=False)
         report = import_credentials(
-            reader,
+            files.reader,
             args.config,
             selected_keys=sorted(choices.get("broker_credentials", ())),
         )
@@ -343,7 +381,9 @@ def _review(args: argparse.Namespace) -> None:
 
     passphrase = read_passphrase(args.passphrase_file, confirm=False)
     with TransferReader.open(args.input_path, passphrase) as reader:
-        files = prepare_review(reader, args.instance_root, args.review_dir)
+        files = prepare_review(
+            reader, args.instance_root, args.review_dir, new_team_id=args.new_team_id
+        )
         try:
             asyncio.run(serve_review(files))
         except KeyboardInterrupt:
@@ -372,6 +412,12 @@ def plan_summary(plan: ImportPlan, *, dry_run: bool) -> list[str]:
         f"{verb} {counts[RecordOutcome.IMPORT] + counts[RecordOutcome.ATTENTION]} of {len(plan.records)} record(s) "
         f"into {plan.target_root}; {counts[RecordOutcome.REFUSED]} refused.",
     ]
+    if plan.team_ids.renamed:
+        ids = plan.team_ids
+        lines.append(
+            f"Team {ids.exported} {'would be' if dry_run else 'was'} imported as {ids.imported}: "
+            "every imported record names the new team id."
+        )
     for title, outcome in (
         ("Needs your attention:", RecordOutcome.ATTENTION),
         ("Refused:", RecordOutcome.REFUSED),

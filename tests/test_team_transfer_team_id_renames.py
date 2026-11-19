@@ -977,9 +977,10 @@ async def _serving_broker(team_id: str, root_token: str, monkeypatch: pytest.Mon
 
 @pytest.mark.asyncio
 async def test_credentials_stored_after_an_import_under_a_new_id_are_the_new_teams(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     import asyncio
+    import logging
 
     from assistant_gateway.config import GatewayInstanceConfig
     from internal_credentials import parse_env_file
@@ -1025,6 +1026,7 @@ async def test_credentials_stored_after_an_import_under_a_new_id_are_the_new_tea
         await broker.close()
 
     # The first import gives the team its new id; the credentials wait for the new instance's broker.
+    caplog.set_level(logging.INFO, logger="team_transfer.credential_handover")
     target = tmp_path / "new"
     with TransferReader.open(out, passphrase) as reader:
         renamed_reader = reader.with_team_ids(IDS)
@@ -1048,6 +1050,20 @@ async def test_credentials_stored_after_an_import_under_a_new_id_are_the_new_tea
         await broker.close()
 
     assert report is not None
+    # The instance's log names its own team, and where the credentials came from.
+    logged = {
+        event: message
+        for message in (entry.getMessage() for entry in caplog.records)
+        for event in ("team_import_credentials_handed_over", "team_import_credentials_refused",
+                      "team_import_credentials_imported", "credentials_transfer_imported")
+        if f"event={event} " in message
+    }
+    assert len(logged) == 4, logged
+    for event in ("team_import_credentials_handed_over", "team_import_credentials_refused",
+                  "team_import_credentials_imported"):
+        assert f"team_id={NEW} exported_team_id={OLD} " in logged[event], logged[event]
+    assert "refused=person:usr_ana/stored_value/github.sign_in" in logged["team_import_credentials_refused"]
+    assert f"team_id={NEW} source_team_id={OLD} " in logged["credentials_transfer_imported"]
     outcomes = {outcome["key"]: outcome for outcome in report.outcomes}
     assert {key for key, outcome in outcomes.items() if not outcome["imported"]} == {
         "person:usr_ana/stored_value/github.sign_in"}
