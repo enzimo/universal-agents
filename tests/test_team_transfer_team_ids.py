@@ -377,7 +377,9 @@ def test_a_later_batch_reads_under_the_recorded_id_and_a_reader_under_the_old_on
 
         with pytest.raises(TransferError) as refused:
             plan_import(opened, target, sections=SECTIONS, allow_existing=True)
-    assert str(refused.value) == f"The target instance is team {NEW}, and this import is for team {OLD}: they are different teams."
+    assert str(refused.value).startswith(
+        f"The target instance is team {NEW}, and this import is for team {OLD}: they are different teams. If this "
+        "instance's first import came from this same export, prepare a new review folder")
 
 
 def test_a_failed_first_import_under_a_new_id_is_named_when_it_is_run_again(tmp_path: Path, monkeypatch) -> None:

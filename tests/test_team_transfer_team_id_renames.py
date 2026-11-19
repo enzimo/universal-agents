@@ -1061,9 +1061,9 @@ async def test_credentials_stored_after_an_import_under_a_new_id_are_the_new_tea
     assert len(logged) == 4, logged
     for event in ("team_import_credentials_handed_over", "team_import_credentials_refused",
                   "team_import_credentials_imported"):
-        assert f"team_id={NEW} exported_team_id={OLD} " in logged[event], logged[event]
+        assert f"team_id={NEW} exported_team_id={OLD!r} " in logged[event], logged[event]
     assert "refused=person:usr_ana/stored_value/github.sign_in" in logged["team_import_credentials_refused"]
-    assert f"team_id={NEW} source_team_id={OLD} " in logged["credentials_transfer_imported"]
+    assert f"team_id={NEW} source_team_id={OLD!r} " in logged["credentials_transfer_imported"]
     outcomes = {outcome["key"]: outcome for outcome in report.outcomes}
     assert {key for key, outcome in outcomes.items() if not outcome["imported"]} == {
         "person:usr_ana/stored_value/github.sign_in"}

@@ -347,7 +347,7 @@ def import_credentials(
         outcomes.append(_import_record(record, team_id))
     logger.warning(
         "Stored credentials imported from a team transfer. event=credentials_transfer_imported team_id=%s "
-        "source_team_id=%s imported=%s refused=%s",
+        "source_team_id=%r imported=%s refused=%s",
         team_id,
         source_team_id or team_id,
         sum(1 for outcome in outcomes if outcome.imported),

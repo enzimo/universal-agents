@@ -8,7 +8,7 @@ const HTML = readFileSync(new URL("../team_transfer/review_assets/review.html", 
 const SCRIPT = readFileSync(new URL("../assistant_gateway/onboarding_web/assets/team_review.js", import.meta.url), "utf8");
 const SAVED = "value: old\n";
 
-async function fixture(section = "settings") {
+async function fixture(section = "settings", ids = { team_id: "team_a" }) {
   const env = fakeBrowser();
   const nodes = withElements(env.document, [...HTML.matchAll(/\sid="([^"]+)"/g)].map(match => [match[1]]));
   env.document.documentElement = { dataset: {} };
@@ -18,7 +18,7 @@ async function fixture(section = "settings") {
   });
   await answer(env.requests, "/api/review", jsonResponse({
     records: [{ section, key: "llm.model_id", selected: true, text: SAVED, details: {} }],
-    team_id: "team_a", target_root: "/tmp/new", review_directory: "/tmp/review",
+    ...ids, target_root: "/tmp/new", review_directory: "/tmp/review",
   }));
   const editor = () => nodes.records.querySelector("textarea");
   const edit = text => { editor().value = text; editor().dispatchEvent(new Event("input")); };
@@ -27,6 +27,13 @@ async function fixture(section = "settings") {
 }
 
 const validation = digest => jsonResponse({ records: [], valid: true, skipped: 0, digest });
+
+test("the header names the team, and the new id when the import gives it one", async () => {
+  const kept = await fixture("settings", { team_id: "team_a", imported_team_id: "team_a" });
+  assert.equal(kept.nodes.source.textContent, "Team team_a → /tmp/new");
+  const renamed = await fixture("settings", { team_id: "team_research_assistant_pro", imported_team_id: "team_research" });
+  assert.equal(renamed.nodes.source.textContent, "Team team_research_assistant_pro, imported as team_research → /tmp/new");
+});
 
 test("an edit during validation cannot restore an outdated import digest", async () => {
   const f = await fixture();

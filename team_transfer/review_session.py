@@ -92,7 +92,9 @@ class ReviewSession:
         order = [section.name for section in default_sections()]
         present = {record.section for record in files.review.records}
         return {
-            "team_id": files.reader.manifest.team_id,
+            # The export's team id and the id the import writes (equal unless the team gets a new one).
+            "team_id": files.reader.team_ids.exported,
+            "imported_team_id": files.reader.team_ids.imported,
             "target_root": files.review.target_root,
             "review_directory": str(files.root),
             "sections": [

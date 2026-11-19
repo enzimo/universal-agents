@@ -337,7 +337,9 @@ def _import_context(reader, target_root, sections, allow_existing):
     if config.gateway.team_id != context.team_id:
         raise TransferError(
             f"The target instance is team {config.gateway.team_id}, and this import is for "
-            f"{context.team_ids.describe()}: they are different teams."
+            f"{context.team_ids.describe()}: they are different teams. If this instance's first import came from "
+            "this same export, prepare a new review folder for it with assistant_cli team review; it takes the "
+            "instance's id."
         )
     context.existing = True
     context.scratch["settings.config"] = config

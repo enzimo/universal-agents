@@ -2,8 +2,9 @@
 
 team_transfer.protocol1_ids, called by every plan for a fresh root (the command-line import,
 the review pages) and by onboarding's Import when an export is opened, before its review is
-prepared. The launcher would otherwise refuse such a team at its first start, once everything
-was written, with advice meant for an instance upgraded in place.
+prepared (there for agent types: a team id that does not fit is asked for anew, decision 103).
+The launcher would otherwise refuse such a team at its first start, once everything was written,
+with advice meant for an instance upgraded in place.
 """
 
 from __future__ import annotations
@@ -129,13 +130,17 @@ def test_an_agent_type_over_24_characters_is_refused_naming_where_it_is_defined(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("team_id", "agent_type", "refused"), [
-    (TOO_LONG, None, f"The team id {TOO_LONG!r} is 25 characters long"),
-    (FITS, LONG_TYPE, f"The agent type {LONG_TYPE!r} (defined in control/agent_bundles/long) is 28 characters long"),
+    (TOO_LONG, None, None),
+    (TOO_LONG, LONG_TYPE, (f"The agent type {LONG_TYPE!r} (defined in control/agent_bundles/long) is 28 characters long",
+                           f"The team id {TOO_LONG!r} is 25 characters long")),
+    (FITS, LONG_TYPE, (f"The agent type {LONG_TYPE!r} (defined in control/agent_bundles/long) is 28 characters long",)),
     (FITS, None, None),
 ])
-async def test_onboarding_refuses_such_an_export_when_it_is_opened_before_preparing_its_review(
-    tmp_path: Path, team_id: str, agent_type: str | None, refused: str | None
+async def test_onboarding_refuses_agent_types_and_asks_for_a_team_id_when_an_export_is_opened(
+    tmp_path: Path, team_id: str, agent_type: str | None, refused: tuple[str, ...] | None
 ) -> None:
+    """Agent types that do not fit are refused when the export is opened; a team id alone is asked for anew."""
+
     root = tmp_path / "new"
     (root / "import").mkdir(parents=True)
     shutil.copy(_export(tmp_path, team_id, agent_type=agent_type), root / "import" / "team.uatransfer")
@@ -147,7 +152,13 @@ async def test_onboarding_refuses_such_an_export_when_it_is_opened_before_prepar
 
     if refused is None:
         assert opened.status == 200 and body["token"]
+        question = body["team_id_question"]
+        if team_id == FITS:
+            assert question is None, "a team whose id fits keeps it"
+            return
+        assert (question["exported_team_id"], question["suggestion"]) == (TOO_LONG, FITS)
+        assert sorted(path.name for path in root.iterdir()) == ["import"], "no review before the new id is chosen"
         return
-    assert opened.status == 400 and refused in body["error"]
+    assert opened.status == 400 and all(sentence in body["error"] for sentence in refused), body["error"]
     assert body["error"].startswith("This export's team cannot be imported into this version")
     assert sorted(path.name for path in root.iterdir()) == ["import"], "no review folder, nothing written"

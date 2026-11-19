@@ -427,6 +427,18 @@ h1 {
   width: 100%;
 }
 
+/* A team id this version cannot carry: why, the new id (suggested, editable) and Continue. */
+.team-import-team-id {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  width: 100%;
+}
+
+.team-import-team-id > .field {
+  width: 100%;
+}
+
 .team-import-exports {
   grid-template-columns: minmax(0, 1fr);
 }

@@ -5,11 +5,12 @@ message addresses, with a cap of 24 characters each (``custom_messages.wire.ids`
 launcher's id check (``instance_upgrades.protocol1_ids``) refuses an instance whose ids do
 not fit at its first start, but after an import that comes once the whole team is written
 and onboarding has ended, with advice meant for an instance upgraded in place. A transfer
-keeps the team id and the agent types, so a fresh import applies the same caps first:
-onboarding's Import when the export is opened, before its review is prepared
-(``assistant_gateway.onboarding_web.team_import``), and every plan for a fresh root
-(``service._import_context``), which covers the command-line import, the operator's review
-page and onboarding's own validation and import.
+keeps the agent types, so a fresh import applies the same caps first: onboarding's Import
+when the export is opened, before its review is prepared
+(``assistant_gateway.onboarding_web.team_import``, ``require_protocol1_agent_types``), and every
+plan for a fresh root (``service._import_context``), which covers the command-line import, the
+operator's review page and onboarding's own validation and import. Onboarding's open step leaves
+a team id that does not fit to its next step, which asks for a new one (owner's decision 103).
 
 What it checks, as the launcher does for the catalog: the team id the import writes
 (``TransferReader.team_ids``: the export's own, or the new id the import gives the team,
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import logging
 
+from custom_messages.wire.ids import TEAM_ID
 from instance_upgrades.protocol1_ids import (
     IMPORT_REFUSED_EVENT,
     IdOverCap,
@@ -53,8 +55,24 @@ def require_protocol1_ids(reader: TransferReader) -> None:
     """Return when every id of the export fits; ``TransferError`` with what to do otherwise."""
 
     found = ids_over_cap(reader)
-    if not found:
-        return
+    if found:
+        _refuse(reader, found)
+
+
+def require_protocol1_agent_types(reader: TransferReader) -> None:
+    """Onboarding's open step: refuse the export when an agent type does not fit.
+
+    A team id that does not fit alone is not refused here: the page asks for a new one next. When
+    an agent type is refused, the message names a team id that does not fit too, so the owner
+    learns both before exporting again.
+    """
+
+    found = ids_over_cap(reader)
+    if any(item.rule_what != TEAM_ID.what for item in found):
+        _refuse(reader, found)
+
+
+def _refuse(reader: TransferReader, found: list[IdOverCap]) -> None:
     LOGGER.warning(
         "A team export holds ids protocol 1 cannot carry, so it is not imported. event=%s team_id=%r "
         "imported_team_id=%r ids=%r",
@@ -66,4 +84,4 @@ def require_protocol1_ids(reader: TransferReader) -> None:
     raise TransferError(import_refusal_message(found))
 
 
-__all__ = ["ids_over_cap", "require_protocol1_ids"]
+__all__ = ["ids_over_cap", "require_protocol1_agent_types", "require_protocol1_ids"]

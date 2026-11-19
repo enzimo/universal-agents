@@ -414,10 +414,7 @@ def plan_summary(plan: ImportPlan, *, dry_run: bool) -> list[str]:
     ]
     if plan.team_ids.renamed:
         ids = plan.team_ids
-        lines.append(
-            f"Team {ids.exported} {'would be' if dry_run else 'was'} imported as {ids.imported}: "
-            "every imported record names the new team id."
-        )
+        lines.append(f"Team {ids.exported} {'would be' if dry_run else 'was'} imported as {ids.imported}.")
     for title, outcome in (
         ("Needs your attention:", RecordOutcome.ATTENTION),
         ("Refused:", RecordOutcome.REFUSED),

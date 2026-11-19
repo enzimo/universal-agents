@@ -30,6 +30,15 @@ Why these choices:
   from the old instance's choice, because the new host may differ.
 - **Clean-up.** After a successful import the copied export and its review
   folder are deleted; the original stays wherever it was exported.
+- **A team id this version cannot carry** (owner's decision 103,
+  ``team_transfer.team_ids``). Opening such an export prepares no review: the
+  reply carries a question (why the id does not fit, and a suggested new id),
+  and ``POST /api/team-import/team-id`` prepares the review under the id the
+  owner confirms, checked like a typed onboarding id. Agent types that do not
+  fit are still refused when the export is opened. The review folder is fixed
+  per export, so opening the export again offers the id chosen before; another
+  id prepares the review again (``prepare_review(restart_for_another_id=True)``),
+  because a team id cannot be changed after the import.
 """
 
 from __future__ import annotations
@@ -53,11 +62,13 @@ from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.secrets_source import SECRETS_SOURCE_ENV_FILE, normalize_secrets_source
 from team_transfer.container import TransferFileError, TransferReader
 from team_transfer.crypto import TransferKeyError
-from team_transfer.errors import TransferError
+from team_transfer.errors import NewTeamIdRefused, TransferError
 from team_transfer.format import TransferModel
-from team_transfer.protocol1_ids import require_protocol1_ids
+from team_transfer.protocol1_ids import require_protocol1_agent_types
+from team_transfer.review import ReviewFiles, prepare_review, saved_review_team_id
 from team_transfer.review_session import ReviewApplyV1, ReviewSession, ReviewUpdateV1
 from team_transfer.sections import DestinationChoices
+from team_transfer.team_ids import new_team_ids, suggested_team_id, team_id_explanation
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,6 +79,7 @@ TOKEN_HEADER = "X-Transfer-Token"
 PAGE_FILE = Path(__file__).resolve().parent / "assets" / "team_import.html"
 _FAILURES = (TransferError, TransferFileError, TransferKeyError, ValidationError, ValueError, OSError)
 _WAITING_REASON = "stored when the team starts, by its broker"
+_CHOOSE_TEAM_ID_FIRST = "Choose the team's new id first: open the export again from onboarding's Let's Begin step."
 
 
 class OpenExportV1(TransferModel):
@@ -79,14 +91,39 @@ class DestinationV1(TransferModel):
     secrets_source: str
 
 
+class TeamIdV1(TransferModel):
+    # Empty is allowed here so the id rule answers it in words by the field.
+    team_id: str = Field(max_length=255)
+
+
 @dataclass
 class _OpenImport:
     reader: TransferReader
     archive_path: Path
     review_dir: Path
-    session: ReviewSession
     token: str = field(repr=False)
-    exported_secrets_source: str
+    # None until the review is prepared: when the export is opened for a team that keeps its id,
+    # after the owner chose a new one (``team_id_question``) for a team whose id does not fit.
+    session: ReviewSession | None = None
+    exported_secrets_source: str = SECRETS_SOURCE_ENV_FILE
+    team_id_question: dict[str, Any] | None = None
+    # Set while the review is prepared under a new id, which may replace the review folder; the
+    # import refuses meanwhile, and the id step refuses while an import runs.
+    preparing: bool = False
+
+    @property
+    def review(self) -> ReviewSession:
+        if self.session is None:
+            raise TransferError(_CHOOSE_TEAM_ID_FIRST)
+        return self.session
+
+    def start_review(self, files: ReviewFiles) -> None:
+        self.exported_secrets_source = _exported_secrets_source(files.archive)
+        self.session = ReviewSession(
+            files,
+            prepare_credentials=_leave_for_first_start,
+            destination=DestinationChoices(secrets_source=self.exported_secrets_source),
+        )
 
 
 class TeamImport:
@@ -112,6 +149,7 @@ class TeamImport:
         app.router.add_get(PAGE_PATH, self._page)
         app.router.add_get(f"{API_PREFIX}/exports", self._exports)
         app.router.add_post(f"{API_PREFIX}/open", self._open_export)
+        app.router.add_post(f"{API_PREFIX}/team-id", self._guarded(self._choose_team_id, needs_review=False))
         app.router.add_get(f"{API_PREFIX}/review", self._guarded(self._review))
         app.router.add_post(f"{API_PREFIX}/record", self._guarded(self._record))
         app.router.add_post(f"{API_PREFIX}/destination", self._guarded(self._destination))
@@ -172,47 +210,79 @@ class TeamImport:
             self._open = opened
         manifest = opened.reader.manifest
         self._logger.info(
-            "Opened a team export for import. event=onboarding_team_import_opened file_name=%s team_id=%s "
-            "exported_by_version=%s",
+            "Opened a team export for import. event=onboarding_team_import_opened file_name=%s team_id=%r "
+            "exported_by_version=%s asks_for_team_id=%s",
             path.name,
             manifest.team_id,
             manifest.application_version,
+            opened.team_id_question is not None,
         )
-        return _json({"token": opened.token, "page": PAGE_PATH})
+        return _json({"token": opened.token, "page": PAGE_PATH, "team_id_question": opened.team_id_question})
 
     def _open_reader(self, layout: InstanceLayout, path: Path, passphrase: str) -> _OpenImport:
-        from team_transfer.review import prepare_review
-
         reader = TransferReader.open(path, passphrase)
         try:
-            # Before the review is prepared: a team this version cannot run is refused on the page.
-            require_protocol1_ids(reader)
-            review_dir = layout.team_import_review_dir / reader.manifest.mac[:24]
-            _private_folder(review_dir.parent)
-            # Reopening the same export keeps the selections and edits made so far.
-            files = prepare_review(reader, layout.root, review_dir)
-            exported = _exported_secrets_source(files.archive)
-            session = ReviewSession(
-                files,
-                prepare_credentials=_leave_for_first_start,
-                destination=DestinationChoices(secrets_source=exported),
+            # Before anything is written: agent types this version cannot run are refused on the page.
+            require_protocol1_agent_types(reader)
+            opened = _OpenImport(
+                reader=reader,
+                archive_path=path,
+                review_dir=layout.team_import_review_dir / reader.manifest.mac[:24],
+                token=secrets.token_urlsafe(32),
             )
+            opened.team_id_question = _team_id_question(reader, opened.review_dir)
+            if opened.team_id_question is None:
+                _private_folder(opened.review_dir.parent)
+                # Reopening the same export keeps the selections and edits made so far.
+                opened.start_review(prepare_review(reader, layout.root, opened.review_dir))
         except BaseException:
             reader.close()
             raise
-        return _OpenImport(
-            reader=reader,
-            archive_path=path,
-            review_dir=review_dir,
-            session=session,
-            token=secrets.token_urlsafe(32),
-            exported_secrets_source=exported,
+        return opened
+
+    async def _choose_team_id(self, request: web.Request, opened: _OpenImport) -> web.Response:
+        """The new team id for an export whose id does not fit; the review is prepared under it."""
+
+        payload = TeamIdV1.model_validate(await request.json())
+        if opened.team_id_question is None:
+            return _error("This export's team id fits this version, so the team keeps it.", status=409)
+        if self._importing:
+            return _error("An import is running. Wait for it to finish.", status=409)
+        layout = self._layout()
+        problem = _not_fresh(layout)
+        if problem:
+            return _error(problem, status=409)
+        async with self._opening:
+            if self._open is not opened:
+                return _error("Open the export again from onboarding's Let's Begin step.", status=403)
+            if self._importing:
+                return _error("An import is running. Wait for it to finish.", status=409)
+            opened.preparing = True
+            try:
+                files, previous = await asyncio.to_thread(_review_under_new_id, layout, opened, payload.team_id)
+            except NewTeamIdRefused as exc:
+                return _error(str(exc), field="team_id")
+            finally:
+                opened.preparing = False
+            opened.start_review(files)
+        ids = files.reader.team_ids
+        restarted = previous is not None and previous != ids.imported
+        self._logger.info(
+            "Chose the imported team's new id. event=onboarding_team_import_team_id_chosen team_id=%s "
+            "exported_team_id=%r restarted_review=%s",
+            ids.imported,
+            ids.exported,
+            restarted,
         )
+        return _json({"page": PAGE_PATH, "team_id": ids.imported, "restarted_review": restarted})
 
     # -- the review --------------------------------------------------------------------
 
     def _guarded(
-        self, handler: Callable[[web.Request, _OpenImport], Awaitable[web.StreamResponse]]
+        self,
+        handler: Callable[[web.Request, _OpenImport], Awaitable[web.StreamResponse]],
+        *,
+        needs_review: bool = True,
     ) -> Callable[[web.Request], Awaitable[web.StreamResponse]]:
         async def guarded(request: web.Request) -> web.StreamResponse:
             opened = self._open
@@ -222,6 +292,8 @@ class TeamImport:
                 return _error(
                     "Open the export again from onboarding's Let's Begin step.", status=403
                 )
+            if needs_review and opened.session is None:
+                return _error(_CHOOSE_TEAM_ID_FIRST, status=409)
             try:
                 return await handler(request, opened)
             except _FAILURES as exc:
@@ -230,10 +302,10 @@ class TeamImport:
         return guarded
 
     async def _review(self, _request: web.Request, opened: _OpenImport) -> web.Response:
-        destination = opened.session.destination or DestinationChoices()
+        destination = opened.review.destination or DestinationChoices()
         return _json(
             {
-                **opened.session.state(),
+                **opened.review.state(),
                 "review_directory": None,
                 "destination": {
                     "secrets_source": destination.secrets_source,
@@ -244,22 +316,26 @@ class TeamImport:
 
     async def _record(self, request: web.Request, opened: _OpenImport) -> web.Response:
         payload = ReviewUpdateV1.model_validate(await request.json())
-        return _json(await opened.session.update(payload))
+        return _json(await opened.review.update(payload))
 
     async def _destination(self, request: web.Request, opened: _OpenImport) -> web.Response:
         payload = DestinationV1.model_validate(await request.json())
         source = normalize_secrets_source(payload.secrets_source)
-        await opened.session.set_destination(DestinationChoices(secrets_source=source))
+        await opened.review.set_destination(DestinationChoices(secrets_source=source))
         return _json({"saved": True, "secrets_source": source})
 
     async def _validate(self, _request: web.Request, opened: _OpenImport) -> web.Response:
-        return _json(await opened.session.validate())
+        return _json(await opened.review.validate())
 
     async def _import(self, request: web.Request, opened: _OpenImport) -> web.Response:
         payload = ReviewApplyV1.model_validate(await request.json())
+        if opened.preparing:
+            return _error("The review is being prepared under the new team id. Wait for it, then validate again.",
+                          status=409)
+        session = opened.review
         self._importing = True
         try:
-            result = await opened.session.apply(payload)
+            result = await session.apply(payload)
             layout = self._layout()
             completion = await asyncio.to_thread(_completion, layout, opened)
         finally:
@@ -267,10 +343,12 @@ class TeamImport:
         await self.close()
         _remove_import_files(opened, self._logger)
         restarting = self._on_imported(completion)
+        ids = session.files.reader.team_ids
         self._logger.info(
-            "Team imported during onboarding. event=onboarding_team_imported team_id=%s records=%s "
-            "credentials_waiting=%s missing_secrets=%s restarting=%s",
-            opened.reader.manifest.team_id,
+            "Team imported during onboarding. event=onboarding_team_imported team_id=%s exported_team_id=%r "
+            "records=%s credentials_waiting=%s missing_secrets=%s restarting=%s",
+            ids.imported,
+            ids.exported,
             result["imported"],
             len(result["credentials"]),
             ",".join(item["name"] for item in completion["missing_secrets"]),
@@ -299,6 +377,41 @@ def _leave_for_first_start(files: Any, layout: Any, keys: list[str]) -> list[dic
     return [{"key": key, "imported": False, "waiting": True, "reason": _WAITING_REASON} for key in keys]
 
 
+def _team_id_question(reader: TransferReader, review_dir: Path) -> dict[str, Any] | None:
+    """What the page asks when the export's team id does not fit; None when the team keeps its id.
+
+    The field starts with the id chosen when this export was opened before (its review folder
+    recorded it), so an owner who comes back keeps their choice; otherwise with the suggestion.
+    """
+
+    exported = reader.manifest.team_id
+    explanation = team_id_explanation(exported)
+    if explanation is None:
+        return None
+    chosen_before = saved_review_team_id(reader.manifest, review_dir)
+    if chosen_before == exported:
+        chosen_before = None
+    return {
+        "exported_team_id": exported,
+        "explanation": explanation,
+        "suggestion": chosen_before or suggested_team_id(exported),
+        "chosen_before": chosen_before,
+    }
+
+
+def _review_under_new_id(layout: InstanceLayout, opened: _OpenImport, team_id: str) -> tuple[ReviewFiles, str | None]:
+    """The review prepared under ``team_id``, and the id an earlier review of this export had recorded."""
+
+    # The rule a typed id must pass, before any folder is created: a refused id writes nothing.
+    new_team_ids(opened.reader.manifest.team_id, team_id)
+    previous = saved_review_team_id(opened.reader.manifest, opened.review_dir)
+    _private_folder(opened.review_dir.parent)
+    files = prepare_review(
+        opened.reader, layout.root, opened.review_dir, new_team_id=team_id, restart_for_another_id=True
+    )
+    return files, previous
+
+
 def _completion(layout: InstanceLayout, opened: _OpenImport) -> dict[str, Any]:
     """What onboarding records after the import, as ``_handle_complete`` does after its write."""
 
@@ -311,7 +424,7 @@ def _completion(layout: InstanceLayout, opened: _OpenImport) -> dict[str, Any]:
         # Secrets the old team.env held must now come from the environment too.
         entered = [
             record.key.split("/", 1)[1]
-            for record in opened.session.files.review.records
+            for record in opened.review.files.review.records
             if record.section == "operator_secrets"
             and record.selected
             and record.key.startswith("environment/")
@@ -331,7 +444,9 @@ def _completion(layout: InstanceLayout, opened: _OpenImport) -> dict[str, Any]:
         "source_env_ignored": False,
         "skills_repos": [],
         "team_import": {
-            "team_id": opened.reader.manifest.team_id,
+            # The id the instance runs under, and the export's when the import gave the team a new one.
+            "team_id": opened.review.files.reader.team_ids.imported,
+            "exported_team_id": opened.reader.manifest.team_id,
             "exported_by_version": opened.reader.manifest.application_version,
             "imported_at_utc": datetime.now(timezone.utc).isoformat(),
         },
@@ -442,8 +557,13 @@ def _json(value: Any, status: int = 200) -> web.Response:
     return web.json_response(value, status=status, headers=_private_headers())
 
 
-def _error(message: str, *, status: int = 400) -> web.Response:
-    return _json({"error": message}, status=status)
+def _error(message: str, *, status: int = 400, field: str | None = None) -> web.Response:
+    """A refusal; ``field`` names the input it belongs to, so the page shows it by that field."""
+
+    body: dict[str, Any] = {"error": message}
+    if field is not None:
+        body["field"] = field
+    return _json(body, status=status)
 
 
 __all__ = ["API_PREFIX", "PAGE_PATH", "TeamImport"]

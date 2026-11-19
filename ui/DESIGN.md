@@ -120,6 +120,8 @@ onboarding's server, titled **Choose what to import**, with these differences:
 - Credentials waiting for the first start show as attention lines, not
   failures. Missing environment secrets are listed by name, purpose and how to
   create them, and the page does not wait for a start.
+- The line under the title names the team, and reads "Team X, imported as Y"
+  when the import gives the team a new id (both review pages).
 - No review folder is shown: it is private to the new instance and deleted
   after the import. The token, as on the loopback page, is never stored; after
   a reload the person opens the export again and keeps their selections.
@@ -1623,6 +1625,14 @@ its history. Steps with linked requests cannot use this correction.
   instance shows the reason as an alert and disables **Open export**; a wrong
   passphrase shows "The export was not opened." with the reason as an alert and
   clears the field.
+- When the export's team id does not fit this version (owner's decision 103),
+  opening it shows, in the same card, why in plain words, a **New team id**
+  field starting from the suggested id, **Choose another export** and
+  **Continue**. When the export was opened before and given an id, the field
+  starts from that id and a note says that keeping it keeps the selections and
+  another id starts the review again. A refused id shows under the field as a
+  red `field-error` alert beginning "This id was not used." and keeps what was
+  typed; other failures use the card's alert line.
 - Below the path choices, Let's Begin shows one toggle card, **Secrets come
   from the environment (Docker secrets). Don't write team.env.**, off by
   default, using the standard `choice-card` toggle with its help text always

@@ -221,7 +221,9 @@
   request("/review").then(value => {
     records = value.records;
     sections = value.sections || [...new Set(records.map(r => r.section))].map(name => ({name, title: name}));
-    byId("source").textContent = `Team ${value.team_id} → ${value.target_root}`;
+    const team = value.imported_team_id && value.imported_team_id !== value.team_id
+      ? `Team ${value.team_id}, imported as ${value.imported_team_id}` : `Team ${value.team_id}`;
+    byId("source").textContent = `${team} → ${value.target_root}`;
     if (byId("files")) byId("files").textContent = `Editable files are saved in ${value.review_directory}.`;
     for (const section of sections) { const option = node("option", section.title); option.value = section.name; byId("section").append(option); }
     renderDestination(value.destination);

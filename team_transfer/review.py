@@ -7,6 +7,12 @@ id does not fit (owner's decision 103). It is chosen once, when the review is pr
 first import created). After that the review folder is its source: ``ReviewFiles.open`` reads
 the export under the recorded id and refuses a caller that requires another one, so a
 reviewed import, a later batch and the review page all write the same id.
+
+The one exception is onboarding's Import, whose review folder is fixed per export
+(``state/team-import/review/<signature>``): an owner who chose an id and opens the export again
+may still correct it before the import (``prepare_review(restart_for_another_id=True)``), since a
+team id cannot be changed afterwards. The page offers the saved id first
+(``saved_review_team_id``). On the command line the operator names another review folder instead.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ from team_transfer.team_ids import TeamIds, new_team_ids, target_team_ids
 
 if TYPE_CHECKING:
     from team_transfer.container import TransferReader
+    from team_transfer.format import TransferManifestV1
 
 LOGGER = logging.getLogger(__name__)
 
@@ -107,14 +114,20 @@ def archive_records(reader) -> dict[str, dict[str, dict[str, Any]]]:
 
 
 def prepare_review(
-    reader, target_root: str | Path, directory: str | Path, *, new_team_id: str | None = None
+    reader,
+    target_root: str | Path,
+    directory: str | Path,
+    *,
+    new_team_id: str | None = None,
+    restart_for_another_id: bool = False,
 ) -> "ReviewFiles":
     """Publish a complete review once; failed writes leave its name available.
 
     ``new_team_id`` is the id an owner asked for (onboarding's Import, ``--new-team-id``). A
     new review takes its team id from ``target_team_ids`` and, for a fresh target, refuses ids
     this version cannot carry (``protocol1_ids``) before writing anything. A review that exists
-    keeps the id it recorded; a different ``new_team_id`` is refused.
+    keeps the id it recorded; a different ``new_team_id`` is refused, unless
+    ``restart_for_another_id`` (onboarding's Import) asks to prepare the review again under it.
     """
 
     root = _review_directory(directory)
@@ -124,6 +137,8 @@ def prepare_review(
     with _initialization_lock(root.parent):
         if safe_open.entry_status(root.parent, (root.name,)) is not None:
             if safe_open.entry_status(root.parent, (root.name, "review.json")) is not None:
+                if restart_for_another_id and _asks_for_another_id(reader, root, new_team_id):
+                    return _restart_review(reader, target_root, root, new_team_id)
                 return ReviewFiles.open(reader, root, target_root=target_root, team_id=new_team_id)
             # Old initialization wrote the target folder before review.json. Only
             # a folder without that completion record may be discarded on retry.
@@ -154,6 +169,54 @@ def _reader_for_new_review(
     return chosen
 
 
+def saved_review_team_id(manifest: "TransferManifestV1", directory: str | Path) -> str | None:
+    """The team id a review saved in ``directory`` for this export recorded; None when there is none.
+
+    Read without building the records, for onboarding's Import, which offers the id chosen before
+    in place of the suggestion. A review that cannot be read or belongs to another backup counts
+    as none here; opening it gives the reason.
+    """
+
+    root = _review_directory(directory)
+    try:
+        review = ImportReviewV1.model_validate_json(safe_open.read_bytes(root.parent, (root.name, "review.json")))
+    except (OSError, ValueError):
+        return None
+    if review.schema_version != 1 or review.source_mac != manifest.mac:
+        return None
+    return review.team_id or manifest.team_id
+
+
+def _asks_for_another_id(reader: "TransferReader", root: Path, new_team_id: str | None) -> bool:
+    saved = saved_review_team_id(reader.manifest, root)
+    return new_team_id is not None and saved is not None and new_team_id.strip() != saved
+
+
+def _restart_review(
+    reader: "TransferReader", target_root: str | Path, root: Path, new_team_id: str | None
+) -> "ReviewFiles":
+    """Onboarding's review prepared again under another new team id; its selections and edits start again.
+
+    They cannot be carried: record keys can hold the team id (a knowledge redirect, the
+    maintenance schedule). The new review's records are read first, so an id the rule or a
+    section refuses leaves the saved review as it was.
+    """
+
+    previous = saved_review_team_id(reader.manifest, root)
+    chosen = _reader_for_new_review(reader, target_root, new_team_id)
+    archive = archive_records(chosen)
+    safe_open.remove_directory(root.parent, (root.name,))
+    LOGGER.info(
+        "Prepared an import review again under another team id; its selections start again. "
+        "event=team_transfer_review_restarted directory=%s source_mac=%s team_id=%s previous_team_id=%r",
+        root,
+        reader.manifest.mac,
+        chosen.team_ids.imported,
+        previous,
+    )
+    return _initialize_review(chosen, target_root, root, archive)
+
+
 def _recorded_team_ids(exported: str, recorded: str | None) -> TeamIds:
     """The ids a saved review recorded, checked by the rule a typed new id passes."""
 
@@ -178,8 +241,9 @@ def _initialization_lock(parent: Path):
         os.close(descriptor)
 
 
-def _initialize_review(reader, target_root: str | Path, root: Path) -> "ReviewFiles":
-    archive = archive_records(reader)
+def _initialize_review(reader, target_root: str | Path, root: Path, archive=None) -> "ReviewFiles":
+    if archive is None:
+        archive = archive_records(reader)
     staging = Path(tempfile.mkdtemp(prefix=f".{root.name}.init-", dir=root.parent))
     try:
         files = _write_review(reader, target_root, staging, archive)

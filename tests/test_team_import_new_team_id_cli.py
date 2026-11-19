@@ -329,7 +329,7 @@ def test_a_long_team_id_moves_through_the_command_line_under_a_new_id(
     with pytest.raises(SystemExit) as dry_run:
         _run_cli("import", *common, "--dry-run", "--new-team-id", NEW)
     assert dry_run.value.code == 1, "it lists records this version refuses, as for any team"
-    assert f"Team {OLD} would be imported as {NEW}" in capsys.readouterr().out
+    assert f"Team {OLD} would be imported as {NEW}.\n" in capsys.readouterr().out
     assert not target.exists()
 
     def select_all_but_one_fact(files: ReviewFiles) -> tuple[str, set[tuple[str, str]]]:
@@ -358,7 +358,7 @@ def test_a_long_team_id_moves_through_the_command_line_under_a_new_id(
     assert not target.exists()
     _run_cli("import", *common, "--review", str(review))
     printed = capsys.readouterr().out
-    assert f"Team {OLD} was imported as {NEW}: every imported record names the new team id." in printed
+    assert f"Team {OLD} was imported as {NEW}.\n" in printed
 
     # Nothing in the new instance names the old id or an id the old instance derived from it; only the
     # import report, the history of where the team came from, does. The same search finds each of them in
@@ -491,6 +491,11 @@ async def test_import_credentials_stores_the_teams_credentials_under_the_receipt
         await asyncio.to_thread(_run_cli, "import-credentials", *common, "--config", config_path, "--review", str(review))
     assert f"prepared to import the team as {OTHER!r}, and this instance's first import gave it the id {NEW!r}" in str(
         refused.value)
+    # A later batch from that review is refused saying how to go on.
+    with pytest.raises(SystemExit) as refused:
+        await asyncio.to_thread(_run_cli, "import", *common, "--instance-root", str(target), "--review", str(review))
+    assert f"team {OLD}, imported as {OTHER}: they are different teams" in str(refused.value)
+    assert "prepare a new review folder for it with assistant_cli team review" in str(refused.value)
     (review / "review.json").write_text(saved)
 
     # The new instance's first start: its broker is team NEW.
@@ -505,3 +510,5 @@ async def test_import_credentials_stores_the_teams_credentials_under_the_receipt
     with credential_owner_context(NEW, scope_kind="team"):
         assert read_credential_state("x.oauth_client_json") == X_APP
     assert _stored_naming(target, (OLD,)) == [] and _stored_naming(tmp_path / "new_store", (OLD,)) == []
+    # The broker of this test keeps its values in files, so they are searched too.
+    assert _files_naming(target, (OLD,)) == [] and _files_naming(tmp_path / "new_store", (OLD,)) == []

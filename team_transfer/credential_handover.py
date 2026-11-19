@@ -99,7 +99,7 @@ def write_credential_handover(reader: Any, layout: Any, selected_keys: Sequence[
     # team_id is the team the instance will be (the id the import wrote); exported_team_id is the export's.
     logger.info(
         "Credentials left for the first start. event=team_import_credentials_handed_over team_id=%s "
-        "exported_team_id=%s count=%s",
+        "exported_team_id=%r count=%s",
         reader.team_ids.imported,
         bundle.manifest.team_id,
         len(keys),
@@ -174,7 +174,7 @@ def import_handed_over_credentials(
     refused = [outcome for outcome in report.outcomes if not outcome.get("imported")]
     path.unlink()
     logger.info(
-        "Handed-over credentials imported. event=team_import_credentials_imported team_id=%s exported_team_id=%s "
+        "Handed-over credentials imported. event=team_import_credentials_imported team_id=%s exported_team_id=%r "
         "stored=%s refused=%s",
         config.gateway.team_id,
         bundle.manifest.team_id,
@@ -190,7 +190,7 @@ def _record_outcomes(config: Any, bundle: CredentialBundle, report: CredentialIm
     if refused:
         logger.warning(
             "Some handed-over credentials were not stored. event=team_import_credentials_refused "
-            "team_id=%s exported_team_id=%s refused=%s",
+            "team_id=%s exported_team_id=%r refused=%s",
             config.gateway.team_id,
             bundle.manifest.team_id,
             ",".join(str(outcome.get("key")) for outcome in refused),
