@@ -10,14 +10,23 @@ never saved, the task failed, and the agent stayed paused for later turns.
 Now the turn hands the pause on and the guidance waits for the resumed turn.
 The agent is marked for replacement as soon as its call pauses
 (``strands_parts.mark_paused``), so a turn that still ends before it saves
-the pause leaves no stuck agent to the next turn.
+the pause leaves no stuck agent to the next turn. A work-session turn whose
+call pauses keeps its pause too; its resumed turn checks the required skills.
 
 Real pieces: the turn owner (``LLMTurnExecutor``), a Strands agent on the
 locked SDK with the production executor (``ChangesFirstToolExecutor``) and the
 real ``RuntimeSteeringPlugin``, the real guidance acceptance
 (``handle_task_steering_message``), the real ``send_interrupt_request_for_result``
-and resume (``_run_resumed_turn``), and a real ``TaskManager``. Only the model
-is scripted (``tests.test_resumed_tool_call_guidance.StepsModel``).
+and resume (``_run_resumed_turn``), the real work-session coordinator and plan,
+and a real ``TaskManager``. The model is scripted
+(``tests.test_resumed_tool_call_guidance.StepsModel``), and these turn parts
+are stand-ins (``tests.test_runtime_owner_boundaries.build_turn_owner``): the
+outbox records the decision instead of carrying it out, the structured output
+is used as the decision without conversion, the result transformer passes the
+result on, and context assembly uses the message itself as the prompt. The
+resumed turns' results are recorded instead of applied to their tasks, and
+the work-session test completes the plan step directly
+(``TaskManager.complete_task``), as applying the result would.
 """
 
 from __future__ import annotations
@@ -409,8 +418,8 @@ REQUIRED_SKILL = "long-horizon-plan-execution"  # the work policy's required ski
 BOUNDARIES = ["over-limit", "skill-missing"]
 
 
-def _work_session_plan(manager: Any) -> tuple[Any, Any, Any]:
-    """An Objective in a running work session with a two-step plan; step 1's task has started."""
+def _work_session(manager: Any) -> tuple[Any, Any]:
+    """An Objective in a running work session; its root task is the session's own task."""
 
     root, objective = _objective(manager)
     coordinator = manager.objective_work_coordinator
@@ -418,7 +427,13 @@ def _work_session_plan(manager: Any) -> tuple[Any, Any, Any]:
         objective.objective_id, profile_name="daily", accepted_by_task_id=root.task_id,
         acceptance_summary="Use bounded work windows.",
     )
-    session = coordinator.start_session(objective.objective_id, task_id=root.task_id)
+    return root, coordinator.start_session(objective.objective_id, task_id=root.task_id)
+
+
+def _work_session_plan(manager: Any) -> tuple[Any, Any, Any]:
+    """An Objective in a running work session with a two-step plan; step 1's task has started."""
+
+    root, session = _work_session(manager)
     plan = manager.activate_plan_execution(
         root.task_id,
         steps=[
@@ -437,6 +452,64 @@ def _saved_session(manager: Any, session: Any) -> Any:
     )
 
 
+def _work_session_tasks(manager: Any) -> dict[str, Any]:
+    """The task operations a work-session turn reads from the real task manager."""
+
+    return {
+        "objective_work_coordinator": manager.objective_work_coordinator,
+        "is_plan_step_task": manager.is_plan_step_task,
+        "read_runtime_resume_directive": manager.read_runtime_resume_directive,
+        "release_turn_start_notes": manager.release_turn_start_notes,
+    }
+
+
+def _checkpoints(manager: Any, session: Any) -> list[tuple[bool, str]]:
+    """The session's checkpoints: whether each is the runtime's degraded one, and its health."""
+
+    snapshot = manager.objective_work_coordinator.snapshot(session.objective_id)
+    return [(checkpoint["degraded"], checkpoint["health"]) for checkpoint in snapshot["checkpoints"]]
+
+
+async def _resume_saved_turn(host: Any, task_id: str) -> tuple[Any, list[Any]]:
+    """The person answers; the production resume runs the saved session.
+
+    The resumed turn uses the work-session wiring a manager has (the real
+    coordinator and start notes). Its outbox records the decisions it is given
+    and answers for the task; ``_apply_task_processing_result`` is recorded,
+    not run. Returns the turn's result and the decisions carried out.
+    """
+
+    manager = host.task_manager
+    carried_out: list[Any] = []
+
+    async def outbox(**kwargs: Any) -> Any:
+        carried_out.append(kwargs["decision"])
+        return Task(task_id=task_id, task_type=MessageMetaType.RESPONSE, answer=ANSWER_WITHOUT_GUIDANCE)
+
+    executor = _resume_executor(manager)
+    executor.tasks = replace(
+        executor.tasks,
+        objective_work_coordinator=manager.objective_work_coordinator,
+        release_turn_start_notes=manager.release_turn_start_notes,
+    )
+    host.turn_executor = executor
+    host._execute_turn_decision_outbox = outbox
+    host._apply_task_processing_result = AsyncMock()
+    saved = host._interrupted_turn_sessions[task_id]
+    answers = [{"interruptResponse": {"interruptId": r.interrupt_id, "response": ANSWER}} for r in saved.interrupts]
+    with task_work(task_id):
+        content = await _run_resumed_turn(
+            host, saved, TaskSteering(steering_type=TaskSteeringType.INTERRUPT_RESPONSE, target_task_id=task_id),
+            manager.get_task_info(task_id), answers, ToolStop(agent_id="lead", task_id=task_id),
+        )
+    return content, carried_out
+
+
+def _assert_skill_yield(content: Any) -> None:
+    assert isinstance(content, Task) and content.errors and content.errors[0] == "objective_work_session_yield"
+    assert REQUIRED_SKILL in content.errors[1]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", BOUNDARIES)
 async def test_an_objective_turn_that_pauses_at_its_boundary_keeps_the_pause(tmp_path, monkeypatch, caplog, boundary):
@@ -452,22 +525,19 @@ async def test_an_objective_turn_that_pauses_at_its_boundary_keeps_the_pause(tmp
         coordinator.objective_work_repository.save_session(expired)
     before = _saved_session(manager, session)
     host = _host(manager)
-    model = StepsModel([[("wait_for_access", {"service": "service-a"})], _decide, _decide])
+    model = StepsModel([[("wait_for_access", {"service": "service-a"})], _decide])
     sdk = _strands_agent(host, model, _tools())
     parts = host._strands_parts = strands_parts(sdk)
     calls = _count_calls(sdk)
-    tasks = {
-        "objective_work_coordinator": coordinator,
-        "is_plan_step_task": manager.is_plan_step_task,
-        "release_turn_start_notes": manager.release_turn_start_notes,
-    }
     step_id = plan.plan_steps[0].current_step_task_id
     step = manager.get_task_info(step_id)
     assert step.meta.objective_work_session_id == session.session_id
     caplog.set_level(logging.INFO)
 
     with task_work(step_id):
-        outcome = await _fresh_turn(host, tasks=tasks).process_llm_interaction(step.task, step.header, step.meta)
+        outcome = await _fresh_turn(host, tasks=_work_session_tasks(manager)).process_llm_interaction(
+            step.task, step.header, step.meta
+        )
 
     # The pause was saved; no checkpoint-only call went to the paused agent, and nothing yielded.
     assert len(calls) == 1
@@ -487,46 +557,71 @@ async def test_an_objective_turn_that_pauses_at_its_boundary_keeps_the_pause(tmp
     deferred = [r.getMessage() for r in caplog.records if "event=objective_work_boundary_after_pause" in r.getMessage()]
     assert len(deferred) == 1 and f"session_id={session.session_id}" in deferred[0]
 
-    # The person decides; the resumed turn finishes step 1, and the outbox completes its task.
-    async def outbox(**_kwargs: Any) -> Any:
-        return Task(task_id=step_id, task_type=MessageMetaType.RESPONSE, answer=ANSWER_WITHOUT_GUIDANCE)
-
-    host.turn_executor = _resume_executor(manager)
-    host._execute_turn_decision_outbox = outbox
-    host._apply_task_processing_result = AsyncMock()
-    saved = host._interrupted_turn_sessions[step_id]
-    answers = [{"interruptResponse": {"interruptId": r.interrupt_id, "response": ANSWER}} for r in saved.interrupts]
-    with task_work(step_id):
-        await _run_resumed_turn(
-            host, saved, TaskSteering(steering_type=TaskSteeringType.INTERRUPT_RESPONSE, target_task_id=step_id),
-            manager.get_task_info(step_id), answers, ToolStop(agent_id="lead", task_id=step_id),
-        )
+    # The person decides and step 1's turn resumes with the access answer.
+    content, carried_out = await _resume_saved_turn(host, step_id)
     assert _tool_results(sdk)["step1-call0"] == ("success", f"access to service-a: {ANSWER}")
+    host._apply_task_processing_result.assert_awaited_once()
+    if boundary == "over-limit":
+        # The limit does not stop the resumed turn: its decision is carried out.
+        assert len(carried_out) == 1 and not content.errors
+    else:
+        # The missing skill stops the resumed turn before its decision is carried out.
+        assert carried_out == []
+        _assert_skill_yield(content)
+    # Applying that result completes step 1's task; this test completes it directly.
     manager.complete_task(step_id, datetime.now(timezone.utc).isoformat())
 
+    # Either way the session stops before step 2, with the runtime's degraded checkpoint.
     resumed_plan = manager.get_plan(plan.plan_id)
-    snapshot = coordinator.snapshot(session.objective_id)
-    if boundary == "over-limit":
-        # The saved over-limit status refuses step 2 and checkpoints the session.
-        assert resumed_plan.plan_steps[0].status == ExecutionPlanItemStatus.COMPLETED
-        assert resumed_plan.plan_steps[1].status == ExecutionPlanItemStatus.PLANNED
-        assert resumed_plan.plan_steps[1].current_step_task_id is None
-        assert _saved_session(manager, session).status == ObjectiveWorkSessionStatus.CHECKPOINTED
-        assert [checkpoint["degraded"] for checkpoint in snapshot["checkpoints"]] == [True]
-        # The root task runs again to finish this execution window (_resume_checkpointed_plan_root).
-        assert root.task_id in manager.task_state.task_queue
-        assert manager.get_task_info(root.task_id).state == ProgressState.PARTIAL
-        return
-    # Step 2 starts; its fresh turn yields at its end because the skill is still missing.
-    next_id = resumed_plan.plan_steps[1].current_step_task_id
-    assert next_id
-    next_step = manager.get_task_info(next_id)
-    with task_work(next_id):
-        yielded = await _fresh_turn(host, tasks=tasks).process_llm_interaction(
-            next_step.task, next_step.header, next_step.meta
-        )
-    assert isinstance(yielded, Task) and yielded.errors[0] == "objective_work_session_yield"
-    assert REQUIRED_SKILL in yielded.errors[1]
+    assert resumed_plan.plan_steps[0].status == ExecutionPlanItemStatus.COMPLETED
+    assert resumed_plan.plan_steps[1].status == ExecutionPlanItemStatus.PLANNED
+    assert resumed_plan.plan_steps[1].current_step_task_id is None
     assert _saved_session(manager, session).status == ObjectiveWorkSessionStatus.CHECKPOINTED
-    checkpoints = coordinator.snapshot(session.objective_id)["checkpoints"]
-    assert [(c["degraded"], c["health"]) for c in checkpoints] == [(True, ObjectiveHealthDisposition.NEEDS_HUMAN.value)]
+    health = ObjectiveHealthDisposition.AT_RISK if boundary == "over-limit" else ObjectiveHealthDisposition.NEEDS_HUMAN
+    assert _checkpoints(manager, session) == [(True, health.value)]
+    # The root task runs again to finish this execution window (_resume_checkpointed_plan_root).
+    assert root.task_id in manager.task_state.task_queue
+    assert manager.get_task_info(root.task_id).state == ProgressState.PARTIAL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skill", ["missing", "activated"])
+async def test_a_session_root_turn_resumed_after_a_pause_checks_its_required_skills(tmp_path, monkeypatch, skill):
+    # The session's own task pauses in its last turn and finishes on resume:
+    # no fresh turn follows that would catch a missing required skill.
+    use_signed_contexts(monkeypatch)
+    manager = _objective_manager(tmp_path, policy=True)
+    root, session = _work_session(manager)
+    if skill == "activated":
+        manager.objective_work_coordinator.record_skill_activation(root.task_id, REQUIRED_SKILL)
+    note = "An earlier access decision arrived. Continue the task."
+    manager.append_runtime_resume_directive(root.task_id, note)
+    host = _host(manager)
+    sdk = _strands_agent(host, StepsModel([[("wait_for_access", {"service": "service-a"})], _decide]), _tools())
+    parts = host._strands_parts = strands_parts(sdk)
+    info = manager.get_task_info(root.task_id)
+    with task_work(root.task_id):
+        outcome = await _fresh_turn(host, tasks=_work_session_tasks(manager)).process_llm_interaction(
+            info.task, info.header, info.meta
+        )
+    assert isinstance(outcome, TaskSteering)
+    assert manager.read_runtime_resume_directive(root.task_id) == note  # kept while the task waits
+
+    content, carried_out = await _resume_saved_turn(host, root.task_id)
+
+    host._apply_task_processing_result.assert_awaited_once()
+    assert host._apply_task_processing_result.await_args.args[2] is content
+    assert root.task_id not in host._interrupted_turn_sessions
+    assert parts.replace_before_next_turn is False
+    final = _saved_session(manager, session)
+    if skill == "activated":
+        assert len(carried_out) == 1 and not content.errors
+        assert final.status == ObjectiveWorkSessionStatus.RUNNING and final.checkpoint_id is None
+        return
+    # The resumed turn stops before its decision, as a fresh turn would, and asks for a person.
+    assert carried_out == []
+    _assert_skill_yield(content)
+    assert final.status == ObjectiveWorkSessionStatus.CHECKPOINTED
+    assert _checkpoints(manager, session) == [(True, ObjectiveHealthDisposition.NEEDS_HUMAN.value)]
+    # The yield is the turn's saved result, so the note it read is released.
+    assert manager.read_runtime_resume_directive(root.task_id) is None

@@ -167,6 +167,53 @@ def _objective_work_invocation_usage(result: Any) -> tuple[dict[str, Any], list[
     )
 
 
+def _missing_skills_reason(missing_skills: list[str]) -> str:
+    return "Required work-session skills were not activated: " + ", ".join(missing_skills)
+
+
+async def _saved_work_checkpoint(
+    *, coordinator: Any, runtime: TaskOperationRuntime, session: Any
+) -> Any:
+    """The checkpoint the work session already points to, if it has one."""
+
+    if not session.checkpoint_id:
+        return None
+    checkpoints = await runtime.run(
+        coordinator.objective_work_repository.list_checkpoints,
+        session.objective_id,
+        owner_agent_id=session.owner_agent_id,
+        limit=1,
+    )
+    return next(
+        (item for item in checkpoints if item.checkpoint_id == session.checkpoint_id),
+        None,
+    )
+
+
+def _objective_work_yield_response(
+    *, msg_content: ContentType, active_task_id: Optional[str], checkpoint: Any, reason: str
+) -> Task:
+    """The task's response when its work session stops at a boundary (a fresh or a resumed turn)."""
+
+    return Task(
+        task_id=msg_content.task_id
+        if isinstance(msg_content, Task)
+        else active_task_id,
+        parent_task_id=msg_content.parent_task_id
+        if isinstance(msg_content, Task)
+        else None,
+        task_type=MessageMetaType.RESPONSE,
+        problem_statement=msg_content.problem_statement
+        if isinstance(msg_content, Task)
+        else None,
+        answer=(
+            "The bounded Objective work session yielded safely. "
+            f"Checkpoint {checkpoint.checkpoint_id} preserves the continuation state."
+        ),
+        errors=["objective_work_session_yield", reason],
+    )
+
+
 async def _finalize_objective_work_invocation(
     *,
     model: Agent,
@@ -213,9 +260,7 @@ async def _finalize_objective_work_invocation(
     if not (missing_skills or limit_reached or session_boundary):
         return None
     if missing_skills:
-        reason = "Required work-session skills were not activated: " + ", ".join(
-            missing_skills
-        )
+        reason = _missing_skills_reason(missing_skills)
     elif limit_reached:
         reason = (
             f"Strands stopped at the configured {result.stop_reason} safe boundary."
@@ -230,11 +275,13 @@ async def _finalize_objective_work_invocation(
         # (_complete_turn). The checkpoint-only call below would fail on the
         # paused agent, which takes only interrupt answers, and a yield here
         # would drop the pause. The usage up to the pause is recorded above;
-        # the work after the resume is not counted against the session
-        # budget and runs within this turn's per-call limits. The boundary
-        # applies after the resume: the saved session status refuses the next
-        # plan step (ObjectiveWorkSessionCoordinator.admits_plan_step), and
-        # missing skills are caught at the end of the session's next fresh turn.
+        # the work after the resume is not counted against the session budget:
+        # each resumed call gets this turn's per-call limits again, and the
+        # tool-call cap is not checked after a resume. The boundary applies
+        # after the resume: missing skills stop the resumed turn before its
+        # decision is carried out (LLMTurnExecutor.yield_for_missing_work_skills),
+        # and the saved session status refuses the next plan step
+        # (ObjectiveWorkSessionCoordinator.admits_plan_step).
         logger.info(
             "An Objective work session reached its boundary in a call that paused; the pause is kept and the "
             "boundary applies after the resume. event=objective_work_boundary_after_pause session_id=%s "
@@ -248,19 +295,8 @@ async def _finalize_objective_work_invocation(
 
     checkpoint = None
     if session.checkpoint_id:
-        checkpoints = await runtime.run(
-            coordinator.objective_work_repository.list_checkpoints,
-            session.objective_id,
-            owner_agent_id=session.owner_agent_id,
-            limit=1,
-        )
-        checkpoint = next(
-            (
-                item
-                for item in checkpoints
-                if item.checkpoint_id == session.checkpoint_id
-            ),
-            None,
+        checkpoint = await _saved_work_checkpoint(
+            coordinator=coordinator, runtime=runtime, session=session
         )
     elif not missing_skills:
         checkpoint_started = time.monotonic()
@@ -326,21 +362,9 @@ async def _finalize_objective_work_invocation(
                 tool_calls=len(checkpoint_handler.tool_sequence),
                 stop_reason=getattr(checkpoint_result, "stop_reason", None),
             )
-            if session.checkpoint_id:
-                checkpoints = await runtime.run(
-                    coordinator.objective_work_repository.list_checkpoints,
-                    session.objective_id,
-                    owner_agent_id=session.owner_agent_id,
-                    limit=1,
-                )
-                checkpoint = next(
-                    (
-                        item
-                        for item in checkpoints
-                        if item.checkpoint_id == session.checkpoint_id
-                    ),
-                    None,
-                )
+            checkpoint = await _saved_work_checkpoint(
+                coordinator=coordinator, runtime=runtime, session=session
+            )
         except Exception as exc:
             logger.warning(
                 "Checkpoint-only Objective invocation failed; using deterministic degraded checkpoint. "
@@ -355,22 +379,8 @@ async def _finalize_objective_work_invocation(
         checkpoint = await runtime.run(
             coordinator.degraded_checkpoint, session, reason=reason
         )
-    return Task(
-        task_id=msg_content.task_id
-        if isinstance(msg_content, Task)
-        else active_task_id,
-        parent_task_id=msg_content.parent_task_id
-        if isinstance(msg_content, Task)
-        else None,
-        task_type=MessageMetaType.RESPONSE,
-        problem_statement=msg_content.problem_statement
-        if isinstance(msg_content, Task)
-        else None,
-        answer=(
-            "The bounded Objective work session yielded safely. "
-            f"Checkpoint {checkpoint.checkpoint_id} preserves the continuation state."
-        ),
-        errors=["objective_work_session_yield", reason],
+    return _objective_work_yield_response(
+        msg_content=msg_content, active_task_id=active_task_id, checkpoint=checkpoint, reason=reason
     )
 
 
@@ -2093,16 +2103,19 @@ class LLMTurnExecutor:
         cancelled at shutdown lost them; a delegation repeated by a later turn
         is not deduplicated, so they must not outlive the decision either.
         """
-        if turn.start_notes is None:
+        await self._release_start_notes(turn.start_notes, turn.active_task_id)
+
+    async def _release_start_notes(self, notes: TurnStartNotes | None, task_id: Optional[str]) -> None:
+        if notes is None:
             return
         try:
-            await self.tasks.runtime.run(self.tasks.release_turn_start_notes, turn.start_notes)
+            await self.tasks.runtime.run(self.tasks.release_turn_start_notes, notes)
         except Exception:
             self.logger.exception(
                 "Could not remove the note a finished turn read; the next turn reads it again. "
                 "event=turn_start_state_release_failed agent_id=%s task_id=%s",
                 self.settings.id,
-                turn.active_task_id,
+                task_id,
             )
 
     async def _run_prepared_turn(self, turn: _TurnState) -> ContentType:
@@ -2633,7 +2646,7 @@ class LLMTurnExecutor:
                         # called again with text it raises TypeError and stays
                         # paused. It is marked first, so no later turn reuses
                         # it even if this one ends before saving the pause.
-                        # _complete_turn hands the pause to
+                        # For a Task, _complete_turn hands the pause to
                         # send_interrupt_request_for_result; guidance waits for
                         # the resumed turn (its next new tool call, or
                         # task_steering_runtime._call_until_guidance_read).
@@ -2928,6 +2941,55 @@ class LLMTurnExecutor:
             limit,
         )
         raise TaskWaitLimitReached(task_id=task_id, waits=waits, limit=limit)
+
+    async def yield_for_missing_work_skills(
+        self,
+        *,
+        msg_content: ContentType,
+        msg_meta: MessageMeta,
+        task_id: Optional[str],
+        start_notes: TurnStartNotes | None,
+    ) -> Optional[Task]:
+        """Stop a resumed work-session turn whose required skills are still missing; None to carry on.
+
+        A fresh turn whose call paused leaves this check to the resumed turn
+        (``_finalize_objective_work_invocation``), which calls it before its
+        decision is carried out (``task_steering_runtime._run_resumed_turn``).
+        Without it, a session whose last turn paused finished without its
+        required skills and without a checkpoint. Like a fresh turn with
+        missing skills, the session gets its saved checkpoint or the degraded
+        one (which asks for a person), the decision is dropped, and the task
+        answers with the same yield response. The session limit is not checked
+        here: the saved session status refuses the next plan step.
+        """
+
+        coordinator, session = await self._resolve_objective_work_context(msg_meta, task_id)
+        if session is None:
+            return None
+        missing_skills = await self.tasks.runtime.run(coordinator.missing_required_skills, session)
+        if not missing_skills:
+            return None
+        reason = _missing_skills_reason(missing_skills)
+        checkpoint = await _saved_work_checkpoint(
+            coordinator=coordinator, runtime=self.tasks.runtime, session=session
+        )
+        if checkpoint is None:
+            checkpoint = await self.tasks.runtime.run(coordinator.degraded_checkpoint, session, reason=reason)
+        self.logger.info(
+            "A resumed work-session turn stopped before its decision because required skills were not "
+            "activated. event=objective_work_session_yield_after_resume agent_id=%s task_id=%s session_id=%s "
+            "checkpoint_id=%s missing_skills=%s",
+            self.settings.id,
+            task_id,
+            session.session_id,
+            checkpoint.checkpoint_id,
+            missing_skills,
+        )
+        # The yield is the turn's saved result, as for a fresh turn's yield.
+        await self._release_start_notes(start_notes, task_id)
+        return _objective_work_yield_response(
+            msg_content=msg_content, active_task_id=task_id, checkpoint=checkpoint, reason=reason
+        )
 
     async def prepare_turn_decision(
         self, *, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta,

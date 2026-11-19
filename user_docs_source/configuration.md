@@ -1786,12 +1786,16 @@ A step can pause while it waits for a person, for example for an access
 decision or a setup step. Such a step keeps its pause even when the session
 reaches its limit or a required skill is not yet activated. The session
 records the usage up to the pause. The work after the person answers is not
-yet counted against the session budget: it runs within the limits the step's
-model turn started with, so a pause resumed at the limit can use up to one
-more turn's allowance. When that step finishes, a session past its limit does
-not start the next plan step and records a checkpoint instead; a required
-skill that is still missing stops the session at the end of its next model
-turn.
+counted against the session budget yet: each resumed model call gets the
+step's per-call turn and token allowance again, and the step's tool-call
+limit is not checked after a resume. A step that pauses at the limit, once or
+several times, can therefore do more work than the budget allows; counting
+that work is planned. A required skill that is still missing stops the step
+when the person has answered, before its result is used, and the session ends
+with the runtime's degraded checkpoint. A session past its limit lets the
+step finish; when the step belongs to a plan, the session then does not start
+the next plan step and also ends with the degraded checkpoint, not the
+model's own checkpoint pass.
 
 The same policy file owns `custom_profiles`; these controls are deliberately
 separate from the main runtime config. The built-in envelope enables one-time

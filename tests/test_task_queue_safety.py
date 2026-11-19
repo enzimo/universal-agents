@@ -194,6 +194,7 @@ async def test_access_resume_clears_old_blocker_before_final_review(
         _execute_turn_decision_outbox=dispatch,
         turn_executor=SimpleNamespace(
             _apply_agent_result_transformer=lambda _, result: result,
+            yield_for_missing_work_skills=AsyncMock(return_value=None),  # no work session
             prepare_turn_decision=AsyncMock(),
             # Saves a note when the outbox held the turn's answer back.
             record_held_answer_work=AsyncMock(),

@@ -1294,7 +1294,7 @@ async def _run_resumed_turn(
     response_blocks: list[dict[str, Any]],
     tool_stop: ToolStop,
 ) -> Optional[Any]:
-    """Answer the SDK interrupt, then apply the turn's decision to the task."""
+    """Answer the SDK interrupt, then apply the turn's decision (or its work session's yield) to the task."""
 
     task_id = session.task_id
     result = await _call_until_guidance_read(agent, session, response_blocks, tool_stop)
@@ -1313,6 +1313,16 @@ async def _run_resumed_turn(
             full_prompt=session.full_prompt,
             start_notes=session.start_notes,
         )
+    # A fresh turn whose call paused left the work session's required-skill
+    # check to this turn (sdk.strands.turn._finalize_objective_work_invocation).
+    work_yield = await agent.turn_executor.yield_for_missing_work_skills(
+        msg_content=session.msg_content,
+        msg_meta=session.msg_meta,
+        task_id=task_id,
+        start_notes=session.start_notes,
+    )
+    if work_yield is not None:
+        return await _finish_resumed_turn(agent, session, steering, task_info, work_yield)
 
     outcome = agent.turn_executor.decode_result(
         result=result,
@@ -1348,6 +1358,15 @@ async def _run_resumed_turn(
         task_id=task_id, decision=outcome.decision, content=content, strands_agent=session.strands_agent,
         decision_tool_name=decision_tool_name,
     )
+    return await _finish_resumed_turn(agent, session, steering, task_info, content)
+
+
+async def _finish_resumed_turn(
+    agent: Any, session: StrandsInterruptedTurnSession, steering: TaskSteering, task_info: Any, content: Any
+) -> Any:
+    """Apply a resumed turn's result to its task and free its Strands agent for later turns."""
+
+    task_id = session.task_id
     await agent._apply_task_processing_result(task_id, task_info, content)
     agent._interrupted_turn_sessions.pop(task_id, None)
     _mark_strands_resumable(agent, resumed=session.strands)
