@@ -182,7 +182,10 @@ async def _finalize_objective_work_invocation(
     active_task_id: Optional[str],
     tool_stop: ToolStop,
 ) -> Optional[Task]:
-    """Account one bounded invocation and produce a durable-yield response if needed."""
+    """Account one bounded invocation and produce a durable-yield response if needed.
+
+    A call that paused is accounted but never yields: its turn keeps the pause.
+    """
     usage, cycles = _objective_work_invocation_usage(result)
     session = await runtime.run(
         coordinator.account_invocation,
@@ -221,6 +224,27 @@ async def _finalize_objective_work_invocation(
         reason = (
             session.yield_reason or "The configured work-session boundary was reached."
         )
+    if call_paused(result):
+        # The call paused for a person (an access decision, a setup step), so
+        # the turn's work is not finished and the turn saves its pause next
+        # (_complete_turn). The checkpoint-only call below would fail on the
+        # paused agent, which takes only interrupt answers, and a yield here
+        # would drop the pause. The usage up to the pause is recorded above;
+        # the work after the resume is not counted against the session
+        # budget and runs within this turn's per-call limits. The boundary
+        # applies after the resume: the saved session status refuses the next
+        # plan step (ObjectiveWorkSessionCoordinator.admits_plan_step), and
+        # missing skills are caught at the end of the session's next fresh turn.
+        logger.info(
+            "An Objective work session reached its boundary in a call that paused; the pause is kept and the "
+            "boundary applies after the resume. event=objective_work_boundary_after_pause session_id=%s "
+            "objective_id=%s status=%s reason=%s",
+            session.session_id,
+            session.objective_id,
+            getattr(session.status, "value", session.status),
+            reason,
+        )
+        return None
 
     checkpoint = None
     if session.checkpoint_id:
