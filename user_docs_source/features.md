@@ -683,6 +683,10 @@ same way.
   fresh page opens. A step outside Universal Agents keeps waiting without its
   card: its line in chat history keeps the instructions and link, and you
   mark it done on the workflow page.
+- If TeamLead is restarting when you finish a page (or the gateway cannot
+  reach it), the page's card still closes and the gateway keeps the result.
+  TeamLead gets it as soon as it is back, or when the gateway next starts, and
+  the task carries on; the other pages' cards stay until each page ends.
 
 When the request needs two or more things, one chat message says so first
 and links the workflow page that tracks them all, for example "I need 2

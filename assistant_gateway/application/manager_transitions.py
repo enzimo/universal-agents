@@ -35,6 +35,12 @@ class GatewayMaintenanceScheduleInstaller(Protocol):
     async def ensure_all(self) -> None: ...
 
 
+class GatewayKeptResults(Protocol):
+    """Setup page results kept while no team lead could be reached (``tool_setup.GatewayToolSetups``)."""
+
+    async def resend_kept_results(self) -> object: ...
+
+
 @dataclass(frozen=True)
 class GatewayManagerTransitionSettings:
     """Stable presentation and route settings for manager transitions."""
@@ -81,6 +87,7 @@ class GatewayManagerTransitionApplication:
         targets: GatewayProactiveTargetProvider,
         proactive_sessions: GatewayProactiveSessionResolver,
         maintenance: GatewayMaintenanceScheduleInstaller,
+        kept_results: GatewayKeptResults,
         manager: GatewayManagerClient,
         responses: GatewayResponseCoordinator,
         event_output: GatewayEventOutput,
@@ -91,6 +98,7 @@ class GatewayManagerTransitionApplication:
         self._targets = targets
         self._proactive_sessions = proactive_sessions
         self._maintenance = maintenance
+        self._kept_results = kept_results
         self._manager = manager
         self._responses = responses
         self._event_output = event_output
@@ -120,6 +128,15 @@ class GatewayManagerTransitionApplication:
         self._available_hook = on_manager_available
 
     async def handle_available(self, transition: GatewayManagerTransition) -> None:
+        """A team lead is reachable: reinstall schedules, announce a return, then send kept setup results.
+
+        The kept results go on every available transition, a lead's return and
+        a change to another lead alike, because a result whose publish failed
+        while the old lead was known is kept too. They go last, after the
+        notice and the apps' hook (which resumes Telegram polling), so many
+        kept results never delay those, and even when one of them fails.
+        """
+
         if not self._active:
             return
         try:
@@ -133,11 +150,27 @@ class GatewayManagerTransitionApplication:
                 transition.source,
                 type(exc).__name__,
             )
-        if not transition.became_available:
-            return
-        if self._notices_enabled:
-            await self._emit_notice(available=True)
-        await self._run_hook(self._available_hook, label="available")
+        try:
+            if transition.became_available:
+                if self._notices_enabled:
+                    await self._emit_notice(available=True)
+                await self._run_hook(self._available_hook, label="available")
+        finally:
+            await self._resend_kept_results(transition)
+
+    async def _resend_kept_results(self, transition: GatewayManagerTransition) -> None:
+        try:
+            await self._kept_results.resend_kept_results()
+        except Exception as exc:  # noqa: BLE001 - the next transition or start sends them
+            self._logger.error(
+                "Gateway could not send the setup results kept for the team lead. "
+                "event=gateway_manager_transition_step_failed step=resend_kept_results manager_id=%s source=%s "
+                "error_type=%s",
+                transition.manager_id,
+                transition.source,
+                type(exc).__name__,
+                exc_info=exc,
+            )
 
     async def handle_unavailable(self, _transition: GatewayManagerTransition) -> None:
         if self._notices_enabled:

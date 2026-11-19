@@ -2850,6 +2850,65 @@ person which command to run or asking whether to start:
    a gateway restart, broker pages still waiting are reported as unwatched
    (and offered again); an outside step keeps waiting, because nothing
    watches it. Page addresses are never stored.
+   The same conditional update keeps the task's result in the row
+   (`result_json`, a `ToolSetupResultV1` without any address, and
+   `result_state`: `unsent`, `sent` or `unsendable`), and the result is sent
+   from there (`GatewayToolSetups.resend_kept_results`); the update that
+   marks it sent or unsendable drops the kept copy, which holds the person's
+   account name. It is addressed when
+   it is sent, to the team lead known at that moment, under a NATS message id
+   that names that lead (`secure_result:<kind>:<result id>:<lead id>`): NATS
+   drops a repeated id for 600 seconds, so a copy for a replacement lead must
+   not reuse the old lead's id. When no lead is known, or the publish fails
+   (NATS disconnected), the result stays kept and the chat request is never
+   given a finished status (`secure_results.SecureResultPublisher`). Kept
+   results are sent when a page ends, at gateway start, on every
+   team-lead-available transition (`manager_transitions.handle_available`,
+   after the notice and the apps' hook), and by a retry with backoff (1 to 30
+   seconds) after a failed publish or an unexpected error while a lead is
+   known; the retry gives up after eight passes in a row in which a kept
+   result failed with an error (`event=gateway_tool_setup_resend_gave_up`)
+   and the next start or transition tries again, while a pass that cannot
+   even list the kept results (the database is down) is retried like a
+   failed publish. No retry starts once the gateway began to stop
+   (`event=gateway_tool_setup_retry_skipped_closed`); the next start sends
+   what is still kept. One pass at a time sends them, oldest first, and
+   reads them afresh, so a result is never sent from two places at once; a
+   missing lead or a failed publish stops the pass, while an error on one
+   result is logged (`event=gateway_tool_setup_resend_failed`) and the pass
+   goes on. A result that can never be sent (its chat no longer exists, or
+   the kept copy cannot be read) is marked `unsendable` and logged once
+   (`event=gateway_tool_setup_result_unsendable`). The stored result leaves out
+   the broker session id, which for an account link is the form's bearer. A
+   result is "sent" once it is accepted into the queue of the lead known
+   then; a lead that stops before the gateway notices (the liveness check)
+   can still lose it, as it can lose any message the gateway sends it. The
+   team lead applies a page's result to its run once, before it checks
+   whether the task ended (`tool_setup_run_runtime.apply_page_result`, with
+   the applied ids in `ToolSetupRunV1.results_applied`), and marks it handled
+   only after its follow-up steps finished: the workflow step, the history
+   entry and the next pages, or the answer when the task had ended
+   (`results_handled`). A copy of a handled result is ignored
+   (`event=tool_setup_result_duplicate`) and never answers the person twice;
+   a copy of a result whose handling failed partway, or was cut short by a
+   stop, runs the follow-up steps again
+   (`event=tool_setup_result_handled_again`), so the task still continues as
+   it did when every copy was handled in full. Setup-run recovery
+   (`resume_ended_setup_runs`) may advance such a run first, without waiting
+   for the copy; the copy then still records the page on its workflow step
+   and in the history, and its own `advance` finds nothing left to do. A result never changes a
+   piece that no longer waits, and a run saved by the previous version (no
+   ids) handles a replayed copy as that version did. The gateway logs a
+   publish NATS answered as a duplicate
+   (`event=gateway_durable_publish_duplicate`). Removing a person deletes
+   their setup rows with their chat sessions (`forget_person_records`):
+   without the chat a kept result could never be sent, and the person's tasks
+   end with their removal. The rows do not travel in a team transfer.
+   Rationale (review of the 2026-11-14 incident fixes): the row was marked
+   finished before the send and the result was not kept, so a page that ended
+   while the team lead restarted never reached its task, and the publisher
+   marked the still-running chat request `manager_unavailable`, which closed
+   the task's other cards and refused its later pages.
    The way that ends a page writes the one chat line that closes its card
    (`PageEnding.closing`, else the task's message). The line names the page by kind and the tool by the
    name its page showed: the sign-in name for sign-ins, the catalog's display
@@ -2871,8 +2930,13 @@ person which command to run or asking whether to start:
    so after a refresh only its history line remains. A listed card stays
    until that page's own `ToolSetupRecord` ends
    (`GatewayToolSetups.page_status`), its expiry
-   passes, or the task ends (the chat request has a terminal status or a
-   finished run state). Cards live only in gateway memory, so a gateway
+   passes, or the task ends (`request_service.request_task_ended`: a thread's
+   request when its run state is finished, another request at a terminal
+   status; the same rule decides whether a new page for the task still
+   opens). A thread's status cannot say it: every page result changes it,
+   and the team-lead-unavailable transition still writes
+   `manager_unavailable` onto a request with an open reply wait while its
+   task resumes when a lead is back. Cards live only in gateway memory, so a gateway
    restart drops them: a broker page is offered again with a new card, while
    an outside step keeps only its history line and its Mark Done button on
    the workflow page. Each removal is logged once
