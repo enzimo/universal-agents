@@ -32,6 +32,8 @@ from custom_agents.stuck_tasks import (
     report_stuck_tasks,
 )
 from custom_agents.task_human_interaction_blockers import (
+    ANSWER_HELD_AT_KEY,
+    ANSWER_HELD_BY_KEY,
     clear_human_interaction_blocker,
     record_human_interaction_blocker,
 )
@@ -44,7 +46,8 @@ from custom_agents.task_steering_runtime import (
     INTERRUPT_WAITS_ON_REQUESTER_KEY,
 )
 from custom_agents import tool_setup_run_runtime
-from custom_agents.tool_setup_runs import DONE, RUN_FINISHED, TOOL_SETUP_RUN_KIND, RunPieceV1, ToolSetupRunV1
+from custom_agents.task_wait_reasons import SavedWork, WaitReason, saved_wait_reason
+from custom_agents.tool_setup_runs import DONE, RUN_FINISHED, RUN_WAITING, TOOL_SETUP_RUN_KIND, RunPieceV1, ToolSetupRunV1
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccessRequestStatus,
@@ -67,6 +70,7 @@ from custom_messages.contracts.runtime_snapshot_v3 import (
     TaskRuntimeLeaseRecord,
     TaskSnapshotRecord,
     TurnActionBatchRecord,
+    decode_runtime_snapshot,
 )
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskQuery
@@ -623,6 +627,10 @@ async def test_a_finished_setup_run_whose_answer_waits_for_a_busy_lane_is_never_
     await tool_setup_run_runtime.advance(lead, "run-1")  # the last page ended: the run finishes
 
     assert "root" in lead._pending_interrupt_responses and woken, "the answer waits for its lane"
+    # Review C05: the owner's own held answer is what excuses the task.
+    (row,) = [row for row in manager.runtime_state_store.peek_task_runtime_by_team("team") if row.owner_agent_id == "lead"]
+    work = SavedWork.from_snapshot(decode_runtime_snapshot(row.runtime_state_json), owner_agent_id="lead")
+    assert saved_wait_reason(work, work.tasks["root"]) is WaitReason.SETUP_ANSWER_HELD
     first = datetime.now(timezone.utc)
     await report_stuck_tasks(lead, now=first)
     await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
@@ -820,14 +828,31 @@ def waiting_access_request(lead):
     return [record("root", state=ProgressState.WAITING)], {}
 
 
-def waiting_setup_run(lead):
+def setup_run(lead, status=RUN_WAITING, page="waiting"):
+    """The task's set_up_tools run, with one sign-in page."""
     ToolSetupRunRepository(lead.task_manager.storage_settings).create(
         ToolSetupRunV1(
             run_id="run-1", team_id="team", person_id="jordan", task_id="root", agent_id="lead",
-            agent_type="TeamArchitect", tool_ids=("http:registrar",),
+            agent_type="TeamArchitect", tool_ids=("http:registrar",), status=status, interrupt_id="i1",
+            pieces=(RunPieceV1(piece_id="sign_in", tool_id="http:registrar", kind="sign_in", status=page),),
         )
     )
-    return [record("root", state=ProgressState.WAITING)], {}
+
+
+def setup_wait(held_by=None):
+    """The task's set_up_tools record; ``held_by`` marks its answer as held for the lane by that process."""
+    held = {ANSWER_HELD_AT_KEY: iso(datetime.now(timezone.utc)), ANSWER_HELD_BY_KEY: held_by} if held_by else {}
+    return blocker(TOOL_SETUP_RUN_KIND, run_id="run-1", interrupt_id="i1", **held)
+
+
+def waiting_setup_run(lead):
+    setup_run(lead)
+    return [record("root", state=ProgressState.WAITING)], setup_wait()
+
+
+def setup_answer_held_for_the_lane(lead):
+    setup_run(lead, status=RUN_FINISHED, page="done")
+    return [record("root", state=ProgressState.WAITING)], setup_wait(held_by="lead")
 
 
 def running_plan(lead):
@@ -874,7 +899,6 @@ LEGITIMATE_WAITS = {
         recoverable_pause_records={"p1": RecoverablePauseRecord(task_id="root", pause_id="p1", trigger="tool_call_budget")},
     ),
     "access request blocker": saved_only(lambda: [record("root", state=W)], **blocker("access_request", access_request_id="req-1")),
-    "setup run blocker": saved_only(lambda: [record("root", state=W)], **blocker(TOOL_SETUP_RUN_KIND, run_id="run-1")),
     "secure credential form": lambda lead: outside_wait("SecureCredentialCollectionRequest"),
     "signup automation": lambda lead: outside_wait("SignupAutomationRequest"),
     "interrupt sent to the requester": lambda lead: (
@@ -913,7 +937,10 @@ LEGITIMATE_WAITS = {
         lambda: [record("root", state=ProgressState.PARTIAL)], task_queue=["root"], final_review_pending_task_ids=["root"]
     ),
     "access request in the store": waiting_access_request,
-    "setup run in the store": waiting_setup_run,
+    # A setup-run record counts only while its run waits, or while this
+    # process holds its answer for the lane (task_wait_reasons, 2026-11-19).
+    "setup run waiting for its page": waiting_setup_run,
+    "setup answer held for the lane": setup_answer_held_for_the_lane,
     "plan in the store": running_plan,
     "retry timer in the schedule store": retry_timer,
 }
@@ -932,6 +959,29 @@ async def test_a_legitimate_wait_is_never_reported_as_waiting_on_nothing(lead, n
     assert STRANDED_TITLE not in [notice.title for notice in notices(lead)]
 
 
+@pytest.mark.parametrize(
+    ("run_status", "held_by"),
+    [(RUN_FINISHED, None), (None, None), (RUN_FINISHED, "agent-before-restart")],
+    ids=["its run ended", "its run is not stored", "an earlier process held its answer"],
+)
+@pytest.mark.asyncio
+async def test_a_setup_run_record_that_nothing_will_resume_is_reported(lead, run_status, held_by):
+    """Review CRIT-1: a record whose run no longer waits, with no answer held by its owner, is stranded.
+
+    Recovery normally resumes such a task within a minute
+    (``tool_setup_run_runtime.resume_ended_setup_runs``); this is the check for
+    when it cannot.
+    """
+    if run_status is not None:
+        setup_run(lead, status=run_status, page="done")
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)], **setup_wait(held_by=held_by))
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    assert waiting_reasons(lead) == {TASK_WAITING_ON_NOTHING}
+    assert STRANDED_TITLE in [notice.title for notice in notices(lead)]
+
+
 # -- a store that cannot be read (review C02) -------------------------------------------------
 
 
@@ -942,7 +992,9 @@ def damaged(*_args, **_kwargs):
 @pytest.mark.parametrize("store", ["plans", "tool_setup_runs"])
 @pytest.mark.asyncio
 async def test_an_unreadable_row_keeps_its_warning_and_the_other_notices_go_on(lead, monkeypatch, caplog, store):
-    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)], task_to_plan_id={"root": "plan-1"})
+    # The run store is read only for a task with a setup-run record (task_wait_reasons, 2026-11-19).
+    setup = setup_wait() if store == "tool_setup_runs" else {}
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING)], task_to_plan_id={"root": "plan-1"}, **setup)
     first = datetime.now(timezone.utc)
     await report_stuck_tasks(lead, now=first)
     await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)

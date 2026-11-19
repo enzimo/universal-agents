@@ -25,11 +25,22 @@ Read from the agent's saved work (``RuntimeSnapshotV3``):
   question to its parent.
 - ``RECOVERABLE_PAUSE``: a pause still waits for the person's choice
   (``get_pending_recoverable_pause``).
-- ``PERSON_DECISION``: a human interaction blocker of any kind: an access,
-  change or proposal request, or a ``set_up_tools`` run
+- ``PERSON_DECISION``: an access, change or proposal request's record
   (``task_human_interaction_blockers``). Every interrupt the code raises today
-  records one, so a paused turn's live session, which only its own process
-  holds in memory, needs no saved record of its own.
+  records one (a ``set_up_tools`` run's below), so a paused turn's live
+  session, which only its own process holds in memory, needs no saved record
+  of its own.
+- ``SETUP_ANSWER_HELD``: the task's ``set_up_tools`` run ended while its
+  paused turn was live, and the answer waits in memory for the task's lane,
+  which can be busy with another turn or paused (``execution_lanes_runtime``).
+  The run's record stays, marked with the agent process that holds the answer
+  (``mark_setup_answer_held``), until the turn resumes. A mark counts only
+  when that process owns the saved work: agent ids are new for each process,
+  so a mark left from before a restart falls back to the run's own state
+  below, and the task is reported once the run has ended. Recovery resumes
+  such a task first (``tool_setup_run_runtime.resume_ended_setup_runs``). An
+  agent whose id is fixed in its configuration keeps it across restarts, so
+  for it a stale mark relies on that recovery alone.
 - ``OUTSIDE_RESULT``: the task's latest action batch stopped to wait for a
   secure credential form or signup automation (the outbox's external-wait
   barrier, ``BATCH_WAITING_EXTERNAL_RESULT``), and since then neither has the
@@ -56,8 +67,13 @@ Read from team stores, only for a task with no reason above (``OutsideRecords``)
   store, and only the team lead has them. A plan step task is not excused by
   its plan: its own wake is its queue entry, and excusing it would hide a plan
   that cannot go on.
-- ``SETUP_RUN``: a ``set_up_tools`` run for the task still waits
-  (``ToolSetupRunRepository``).
+- ``SETUP_RUN``: the ``set_up_tools`` run the task's record names still
+  waits for its pages or decisions (``ToolSetupRunRepository``,
+  ``tool_setup_runs.still_waits``). A record whose run ended, is missing, or
+  waits with work left for ``advance`` explains nothing: nothing will
+  continue that task unless recovery does, and it is reported if recovery
+  cannot (until 2026-11-19 any record counted). A run with no record does not
+  count either: the pause that starts a run saves its record.
 - ``RETRY_TIMER``: an enabled one-time schedule with runs left named
   ``provider_overload_retry:<task id>:<marker>``: a person's "retry in 5 or 10
   minutes" choice, or a worker's wait after a model provider refused calls.
@@ -85,7 +101,8 @@ from custom_agents.task_steering_runtime import (
     INTERRUPT_REQUEST_EVENT,
     INTERRUPT_WAITS_ON_REQUESTER_KEY,
 )
-from custom_agents.tool_setup_runs import RUN_WAITING, ToolSetupRunV1
+from custom_agents.task_human_interaction_blockers import is_setup_run_blocker, setup_answer_held
+from custom_agents.tool_setup_runs import ToolSetupRunV1, still_waits
 from custom_messages.contracts.runtime_snapshot_v3 import (
     BATCH_WAITING_EXTERNAL_RESULT,
     RuntimeSnapshotV3,
@@ -129,6 +146,7 @@ class WaitReason(StrEnum):
     PERSON_DECISION = "person_decision"
     OUTSIDE_RESULT = "outside_result"
     REQUESTER_ANSWER = "requester_answer"
+    SETUP_ANSWER_HELD = "setup_answer_held"
     ISOLATED_RECOVERY = "isolated_recovery"
     QUEUE_PAUSE = "queue_pause"
     ACCESS_REQUEST = "access_request"
@@ -158,10 +176,12 @@ class SavedWork:
     """One agent's saved work with the records the rules read indexed once.
 
     Built per check, so one pass is linear in the size of the snapshot rather
-    than scanning every map for every task.
+    than scanning every map for every task. ``owner_agent_id`` is the agent
+    process that saved it; the snapshot itself does not name it.
     """
 
     snapshot: RuntimeSnapshotV3
+    owner_agent_id: str
     tasks: Mapping[str, TaskSnapshotRecord]
     queued: frozenset[str]
     parents_with_open_delegations: frozenset[str]
@@ -171,10 +191,21 @@ class SavedWork:
     roots_with_active_lease: frozenset[str]
     roots_with_pending_event: frozenset[str]
     tasks_in_isolated_recovery: frozenset[str]
+    # Records of waits for people (every kind but a setup run's).
+    tasks_waiting_on_person: frozenset[str]
+    # Setup-run records whose answer this owner holds for the task's lane.
+    tasks_with_setup_answer_held: frozenset[str]
+    # The run each other setup-run record names; the run store decides those.
+    setup_run_waited: Mapping[str, str]
 
     @classmethod
-    def from_snapshot(cls, snapshot: RuntimeSnapshotV3) -> SavedWork:
+    def from_snapshot(cls, snapshot: RuntimeSnapshotV3, *, owner_agent_id: str) -> SavedWork:
         tasks = {record.task_id: record for record in snapshot.tasks}
+        blockers = snapshot.human_interaction_blockers
+        setup_records = {task_id: blocker for task_id, blocker in blockers.items() if is_setup_run_blocker(blocker)}
+        held = frozenset(
+            task_id for task_id, blocker in setup_records.items() if setup_answer_held(blocker, owner_agent_id)
+        )
 
         def is_open(task_id: str) -> bool:
             record = tasks.get(task_id)
@@ -189,6 +220,7 @@ class SavedWork:
                 latest[batch.source_task_id] = (moment, batch.status)
         return cls(
             snapshot=snapshot,
+            owner_agent_id=owner_agent_id,
             tasks=tasks,
             queued=frozenset(snapshot.task_queue),
             parents_with_open_delegations=frozenset(
@@ -211,6 +243,13 @@ class SavedWork:
                 for link in snapshot.recovery_links.values()
                 if link.merge_status == UNMERGED_RECOVERY and is_open(link.recovery_task_id)
             ),
+            tasks_waiting_on_person=frozenset(set(blockers) - set(setup_records)),
+            tasks_with_setup_answer_held=held,
+            setup_run_waited={
+                task_id: str(blocker.get("run_id") or "")
+                for task_id, blocker in setup_records.items()
+                if task_id not in held
+            },
         )
 
     def runs_itself(self, task_id: str) -> bool:
@@ -305,7 +344,8 @@ def saved_wait_reason(work: SavedWork, record: TaskSnapshotRecord) -> WaitReason
         (WaitReason.PENDING_EVENT, root in work.roots_with_pending_event),
         (WaitReason.DELEGATED_WORK, task_id in work.parents_with_open_delegations),
         (WaitReason.RECOVERABLE_PAUSE, task_id in work.tasks_with_pending_pause),
-        (WaitReason.PERSON_DECISION, task_id in work.snapshot.human_interaction_blockers),
+        (WaitReason.PERSON_DECISION, task_id in work.tasks_waiting_on_person),
+        (WaitReason.SETUP_ANSWER_HELD, task_id in work.tasks_with_setup_answer_held),
         (WaitReason.ISOLATED_RECOVERY, task_id in work.tasks_in_isolated_recovery),
     )
     for reason, holds in checks:
@@ -375,15 +415,17 @@ class OutsideRecords:
         plan_id = work.snapshot.task_to_plan_id.get(task_id)
         if plan_id and plan_scope and plan_execution_active(self._plan(plan_id, plan_scope, task_id), task_id):
             return WaitReason.PLAN_EXECUTION
-        if self._setup_run_waits(task_id):
+        run_id = work.setup_run_waited.get(task_id)
+        if run_id is not None and self._setup_run_waits(task_id, run_id):
             return WaitReason.SETUP_RUN
         if self.has_retry_timer(task_id):
             return WaitReason.RETRY_TIMER
         return None
 
-    def _setup_run_waits(self, task_id: str) -> bool:
+    def _setup_run_waits(self, task_id: str, run_id: str) -> bool:
+        """The run the task's record names still waits (module docstring, ``SETUP_RUN``)."""
         try:
-            return any(run.status == RUN_WAITING for run in self.setup_runs_for_task(task_id))
+            return any(run.run_id == run_id and still_waits(run) for run in self.setup_runs_for_task(task_id))
         except Exception as exc:  # a bad row (another version, damaged JSON) or a failed read
             raise UnreadableWaitRecord(SETUP_RUN_STORE, task_id) from exc
 

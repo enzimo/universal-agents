@@ -578,7 +578,7 @@ async def _resume_ended_setup_runs(agent: Any) -> None:
     from custom_agents.tool_setup_run_runtime import resume_ended_setup_runs
 
     try:
-        await resume_ended_setup_runs(agent, wake=False)
+        await resume_ended_setup_runs(agent, at_start=True)
     except Exception:
         agent._logger.exception(
             "Could not resume tasks whose setup run ended during the restart. "

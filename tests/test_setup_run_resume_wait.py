@@ -418,6 +418,13 @@ async def test_a_failure_while_resuming_from_a_note_leaves_the_record_for_recove
 PASS = 100.0  # a scheduler pass's monotonic time, past any earlier pacing
 
 
+@pytest.fixture(autouse=True)
+def settled_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Runs saved by a test count as settled; the grace for runs between two steps has its own test."""
+
+    monkeypatch.setattr(tool_setup_run_runtime, "RECENT_RUN_SECONDS", 0.0)
+
+
 @pytest.fixture
 def results(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tool_setup_run_runtime, "outcome_for", lambda agent, run: RESULT)
@@ -635,7 +642,7 @@ async def test_start_recovery_queues_without_waking_and_a_failure_does_not_stop_
     with caplog.at_level(logging.ERROR):
         await runtime_recovery._resume_ended_setup_runs(agent)
 
-    assert calls == [{"wake": False}]
+    assert calls == [{"at_start": True}]
     assert "event=setup_run_recovery_failed" in caplog.text
 
 
@@ -671,3 +678,36 @@ async def test_each_scheduler_pass_runs_the_recovery_and_goes_on_after_a_failure
 
     assert calls == [agent] and alerts == [agent]
     assert ("event=setup_run_recovery_failed" in caplog.text) is fails
+
+
+@pytest.mark.asyncio
+async def test_a_pass_leaves_a_run_another_step_is_working_on(lead, woken, monkeypatch, caplog) -> None:
+    """Review C07: a run in the middle of its own step is not a lost wake-up, so no warning names it."""
+    pause_on_setup(lead)  # the page is done, but the run is not settled yet: still_waits is false
+
+    lock = tool_setup_run_runtime._lock(lead, "run-1")
+    with caplog.at_level(logging.WARNING):
+        async with lock:  # advance, begin_run or _resume holds it
+            assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
+        monkeypatch.setattr(tool_setup_run_runtime, "RECENT_RUN_SECONDS", 30.0)
+        assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 61) == 0  # just saved
+    assert run_repository(lead).get("run-1").status == "waiting"
+    assert "event=tool_setup_run_" not in caplog.text and not woken
+
+    monkeypatch.setattr(tool_setup_run_runtime, "RECENT_RUN_SECONDS", 0.0)  # later: the run has settled
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 122) == 1
+    assert run_repository(lead).get("run-1").status == RUN_FINISHED
+
+
+@pytest.mark.asyncio
+async def test_start_recovery_does_not_wait_for_a_recently_saved_run(lead, woken, results, monkeypatch) -> None:
+    """At start no step of the new process can be part-way through a run: a run the old one just saved is recovered."""
+    monkeypatch.setattr(tool_setup_run_runtime, "RECENT_RUN_SECONDS", 30.0)
+    pause_on_setup(lead)
+    ended(lead)
+    lead._interrupted_turn_sessions.clear()
+
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS, at_start=True) == 1
+
+    assert record_of(lead) is None and list(lead.task_manager.task_state.task_queue) == [TASK]
+    assert not woken, "startup wakes the drain itself"

@@ -746,6 +746,11 @@ async def _resume_from_note(
 # How often an agent looks for setup runs whose task was not resumed (the pace
 # of ``access_request_runtime.resume_decided_access_waits``).
 SETUP_RUN_RECOVERY_SECONDS = 60.0
+# A run saved this recently may be between two steps of its own (a result
+# saved before its ``advance``, an ended run before ``_resume``); a pass
+# leaves it to the next pass rather than report a lost wake-up that is not
+# one (review C07). Below the pace, so a lost run waits at most two passes.
+RECENT_RUN_SECONDS = 30.0
 # What recovery does for one task (``_recovery_step``).
 RECOVER_ADVANCE = "advance"
 RECOVER_RESUME = "resume"
@@ -776,14 +781,21 @@ def _recovery_step(agent: Any, blocker: dict[str, Any], run: ToolSetupRunV1) -> 
     return RECOVER_RESUME
 
 
-async def resume_ended_setup_runs(agent: Any, *, now: float | None = None, wake: bool = True) -> int:
+async def resume_ended_setup_runs(agent: Any, *, now: float | None = None, at_start: bool = False) -> int:
     """Resume this agent's tasks whose setup run ended without resuming them (module docstring).
 
-    Runs at agent start, after restart recovery (``wake=False``: startup wakes
-    the drain once it is ready), and on every scheduler pass, at most every
-    ``SETUP_RUN_RECOVERY_SECONDS``. Only the agent's own tasks are read;
-    nothing here starts an agent. Each task is handled on its own, so one
-    failure is logged and the others go on. Returns how many it resumed.
+    Runs at agent start, after restart recovery, and on every scheduler pass,
+    at most every ``SETUP_RUN_RECOVERY_SECONDS``. Only the agent's own tasks
+    are read; nothing here starts an agent. Each task is handled on its own,
+    so one failure is logged and the others go on. Returns how many it
+    resumed.
+
+    A pass leaves a run alone while another step of this process works on
+    it (its lock is held) or just saved it (``RECENT_RUN_SECONDS``), so its
+    warnings name only real lost wake-ups. ``at_start``: no step of the new
+    process can be part-way through a run, so a recent one is recovered at
+    once; and startup wakes the drain itself once it is ready, so recovery
+    only queues tasks.
     """
 
     import time
@@ -794,20 +806,29 @@ async def resume_ended_setup_runs(agent: Any, *, now: float | None = None, wake:
     agent._setup_run_check_after = moment + SETUP_RUN_RECOVERY_SECONDS
     resumed = 0
     for task_id, blocker in await agent.task_manager.operations_runtime.run(partial(_setup_run_waits, agent)):
-        resumed += await _recover_task(agent, task_id, blocker, wake=wake)
+        resumed += await _recover_task(agent, task_id, blocker, at_start=at_start)
     return resumed
 
 
-async def _recover_task(agent: Any, task_id: str, blocker: dict[str, Any], *, wake: bool) -> int:
+def _changed_recently(run: ToolSetupRunV1) -> bool:
+    return (datetime.now(timezone.utc) - run.updated_at_utc).total_seconds() < RECENT_RUN_SECONDS
+
+
+async def _recover_task(agent: Any, task_id: str, blocker: dict[str, Any], *, at_start: bool) -> int:
     """Recover one task's setup run; 1 when it resumed the task. A failure is logged, never raised."""
 
     run_id = str(blocker.get("run_id") or "")
+    if _lock(agent, run_id).locked():
+        return 0  # a step of this process works on the run now; the next pass looks again
+    wake = not at_start
     stage = "read"
     try:
         run = await _load(agent, run_id)
         if run is None or run.task_id != task_id:
             stage = RECOVER_NOT_FOUND
             return int(await _resume_missing_run(agent, task_id, run_id, wake=wake))
+        if not at_start and _changed_recently(run):
+            return 0
         step = _recovery_step(agent, blocker, run)
         if step is None:
             return 0
