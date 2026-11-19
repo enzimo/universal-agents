@@ -24,6 +24,7 @@ from custom_agents.sdk.strands.turn_tool_stop import (
     invoke_with_tool_stop,
     stop_tool_calls,
 )
+from custom_agents.sdk.strands.paused_tool_calls import call_paused
 from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.sdk.strands.turn_ports import (
     TurnRuntimeSettings,
@@ -2599,32 +2600,51 @@ class LLMTurnExecutor:
                         callback_handler=turn.callback_handler,
                         logger=self.logger,
                     )
-                    late_guidance = (
-                        await self.effects.consume_pending_proactive_guidance_message(
-                            turn.active_task_id
-                        )
-                    )
-                    if late_guidance:
-                        self.logger.info(
-                            "[%s] Re-invoking task %s because mid-turn steering arrived after the model call.",
-                            self.settings.id,
-                            turn.active_task_id or "unknown",
-                        )
-                        turn.assembly = self._append_provider_prompt_suffix(
-                            turn.assembly,
-                            text=late_guidance_instruction(late_guidance),
-                            name="late_requester_steering",
-                            source="task_steering_runtime.consume_pending_proactive_guidance_message",
-                        )
-                        turn.full_prompt = turn.assembly.prompt
-                        self.effects.reset_llm_conversation()
-                        self.effects.refresh_skills_plugins()
-                        self._take_optional_strands_snapshot()
-                        turn.strands_invocation_attempt += 1
+                    if call_paused(turn.result):
+                        # A paused Strands agent takes only interrupt answers:
+                        # called again with text it raises TypeError and stays
+                        # paused. _complete_turn hands the pause to
+                        # send_interrupt_request_for_result; guidance waits for
+                        # the resumed turn (its next new tool call, or
+                        # task_steering_runtime._call_until_guidance_read).
+                        break
+                    if await self._reinvoke_for_late_guidance(turn):
                         continue
                     break
                 except Exception as invoke_error:
                     await self._recover_invocation(turn, invoke_error)
+
+    async def _reinvoke_for_late_guidance(self, turn: _TurnState) -> bool:
+        """Prepare another call when guidance arrived during a call that did not pause; return whether it did.
+
+        The turn decision is not always a tool call that ``RuntimeSteeringPlugin``
+        can cancel with the guidance (``task_steering_runtime`` module
+        docstring), so the turn reads waiting guidance before it carries out
+        its decision and calls the model again with a fresh conversation.
+        """
+
+        late_guidance = await self.effects.consume_pending_proactive_guidance_message(
+            turn.active_task_id
+        )
+        if not late_guidance:
+            return False
+        self.logger.info(
+            "[%s] Re-invoking task %s because mid-turn steering arrived after the model call.",
+            self.settings.id,
+            turn.active_task_id or "unknown",
+        )
+        turn.assembly = self._append_provider_prompt_suffix(
+            turn.assembly,
+            text=late_guidance_instruction(late_guidance),
+            name="late_requester_steering",
+            source="task_steering_runtime.consume_pending_proactive_guidance_message",
+        )
+        turn.full_prompt = turn.assembly.prompt
+        self.effects.reset_llm_conversation()
+        self.effects.refresh_skills_plugins()
+        self._take_optional_strands_snapshot()
+        turn.strands_invocation_attempt += 1
+        return True
 
     async def _recover_invocation(
         self, turn: _TurnState, invoke_error: Exception
@@ -3043,9 +3063,7 @@ class LLMTurnExecutor:
         turn.result = self._apply_agent_result_transformer(
             turn.msg_content, turn.result
         )
-        if getattr(turn.result, "stop_reason", None) == "interrupt" and isinstance(
-            turn.msg_content, Task
-        ):
+        if call_paused(turn.result) and isinstance(turn.msg_content, Task):
             # The task is mid-work: the resumed turn's decision releases what
             # this turn read (TurnStartNotes).
             turn.start_notes_handed_over = True

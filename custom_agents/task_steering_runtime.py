@@ -84,7 +84,7 @@ from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.prompt_context_sanitization import render_replied_message_lines
 from custom_agents.provider_error_runtime import ProviderTimeoutError, is_provider_timeout_error
 from custom_agents.sent_files_runtime import keep_sent_files
-from custom_agents.sdk.strands.paused_tool_calls import INTERRUPT_STOP_REASON, PausedToolCalls
+from custom_agents.sdk.strands.paused_tool_calls import PausedToolCalls, call_paused
 from custom_agents.sdk.strands.turn import late_guidance_instruction
 from custom_agents.sdk.strands.turn_tool_stop import (
     TURN_CANCELLED_REASON,
@@ -1267,7 +1267,7 @@ async def _call_until_guidance_read(
             callback_handler=session.callback_handler,
             logger=agent._logger,
         )
-        if getattr(result, "stop_reason", None) == INTERRUPT_STOP_REASON:
+        if call_paused(result):
             return result
         guidance = await consume_pending_proactive_guidance_message(agent, session.task_id)
         if not guidance:
@@ -1296,7 +1296,7 @@ async def _run_resumed_turn(
     result = agent.turn_executor._apply_agent_result_transformer(
         session.msg_content, result
     )
-    if getattr(result, "stop_reason", None) == "interrupt":
+    if call_paused(result):
         return await send_interrupt_request_for_result(
             agent,
             result=result,
