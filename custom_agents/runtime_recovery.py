@@ -572,8 +572,8 @@ async def _resume_ended_setup_runs(agent: Any) -> None:
     A restart leaves no paused turn, so such a task resumes from a note with
     the run's result; without this it would wait for good, its record
     keeping it waiting above. Recovery only queues the task: startup wakes
-    the drain once it is ready. A failure is logged and the scheduler pass
-    tries again.
+    the drain once it is ready. A failure is logged; the task keeps its
+    record (a failed resume puts it back), so the scheduler pass tries again.
     """
     from custom_agents.tool_setup_run_runtime import resume_ended_setup_runs
 

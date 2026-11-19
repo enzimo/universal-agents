@@ -596,12 +596,10 @@ async def test_a_task_stranded_after_its_form_result_and_a_later_setup_pause_is_
     assert notice.title == STRANDED_TITLE
 
 
-@pytest.mark.asyncio
-async def test_a_finished_setup_run_whose_answer_waits_for_a_busy_lane_is_never_reported(lead, monkeypatch):
-    """Review FAIL-2: the run ends while the paused turn is live, and its lane stays busy past the threshold.
+def finish_setup_with_a_live_turn(lead, monkeypatch):
+    """A run ends through the real ``advance`` while the task's paused turn is live and its lane is busy.
 
-    The answer waits in memory until the lane is free (``execution_lanes_runtime``);
-    the saved record of the wait must stay until the turn really resumes.
+    The answer waits in memory until the lane is free (``execution_lanes_runtime``).
     """
     manager = lead.task_manager
     started = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -618,11 +616,24 @@ async def test_a_finished_setup_run_whose_answer_waits_for_a_busy_lane_is_never_
             pieces=(RunPieceV1(piece_id="sign_in", tool_id="http:registrar", kind="sign_in", status=DONE),),
         )
     )
-    lead._interrupted_turn_sessions = {"root": SimpleNamespace(interrupts=[SimpleNamespace(interrupt_id="i1")])}
+    lead._interrupted_turn_sessions = {
+        "root": SimpleNamespace(interrupts=[SimpleNamespace(interrupt_id="i1")], strands=SimpleNamespace())
+    }
     lead._pending_interrupt_responses = {}
     woken = []
     # The lane is busy (or the agent paused): the drain does not run the resume yet.
     monkeypatch.setattr(tool_setup_run_runtime, "schedule_pending_work", woken.append)
+    return woken
+
+
+@pytest.mark.asyncio
+async def test_a_finished_setup_run_whose_answer_waits_for_a_busy_lane_is_never_reported(lead, monkeypatch):
+    """Review FAIL-2: the run ends while the paused turn is live, and its lane stays busy past the threshold.
+
+    The saved record of the wait must stay until the turn really resumes.
+    """
+    woken = finish_setup_with_a_live_turn(lead, monkeypatch)
+    manager = lead.task_manager
 
     await tool_setup_run_runtime.advance(lead, "run-1")  # the last page ended: the run finishes
 
@@ -637,6 +648,31 @@ async def test_a_finished_setup_run_whose_answer_waits_for_a_busy_lane_is_never_
     assert TASK_WAITING_ON_NOTHING not in waiting_reasons(lead)
     assert not notices(lead) and not chats(lead)
     assert "root" not in manager.task_state.task_queue, "the held answer resumes it, not the queue"
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_turn_whose_resume_keeps_failing_is_reported(lead, monkeypatch):
+    """Review F1/F3 (CRIT-1): the held answer's turn is gone and resuming from a note fails every time.
+
+    Nothing waits for an answer any more, so the record loses its mark and
+    the stuck check reports the task (recovery logs each failed attempt).
+    """
+    finish_setup_with_a_live_turn(lead, monkeypatch)
+    await tool_setup_run_runtime.advance(lead, "run-1")
+    steering = lead._pending_interrupt_responses.pop("root")
+    lead._interrupted_turn_sessions.clear()  # the paused turn ended after its answer was held
+
+    def unreadable(agent, run):
+        raise RuntimeError("the catalog could not be read")
+
+    monkeypatch.setattr(tool_setup_run_runtime, "outcome_for", unreadable)
+    assert await tool_setup_run_runtime.resume_without_paused_turn(lead, "root", steering, why="paused_turn_gone") is False
+
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    assert waiting_reasons(lead) == {TASK_WAITING_ON_NOTHING}
+    assert STRANDED_TITLE in [notice.title for notice in notices(lead)]
 
 
 @pytest.mark.asyncio

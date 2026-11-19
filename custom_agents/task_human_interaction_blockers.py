@@ -15,6 +15,15 @@ of one of two kinds:
   2026-11-19 it was deleted when the run ended, so a task whose answer waited
   for a busy lane had no saved reason to wait and was reported as stuck.
 
+  The mark exists only while a paused turn of this process waits on the
+  run's interrupt with its answer held or being resumed: a failed save of
+  the mark puts the unmarked record back, the mark is removed wherever the
+  turn is dropped or the task resumes from a note instead
+  (``remove_setup_answer_mark``), and agent start removes every mark
+  (``clear_setup_answer_marks``), because no paused turn survives a restart.
+  The stuck-task check excuses a marked task, so a mark without its answer
+  would hide a stranded task.
+
 A record is removed only by what ends its wait: the answer a resumed turn
 takes (``clear_answered_blocker``, before the turn runs, so a new pause in it
 keeps its own record), a resume from a note (``clear_setup_run_blocker``), or
@@ -124,6 +133,64 @@ def mark_setup_answer_held(
         ANSWER_HELD_AT_KEY: at,
         ANSWER_HELD_BY_KEY: holder_id,
     }
+    try:
+        host._persist_runtime_state()
+    except Exception:
+        # No answer will be held: the unmarked record goes back, so recovery
+        # answers the turn on its next pass (module docstring).
+        host.task_state.human_interaction_blockers[task_id] = blocker
+        raise
+    return True
+
+
+def _unmarked(blocker: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in blocker.items() if key not in (ANSWER_HELD_AT_KEY, ANSWER_HELD_BY_KEY)}
+
+
+def remove_setup_answer_mark(
+    host: TaskHumanInteractionBlockerHost,
+    task_id: str,
+    run_id: str,
+) -> dict[str, Any] | None:
+    """Remove the mark from the run's record, keeping the record; the record, or None when it is not the run's.
+
+    For when no paused turn waits on the run any more. Memory changes first:
+    if the save then fails, the unmarked record, which cannot hide the task,
+    is what the next save writes.
+    """
+
+    blocker = host.task_state.human_interaction_blockers.get(task_id)
+    if blocker is None or not is_setup_run_blocker(blocker, run_id):
+        return None
+    unmarked = _unmarked(blocker)
+    if unmarked != blocker:
+        host.task_state.human_interaction_blockers[task_id] = unmarked
+        host._persist_runtime_state()
+    return dict(unmarked)
+
+
+def clear_setup_answer_marks(host: TaskHumanInteractionBlockerHost) -> list[str]:
+    """Remove every mark (agent start: no paused turn survives a restart); the tasks whose mark was removed."""
+
+    blockers = host.task_state.human_interaction_blockers
+    marked = [task_id for task_id, blocker in blockers.items() if setup_answer_held(blocker)]
+    for task_id in marked:
+        blockers[task_id] = _unmarked(blockers[task_id])
+    if marked:
+        host._persist_runtime_state()
+    return marked
+
+
+def restore_setup_run_blocker(
+    host: TaskHumanInteractionBlockerHost,
+    task_id: str,
+    blocker: dict[str, Any],
+) -> bool:
+    """Put back a setup-run record whose removal could not be completed, unless the task has a record again."""
+
+    if task_id not in host.task_state.tasks or task_id in host.task_state.human_interaction_blockers:
+        return False
+    host.task_state.human_interaction_blockers[task_id] = dict(blocker)
     host._persist_runtime_state()
     return True
 
@@ -156,20 +223,28 @@ def clear_answered_blocker(
     host: TaskHumanInteractionBlockerHost,
     task_id: str,
     answers: Iterable[tuple[str, Mapping[str, Any]]],
+    resumed_interrupt_ids: Iterable[str] = (),
 ) -> bool:
     """Consume only the wait an answer belongs to; this does not grant tool authority.
 
     ``answers`` pairs an interrupt id with the structured answer the turn gets.
     An access record is answered when the interrupt id matches and the answer
     names one of its requests; a setup-run record when the interrupt id
-    matches and the answer is its run's. Run before resuming the SDK, so a new
-    interruption can install its own record without later cleanup deleting it.
+    matches and the answer is its run's. A marked setup-run record also ends
+    when the resumed turn holds its interrupt (``resumed_interrupt_ids``),
+    whatever answer resumes it: its run has ended, and ``set_up_tools``
+    re-reads the run, so the turn gets the run's result anyway (another
+    answer can replace a held one). An unmarked record stays then: its run
+    still waits and must resume the task later. Run before resuming the SDK,
+    so a new interruption can install its own record without later cleanup
+    deleting it.
     """
     blocker = host.task_state.human_interaction_blockers.get(task_id)
     interrupt_id = blocker.get("interrupt_id") if blocker else None
     if blocker is None or not interrupt_id:
         return False
-    if not any(answered == interrupt_id and _answers(blocker, response) for answered, response in answers):
+    answered = any(answered == interrupt_id and _answers(blocker, response) for answered, response in answers)
+    if not answered and not (setup_answer_held(blocker) and interrupt_id in set(resumed_interrupt_ids)):
         return False
     return clear_human_interaction_blocker(host, task_id)
 

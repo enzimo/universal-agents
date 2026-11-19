@@ -408,7 +408,10 @@ async def test_a_failure_while_resuming_from_a_note_leaves_the_record_for_recove
     with caplog.at_level(logging.WARNING):
         assert await resume_interrupted_task_turn(lead, TASK) is None
 
-    assert setup_answer_held(record_of(lead), AGENT_ID), "the record stays for recovery"
+    # The record stays for recovery, without its mark: no paused turn waits for
+    # the answer any more (review F1/F3), so the stuck check may report the task.
+    record = record_of(lead)
+    assert record["run_id"] == "run-1" and not setup_answer_held(record)
     assert not lead.task_manager.task_state.task_queue
     assert "event=tool_setup_answer_not_taken_failed" in caplog.text and "error_type=RuntimeError" in caplog.text
 
@@ -655,9 +658,11 @@ async def test_each_scheduler_pass_runs_the_recovery_and_goes_on_after_a_failure
     agent = _LoopAgent(can_start=False)
     calls: list = []
     alerts: list = []
+    order: list = []
 
     async def recover(item):
         calls.append(item)
+        order.append("recovery")
         if fails:
             raise RuntimeError("database is locked")
         return 0
@@ -667,6 +672,7 @@ async def test_each_scheduler_pass_runs_the_recovery_and_goes_on_after_a_failure
 
     async def report(_agent):
         alerts.append(_agent)
+        order.append("stuck check")
 
     monkeypatch.setattr(scheduled_runtime, "resume_ended_setup_runs", recover)
     monkeypatch.setattr(scheduled_runtime, "resume_decided_access_waits", nothing)
@@ -677,6 +683,8 @@ async def test_each_scheduler_pass_runs_the_recovery_and_goes_on_after_a_failure
         await scheduled_runtime._scheduler_pass(agent, {}, asyncio.sleep)
 
     assert calls == [agent] and alerts == [agent]
+    # Review F8 (EVD-03): recovery resumes what it can before the stuck check reports.
+    assert order == ["recovery", "stuck check"]
     assert ("event=setup_run_recovery_failed" in caplog.text) is fails
 
 
@@ -711,3 +719,180 @@ async def test_start_recovery_does_not_wait_for_a_recently_saved_run(lead, woken
 
     assert record_of(lead) is None and list(lead.task_manager.task_state.task_queue) == [TASK]
     assert not woken, "startup wakes the drain itself"
+
+
+# -- project review fixes: a mark only while its answer is held; a failed resume is retried ----
+
+
+def persist_fails_once(monkeypatch: pytest.MonkeyPatch, manager: TaskManager) -> None:
+    """The next runtime-state save raises, as when the database is locked; later saves work."""
+
+    original = manager._persist_runtime_state
+    failures = [RuntimeError("database is locked")]
+
+    def persist(*args, **kwargs):
+        if failures:
+            raise failures.pop()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_persist_runtime_state", persist)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_save_of_the_mark_leaves_the_record_unmarked_for_recovery(lead, woken, monkeypatch) -> None:
+    """Review F1 (GEN-1): a mark saved without its answer would hide a stranded task from the stuck check."""
+    pause_on_setup(lead)
+    persist_fails_once(monkeypatch, lead.task_manager)
+
+    with pytest.raises(RuntimeError):
+        await tool_setup_run_runtime.advance(lead, "run-1")
+
+    assert record_of(lead) == {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"}
+    assert TASK not in lead._pending_interrupt_responses and not woken
+    # The next pass answers the paused turn, once.
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 1
+    assert setup_answer_held(record_of(lead), AGENT_ID) and TASK in lead._pending_interrupt_responses
+    assert woken == [lead]
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 61) == 0
+
+
+@pytest.mark.parametrize("step", ["the removal's save", "the history save", "the state change"])
+@pytest.mark.asyncio
+async def test_a_failure_after_the_record_is_removed_puts_it_back_and_the_next_pass_resumes_once(
+    lead, woken, results, monkeypatch, caplog, step
+) -> None:
+    """Review F2 (FAIL-02): the record is what lets recovery try again."""
+    pause_on_setup(lead)
+    ended(lead)
+    lead._interrupted_turn_sessions.clear()
+    manager = lead.task_manager
+    failures = [RuntimeError("database is locked")]
+    if step == "the removal's save":
+        original = tool_setup_run_runtime.clear_setup_run_blocker
+
+        def removal(host, task_id, run_id):
+            if failures:
+                persist_fails_once(monkeypatch, host)
+                failures.pop()
+            return original(host, task_id, run_id)
+
+        monkeypatch.setattr(tool_setup_run_runtime, "clear_setup_run_blocker", removal)
+    elif step == "the history save":
+        original_history = tool_setup_run_runtime._history
+
+        async def history(*args, **kwargs):
+            if failures:
+                raise failures.pop()
+            return await original_history(*args, **kwargs)
+
+        monkeypatch.setattr(tool_setup_run_runtime, "_history", history)
+    else:
+        original_state = manager.update_main_task_state
+
+        def update_state(*args, **kwargs):
+            if failures:
+                raise failures.pop()
+            return original_state(*args, **kwargs)
+
+        monkeypatch.setattr(manager, "update_main_task_state", update_state)
+
+    with caplog.at_level(logging.WARNING):
+        assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
+
+    assert record_of(lead) == {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"}, "put back"
+    assert not manager.task_state.task_queue
+    assert "event=tool_setup_run_recovery_failed" in caplog.text and "event=tool_setup_run_record_restored" in caplog.text
+
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 61) == 1
+
+    assert record_of(lead) is None and list(manager.task_state.task_queue) == [TASK]
+    assert manager.get_task_info(TASK).state == ProgressState.ACCEPTED
+    assert manager.read_runtime_resume_directive(TASK).count(tool_setup_run_runtime.RUN_ENDED_NOTE) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_turn_takes_the_mark_with_it_even_when_the_resume_then_fails(lead, woken, monkeypatch) -> None:
+    """Review F3 (CRIT-1): no paused turn and no answer, so nothing may claim an answer is held."""
+    pause_on_setup(lead)
+    await tool_setup_run_runtime.advance(lead, "run-1")
+    lead._interrupted_turn_sessions.clear()  # the paused turn ended after its answer was held
+
+    def unreadable(agent, run):
+        raise RuntimeError("the catalog could not be read")
+
+    monkeypatch.setattr(tool_setup_run_runtime, "outcome_for", unreadable)
+
+    assert await resume_interrupted_task_turn(lead, TASK) is None
+
+    record = record_of(lead)
+    assert record["run_id"] == "run-1" and not setup_answer_held(record)
+
+
+@pytest.mark.asyncio
+async def test_start_recovery_removes_every_mark_even_when_it_cannot_resume_the_task_yet(lead, woken, monkeypatch, caplog) -> None:
+    """Review F4 (GEN-2): an agent whose id is fixed in its configuration keeps that id across a restart."""
+    pause_on_setup(lead)
+    await tool_setup_run_runtime.advance(lead, "run-1")
+    lead._interrupted_turn_sessions.clear()
+    lead._pending_interrupt_responses.clear()  # the restart: same agent id, nothing in memory
+
+    async def unreadable(agent, run_id):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(tool_setup_run_runtime, "_load", unreadable)
+
+    with caplog.at_level(logging.INFO):
+        assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS, at_start=True) == 0
+
+    assert not setup_answer_held(record_of(lead)), "the stuck check can report it if recovery keeps failing"
+    assert "event=tool_setup_answer_marks_cleared" in caplog.text
+
+
+@pytest.mark.parametrize("marked", [True, False], ids=["marked record", "unmarked record"])
+@pytest.mark.asyncio
+async def test_a_resumed_turn_holding_the_setup_interrupt_ends_only_a_marked_record(lead, woken, monkeypatch, marked) -> None:
+    """Review F5 (CONC-2): another answer replaced the held setup answer, but the run has ended.
+
+    ``set_up_tools`` re-reads the run, so the turn still gets its result. An
+    unmarked record's run still waits; that record must stay to resume the
+    task later.
+    """
+    pause_on_setup(lead, page="done" if marked else "waiting")
+    if marked:
+        await tool_setup_run_runtime.advance(lead, "run-1")
+    lead._pending_interrupt_responses[TASK] = text_answer()  # replaces the held answer, if any
+    seen = stub_turn(monkeypatch, lead)
+
+    await resume_interrupted_task_turn(lead, TASK)
+
+    if marked:
+        assert seen == [None] and record_of(lead) is None
+    else:
+        assert [item["run_id"] for item in seen] == ["run-1"] and record_of(lead)["run_id"] == "run-1"
+
+
+def test_an_answer_replacing_a_held_setup_answer_is_logged(lead, caplog) -> None:
+    """Review F5 (CONC-2)."""
+    lead._pending_interrupt_responses[TASK] = answer("i1", "run-1")
+
+    with caplog.at_level(logging.WARNING):
+        task_steering_runtime._note_replaced_setup_answer(lead, TASK, text_answer())
+        task_steering_runtime._note_replaced_setup_answer(lead, "task-without-a-held-answer", text_answer())
+
+    assert caplog.text.count("event=tool_setup_answer_replaced") == 1
+    assert f"task_id={TASK}" in caplog.text and "replaced_steering_id=tool_setup_resume_run-1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_pass_skips_a_finished_task_that_still_has_a_record(lead, woken, monkeypatch) -> None:
+    """Review F9 (EVD-04): a finished task never resumes; ending a task normally removes its record too."""
+    pause_on_setup(lead)
+    ended(lead)
+    lead._interrupted_turn_sessions.clear()
+    lead.task_manager.update_main_task_state(TASK, ProgressState.COMPLETED, _now())
+    reads = count_reads(monkeypatch)
+
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
+
+    assert reads == [1]
+    assert record_of(lead) is not None and not lead.task_manager.task_state.task_queue and not woken

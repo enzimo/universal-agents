@@ -440,7 +440,7 @@ def _restarted(lead, tmp_path: Path) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_a_restart_while_the_answer_waits_for_its_lane_resumes_the_task_with_the_result(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, caplog
 ) -> None:
     """The run ended with the paused turn live, the lane stayed busy, and the agent restarted.
 
@@ -448,7 +448,7 @@ async def test_a_restart_while_the_answer_waits_for_its_lane_resumes_the_task_wi
     because of its record, then the setup-run recovery resumes it from a note
     with the run's result, once, without waking the drain before startup ends.
     """
-    lead = lead_agent(tmp_path, enabled=False)
+    lead = lead_agent(tmp_path, enabled=False, instance_root=tmp_path)
     broker_states(monkeypatch, {GITHUB: SIGNED_OUT})
     _call, raised = start(lead, [GITHUB])
     await pause_turn(lead, raised.interrupt)
@@ -458,7 +458,10 @@ async def test_a_restart_while_the_answer_waits_for_its_lane_resumes_the_task_wi
     await asyncio.wait_for(lead._pending_work_task, 2)  # the busy lane never ran the answer
 
     agent = _restarted(lead, tmp_path)
-    await recover_runtime_after_restart(agent)
+    with caplog.at_level(logging.WARNING):
+        await recover_runtime_after_restart(agent)
+    # Review F7 (EVD-02): restart recovery itself ran without an error of its own.
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
 
     manager = agent.task_manager
     assert get_human_interaction_blocker(manager, "task-lead") is None

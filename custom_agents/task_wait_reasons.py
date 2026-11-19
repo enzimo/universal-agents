@@ -34,13 +34,13 @@ Read from the agent's saved work (``RuntimeSnapshotV3``):
   paused turn was live, and the answer waits in memory for the task's lane,
   which can be busy with another turn or paused (``execution_lanes_runtime``).
   The run's record stays, marked with the agent process that holds the answer
-  (``mark_setup_answer_held``), until the turn resumes. A mark counts only
-  when that process owns the saved work: agent ids are new for each process,
-  so a mark left from before a restart falls back to the run's own state
-  below, and the task is reported once the run has ended. Recovery resumes
-  such a task first (``tool_setup_run_runtime.resume_ended_setup_runs``). An
-  agent whose id is fixed in its configuration keeps it across restarts, so
-  for it a stale mark relies on that recovery alone.
+  (``mark_setup_answer_held``), until the turn resumes. The runtime keeps a
+  mark only while a paused turn of that process waits for the answer
+  (``task_human_interaction_blockers``); agent start removes every mark. A
+  mark also counts only when that process owns the saved work, so one left
+  by another process (taken-over work, or a start that has not run its
+  recovery yet) falls back to the run's own state below, and the task is
+  reported once the run has ended.
 - ``OUTSIDE_RESULT``: the task's latest action batch stopped to wait for a
   secure credential form or signup automation (the outbox's external-wait
   barrier, ``BATCH_WAITING_EXTERNAL_RESULT``), and since then neither has the

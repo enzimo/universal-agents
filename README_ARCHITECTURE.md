@@ -726,9 +726,11 @@ waiting access request, a running plan, the setup run the task's record names
 while it still waits, a provider retry timer). A new kind of wait must save a
 record one of these rules can find. A setup-run record excuses a task only
 while its run waits or its answer is held for the lane, by the agent process
-that saved the work (agent ids are new for each process, so a mark left from
-before a restart does not count); a record whose run ended or is missing is
-reported once nothing has resumed the task. No saved record says when the last reason ended, and accepted
+that saved the work. The runtime keeps that mark only while a paused turn
+waits for the answer: a failed save of the mark is undone, a dropped turn
+or a resume from a note removes it, and agent start removes every mark,
+since no paused turn survives a restart. A record whose run ended or is
+missing is reported once nothing has resumed the task. No saved record says when the last reason ended, and accepted
 guidance adds history to such a task without moving it, so the wait counts from
 the first pass that sees it: the stuck-work engine takes a per-finding wait
 (`StuckFinding.notice_after`, here `no_progress_after_seconds`), and a pass that

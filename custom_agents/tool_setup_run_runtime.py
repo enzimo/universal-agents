@@ -36,22 +36,26 @@ code:
   2026-11-19 the record was deleted when the run ended, and a task whose
   answer waited for a busy lane was reported as stuck. A note is saved
   before the record is removed; a restart between the two saves the same
-  note again, which is not added twice. Both decisions are made under the
-  run's lock, after reading the record again, so a task is resumed once.
+  note again, which is not added twice, and a failure after the removal puts
+  the record back, so recovery tries again. Both decisions are made under
+  the run's lock, after reading the record again, so a task is resumed once.
 - **Answers a paused turn cannot take** (``resume_without_paused_turn``): the
   paused turn ended after its answer was held, or the answer could not be
   given to the SDK. The task then resumes from the note too, so the answer
   is not lost with the turn; a paused turn that can never take its answer is
-  dropped. A run that is not stored resumes the task with a note saying the
-  setup was not found (``_resume_missing_run``).
+  dropped, and the record loses its mark at once, so a resume that then
+  fails leaves a task the stuck-task check can report. A run that is not
+  stored resumes the task with a note saying the setup was not found
+  (``_resume_missing_run``).
 - **Recovery** (``resume_ended_setup_runs``, at agent start after restart
   recovery and on every scheduler pass): a task whose run ended without
   resuming it (a restart between the run's end and the resume, a lost
   wake-up, a run that is not stored, a result whose ``advance`` was lost) is
   found from its record and resumed. A restart leaves no paused turn, so
-  every held-answer mark is stale then and the task resumes from a note with
-  the run's result. Only the agent's own tasks are read; another agent's are
-  left to that agent, or to the takeover of a gone agent's work.
+  start recovery first removes every held-answer mark and the task resumes
+  from a note with the run's result. Only the agent's own tasks are read;
+  another agent's are left to that agent, or to the takeover of a gone
+  agent's work.
 
 The run and the task blocker are stored, so both processes can restart
 during the wait. Nothing here grants access or reads a credential.
@@ -70,11 +74,14 @@ from typing import Any
 from custom_agents.access_workflow_setup_hooks import link_setup_request, record_setup_result
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_human_interaction_blockers import (
+    clear_setup_answer_marks,
     clear_setup_run_blocker,
     get_human_interaction_blocker,
     is_setup_run_blocker,
     mark_setup_answer_held,
     record_human_interaction_blocker,
+    remove_setup_answer_mark,
+    restore_setup_run_blocker,
     setup_answer_held,
 )
 from custom_agents.tool_setup_runs import (
@@ -544,6 +551,10 @@ async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any, *, wa
     """
 
     manager = agent.task_manager
+    # "Once" rests on the record, read again here under the lock: a held
+    # answer stops a second caller below, and each path's own record change
+    # (the mark's compare-and-set, the note path's conditional removal) lets
+    # only one caller through even without the lock.
     async with _lock(agent, run.run_id):
         blocker = await manager.operations_runtime.run(partial(get_human_interaction_blocker, manager), run.task_id)
         # Only the task's own wait is answered.
@@ -673,7 +684,11 @@ async def resume_without_paused_turn(agent: Any, task_id: str, steering: TaskSte
         why,
     )
     _drop_paused_turn(agent, task_id, interrupt_id, why=why)
+    manager = agent.task_manager
     try:
+        # No paused turn waits for the answer any more, so the record must not
+        # claim one is held: if the resume below fails, the task can be reported.
+        await manager.operations_runtime.run(partial(remove_setup_answer_mark, manager), task_id, run_id)
         run = await _load(agent, run_id)
         if run is None or run.task_id != task_id:
             return await _resume_missing_run(agent, task_id, run_id)
@@ -723,23 +738,60 @@ async def _resume_from_note(
 ) -> bool:
     """Queue the task at the front with a note its next turn reads; True when this call removed the record.
 
-    The caller holds the run's lock. The note is saved before the record is
+    The caller holds the run's lock. No paused turn waits on the run here, so
+    the record loses any mark first: should this fail, the task must not look
+    as if its answer were held. The note is saved before the record is
     removed: a restart between the two finds the record and saves the same
     note again, which is not added twice (``append_runtime_resume_directive``).
+    The record goes before the task is queued, because the queue refuses a
+    task with a record (``task_queue_safety.is_ready``); if anything after the
+    removal fails, the record is put back and the error raised, so recovery
+    tries again. Repeating is safe: the note is not added twice and the state
+    may be set again; only a second history line is added.
     """
 
     manager = agent.task_manager
     run_ops = manager.operations_runtime.run
+    record = await run_ops(partial(remove_setup_answer_mark, manager), task_id, run_id)
+    if record is None:
+        return False  # read under the lock; only the task ending removes it meanwhile
     await run_ops(manager.append_runtime_resume_directive, task_id, note)
-    if not await run_ops(partial(clear_setup_run_blocker, manager), task_id, run_id):
-        # The record was read under the lock; only the task ending removes it meanwhile.
-        return False
-    await _history(agent, task_id, history, {"event": event, "run_id": run_id})
-    await run_ops(manager.update_main_task_state, task_id, ProgressState.ACCEPTED, _now())
-    await run_ops(manager.enqueue_task, task_id, front=True)
+    try:
+        if not await run_ops(partial(clear_setup_run_blocker, manager), task_id, run_id):
+            return False
+        await _history(agent, task_id, history, {"event": event, "run_id": run_id})
+        await run_ops(manager.update_main_task_state, task_id, ProgressState.ACCEPTED, _now())
+        await run_ops(manager.enqueue_task, task_id, front=True)
+    except Exception:
+        await _put_record_back(agent, task_id, record)
+        raise
     if wake:
         schedule_pending_work(agent)
     return True
+
+
+async def _put_record_back(agent: Any, task_id: str, record: dict[str, Any]) -> None:
+    """After a failed resume from a note, the record goes back so recovery finds the task again (logged)."""
+
+    manager = agent.task_manager
+    try:
+        restored = await manager.operations_runtime.run(partial(restore_setup_run_blocker, manager), task_id, record)
+    except Exception as exc:  # noqa: BLE001 - the record is back in memory; the next save writes it
+        logger.warning(
+            "Could not save the setup-run record put back after a failed resume. "
+            "event=tool_setup_run_record_restore_failed task_id=%s run_id=%s error_type=%s",
+            task_id,
+            record.get("run_id"),
+            type(exc).__name__,
+        )
+        return
+    logger.warning(
+        "A resume from a note failed after the task's setup-run record was removed; the record is back. "
+        "event=tool_setup_run_record_restored task_id=%s run_id=%s restored=%s",
+        task_id,
+        record.get("run_id"),
+        restored,
+    )
 
 
 # -- recovery ------------------------------------------------------------------------------
@@ -804,6 +856,19 @@ async def resume_ended_setup_runs(agent: Any, *, now: float | None = None, at_st
     if moment < getattr(agent, "_setup_run_check_after", 0.0):
         return 0
     agent._setup_run_check_after = moment + SETUP_RUN_RECOVERY_SECONDS
+    if at_start:
+        # No paused turn survives a restart, so every held-answer mark is stale;
+        # removing them also covers an agent whose id is fixed in its
+        # configuration, whose old marks would otherwise still name it.
+        cleared = await agent.task_manager.operations_runtime.run(
+            partial(clear_setup_answer_marks, agent.task_manager)
+        )
+        if cleared:
+            logger.info(
+                "Removed held-answer marks left from before the restart. event=tool_setup_answer_marks_cleared "
+                "task_ids=%s",
+                ",".join(cleared),
+            )
     resumed = 0
     for task_id, blocker in await agent.task_manager.operations_runtime.run(partial(_setup_run_waits, agent)):
         resumed += await _recover_task(agent, task_id, blocker, at_start=at_start)
@@ -844,7 +909,8 @@ async def _recover_task(agent: Any, task_id: str, blocker: dict[str, Any], *, at
         resumed = await _resume(agent, run, None, None, wake=wake)
     except Exception as exc:  # noqa: BLE001 - one task must not stop recovery for the others
         logger.warning(
-            "Could not recover a task's setup run; the next pass tries again. event=tool_setup_run_recovery_failed "
+            "Could not recover a task's setup run; it keeps its record and the next pass tries again. "
+            "event=tool_setup_run_recovery_failed "
             "task_id=%s run_id=%s stage=%s error_type=%s",
             task_id,
             run_id,
