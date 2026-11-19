@@ -297,7 +297,7 @@ def _import(args: argparse.Namespace) -> None:
             )
         else:
             from runtime_settings.instance_layout import InstanceLayout
-            from team_transfer.team_ids import target_team_ids
+            from team_transfer.team_id_choice import target_team_ids
 
             ids = target_team_ids(opened.manifest, InstanceLayout.at(args.instance_root), args.new_team_id)
             reader = opened.with_team_ids(ids)
@@ -316,7 +316,7 @@ def _import_credentials(args: argparse.Namespace) -> None:
     with TransferReader.open(args.input_path, passphrase) as reader:
         from assistant_gateway.config import GatewayInstanceConfig
         from team_transfer.review import ReviewFiles
-        from team_transfer.team_ids import recorded_team_ids
+        from team_transfer.team_id_choice import recorded_team_ids
 
         config = GatewayInstanceConfig.load_saved(args.config)
         # The id the first import gave the team, from its receipt; the review must be for that id.

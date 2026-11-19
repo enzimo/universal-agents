@@ -23,7 +23,7 @@ def import_receipt(layout: "InstanceLayout", manifest: TransferManifestV1) -> di
 
     The one place that reads where an instance's import came from, so later batches
     (``previous_records``), the credentials and the team id they read under
-    (``team_ids.target_team_ids``) agree on what the folder holds. The caller checks the
+    (``team_id_choice.target_team_ids``) agree on what the folder holds. The caller checks the
     import finished (``runtime_guard.require_finished_import``) where that matters: the
     receipt is written while the unfinished-import marker still exists.
     """
@@ -159,7 +159,7 @@ def receipt(context: ImportContext, imported: dict[str, list[str]]) -> dict[str,
     return {
         "source_mac": context.reader.manifest.mac,
         # The id the team was imported under; later batches and the credentials keep it
-        # (team_transfer.team_ids.recorded_team_id).
+        # (team_transfer.team_id_choice.recorded_team_id).
         RECEIPT_TEAM_ID: context.team_id,
         "initial_control": initial_control,
         "records": {

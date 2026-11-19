@@ -37,7 +37,8 @@ from team_transfer.errors import TransferError
 from team_transfer.format import TransferModel
 from team_transfer.sections import read_section_records, renamed_records
 from team_transfer.selection import keyed_records
-from team_transfer.team_ids import TeamIds, new_team_ids, target_team_ids
+from team_transfer.team_id_choice import new_team_ids, target_team_ids
+from team_transfer.team_ids import TeamIds
 
 if TYPE_CHECKING:
     from team_transfer.container import TransferReader

@@ -29,7 +29,10 @@ Design notes, so a later reader can map the structure to its reasons:
 - The first batch creates a fresh instance; later reviewed batches from the
   exact same signed backup skip imported identities. Import keeps the original identities
   (team id, instance name, person, schedule and grant ids), which removes
-  nearly all remapping.
+  nearly all remapping. The one exception is a team id this version cannot
+  carry (owner's decision 103): a first import into a fresh instance may give
+  that team a new id, which every section applies to its records as they are
+  read (``team_ids``), and later batches take from the first import's receipt.
 - One planner decides every record's outcome and both ``--dry-run`` and the
   real import use it, as ``custom_agents.pinned_memory_transfer`` does.
 - A passphrase protects the file: a key derived from it authenticates the

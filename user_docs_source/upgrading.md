@@ -163,8 +163,9 @@ supported, because it may not read what a newer one saved.
        [Import in onboarding](team-transfer.md#import-during-onboarding). When
        the export's team id does not fit, the page says why and asks for a new
        team id, filled in with the old one cut to fit; you can change it.
-       Everything imported gets the new id, and the export file stays as it
-       is. On the command line, `assistant_cli team review` takes the new id
+       The team is imported under the new id; text you wrote, such as a
+       schedule's instructions, is kept as written, even where it mentions
+       the old id. The export file stays as it is. On the command line, `assistant_cli team review` takes the new id
        with `--new-team-id`, and `assistant_cli team import --review` then uses
        the id the review recorded.
 

@@ -5018,15 +5018,18 @@ the desktop app never offers an older version.
   onboarding routes, the page and the command-line `onboard`, cut the team id
   they derive to 24 characters and refuse a typed one that does not fit
   (`onboarding_engine.team_id_answer`), so a new instance never stops here.
-  A team transfer keeps the team id and the agent types, so a fresh import
-  applies the same caps before it writes anything (`team_transfer.protocol1_ids`,
-  G1 of pull request 152's review): onboarding's Import when the export is
-  opened, before its review is prepared, and every plan for a fresh root
+  A team transfer keeps the agent types, and the team id unless the import
+  gives the team a new one (below), so a fresh import applies the same caps
+  before it writes anything (`team_transfer.protocol1_ids`, G1 of pull request
+  152's review): onboarding's Import when the export is opened, before its
+  review is prepared, and every plan for a fresh root
   (`team_transfer.service._import_context`, which covers the command-line
-  import and the review pages). It checks the export's team id and every agent
-  type its control section defines, selected or not, as the launcher checks the
-  whole catalog, and refuses with advice for the instance the export came from
-  (`event=team_import_ids_over_caps`). A later batch into an instance that
+  import and the review pages). It checks the team id the import writes and
+  every agent type the control section defines, selected or not, as the
+  launcher checks the whole catalog, and refuses with advice for the instance
+  the export came from (`event=team_import_ids_over_caps`); a team id that
+  does not fit is refused naming how to give the team a new one, and
+  onboarding's Import asks for one instead. A later batch into an instance that
   exists is not checked: its team id is the instance's, and a type added there
   later is handled as any type added later.
   `assistant_cli.py migrate-config` and the command-line tool's offer to upgrade
@@ -5210,7 +5213,8 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   release.
 - **Fresh first batch, same ids.** Import creates the instance (the same first
   steps as onboarding, `assistant_gateway.instance_secrets`) and keeps team,
-  person, schedule and grant ids. Person schedules are signed again with the
+  person, schedule and grant ids (a team id that does not fit is the one
+  exception, below). Person schedules are signed again with the
   new gateway key. Chat sessions keep their keys, and each chat continues in
   the session that was current when the team was exported: the import saves
   sessions without switching chats and then gives each chat that has no
@@ -5228,6 +5232,58 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   loader checks the unfinished marker for every entry point. Failed later
   batches require a pre-batch backup restore: writers do not share a transaction
   across stores.
+- **A new team id for a team whose id does not fit** (owner's decision 103,
+  `team_transfer.team_ids` for the mapping and its rename rule,
+  `team_transfer.team_id_choice` for choosing it). 0.9 built team ids from the
+  assistant's name with no cap, and protocol 1 carries the team id in every message address (at most
+  24 characters), while an instance never changes its own id. So a first
+  import into a fresh root may give such a team a new id; this is the one
+  exception to "same ids", and only for a team whose id does not fit (the
+  owner's answer, 2026-11-19), since import otherwise keeps ids. The id is
+  checked with onboarding's rule for a typed id
+  (`onboarding_engine.team_id_answer`) before anything is written, and
+  suggested as the old id cut to fit (`onboarding_engine.shortened_team_id`,
+  the same cut onboarding applies to a derived id). Where it comes from: the
+  first choice is onboarding's id step or `--new-team-id`; after that the
+  review folder records it (`ImportReviewV1.team_id`) and the first import's
+  receipt holds it for later batches and the credentials
+  (`team_id_choice.recorded_team_ids`), so one team never gets two ids. The
+  choosing steps live apart from the mapping because they call onboarding's
+  rule and read the receipt, both of which lead back to the gateway, while
+  every section imports the mapping and the gateway's `/upgrade` command
+  reaches the sections; one module would close an import loop
+  (`test_runtime_architecture_boundaries`). How it is applied: `TransferReader.with_team_ids` gives the open file both ids, and
+  `sections.read_section_records` renames each section's records right after
+  its version step, through the rename the section registers in
+  `sections.TEAM_ID_RENAMES` (`holds_no_team_id` when its records name no
+  team; a section without one is refused under a new id). Review keys,
+  selections, digests, plans, writers and receipts therefore all see one set
+  of records under the new id, and the export file is never edited. Every
+  rename goes through `TeamIds.rename` or `rename_derived`: a value changes only
+  when it is the old id, starts with it and a separator the section names, or
+  equals an id the runtime derives from it (the maintenance schedule's id, name
+  and task id, a hosted MCP server's id and its connection locator), computed
+  with the owning module's function. Anything else, a third team's id
+  included, keeps today's outcome. What is not rewritten: free text (task
+  instructions, `SOUL.md`, grant reasons) stays as written; a carried setting
+  that names the old id, other than `transport.subject_prefix` and
+  `gateway.response_queue_name`, is imported and listed for attention;
+  schedules' signed task contexts name the old id under the old key, so they
+  are dropped and signed again as for any import; plan digests of approved
+  specialists and skills, MCP approval records and notice ids stay as
+  history. MCP record digests and a binding digest that matched are computed
+  again. Credentials take the receipt's id (`import_credential_bundle`), and
+  the broker's operator-only transfer route is told the export's id
+  (`source_team_id`), so it renames the team's own records to the new id as
+  it reads them (`renamed_credential_owners`); any other team's records are
+  still refused. Onboarding asks for the
+  id once per opening: preparing the review under another id replaces the
+  review folder (`prepare_review(restart_for_another_id=True)`, which first
+  reads the new records, so an id a section refuses leaves the saved review
+  as it was), so it runs only before the opening has a review, while every
+  review route refuses; another id needs the export opened again. An import
+  whose request was accepted for an export opened again before its body
+  arrived is refused, so no import runs beside that step.
 - **One planner, nothing silently dropped.** Every record is imported, imported
   with a note, or refused with a reason, checked with this version's own
   loaders and models; sections see what earlier sections accept, so a grant on

@@ -8,7 +8,7 @@ it is a dry run, applies the plan section by section.
 A fresh instance is one without ``instance_config.yaml``: the import creates
 the instance. The reader's ``team_ids`` say which team id the import writes:
 the export's own, or a new one a first import gives a team whose id does not
-fit (``team_transfer.team_ids``); later batches into the instance use the id
+fit (``team_transfer.team_id_choice``); later batches into the instance use the id
 its first import recorded in the receipt. While it writes, a marker file
 (``InstanceLayout.team_import_marker_path``) records that the import has not
 finished; ``require_finished_import`` refuses to start the runtime while it is

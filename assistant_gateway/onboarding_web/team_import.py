@@ -35,10 +35,13 @@ Why these choices:
   reply carries a question (why the id does not fit, and a suggested new id),
   and ``POST /api/team-import/team-id`` prepares the review under the id the
   owner confirms, checked like a typed onboarding id. Agent types that do not
-  fit are still refused when the export is opened. The review folder is fixed
-  per export, so opening the export again offers the id chosen before; another
-  id prepares the review again (``prepare_review(restart_for_another_id=True)``),
-  because a team id cannot be changed after the import.
+  fit are still refused when the export is opened. Each opening chooses the id
+  once: preparing the review under another id replaces the review folder, so
+  it happens only before this opening has a review, while no review route can
+  use the folder. The review folder is fixed per export, so opening the export
+  again offers the id chosen before; another id prepares the review again
+  (``prepare_review(restart_for_another_id=True)``), because a team id cannot
+  be changed after the import.
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ from typing import Any, Awaitable, Callable
 from aiohttp import web
 from pydantic import Field, ValidationError
 
+from custom_messages.wire.ids import TEAM_ID
 from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.secrets_source import SECRETS_SOURCE_ENV_FILE, normalize_secrets_source
 from team_transfer.container import TransferFileError, TransferReader
@@ -68,7 +72,7 @@ from team_transfer.protocol1_ids import require_protocol1_agent_types
 from team_transfer.review import ReviewFiles, prepare_review, saved_review_team_id
 from team_transfer.review_session import ReviewApplyV1, ReviewSession, ReviewUpdateV1
 from team_transfer.sections import DestinationChoices
-from team_transfer.team_ids import new_team_ids, suggested_team_id, team_id_explanation
+from team_transfer.team_id_choice import new_team_ids, suggested_team_id, team_id_explanation
 
 LOGGER = logging.getLogger(__name__)
 
@@ -80,6 +84,13 @@ PAGE_FILE = Path(__file__).resolve().parent / "assets" / "team_import.html"
 _FAILURES = (TransferError, TransferFileError, TransferKeyError, ValidationError, ValueError, OSError)
 _WAITING_REASON = "stored when the team starts, by its broker"
 _CHOOSE_TEAM_ID_FIRST = "Choose the team's new id first: open the export again from onboarding's Let's Begin step."
+_OPEN_AGAIN = "Open the export again from onboarding's Let's Begin step."
+_TEAM_ID_CHOSEN = (
+    "The new team id is already chosen for this review. To choose another, open the export again from "
+    "onboarding's Let's Begin step."
+)
+_IMPORT_RUNNING = "An import is running. Wait for it to finish."
+_TYPE_TEAM_ID = f"Type the new team id: at most {TEAM_ID.cap} letters, digits, '-' and '_'."
 
 
 class OpenExportV1(TransferModel):
@@ -92,7 +103,8 @@ class DestinationV1(TransferModel):
 
 
 class TeamIdV1(TransferModel):
-    # Empty is allowed here so the id rule answers it in words by the field.
+    # Empty is allowed here so the id rule answers it in words by the field; a refused body is
+    # answered by the field too (``_typed_team_id``).
     team_id: str = Field(max_length=255)
 
 
@@ -107,9 +119,6 @@ class _OpenImport:
     session: ReviewSession | None = None
     exported_secrets_source: str = SECRETS_SOURCE_ENV_FILE
     team_id_question: dict[str, Any] | None = None
-    # Set while the review is prepared under a new id, which may replace the review folder; the
-    # import refuses meanwhile, and the id step refuses while an import runs.
-    preparing: bool = False
 
     @property
     def review(self) -> ReviewSession:
@@ -182,7 +191,7 @@ class TeamImport:
         except (ValidationError, ValueError):
             return _error("Choose an export file and type its passphrase.")
         if self._importing:
-            return _error("An import is running. Wait for it to finish.", status=409)
+            return _error(_IMPORT_RUNNING, status=409)
         layout = self._layout()
         problem = _not_fresh(layout)
         if problem:
@@ -205,7 +214,7 @@ class TeamImport:
             if self._importing:
                 # An import started in another tab while this one was opening.
                 opened.reader.close()
-                return _error("An import is running. Wait for it to finish.", status=409)
+                return _error(_IMPORT_RUNNING, status=409)
             await self.close()
             self._open = opened
         manifest = opened.reader.manifest
@@ -241,29 +250,42 @@ class TeamImport:
         return opened
 
     async def _choose_team_id(self, request: web.Request, opened: _OpenImport) -> web.Response:
-        """The new team id for an export whose id does not fit; the review is prepared under it."""
+        """The new team id for an export whose id does not fit; the review is prepared under it.
 
-        payload = TeamIdV1.model_validate(await request.json())
+        Once per opening. The review routes refuse until the review exists, and this step
+        refuses once it does (another id needs the export opened again), so nothing else uses
+        the review folder while it is prepared here. No import runs meanwhile either: an import
+        needs a review, opening this export was refused while one ran, and an import on an
+        export opened before this one is refused (``_import``).
+        """
+
+        team_id = await _typed_team_id(request)
+        if team_id is None:
+            return _error(_TYPE_TEAM_ID, field="team_id")
         if opened.team_id_question is None:
             return _error("This export's team id fits this version, so the team keeps it.", status=409)
-        if self._importing:
-            return _error("An import is running. Wait for it to finish.", status=409)
         layout = self._layout()
         problem = _not_fresh(layout)
         if problem:
             return _error(problem, status=409)
         async with self._opening:
             if self._open is not opened:
-                return _error("Open the export again from onboarding's Let's Begin step.", status=403)
-            if self._importing:
-                return _error("An import is running. Wait for it to finish.", status=409)
-            opened.preparing = True
+                return _error(_OPEN_AGAIN, status=403)
+            if opened.session is not None:
+                return _error(_TEAM_ID_CHOSEN, status=409)
             try:
-                files, previous = await asyncio.to_thread(_review_under_new_id, layout, opened, payload.team_id)
+                files, previous = await asyncio.to_thread(_review_under_new_id, layout, opened, team_id)
             except NewTeamIdRefused as exc:
                 return _error(str(exc), field="team_id")
-            finally:
-                opened.preparing = False
+            except _FAILURES as exc:
+                self._logger.warning(
+                    "The review could not be prepared under the new team id. "
+                    "event=onboarding_team_import_team_id_failed file_name=%s exported_team_id=%r error_type=%s",
+                    opened.archive_path.name,
+                    opened.reader.manifest.team_id,
+                    type(exc).__name__,
+                )
+                return _error(str(exc))
             opened.start_review(files)
         ids = files.reader.team_ids
         restarted = previous is not None and previous != ids.imported
@@ -289,9 +311,7 @@ class TeamImport:
             if opened is None or not hmac.compare_digest(
                 request.headers.get(TOKEN_HEADER, ""), opened.token
             ):
-                return _error(
-                    "Open the export again from onboarding's Let's Begin step.", status=403
-                )
+                return _error(_OPEN_AGAIN, status=403)
             if needs_review and opened.session is None:
                 return _error(_CHOOSE_TEAM_ID_FIRST, status=409)
             try:
@@ -329,9 +349,12 @@ class TeamImport:
 
     async def _import(self, request: web.Request, opened: _OpenImport) -> web.Response:
         payload = ReviewApplyV1.model_validate(await request.json())
-        if opened.preparing:
-            return _error("The review is being prepared under the new team id. Wait for it, then validate again.",
-                          status=409)
+        if self._open is not opened:
+            # The export was opened again while this request's body arrived. Checked with no
+            # await before the flag below, so opening (which refuses while the flag is set) and
+            # an import exclude each other, and the id step of the newer opening never runs
+            # beside an import.
+            return _error(_OPEN_AGAIN, status=403)
         session = opened.review
         self._importing = True
         try:
@@ -397,6 +420,16 @@ def _team_id_question(reader: TransferReader, review_dir: Path) -> dict[str, Any
         "suggestion": chosen_before or suggested_team_id(exported),
         "chosen_before": chosen_before,
     }
+
+
+async def _typed_team_id(request: web.Request) -> str | None:
+    """The id typed on the page; None for a body the model refuses, such as a pasted id over
+    255 characters, which the page answers by the field instead of in the library's words."""
+
+    try:
+        return TeamIdV1.model_validate(await request.json()).team_id
+    except (ValidationError, ValueError):
+        return None
 
 
 def _review_under_new_id(layout: InstanceLayout, opened: _OpenImport, team_id: str) -> tuple[ReviewFiles, str | None]:

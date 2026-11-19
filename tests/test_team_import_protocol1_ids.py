@@ -21,7 +21,8 @@ from team_transfer.crypto import new_key_derivation
 from team_transfer.errors import TransferError
 from team_transfer.service import export_source, export_team, import_team
 from team_transfer.settings import SettingsSection
-from team_transfer.team_ids import TeamIds, new_team_ids
+from team_transfer.team_id_choice import new_team_ids
+from team_transfer.team_ids import TeamIds
 from tests.pinned_memory_support import new_instance
 from tests.test_onboarding_team_import import _onboarding
 from tests.test_team_transfer_control import GOOD_BUNDLE

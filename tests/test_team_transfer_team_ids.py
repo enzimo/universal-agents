@@ -28,14 +28,14 @@ from team_transfer.pinned_memory import PinnedMemorySection
 from team_transfer.sections import TEAM_ID_RENAMES, RecordOutcome, renamed_records
 from team_transfer.service import export_source, export_team, import_team, plan_import
 from team_transfer.settings import SettingsSection
-from team_transfer.team_ids import (
-    TeamIds,
+from team_transfer.team_id_choice import (
     new_team_ids,
     recorded_team_id,
     suggested_team_id,
     target_team_ids,
     team_id_explanation,
 )
+from team_transfer.team_ids import TeamIds
 from tests.memory_support import SYSTEM_MEMORY_WRITER
 from tests.pinned_memory_support import new_instance
 
@@ -172,7 +172,8 @@ def test_the_explanation_says_what_is_wrong_with_the_id() -> None:
     assert dotted is not None and "has characters protocol 1 does not allow" in dotted
     assert spaced is not None and "has characters protocol 1 does not allow" in spaced
     assert "characters long" not in dotted
-    assert long.startswith("This version carries the team id in every message address")
+    assert long.startswith("This version's messages (protocol 1) carry the team id in their addresses")
+    assert long.endswith("Choose a new team id: the team is imported under it, and the export file stays as it is.")
     assert team_id_explanation(NEW) is None
 
 

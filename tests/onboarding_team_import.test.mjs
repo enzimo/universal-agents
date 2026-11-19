@@ -89,13 +89,15 @@ test("a wrong passphrase is reported and the person can try again", async () => 
   assert.equal(buttons(f.panel())["Open export"].disabled, false);
 });
 
-// A team whose id this version cannot carry (owner's decision 103).
+// A team whose id this version cannot carry (owner's decision 103). The explanation and the
+// refusal below are the sentences the server sends (team_transfer.team_ids, onboarding_engine).
 const QUESTION = {
   exported_team_id: "team_research_assistant_pro",
-  explanation: "This version carries the team id in every message address, and this team's id 'team_research_assistant_pro' is 27 characters long; at most 24 are allowed. Choose a new team id.",
+  explanation: "This version's messages (protocol 1) carry the team id in their addresses, and this team's id 'team_research_assistant_pro' is 27 characters long; protocol 1 allows at most 24. Choose a new team id: the team is imported under it, and the export file stays as it is.",
   suggestion: "team_research_assistant",
   chosen_before: null,
 };
+const REFUSED_ID = "The team id 'team research' has characters protocol 1 does not allow; it allows letters, digits, '-' and '_', starting with a letter or digit. Messages carry it in their addresses.";
 const teamIdInput = panel => byTag(panel, "input").find(input => input.id === "team-import-team-id");
 
 async function askedForTeamId(f, question = QUESTION) {
@@ -111,7 +113,7 @@ test("a team id this version cannot carry is asked for, starting from the sugges
 
   const panel = f.panel();
   assert.deepEqual(f.visited, [], "the review waits for the new id");
-  assert.match(panel.textContent, /is 27 characters long; at most 24 are allowed/);
+  assert.ok(panel.textContent.includes(QUESTION.explanation), "the explanation is shown as the server words it");
   assert.equal(teamIdInput(panel).value, "team_research_assistant");
   assert.equal(buttons(panel)["Open export"], undefined, "the export is open");
   const input = teamIdInput(panel);
@@ -136,13 +138,13 @@ test("a refused new team id shows by the field and keeps what was typed", async 
 
   buttons(f.panel())["Continue"].click();
   await answer(f.requests, "/api/team-import/team-id", jsonResponse({
-    error: "The team id 'team research' has characters the rule does not allow.", field: "team_id" }, 400));
+    error: REFUSED_ID, field: "team_id" }, 400));
   await settle();
 
   const panel = f.panel();
   const error = byTag(panel, "p").find(node => node.id === "team-import-team-id-error");
   assert.ok(error && error.classList.contains("field-error") && error.getAttribute("role") === "alert");
-  assert.equal(error.textContent, "This id was not used. The team id 'team research' has characters the rule does not allow.");
+  assert.equal(error.textContent, `This id was not used. ${REFUSED_ID}`);
   assert.equal(teamIdInput(panel).value, "team research");
   assert.equal(teamIdInput(panel).getAttribute("aria-invalid"), "true");
   assert.deepEqual(f.visited, []);

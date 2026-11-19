@@ -54,7 +54,8 @@ from team_transfer.sections import (
     SectionRecords,
     encrypted_member,
 )
-from team_transfer.team_ids import TeamIds, recorded_team_ids
+from team_transfer.team_id_choice import recorded_team_ids
+from team_transfer.team_ids import TeamIds
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +336,9 @@ def import_credential_bundle(
             return report
 
 
-def _import_with_config(bundle, config, team_ids: TeamIds, *, selected_keys, dry_run):
+def _import_with_config(
+    bundle: CredentialBundle, config: Any, team_ids: TeamIds, *, selected_keys: list[str] | None, dry_run: bool
+) -> CredentialImportReport:
     from secure_tool_broker.defaults import CREDENTIAL_TRANSFER_IMPORT_ROUTE
 
     manifest = bundle.manifest

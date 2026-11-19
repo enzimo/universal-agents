@@ -36,6 +36,17 @@ IDS = TeamIds(OLD, NEW)
 NOW = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
 
+# What this version refuses of the old instance's own edge cases (a removed person's, records that do
+# not move), as when a team keeps its id.
+REFUSED_FOR_ANY_TEAM = {
+    ("schedules", key) for key in (
+        "session/sess_gone", "schedule/sched_gone", "schedule/heartbeat_launcher", "schedule/sched_aar",
+        "heartbeat_item/hb_goal", "worker_binding/sched_sys_worker", "pool_limit/GhostAgent",
+        "pool_limit/PersonalAdminAgent", "execution_job/exec_job_1",
+    )
+}
+
+
 def _run_cli(*argv: str) -> None:
     import assistant_cli
     from team_transfer.cli import run_team_command
@@ -253,6 +264,10 @@ def _old_team(tmp_path: Path, registry: Any, monkeypatch: pytest.MonkeyPatch) ->
 
 @pytest.fixture
 def every_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, dict[str, str], Any]:
+    return _exported_every_section(tmp_path, monkeypatch)
+
+
+def _exported_every_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, dict[str, str], Any]:
     """The old team exported with every section but credentials; the sections use the test's procedure registry."""
 
     import team_transfer.registry as registry_module
@@ -343,13 +358,7 @@ def test_a_long_team_id_moves_through_the_command_line_under_a_new_id(
     assert (recorded, ids) == (NEW, IDS)
     # Only the old instance's own edge cases are refused (a removed person's, records that do not move), as
     # when a team keeps its id; none for the new id.
-    assert refused_records == {
-        ("schedules", key) for key in (
-            "session/sess_gone", "schedule/sched_gone", "schedule/heartbeat_launcher", "schedule/sched_aar",
-            "heartbeat_item/hb_goal", "worker_binding/sched_sys_worker", "pool_limit/GhostAgent",
-            "pool_limit/PersonalAdminAgent", "execution_job/exec_job_1",
-        )
-    }
+    assert refused_records == REFUSED_FOR_ANY_TEAM
 
     # The review folder supplies the id: another one is refused naming both, and none is needed.
     with pytest.raises(SystemExit) as refused:
@@ -427,6 +436,129 @@ def test_a_long_team_id_moves_through_the_command_line_under_a_new_id(
     assert sorted((f.team_id, f.fact_text) for f in facts if f.bank == COREMEM_BANK) == [
         (NEW, "Reports go out on Mondays."), (NEW, "The team ships on Fridays.")]
     assert _files_naming(target, needles) == [] and _stored_naming(target, needles) == []
+
+
+# -- PostgreSQL ---------------------------------------------------------------------------------
+
+
+def _postgres_naming(dsn: str, needles: tuple[str, ...]) -> list[str]:
+    """Each table name and stored value in the PostgreSQL database ``dsn`` that names one of ``needles``."""
+
+    import psycopg
+    from psycopg import sql
+
+    found = []
+    with psycopg.connect(dsn) as database:
+        tables = database.execute(
+            "SELECT table_schema, table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' "
+            "AND table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY 1, 2").fetchall()
+        assert tables, "the instance stored its records in this database"
+        for schema, table in tables:
+            found += [f"table {table}: {needle}" for needle in needles if _names(table, needle)]
+            for row in database.execute(sql.SQL("SELECT * FROM {}.{}").format(sql.Identifier(schema), sql.Identifier(table))):
+                for value in row:
+                    if isinstance(value, (bytes, memoryview)):
+                        text = bytes(value).decode("utf-8", "replace")
+                    elif isinstance(value, (dict, list)):
+                        text = json.dumps(value, default=str)
+                    else:
+                        text = str(value)
+                    found += [f"{table}: {needle}" for needle in needles if _names(text, needle)]
+    return found
+
+
+@pytest.mark.live
+@pytest.mark.postgres
+def test_a_postgres_team_moves_under_a_new_id_and_no_table_names_the_old_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command-line import of the every-section team, stored in PostgreSQL, into a new, empty database."""
+
+    import os
+    from uuid import uuid4
+
+    import psycopg
+    import yaml
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    import team_transfer.review_web as review_web
+    import tests.test_team_transfer_schedules as schedule_tests
+    from assistant_gateway.config import GatewayInstanceConfig
+    from instance_upgrades.protocol1_ids import check_ids_before_upgrade, load_saved_for_check
+    from storage.access_repository import AccessRepository
+    from storage.gateway_state_repository import create_gateway_state_repository
+    from storage.pinned_memory_repository import COREMEM_BANK, create_pinned_memory_repository
+
+    admin = os.environ.get("LIVE_TEST_POSTGRES_DSN")
+    if not admin:
+        pytest.skip("Set LIVE_TEST_POSTGRES_DSN to a PostgreSQL server where the test may create databases.")
+    # Neither database may come from the developer's or the bundle's own settings.
+    for name in ("POSTGRES_DSN", "POSTGRES_DSN_FILE", "TEAM_BUNDLED_POSTGRES_ADDRESS"):
+        monkeypatch.delenv(name, raising=False)
+    names = {role: f"team_import_{role}_{uuid4().hex}" for role in ("old", "new")}
+    with psycopg.connect(admin, autocommit=True) as server:  # CREATE DATABASE cannot run inside a transaction.
+        for name in names.values():
+            server.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    old_dsn, new_dsn = (make_conninfo(admin, dbname=names[role]) for role in ("old", "new"))
+    try:
+        # The old instance stores everything in its own PostgreSQL database.
+        built = schedule_tests.new_instance
+
+        def on_postgres(*args: Any, **kwargs: Any) -> tuple[Path, Any]:
+            path, _config = built(*args, **kwargs)
+            saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for section in ("state", "gateway"):
+                saved[section]["storage"]["backend"] = "postgres"
+            path.write_text(yaml.safe_dump(saved, sort_keys=False), encoding="utf-8")
+            return path, GatewayInstanceConfig.load(path)
+
+        monkeypatch.setattr(schedule_tests, "new_instance", on_postgres)
+        monkeypatch.setenv("POSTGRES_DSN", old_dsn)
+        out, secret, derived, _registry = _exported_every_section(tmp_path, monkeypatch)
+        needles = (OLD, *derived.values())
+        old_root = tmp_path / "old" / "alpha"
+        found = _files_naming(old_root, needles) + _stored_naming(old_root, needles) + _postgres_naming(old_dsn, needles)
+        assert {hit.rsplit(": ", 1)[1] for hit in found} == set(needles), "the search finds each id in the old instance"
+
+        # The new instance's empty database, as the import asks for it.
+        monkeypatch.setenv("POSTGRES_DSN", new_dsn)
+        target, review = tmp_path / "new", tmp_path / "review"
+        common = ("--in", str(out), "--instance-root", str(target), "--passphrase-file", str(secret))
+        selected: list[set[tuple[str, str]]] = []
+
+        async def on_the_page(files: ReviewFiles) -> None:
+            selected.append(_select_importable(files, set()))
+
+        monkeypatch.setattr(review_web, "serve_review", on_the_page)
+        _run_cli("review", *common, "--review-dir", str(review), "--new-team-id", NEW)
+        assert selected == [REFUSED_FOR_ANY_TEAM]
+        _run_cli("import", *common, "--review", str(review))
+        assert f"Team {OLD} was imported as {NEW}.\n" in capsys.readouterr().out
+
+        config = GatewayInstanceConfig.load(target / "instance_config.yaml")
+        assert (config.gateway.team_id, config.manager_storage_settings.backend) == (NEW, "postgres")
+        assert config.manager_storage_settings.postgres_dsn == new_dsn
+        assert sorted(p.canonical_user_id for p in create_gateway_state_repository(
+            config.state_storage_settings).list_team_people(NEW)) == ["usr_ana", "usr_ben"]
+        assert {grant.grant_id for grant in AccessRepository(config.manager_storage_settings).list_team(NEW)} == {
+            "g_person", "g_lead", "g_team", "g_role"}
+        facts = create_pinned_memory_repository(config.manager_storage_settings).list_unexpired_facts()
+        assert sorted((f.team_id, f.fact_text) for f in facts if f.bank == COREMEM_BANK) == [
+            (NEW, "Reports go out on Mondays."), (NEW, "The team ships on Fridays.")]
+        checked = load_saved_for_check(target / "instance_config.yaml")
+        assert check_ids_before_upgrade(checked, lambda: checked.manager_storage_settings) is None
+
+        # No table, stored value or file of the new instance names the old id or an id derived from it,
+        # while the same search finds the new id there.
+        assert _postgres_naming(new_dsn, needles) == []
+        assert _postgres_naming(new_dsn, (NEW,))
+        assert _stored_naming(target, needles) == []
+        assert _files_naming(target, needles) == []
+    finally:
+        with psycopg.connect(admin, autocommit=True) as server:
+            for name in names.values():
+                server.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
 
 
 # -- credentials after the first start ---------------------------------------------------------

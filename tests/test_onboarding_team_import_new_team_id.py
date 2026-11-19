@@ -3,9 +3,9 @@
 Opening such an export prepares no review: the page explains why the id does not fit and asks
 for a new one, starting from the suggestion. ``POST /api/team-import/team-id`` checks the typed id
 like a typed onboarding id (a refused one is shown by the field and nothing is written) and
-prepares the review under it. The review folder is fixed per export, so opening the export again
-offers the id chosen before: the same id keeps the selections, another id prepares the review again
-(``team_transfer.review.prepare_review(restart_for_another_id=True)``). After the import, the first
+prepares the review under it, once per opening. The review folder is fixed per export, so opening
+the export again offers the id chosen before: the same id keeps the selections, another id prepares
+the review again (``team_transfer.review.prepare_review(restart_for_another_id=True)``). After the import, the first
 start stores the handed-over credentials for the new team, and no file or stored value of the new
 instance names the old id.
 """
@@ -30,7 +30,7 @@ from runtime_settings.instance_layout import InstanceLayout
 from storage.access_repository import AccessRepository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_transfer.credential_handover import import_handed_over_credentials
-from team_transfer.team_ids import team_id_explanation
+from team_transfer.team_id_choice import team_id_explanation
 from tests.test_onboarding_team_import import GITHUB_TOKEN, PASSPHRASE, _confirm_schedules, _onboarding
 from tests.test_team_transfer_broker_credentials import _use_store
 from tests.test_team_transfer_team_id_renames import _files_naming, _stored_naming
@@ -112,12 +112,17 @@ async def test_a_long_team_id_moves_through_onboardings_import_under_a_new_id(
         assert (question["suggestion"], question["chosen_before"]) == (OTHER, OTHER)
         assert (await _choose(client, headers, OTHER))[1]["restarted_review"] is False
         assert not next(r for r in (await _review(client, headers))["records"] if r["key"] == outdated["key"])["selected"]
-        # A refused id leaves that review as it was.
-        assert (await _choose(client, headers, "team research"))[0] == 400
+        # Once this opening has its review, another id needs the export opened again.
+        status, body = await _choose(client, headers, NEW)
+        assert status == 409 and "open the export again" in body["error"], body
         assert (await _review(client, headers))["imported_team_id"] == OTHER
-
-        # Opened again and given the suggestion: the review is prepared again, everything selected.
+        # Opened again, an id the rule refuses leaves the saved review as it was.
         headers, _question = await _open(client)
+        assert (await _choose(client, headers, "team research"))[0] == 400
+        headers, question = await _open(client)
+        assert question["chosen_before"] == OTHER
+
+        # Given the suggestion instead: the review is prepared again, everything selected.
         assert (await _choose(client, headers, NEW))[1] == {
             "page": "/team-import", "team_id": NEW, "restarted_review": True}
         review = await _review(client, headers)
@@ -195,24 +200,32 @@ async def test_an_id_another_team_in_the_knowledge_already_has_is_refused_by_the
         assert not InstanceLayout.at(root).team_import_review_dir.exists() or not any(
             InstanceLayout.at(root).team_import_review_dir.iterdir()), "no review is prepared"
 
-        # After a review under a free id, that id is refused the same way and the review stays.
+        # After a review under a free id, opening again and choosing that id is refused the same
+        # way, and the saved review stays.
         assert (await _choose(client, headers, NEW))[0] == 200
+        headers, question = await _open(client)
+        assert question["chosen_before"] == NEW
         status, body = await _choose(client, headers, OTHER)
-        assert (status, body["field"]) == (400, "team_id"), body
-        assert (await _review(client, headers))["imported_team_id"] == NEW
+        assert (status, body["field"]) == (400, "team_id") and "Choose another new team id" in body["error"], body
         headers, question = await _open(client)
         assert question["chosen_before"] == NEW
 
 
 @pytest.mark.asyncio
-async def test_the_id_step_and_an_import_never_overlap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Preparing the review under another id may replace its folder, so neither starts while the other runs."""
+async def test_each_opening_chooses_the_id_once_and_an_older_opening_cannot_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Preparing the review under another id replaces its folder, so nothing else may use it then.
+
+    The review routes refuse until the opening has its review, and the id step refuses once it
+    has one. Two id steps sent at once: the second waits for the first and is refused. An
+    import whose request was accepted for an export that was opened again before its body
+    arrived is refused, so the newer opening's id step never runs beside an import.
+    """
 
     import threading
 
     import assistant_gateway.onboarding_web.team_import as team_import
-    from team_transfer.errors import TransferError
-    from team_transfer.review_session import ReviewSession
     from tests.test_team_import_protocol1_ids import FITS, TOO_LONG, _export
 
     root = _copied(_export(tmp_path, TOO_LONG), tmp_path)
@@ -224,27 +237,57 @@ async def test_the_id_step_and_an_import_never_overlap(tmp_path: Path, monkeypat
         release.wait(10)
         return prepare(*args, **kwargs)
 
-    async def slow_apply(self: ReviewSession, payload: Any) -> Any:
-        await asyncio.Event().wait()
-        raise TransferError("never reached")
+    # Set once an import request is past the token check, before it reads its body.
+    import_started = asyncio.Event()
+    handle_import = team_import.TeamImport._import
+
+    async def noting_import(self: Any, request: Any, opened: Any) -> Any:
+        import_started.set()
+        return await handle_import(self, request, opened)
+
+    monkeypatch.setattr(team_import.TeamImport, "_import", noting_import)
 
     async with TestClient(TestServer(_onboarding(root).build_app())) as client:
         headers, _question = await _open(client)
-        assert (await _choose(client, headers, FITS))[0] == 200
+        # A body the model refuses (a pasted id over 255 characters, or no id) is answered by the field.
+        for body in ({"team_id": "t" * 300}, {}):
+            response = await client.post("/api/team-import/team-id", json=body, headers=headers)
+            assert (response.status, (await response.json())["field"]) == (400, "team_id")
+        assert "letters, digits" in (await response.json())["error"]
 
-        # While the review is prepared again, the import is refused.
         monkeypatch.setattr(team_import, "prepare_review", slow_prepare)
-        choosing = asyncio.create_task(_choose(client, headers, "team_b"))
+        first = asyncio.create_task(_choose(client, headers, FITS))
         await asyncio.to_thread(preparing.wait, 10)
-        refused = await client.post("/api/team-import/import", json={"digest": "d"}, headers=headers)
-        assert refused.status == 409 and "being prepared" in (await refused.json())["error"]
+        second = asyncio.create_task(_choose(client, headers, "team_b"))
+        await asyncio.sleep(0.05)  # the second call is waiting for the first
         release.set()
-        assert (await choosing)[0] == 200
+        assert (await first)[0] == 200
+        status, body = await second
+        assert status == 409 and "already chosen" in body["error"], body
+        assert (await _review(client, headers))["imported_team_id"] == FITS
 
-        # While an import runs, the id step is refused.
-        monkeypatch.setattr(ReviewSession, "apply", slow_apply)
-        importing = asyncio.create_task(client.post("/api/team-import/import", json={"digest": "d"}, headers=headers))
-        await asyncio.sleep(0.05)
-        status, body = await _choose(client, headers, FITS)
-        importing.cancel()
-    assert status == 409 and "import is running" in body["error"]
+        # An import whose body arrives after the export was opened again is refused.
+        body_sent = asyncio.Event()
+
+        async def slow_body() -> Any:
+            yield b'{"digest": '
+            await body_sent.wait()
+            yield b'"d"}'
+
+        importing = asyncio.create_task(client.post(
+            "/api/team-import/import", data=slow_body(), headers={**headers, "Content-Type": "application/json"}))
+        await asyncio.wait_for(import_started.wait(), 10)
+        newer, _question = await _open(client)
+        body_sent.set()
+        refused = await importing
+        assert refused.status == 403 and "Open the export again" in (await refused.json())["error"]
+
+        # A review that cannot be prepared is answered on the page and logged with the file and the error type.
+        def failing_prepare(*args: Any, **kwargs: Any) -> Any:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(team_import, "prepare_review", failing_prepare)
+        status, body = await _choose(client, newer, FITS)
+    assert (status, body["error"]) == (400, "disk full") and "field" not in body, body
+    assert ("event=onboarding_team_import_team_id_failed file_name=team.uatransfer "
+            f"exported_team_id={TOO_LONG!r} error_type=OSError") in caplog.text

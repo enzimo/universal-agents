@@ -8,7 +8,7 @@ class TransferError(RuntimeError):
 
 
 class NewTeamIdRefused(TransferError):
-    """The new team id asked for cannot be used, and another one can (``team_transfer.team_ids``).
+    """The new team id asked for cannot be used, and another one can (``team_transfer.team_id_choice``).
 
     Raised for a typed id the rule refuses and for an id another team in the export already has,
     so onboarding's Import page shows the message by the id field and keeps what was typed,
