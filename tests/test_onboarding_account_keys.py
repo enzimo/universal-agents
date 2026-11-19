@@ -419,7 +419,11 @@ async def _first_start_with_a_model_key(instance: Path, running, *, roles: tuple
         access_store=lambda: running.gate.links,
         catalog=lambda: running.gate.catalog,
     )
-    idle = SimpleNamespace(recover_unwatched=nothing_to_recover, recover_collections=nothing_to_recover)
+    idle = SimpleNamespace(
+        recover_unwatched=nothing_to_recover,
+        resend_kept_results=nothing_to_recover,
+        recover_collections=nothing_to_recover,
+    )
     stop = asyncio.Event()
     # The gateway's start-up access work, started as the gateway starts it.
     tasks = gateway_module._access_maintenance_tasks(

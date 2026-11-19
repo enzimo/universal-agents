@@ -35,6 +35,12 @@ class GatewayMaintenanceScheduleInstaller(Protocol):
     async def ensure_all(self) -> None: ...
 
 
+class GatewayKeptResults(Protocol):
+    """Setup page results kept while no team lead could be reached (``tool_setup.GatewayToolSetups``)."""
+
+    async def resend_kept_results(self) -> object: ...
+
+
 @dataclass(frozen=True)
 class GatewayManagerTransitionSettings:
     """Stable presentation and route settings for manager transitions."""
@@ -81,6 +87,7 @@ class GatewayManagerTransitionApplication:
         targets: GatewayProactiveTargetProvider,
         proactive_sessions: GatewayProactiveSessionResolver,
         maintenance: GatewayMaintenanceScheduleInstaller,
+        kept_results: GatewayKeptResults,
         manager: GatewayManagerClient,
         responses: GatewayResponseCoordinator,
         event_output: GatewayEventOutput,
@@ -91,6 +98,7 @@ class GatewayManagerTransitionApplication:
         self._targets = targets
         self._proactive_sessions = proactive_sessions
         self._maintenance = maintenance
+        self._kept_results = kept_results
         self._manager = manager
         self._responses = responses
         self._event_output = event_output
@@ -120,6 +128,16 @@ class GatewayManagerTransitionApplication:
         self._available_hook = on_manager_available
 
     async def handle_available(self, transition: GatewayManagerTransition) -> None:
+        """A team lead is reachable: reinstall schedules, announce a return, then send kept setup results.
+
+        The kept results go on every available transition, a lead's return and
+        a change to another lead alike, because a result whose publish failed
+        while the old lead was known is kept too. They go last, after the
+        notice and the apps' hook (which resumes Telegram polling), so many
+        kept results never delay those. Each part runs on its own (``_step``),
+        so one that fails skips none of the others.
+        """
+
         if not self._active:
             return
         try:
@@ -133,11 +151,14 @@ class GatewayManagerTransitionApplication:
                 transition.source,
                 type(exc).__name__,
             )
-        if not transition.became_available:
-            return
-        if self._notices_enabled:
-            await self._step("notice", transition, lambda: self._emit_notice(available=True))
-        await self._step("hook", transition, lambda: self._run_hook(self._available_hook, label="available"))
+        if transition.became_available:
+            if self._notices_enabled:
+                await self._step("notice", transition, lambda: self._emit_notice(available=True))
+            await self._step("hook", transition, lambda: self._run_hook(self._available_hook, label="available"))
+        # Every available transition, a lead's return and a change to another lead alike; the lead follower
+        # reaches this through GatewayManagerClient.set_lead (assistant_gateway.team_view.TeamLeadFollower). A
+        # failed send is logged by _step; the next transition, page end or gateway start sends the results.
+        await self._step("resend_kept_results", transition, self._kept_results.resend_kept_results)
 
     async def handle_unavailable(self, transition: GatewayManagerTransition) -> None:
         """The notice, the hook (pausing Telegram polling) and failing people's waiting replies, each on its own:
@@ -181,7 +202,7 @@ class GatewayManagerTransitionApplication:
         self,
         step: str,
         transition: GatewayManagerTransition | None,
-        run: Callable[[], Awaitable[None]],
+        run: Callable[[], Awaitable[object]],
         *,
         correlation_id: str | None = None,
     ) -> None:

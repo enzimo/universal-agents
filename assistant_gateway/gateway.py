@@ -201,7 +201,7 @@ from assistant_gateway.http_secure_broker import HttpGatewaySecureBroker
 from assistant_gateway.onboarding_account_keys import OnboardingAccountKeyHandover
 from assistant_gateway.installed_procedures import GatewayInstalledProcedures
 from assistant_gateway.mcp_controls import GatewayMCPControls
-from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
+from assistant_gateway.nats_manager_runtime import HANDLING_RETRY_DELAY_SECONDS, NatsGatewayManagerRuntime
 from assistant_gateway.person_departure import build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
 from assistant_gateway.team_services_client import (
@@ -450,6 +450,8 @@ def _access_maintenance_tasks(
     typed during onboarding (``assistant_gateway.onboarding_account_keys``); setup recovery
     tells tasks whose setup page was open when the gateway stopped that
     nobody watched it (``tool_setup.GatewayToolSetups.recover_unwatched``);
+    the setup results kept while no team lead could be reached are sent to the
+    one known now (``tool_setup.GatewayToolSetups.resend_kept_results``);
     credential recovery resumes saved broker session watches without storing
     submitted fields or page URLs;
     the Inbox loop (authorization on) sends announcements and decision
@@ -474,6 +476,7 @@ def _access_maintenance_tasks(
     tasks = [
         handover_task,
         asyncio.create_task(tool_setups.recover_unwatched(), name="gateway_tool_setup_recovery"),
+        asyncio.create_task(tool_setups.resend_kept_results(), name="gateway_tool_setup_resend"),
         asyncio.create_task(credential_workflow.recover_collections(), name="gateway_credential_collection_recovery"),
         # Its first check waits for the hand-over, which saves the model keys from onboarding.
         asyncio.create_task(
@@ -623,6 +626,9 @@ def _bind_manager_client(gateway: "UserGateway", view: GatewayTeamView | None) -
         on_unsolicited=gateway.inbound_messages.handle,
         on_manager_available=gateway.manager_transitions.handle_available,
         on_manager_unavailable=gateway.manager_transitions.handle_unavailable,
+        # A setup, form or signup request left on a closed reply wait and given up on is refused to its task
+        # (assistant_gateway.application.reply_leftovers).
+        on_leftover_lost=gateway._response_coordinator.fail_lost_credential_request,
     )
     if view is None:
         return None
@@ -901,6 +907,9 @@ class UserGateway:
                 manager_named_agent_type=config.manager.named_agent_type,
                 response_route=config.manager.response_queue_name,
                 initial_manager_id=config.manager.manager_agent_id,
+                # A leftover reply is retried as the response receiver retries a message.
+                leftover_attempts=int(config.transport.max_deliver or 1),
+                leftover_retry_seconds=HANDLING_RETRY_DELAY_SECONDS,
             ),
             id_generator=self._id_generator,
             logger=logger,
@@ -1235,6 +1244,8 @@ class UserGateway:
             targets=self._delivery_preferences,
             proactive_sessions=self.proactive_delivery,
             maintenance=self._maintenance_schedules,
+            # Sent on every team-lead-available transition (tool_setup.resend_kept_results).
+            kept_results=self._credential_workflow.tool_setups,
             manager=self._manager_client,
             responses=self._response_coordinator,
             event_output=self._event_output,
@@ -1552,6 +1563,9 @@ class UserGateway:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks = []
+        # Before the page watches stop: a leftover passed on later could open a
+        # page that nothing watches (reply_leftovers).
+        await self._manager_client.stop_leftover_passes()
         await self._credential_workflow.close()
         self._credential_handoffs.clear()
         await self._activity_notices.close()

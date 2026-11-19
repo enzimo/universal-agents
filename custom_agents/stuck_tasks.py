@@ -484,7 +484,7 @@ class StuckTasks:
         task's original) and the agent type of the owner that runs the task.
         """
         threshold = timedelta(seconds=self.settings.no_progress_after_seconds)
-        work = SavedWork.from_snapshot(owner.snapshot)
+        work = SavedWork.from_snapshot(owner.snapshot, owner_agent_id=owner.owner_agent_id)
         plan_scope = manager_durable_scope_id(
             team_id=self.team_id, named_agent_type=owner.owner_named_agent_type, fallback_agent_id=owner.owner_agent_id
         )

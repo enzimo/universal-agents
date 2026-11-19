@@ -12,8 +12,9 @@ the agent's final answer.
 The gateway saves the broker session id and result routing before it starts a
 watch, so startup can resume forms that remain open across a gateway restart.
 Submitted fields and page URLs are never saved. Final results remain with the
-owned watcher through temporary manager delivery failures, and the saved wait
-is removed only after publication succeeds. A broker that no longer knows the
+owned watcher through temporary manager delivery failures (no team lead known,
+or a failed publish), which leave the chat request as it was, and the saved
+wait is removed only after publication succeeds. A broker that no longer knows the
 session produces an unconfirmed result rather than an invented success.
 
 This workflow also owns the other broker page watchers, so they share one
@@ -55,8 +56,11 @@ from assistant_gateway.application.response_models import GatewayResponse
 from assistant_gateway.application.secure_results import (
     REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
     REQUEST_STATUS_WAITING_FOR_CREDENTIAL_RESULT,
+    SECURE_RESULT_RETRY_MAX_SECONDS,
+    SECURE_RESULT_RETRY_MIN_SECONDS,
     GatewayCredentialWorkflowSettings,
     SecureResultPublisher,
+    SendOutcome,
 )
 from assistant_gateway.application.tool_setup import (
     REQUEST_KIND_TOOL_SETUP_RESULT,
@@ -594,7 +598,7 @@ class GatewayCredentialWorkflow:
         elif isinstance(results[0], BaseException):
             raise results[0]
         published = results[1]
-        retry_seconds = max(1.0, self._settings.poll_interval_seconds)
+        retry_seconds = max(SECURE_RESULT_RETRY_MIN_SECONDS, self._settings.poll_interval_seconds)
         while published is False or isinstance(published, Exception):
             if isinstance(published, Exception):
                 self._logger.warning(
@@ -612,7 +616,7 @@ class GatewayCredentialWorkflow:
                 )
             except Exception as exc:
                 published = exc
-            retry_seconds = min(30.0, retry_seconds * 2)
+            retry_seconds = min(SECURE_RESULT_RETRY_MAX_SECONDS, retry_seconds * 2)
         if isinstance(published, BaseException):
             raise published
         if published is True:
@@ -627,7 +631,7 @@ class GatewayCredentialWorkflow:
         conversation_id: str | None,
         session_key: str,
     ) -> bool:
-        """Send the waiting task the form's secret-free result."""
+        """Send the waiting task the form's secret-free result; False when it was not sent (logged)."""
 
         result_payload = _mapping(session_payload.get("result"))
         content_payload = _mapping(result_payload.get("content"))
@@ -655,7 +659,7 @@ class GatewayCredentialWorkflow:
             error=str(result_payload.get("error") or "") or None,
             continue_task=request_content.continue_task,
         )
-        return await self._publisher.publish(
+        outcome = await self._publisher.publish(
             result,
             session=session,
             correlation_id=correlation_id,
@@ -664,6 +668,7 @@ class GatewayCredentialWorkflow:
             request_text=message,
             parent_task_id=request_content.parent_task_id,
         )
+        return outcome is SendOutcome.SENT
 
     async def _post_closing(
         self, request_content: SecureCredentialCollectionRequest, status: str, session_key: str,

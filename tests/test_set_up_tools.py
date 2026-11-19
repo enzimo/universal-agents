@@ -21,7 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from strands import Agent
@@ -30,7 +35,10 @@ from strands.models.model import Model as _StrandsModel
 
 from custom_agents import access_runtime
 from custom_agents.access_workflows import workflow_service_for
-from custom_agents.task_human_interaction_blockers import get_human_interaction_blocker
+from custom_agents.task_human_interaction_blockers import get_human_interaction_blocker, setup_answer_held
+from custom_agents import tool_setup_run_runtime
+from custom_agents.runtime_recovery import recover_runtime_after_restart
+from custom_agents.task_manager import TaskManager
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND, TOOL_SETUP_RUN_RESPONSE_KIND
 from custom_messages.contracts.access_v2 import AccessRequestStatus, AccessReviewChoice
 from custom_messages.enums import ProgressState
@@ -114,7 +122,10 @@ async def test_repos_in_github_with_access_and_sign_in_missing(tmp_path: Path, m
     steering = lead._pending_interrupt_responses["task-lead"]
     [answer] = steering.interrupt_responses
     assert answer["response"]["kind"] == TOOL_SETUP_RUN_RESPONSE_KIND
-    assert get_human_interaction_blocker(lead.task_manager, "task-lead") is None
+    # The record stays, marked, until the paused turn really resumes: the
+    # answer waits for the task's lane (test_setup_run_resume_wait).
+    blocker = get_human_interaction_blocker(lead.task_manager, "task-lead")
+    assert blocker["run_id"] == run.run_id and setup_answer_held(blocker, lead.id)
     tool_call.response = answer["response"]
     result = call(lead, [GITHUB], tool_call, purpose="list the repos you can access in GitHub")
     assert result["status"] == "ready"
@@ -399,6 +410,79 @@ async def test_after_an_agent_restart_the_task_resumes_from_a_directive(tmp_path
     lead._continue_pending_work.assert_awaited()
 
 
+def _restarted(lead, tmp_path: Path) -> SimpleNamespace:
+    """The same agent after a restart: its saved work in a new TaskManager, no paused turn or held answer."""
+
+    manager = TaskManager(db_path=str(tmp_path / "manager.db"))
+    manager.set_owner_identity(lead.id, lead.name, TEAM, lead.named_agent_type)
+    state = {key: value for key, value in vars(lead).items() if not key.startswith("_tool_setup_run")}
+    return SimpleNamespace(
+        **{
+            **state,
+            "task_manager": manager,
+            "_interrupted_turn_sessions": {},
+            "_pending_interrupt_responses": {},
+            "_pending_work_task": None,
+            "_logger": logging.getLogger("test.set_up_tools.restart"),
+            # What restart recovery reads (runtime_recovery.recover_runtime_after_restart).
+            "deferred_inbox": SimpleNamespace(
+                stored_team_id=AsyncMock(return_value=None),
+                restore_role=AsyncMock(return_value=False),
+                restore=AsyncMock(return_value=False),
+            ),
+            "same_role_runtime_takeover_enabled": False,
+            "_agent_state_store": None,
+            "_recovery_retry_deadline_seconds": lambda: 900.0,
+            "_parse_iso_timestamp": lambda value: datetime.fromisoformat(value) if value else None,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_restart_while_the_answer_waits_for_its_lane_resumes_the_task_with_the_result(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The run ended with the paused turn live, the lane stayed busy, and the agent restarted.
+
+    The answer lived only in memory. Restart recovery keeps the task waiting
+    because of its record, then the setup-run recovery resumes it from a note
+    with the run's result, once, without waking the drain before startup ends.
+    """
+    lead = lead_agent(tmp_path, enabled=False, instance_root=tmp_path)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT})
+    _call, raised = start(lead, [GITHUB])
+    await pause_turn(lead, raised.interrupt)
+    [page] = sent_pages(lead)
+    await gateway_result(lead, page, "completed", account_label="exampleuser")
+    assert setup_answer_held(get_human_interaction_blocker(lead.task_manager, "task-lead"), lead.id)
+    await asyncio.wait_for(lead._pending_work_task, 2)  # the busy lane never ran the answer
+
+    agent = _restarted(lead, tmp_path)
+    with caplog.at_level(logging.WARNING):
+        await recover_runtime_after_restart(agent)
+    # Review F7 (EVD-02): restart recovery itself ran without an error of its own.
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+    manager = agent.task_manager
+    assert get_human_interaction_blocker(manager, "task-lead") is None
+    assert manager.get_task_info("task-lead").state == ProgressState.ACCEPTED
+    assert list(manager.task_state.task_queue) == ["task-lead"]
+    note = manager.read_runtime_resume_directive("task-lead")
+    assert "Signed in to GitHub as exampleuser" in note and '"status": "ready"' in note
+    assert agent._pending_work_task is None, "startup wakes the drain itself once it is ready"
+
+    # Review C03: a second pass past the pacing window looks again and resumes nothing more.
+    reads = []
+    original = tool_setup_run_runtime._setup_run_waits
+    monkeypatch.setattr(tool_setup_run_runtime, "_setup_run_waits", lambda item: reads.append(1) or original(item))
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(agent, now=time.monotonic() + 3600) == 0
+    assert reads == [1]
+    assert manager.read_runtime_resume_directive("task-lead").count(tool_setup_run_runtime.RUN_ENDED_NOTE) == 1
+    resumes = [entry for entry in manager.get_task_history_entries("task-lead", limit=None)
+               if entry.summary == "Tool setup ended; the task resumes."]
+    assert len(resumes) == 1 and list(manager.task_state.task_queue) == ["task-lead"]
+
+
 @pytest.mark.asyncio
 async def test_a_denied_access_request_stops_the_setup(tmp_path: Path, monkeypatch) -> None:
     lead = lead_agent(tmp_path)
@@ -433,3 +517,338 @@ def _no_sharing_choices():
             raise AssertionError("compiling a proposal records no choice")
 
     return TeamAccountSharing(_NoChoices(), TEAM)
+
+
+@pytest.mark.asyncio
+async def test_a_second_copy_of_a_page_result_is_ignored_even_after_the_task_ended(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The gateway sends a kept result again when a team lead is back, so a copy can arrive twice (C02).
+
+    The run applies each result once, before the check for an ended task, so a
+    late copy never posts a second answer, a second history entry or a second
+    workflow event; a result whose task had already ended is recorded too, so
+    its copy is recognised as well.
+    """
+
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from custom_agents import tool_setup_runtime
+
+    lead = lead_agent(tmp_path, enabled=False)
+    answers = AsyncMock()
+    monkeypatch.setattr(tool_setup_runtime, "_publish_task_response", answers)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT, "cli:google": SIGNED_OUT | {"team_sign_in_app": "configured"}})
+    _tool_call, raised = start(lead, [GITHUB, "cli:google"], purpose="check your GitHub and Gmail for Acme")
+    await pause_turn(lead, raised.interrupt)
+    github, google = sent_pages(lead)
+    workflow_id = the_run(lead).workflow_id
+
+    def workflow_events() -> int:
+        return len(workflow_service_for(lead).repository.events(workflow_id, limit=500))
+
+    def github_history() -> list[str]:
+        entries = lead.task_manager.get_task_history_entries("task-lead", limit=None)
+        return [entry.summary for entry in entries if entry.summary.startswith("Setup page (sign_in) for cli:github")]
+
+    await gateway_result(lead, github, "completed", account_label="exampleuser")
+    events_after_first = workflow_events()
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+    assert workflow_events() == events_after_first
+    assert github_history() == ["Setup page (sign_in) for cli:github: completed."]
+    assert the_run(lead).results_applied == (github.setup_request_id,)
+
+    # The task ends while a result is still on its way, and copies keep arriving.
+    lead.task_manager.complete_task("task-lead", datetime.now(timezone.utc).isoformat())
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+        await gateway_result(lead, google, "completed", account_label="me@acme.example")
+        await gateway_result(lead, google, "completed", account_label="me@acme.example")
+
+    assert answers.await_count == 1, "only the first copy of the result whose task had ended answers"
+    assert github_history() == ["Setup page (sign_in) for cli:github: completed."]
+    assert the_run(lead).results_applied == (github.setup_request_id, google.setup_request_id)
+    duplicates = [record.getMessage() for record in caplog.records if "event=tool_setup_result_duplicate" in record.getMessage()]
+    assert len(duplicates) == 3
+    assert f"setup_request_id={google.setup_request_id} status=completed" in duplicates[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_an_expired_pages_result_is_recognised_after_the_page_was_offered_again(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The piece carries the new page's id; the run's applied ids still recognise the old result's copy.
+
+    Without them, a copy arriving after the task ended matched no run and
+    posted the orphaned-result answer ("... was not finished") to the person.
+    """
+
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from custom_agents import tool_setup_runtime
+
+    lead = lead_agent(tmp_path, enabled=False)
+    answers = AsyncMock()
+    monkeypatch.setattr(tool_setup_runtime, "_publish_task_response", answers)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT})
+    _tool_call, raised = start(lead, [GITHUB])
+    await pause_turn(lead, raised.interrupt)
+    [first] = sent_pages(lead)
+
+    await gateway_result(lead, first, "expired", attempt=1)
+    await gateway_result(lead, first, "expired", attempt=1)
+    pages = sent_pages(lead)
+    assert len(pages) == 2, "one fresh page, not two"
+    [piece] = the_run(lead).pieces
+    assert (piece.setup_request_id, piece.attempt) == (pages[-1].setup_request_id, 2)
+
+    lead.task_manager.complete_task("task-lead", datetime.now(timezone.utc).isoformat())
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, first, "expired", attempt=1)
+
+    answers.assert_not_awaited()
+    assert f"event=tool_setup_result_duplicate run_id={the_run(lead).run_id}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_result_replayed_into_a_run_stored_by_the_previous_version_is_handled_as_before(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """A run saved by the previous version records no result ids (C10, finding F2).
+
+    A copy replayed into it after the upgrade (an inbox message the stopped
+    agent had not cleared) gets the previous version's handling: the done
+    piece stays done, the follow-up steps run again so the task still
+    continues, and only from then on is a further copy ignored.
+    """
+
+    from custom_agents.tool_setup_run_runtime import run_repository
+    from storage.tool_setup_run_repository import RUN_TABLE
+
+    lead = lead_agent(tmp_path, enabled=False)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT, "cli:google": SIGNED_OUT | {"team_sign_in_app": "configured"}})
+    _tool_call, raised = start(lead, [GITHUB, "cli:google"], purpose="check your GitHub and Gmail for Acme")
+    await pause_turn(lead, raised.interrupt)
+    github, _google = sent_pages(lead)
+    await gateway_result(lead, github, "completed", account_label="exampleuser")
+    run = the_run(lead)
+    # Store the run as the previous version wrote it: the same run without the result ids.
+    stored = json.loads(run.model_dump_json())
+    del stored["results_applied"], stored["results_handled"]
+    repository = run_repository(lead)
+    with repository._connect() as conn:
+        conn.execute(
+            f"UPDATE {RUN_TABLE} SET payload_json = {repository.dialect.bind} WHERE run_id = {repository.dialect.bind}",
+            (json.dumps(stored), run.run_id),
+        )
+        conn.commit()
+    assert (the_run(lead).results_applied, the_run(lead).results_handled) == ((), ()), "it loads"
+
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+
+    assert "event=tool_setup_result_duplicate" not in caplog.text, "the previous version's copy is handled as it was"
+    assert [piece.status for piece in the_run(lead).pieces if piece.tool_id == GITHUB] == ["done"]
+    assert _github_history(lead) == ["Setup page (sign_in) for cli:github: completed."] * 2
+    assert the_run(lead).results_handled == (github.setup_request_id,)
+
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+    assert f"event=tool_setup_result_duplicate run_id={run.run_id}" in caplog.text
+    assert len(_github_history(lead)) == 2
+
+
+# A result whose first handling failed partway (finding F1) --------------------------------
+
+
+def _github_history(lead) -> list[str]:
+    entries = lead.task_manager.get_task_history_entries("task-lead", limit=None)
+    return [entry.summary for entry in entries if entry.summary.startswith("Setup page (sign_in) for cli:github")]
+
+
+def _page_on_its_step(lead, setup_request_id: str) -> tuple[str, str] | None:
+    """The page's workflow step state and the page's own status on it."""
+
+    record = workflow_service_for(lead).repository.get(the_run(lead).workflow_id)
+    for step in record.steps:
+        for link in step.setups:
+            if link.setup_request_id == setup_request_id:
+                return str(getattr(step.state, "value", step.state)), str(link.status)
+    return None
+
+
+async def _github_page_after_google(tmp_path: Path, monkeypatch):
+    """Two tools, so a workflow tracks the pages; the Google page finished first."""
+
+    lead = lead_agent(tmp_path, enabled=False)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT, "cli:google": SIGNED_OUT | {"team_sign_in_app": "configured"}})
+    _tool_call, raised = start(lead, [GITHUB, "cli:google"], purpose="check your GitHub and Gmail for Acme")
+    await pause_turn(lead, raised.interrupt)
+    github, google = sent_pages(lead)
+    await gateway_result(lead, google, "completed", account_label="me@acme.example")
+    return lead, github
+
+
+def _failing_once(real, error: Exception):
+    calls = 0
+
+    def call(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise error
+        return real(*args, **kwargs)
+
+    return call
+
+
+def _async_failing_once(real, error: Exception):
+    calls = 0
+
+    async def call(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise error
+        return await real(*args, **kwargs)
+
+    return call
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_step", ["task_lookup", "workflow_step", "history", "next_pages"])
+async def test_a_result_whose_first_handling_failed_continues_the_task_when_dispatched_again(
+    tmp_path: Path, monkeypatch, caplog, failing_step: str
+) -> None:
+    """The run applied the result, then a follow-up step failed; the inbox dispatches it again and the task resumes."""
+
+    from custom_agents import tool_setup_run_runtime as run_runtime
+
+    lead, github = await _github_page_after_google(tmp_path, monkeypatch)
+    error = RuntimeError("the store is unavailable for a moment")
+    if failing_step == "task_lookup":
+        monkeypatch.setattr(lead.task_manager, "get_task_info", _failing_once(lead.task_manager.get_task_info, error))
+    elif failing_step == "workflow_step":
+        monkeypatch.setattr(run_runtime, "record_setup_result", _failing_once(run_runtime.record_setup_result, error))
+    elif failing_step == "history":
+        monkeypatch.setattr(run_runtime, "_history", _async_failing_once(run_runtime._history, error))
+    else:
+        monkeypatch.setattr(run_runtime, "advance", _async_failing_once(run_runtime.advance, error))
+
+    with pytest.raises(RuntimeError):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+    assert the_run(lead).results_applied[-1] == github.setup_request_id
+    assert github.setup_request_id not in the_run(lead).results_handled
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+
+    assert "event=tool_setup_result_handled_again" in caplog.text
+    assert "event=tool_setup_result_duplicate" not in caplog.text
+    assert "task-lead" in lead._pending_interrupt_responses, "the task resumes"
+    assert the_run(lead).status == "finished"
+    assert _page_on_its_step(lead, github.setup_request_id)[1] == "completed", "its workflow step records the page"
+    assert 1 <= len(_github_history(lead)) <= 2, "at most one repeated history entry"
+    assert github.setup_request_id in the_run(lead).results_handled
+
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+    assert "event=tool_setup_result_duplicate" in caplog.text, "once handled, a copy is ignored"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_for_an_ended_task_that_failed_is_sent_when_dispatched_again_and_only_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from custom_agents import tool_setup_runtime
+
+    lead, github = await _github_page_after_google(tmp_path, monkeypatch)
+    lead.task_manager.complete_task("task-lead", datetime.now(timezone.utc).isoformat())
+    answers = AsyncMock(side_effect=[TimeoutError("nats: timeout"), None, None])
+    monkeypatch.setattr(tool_setup_runtime, "_publish_task_response", answers)
+
+    with pytest.raises(TimeoutError):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+    await gateway_result(lead, github, "completed", account_label="exampleuser")
+    await gateway_result(lead, github, "completed", account_label="exampleuser")
+
+    assert answers.await_count == 2, "the failed answer is sent again; a later copy does not answer a third time"
+
+
+@pytest.mark.asyncio
+async def test_a_late_copy_of_an_expired_pages_result_leaves_the_completed_step_alone(tmp_path: Path, monkeypatch) -> None:
+    lead, first = await _github_page_after_google(tmp_path, monkeypatch)
+    await gateway_result(lead, first, "expired", attempt=1)
+    second = sent_pages(lead)[-1]
+    assert second.setup_request_id != first.setup_request_id
+    await gateway_result(lead, second, "completed", account_label="exampleuser")
+    step_before, pages_before = _page_on_its_step(lead, second.setup_request_id), len(sent_pages(lead))
+
+    await gateway_result(lead, first, "expired", attempt=1)
+
+    assert _page_on_its_step(lead, second.setup_request_id) == step_before
+    assert len(sent_pages(lead)) == pages_before
+
+
+@pytest.mark.asyncio
+async def test_a_first_result_for_a_piece_whose_page_send_failed_is_not_a_duplicate(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The page request raised (NATS may still have stored it), so the piece failed; the page opened anyway (F2)."""
+
+    lead = lead_agent(tmp_path, enabled=False)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT})
+    lead.team_comms.send_message.side_effect = TimeoutError("nats: timeout")
+    _tool_call, raised = start(lead, [GITHUB], purpose="list the repos")
+    await pause_turn(lead, raised.interrupt)
+    [page] = sent_pages(lead)
+    lead.team_comms.send_message.side_effect = None
+
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, page, "completed", account_label="exampleuser")
+
+    assert "event=tool_setup_result_duplicate" not in caplog.text
+    assert [piece.status for piece in the_run(lead).pieces] == ["failed"], "a stale result never changes the piece"
+    assert _github_history(lead) == ["Setup page (sign_in) for cli:github: completed."]
+
+
+@pytest.mark.asyncio
+async def test_recovery_and_a_copy_of_a_result_whose_handling_failed_resume_the_task_once(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """Setup-run recovery advances the run before the copy arrives; the copy still finishes its steps, without a second resume."""
+
+    from custom_agents import tool_setup_run_runtime as run_runtime
+
+    lead, github = await _github_page_after_google(tmp_path, monkeypatch)
+    # The first handling stops at the task lookup: no workflow step, history entry or advance yet.
+    monkeypatch.setattr(
+        lead.task_manager, "get_task_info", _failing_once(lead.task_manager.get_task_info, RuntimeError("store busy"))
+    )
+    with pytest.raises(RuntimeError):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+    assert the_run(lead).status == "waiting", "the result was saved, its advance lost"
+    assert _page_on_its_step(lead, github.setup_request_id)[1] != "completed"
+    wakes = []
+    real_wake = run_runtime.schedule_pending_work
+    monkeypatch.setattr(run_runtime, "schedule_pending_work", lambda agent: (wakes.append(1), real_wake(agent))[1])
+    monkeypatch.setattr(run_runtime, "RECENT_RUN_SECONDS", -1.0)
+
+    assert await run_runtime.resume_ended_setup_runs(lead) == 1
+    assert "task-lead" in lead._pending_interrupt_responses and len(wakes) == 1, "recovery resumed the task"
+    assert _page_on_its_step(lead, github.setup_request_id)[1] != "completed", "recovery does not record the page"
+
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+
+    assert "event=tool_setup_result_handled_again" in caplog.text
+    assert len(wakes) == 1, "the copy does not resume the task again"
+    assert _page_on_its_step(lead, github.setup_request_id)[1] == "completed"
+    assert _github_history(lead) == ["Setup page (sign_in) for cli:github: completed."]
+    assert github.setup_request_id in the_run(lead).results_handled
