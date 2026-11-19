@@ -375,7 +375,36 @@ def launch_result(record: AgentLaunchV1) -> AgentLaunchResultV1:
     )
 
 
-def update_runtime_launch(agent: Any, *, state: AgentLaunchState) -> None:
+# Why a started worker ended before it was ready (``AgentLaunchV1.reason``).
+# The worker pool controller counts such starts as failed and waits longer
+# before each next start of the type (custom_agents.worker_pool_controller).
+CRASHED_BEFORE_READY = "crashed_before_ready"
+EXITED_BEFORE_READY = "exited_before_ready"
+
+
+def start_failure_reason(error: BaseException | None) -> str:
+    """The start record's reason for a worker that ended before it was ready.
+
+    Only the error's type is kept, plus the code and description when a NATS
+    JetStream request was refused (server text such as "maximum consumers
+    limit reached"). Other error text can carry anything, and this reason
+    reaches TeamArchitect's review and administrators' notices; the full
+    error is in the log (``event=agent_thread_crash``).
+    """
+
+    if error is None:
+        return EXITED_BEFORE_READY
+    reason = f"{CRASHED_BEFORE_READY}: {type(error).__name__}"
+    err_code = getattr(error, "err_code", None)
+    description = getattr(error, "description", None)
+    if isinstance(err_code, int) and isinstance(description, str) and description:
+        reason += f" (NATS {err_code}: {description[:200]})"
+    return reason
+
+
+def update_runtime_launch(
+    agent: Any, *, state: AgentLaunchState, reason: str | None = None
+) -> None:
     record = agent._worker_launch
     if record is None:
         return
@@ -421,8 +450,26 @@ def update_runtime_launch(agent: Any, *, state: AgentLaunchState) -> None:
                 or not schedule.enabled
             ):
                 raise LaunchConflict("launch_policy_revoked_before_readiness")
-    changes = {"ready_at_utc": utc_now()} if state == AgentLaunchState.READY else {}
+    changes: dict[str, Any] = {"ready_at_utc": utc_now()} if state == AgentLaunchState.READY else {}
+    if reason is not None:
+        changes["reason"] = reason
     agent._worker_launch = repository.update(current, state=state, **changes)
+
+
+def record_worker_exit(agent: Any, crash: BaseException | None) -> None:
+    """Settle a started worker's record when its thread ends (``strands_team.instantiate_agent_type``).
+
+    A worker that was ready retires. One that ended before it was ready failed,
+    with the reason (``start_failure_reason``); the worker pool controller
+    counts it as a failed start and waits before the next start of the type.
+    """
+
+    if agent._worker_ready:
+        update_runtime_launch(agent, state=AgentLaunchState.RETIRED)
+    else:
+        update_runtime_launch(
+            agent, state=AgentLaunchState.FAILED, reason=start_failure_reason(crash)
+        )
 
 
 def renew_runtime_launch(agent: Any) -> None:

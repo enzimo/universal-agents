@@ -1250,6 +1250,9 @@ class UniversalAgent(BaseModel):
     # Worker queues the pool controller made sure exist, and its latest view of
     # every pool (custom_agents.worker_pool_controller; read by inspect_worker_pools).
     _ensured_worker_queues: set[str] = PrivateAttr(default_factory=set)
+    # Worker types whose starts the hourly start limit refuses right now; the
+    # controller logs when a type enters and leaves this set.
+    _pool_rate_limited_types: set[str] = PrivateAttr(default_factory=set)
     _worker_pool_snapshot: Dict[str, Any] = PrivateAttr(default_factory=dict)
     # While a model provider refuses calls, the worker holds its task, takes no
     # new work and retries after this monotonic time (custom_agents.provider_limits).

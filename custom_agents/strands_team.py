@@ -32,7 +32,7 @@ from custom_agents.agent_instantiation_skill import (
     ensure_runtime_agent_instantiation_skill,
 )
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime
-from custom_messages.contracts.schedule_worker_v1 import AgentLaunchResultV1, AgentLaunchState, AgentLaunchV1
+from custom_messages.contracts.schedule_worker_v1 import AgentLaunchResultV1, AgentLaunchV1
 from custom_agents.agent_instructions import strip_access_prompt
 from custom_agents.agent_catalog import load_agent_type_map
 from custom_agents.access_runtime import authorization_enabled
@@ -970,7 +970,7 @@ def instantiate_agent_type(
     Returns:
         A typed startup acknowledgement. Readiness and admission are separate.
     """
-    from custom_agents.agent_instantiation_service import update_runtime_launch
+    from custom_agents.agent_instantiation_service import record_worker_exit
     from custom_agents.schedule_definition_identity import launch_definition_digest
 
     config = load_agent_type_map().get(named_agent_type)
@@ -1105,6 +1105,7 @@ def instantiate_agent_type(
             await asyncio.gather(ttl_task, return_exceptions=True)
             await connect_task
 
+        crash: BaseException | None = None
         try:
             _logger.debug(
                 "event=agent_thread_connect_start agent_id=%s named_agent_type=%s team_id=%s thread_name=%s",
@@ -1116,7 +1117,8 @@ def instantiate_agent_type(
             # Set agent reference inside the thread so tools have correct context
             set_agent_ref(agent)
             asyncio.run(_connect_with_optional_idle_ttl())
-        except Exception:
+        except Exception as exc:
+            crash = exc
             _logger.exception(
                 "Spawned agent thread crashed before clean shutdown. "
                 "event=agent_thread_crash agent_id=%s named_agent_type=%s team_id=%s thread_name=%s",
@@ -1127,7 +1129,7 @@ def instantiate_agent_type(
             )
         finally:
             try:
-                update_runtime_launch(agent, state=AgentLaunchState.RETIRED if agent._worker_ready else AgentLaunchState.FAILED)
+                record_worker_exit(agent, crash)
             except Exception:
                 _logger.exception("Could not record worker exit", extra={"launch_id": launch.launch_id, "agent_id": agent.id})
             _unregister_spawned_agent(agent.id)

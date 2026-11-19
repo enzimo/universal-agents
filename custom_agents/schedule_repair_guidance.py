@@ -119,7 +119,10 @@ _REPAIR_BY_REASON = {
     ),
     WORKER_LAUNCH_RATE_LIMIT: (
         "Too many workers of this type started in the last hour. The start is "
-        "retried once the hourly limit allows."
+        "retried once the hourly limit allows. Many starts in a short time "
+        "usually mean each worker stopped before it was ready: read the type's "
+        "start failures (inspect_worker_pools: last_start_failure) and fix that "
+        "cause; raising the limit only allows more failed starts."
     ),
     WORKER_READY_BUT_UNCLAIMED: (
         "A worker started but did not take the occurrence within the admission "
@@ -222,7 +225,8 @@ _PERSON_EXPLANATION_BY_REASON = {
     ),
     WORKER_LAUNCH_RATE_LIMIT: (
         "Too many workers of this kind started in the last hour. The schedule "
-        "starts again once the hourly limit allows."
+        "starts again once the hourly limit allows. This usually means the "
+        "workers stop right after they start. " + _ADMIN_LOG
     ),
     SCHEDULE_OVERDUE_UNCLAIMED: (
         "The schedule is overdue and no worker has picked it up. " + _ADMIN_LOG

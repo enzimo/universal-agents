@@ -893,6 +893,13 @@ agent:
     scale_up_wait_seconds: 20         # A task waiting this long with no free worker starts another.
 ```
 
+A worker that fails to start, or stops before it is ready, counts as a failed
+start. While tasks wait, TeamArchitect gets a review naming the failure. The
+next start of that type waits 10 seconds, twice as long after each further
+failure in a row, up to 10 minutes. A worker of the type that becomes ready
+resets the wait. A type whose workers keep crashing is tried about 11 times in
+its first hour instead of reaching `max_launches_per_type_per_hour`.
+
 TeamArchitect sets pool sizes itself inside the ceilings, for a while or for
 good, when it reviews a pool at its limit, a model provider that keeps refusing
 calls, or workers that cannot start. Administrators get an Inbox notice of each

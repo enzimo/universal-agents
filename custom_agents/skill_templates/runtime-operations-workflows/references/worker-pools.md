@@ -97,7 +97,7 @@ The runtime gives you a `worker_pool_review_...` task when:
 |---|---|
 | `capacity` | A pool (or the team, scope `*`) reached about 95% of its limit while tasks waited. For small pools that is the limit itself. |
 | `provider_limited` | Tasks of a type keep hitting the model provider's limits (rate limit, quota, overload), or a worker waits one out while tasks wait. No workers are added meanwhile. |
-| `start_failed` | The runtime could not start a worker it needed; the evidence says why. |
+| `start_failed` | Workers the runtime needed could not be started, or stopped before they were ready; the evidence names the last failure. |
 
 Each review works for the team's maintenance owner (an administrator), so
 `notify_user` reaches them. Check `inspect_worker_pools`, then choose:
@@ -114,9 +114,13 @@ Each review works for the team's maintenance owner (an administrator), so
   finish their work and leave; nothing running is interrupted.
 
 Never choose A or B for `provider_limited`: more workers make more calls and
-more refusals. A pool size does not fix `start_failed`: check the agent type's
-definition, the operator's denied types and start-rate limit, and tell an
-administrator what to change. Above an operator ceiling only an administrator
+more refusals. Neither a pool size nor a higher start-rate limit fixes
+`start_failed`: the runtime already waits longer before each next try
+(`next_start_waits_seconds`), and more starts only fail more often. Read
+`last_start_failure`, check the agent type's definition and the operator's
+denied types, and tell an administrator the failure and what to change. A
+refusal by the hourly start limit after many failed starts is a symptom; report
+the failure behind it. Above an operator ceiling only an administrator
 can help (`agent.worker_pools` in the configuration); say so.
 
 When the review says the problem keeps coming back, tell administrators with
@@ -131,6 +135,7 @@ Do not delegate the waiting tasks again; they are still queued.
 | What you see | What it means and what to do |
 |---|---|
 | Tasks wait, `workers_running` 0, `decision` mentions a start problem | A worker cannot start; see the open `start_failed` problem and tell an administrator. |
+| `failed_starts_in_row` > 0 and `decision` says the next start waits | Workers of the type stop before they are ready. The runtime tries again after a growing wait; report `last_start_failure` to an administrator. |
 | Tasks wait, pool at its size, nobody free | Normal under load. Choose A, B or C. |
 | `workers_waiting_out_provider_limit` > 0 | The provider refuses calls; workers retry on their own after a growing wait. Choose C or D. |
 | `workers_unknown` > 0 | A start whose process cannot be checked holds a slot until it is proven gone; tell an administrator if it stays. |

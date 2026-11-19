@@ -305,6 +305,18 @@ each. They run in parallel on as many workers as the team allows:
   when tasks waited `agent.worker_pools.scale_up_wait_seconds` with no free
   worker, up to the type's pool size and the team limit. Workers above a lowered
   size leave once they hold no work; idle workers leave after their idle time.
+  A start counts as successful only once its worker is ready. A worker that
+  crashes or stops before then fails its start record with the reason
+  (`record_worker_exit`; only the error type and a NATS refusal's code and
+  text, since the reason reaches TeamArchitect and administrators). The
+  controller then waits 10 seconds before the next start of the type, doubling
+  with each failure in a row up to 10 minutes (fixed values; a new setting would
+  change the team transfer's settings section), and opens a `start_failed` review naming
+  the failure while tasks wait. Until 2026-11-19 an accepted start counted as
+  success at once. Workers that crashed at start (their stream was at its NATS
+  consumer limit) were restarted every pass until the hourly start limit
+  refused them, and TeamArchitect saw only that refusal. That refusal is now
+  logged when it begins and ends, not every pass.
 - **Pool sizes.** `agent.worker_pools.default_max_workers_per_type` (4) applies
   until TeamArchitect sets another size, lasting or until a time, with
   `set_worker_pool_limit`; it can never exceed the operator ceilings

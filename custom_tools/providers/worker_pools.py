@@ -30,6 +30,9 @@ _EXPLANATION = {
     "workers_draining": "Workers asked to leave (the pool is above its size); they finish their work first.",
     "workers_waiting_out_provider_limit": "Workers whose model provider refused calls; they retry later and take no new work, and no workers are added meanwhile.",
     "pool_size": "effective: in force now; source: temporary, lasting (both set by you) or default (configuration); ceiling: the operator's maximum.",
+    "failed_starts_in_row": "Starts of the type since its last ready worker that ended before the worker was ready (the launcher refused it, or the worker crashed or stopped at start).",
+    "last_start_failure": "Why the newest of those starts failed. A worker that keeps failing at start is a fault to report, not a pool-size question.",
+    "next_start_waits_seconds": "How long the controller still waits before the next start of the type; the wait doubles with each failed start in a row.",
     "decision": "What the controller did on its last pass and why.",
     "open_problems": "Worker pool problems still open (capacity, provider_limited, start_failed); each gives you a review.",
 }
@@ -161,6 +164,7 @@ async def inspect_worker_pools(agent_type: str = "") -> str:
                 "max_workers_per_type_ceiling": settings.max_workers_per_type_ceiling,
                 "max_total_workers_per_team": settings.max_total_workers_per_team,
                 "scale_up_wait_seconds": settings.scale_up_wait_seconds,
+                "max_launches_per_type_per_hour": settings.max_launches_per_type_per_hour,
                 "capacity_warning_ratio": settings.capacity_warning_ratio,
             },
             "explanation": _EXPLANATION,
