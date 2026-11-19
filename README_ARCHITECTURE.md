@@ -2832,8 +2832,14 @@ person which command to run or asking whether to start:
    source alone, which covers both the person's own `/link` and Mark Done,
    so Mark Done read as an account link with the raw tool id.
    A page that opens after the chat reply closed (usually every page of a run
-   but the first) is listed for Web Chat and the workflow page by
-   `credential_handoff.ToolSetupHandoffs`. A page shown in the live reply is
+   but the first, including one still queued on the reply's wait when it
+   closed, see "Messages left on a closing reply wait" below) is listed for
+   Web Chat and the workflow page by
+   `credential_handoff.ToolSetupHandoffs`. This holds after a reply wait that
+   timed out or was cancelled too: the request still runs, so its late page
+   opens in Web Chat. A chat that cannot show late pages refuses the page and
+   sends the task a `tool_setup_chat_not_waiting` result, so the run never
+   waits on a page that did not open. A page shown in the live reply is
    not listed again: its address goes only into that first no-store response,
    so after a refresh only its history line remains. A listed card stays
    until that page's own `ToolSetupRecord` ends
@@ -3203,6 +3209,47 @@ Before upgrading from a version without running-request state, operators must
 finish or stop active interactive work and answer or close pending questions.
 Older request rows are not inferred into the new running state, so leaving
 their tasks active would bypass the new busy-thread protection.
+
+Messages left on a closing reply wait are passed on, not dropped
+(`assistant_gateway/application/reply_leftovers.py`). A wait ends at the first
+message that answers it, but the team lead may already have sent more for the
+same request: `set_up_tools` sends all of a task's setup pages at once, and
+while the gateway opens the first through the broker, the others are queued
+on the same wait. Each wait records how its messages came in. Every way a wait
+ends (answer, timeout, cancellation, error) goes through
+`GatewayManagerClient.unregister_response_channel`, which empties what is left
+in the same step. A task of its own then passes each leftover on, oldest
+first, as if it had arrived after the close:
+
+- one from the response route takes the path of a message that nothing waits
+  for: a late setup page opens, forms fail closed, replies and notifications
+  are delivered, and late guidance answers settle their held copy;
+- one from the operational subject only updates an agent status or is dropped;
+- the gateway's own notice is not passed on.
+
+The presence observation that ran on arrival is not repeated.
+
+A message that nothing waits for, and that arrives while its request's
+leftovers are being passed on, waits for them, so it cannot overtake them. The
+response route is handled one message at a time, so meanwhile every chat's
+replies wait too. That wait therefore gives up after
+`LEFTOVER_ORDER_WAIT_SECONDS` (20 seconds, the longest broker call a leftover
+makes plus delivery), logs `event=gateway_reply_leftover_order_wait_expired`,
+and lets the message go on out of order.
+
+Each leftover is logged: `event=gateway_reply_leftover_passed_on`,
+`event=gateway_reply_leftover_not_passed_on` with a reason, or
+`event=gateway_reply_leftover_failed`. When the gateway stops, it stops
+passing leftovers on before it stops its page watches, so a page cannot open
+with nothing watching it. Each leftover not passed on is logged. A leftover
+was acknowledged to NATS when it was first queued, so one lost to a crash is
+not delivered again.
+
+Rationale (review of 2026-11-16): closing a wait discarded what it still
+held, so the second page of a setup run got no record, card, result or log
+line, and the run waited forever. Passing leftovers on outside the closing
+task means a cancelled or timed-out waiter never waits on broker calls, and
+the caller records the reply that ended the wait before any leftover.
 
 Delivery receipts use the durable team-lead route, so they can wait for a
 replacement lead before discovery completes. Repeated publication of one

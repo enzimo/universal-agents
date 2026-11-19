@@ -1,5 +1,9 @@
 """Application-owned terminal-response orchestration.
 
+A request's reply wait ends at the first message that answers it, for example
+the first setup page. Messages the team lead already sent behind it are
+passed on when the wait closes (``reply_leftovers``).
+
 Guidance for a running request is sent by ``thread_guidance``.
 """
 

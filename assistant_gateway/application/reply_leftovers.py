@@ -99,10 +99,12 @@ NOT_PASSED_ON_GATEWAY_STOPPING = "gateway_stopping"
 
 # How long a message that no wait takes waits for its request's leftovers
 # before it goes on out of order (module docstring, "Order"). While it waits,
-# the response route waits too. This is the longest broker call these
-# leftovers make: executing an approved signup allows 30 s; opening a sign-in
-# or account link page allows 15 s.
-LEFTOVER_ORDER_WAIT_SECONDS = 30.0
+# the response route waits too, so it is kept short. The longest broker call a
+# leftover makes is opening a setup page (an account link page allows 15 s; a
+# sign-in page 10 s). A leftover signup or form request fails closed without
+# calling the broker. The 5 s beyond that cover storage and chat delivery
+# around the call.
+LEFTOVER_ORDER_WAIT_SECONDS = 20.0
 
 
 @dataclass(frozen=True)

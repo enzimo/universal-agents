@@ -1,4 +1,11 @@
-"""Manager-facing gateway client with transport-neutral lifecycle and routing."""
+"""Manager-facing gateway client with transport-neutral lifecycle and routing.
+
+A reply wait (``response_channel``) takes the messages for its correlation and
+task while it is open. A message that no wait takes goes through
+``_nothing_waiting_for_response`` or ``_nothing_waiting_for_operational``. What
+is still queued when a wait closes is passed on through the same path, as if
+it had arrived after the close (``reply_leftovers``).
+"""
 
 from __future__ import annotations
 

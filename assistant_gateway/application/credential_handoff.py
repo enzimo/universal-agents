@@ -2,8 +2,9 @@
 
 An agent task can ask for a setup page (sign-in, account link, team sign-in
 app, outside step) after a permission approval ended the Web Chat HTTP
-response, after an earlier page of the same ``set_up_tools`` run, or from
-delegated work that never had one. The gateway then opens the page for the
+response, after an earlier page of the same ``set_up_tools`` run (including a
+page still queued on the live reply's wait when it closed, which
+``reply_leftovers`` passes on), or from delegated work that never had one. The gateway then opens the page for the
 Web Chat session owner (``tool_setup.GatewayToolSetups``) and keeps the
 page's own secret-free line in the transcript (its receipt, such as "Account
 link form opened for Portainer (your account)."; an outside step's line also
