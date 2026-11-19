@@ -433,6 +433,8 @@ def _access_maintenance_tasks(
     typed during onboarding (``assistant_gateway.onboarding_account_keys``); setup recovery
     tells tasks whose setup page was open when the gateway stopped that
     nobody watched it (``tool_setup.GatewayToolSetups.recover_unwatched``);
+    the setup results kept while no team lead could be reached are sent to the
+    one known now (``tool_setup.GatewayToolSetups.resend_kept_results``);
     credential recovery resumes saved broker session watches without storing
     submitted fields or page URLs;
     the Inbox loop (authorization on) sends announcements and decision
@@ -457,6 +459,7 @@ def _access_maintenance_tasks(
     tasks = [
         handover_task,
         asyncio.create_task(tool_setups.recover_unwatched(), name="gateway_tool_setup_recovery"),
+        asyncio.create_task(tool_setups.resend_kept_results(), name="gateway_tool_setup_resend"),
         asyncio.create_task(credential_workflow.recover_collections(), name="gateway_credential_collection_recovery"),
         # Its first check waits for the hand-over, which saves the model keys from onboarding.
         asyncio.create_task(

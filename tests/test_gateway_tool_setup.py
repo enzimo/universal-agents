@@ -843,10 +843,10 @@ async def test_a_record_that_cannot_be_reported_is_logged_and_the_later_ones_sti
 
 
 @pytest.mark.asyncio
-async def test_a_record_whose_result_cannot_be_sent_is_logged_as_finished_not_waiting(chat_setup_gateway, caplog) -> None:
-    """The record is claimed before its result is sent; the log line says so instead of 'still waiting'."""
+async def test_a_result_whose_chat_is_gone_is_marked_unsendable_and_logged_once(chat_setup_gateway, caplog) -> None:
+    """The page is reported, but its result can never be sent: it leaves the kept results with one error line."""
 
-    gateway, _broker, _transport, _events = chat_setup_gateway
+    gateway, _broker, transport, _events = chat_setup_gateway
     _setups(gateway).record_tool_setup(
         ToolSetupRecord(
             setup_request_id="tool_setup_req_no_chat", parent_task_id=TASK, person_id=gateway.config.user.canonical_user_id,
@@ -857,13 +857,16 @@ async def test_a_record_whose_result_cannot_be_sent_is_logged_as_finished_not_wa
     )
 
     with caplog.at_level("WARNING"):
-        assert await gateway._credential_workflow.tool_setups.recover_unwatched() == 0
+        assert await gateway._credential_workflow.tool_setups.recover_unwatched() == 1
+        assert (await gateway._credential_workflow.tool_setups.resend_kept_results()).sent == 0
 
-    [failure] = [
-        record for record in caplog.records if "event=gateway_tool_setup_recovery_failed" in record.getMessage()
-    ]
-    assert "setup_request_id=tool_setup_req_no_chat" in failure.getMessage()
-    assert "status=unavailable" in failure.getMessage(), "claimed before the send failed: its task was not told"
+    assert transport.durable == []
+    assert _setups(gateway).get_tool_setup("tool_setup_req_no_chat").result_state == "unsendable"
+    [unsendable] = [record for record in caplog.records if "event=gateway_tool_setup_result_unsendable" in record.getMessage()]
+    assert unsendable.levelname == "ERROR"
+    assert "setup_request_id=tool_setup_req_no_chat task_id=task_link tool_id=cli:github kind=sign_in" in unsendable.getMessage()
+    assert "reason=session_missing" in unsendable.getMessage()
+    assert "event=gateway_tool_setup_recovery_failed" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1160,3 +1163,277 @@ def test_each_way_an_account_link_form_ends_names_the_page(outcome, expected) ->
 
     assert (ending.status, ending.message, ending.reason_code) == expected
     assert ending.closing == "", "the chat shows the same line the task hears"
+
+
+# Results kept while no team lead can be reached (review of the 2026-11-14 incident fixes) ---
+
+
+class _FlakyTransport:
+    """The gateway's manager transport whose next ``failures`` durable publishes raise, as when NATS is down."""
+
+    def __init__(self, failures: int = 0) -> None:
+        self.failures = failures
+        self.durable: list[tuple[MessageEnvelope, str]] = []
+        # Every durable publish tried, sent or not: (queue, NATS message id).
+        self.attempts: list[tuple[str, str | None]] = []
+        self.operational: list[tuple[MessageEnvelope, str]] = []
+        self.release: asyncio.Event | None = None
+        self.entered = asyncio.Event()
+
+    async def publish_durable(self, envelope: MessageEnvelope, *, routing_key: str) -> None:
+        self.entered.set()
+        self.attempts.append((routing_key, envelope.msg_header.idempotency_key))
+        if self.release is not None:
+            await self.release.wait()
+        if self.failures:
+            self.failures -= 1
+            raise ConnectionError("nats: connection closed")
+        self.durable.append((envelope, routing_key))
+
+    async def publish_operational(self, envelope: MessageEnvelope, *, routing_key: str) -> None:
+        self.operational.append((envelope, routing_key))
+
+
+@pytest_asyncio.fixture
+async def flaky_gateway(tmp_path, fake_broker):  # noqa: F811 - the imported pytest fixture
+    """A gateway whose manager transport can fail, and whose kept results are retried quickly."""
+
+    from dataclasses import replace
+
+    from assistant_gateway.application import tool_setup as tool_setup_module
+    from assistant_gateway.store import GatewayStateStore
+    from tests.test_gateway_phase1 import _build_test_config
+
+    _broker, client = fake_broker
+    events: list = []
+    transport = _FlakyTransport()
+    gateway = UserGateway(
+        _build_test_config(tmp_path),
+        output_sink=None,
+        event_sink=events.append,
+        state_store=GatewayStateStore(str(tmp_path / "gateway.db")),
+        manager_transport=transport,
+        secure_broker=client,
+    )
+    gateway._credential_workflow._settings = replace(gateway._credential_workflow._settings, poll_interval_seconds=0.01)
+    original_retry = tool_setup_module.SECURE_RESULT_RETRY_MIN_SECONDS
+    tool_setup_module.SECURE_RESULT_RETRY_MIN_SECONDS = 0.01
+    _waiting_task(gateway, owner=gateway.config.user.canonical_user_id)
+    yield gateway, transport, events
+    tool_setup_module.SECURE_RESULT_RETRY_MIN_SECONDS = original_retry
+    await gateway._credential_workflow.close()
+
+
+def _setup_results(transport) -> list[tuple[ToolSetupResultV1, str, str]]:
+    """Each setup result sent: the result, the lead's queue it went to and its NATS message id."""
+
+    return [
+        (envelope.msg_content, routing_key, envelope.msg_header.idempotency_key)
+        for envelope, routing_key in transport.durable
+        if isinstance(envelope.msg_content, ToolSetupResultV1)
+    ]
+
+
+def _kept_lines(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records if "event=gateway_tool_setup_result_kept" in record.getMessage()]
+
+
+async def _until(condition, *, timeout: float = 5.0) -> None:
+    async def wait() -> None:
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(wait(), timeout=timeout)
+
+
+@pytest.mark.asyncio
+async def test_a_page_ending_without_a_team_lead_keeps_its_result_for_the_next_start(
+    chat_setup_gateway, tmp_path, caplog
+) -> None:
+    from assistant_gateway.store import GatewayStateStore
+    from tests.test_gateway_phase1 import _CaptureGatewayManagerTransport
+
+    gateway, _broker, transport, events = chat_setup_gateway
+    _waiting_record(gateway, "cli:github", "sign_in", "person")
+    await gateway._manager_client.mark_manager_unavailable(reason="the team lead restarted")
+
+    with caplog.at_level("INFO"):
+        assert await gateway._credential_workflow.tool_setups.recover_unwatched() == 1
+
+    assert _setup_results(transport) == []
+    assert _setups(gateway).get_tool_setup("tool_setup_req_old").result_state == "unsent"
+    [kept] = _kept_lines(caplog)
+    assert (
+        "setup_request_id=tool_setup_req_old task_id=task_link tool_id=cli:github kind=sign_in "
+        "status=unavailable reason=no_route"
+    ) in kept
+    assert "event=gateway_secure_result_not_sent reason=no_route" in caplog.text
+    assert gateway.state_store.get_request(CHAT_REQUEST).status == "pending", "the chat request is left as it was"
+    assert [closing.correlation_id for closing in _closings(events)] == ["tool_setup_req_old"], "the card still closes"
+
+    # The gateway restarts on the same store and finds the team lead.
+    after_restart = _CaptureGatewayManagerTransport()
+    restarted = UserGateway(
+        gateway.config,
+        output_sink=None,
+        state_store=GatewayStateStore(str(tmp_path / "gateway.db")),
+        manager_transport=after_restart,
+    )
+    # Connecting found the restarted team lead (refresh_manager_id) before the start tasks run.
+    lead = "manager_after_restart"
+    restarted._manager_client._manager_id = lead
+    start_config = SimpleNamespace(
+        instance_root=gateway.config.instance_root,
+        manager=gateway.config.manager,
+        authorization=SimpleNamespace(enabled=False),
+    )
+    tasks = gateway_module._access_maintenance_tasks(
+        start_config,
+        access_inbox=restarted.access_inbox,
+        broker=restarted._secure_broker,
+        tool_setups=restarted._credential_workflow.tool_setups,
+        credential_workflow=restarted._credential_workflow,
+        status_page=restarted.application.status,
+        stop_event=asyncio.Event(),
+    )
+    resend = next(task for task in tasks if task.get_name() == "gateway_tool_setup_resend")
+    try:
+        assert (await resend).sent == 1
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    [(result, queue, message_id)] = _setup_results(after_restart)
+    assert (result.setup_request_id, result.reason_code) == ("tool_setup_req_old", "tool_setup_page_not_watched")
+    assert (queue, message_id) == (lead, f"secure_result:tool_setup_result:tool_setup_req_old:{lead}")
+    assert result.broker_session_id is None
+    assert restarted.state_store.tool_setup_repository.get_tool_setup("tool_setup_req_old").result_state == "sent"
+    assert (await restarted._credential_workflow.tool_setups.resend_kept_results()).sent == 0
+    assert len(_setup_results(after_restart)) == 1, "sent once"
+    await restarted._credential_workflow.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_publish_keeps_the_result_and_the_retry_sends_it(flaky_gateway, caplog) -> None:
+    gateway, transport, _events = flaky_gateway
+    setups = gateway._credential_workflow.tool_setups
+    transport.failures = 2
+    _waiting_record(gateway, "http:portainer", "account_link", "person")
+
+    with caplog.at_level("INFO"):
+        assert await setups.recover_unwatched() == 1
+        await _until(lambda: len(_setup_results(transport)) == 1)
+        await _until(lambda: setups._retries.count == 0)
+
+    [kept] = _kept_lines(caplog)
+    assert "setup_request_id=tool_setup_req_old task_id=task_link tool_id=http:portainer kind=account_link" in kept
+    assert "reason=publish_failed" in kept
+    assert "event=gateway_secure_result_not_sent reason=publish_failed" in caplog.text
+    assert "error_type=ConnectionError" in caplog.text
+    assert _setups(gateway).get_tool_setup("tool_setup_req_old").result_state == "sent"
+    assert gateway.state_store.get_request(CHAT_REQUEST).status == "waiting_for_credential_result"
+    assert len(_setup_results(transport)) == 1, "the retry stopped after the pass that sent it"
+
+
+@pytest.mark.asyncio
+async def test_a_result_kept_under_one_lead_is_sent_to_the_next_under_its_own_message_id(flaky_gateway) -> None:
+    gateway, transport, _events = flaky_gateway
+    setups = gateway._credential_workflow.tool_setups
+    first_lead = gateway._manager_client.manager_id
+    transport.failures = 1
+    _waiting_record(gateway, "cli:github", "sign_in", "person")
+
+    assert await setups.recover_unwatched() == 1
+    assert setups._retries.count == 1, "a failed publish while a lead is known starts the retry"
+    # The lead stops before the retry: the retry finds no lead and ends; the next lead's arrival sends it.
+    gateway._manager_client._manager_id = None
+    await _until(lambda: setups._retries.count == 0)
+    assert _setups(gateway).get_tool_setup("tool_setup_req_old").result_state == "unsent"
+
+    gateway._manager_client._manager_id = "manager_replacement"
+    assert (await setups.resend_kept_results()).sent == 1
+
+    [(result, queue, message_id)] = _setup_results(transport)
+    assert result.setup_request_id == "tool_setup_req_old"
+    assert transport.attempts == [
+        (first_lead, f"secure_result:tool_setup_result:tool_setup_req_old:{first_lead}"),
+        ("manager_replacement", "secure_result:tool_setup_result:tool_setup_req_old:manager_replacement"),
+    ], "each lead gets its own message id, so NATS does not drop the copy for the new lead as a repeat"
+    assert (queue, message_id) == transport.attempts[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_result_that_can_never_be_sent_does_not_keep_the_retry_going(flaky_gateway, caplog) -> None:
+    """One kept result whose chat is gone, one unreadable, one whose publish fails once (critique C01)."""
+
+    gateway, transport, _events = flaky_gateway
+    setups = gateway._credential_workflow.tool_setups
+    for page_id, session_key, created_at in (
+        ("tool_setup_req_gone", "session_gone", "2026-09-28T07:00:00+00:00"),
+        ("tool_setup_req_garbled", SESSION, "2026-09-28T07:30:00+00:00"),
+    ):
+        _setups(gateway).record_tool_setup(
+            ToolSetupRecord(
+                setup_request_id=page_id, parent_task_id=TASK, person_id=gateway.config.user.canonical_user_id,
+                tool_id="cli:github", kind="sign_in", owner_kind="person", session_key=session_key,
+                correlation_id=CHAT_REQUEST, conversation_id="conversation_link", status="waiting",
+                created_at=created_at,
+            )
+        )
+        assert _setups(gateway).finish_tool_setup(page_id, status="expired", result_json='{"not": "a result"}'
+                                                  if page_id.endswith("garbled") else _result_json(page_id))
+    transport.failures = 1
+    _waiting_record(gateway, "cli:github", "sign_in", "person")
+
+    with caplog.at_level("INFO"):
+        assert await setups.recover_unwatched() == 1
+        await _until(lambda: len(_setup_results(transport)) == 1)
+        await _until(lambda: setups._retries.count == 0)
+        assert (await setups.resend_kept_results()).sent == 0
+
+    assert [result.setup_request_id for result, _queue, _id in _setup_results(transport)] == ["tool_setup_req_old"]
+    states = {page_id: _setups(gateway).get_tool_setup(page_id).result_state for page_id in (
+        "tool_setup_req_gone", "tool_setup_req_garbled", "tool_setup_req_old")}
+    assert states == {"tool_setup_req_gone": "unsendable", "tool_setup_req_garbled": "unsendable", "tool_setup_req_old": "sent"}
+    unsendable = [record.getMessage() for record in caplog.records if "event=gateway_tool_setup_result_unsendable" in record.getMessage()]
+    assert len(unsendable) == 2, "each is logged once"
+    assert {line.rsplit("reason=", 1)[1] for line in unsendable} == {"session_missing", "unreadable"}
+
+
+def _result_json(setup_request_id: str) -> str:
+    return ToolSetupResultV1(
+        setup_request_id=setup_request_id, status="expired", parent_task_id=TASK, tool_id="cli:github",
+        kind="sign_in", owner="person", message="The page expired.",
+    ).model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_a_page_ending_while_another_send_waits_is_sent_once_after_it(flaky_gateway) -> None:
+    """Sends take turns: a pass that waits for the lock reads the kept results afresh, and skips none (critique C03)."""
+
+    gateway, transport, _events = flaky_gateway
+    setups = gateway._credential_workflow.tool_setups
+    transport.release = asyncio.Event()
+    _waiting_record(gateway, "cli:github", "sign_in", "person", setup_request_id="tool_setup_req_first")
+    _waiting_record(
+        gateway, "http:portainer", "account_link", "person",
+        setup_request_id="tool_setup_req_second", created_at="2026-09-28T09:00:00+00:00",
+    )
+    first = asyncio.create_task(setups._report_unwatched(_setups(gateway).get_tool_setup("tool_setup_req_first")))
+    await transport.entered.wait()
+    # While the first page's publish waits: a lead-available transition's pass and the second page's ending.
+    transition = asyncio.create_task(setups.resend_kept_results())
+    second = asyncio.create_task(setups._report_unwatched(_setups(gateway).get_tool_setup("tool_setup_req_second")))
+    await asyncio.sleep(0.05)
+    assert not transition.done() and not second.done(), "both wait for the first send"
+
+    transport.release.set()
+    assert await first and await second
+    await transition
+
+    assert [result.setup_request_id for result, _queue, _id in _setup_results(transport)] == [
+        "tool_setup_req_first",
+        "tool_setup_req_second",
+    ]
+    assert {record.result_state for record in _setups(gateway).list_tool_setups(parent_task_id=TASK)} == {"sent"}

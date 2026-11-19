@@ -37,6 +37,23 @@ its title, instructions and link in chat history, opens no broker page, and
 waits until the person marks it done on the workflow page
 (``external_step_done``); it does not expire.
 
+When a page ends, its record keeps the task's result (``result_json``,
+without any address) in the same conditional update that ends the wait, and
+the result is sent from there (``resend_kept_results``): to the team lead
+known at that moment, under a message id naming that lead
+(``secure_results``). If no lead is known, or the publish fails (NATS
+disconnected), the result stays kept and the chat request is left as it was,
+so the task's other pages keep their cards and later pages still open. Kept
+results are sent at gateway start, on every team-lead-available transition
+(``manager_transitions``), and, after a failed publish while a lead is known,
+by a retry with backoff; one pass at a time sends them, oldest first. A
+result that can never be sent (its chat no longer exists, or the kept copy
+cannot be read) is marked ``unsendable`` and logged once. Rationale (review
+of the 2026-11-14 incident fixes): the record was marked finished before the
+send and the result was not kept, so a page that ended while the team lead
+restarted never reached its task, and the publisher marked the still-running
+chat request ``manager_unavailable``, which removed the other pages' cards.
+
 Two other ways end a wait: the person finishing the same setup on their own
 (``/link <tool>`` or ``/auth <provider> team_client``; ``link_results`` calls
 ``person_finished``), and a gateway restart, after which nobody watches the
@@ -70,6 +87,8 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Protocol
 
+from pydantic import ValidationError
+
 from access_control.people import is_administrator
 from assistant_gateway.application.account_links import (
     ACCOUNT_LINK_NO_ACCESS_NOTE,
@@ -97,7 +116,10 @@ from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.application.response_models import GatewayResponse
 from assistant_gateway.application.secure_results import (
     REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
+    SECURE_RESULT_RETRY_MAX_SECONDS,
+    SECURE_RESULT_RETRY_MIN_SECONDS,
     SecureResultPublisher,
+    SendOutcome,
 )
 from assistant_gateway.application.transient_presentation import (
     TOOL_SETUP_ACTION_KIND,
@@ -108,7 +130,11 @@ from assistant_gateway.domain.message_types import (
     TOOL_SETUP_RESULT_MESSAGE_TYPE,
     TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE,
 )
-from assistant_gateway.domain.request_state import ToolSetupRecord
+from assistant_gateway.domain.request_state import (
+    TOOL_SETUP_RESULT_SENT,
+    TOOL_SETUP_RESULT_UNSENDABLE,
+    ToolSetupRecord,
+)
 from assistant_gateway.domain.sessions import SessionRecord
 from access_control.tool_setup_states import (
     HOW_OWN_LINK,
@@ -176,6 +202,9 @@ _SIGN_IN_KINDS = frozenset({TOOL_SETUP_SIGN_IN, TOOL_SETUP_TEAM_SIGN_IN_APP})
 # a non-time-sensitive wait, like approvals.
 EXTERNAL_STEP_ACTION_HOURS = 48
 REASON_STEP_UNKNOWN = "tool_setup_step_unknown"
+# Why a kept result can never be sent (event=gateway_tool_setup_result_unsendable reason=...).
+UNSENDABLE_SESSION_MISSING = "session_missing"
+UNSENDABLE_UNREADABLE = "unreadable"
 
 
 class SetupGuide(Protocol):
@@ -237,6 +266,18 @@ def _unconfirmed(what: str) -> str:
 
 def _form_expired(what: str) -> str:
     return f"The form for {what} expired before it was used."
+
+
+@dataclass(frozen=True)
+class ResendPass:
+    """What one pass over the kept results did (``GatewayToolSetups.resend_kept_results``).
+
+    ``stopped`` is why the pass stopped before the end (no team lead known, or
+    a failed publish); the results after that stay kept for the next pass.
+    """
+
+    sent: int
+    stopped: SendOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -371,6 +412,14 @@ class GatewayToolSetups:
         self.guide: SetupGuide | None = None
         # Posts the line that closes a page's card when the page ends (_post_closing).
         self._event_output = event_output
+        # Every send of a page result is one pass over the kept results, one
+        # pass at a time (resend_kept_results), so a result is never sent from
+        # two places at once.
+        self._send_lock = asyncio.Lock()
+        # The retry after a failed publish while a team lead is known; kept
+        # apart from the page watches, which pending_count counts.
+        self._retries = BrokerSessionWatches(owner="tool_setup_results", logger=self._logger)
+        self._retrying = False
 
     @property
     def pending_count(self) -> int:
@@ -378,6 +427,7 @@ class GatewayToolSetups:
 
     async def close(self) -> None:
         await self._watches.close()
+        await self._retries.close()
 
     # -- starting a page ---------------------------------------------------------
 
@@ -843,8 +893,8 @@ class GatewayToolSetups:
         reported never stops the records after it. Its failure is logged with
         the record's stored status: ``waiting`` when it failed before it was
         claimed (a kind this version does not know), so the next start tries
-        again; a finished status when it failed after the claim (the result
-        could not be sent), so its task was not told.
+        again; a finished status when it failed after the claim, which already
+        kept its result for the task (``resend_kept_results``).
         """
 
         recovered = 0
@@ -857,7 +907,7 @@ class GatewayToolSetups:
             except Exception:  # noqa: BLE001 - one bad record must not keep every later page waiting
                 self._logger.exception(
                     "Could not report a setup page nobody watched after the gateway started "
-                    "(status waiting: the next start tries again; a finished status: its task was not told). "
+                    "(status waiting: the next start tries again; a finished status: its result is kept). "
                     "event=gateway_tool_setup_recovery_failed setup_request_id=%s task_id=%s tool_id=%s kind=%s "
                     "status=%s",
                     record.setup_request_id,
@@ -919,7 +969,8 @@ class GatewayToolSetups:
                 person_id=record.person_id, tool_id=record.tool_id, kind=record.kind,
                 owner=record.owner_kind, account_label=ending.account_label, source=SOURCE_SETUP_PAGE,
             )
-        await self._send(result, record.session_key, record.correlation_id, record.conversation_id)
+        sending = await self.resend_kept_results()
+        self._log_if_kept(record, sending)
         await self._post_closing(record, ending, source)
         return True
 
@@ -1039,8 +1090,10 @@ class GatewayToolSetups:
             reason_code=refused.reason_code,
             message=refused.message,
         )
+        # A refusal has no page record, so a refusal that is not sent is not
+        # kept: the task asked a moment ago, so a team lead was there to ask.
         try:
-            await self._send(result, session.session_key, correlation_id, conversation_id)
+            outcome = await self._publish(result, session, correlation_id, conversation_id)
         except Exception:  # noqa: BLE001 - the person is still told why below
             self._logger.exception(
                 "A tool setup refusal could not be sent to the task. event=gateway_tool_setup_refusal_send_failed "
@@ -1048,6 +1101,15 @@ class GatewayToolSetups:
                 request.setup_request_id,
                 correlation_id,
             )
+        else:
+            if outcome is not SendOutcome.SENT:
+                self._logger.warning(
+                    "A tool setup refusal could not be sent to the task. "
+                    "event=gateway_tool_setup_refusal_send_failed setup_request_id=%s correlation_id=%s reason=%s",
+                    request.setup_request_id,
+                    correlation_id,
+                    outcome.value,
+                )
         return GatewayResponse(
             correlation_id=correlation_id,
             conversation_id=conversation_id,
@@ -1081,8 +1143,11 @@ class GatewayToolSetups:
             envelope=request_envelope,
         )
 
-    async def _send(self, result: ToolSetupResultV1, session_key: str, correlation_id: str, conversation_id: str | None) -> None:
-        session = self._require_session(session_key)
+    async def _publish(
+        self, result: ToolSetupResultV1, session: SessionRecord, correlation_id: str, conversation_id: str | None
+    ) -> SendOutcome:
+        """One send of a result to the team lead known now (``SecureResultPublisher``)."""
+
         self._logger.info(
             "Sending a tool setup result. event=gateway_tool_setup_result setup_request_id=%s task_id=%s "
             "tool_id=%s kind=%s status=%s source=%s attempt=%s reason_code=%s",
@@ -1095,7 +1160,7 @@ class GatewayToolSetups:
             result.attempt,
             result.reason_code or "-",
         )
-        await self._publisher.publish(
+        return await self._publisher.publish(
             result,
             session=session,
             correlation_id=correlation_id,
@@ -1104,6 +1169,120 @@ class GatewayToolSetups:
             request_text=result.message,
             parent_task_id=result.parent_task_id,
         )
+
+    # -- sending kept results ----------------------------------------------------------
+
+    async def resend_kept_results(self) -> ResendPass:
+        """Send every kept page result to the team lead known now, oldest first; one pass at a time.
+
+        The one way page results are sent: when a page ends, at gateway start,
+        on every team-lead-available transition (``manager_transitions``) and
+        from the retry after a failed publish. Each pass reads the kept results
+        afresh under the lock, so a result is never sent twice at once. A pass
+        stops at the first result it cannot send for want of a lead or because
+        the publish failed; a result that can never be sent is marked and
+        skipped. A publish failure while a lead is known starts the retry.
+        """
+
+        async with self._send_lock:
+            sending = await self._send_pass()
+        if sending.stopped is SendOutcome.PUBLISH_FAILED and self._publisher.route_known:
+            self._retry_later()
+        return sending
+
+    async def _send_pass(self) -> ResendPass:
+        sent = 0
+        for record in self._setups.list_unsent_tool_setup_results():
+            outcome = await self._send_kept(record)
+            if outcome is SendOutcome.SENT:
+                sent += 1
+            elif outcome is not None:
+                return ResendPass(sent=sent, stopped=outcome)
+        return ResendPass(sent=sent)
+
+    async def _send_kept(self, record: ToolSetupRecord) -> SendOutcome | None:
+        """Send one kept result; None when it can never be sent (marked, logged once)."""
+
+        try:
+            result = ToolSetupResultV1.model_validate_json(record.result_json or "")
+        except ValidationError:
+            self._mark_unsendable(record, UNSENDABLE_UNREADABLE)
+            return None
+        session = self._sessions.get_session(record.session_key)
+        if session is None:
+            self._mark_unsendable(record, UNSENDABLE_SESSION_MISSING)
+            return None
+        outcome = await self._publish(result, session, record.correlation_id, record.conversation_id)
+        if outcome is SendOutcome.SENT and not self._setups.mark_tool_setup_result(
+            record.setup_request_id, state=TOOL_SETUP_RESULT_SENT
+        ):
+            self._logger.warning(
+                "A sent setup page result was no longer waiting to be sent; another sender may have sent it too. "
+                "event=gateway_tool_setup_result_already_marked setup_request_id=%s task_id=%s",
+                record.setup_request_id,
+                record.parent_task_id,
+            )
+        return outcome
+
+    def _mark_unsendable(self, record: ToolSetupRecord, reason: str) -> None:
+        """A kept result that can never be sent leaves the kept results, logged once with why."""
+
+        self._setups.mark_tool_setup_result(record.setup_request_id, state=TOOL_SETUP_RESULT_UNSENDABLE)
+        self._logger.error(
+            "A setup page's result can never be sent to its task, so it is no longer kept. "
+            "event=gateway_tool_setup_result_unsendable setup_request_id=%s task_id=%s tool_id=%s kind=%s reason=%s",
+            record.setup_request_id,
+            record.parent_task_id,
+            record.tool_id,
+            record.kind,
+            reason,
+        )
+
+    def _log_if_kept(self, record: ToolSetupRecord, sending: ResendPass) -> None:
+        """Log once, when its page ends, that a result is kept for later and why."""
+
+        stored = self._setups.get_tool_setup(record.setup_request_id)
+        if stored is None or not stored.result_unsent:
+            return
+        self._logger.warning(
+            "A setup page ended but its result could not be sent to the task; it is kept and sent when a team "
+            "lead can be reached. event=gateway_tool_setup_result_kept setup_request_id=%s task_id=%s tool_id=%s "
+            "kind=%s status=%s reason=%s",
+            record.setup_request_id,
+            record.parent_task_id,
+            record.tool_id,
+            record.kind,
+            stored.status,
+            sending.stopped.value if sending.stopped is not None else "-",
+        )
+
+    def _retry_later(self) -> None:
+        """Start the retry after a failed publish, unless it already runs."""
+
+        if self._retrying:
+            return
+        self._retrying = True
+        self._retries.start(self._retry_kept_results(), name="gateway_tool_setup_result_retry")
+
+    async def _retry_kept_results(self) -> None:
+        """Send the kept results again with backoff until a pass has no failed publish or no lead is known.
+
+        Without a lead the next team-lead-available transition sends them;
+        a NATS outage that ends without a lead change fires no transition, so
+        this retry sends them then.
+        """
+
+        delay = max(SECURE_RESULT_RETRY_MIN_SECONDS, self._poll_interval_seconds())
+        try:
+            while True:
+                await asyncio.sleep(delay)
+                async with self._send_lock:
+                    sending = await self._send_pass()
+                if sending.stopped is not SendOutcome.PUBLISH_FAILED or not self._publisher.route_known:
+                    return
+                delay = min(SECURE_RESULT_RETRY_MAX_SECONDS, delay * 2)
+        finally:
+            self._retrying = False
 
     # -- presentation ----------------------------------------------------------------
 
