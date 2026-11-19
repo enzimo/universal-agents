@@ -169,6 +169,7 @@ WEB_CHAT_MODULE_ASSETS = (
     "knowledge_navigation.mjs",
     "activity_mesh.mjs",
     "team_activity.mjs",
+    "broker_card.mjs",
 )
 _CONFIG_EDITOR_ASSETS = {
     *WEB_CHAT_MODULE_ASSETS,

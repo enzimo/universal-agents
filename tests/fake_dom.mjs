@@ -8,7 +8,7 @@ export class FakeElement extends EventTarget {
     super();
     Object.assign(this, { ownerDocument: document, tagName: tagName.toUpperCase(), children: [],
       parentNode: null, attributes: new Map(), className: "", ownText: "", hidden: false,
-      disabled: false, readOnly: false, value: "", tabIndex: 0, open: false, dataset: {} });
+      disabled: false, readOnly: false, value: "", tabIndex: 0, open: false, dataset: {}, style: {} });
   }
   get classList() {
     const names = () => this.className.split(/\s+/).filter(Boolean);
@@ -41,6 +41,13 @@ export class FakeElement extends EventTarget {
     node.remove();
     node.parentNode = this;
     this.children.push(node);
+    return node;
+  }
+  insertBefore(node, reference) {
+    if (!reference) return this.appendChild(node);
+    node.remove();
+    node.parentNode = this;
+    this.children.splice(this.children.indexOf(reference), 0, node);
     return node;
   }
   replaceChildren(...nodes) {

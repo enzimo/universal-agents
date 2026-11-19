@@ -164,6 +164,25 @@
       : "";
   }
 
+  // A broker page's card view (``frame_url``, broker_card.mjs) is shown in the
+  // chat only when it is the same page as ``url``: same origin and path, an
+  // http(s) address. Anything else stays a link.
+  function brokerCardFrameUrl(rawFrameUrl, pageUrl) {
+    var text = String(rawFrameUrl || "").trim();
+    if (!text) {
+      return "";
+    }
+    try {
+      var frameUrl = new URL(text, pageUrl.href);
+      if (frameUrl.origin !== pageUrl.origin || frameUrl.pathname !== pageUrl.pathname) {
+        return "";
+      }
+      return frameUrl.href;
+    } catch (error) {
+      return "";
+    }
+  }
+
   function normalizeTransientItem(value, origin) {
     if (!value || typeof value !== "object") {
       return null;
@@ -210,6 +229,10 @@
       item.label = label;
       item.url = parsedUrl.href;
       item.expiresAtUtc = String(action.expires_at_utc || "");
+      var frameUrl = brokerCardFrameUrl(action.frame_url, parsedUrl);
+      if (frameUrl) {
+        item.frameUrl = frameUrl;
+      }
       item.correlationId = correlationId;
       var pageId = String(value.request_id || "").trim();
       if (pageId && FINISHING_PAGE_MESSAGE_TYPES[kind]) {

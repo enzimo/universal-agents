@@ -179,3 +179,43 @@ test("the task's final answer still closes a credential form card", () => {
     message({ correlationId: "req_chat", messageType: "task", sessionSequence: 7 }),
   ]), []);
 });
+
+// A broker page's card view (frame_url) is kept only when it is the same page as its link.
+function brokerItem(frameUrl) {
+  return delivery.normalizeTransientItem(
+    {
+      kind: "tool_setup",
+      item_id: "tool_setup:req_page",
+      request_id: "req_page",
+      correlation_id: "corr_page",
+      session_sequence: 3,
+      created_at_utc: "2026-11-19T13:32:00Z",
+      content: "Choose your account for Portainer.",
+      action: {
+        label: "Choose your account for Portainer",
+        url: "https://broker.example.test/account-link/bearer",
+        expires_at_utc: "2026-11-19T13:47:00Z",
+        frame_url: frameUrl,
+      },
+    },
+    "https://agents.example.test",
+  );
+}
+
+test("a broker page's card view is kept only when it is the same page", () => {
+  assert.equal(
+    brokerItem("https://broker.example.test/account-link/bearer?view=card").frameUrl,
+    "https://broker.example.test/account-link/bearer?view=card",
+  );
+  for (const other of [
+    "https://evil.example.test/account-link/bearer?view=card",
+    "https://broker.example.test/account-link/other?view=card",
+    "javascript:alert(1)",
+    undefined,
+  ]) {
+    const item = brokerItem(other);
+    assert.ok(item, "the card itself stays");
+    assert.equal(item.frameUrl, undefined, `${other} must not be framed`);
+    assert.equal(item.url, "https://broker.example.test/account-link/bearer");
+  }
+});
