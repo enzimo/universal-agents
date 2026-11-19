@@ -44,6 +44,14 @@ code:
   is not lost with the turn; a paused turn that can never take its answer is
   dropped. A run that is not stored resumes the task with a note saying the
   setup was not found (``_resume_missing_run``).
+- **Recovery** (``resume_ended_setup_runs``, at agent start after restart
+  recovery and on every scheduler pass): a task whose run ended without
+  resuming it (a restart between the run's end and the resume, a lost
+  wake-up, a run that is not stored, a result whose ``advance`` was lost) is
+  found from its record and resumed. A restart leaves no paused turn, so
+  every held-answer mark is stale then and the task resumes from a note with
+  the run's result. Only the agent's own tasks are read; another agent's are
+  left to that agent, or to the takeover of a gone agent's work.
 
 The run and the task blocker are stored, so both processes can restart
 during the wait. Nothing here grants access or reads a credential.
@@ -90,6 +98,7 @@ from custom_agents.tool_setup_runs import (
     record_page_result,
     service_name,
     settle,
+    still_waits,
 )
 from custom_messages.contracts.access_v2 import AccessRequestV1
 from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1, ToolSetupResultV1
@@ -346,27 +355,31 @@ async def _open(agent: Any, run: ToolSetupRunV1, piece: RunPieceV1, task_info: A
     return await _open_page(agent, run, piece, task_info)
 
 
-async def advance(agent: Any, run_id: str, header: Any = None, meta: Any = None) -> None:
-    """Open every piece that may start now, then resume the task once the run ends."""
+async def advance(agent: Any, run_id: str, header: Any = None, meta: Any = None, *, wake: bool = True) -> bool:
+    """Open every piece that may start now, then resume the task once the run ends; True when it resumed it.
+
+    ``wake`` is False only for recovery at agent start (``resume_ended_setup_runs``).
+    """
 
     manager = agent.task_manager
     async with _lock(agent, run_id):
         run = await _load(agent, run_id)
         if run is None or run.status != RUN_WAITING:
-            return
+            return False
         task_info = await manager.operations_runtime.run(manager.get_task_info, run.task_id)
         if task_info is None or await manager.operations_runtime.run(manager.is_terminal_state, task_info.state):
             await _save(agent, run.model_copy(update={"status": RUN_STOPPED, "stop_reason": "task_ended"}))
             logger.info("A setup run ended with its task. event=tool_setup_run_task_ended run_id=%s", run_id)
-            return
+            return False
         for piece in openable(run):
             run = await _open(agent, run, piece, task_info)
         settled = settle(run)
         if settled.status != run.status:
             run = await _save(agent, settled)
     await asyncio.to_thread(complete_access_steps, agent, run)
-    if run.status != RUN_WAITING:
-        await _resume(agent, run, header, meta)
+    if run.status == RUN_WAITING:
+        return False
+    return await _resume(agent, run, header, meta, wake=wake)
 
 
 # -- results ------------------------------------------------------------------------------
@@ -519,12 +532,14 @@ def _paused_turn_waits(agent: Any, run: ToolSetupRunV1) -> bool:
     return session is not None and any(item.interrupt_id == run.interrupt_id for item in session.interrupts)
 
 
-async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any) -> bool:
+async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any, *, wake: bool = True) -> bool:
     """Answer the paused turn, or resume the task from a note (module docstring).
 
     True when this call resumed the task. Runs under the run's lock and reads
     the task's record again inside it, so callers that see the run ended at
-    the same time resume the task once.
+    the same time resume the task once. ``wake=False`` (recovery at agent
+    start) queues the task without waking the drain; a live turn, which
+    cannot exist then, is always woken.
     """
 
     manager = agent.task_manager
@@ -541,7 +556,7 @@ async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any) -> bo
         result = await asyncio.to_thread(outcome_for, agent, run)
         resumed = await _resume_from_note(
             agent, run.task_id, run.run_id, RUN_ENDED_NOTE + json.dumps(result, sort_keys=True),
-            history="Tool setup ended; the task resumes.", event="tool_setup_run_resume",
+            history="Tool setup ended; the task resumes.", event="tool_setup_run_resume", wake=wake,
         )
     if resumed:
         logger.info(
@@ -638,6 +653,11 @@ async def resume_without_paused_turn(agent: Any, task_id: str, steering: TaskSte
     ``why`` is ``paused_turn_gone`` or ``answer_not_converted``
     (``task_steering_runtime._resume_interrupted_task_turn``). Returns False,
     doing nothing, for any other answer, which keeps its own handling.
+
+    It runs in the drain, so a failure is logged and not raised: raising
+    would hold back every other task of the agent, and repeating it would
+    not help, because the answer is already taken. The task keeps its
+    record, which recovery finishes (``resume_ended_setup_runs``).
     """
 
     answer = _setup_answer(steering)
@@ -652,13 +672,25 @@ async def resume_without_paused_turn(agent: Any, task_id: str, steering: TaskSte
         why,
     )
     _drop_paused_turn(agent, task_id, interrupt_id, why=why)
-    run = await _load(agent, run_id)
-    if run is None or run.task_id != task_id:
-        return await _resume_missing_run(agent, task_id, run_id)
-    return await _resume(agent, run, None, None)
+    try:
+        run = await _load(agent, run_id)
+        if run is None or run.task_id != task_id:
+            return await _resume_missing_run(agent, task_id, run_id)
+        return await _resume(agent, run, None, None)
+    except Exception as exc:  # noqa: BLE001 - recovery resumes the task from its record (docstring)
+        logger.warning(
+            "Could not resume a task whose paused turn could not take its setup answer; recovery will. "
+            "event=tool_setup_answer_not_taken_failed task_id=%s run_id=%s why=%s error_type=%s",
+            task_id,
+            run_id,
+            why,
+            type(exc).__name__,
+            exc_info=exc,
+        )
+        return False
 
 
-async def _resume_missing_run(agent: Any, task_id: str, run_id: str) -> bool:
+async def _resume_missing_run(agent: Any, task_id: str, run_id: str, *, wake: bool = True) -> bool:
     """The run the task's record names is not stored: resume the task saying the setup was not found (logged).
 
     A paused turn still waiting on it is dropped: its answer can never come,
@@ -673,7 +705,7 @@ async def _resume_missing_run(agent: Any, task_id: str, run_id: str) -> bool:
         _drop_paused_turn(agent, task_id, str(blocker.get("interrupt_id") or ""), why="setup_run_not_found")
         resumed = await _resume_from_note(
             agent, task_id, run_id, RUN_NOT_FOUND_NOTE,
-            history="The tool setup was not found; the task resumes.", event="tool_setup_run_not_found",
+            history="The tool setup was not found; the task resumes.", event="tool_setup_run_not_found", wake=wake,
         )
     if resumed:
         logger.warning(
@@ -685,7 +717,9 @@ async def _resume_missing_run(agent: Any, task_id: str, run_id: str) -> bool:
     return resumed
 
 
-async def _resume_from_note(agent: Any, task_id: str, run_id: str, note: str, *, history: str, event: str) -> bool:
+async def _resume_from_note(
+    agent: Any, task_id: str, run_id: str, note: str, *, history: str, event: str, wake: bool = True
+) -> bool:
     """Queue the task at the front with a note its next turn reads; True when this call removed the record.
 
     The caller holds the run's lock. The note is saved before the record is
@@ -702,8 +736,112 @@ async def _resume_from_note(agent: Any, task_id: str, run_id: str, note: str, *,
     await _history(agent, task_id, history, {"event": event, "run_id": run_id})
     await run_ops(manager.update_main_task_state, task_id, ProgressState.ACCEPTED, _now())
     await run_ops(manager.enqueue_task, task_id, front=True)
-    schedule_pending_work(agent)
+    if wake:
+        schedule_pending_work(agent)
     return True
+
+
+# -- recovery ------------------------------------------------------------------------------
+
+# How often an agent looks for setup runs whose task was not resumed (the pace
+# of ``access_request_runtime.resume_decided_access_waits``).
+SETUP_RUN_RECOVERY_SECONDS = 60.0
+# What recovery does for one task (``_recovery_step``).
+RECOVER_ADVANCE = "advance"
+RECOVER_RESUME = "resume"
+RECOVER_NOT_FOUND = "not_found"
+
+
+def _setup_run_waits(agent: Any) -> list[tuple[str, dict[str, Any]]]:
+    """This agent's unfinished tasks that have a setup-run record, with the record (an operations-lane read)."""
+
+    manager = agent.task_manager
+    waits = []
+    for task_id, blocker in list(manager.task_state.human_interaction_blockers.items()):
+        if not is_setup_run_blocker(blocker):
+            continue
+        info = manager.get_task_info(task_id)
+        if info is not None and not manager.is_terminal_state(info.state):
+            waits.append((task_id, dict(blocker)))
+    return waits
+
+
+def _recovery_step(agent: Any, blocker: dict[str, Any], run: ToolSetupRunV1) -> str | None:
+    """What recovery does for a task whose record names the stored ``run``; None when the task waits legitimately."""
+
+    if run.status == RUN_WAITING:
+        return None if still_waits(run) else RECOVER_ADVANCE
+    if setup_answer_held(blocker) and _paused_turn_waits(agent, run):
+        return None  # the answer waits for the task's lane
+    return RECOVER_RESUME
+
+
+async def resume_ended_setup_runs(agent: Any, *, now: float | None = None, wake: bool = True) -> int:
+    """Resume this agent's tasks whose setup run ended without resuming them (module docstring).
+
+    Runs at agent start, after restart recovery (``wake=False``: startup wakes
+    the drain once it is ready), and on every scheduler pass, at most every
+    ``SETUP_RUN_RECOVERY_SECONDS``. Only the agent's own tasks are read;
+    nothing here starts an agent. Each task is handled on its own, so one
+    failure is logged and the others go on. Returns how many it resumed.
+    """
+
+    import time
+
+    moment = time.monotonic() if now is None else now
+    if moment < getattr(agent, "_setup_run_check_after", 0.0):
+        return 0
+    agent._setup_run_check_after = moment + SETUP_RUN_RECOVERY_SECONDS
+    resumed = 0
+    for task_id, blocker in await agent.task_manager.operations_runtime.run(partial(_setup_run_waits, agent)):
+        resumed += await _recover_task(agent, task_id, blocker, wake=wake)
+    return resumed
+
+
+async def _recover_task(agent: Any, task_id: str, blocker: dict[str, Any], *, wake: bool) -> int:
+    """Recover one task's setup run; 1 when it resumed the task. A failure is logged, never raised."""
+
+    run_id = str(blocker.get("run_id") or "")
+    stage = "read"
+    try:
+        run = await _load(agent, run_id)
+        if run is None or run.task_id != task_id:
+            stage = RECOVER_NOT_FOUND
+            return int(await _resume_missing_run(agent, task_id, run_id, wake=wake))
+        step = _recovery_step(agent, blocker, run)
+        if step is None:
+            return 0
+        stage = step
+        if step == RECOVER_ADVANCE:
+            logger.warning(
+                "A setup run waits with work left for it; advancing it. event=tool_setup_run_advanced_on_recovery "
+                "run_id=%s task_id=%s",
+                run_id,
+                task_id,
+            )
+            return int(await advance(agent, run_id, wake=wake))
+        resumed = await _resume(agent, run, None, None, wake=wake)
+    except Exception as exc:  # noqa: BLE001 - one task must not stop recovery for the others
+        logger.warning(
+            "Could not recover a task's setup run; the next pass tries again. event=tool_setup_run_recovery_failed "
+            "task_id=%s run_id=%s stage=%s error_type=%s",
+            task_id,
+            run_id,
+            stage,
+            type(exc).__name__,
+            exc_info=exc,
+        )
+        return 0
+    if resumed:
+        logger.warning(
+            "Found a setup run that ended without resuming its task; resumed it. event=tool_setup_run_recovered "
+            "run_id=%s task_id=%s status=%s why=%s",
+            run_id,
+            task_id,
+            run.status,
+            "answer_mark_stale" if setup_answer_held(blocker) else "not_resumed",
+        )
+    return int(resumed)
 
 
 def outcome_for(agent: Any, run: ToolSetupRunV1) -> dict[str, Any]:
@@ -719,6 +857,7 @@ __all__ = [
     "on_access_decided",
     "on_setup_result",
     "outcome_for",
+    "resume_ended_setup_runs",
     "resume_without_paused_turn",
     "run_repository",
     "send_setup_request",

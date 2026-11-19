@@ -87,21 +87,23 @@ def lead(tmp_path: Path) -> SimpleNamespace:
     )
 
 
-def pause_on_setup(agent: SimpleNamespace, run_id: str = "run-1", interrupt_id: str = "i1") -> None:
-    """set_up_tools paused the turn: its run (every page done), its record and the live session."""
+def pause_on_setup(
+    agent: SimpleNamespace, run_id: str = "run-1", interrupt_id: str = "i1", *, task_id: str = TASK, page: str = DONE
+) -> None:
+    """set_up_tools paused the turn: its run (one sign-in page, ``page``), its record and the live session."""
 
     record_human_interaction_blocker(
-        agent.task_manager, TASK, {"kind": TOOL_SETUP_RUN_KIND, "run_id": run_id, "interrupt_id": interrupt_id}
+        agent.task_manager, task_id, {"kind": TOOL_SETUP_RUN_KIND, "run_id": run_id, "interrupt_id": interrupt_id}
     )
     run_repository(agent).create(
         ToolSetupRunV1(
-            run_id=run_id, team_id="team", person_id="user-1", task_id=TASK, agent_id=agent.id,
+            run_id=run_id, team_id="team", person_id="user-1", task_id=task_id, agent_id=agent.id,
             agent_type="TeamArchitect", tool_ids=("cli:github",), interrupt_id=interrupt_id,
-            pieces=(RunPieceV1(piece_id="sign_in", tool_id="cli:github", kind="sign_in", status=DONE),),
+            pieces=(RunPieceV1(piece_id="sign_in", tool_id="cli:github", kind="sign_in", status=page, attempt=1),),
         )
     )
-    agent._interrupted_turn_sessions[TASK] = SimpleNamespace(
-        task_id=TASK, interrupts=[SimpleNamespace(interrupt_id=interrupt_id)],
+    agent._interrupted_turn_sessions[task_id] = SimpleNamespace(
+        task_id=task_id, interrupts=[SimpleNamespace(interrupt_id=interrupt_id)],
         strands=SimpleNamespace(replace_before_next_turn=True),
     )
 
@@ -275,6 +277,18 @@ async def test_without_a_live_turn_two_resumes_at_once_queue_the_task_once(lead,
 RESULT = {"status": "ready", "tools": [{"tool_id": "cli:github", "ready": True}]}
 
 
+def another_waiting_task(agent: SimpleNamespace, task_id: str) -> None:
+    """A second task of the agent whose turn paused too."""
+
+    manager = agent.task_manager
+    assert manager.add_task(
+        Task(task_id=task_id, task_type=MessageMetaType.REQUEST), MessageHeader(from_agent_id="gateway"), MessageMeta(),
+        owner_person_id=None,
+    )
+    assert manager.get_next_task_to_process() == task_id
+    manager.update_main_task_state(task_id, ProgressState.WAITING, _now())
+
+
 def queue_another_task(agent: SimpleNamespace) -> None:
     """Other work already waits in the queue, so 'at the front' means something."""
 
@@ -377,3 +391,283 @@ async def test_other_answers_keep_their_handling_in_those_branches(lead, woken, 
     assert record_of(lead) == access
     assert lead.task_manager.get_task_info(TASK).state == ProgressState.WAITING
     assert not lead.task_manager.task_state.task_queue and not woken
+
+
+@pytest.mark.asyncio
+async def test_a_failure_while_resuming_from_a_note_leaves_the_record_for_recovery(lead, woken, monkeypatch, caplog) -> None:
+    """Review C06: the handoff runs in the drain; raising there would hold back every other task."""
+    pause_on_setup(lead)
+    await tool_setup_run_runtime.advance(lead, "run-1")
+    lead._interrupted_turn_sessions.clear()
+
+    async def unreadable(agent, run_id):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(tool_setup_run_runtime, "_load", unreadable)
+
+    with caplog.at_level(logging.WARNING):
+        assert await resume_interrupted_task_turn(lead, TASK) is None
+
+    assert setup_answer_held(record_of(lead), AGENT_ID), "the record stays for recovery"
+    assert not lead.task_manager.task_state.task_queue
+    assert "event=tool_setup_answer_not_taken_failed" in caplog.text and "error_type=RuntimeError" in caplog.text
+
+
+# -- recovery at start and on each scheduler pass (A4) ----------------------------------------
+
+PASS = 100.0  # a scheduler pass's monotonic time, past any earlier pacing
+
+
+@pytest.fixture
+def results(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tool_setup_run_runtime, "outcome_for", lambda agent, run: RESULT)
+
+
+def count_reads(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Calls of the recovery's read of the agent's setup-run records, so a test sees that a pass looked."""
+
+    reads: list = []
+    original = tool_setup_run_runtime._setup_run_waits
+    monkeypatch.setattr(tool_setup_run_runtime, "_setup_run_waits", lambda agent: reads.append(1) or original(agent))
+    return reads
+
+
+@pytest.mark.asyncio
+async def test_a_pass_answers_a_live_turn_whose_run_ended_without_resuming_it(lead, woken, caplog) -> None:
+    pause_on_setup(lead)
+    ended(lead)  # saved as ended, but the wake-up was lost
+
+    with caplog.at_level(logging.WARNING):
+        assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 1
+
+    assert setup_answer_held(record_of(lead), AGENT_ID) and TASK in lead._pending_interrupt_responses
+    assert woken == [lead]
+    assert "event=tool_setup_run_recovered" in caplog.text and "why=not_resumed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_pass_resumes_a_task_with_no_live_turn_from_a_note(lead, woken, results) -> None:
+    pause_on_setup(lead)
+    ended(lead)
+    queue_another_task(lead)
+    lead._interrupted_turn_sessions.clear()
+
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 1
+
+    resumed_from_note(lead, tool_setup_run_runtime.RUN_ENDED_NOTE)
+    assert woken == [lead]
+
+
+@pytest.mark.asyncio
+async def test_a_pass_resumes_a_task_whose_run_is_not_stored_and_drops_its_paused_turn(lead, woken, caplog) -> None:
+    """begin_run records the wait before it finds the run; a missing run never ends on its own."""
+    pause_on_setup(lead)
+    queue_another_task(lead)
+    record_human_interaction_blocker(lead.task_manager, TASK, {**record_of(lead), "run_id": "run-gone"})
+
+    with caplog.at_level(logging.WARNING):
+        assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 1
+
+    resumed_from_note(lead, tool_setup_run_runtime.RUN_NOT_FOUND_NOTE)
+    assert TASK not in lead._interrupted_turn_sessions
+    assert "event=tool_setup_run_not_found" in caplog.text and "run_id=run-gone" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_pass_leaves_a_run_that_still_waits_for_its_page_alone(lead, woken, monkeypatch) -> None:
+    pause_on_setup(lead, page="waiting")
+
+    reads = count_reads(monkeypatch)
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
+
+    assert reads == [1], "the pass looked"
+    assert record_of(lead) == {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"}
+    assert run_repository(lead).get("run-1").status == "waiting"
+    assert not woken and not lead.task_manager.task_state.task_queue
+
+
+@pytest.mark.asyncio
+async def test_a_pass_leaves_an_answer_held_for_a_busy_lane_alone(lead, woken) -> None:
+    """The companion of the stuck-task test: the per-pass recovery must not resume a held answer twice."""
+    pause_on_setup(lead)
+    await tool_setup_run_runtime.advance(lead, "run-1")
+    woken.clear()
+
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
+
+    assert setup_answer_held(record_of(lead), AGENT_ID) and TASK in lead._pending_interrupt_responses
+    assert not woken and not lead.task_manager.task_state.task_queue
+
+
+@pytest.mark.asyncio
+async def test_a_pass_finishes_a_run_whose_advance_was_lost(lead, woken, caplog) -> None:
+    """Review C04: the last page's result was saved, but the run was never settled."""
+    pause_on_setup(lead)  # its one page is done; the run is still saved as waiting
+
+    with caplog.at_level(logging.WARNING):
+        assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 1
+
+    assert run_repository(lead).get("run-1").status == RUN_FINISHED
+    assert setup_answer_held(record_of(lead), AGENT_ID) and woken == [lead]
+    assert "event=tool_setup_run_advanced_on_recovery" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_pass_opens_a_page_whose_advance_was_lost(lead, woken, monkeypatch) -> None:
+    """Review C04: an expired page was saved to be offered again, but no new page was opened."""
+    pause_on_setup(lead, page="pending")
+    opened: list = []
+
+    async def open_page(agent, run, piece, task_info):
+        opened.append(piece.piece_id)
+        return await tool_setup_run_runtime._save(agent, run.with_piece(piece.model_copy(update={"status": "waiting"})))
+
+    monkeypatch.setattr(tool_setup_run_runtime, "_open", open_page)
+
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
+
+    assert opened == ["sign_in"]
+    assert run_repository(lead).get("run-1").status == "waiting"
+    assert record_of(lead)["run_id"] == "run-1" and not lead.task_manager.task_state.task_queue
+
+
+@pytest.mark.asyncio
+async def test_a_pass_never_touches_another_agents_run(lead, woken) -> None:
+    """Only this agent's tasks are read; a run of a task it does not hold is left to its holder."""
+    run_repository(lead).create(
+        ToolSetupRunV1(
+            run_id="run-elsewhere", team_id="team", person_id="user-1", task_id="task-of-another-agent",
+            agent_id="agent-other", agent_type="TeamArchitect", tool_ids=("cli:github",), interrupt_id="i9",
+            status=RUN_FINISHED,
+        )
+    )
+
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
+
+    assert run_repository(lead).get("run-elsewhere").status == RUN_FINISHED
+    assert not lead.task_manager.task_state.task_queue and not woken
+
+
+@pytest.mark.asyncio
+async def test_a_pass_runs_at_most_once_a_minute(lead, woken, monkeypatch) -> None:
+    reads = count_reads(monkeypatch)
+    for moment in (PASS, PASS + 30, PASS + tool_setup_run_runtime.SETUP_RUN_RECOVERY_SECONDS + 1):
+        await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=moment)
+    assert reads == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_one_task_that_fails_does_not_stop_recovery_for_the_others(lead, woken, results, monkeypatch, caplog) -> None:
+    """Review C02."""
+    another_waiting_task(lead, "task-two")
+    for task_id, run_id in ((TASK, "run-1"), ("task-two", "run-2")):
+        pause_on_setup(lead, run_id, f"i-{run_id}", task_id=task_id)
+        ended(lead, run_id)
+    lead._interrupted_turn_sessions.clear()
+    original = tool_setup_run_runtime._resume
+
+    async def fails_for_the_first(agent, run, header, meta, **kwargs):
+        if run.task_id == TASK:
+            raise RuntimeError("database is locked")
+        return await original(agent, run, header, meta, **kwargs)
+
+    monkeypatch.setattr(tool_setup_run_runtime, "_resume", fails_for_the_first)
+
+    with caplog.at_level(logging.WARNING):
+        assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 1
+
+    assert lead.task_manager.task_state.task_queue[0] == "task-two"
+    assert record_of(lead)["run_id"] == "run-1", "the failed task keeps its record for the next pass"
+    failure = next(line for line in caplog.text.splitlines() if "event=tool_setup_run_recovery_failed" in line)
+    assert f"task_id={TASK}" in failure and "stage=resume" in failure and "error_type=RuntimeError" in failure
+
+
+@pytest.mark.asyncio
+async def test_a_stop_between_saving_the_note_and_removing_the_record_resumes_once(
+    lead, woken, results, monkeypatch, caplog
+) -> None:
+    """Review C05: the note is saved, then the agent stops (here: the removal fails) before the record goes."""
+    pause_on_setup(lead)
+    ended(lead)
+    lead._interrupted_turn_sessions.clear()
+    original = tool_setup_run_runtime.clear_setup_run_blocker
+    failures = [RuntimeError("the agent stopped")]
+
+    def stops_once(host, task_id, run_id):
+        if failures:
+            raise failures.pop()
+        return original(host, task_id, run_id)
+
+    monkeypatch.setattr(tool_setup_run_runtime, "clear_setup_run_blocker", stops_once)
+
+    with caplog.at_level(logging.WARNING):
+        assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
+    manager = lead.task_manager
+    assert record_of(lead) is not None and manager.read_runtime_resume_directive(TASK)
+    assert "event=tool_setup_run_recovery_failed" in caplog.text
+
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 61) == 1
+
+    assert record_of(lead) is None
+    assert list(manager.task_state.task_queue) == [TASK]
+    assert manager.read_runtime_resume_directive(TASK).count(tool_setup_run_runtime.RUN_ENDED_NOTE) == 1
+    resumes = [entry for entry in manager.get_task_history_entries(TASK, limit=None)
+               if (entry.details or {}).get("event") == "tool_setup_run_resume"]
+    assert len(resumes) == 1
+
+
+# -- where recovery runs ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_recovery_queues_without_waking_and_a_failure_does_not_stop_the_start(monkeypatch, caplog) -> None:
+    from custom_agents import runtime_recovery
+
+    calls: list = []
+
+    async def recover(agent, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(tool_setup_run_runtime, "resume_ended_setup_runs", recover)
+    agent = SimpleNamespace(id="agent-lead", _logger=logging.getLogger("test.setup_run_resume_wait"))
+
+    with caplog.at_level(logging.ERROR):
+        await runtime_recovery._resume_ended_setup_runs(agent)
+
+    assert calls == [{"wake": False}]
+    assert "event=setup_run_recovery_failed" in caplog.text
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["runs", "fails"])
+@pytest.mark.asyncio
+async def test_each_scheduler_pass_runs_the_recovery_and_goes_on_after_a_failure(monkeypatch, caplog, fails) -> None:
+    from custom_agents import scheduled_runtime
+    from tests.test_schedule_tools import _LoopAgent
+
+    agent = _LoopAgent(can_start=False)
+    calls: list = []
+    alerts: list = []
+
+    async def recover(item):
+        calls.append(item)
+        if fails:
+            raise RuntimeError("database is locked")
+        return 0
+
+    async def nothing(_agent):
+        return None
+
+    async def report(_agent):
+        alerts.append(_agent)
+
+    monkeypatch.setattr(scheduled_runtime, "resume_ended_setup_runs", recover)
+    monkeypatch.setattr(scheduled_runtime, "resume_decided_access_waits", nothing)
+    monkeypatch.setattr(scheduled_runtime, "take_over_orphaned_work", nothing)
+    monkeypatch.setattr(scheduled_runtime, "report_stuck_tasks", report)
+
+    with caplog.at_level(logging.ERROR):
+        await scheduled_runtime._scheduler_pass(agent, {}, asyncio.sleep)
+
+    assert calls == [agent] and alerts == [agent]
+    assert ("event=setup_run_recovery_failed" in caplog.text) is fails

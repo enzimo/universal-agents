@@ -52,6 +52,7 @@ from custom_agents.dead_letter_watch import report_dead_letters
 from custom_agents.storage_usage_runtime import keep_storage_usage_measured
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.access_request_runtime import resume_decided_access_waits
+from custom_agents.tool_setup_run_runtime import resume_ended_setup_runs
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
 from custom_agents.agent_liveness import prune_departed_agent_rows_when_due
 from custom_agents.turn_failure_runtime import release_orphaned_slot_when_idle
@@ -1939,6 +1940,16 @@ async def _scheduler_pass(
     except Exception:
         agent._logger.exception(
             "Could not check for decided access requests. event=access_decision_check_failed agent_id=%s",
+            agent.id,
+        )
+    # A task whose set_up_tools run ended without resuming it (a lost wake-up,
+    # a run that is not stored) is resumed from its record.
+    try:
+        await resume_ended_setup_runs(agent)
+    except Exception:
+        agent._logger.exception(
+            "Could not check for setup runs that ended without resuming their task. "
+            "event=setup_run_recovery_failed agent_id=%s",
             agent.id,
         )
     # The lead sends out again any task a worker returned that is not settled.

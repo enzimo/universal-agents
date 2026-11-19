@@ -21,7 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from strands import Agent
@@ -31,6 +36,9 @@ from strands.models.model import Model as _StrandsModel
 from custom_agents import access_runtime
 from custom_agents.access_workflows import workflow_service_for
 from custom_agents.task_human_interaction_blockers import get_human_interaction_blocker, setup_answer_held
+from custom_agents import tool_setup_run_runtime
+from custom_agents.runtime_recovery import recover_runtime_after_restart
+from custom_agents.task_manager import TaskManager
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND, TOOL_SETUP_RUN_RESPONSE_KIND
 from custom_messages.contracts.access_v2 import AccessRequestStatus, AccessReviewChoice
 from custom_messages.enums import ProgressState
@@ -400,6 +408,76 @@ async def test_after_an_agent_restart_the_task_resumes_from_a_directive(tmp_path
     assert "Signed in to GitHub as exampleuser" in directive and '"status": "ready"' in directive
     await asyncio.wait_for(lead._pending_work_task, 2)  # the retained drain runs the task
     lead._continue_pending_work.assert_awaited()
+
+
+def _restarted(lead, tmp_path: Path) -> SimpleNamespace:
+    """The same agent after a restart: its saved work in a new TaskManager, no paused turn or held answer."""
+
+    manager = TaskManager(db_path=str(tmp_path / "manager.db"))
+    manager.set_owner_identity(lead.id, lead.name, TEAM, lead.named_agent_type)
+    state = {key: value for key, value in vars(lead).items() if not key.startswith("_tool_setup_run")}
+    return SimpleNamespace(
+        **{
+            **state,
+            "task_manager": manager,
+            "_interrupted_turn_sessions": {},
+            "_pending_interrupt_responses": {},
+            "_pending_work_task": None,
+            "_logger": logging.getLogger("test.set_up_tools.restart"),
+            # What restart recovery reads (runtime_recovery.recover_runtime_after_restart).
+            "deferred_inbox": SimpleNamespace(
+                stored_team_id=AsyncMock(return_value=None),
+                restore_role=AsyncMock(return_value=False),
+                restore=AsyncMock(return_value=False),
+            ),
+            "same_role_runtime_takeover_enabled": False,
+            "_agent_state_store": None,
+            "_recovery_retry_deadline_seconds": lambda: 900.0,
+            "_parse_iso_timestamp": lambda value: datetime.fromisoformat(value) if value else None,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_restart_while_the_answer_waits_for_its_lane_resumes_the_task_with_the_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The run ended with the paused turn live, the lane stayed busy, and the agent restarted.
+
+    The answer lived only in memory. Restart recovery keeps the task waiting
+    because of its record, then the setup-run recovery resumes it from a note
+    with the run's result, once, without waking the drain before startup ends.
+    """
+    lead = lead_agent(tmp_path, enabled=False)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT})
+    _call, raised = start(lead, [GITHUB])
+    await pause_turn(lead, raised.interrupt)
+    [page] = sent_pages(lead)
+    await gateway_result(lead, page, "completed", account_label="exampleuser")
+    assert setup_answer_held(get_human_interaction_blocker(lead.task_manager, "task-lead"), lead.id)
+    await asyncio.wait_for(lead._pending_work_task, 2)  # the busy lane never ran the answer
+
+    agent = _restarted(lead, tmp_path)
+    await recover_runtime_after_restart(agent)
+
+    manager = agent.task_manager
+    assert get_human_interaction_blocker(manager, "task-lead") is None
+    assert manager.get_task_info("task-lead").state == ProgressState.ACCEPTED
+    assert list(manager.task_state.task_queue) == ["task-lead"]
+    note = manager.read_runtime_resume_directive("task-lead")
+    assert "Signed in to GitHub as exampleuser" in note and '"status": "ready"' in note
+    assert agent._pending_work_task is None, "startup wakes the drain itself once it is ready"
+
+    # Review C03: a second pass past the pacing window looks again and resumes nothing more.
+    reads = []
+    original = tool_setup_run_runtime._setup_run_waits
+    monkeypatch.setattr(tool_setup_run_runtime, "_setup_run_waits", lambda item: reads.append(1) or original(item))
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(agent, now=time.monotonic() + 3600) == 0
+    assert reads == [1]
+    assert manager.read_runtime_resume_directive("task-lead").count(tool_setup_run_runtime.RUN_ENDED_NOTE) == 1
+    resumes = [entry for entry in manager.get_task_history_entries("task-lead", limit=None)
+               if entry.summary == "Tool setup ended; the task resumes."]
+    assert len(resumes) == 1 and list(manager.task_state.task_queue) == ["task-lead"]
 
 
 @pytest.mark.asyncio
