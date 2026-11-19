@@ -235,12 +235,19 @@ lifecycle.interval(refreshThreadAges, 60 * 1000);
 // One menu for every row, keyed by the thread's session key (chat_thread_menu.mjs).
 shellState.threadMenu = createThreadMenu({
   document, window, lifecycle,
+  threadList: sharedState.threadList,
   onAction: (...args) => threadMenuAction(...args),
   focusRow: sessionKey => {
     var button = threadRowButton(sessionKey);
     if (button) button.focus();
   },
 });
+// Right-click, long press, the context-menu key or Shift+F10 on a row open its
+// menu; tracked once for the whole list so a redraw cannot orphan a press.
+attachThreadMenuTriggers(sharedState.threadList, (sessionKey, point) => {
+  var thread = threadForSession(sessionKey);
+  if (thread) openThreadMenu(thread, point);
+}, { lifecycle, window });
 
 diagnosticsState.debugContextControls = document.getElementById("debug-context-controls");
 
@@ -1888,10 +1895,6 @@ function threadRow(thread) {
       ensureActiveThreadHistory();
     });
     row.appendChild(button);
-    // Right-click, long press, the context-menu key or Shift+F10 open its menu.
-    attachThreadMenuTriggers(row, function (point) {
-      openThreadMenu(thread, point);
-    }, { lifecycle: lifecycle, window: window });
     return row;
   }
 
@@ -2152,8 +2155,12 @@ function changeThreadPlacement(thread, action, extra) {
       return true;
     }).catch(function (error) {
       var named = thread.id === sharedState.activeThreadId ? "This chat" : "\u201c" + fullThreadTitle(thread) + "\u201d";
+      // The gateway's refusal says why, and repeating it cannot help; a
+      // request that did not get through gets Retry for the same change.
+      var refused = Boolean(error.refused);
       appendSystemError(null, shellState.SYSTEM_ERROR_SOURCE.THREAD_PLACEMENT,
-        named + " was not moved. " + (error.message || "Try again."));
+        named + " was not moved. " + (refused ? error.message : "Try again."),
+        refused ? null : function () { changeThreadPlacement(thread, action, extra); });
       renderMessages();
       return false;
     });
@@ -2174,7 +2181,10 @@ function sendThreadPlacement(thread, action, extra) {
       return response.text().then(function (text) {
         if (!response.ok) {
           authentication.handleUnauthorizedResponse(response);
-          throw new Error(placementRefusal(text));
+          var refusal = new Error(placementRefusal(text));
+          // 4xx: the gateway looked at the change and turned it down.
+          refusal.refused = response.status >= 400 && response.status < 500;
+          throw refusal;
         }
       });
     });

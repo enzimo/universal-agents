@@ -15,6 +15,13 @@ import { FakeElement, byClass, fakeDocument } from "./fake_dom.mjs";
 FakeElement.prototype.getBoundingClientRect = function () {
   return { left: 10, top: 20, right: 190, bottom: 60, width: 180, height: 40 };
 };
+FakeElement.prototype.closest = function (selector) {
+  const names = selector.split(",").map(part => part.trim().slice(1));
+  for (let node = this; node; node = node.parentNode) {
+    if (node.classList && names.some(name => node.classList.contains(name))) return node;
+  }
+  return null;
+};
 Object.defineProperty(FakeElement.prototype, "style", {
   configurable: true,
   get() { return (this._style ||= {}); },
@@ -44,19 +51,45 @@ function fixture() {
   const actions = [], focused = [];
   // The row the menu gives focus back to is looked up by session key each time.
   const rows = new Map();
+  // The thread list the triggers listen on, with one row per session key.
+  const list = document.createElement("div");
+  document.body.appendChild(list);
+  const addRow = sessionKey => {
+    const row = document.createElement("div");
+    row.className = "thread-row";
+    row.dataset.sessionKey = sessionKey;
+    const button = document.createElement("button");
+    button.className = "thread-button";
+    row.appendChild(button);
+    list.appendChild(row);
+    rows.set(sessionKey, button);
+    return row;
+  };
   const menu = createThreadMenu({
-    document, window, lifecycle, now: () => NOW,
+    document, window, lifecycle, now: () => NOW, threadList: list,
     onAction: (sessionKey, action, detail) => actions.push({ sessionKey, action, detail }),
     focusRow: sessionKey => { focused.push(sessionKey); if (rows.get(sessionKey)) rows.get(sessionKey).focus(); },
   });
-  return { document, window, lifecycle, runTimers, actions, focused, rows, menu };
+  const opened = [];
+  const wire = () => attachThreadMenuTriggers(list, (sessionKey, point) => {
+    opened.push({ sessionKey, point });
+    menu.open({ ...THREAD, sessionKey }, point);
+  }, { lifecycle, window });
+  // This stand-in does not bubble events: deliver one to the list as if it
+  // came from `element`, the way the page's listeners receive it.
+  const send = (element, event) => {
+    Object.defineProperty(event, "target", { value: element });
+    list.dispatchEvent(event);
+    return event;
+  };
+  return { document, window, lifecycle, runTimers, actions, focused, rows, menu, list, addRow, wire, opened, send };
 }
 
 const openMenus = document => byClass(document.body, "thread-menu");
 const labels = menu => byClass(menu, "thread-menu-item").map(item => byClass(item, "thread-menu-label")[0].textContent);
+const keyEvent = (name, extra = {}) => Object.assign(new Event("keydown", { cancelable: true, bubbles: true }), { key: name, ...extra });
 const key = (target, name, extra = {}) => {
-  const event = new Event("keydown", { cancelable: true, bubbles: true });
-  Object.assign(event, { key: name, ...extra });
+  const event = keyEvent(name, extra);
   target.dispatchEvent(event);
   return event;
 };
@@ -75,20 +108,18 @@ test("the menu offers Pin, Snooze, Dismiss, Rename and Delete, or Unpin and Rest
 });
 
 test("a right-click opens the menu with the first item focused, and Escape closes it back to the row", () => {
-  const { document, lifecycle, window, focused, menu } = fixture();
-  const row = document.createElement("div");
-  document.body.appendChild(row);
-  attachThreadMenuTriggers(row, point => menu.open(THREAD, point), { lifecycle, window });
-  const event = new Event("contextmenu", { cancelable: true });
+  const { document, focused, addRow, wire, send } = fixture();
+  const row = addRow("alpha");
+  wire();
+  const event = new Event("contextmenu", { cancelable: true, bubbles: true });
   Object.assign(event, { clientX: 40, clientY: 50 });
-  row.dispatchEvent(event);
+  send(row.children[0], event);
   assert.equal(event.defaultPrevented, true, "the browser's own menu does not open");
   const [opened] = openMenus(document);
   assert.equal(opened.getAttribute("role"), "menu");
   assert.equal(opened.getAttribute("aria-label"), "Chat actions for Plan the offsite");
   assert.deepEqual(labels(opened), ["Pin to top", "Snooze", "Dismiss", "Rename", "Delete"]);
   assert.equal(document.activeElement, byClass(opened, "thread-menu-item")[0]);
-  assert.equal(menu.openFor(), "alpha");
   key(opened, "Escape");
   assert.equal(openMenus(document).length, 0);
   assert.deepEqual(focused, ["alpha"]);
@@ -154,74 +185,97 @@ test("the menu still acts on its thread and finds the row again after the list i
   assert.equal(document.activeElement, redrawn);
 });
 
+const pointer = (type, fields = {}) => Object.assign(new Event(type, { bubbles: true }),
+  { pointerType: "touch", pointerId: 7, clientX: 30, clientY: 40, ...fields });
+
 test("a long press on a touch screen opens the menu once, even with the browser's own contextmenu (C04)", () => {
-  const { document, lifecycle, window, runTimers, menu } = fixture();
-  const row = document.createElement("div");
-  let opens = 0;
-  attachThreadMenuTriggers(row, point => { opens += 1; menu.open(THREAD, point); }, { lifecycle, window });
-  const pointer = (type, fields) => Object.assign(new Event(type), { pointerType: "touch", clientX: 30, clientY: 40, ...fields });
-  row.dispatchEvent(pointer("pointerdown"));
+  const { document, window, runTimers, addRow, wire, opened, send } = fixture();
+  const row = addRow("alpha");
+  wire();
+  send(row.children[0], pointer("pointerdown"));
   runTimers(LONG_PRESS_MS);
-  assert.equal(opens, 1);
-  const contextmenu = Object.assign(new Event("contextmenu", { cancelable: true }), { clientX: 30, clientY: 40 });
-  row.dispatchEvent(contextmenu);
-  assert.equal(opens, 1, "Android's contextmenu after a long press does not open it again");
+  assert.deepEqual(opened.map(item => item.sessionKey), ["alpha"]);
+  const contextmenu = Object.assign(new Event("contextmenu", { cancelable: true, bubbles: true }), { clientX: 30, clientY: 40 });
+  send(row, contextmenu);
+  assert.equal(opened.length, 1, "Android's contextmenu after a long press does not open it again");
   assert.equal(contextmenu.defaultPrevented, true);
 
-  // The finger lifting would also click the row: that click is dropped.
-  const click = new Event("click", { cancelable: true });
-  window.dispatchEvent(click);
-  assert.equal(click.defaultPrevented, true);
+  // The finger lifting would also click the row: only that click is dropped,
+  // and a tap inside the menu still works (C27).
+  window.dispatchEvent(pointer("pointerup"));
+  const item = byClass(openMenus(document)[0], "thread-menu-item")[0];
+  const inside = new Event("click", { cancelable: true });
+  Object.defineProperty(inside, "target", { value: item });
+  window.dispatchEvent(inside);
+  assert.equal(inside.defaultPrevented, false);
+  const onRow = new Event("click", { cancelable: true });
+  Object.defineProperty(onRow, "target", { value: row.children[0] });
+  window.dispatchEvent(onRow);
+  assert.equal(onRow.defaultPrevented, true);
+  const later = new Event("click", { cancelable: true });
+  Object.defineProperty(later, "target", { value: row.children[0] });
+  window.dispatchEvent(later);
+  assert.equal(later.defaultPrevented, false, "only one click is dropped");
 });
 
-test("a press that moves or ends early, or a mouse press, opens nothing", () => {
-  const { document, lifecycle, window, runTimers } = fixture();
-  const row = document.createElement("div");
-  let opens = 0;
-  attachThreadMenuTriggers(row, () => { opens += 1; }, { lifecycle, window });
-  const pointer = (type, fields = {}) => Object.assign(new Event(type), { pointerType: "touch", clientX: 30, clientY: 40, ...fields });
-  row.dispatchEvent(pointer("pointerdown"));
-  row.dispatchEvent(pointer("pointermove", { clientX: 30, clientY: 80 }));
+test("a tap while the list is drawn again opens nothing (C27)", () => {
+  const { window, runTimers, list, addRow, wire, opened, send } = fixture();
+  const first = addRow("alpha");
+  wire();
+  send(first.children[0], pointer("pointerdown"));
+  // A message arrives and every row is replaced before the finger lifts.
+  list.replaceChildren();
+  const redrawn = addRow("alpha");
+  send(redrawn.children[0], pointer("pointerup"));
+  window.dispatchEvent(pointer("pointerup"));
   runTimers(LONG_PRESS_MS);
-  row.dispatchEvent(pointer("pointerdown"));
-  row.dispatchEvent(pointer("pointerup"));
+  assert.equal(opened.length, 0);
+});
+
+test("a press that moves or ends early, another finger, a mouse press or a press off the rows opens nothing", () => {
+  const { window, runTimers, list, addRow, wire, opened, send } = fixture();
+  const row = addRow("alpha");
+  wire();
+  send(row.children[0], pointer("pointerdown"));
+  window.dispatchEvent(pointer("pointermove", { clientX: 30, clientY: 80 }));
   runTimers(LONG_PRESS_MS);
-  row.dispatchEvent(pointer("pointerdown", { pointerType: "mouse" }));
+  send(row.children[0], pointer("pointerdown"));
+  window.dispatchEvent(pointer("pointercancel"));
   runTimers(LONG_PRESS_MS);
-  assert.equal(opens, 0);
+  send(row.children[0], pointer("pointerdown", { pointerType: "mouse" }));
+  runTimers(LONG_PRESS_MS);
+  send(list, pointer("pointerdown"));
+  runTimers(LONG_PRESS_MS);
+  assert.equal(opened.length, 0);
+  // A second finger lifting does not end the first one's press.
+  send(row.children[0], pointer("pointerdown"));
+  window.dispatchEvent(pointer("pointerup", { pointerId: 8 }));
+  runTimers(LONG_PRESS_MS);
+  assert.equal(opened.length, 1);
 });
 
 test("the keyboard's context-menu key and Shift+F10 open the menu on a focused row", () => {
-  const { document, lifecycle, window } = fixture();
-  const row = document.createElement("div");
-  const points = [];
-  attachThreadMenuTriggers(row, point => points.push(point), { lifecycle, window });
-  assert.equal(key(row, "ContextMenu").defaultPrevented, true);
-  assert.equal(points.length, 1);
-  assert.deepEqual(points[0], { x: 26, y: 60 }, "placed under the row");
-  key(row, "F10");
-  assert.equal(points.length, 1, "F10 alone is not the menu key");
+  const { addRow, wire, opened, send } = fixture();
+  const row = addRow("alpha");
+  wire();
+  assert.equal(send(row.children[0], keyEvent("ContextMenu")).defaultPrevented, true);
+  assert.equal(opened.length, 1);
+  assert.deepEqual(opened[0].point, { x: 26, y: 60 }, "placed under the row");
+  send(row.children[0], keyEvent("F10"));
+  assert.equal(opened.length, 1, "F10 alone is not the menu key");
+  assert.equal(send(row.children[0], keyEvent("F10", { shiftKey: true })).defaultPrevented, true);
+  assert.equal(opened.length, 2);
 });
 
 test("a right-click or the keyboard right after closing the menu opens it again", () => {
-  const { document, lifecycle, window } = fixture();
-  const row = document.createElement("div");
-  let opens = 0;
-  attachThreadMenuTriggers(row, () => { opens += 1; }, { lifecycle, window });
-  const contextmenu = () => Object.assign(new Event("contextmenu", { cancelable: true }), { clientX: 1, clientY: 1 });
-  row.dispatchEvent(contextmenu());
-  key(row, "F10", { shiftKey: true });
-  row.dispatchEvent(contextmenu());
-  assert.equal(opens, 3, "only the contextmenu that follows a long press is ignored");
-});
-
-test("Shift+F10 opens it too", () => {
-  const { document, lifecycle, window } = fixture();
-  const row = document.createElement("div");
-  let opens = 0;
-  attachThreadMenuTriggers(row, () => { opens += 1; }, { lifecycle, window });
-  assert.equal(key(row, "F10", { shiftKey: true }).defaultPrevented, true);
-  assert.equal(opens, 1);
+  const { addRow, wire, opened, send } = fixture();
+  const row = addRow("alpha");
+  wire();
+  const contextmenu = () => Object.assign(new Event("contextmenu", { cancelable: true, bubbles: true }), { clientX: 1, clientY: 1 });
+  send(row, contextmenu());
+  send(row, keyEvent("F10", { shiftKey: true }));
+  send(row, contextmenu());
+  assert.equal(opened.length, 3, "only the contextmenu that follows a long press is ignored");
 });
 
 test("Pick a time opens a small dialog that refuses a past time and snoozes until the chosen one (C04)", () => {
@@ -269,4 +323,38 @@ test("Escape closes the time dialog back to the row; a press outside closes the 
   Object.defineProperty(press, "target", { value: outside });
   document.dispatchEvent(press);
   assert.equal(menu.isOpen(), false);
+});
+
+test("the open chat scrolling leaves the menu open; the thread list scrolling or a resize closes it back to the row (C26)", () => {
+  const { document, window, focused, rows, list, addRow, menu } = fixture();
+  addRow("alpha");
+  const messages = document.createElement("div");
+  document.body.appendChild(messages);
+  const scroll = target => {
+    const event = new Event("scroll");
+    Object.defineProperty(event, "target", { value: target });
+    document.dispatchEvent(event);
+  };
+  menu.open(THREAD, { x: 0, y: 0 });
+  scroll(messages);
+  assert.equal(menu.isOpen(), true, "a message arriving in the open chat does not close it");
+  scroll(list);
+  assert.equal(menu.isOpen(), false);
+  assert.equal(document.activeElement, rows.get("alpha"), "focus goes back to the row");
+
+  menu.open(THREAD, { x: 0, y: 0 });
+  window.dispatchEvent(new Event("resize"));
+  assert.equal(menu.isOpen(), false);
+  assert.equal(document.activeElement, rows.get("alpha"));
+  assert.deepEqual(focused, ["alpha", "alpha"]);
+});
+
+test("Tab closes the menu and gives focus back to the row, so the page moves on from there (C26)", () => {
+  const { document, rows, addRow, menu } = fixture();
+  addRow("alpha");
+  menu.open(THREAD, { x: 0, y: 0 });
+  const tab = key(openMenus(document)[0], "Tab");
+  assert.equal(tab.defaultPrevented, false, "the browser still moves focus on");
+  assert.equal(menu.isOpen(), false);
+  assert.equal(document.activeElement, rows.get("alpha"));
 });

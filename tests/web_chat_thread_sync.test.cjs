@@ -54,11 +54,12 @@ function harness() {
     renderMessages() {},
     renderParallelSwitch() { switchRenders += 1; },
     clearSystemError() { return false; },
-    appendSystemError(target, source, message) { errors.push({ target, source, message }); },
+    appendSystemError(target, source, message, retry) { errors.push({ target, source, message, retry }); },
     ensureActiveThreadHistory: () => Promise.resolve(),
     requestClient: { async fetch(url, init = {}) {
       if (init.method === "PATCH") {
         patches.push({ url, body: JSON.parse(init.body) });
+        if (server.offline) throw new TypeError("Failed to fetch");
         const refusal = server.refusal;
         return { ok: !refusal, status: refusal ? 400 : 200, text: async () => refusal || "{}" };
       }
@@ -445,4 +446,22 @@ test("what the person typed in a rename field survives a redraw", () => {
   assert.equal(redrawn.value, "New na");
   assert.deepEqual(redrawn.selected, [6, 6], "the caret stays where it was");
   assert.equal(document.activeElement, redrawn);
+});
+
+test("a change that did not get through offers Retry for the same change; a refusal does not (C28)", async () => {
+  const { sandbox, server, patches, errors, thread } = harness();
+  server.sessions = [{ ...SNOOZED, list_state: null }, { session_key: "alpha", updated_at: "2026-11-19T09:00:00Z" }];
+  await sandbox.fetchSessions();
+  server.offline = true;
+  assert.equal(await sandbox.changeThreadPlacement(thread("gamma"), "snooze", { snooze_until: "2026-11-20T09:00:00+00:00" }), false);
+  assert.equal(errors[0].message, "\u201cRenew the certificate\u201d was not moved. Try again.");
+  server.offline = false;
+  await errors[0].retry();
+  assert.deepEqual(patches.map(item => item.body.thread_action), ["snooze", "snooze"]);
+  assert.equal(patches[1].body.snooze_until, "2026-11-20T09:00:00+00:00");
+
+  server.refusal = "Thread not found.";
+  await sandbox.changeThreadPlacement(thread("gamma"), "pin");
+  assert.equal(errors[1].message, "\u201cRenew the certificate\u201d was not moved. Thread not found.");
+  assert.equal(errors[1].retry, null, "repeating a refusal cannot help");
 });

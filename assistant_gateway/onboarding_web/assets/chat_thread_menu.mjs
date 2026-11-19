@@ -28,56 +28,81 @@ const LONG_PRESS_SLOP_PX = 10;
 const SAME_GESTURE_MS = 800;
 const VIEWPORT_MARGIN_PX = 8;
 
-// Wire the ways a row opens its menu. `open(point)` receives where to place it.
-export function attachThreadMenuTriggers(element, open, { lifecycle, window }) {
-  let pressTimer = 0;
-  let pressStart = null;
+// After a long press opens the menu, the click its own finger makes on
+// release is dropped for this long (it would select the row under it).
+const RELEASE_CLICK_MS = 400;
+
+const ROW_SELECTOR = ".thread-row";
+const MENU_SELECTOR = ".thread-menu, .thread-snooze-dialog";
+
+// Wire the ways a row opens its menu, once for the whole list: the list is
+// drawn again on many events, so a press is tracked by the row's session key
+// and its pointer id, never by a row element (plan review C27).
+// `open(sessionKey, point)` receives the thread and where to place the menu.
+export function attachThreadMenuTriggers(list, open, { lifecycle, window }) {
+  let press = null; // { pointerId, sessionKey, x, y, timer, opened }
   let longPressAt = 0;
-  const cancelPress = () => {
-    if (pressTimer) lifecycle.clearTimeout(pressTimer);
-    pressTimer = 0;
-    pressStart = null;
+  const rowFor = event => {
+    const row = event.target && typeof event.target.closest === "function" ? event.target.closest(ROW_SELECTOR) : null;
+    return row && row.dataset.sessionKey ? row : null;
   };
-  lifecycle.listen(element, "contextmenu", event => {
+  const endPress = () => {
+    if (press && press.timer) lifecycle.clearTimeout(press.timer);
+    press = null;
+  };
+  lifecycle.listen(list, "contextmenu", event => {
+    const row = rowFor(event);
+    if (!row) return;
     event.preventDefault();
+    // Android sends its own contextmenu after a long press already opened it.
     if (Date.now() - longPressAt < SAME_GESTURE_MS) return;
-    open({ x: event.clientX, y: event.clientY });
+    open(row.dataset.sessionKey, { x: event.clientX, y: event.clientY });
   });
-  lifecycle.listen(element, "pointerdown", event => {
-    if (event.pointerType !== "touch") return;
-    cancelPress();
-    pressStart = { x: event.clientX, y: event.clientY };
-    pressTimer = lifecycle.timeout(() => {
-      const point = pressStart;
-      cancelPress();
+  lifecycle.listen(list, "pointerdown", event => {
+    const row = rowFor(event);
+    if (event.pointerType !== "touch" || !row) return;
+    endPress();
+    const current = { pointerId: event.pointerId, sessionKey: row.dataset.sessionKey, x: event.clientX, y: event.clientY, timer: 0, opened: false };
+    current.timer = lifecycle.timeout(() => {
+      current.timer = 0;
+      current.opened = true;
       longPressAt = Date.now();
-      open(point);
-      suppressNextClick(window, lifecycle);
+      open(current.sessionKey, { x: current.x, y: current.y });
     }, LONG_PRESS_MS);
+    press = current;
   });
-  lifecycle.listen(element, "pointermove", event => {
-    if (!pressStart) return;
-    if (Math.hypot(event.clientX - pressStart.x, event.clientY - pressStart.y) > LONG_PRESS_SLOP_PX) cancelPress();
+  lifecycle.listen(window, "pointermove", event => {
+    if (!press || event.pointerId !== press.pointerId || press.opened) return;
+    if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > LONG_PRESS_SLOP_PX) endPress();
   });
-  ["pointerup", "pointercancel", "pointerleave"].forEach(type => lifecycle.listen(element, type, cancelPress));
-  lifecycle.listen(element, "keydown", event => {
-    if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
-      event.preventDefault();
-      const rect = element.getBoundingClientRect();
-      open({ x: rect.left + 16, y: rect.bottom });
-    }
+  ["pointerup", "pointercancel"].forEach(type => lifecycle.listen(window, type, event => {
+    if (!press || event.pointerId !== press.pointerId) return;
+    if (press.opened && type === "pointerup") dropReleaseClick(window, lifecycle);
+    endPress();
+  }));
+  lifecycle.listen(list, "keydown", event => {
+    if (event.key !== "ContextMenu" && !(event.key === "F10" && event.shiftKey)) return;
+    const row = rowFor(event);
+    if (!row) return;
+    event.preventDefault();
+    const rect = row.getBoundingClientRect();
+    open(row.dataset.sessionKey, { x: rect.left + 16, y: rect.bottom });
   });
 }
 
-// The finger lifting after a long press would also "click" the row (and may
-// land on a row drawn again meanwhile), so the next click anywhere is dropped.
-function suppressNextClick(window, lifecycle) {
+// The finger lifting after a long press would also "click" the row under it.
+// Only that click is dropped: it is armed on that pointer's release, lasts
+// RELEASE_CLICK_MS, and never touches a click inside the menu.
+function dropReleaseClick(window, lifecycle) {
   const swallow = event => {
+    const target = event.target;
+    if (target && typeof target.closest === "function" && target.closest(MENU_SELECTOR)) return;
     event.preventDefault();
     event.stopPropagation();
+    window.removeEventListener("click", swallow, { capture: true });
   };
-  window.addEventListener("click", swallow, { capture: true, once: true });
-  lifecycle.timeout(() => window.removeEventListener("click", swallow, { capture: true }), SAME_GESTURE_MS);
+  window.addEventListener("click", swallow, { capture: true });
+  lifecycle.timeout(() => window.removeEventListener("click", swallow, { capture: true }), RELEASE_CLICK_MS);
 }
 
 // The items for one thread, in menu order. Snoozed and dismissed threads get
@@ -120,7 +145,8 @@ export function localInputValue(date) {
     + "T" + pad(date.getHours()) + ":" + pad(date.getMinutes());
 }
 
-export function createThreadMenu({ document, window, lifecycle, onAction, focusRow, now = () => new Date() }) {
+// `threadList` is the element whose scrolling moves the rows the menu sits beside.
+export function createThreadMenu({ document, window, lifecycle, onAction, focusRow, threadList, now = () => new Date() }) {
   let state = null; // { sessionKey, menu, submenu, dialog }
 
   function close({ restoreFocus = true } = {}) {
@@ -215,7 +241,8 @@ export function createThreadMenu({ document, window, lifecycle, onAction, focusR
           const active = document.activeElement;
           if (!isSubmenu && active && active.classList.contains("has-submenu")) active.click();
         },
-        Tab: () => close({ restoreFocus: false }),
+        // Focus goes back to the row first, so Tab moves on from there.
+        Tab: () => close(),
       };
       const action = keys[event.key];
       if (!action) return;
@@ -333,21 +360,31 @@ export function createThreadMenu({ document, window, lifecycle, onAction, focusR
     input.focus();
   }
 
-  // A press outside the menu or dialog, or the page scrolling or resizing,
-  // closes it; focus stays where the person put it.
+  const holdsFocus = () => [state.menu, state.submenu, state.dialog]
+    .some(node => node && node.contains(document.activeElement));
+  // Closing for a reason the person did not point at gives focus back to the
+  // row when it was in the menu, so keyboard users are not left on the page.
+  const closeKeepingFocus = () => {
+    if (state) close({ restoreFocus: holdsFocus() });
+  };
+  // A press outside closes it and leaves focus where the person pressed.
   lifecycle.listen(document, "pointerdown", event => {
     if (!state) return;
     const inside = [state.menu, state.submenu, state.dialog].some(node => node && node.contains(event.target));
     if (!inside) close({ restoreFocus: false });
   }, { capture: true });
-  lifecycle.listen(window, "resize", () => close({ restoreFocus: false }));
-  // Scrolling the list or the page would leave the menu beside the wrong row.
+  lifecycle.listen(window, "resize", closeKeepingFocus);
+  lifecycle.listen(window, "blur", closeKeepingFocus);
+  // Only the thread list scrolling (or the page around it) leaves the menu
+  // beside the wrong row; the open chat scrolls itself as messages arrive,
+  // and that must not close it (plan review C26).
   lifecycle.listen(document, "scroll", event => {
-    if (state && ![state.menu, state.submenu, state.dialog].some(node => node && node.contains(event.target))) {
-      close({ restoreFocus: false });
-    }
+    if (!state || !threadList) return;
+    const target = event.target;
+    const movesList = target === document || target === threadList
+      || (target && typeof target.contains === "function" && target.contains(threadList));
+    if (movesList) closeKeepingFocus();
   }, { capture: true });
-  lifecycle.listen(window, "blur", () => close({ restoreFocus: false }));
 
   return { open, close, isOpen, openFor };
 }
