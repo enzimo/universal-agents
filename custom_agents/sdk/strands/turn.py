@@ -25,6 +25,7 @@ from custom_agents.sdk.strands.turn_tool_stop import (
     stop_tool_calls,
 )
 from custom_agents.sdk.strands.paused_tool_calls import call_paused
+from custom_agents.strands_parts import mark_paused
 from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.sdk.strands.turn_ports import (
     TurnRuntimeSettings,
@@ -2592,8 +2593,9 @@ class LLMTurnExecutor:
                         strands_prompt_input=strands_prompt_input,
                         attempt=turn.strands_invocation_attempt,
                     )
+                    model = self._require_model()
                     turn.result = await invoke_with_tool_stop(
-                        self._require_model(),
+                        model,
                         strands_prompt_input,
                         tool_stop=self._require_tool_stop(turn),
                         invoke_kwargs=turn.invoke_kwargs,
@@ -2603,16 +2605,31 @@ class LLMTurnExecutor:
                     if call_paused(turn.result):
                         # A paused Strands agent takes only interrupt answers:
                         # called again with text it raises TypeError and stays
-                        # paused. _complete_turn hands the pause to
+                        # paused. It is marked first, so no later turn reuses
+                        # it even if this one ends before saving the pause.
+                        # _complete_turn hands the pause to
                         # send_interrupt_request_for_result; guidance waits for
                         # the resumed turn (its next new tool call, or
                         # task_steering_runtime._call_until_guidance_read).
+                        self._keep_new_turns_off_paused_agent(turn, model)
                         break
                     if await self._reinvoke_for_late_guidance(turn):
                         continue
                     break
                 except Exception as invoke_error:
                     await self._recover_invocation(turn, invoke_error)
+
+    def _keep_new_turns_off_paused_agent(self, turn: _TurnState, model: Any) -> None:
+        """Mark the agent whose call just paused for replacement before the next turn (``strands_parts.mark_paused``)."""
+
+        if mark_paused(model):
+            return
+        self.logger.warning(
+            "A call paused on a Strands agent that the turn's work record does not hold, so it could not be "
+            "marked for replacement before the next turn. event=paused_strands_agent_unmarked agent_id=%s task_id=%s",
+            self.settings.id,
+            turn.active_task_id,
+        )
 
     async def _reinvoke_for_late_guidance(self, turn: _TurnState) -> bool:
         """Prepare another call when guidance arrived during a call that did not pause; return whether it did.

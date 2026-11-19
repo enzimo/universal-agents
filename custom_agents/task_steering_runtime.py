@@ -236,9 +236,12 @@ def _rotate_main_strands_agent(agent: Any, *, task_id: Optional[str], session_ow
         raise RuntimeError(
             "Could not isolate a live Strands interrupt from a new task turn."
         )
+    # No interrupted task ids: the old agent holds a pause no session will
+    # resume (a turn ended before saving it, or its task ended while it waited).
     agent._logger.warning(
         "[%s] Rotated the default Strands agent before a new turn because the "
-        "prior instance belongs to an interrupted session. "
+        "prior instance still holds an interrupt, kept by a paused session or "
+        "left by a pause no session will resume. "
         "event=strands_agent_rotated_after_interrupt task_id=%s "
         "interrupted_task_ids=%s previous_strands_agent_id=%s "
         "replacement_strands_agent_id=%s",
@@ -1477,6 +1480,8 @@ async def send_interrupt_request_for_result(
                 "conversation_id": getattr(msg_meta, "conversation_id", None),
             },
         )
+    # Already set when the call paused (strands_parts.mark_paused), and kept by
+    # a resumed turn's parts since their first pause; the session holds them now.
     strands.replace_before_next_turn = True
     await agent.task_manager.operations_runtime.run(
         agent.task_manager.append_history_entry,
