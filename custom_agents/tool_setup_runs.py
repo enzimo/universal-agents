@@ -481,6 +481,19 @@ def settle(run: ToolSetupRunV1) -> ToolSetupRunV1:
     return run
 
 
+def still_waits(run: ToolSetupRunV1) -> bool:
+    """The run waits for pages or decisions and nothing is left for ``advance`` to do.
+
+    ``advance`` opens every piece that may start and settles the run after
+    each result. A saved result whose ``advance`` was lost (a stop between
+    the two steps, or an error in the second) leaves the run waiting with a
+    piece to open or ready to settle; then it does not really wait, and
+    recovery advances it (``tool_setup_run_runtime.resume_ended_setup_runs``).
+    """
+
+    return run.status == RUN_WAITING and settle(run).status == RUN_WAITING and not openable(run)
+
+
 # -- 5. the outcome --------------------------------------------------------------------
 
 
@@ -573,6 +586,7 @@ __all__ = [
     "run_id_for",
     "service_name",
     "settle",
+    "still_waits",
     "workflow_notice",
     "workflow_proposal",
 ]

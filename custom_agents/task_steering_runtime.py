@@ -101,10 +101,10 @@ from custom_tools.tool_stop import ToolStop
 from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
-from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
+from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND, TOOL_SETUP_RUN_RESPONSE_KIND
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
-    clear_answered_access_blocker,
+    clear_answered_blocker,
     clear_human_interaction_blocker,
     record_human_interaction_blocker,
 )
@@ -1003,6 +1003,7 @@ async def _take_interrupt_response(
     # Read again: the live session may have ended while the files were recorded.
     session = agent._interrupted_turn_sessions.get(task_id)
     if session is not None:
+        _note_replaced_setup_answer(agent, task_id, steering)
         agent._pending_interrupt_responses[task_id] = steering
         await _send_steering_status_response(
             agent,
@@ -1040,9 +1041,9 @@ async def _take_interrupt_response(
         f"{response_text}"
     )
     await agent.task_manager.operations_runtime.run(
-        partial(clear_answered_access_blocker, agent.task_manager),
+        partial(clear_answered_blocker, agent.task_manager),
         task_id,
-        _answered_access_ids(steering),
+        _structured_answers(steering),
     )
     await agent.task_manager.operations_runtime.run(
         agent.task_manager.append_runtime_resume_directive, task_id, directive
@@ -1076,6 +1077,29 @@ async def _take_interrupt_response(
         reason="Interrupt response accepted as durable recovery guidance.",
     )
     schedule_pending_work(agent)
+
+
+def _note_replaced_setup_answer(agent: Any, task_id: str, steering: TaskSteering) -> None:
+    """Log an answer that replaces a held ``set_up_tools`` answer before the turn took it.
+
+    The turn still gets the run's result: ``set_up_tools`` re-reads the run
+    when it resumes, and the resumed turn removes the run's marked record
+    (``clear_answered_blocker``).
+    """
+
+    pending = agent._pending_interrupt_responses.get(task_id)
+    if pending is None or not any(
+        isinstance(item.get("response"), dict) and item["response"].get("kind") == TOOL_SETUP_RUN_RESPONSE_KIND
+        for item in pending.interrupt_responses or []
+    ):
+        return
+    agent._logger.warning(
+        "An answer replaced a held setup answer before the paused turn took it. "
+        "event=tool_setup_answer_replaced task_id=%s steering_id=%s replaced_steering_id=%s",
+        task_id,
+        steering.steering_id,
+        pending.steering_id,
+    )
 
 
 def _format_interrupt_responses(steering: TaskSteering) -> str:
@@ -1132,19 +1156,35 @@ def _build_interrupt_response_blocks(
     return blocks
 
 
-def _answered_access_ids(
+def _structured_answers(
     steering: TaskSteering,
-) -> list[tuple[str, str]]:
-    """The (interrupt id, access request id) pairs a structured access outcome answers."""
+) -> list[tuple[str, Dict[str, Any]]]:
+    """The (interrupt id, structured answer) pairs an answer carries.
+
+    Trusted code answers access and setup-run waits with a dict
+    (``clear_answered_blocker`` matches it to the task's record); a text
+    answer from a person names no saved wait.
+    """
     answers = []
     for item in steering.interrupt_responses or []:
         response = item.get("response")
-        if isinstance(response, dict):
-            interrupt_id = item.get("interrupt_id") or item.get("interruptId")
-            request_id = response.get(ACCESS_REQUEST_ID_KEY)
-            if interrupt_id and request_id:
-                answers.append((str(interrupt_id), str(request_id)))
+        interrupt_id = item.get("interrupt_id") or item.get("interruptId")
+        if isinstance(response, dict) and interrupt_id:
+            answers.append((str(interrupt_id), dict(response)))
     return answers
+
+
+async def _answer_not_taken(agent: Any, task_id: str, steering: TaskSteering, *, why: str) -> None:
+    """An answer no paused turn can take: a ``set_up_tools`` answer resumes its task from a note.
+
+    Its record would otherwise keep the task waiting with nothing left to
+    resume it (``tool_setup_run_runtime.resume_without_paused_turn``). Other
+    answers keep their handling here.
+    """
+
+    from custom_agents.tool_setup_run_runtime import resume_without_paused_turn
+
+    await resume_without_paused_turn(agent, task_id, steering, why=why)
 
 
 async def resume_interrupted_task_turn(agent: Any, task_id: str) -> Optional[Any]:
@@ -1162,6 +1202,8 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
     session = agent._interrupted_turn_sessions.get(task_id)
     steering = agent._pending_interrupt_responses.pop(task_id, None)
     if session is None or steering is None:
+        if steering is not None:
+            await _answer_not_taken(agent, task_id, steering, why="paused_turn_gone")
         return None
 
     task_info = await agent.task_manager.operations_runtime.run(
@@ -1187,6 +1229,7 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
                 "steering_id": steering.steering_id,
             },
         )
+        await _answer_not_taken(agent, task_id, steering, why="answer_not_converted")
         return None
 
     work.strands = session.strands
@@ -1194,9 +1237,10 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
     # The access-request handler already checked the stored decision; every
     # tool call is still decided again when the SDK resumes.
     await agent.task_manager.operations_runtime.run(
-        partial(clear_answered_access_blocker, agent.task_manager),
+        partial(clear_answered_blocker, agent.task_manager),
         task_id,
-        _answered_access_ids(steering),
+        _structured_answers(steering),
+        resumed_interrupt_ids=[item.interrupt_id for item in session.interrupts],
     )
     # A resumed turn is a new turn: it gets its own stop for its commands.
     tool_stop = agent._set_active_execution_context(task_id)
