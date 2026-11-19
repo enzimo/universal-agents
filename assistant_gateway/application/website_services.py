@@ -6,7 +6,7 @@ import hmac
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, TypeIs, cast
 
 from assistant_gateway.application.objective_control_text import objective_control_text
 from assistant_gateway.application.gateway_application import (
@@ -346,6 +346,16 @@ class WebsiteIdentityApplication:
         return self._identity.is_web_chat_user_active(canonical_user_id)
 
 
+# The largest value both stores keep in an INTEGER column (64-bit signed).
+_STORE_INTEGER_MAX = 2**63 - 1
+
+
+def _valid_seen_sequence(value: object) -> TypeIs[int]:
+    """Whether a page's last shown message sequence is a whole number the store can keep."""
+
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _STORE_INTEGER_MAX
+
+
 class WebsiteSessionApplication:
     """Own browser session visibility, mutation, and attachment access."""
 
@@ -554,7 +564,17 @@ class WebsiteSessionApplication:
         ):
             saved = False
         else:
-            saved = self._place_thread(session.session_key, action, snooze_until, seen_sequence)
+            try:
+                saved = self._place_thread(session.session_key, action, snooze_until, seen_sequence)
+            except InvalidThreadPlacement as refused:
+                LOGGER.info(
+                    "Web Chat thread placement refused. event=web_chat_thread_placement outcome=refused "
+                    "session_key=%s action=%s reason=%r",
+                    session.session_key,
+                    action.value,
+                    str(refused),
+                )
+                raise
         result = WebChatThreadPlacementResult.SAVED if saved else WebChatThreadPlacementResult.NOT_FOUND
         LOGGER.info(
             "Web Chat thread placement change. event=web_chat_thread_placement outcome=%s "
@@ -577,15 +597,16 @@ class WebsiteSessionApplication:
             return repository.set_session_pinned(session_key, pinned=action is WebChatThreadAction.PIN)
         if action is WebChatThreadAction.RESTORE:
             return repository.clear_session_hidden(session_key)
-        if seen_sequence is None or seen_sequence < 0:
+        seen = seen_sequence if _valid_seen_sequence(seen_sequence) else None
+        if seen is None:
             raise InvalidThreadPlacement("Reload the chat and try again.")
         if action is WebChatThreadAction.SNOOZE:
             wake = snooze_wake_time(snooze_until, now=self._clock.now_utc())
             return repository.set_session_hidden(
-                session_key, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until=wake, seen_sequence=seen_sequence
+                session_key, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until=wake, seen_sequence=seen
             )
         return repository.set_session_hidden(
-            session_key, hidden_as=ThreadHiddenAs.DISMISSED, hidden_until=None, seen_sequence=seen_sequence
+            session_key, hidden_as=ThreadHiddenAs.DISMISSED, hidden_until=None, seen_sequence=seen
         )
 
     def rename_web_chat_session(
@@ -830,6 +851,14 @@ class WebsiteTranscriptApplication:
             messages=tuple(self._message_view(message) for message in page.messages),
             before_cursor=page.before_cursor,
             has_more=page.has_more,
+        )
+
+    def count_turns(self, *, owner_canonical_user_id: str, session_key: str) -> int | None:
+        session = self._visible_session(session_key, owner_canonical_user_id)
+        if session is None:
+            return None
+        return self._transcript.count_turns(
+            owner_canonical_user_id=owner_canonical_user_id, session_key=session.session_key
         )
 
     def list_events(

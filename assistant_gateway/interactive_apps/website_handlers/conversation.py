@@ -17,10 +17,13 @@ from assistant_gateway.application.gateway_application import (
     GatewaySession,
 )
 from assistant_gateway.application.transcript_service import TranscriptCursorError
+from assistant_gateway.application.web_chat_threads import InvalidThreadPlacement
 from assistant_gateway.application.website_application import (
     WEB_CHAT_THREAD_LIST_LIMIT,
     GatewaySessionAliasConflict,
     WebChatParallelSettingResult,
+    WebChatThreadAction,
+    WebChatThreadPlacementResult,
     WebTranscriptMessageV1,
     WebsiteGatewayApplication,
     web_chat_threads_revision,
@@ -76,11 +79,16 @@ class WebsiteConversationHandlers:
         listed = self.application.sessions.list_web_chat_threads(
             owner_canonical_user_id=owner,
             limit=WEB_CHAT_THREAD_LIST_LIMIT,
+            include_last_message=True,
         )
         # `title` is the thread's fixed name (web_chat_threads); null until
         # its first ordinary message, and the page shows "New Chat" then.
         # `parallel_thread` is its Run concurrently setting; whether a request
         # is open, which locks that switch, rides on every event page.
+        # The rest draws the row: its latest ordinary message, when anything
+        # was last posted and that message's sequence (sent back with snooze
+        # and dismiss), what it waits on from the person, and where the person
+        # placed it (web_chat_threads.thread_list_state).
         sessions = [
             {
                 "session_key": thread.session_key,
@@ -89,6 +97,21 @@ class WebsiteConversationHandlers:
                 "title": thread.title,
                 "updated_at": thread.updated_at,
                 "parallel_thread": thread.parallel_thread,
+                "last_message": (
+                    {
+                        "role": thread.last_message.role,
+                        "text": thread.last_message.text,
+                        "created_at": thread.last_message.created_at,
+                    }
+                    if thread.last_message is not None
+                    else None
+                ),
+                "last_activity_at": thread.last_activity_at,
+                "last_sequence": thread.last_sequence,
+                "needs_you": thread.needs_you.value if thread.needs_you else None,
+                "pinned": thread.pinned,
+                "list_state": thread.list_state.value if thread.list_state else None,
+                "snoozed_until": thread.snoozed_until,
             }
             for thread in listed
         ]
@@ -154,10 +177,18 @@ class WebsiteConversationHandlers:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         if page is None:
             raise web.HTTPNotFound(text="Thread not found.")
+        extra: dict[str, Any] = {}
+        # Only the thread list's hover preview asks for the thread's turn
+        # count: it reads every row, so ordinary history pages skip it.
+        if str(request.query.get("turn_count") or "") == "1":
+            extra["turn_count"] = self.application.transcripts.count_turns(
+                owner_canonical_user_id=owner, session_key=session_key
+            )
         return web.json_response(
             {
                 "status": "ok",
                 **page.model_dump(mode="json"),
+                **extra,
                 "event_cursor": self.application.transcripts.snapshot_cursor(),
             }
         )
@@ -313,16 +344,51 @@ class WebsiteConversationHandlers:
     async def _handle_web_chat_update_session(
         self, request: web.Request
     ) -> web.Response:
-        """Change one thing about a thread: its name or its Run concurrently setting."""
+        """Change one thing about a thread: its name, its Run concurrently setting, or its place in the list."""
 
         web_session = self.operations._require_web_chat_session(request)
         session_key = str(request.match_info.get("session_key") or "").strip()
         payload = await self.operations._json_payload(request)
+        changes: list[str] = [key for key in ("thread_action", "parallel_thread") if key in payload]
+        if "session_alias" in payload or "title" in payload:
+            changes.append("name")
+        if len(changes) > 1:
+            raise web.HTTPBadRequest(text="Change one thing about a thread at a time.")
+        if "thread_action" in payload:
+            return self._set_web_chat_thread_placement(web_session, session_key, payload)
         if "parallel_thread" in payload:
-            if "session_alias" in payload or "title" in payload:
-                raise web.HTTPBadRequest(text="Change a thread's name and Run concurrently separately.")
             return self._set_web_chat_session_parallel(web_session, session_key, payload)
         return self._rename_web_chat_session(web_session, session_key, payload)
+
+    def _set_web_chat_thread_placement(
+        self, web_session: Any, session_key: str, payload: dict[str, Any]
+    ) -> web.Response:
+        """Pin, unpin, snooze, dismiss or restore a thread (the thread list's menu).
+
+        The same route and checks as a rename; the service checks the owner
+        before the snooze time or sequence, so another person's thread reads
+        as not found whatever the payload holds.
+        """
+
+        try:
+            action = WebChatThreadAction(str(payload.get("thread_action") or ""))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="thread_action must be pin, unpin, snooze, dismiss or restore.") from exc
+        snooze_until = payload.get("snooze_until")
+        seen_sequence = payload.get("seen_sequence")
+        try:
+            outcome = self.application.sessions.set_web_chat_thread_placement(
+                session_key=session_key,
+                action=action,
+                owner_canonical_user_id=self.operations._web_session_owner_scope(web_session),
+                snooze_until=snooze_until if isinstance(snooze_until, str) else None,
+                seen_sequence=seen_sequence if isinstance(seen_sequence, int) else None,
+            )
+        except InvalidThreadPlacement as refused:
+            raise web.HTTPBadRequest(text=str(refused)) from refused
+        if outcome is WebChatThreadPlacementResult.NOT_FOUND:
+            raise web.HTTPNotFound(text="Thread not found.")
+        return web.json_response({"status": "ok", "session_key": session_key, "thread_action": action.value})
 
     def _set_web_chat_session_parallel(
         self, web_session: Any, session_key: str, payload: dict[str, Any]

@@ -603,8 +603,10 @@ class WebChatThreadStatesV1(WebsiteContractV1):
     would otherwise reach other open pages only on reload.
     """
 
-    # Changes whenever a listed thread appears, disappears, or changes name
-    # (a rename, or its first ordinary message naming it); later messages do
+    # Changes whenever a listed thread appears, disappears, changes name (a
+    # rename, or its first ordinary message naming it), changes its Run
+    # concurrently setting, or moves (pinned, snoozed, woke, dismissed, or
+    # waiting on the person; web_chat_threads_revision). Later messages do
     # not change it, so the page reloads the thread list only when it shows
     # something new.
     threads_revision: str = Field(min_length=1, max_length=64)
@@ -969,6 +971,9 @@ class WebTranscriptApplication(Protocol):
         limit: int,
     ) -> WebTranscriptHistoryPageV1 | None:
         """Return one visible session page or ``None`` when inaccessible."""
+
+    def count_turns(self, *, owner_canonical_user_id: str, session_key: str) -> int | None:
+        """Ordinary messages in one visible thread (the hover preview), or ``None`` when inaccessible."""
 
     def list_events(
         self,

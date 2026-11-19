@@ -623,6 +623,13 @@ class GatewayTranscriptService:
             raise ValueError("Gateway delivery events require a stable source id.")
         return TRANSCRIPT_SOURCE_DELIVERY_EVENT, source_id
 
+    def count_turns(self, *, owner_canonical_user_id: str, session_key: str) -> int:
+        """Ordinary messages (no system cards, no slash commands) in one person's thread."""
+
+        return self._repository.count_transcript_turns(
+            owner_canonical_user_id=owner_canonical_user_id, session_key=session_key
+        )
+
     def history_page(
         self,
         *,

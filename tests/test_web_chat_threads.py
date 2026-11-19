@@ -422,3 +422,17 @@ def test_hiding_needs_the_last_message_the_page_showed_and_a_valid_time(tmp_path
     with pytest.raises(InvalidThreadPlacement):
         threads.place(WebChatThreadAction.SNOOZE, snooze_until=NOW.isoformat(), seen_sequence=0)
     assert threads.thread().list_state is None
+
+
+def test_a_sequence_the_store_cannot_keep_is_refused_and_every_refusal_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    threads = _Threads(tmp_path)
+    threads.session(THREAD)
+    with caplog.at_level(logging.INFO):
+        for refused in (2**63, -1, True):
+            with pytest.raises(InvalidThreadPlacement):
+                threads.place(WebChatThreadAction.DISMISS, seen_sequence=refused)
+    assert threads.thread().list_state is None
+    refusals = [line for line in caplog.text.splitlines() if "event=web_chat_thread_placement outcome=refused" in line]
+    assert len(refusals) == 3 and all(THREAD in line and "action=dismiss" in line for line in refusals)
