@@ -833,6 +833,7 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
                 "authorization_keys": tuple(sorted(authorization)),
                 "mcp_config": authorization["mcp_config"],
                 "access_gate": authorization["access_gate"],
+                "web_chat_origin": authorization["web_chat_origin"],
             }
         )
 
@@ -841,6 +842,15 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
     )
 
     await _run_secure_tool_broker_service(str(config_path))
+
+    # Web Chat may frame the broker's card view only from its own address,
+    # derived from the existing public-address settings.
+    expected_origin = (
+        config.internal_website_base_url.rstrip("/")
+        if config.interactive_apps.internal_website.enabled
+        else None
+    )
+    assert observed.pop("web_chat_origin") == expected_origin
 
     mcp_config = observed.pop("mcp_config")
     assert isinstance(mcp_config, BrokerMCPConfig)
@@ -866,7 +876,7 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
         "host": "0.0.0.0",
         "port": 8767,
         "token": "test-token",
-        "authorization_keys": ("access_gate", "mcp_config", "tool_setup_recheck_days"),
+        "authorization_keys": ("access_gate", "mcp_config", "tool_setup_recheck_days", "web_chat_origin"),
     }
 
 

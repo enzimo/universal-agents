@@ -63,11 +63,14 @@ from custom_messages.contracts.access_v2 import AccountLinkRequestV1, PersonCred
 from secure_tool_broker.credential_transfer_api import add_transfer_routes
 from secure_tool_broker.team_export_page import add_team_export_routes
 from secure_tool_broker.defaults import (
+    AUTH_PAGE_STATUS_ROUTE,
+    BROKER_PAGE_PREFIXES,
     ONBOARDING_ACCOUNT_KEYS_ROUTE,
     PERSON_CREDENTIAL_DELETION_ROUTE,
     TRANSFER_ROUTE_PREFIX,
 )
 from secure_tool_broker.departed_person_credentials import delete_person_credentials
+from secure_tool_broker.page_view import page_view_middleware
 from secure_tool_broker.onboarding_account_keys import onboarding_keys_handler
 from secure_tool_broker.bitwarden_cli import (
     bitwarden_server_url_from_env,
@@ -291,9 +294,7 @@ async def _run_claimed_form_thread(
 def _uses_sensitive_session_material(path: str) -> bool:
     return path.startswith(
         (
-            "/auth/",
-            "/credential-collection/",
-            "/account-link/",
+            *BROKER_PAGE_PREFIXES,
             "/v1/auth/",
             "/v1/credential-collection/sessions",
             "/v1/account-link/sessions",
@@ -396,6 +397,41 @@ def _claim_auth_form_submission(
         raise web.HTTPConflict(
             text="Auth session submission is already being processed."
         )
+
+
+# Headings of a broker page that answers with an HTTP error (page_view renders it).
+_ERROR_PAGE_HEADINGS = {
+    404: "This page was not found or has expired.",
+    409: "This page is busy or was already used.",
+    410: "This page is no longer available.",
+}
+
+
+def _error_page(exc: web.HTTPException) -> web.Response:
+    """A broker page's HTTP error as a page in the broker's style, same status, plain reason."""
+
+    reason = str(exc.text or "").strip()
+    if reason.startswith(f"{exc.status}:"):
+        # aiohttp's default text ("404: Not Found") adds nothing to the heading.
+        reason = ""
+    heading = _ERROR_PAGE_HEADINGS.get(exc.status, "This page could not be shown.")
+    body = (
+        '<section class="content-panel"><p class="eyebrow">Secure page</p>'
+        f"<h1>{html.escape(heading)}</h1>"
+        + (f"<p>{html.escape(reason)}</p>" if reason else "")
+        + "</section>"
+    )
+    headers = {
+        name: value
+        for name, value in exc.headers.items()
+        if name.lower() not in {"content-type", "content-length"}
+    }
+    return web.Response(
+        text=render_broker_auth_page(heading, body),
+        content_type="text/html",
+        status=exc.status,
+        headers=headers,
+    )
 
 
 def _account_link_page(title: str, heading: str, text: str, *, status: int = 200) -> web.Response:
@@ -647,6 +683,7 @@ class SecureToolBrokerService:
         access_gate: BrokerAccessGate,
         logger: logging.Logger | None = None,
         mcp_config: BrokerMCPConfig | None = None,
+        web_chat_origin: str | None = None,
     ) -> None:
         if not token:
             raise ValueError(
@@ -670,12 +707,16 @@ class SecureToolBrokerService:
         ] = {}
         self._account_link_sessions: dict[str, AccountLinkSession] = {}
         self._account_link_session_by_request: dict[str, str] = {}
+        # The only address that may show these pages inside the chat (secure_tool_broker.page_view);
+        # None turns the card view off.
+        self._web_chat_origin = web_chat_origin
 
     def build_app(self) -> web.Application:
         app = web.Application(
             middlewares=[
                 _sensitive_session_no_store_middleware,
                 self._auth_middleware,
+                page_view_middleware(self._web_chat_origin, error_page=_error_page),
             ]
         )
         app.router.add_get("/health", self._handle_health)
@@ -734,9 +775,7 @@ class SecureToolBrokerService:
         )
         # Registered before /auth/{provider}/{session_id}, which would also match it.
         app.router.add_get(X_CALLBACK_PATH, self._handle_x_sign_in_callback)
-        app.router.add_get(
-            "/auth/{provider}/{session_id}/status", self._handle_auth_session_status
-        )
+        app.router.add_get(AUTH_PAGE_STATUS_ROUTE, self._handle_auth_session_status)
         app.router.add_get("/auth/{provider}/{session_id}", self._handle_auth_form)
         app.router.add_post(
             "/auth/{provider}/{session_id}", self._handle_submit_auth_form
@@ -772,12 +811,7 @@ class SecureToolBrokerService:
     async def _auth_middleware(
         self, request: web.Request, handler: Any
     ) -> web.StreamResponse:
-        if (
-            request.path == "/health"
-            or request.path.startswith("/auth/")
-            or request.path.startswith("/credential-collection/")
-            or request.path.startswith("/account-link/")
-        ):
+        if request.path == "/health" or request.path.startswith(BROKER_PAGE_PREFIXES):
             return await handler(request)
         caller = verify_caller_token(self._token, self._extract_token(request))
         if caller is None:
@@ -2942,6 +2976,7 @@ async def run_secure_tool_broker(
     access_gate: BrokerAccessGate,
     mcp_config: BrokerMCPConfig | None = None,
     tool_setup_recheck_days: int = 0,
+    web_chat_origin: str | None = None,
 ) -> None:
     # A token left in the environment would be a team-wide credential for a
     # per-person tool; refuse to start and name the sign-in that replaces it.
@@ -3004,7 +3039,18 @@ async def run_secure_tool_broker(
         token=token,
         access_gate=access_gate,
         mcp_config=mcp_config,
+        web_chat_origin=web_chat_origin,
     )
+    if web_chat_origin:
+        LOGGER.info(
+            "Broker pages may show inside Web Chat. event=broker_card_view_origin web_chat_origin=%s",
+            web_chat_origin,
+        )
+    else:
+        LOGGER.info(
+            "Broker pages open only in their own tab: the Web Chat is off or its address is unknown. "
+            "event=broker_card_view_off",
+        )
     hosted_site = await start_aiohttp_site(
         service.build_app(),
         host=host,

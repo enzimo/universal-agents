@@ -4195,6 +4195,7 @@ async def _run_secure_tool_broker_service(
         )
         from runtime_settings.services import web_service_urls
         from secure_tool_broker.access_gate import build_broker_access_gate
+        from secure_tool_broker.page_view import web_chat_origin
 
         access_gate = build_broker_access_gate(
             instance_root=config.instance_root_path,
@@ -4213,6 +4214,12 @@ async def _run_secure_tool_broker_service(
             access_gate=access_gate,
             mcp_config=mcp_config,
             tool_setup_recheck_days=config.security_layer.tool_setup_recheck_days,
+            # Web Chat may show the broker's pages as cards only from its own address.
+            web_chat_origin=(
+                web_chat_origin(config.internal_website_base_url)
+                if config.interactive_apps.internal_website.enabled
+                else None
+            ),
         )
     finally:
         for key, original_value in original_broker_state_env.items():
