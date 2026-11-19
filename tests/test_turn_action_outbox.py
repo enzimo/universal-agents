@@ -1892,6 +1892,85 @@ def test_credential_collection_that_continues_the_task_resumes_through_the_model
     assert manager.get_task_info(parent.task_id) is None
 
 
+@pytest.mark.parametrize(
+    ("flow", "expected_answer"),
+    [
+        ("credential_collection", "You declined the secure form for GitHub, so nothing was stored."),
+        ("credential_deletion", "You declined the secure form, so your saved credentials for GitHub were not deleted."),
+        ("manual_signup", "You declined the secure form for GitHub, so nothing was stored."),
+    ],
+)
+def test_declined_credential_form_ends_the_task_completed_without_retry(tmp_path, flow, expected_answer) -> None:
+    """Declining is the person's choice: the task ends completed, without errors, a model call or a retry."""
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    llm_mock = AsyncMock(side_effect=AssertionError("LLM should not request another credential form"))
+    result = SecureCredentialCollectionResult(
+        credential_request_id=f"cred_req_declined_{flow}",
+        status="credential_declined",
+        credential_key="some_test_token",
+        service_name="GitHub",
+        parent_task_id=parent.task_id,
+        metadata={"flow": flow},
+        message="The person declined the form; nothing was stored or deleted.",
+    )
+
+    with patch.object(type(agent), "process_llm_interaction", llm_mock):
+        asyncio.run(
+            agent._handle_secure_credential_collection_result(
+                result,
+                incoming_msg_header=MessageHeader(from_agent_id="gateway"),
+                incoming_msg_meta=MessageMeta(msg_correlation_id="corr_parent", conversation_id="conv_parent"),
+            )
+        )
+
+    llm_mock.assert_not_awaited()
+    sent = agent.team_comms.send_message.await_args.kwargs["message"].msg_content
+    assert sent.answer == expected_answer
+    assert not sent.errors
+    assert "try again" not in sent.answer.lower()
+    assert manager.get_task_info(parent.task_id) is None
+
+
+def test_declined_credential_form_of_a_continuing_task_resumes_through_the_model(tmp_path) -> None:
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    assert manager.update_main_task_state(parent.task_id, ProgressState.WAITING, _now())
+    agent = _make_agent(tmp_path, task_manager=manager)
+    captured: dict[str, object] = {}
+
+    async def fake_process_llm_interaction(**kwargs):
+        captured["directive"] = manager.read_runtime_resume_directive(parent.task_id) or ""
+        return Task(task_id=parent.task_id, task_type=MessageMetaType.RESPONSE, answer="Without it I stopped.")
+
+    result = SecureCredentialCollectionResult(
+        credential_request_id="cred_req_declined_continue",
+        status="credential_declined",
+        credential_key="team_x_oauth",
+        service_name="X",
+        parent_task_id=parent.task_id,
+        metadata={"flow": "credential_collection"},
+        continue_task=True,
+    )
+
+    with patch.object(
+        type(agent), "process_llm_interaction", AsyncMock(side_effect=fake_process_llm_interaction)
+    ) as llm_mock:
+        asyncio.run(
+            agent._handle_secure_credential_collection_result(
+                result,
+                incoming_msg_header=MessageHeader(from_agent_id="gateway"),
+                incoming_msg_meta=MessageMeta(msg_correlation_id="corr_parent", conversation_id="conv_parent"),
+            )
+        )
+
+    llm_mock.assert_awaited_once()
+    assert "credential_declined" in str(captured["directive"])
+    assert "declined the form, do not ask for it again" in str(captured["directive"])
+
+
 def test_worker_direct_delegation_to_specialist_is_rejected(tmp_path) -> None:
     manager = _make_task_manager(tmp_path)
     manager.set_owner_identity(

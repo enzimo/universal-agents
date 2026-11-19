@@ -2086,6 +2086,28 @@ async def test_credential_form_closes_when_manager_delivery_fails(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_a_declined_credential_form_closes_and_tells_the_task_declined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The person chose Decline on the broker's form: the watch ends, the chat says so, the task hears declined."""
+
+    gateway, events, request = _credential_form_gateway(tmp_path)
+    gateway._manager_client.publish_durable = AsyncMock(return_value=None)
+    await _watch_credential_form(gateway, monkeypatch, request, "credential_declined")
+
+    [closing] = [event for event in events if event.message_type == "secure_credential_result"]
+    assert closing.correlation_id == request.credential_request_id
+    assert closing.text == "The secure form for `bifrost_virtual_key` was declined: nothing was stored or deleted."
+    sent = [
+        value.msg_content
+        for call in gateway._manager_client.publish_durable.await_args_list
+        for value in (*call.args, *call.kwargs.values())
+        if hasattr(value, "msg_content")
+    ]
+    assert [result.status for result in sent] == ["credential_declined"]
+
+
+@pytest.mark.asyncio
 async def test_credential_form_closes_before_stalled_manager_delivery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     gateway, events, request = _credential_form_gateway(tmp_path)
     entered = asyncio.Event()
