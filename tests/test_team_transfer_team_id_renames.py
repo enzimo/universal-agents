@@ -70,14 +70,18 @@ def _documents_valid_for_this_version(name: str, records: list[dict[str, Any]]) 
             access_models[record["kind"]].model_validate(record["document"])
         if name == "knowledge":
             assert _row_problem(KnowledgeTable(record["table"]), record["row"]) == ""
+        if name == "schedules" and record["kind"] == "schedule":
+            from team_transfer.schedule_markdown import parse_schedule
+
+            parse_schedule(record["schedule"]["markdown"])
 
 
 def test_the_previous_releases_records_follow_a_new_team_id() -> None:
     fixtures = json.loads(FIXTURES.read_text())
     sections = {section.name: section for section in TRANSFER_SECTIONS}
-    covered = {"settings", "control", "operator_secrets", "access", "knowledge"}
-    # Schedules register their rename with checkpoint 3; the broker renames its credentials itself (checkpoint 4).
-    assert set(fixtures) - covered == {"schedules", "broker_credentials"}
+    covered = {"settings", "control", "operator_secrets", "access", "knowledge", "schedules"}
+    # The broker renames its credentials itself (checkpoint 4).
+    assert set(fixtures) - covered == {"broker_credentials"}
 
     for name in sorted(covered):
         converted = upgrade_records(SectionDocumentV1.model_validate(fixtures[name]), sections[name].schema_version)
@@ -132,7 +136,13 @@ def test_access_records_follow_the_new_id_in_every_field_and_subject_that_names_
     third_team = {"kind": "grant", "record_id": "g3", "document": {
         "team_id": OTHER, "subject": _subject("agent_type", f"{OTHER}/Writer"), "granted_by": _subject("team", OTHER),
     }}
-    records = [grant, team_link, person_link, folder, *others, third_team]
+    from custom_agents.internal_improvement_runtime import internal_improvement_schedule_id
+
+    maintenance = {"kind": "grant", "record_id": "g4", "document": {
+        "team_id": OLD, "subject": _subject("schedule", f"{OLD}/{internal_improvement_schedule_id(OLD)}"),
+        "delegate_to": [_subject("schedule", f"{OTHER}/{internal_improvement_schedule_id(OLD)}")],
+    }}
+    records = [grant, team_link, person_link, folder, *others, third_team, maintenance]
 
     renamed = renamed_records("access", records, IDS)
 
@@ -151,6 +161,10 @@ def test_access_records_follow_the_new_id_in_every_field_and_subject_that_names_
     assert renamed[3]["document"]["removed_by"]["id"] == f"{NEW}/admin"
     assert [record["document"]["team_id"] for record in renamed[4:7]] == [NEW] * 3
     assert renamed[7] == third_team, "another team's record keeps its id"
+    # The team's maintenance schedule's id is built from the team id, so a grant to it follows that id too;
+    # another team's subject that happens to name the same schedule id keeps both parts.
+    assert renamed[8]["document"]["subject"]["id"] == f"{NEW}/{internal_improvement_schedule_id(NEW)}"
+    assert renamed[8]["document"]["delegate_to"] == maintenance["document"]["delegate_to"]
     assert [record["record_id"] for record in renamed] == [record["record_id"] for record in records]
     assert records[0]["document"]["team_id"] == OLD, "the records read from the file are not changed"
 
@@ -209,6 +223,137 @@ def test_objectives_follow_the_new_id_and_another_teams_objective_is_still_refus
     assert outcomes["objective/obj_team"].outcome is RecordOutcome.IMPORT
     assert outcomes["objective/obj_other"].outcome is RecordOutcome.REFUSED
     assert outcomes["objective/obj_other"].reason == f"it belongs to the team {OTHER}"
+
+
+def _maintenance_agent(team_id: str, *, team_lead: bool, interval_seconds: int = 86_400) -> Any:
+    """The agent the runtime builds the team's maintenance schedule with (``internal_improvement_runtime``)."""
+
+    import logging
+    from types import SimpleNamespace
+
+    from custom_agents.internal_improvement_runtime import INTERNAL_IMPROVEMENT_AGENT_TYPE, TEAM_ARCHITECT_AGENT_TYPE
+
+    return SimpleNamespace(
+        id="agent_lead" if team_lead else "agent_maintainer", name="lead", team_id=team_id, is_team_lead=team_lead,
+        named_agent_type=TEAM_ARCHITECT_AGENT_TYPE if team_lead else INTERNAL_IMPROVEMENT_AGENT_TYPE,
+        schedule_maintenance={"internal_improvement_review_interval_seconds": interval_seconds},
+        bootstrap_config={"instance_name": "alpha", "canonical_user_id": "usr_ana", "timezone": "UTC"},
+        default_request_timezone="UTC", _logger=logging.getLogger("test.maintenance"),
+    )
+
+
+def _maintenance_schedule(team_id: str, interval_seconds: int = 86_400) -> Any:
+    """The team's maintenance schedule as the manager stores it."""
+
+    from custom_agents.internal_improvement_runtime import (
+        build_internal_improvement_schedule,
+        prepare_internal_improvement_schedule_for_manager,
+    )
+
+    built = build_internal_improvement_schedule(_maintenance_agent(team_id, team_lead=False, interval_seconds=interval_seconds))
+    prepared = prepare_internal_improvement_schedule_for_manager(_maintenance_agent(team_id, team_lead=True), built)
+    assert prepared is not None
+    return prepared
+
+
+def _schedule_record(schedule: Any) -> dict[str, Any]:
+    from team_transfer.schedule_markdown import render_schedule
+    from team_transfer.schedule_records import CarriedScheduleV2, ScheduleRecordKind, ScheduleTransferRecordV2
+
+    return ScheduleTransferRecordV2(
+        kind=ScheduleRecordKind.SCHEDULE, record_id=schedule.schedule_id,
+        schedule=CarriedScheduleV2(owner_vouched=True, markdown=render_schedule(schedule.model_dump(mode="json"))),
+    ).model_dump(mode="json")
+
+
+def _scheduled(raw: dict[str, Any]) -> Any:
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from team_transfer.schedule_markdown import parse_schedule
+
+    return ScheduledMessage.model_validate(parse_schedule(raw["schedule"]["markdown"]))
+
+
+def test_schedules_follow_the_new_id_with_the_maintenance_schedule_and_another_teams_keep_theirs() -> None:
+    from access_control.identity import ISSUER_GATEWAY, ContextSigner, generate_signing_key
+    from custom_agents.internal_improvement_runtime import (
+        internal_improvement_schedule_id,
+        internal_improvement_schedule_name,
+        internal_improvement_task_id,
+    )
+    from custom_agents.schedule_execution_identity import execution_digest
+    from custom_messages.contracts.routing_v1 import MessageHeader
+    from tests.test_team_transfer_schedules import _schedule
+
+    signer = ContextSigner.from_value(ISSUER_GATEWAY, generate_signing_key(ISSUER_GATEWAY)[0])
+    route = f"{OLD}_alpha_user_gateway"
+    daily = _schedule("sched_daily", "usr_ana", signer=signer, claim_team_id=OLD, payload_header=MessageHeader(
+        from_agent_id=route, to_routing_path=f"{OLD}_TeamArchitect", response_routing_key=route))
+    changed = _schedule("sched_changed", "usr_ana", claim_team_id=OLD)
+    third = _schedule("sched_third", "usr_ana", claim_team_id=OTHER, payload_header=MessageHeader(
+        from_agent_id=f"{OTHER}_alpha_user_gateway", to_routing_path=f"{OLD}x", response_routing_key="agent_x"))
+    maintenance = _maintenance_schedule(OLD)
+    old_id, new_id = internal_improvement_schedule_id(OLD), internal_improvement_schedule_id(NEW)
+
+    def binding(schedule: Any, digest: str) -> dict[str, Any]:
+        return {"kind": "worker_binding", "record_id": schedule.schedule_id, "document": {
+            "schedule_id": schedule.schedule_id, "team_id": OLD, "definition_digest": "d" * 64, "execution_digest": digest}}
+
+    third_record = _schedule_record(third)
+    daily_target = {"kind": "scheduled_target", "record_id": "sched_daily",
+                    "target": {"schedule_id": "sched_daily", "session_key": "sess_ana"}}
+    other_pool = {"kind": "pool_limit", "record_id": "Writer", "document": {"team_id": OTHER, "scope": "Writer"}}
+    persons_service = {"kind": "managed_service", "record_id": "svc1", "execution": {
+        "record_id": "svc1", "name": "Site", "owner_kind": "user", "owner_id": "usr_ana"}}
+    records = [
+        # Bindings come before their schedules here: the rename reads every schedule first.
+        binding(daily, execution_digest(daily, "d" * 64)), binding(changed, "0" * 64),
+        _schedule_record(daily), _schedule_record(changed), third_record, _schedule_record(maintenance),
+        {"kind": "scheduled_target", "record_id": old_id,
+         "target": {"schedule_id": old_id, "session_key": "sess_ana", "owner_person_id": "usr_ana"}},
+        daily_target,
+        {"kind": "pool_limit", "record_id": "*", "document": {"team_id": OLD, "scope": "*"}},
+        other_pool,
+        {"kind": "execution_job", "record_id": "job1", "execution": {
+            "record_id": "job1", "name": "Export", "owner_kind": "team", "owner_id": OLD}},
+        persons_service,
+    ]
+    exported = json.loads(json.dumps(records))
+
+    renamed = {(record["kind"], record["record_id"]): record for record in renamed_records("schedules", records, IDS)}
+
+    assert records == exported, "the records read from the file are not changed"
+    new_daily = _scheduled(renamed[("schedule", "sched_daily")])
+    assert new_daily.claim_team_id == NEW
+    header = new_daily.payload_header
+    assert (header.from_agent_id, header.to_routing_path, header.response_routing_key) == (
+        f"{NEW}_alpha_user_gateway", f"{NEW}_TeamArchitect", f"{NEW}_alpha_user_gateway")
+    context = new_daily.payload_meta.gateway_context
+    assert context.task_context is None, "signed for the old team; the writer signs it again"
+    assert (context.canonical_user_id, context.session_key) == ("usr_ana", "sess_ana"), "the rest of the context stays"
+    assert renamed[("schedule", "sched_third")] == third_record, "another team's schedule keeps its values"
+
+    new_maintenance = _scheduled(renamed[("schedule", new_id)])
+    assert (new_maintenance.schedule_id, new_maintenance.schedule_name, new_maintenance.payload.task_id) == (
+        new_id, internal_improvement_schedule_name(NEW), internal_improvement_task_id(NEW))
+    assert new_maintenance.claim_team_id == NEW
+    assert new_maintenance.payload_meta.gateway_context.scheduled_job_id == new_id
+    assert new_maintenance.payload_header == maintenance.payload_header, "agent ids name no team"
+    assert renamed[("scheduled_target", new_id)]["target"]["schedule_id"] == new_id
+    assert renamed[("scheduled_target", "sched_daily")] == daily_target
+
+    matched = renamed[("worker_binding", "sched_daily")]["document"]
+    assert matched["team_id"] == NEW
+    assert matched["execution_digest"] == execution_digest(new_daily, "d" * 64) != execution_digest(daily, "d" * 64)
+    unmatched = renamed[("worker_binding", "sched_changed")]["document"]
+    assert (unmatched["team_id"], unmatched["execution_digest"]) == (NEW, "0" * 64), "it still waits for review"
+
+    assert renamed[("pool_limit", "*")]["document"]["team_id"] == NEW
+    assert renamed[("pool_limit", "Writer")] == other_pool
+    assert renamed[("execution_job", "job1")]["execution"]["owner_id"] == NEW
+    assert renamed[("managed_service", "svc1")] == persons_service
+
+    ours = [record for key, record in renamed.items() if key not in {("schedule", "sched_third"), ("pool_limit", "Writer")}]
+    assert _naming(ours, OLD) == [] and _naming(list(renamed.values()), old_id) == []
 
 
 # -- imports under a new id ------------------------------------------------------------------
@@ -352,3 +497,147 @@ def test_a_specialist_imported_under_a_new_id_names_the_new_team_and_passes_the_
         "default_tools": ["fn:schedules"],
     })
     assert checked["team_id"] == NEW
+
+
+def _stored_naming(root: Path, needles: tuple[str, ...]) -> list[str]:
+    """Each stored value in the SQLite files under ``root`` that names one of ``needles``."""
+
+    import sqlite3
+    from contextlib import closing
+
+    found = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.read_bytes()[:16] != b"SQLite format 3\x00":
+            continue
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
+            tables = [name for (name,) in database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+            for table in tables:
+                for row in database.execute(f'SELECT * FROM "{table}"'):
+                    for value in row:
+                        text = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+                        found += [f"{path.name} {table}: {needle}" for needle in needles if needle in text]
+    return found
+
+
+def test_schedules_imported_under_a_new_id_are_the_new_teams_and_its_runtime_finds_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from access_control.identity import ISSUER_GATEWAY, ContextSigner, public_entry, verify_keys_value
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_agents import task_context_runtime
+    from custom_agents.internal_improvement_runtime import (
+        internal_improvement_schedule_id,
+        internal_improvement_schedule_name,
+    )
+    from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
+    from custom_agents.schedule_execution_identity import execution_digest
+    from custom_agents.schedule_store import ScheduleStore
+    from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
+    from internal_credentials import parse_env_file
+    from storage.gateway_state_repository import create_gateway_state_repository
+    from storage.worker_pool_repository import WorkerPoolRepository
+    from team_transfer.crypto import new_key_derivation
+    from team_transfer.service import export_source, export_team, import_team
+    from tests.test_team_transfer_schedules import PASSPHRASE, SECTIONS, WORKER, _old_instance
+
+    old_id, new_id = internal_improvement_schedule_id(OLD), internal_improvement_schedule_id(NEW)
+    carried_interval = 7 * 3600
+
+    # The old instance, with the team's maintenance schedule as its manager stored it and its gateway signed it.
+    config_path, old_store = _old_instance(tmp_path / "old")
+    old_config = GatewayInstanceConfig.load(config_path)
+    old_key = parse_env_file(old_config.layout.team_env_path)["ACCESS_GATEWAY_SIGNING_KEY"]
+    maintenance = _maintenance_schedule(OLD, interval_seconds=carried_interval)
+    maintenance.payload_meta.gateway_context.session_key = "sess_ana"
+    maintenance.payload_meta.gateway_context.task_context = ContextSigner.from_value(ISSUER_GATEWAY, old_key).issue(
+        team_id=OLD, person_id="usr_ana", person_roles=("owner",), schedule_id=old_id
+    )
+    old_store.add(maintenance)
+    create_gateway_state_repository(old_config.state_storage_settings).upsert_scheduled_target(
+        scheduled_job_id=old_id, session_key="sess_ana", conversation_id="conv_maintenance",
+        owner_canonical_user_id="usr_ana",
+    )
+
+    out = tmp_path / "team.uatransfer"
+    export_team(export_source(config_path), out, PASSPHRASE, owner_person_id="usr_ana", sections=SECTIONS,
+                key_derivation=new_key_derivation(opslimit=1, memlimit=8192))
+    with TransferReader.open(out, PASSPHRASE) as reader:
+        kept = import_team(reader, tmp_path / "kept", dry_run=False, sections=SECTIONS)
+        plan = import_team(reader.with_team_ids(IDS), tmp_path / "new", dry_run=False, sections=SECTIONS)
+
+    def outcomes(imported: Any, maintenance_id: str) -> dict[str, tuple[RecordOutcome, str]]:
+        return {
+            r.key.replace(maintenance_id, "<maintenance>"): (r.outcome, r.reason.replace(maintenance_id, "<maintenance>"))
+            for r in imported.records if r.section == "schedules"
+        }
+
+    assert outcomes(kept, old_id)["schedule/<maintenance>"] == (RecordOutcome.IMPORT, "")
+    assert outcomes(plan, new_id) == outcomes(kept, old_id), "the same outcome as an import that keeps the id"
+
+    config = GatewayInstanceConfig.load(tmp_path / "new" / "instance_config.yaml")
+    store = ScheduleStore(storage_settings=config.manager_storage_settings, default_cron_timezone="UTC")
+    new_key = parse_env_file(config.layout.team_env_path)["ACCESS_GATEWAY_SIGNING_KEY"]
+    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", verify_keys_value([public_entry(ISSUER_GATEWAY, new_key)]))
+    task_context_runtime._verifier.cache_clear()
+    try:
+        # A person's schedule: the new team's, signed again by the new gateway for the new team.
+        daily = store.get_scheduled_message("sched_daily")
+        assert daily.claim_team_id == NEW
+        assert task_context_runtime.gateway_vouches(daily.payload_meta.gateway_context, "usr_ana")
+        signed = daily.payload_meta.gateway_context.task_context.context
+        assert (signed.team_id, signed.person_roles) == (NEW, ("admin", "owner")), "roles from the new team's people"
+
+        # Its worker setup and the pool sizes are the new team's; the binding still matches its schedule.
+        binding = store.worker_records.get_binding("sched_worker", team_id=NEW)
+        assert binding is not None and store.worker_records.get_binding("sched_worker", team_id=OLD) is None
+        assert execution_digest(store.get_scheduled_message("sched_worker"), binding.definition_digest) == binding.execution_digest
+        pools = WorkerPoolRepository(config.manager_storage_settings)
+        assert {limit.scope for limit in pools.list_limits(NEW)} == {"*", WORKER} and not pools.list_limits(OLD)
+
+        # The maintenance schedule arrives under the id the new team's runtime builds, with its carried cadence.
+        assert store.get_scheduled_message(old_id) is None
+        imported = store.get_scheduled_message(new_id)
+        assert (imported.schedule_name, imported.claim_team_id, imported.interval_ms) == (
+            internal_improvement_schedule_name(NEW), NEW, carried_interval * 1000)
+        assert imported.payload_meta.gateway_context.task_context is None, "the gateway signs it at its first start"
+        gateway = create_gateway_state_repository(config.state_storage_settings)
+        assert gateway.get_scheduled_target(new_id).conversation_id == "conv_maintenance"
+        assert gateway.get_scheduled_target(old_id) is None
+
+        # The manager's ensure-only install at its first start finds it and adds no second one.
+        assert store.add_if_absent(_maintenance_schedule(NEW)) is False
+        maintenance_schedules = [
+            (found.schedule_id, found.interval_ms)
+            for found in (store.get_scheduled_message(row["schedule_id"]) for row in store.all_rows())
+            if found is not None and found.effective_system_schedule_kind is SystemScheduleKind.INTERNAL_IMPROVEMENT
+        ]
+        assert maintenance_schedules == [(new_id, carried_interval * 1000)]
+
+        # The gateway's refresh at its first start (ids from the new team, as assistant_gateway.gateway builds
+        # them) applies to the imported schedule and leaves it signed for the new team.
+        incoming = ScheduledMessage(
+            schedule_id=new_id, schedule_name=internal_improvement_schedule_name(NEW),
+            management_class=ScheduleManagementClass.SYSTEM, system_schedule_kind=SystemScheduleKind.INTERNAL_IMPROVEMENT,
+            install_mode="refresh", payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Refresh."),
+            payload_meta=MessageMeta(gateway_context=GatewayContext(
+                canonical_user_id="usr_ana", session_key="sess_ana",
+                task_context=ContextSigner.from_value(ISSUER_GATEWAY, new_key).issue(
+                    team_id=NEW, person_id="usr_ana", person_roles=("owner",), schedule_id=new_id),
+            )),
+            interval_ms=86_400_000, repeat_count=None,
+        )
+        assert refresh_schedule_gateway_context(SimpleNamespace(_schedule_store=store, team_id=NEW, id="agent_lead"), incoming)
+        refreshed = store.get_scheduled_message(new_id)
+        assert task_context_runtime.gateway_vouches(refreshed.payload_meta.gateway_context, "usr_ana")
+        assert refreshed.payload_meta.gateway_context.task_context.context.team_id == NEW
+        assert refreshed.interval_ms == carried_interval * 1000, "the refresh keeps the carried cadence"
+    finally:
+        task_context_runtime._verifier.cache_clear()
+
+    assert _stored_naming(tmp_path / "new", (OLD, old_id)) == []
+    assert _stored_naming(tmp_path / "kept", (OLD, old_id)), "the search finds the ids where they are kept"

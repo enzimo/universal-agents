@@ -93,9 +93,9 @@ def test_a_section_without_a_registered_rename_is_refused_under_a_new_id() -> No
     assert renamed_records("not_a_section", records, TeamIds.unchanged(OLD)) is records
     from team_transfer.registry import TRANSFER_SECTIONS  # sections register their renames as they load
 
-    # Every section decides how its records name the team; these register theirs with the schedules (checkpoint 3)
-    # and with MCP servers, procedures and credentials (checkpoint 4), and this set is then empty.
-    pending = {"schedules", "mcp", "procedures", "broker_credentials"}
+    # Every section decides how its records name the team; these register theirs with MCP servers, procedures
+    # and credentials (checkpoint 4), and this set is then empty.
+    pending = {"mcp", "procedures", "broker_credentials"}
     assert {section.name for section in TRANSFER_SECTIONS} - set(TEAM_ID_RENAMES) == pending
 
 

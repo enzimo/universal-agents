@@ -41,8 +41,11 @@ When the import gives the team a new team id (owner's decision 103,
 that names the team (a team subject is the id itself; role, agent type and
 schedule subjects are ``<team>/<name>``) in ``subject``, ``delegate_to``,
 ``granted_by``, ``revoked_by``, ``registered_by``, ``removed_by`` and
-``created_by``. Agent and person subjects and every record id hold no team id
-and stay. A record or subject of another team keeps its id.
+``created_by``. A schedule subject of the team's maintenance schedule also
+gets that schedule's new id, which is built from the team id
+(``team_transfer.schedule_team_ids``). Agent and person subjects and every
+record id hold no team id and stay. A record or subject of another team keeps
+its id.
 
 Each record travels as its own versioned contract (``GrantV1``,
 ``DataFolderRecordV1``, ``AccountLinkV1``, ``PersonSettingsV1``) with its id,
@@ -811,14 +814,28 @@ _TEAM_SUBJECT_KINDS: frozenset[str] = frozenset(
 # Fields holding one subject, and the field holding several (``GrantV1.delegate_to``).
 _SUBJECT_FIELDS: tuple[str, ...] = ("subject", "granted_by", "revoked_by", "registered_by", "removed_by", "created_by")
 _SUBJECT_LIST_FIELD = "delegate_to"
+# Between the team and the name in a subject id (``access_control.entities``).
+_SUBJECT_TEAM_SEPARATOR = "/"
 
 
 def _renamed_subject(subject: Any, team_ids: TeamIds) -> Any:
-    """A subject reference under the new team id; a subject of another team, or of no team, unchanged."""
+    """A subject reference under the new team id; a subject of another team, or of no team, unchanged.
+
+    A schedule subject of the team names its schedule after the team (``<team>/<schedule id>``),
+    and the team's maintenance schedule's id is built from the team id, so that part follows too
+    (``team_transfer.schedule_team_ids``).
+    """
+
+    from team_transfer.schedule_team_ids import renamed_schedule_id
 
     if not isinstance(subject, dict) or subject.get("kind") not in _TEAM_SUBJECT_KINDS:
         return subject
-    return {**subject, "id": team_ids.rename(subject.get("id"), "/")}
+    subject_id = subject.get("id")
+    renamed = team_ids.rename(subject_id, _SUBJECT_TEAM_SEPARATOR)
+    if subject.get("kind") == SubjectKind.SCHEDULE.value and renamed != subject_id:
+        team, _, schedule_id = renamed.partition(_SUBJECT_TEAM_SEPARATOR)
+        renamed = f"{team}{_SUBJECT_TEAM_SEPARATOR}{renamed_schedule_id(team_ids, schedule_id)}"
+    return {**subject, "id": renamed}
 
 
 def _renamed_access(records: SectionRecords, team_ids: TeamIds) -> SectionRecords:

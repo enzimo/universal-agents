@@ -32,6 +32,10 @@ What travels, and why:
   digest (the signed context is not part of it). Contexts saved with
   system-managed schedules are not used to vouch (trusted code set their
   owner) and the gateway refreshes them at start, so they travel unchanged.
+- **Under a new team id** (owner's decision 103), the records follow it as they are read:
+  ``team_transfer.schedule_team_ids`` says what changes, including the team's maintenance
+  schedule, whose ids are built from the team id, and the signed contexts, which are dropped
+  and signed again.
 - **Sessions** (routing records only). A person's schedule delivers through a
   chat session, which no other section carries. This section carries the
   sessions carried schedules and delivery targets use, and each imported
@@ -95,8 +99,10 @@ from team_transfer.schedule_records import (
     run_time_passed,
 )
 from team_transfer.schedule_writers import ScheduleWriter
+from team_transfer.schedule_team_ids import renamed_schedules
 from team_transfer.sections import (
     SECTION_UPGRADES,
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -529,7 +535,7 @@ class _Known:
             if key.startswith("objective/")
         }
         known = cls(
-            team_id=context.reader.manifest.team_id,
+            team_id=context.team_id,
             people=context.accepted("people"),
             objectives=objectives,
             agent_types=known_agent_types(context),
@@ -938,3 +944,6 @@ SECTION_UPGRADES[(SchedulesSection.name, 4, SchedulesSection.schema_version)] = 
 # V6 adds the optional GatewayContext.parallel_thread, false when missing.
 # V5 records are otherwise unchanged.
 SECTION_UPGRADES[(SchedulesSection.name, 5, SchedulesSection.schema_version)] = lambda records: records
+
+# Under a new team id (team_transfer.schedule_team_ids).
+TEAM_ID_RENAMES[SchedulesSection.name] = renamed_schedules

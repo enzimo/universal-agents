@@ -108,6 +108,19 @@ def internal_improvement_schedule_name(team_id: str) -> str:
     return f"{INTERNAL_IMPROVEMENT_SCHEDULE_NAME_PREFIX}{team_id or 'NO_TEAM'}"
 
 
+def internal_improvement_task_id(team_id: str) -> str:
+    """The id of the task the team's maintenance schedule launches, stable for the team.
+
+    The team transfer computes it again when an import gives the team a new team id
+    (``team_transfer.schedule_team_ids``), so it must stay the one place that builds it.
+    """
+
+    return operational_id(
+        INTERNAL_IMPROVEMENT_LAUNCH_ID_PREFIX,
+        hashlib.sha256(team_id.encode("utf-8")).hexdigest()[:12],
+    )
+
+
 def is_internal_improvement_schedule_name(schedule_name: Optional[str]) -> bool:
     return str(schedule_name or "").startswith(INTERNAL_IMPROVEMENT_SCHEDULE_NAME_PREFIX)
 
@@ -159,10 +172,7 @@ def build_internal_improvement_schedule(agent: Any) -> Optional[ScheduledMessage
         system_schedule_kind=SystemScheduleKind.INTERNAL_IMPROVEMENT,
         install_mode="ensure",
         payload=Task(
-            task_id=operational_id(
-                INTERNAL_IMPROVEMENT_LAUNCH_ID_PREFIX,
-                hashlib.sha256(team_id.encode("utf-8")).hexdigest()[:12],
-            ),
+            task_id=internal_improvement_task_id(team_id),
             task_type=MessageMetaType.REQUEST,
             problem_statement=INTERNAL_IMPROVEMENT_TASK_INSTRUCTION,
         ),
