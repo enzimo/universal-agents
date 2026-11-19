@@ -470,7 +470,8 @@ has:
 Pinned, snoozed and dismissed chats are saved with your account, so every
 device you sign in on shows the same list. The list holds your 100 most recent
 chats, pinned ones first; snoozed and dismissed chats count toward the 100.
-They are not carried to a new instance by `/upgrade`.
+Where you put a chat (pinned, snoozed or dismissed) is not carried to a new
+instance by `/upgrade`; see [Team transfer](team-transfer.md) for what is.
 
 With a mouse, rest the pointer on a chat for a moment to see its last four
 messages and how many messages it has, without opening it.
