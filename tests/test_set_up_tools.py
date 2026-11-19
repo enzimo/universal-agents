@@ -527,3 +527,47 @@ async def test_a_copy_of_an_expired_pages_result_is_recognised_after_the_page_wa
 
     answers.assert_not_awaited()
     assert f"event=tool_setup_result_duplicate run_id={the_run(lead).run_id}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_run_stored_before_applied_ids_were_kept_still_ignores_a_copy(tmp_path: Path, monkeypatch, caplog) -> None:
+    """A run saved by the previous version has no results_applied; its done piece still marks the copy (C10)."""
+
+    from unittest.mock import AsyncMock
+
+    from custom_agents import tool_setup_runtime
+    from custom_agents.tool_setup_run_runtime import run_repository
+    from storage.tool_setup_run_repository import RUN_TABLE
+
+    lead = lead_agent(tmp_path, enabled=False)
+    answers = AsyncMock()
+    monkeypatch.setattr(tool_setup_runtime, "_publish_task_response", answers)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT, "cli:google": SIGNED_OUT | {"team_sign_in_app": "configured"}})
+    _tool_call, raised = start(lead, [GITHUB, "cli:google"], purpose="check your GitHub and Gmail for Acme")
+    await pause_turn(lead, raised.interrupt)
+    github, _google = sent_pages(lead)
+    await gateway_result(lead, github, "completed", account_label="exampleuser")
+    run = the_run(lead)
+    workflow_events = len(workflow_service_for(lead).repository.events(run.workflow_id, limit=500))
+    # Store the run as the previous version wrote it: the same run without the applied ids.
+    stored = json.loads(run.model_dump_json())
+    del stored["results_applied"]
+    repository = run_repository(lead)
+    with repository._connect() as conn:
+        conn.execute(
+            f"UPDATE {RUN_TABLE} SET payload_json = {repository.dialect.bind} WHERE run_id = {repository.dialect.bind}",
+            (json.dumps(stored), run.run_id),
+        )
+        conn.commit()
+    assert the_run(lead).results_applied == (), "it loads, with no applied ids"
+
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+
+    assert f"event=tool_setup_result_duplicate run_id={run.run_id}" in caplog.text
+    entries = lead.task_manager.get_task_history_entries("task-lead", limit=None)
+    assert [entry.summary for entry in entries if entry.summary.startswith("Setup page (sign_in) for cli:github")] == [
+        "Setup page (sign_in) for cli:github: completed."
+    ]
+    assert len(workflow_service_for(lead).repository.events(run.workflow_id, limit=500)) == workflow_events
+    answers.assert_not_awaited()

@@ -1517,3 +1517,50 @@ async def test_a_result_failing_on_every_pass_ends_the_retry_with_one_line(chat_
     assert f"error_passes={tool_setup_module.RESEND_ERROR_PASSES_LIMIT}" in gave_up
     failed = [line for line in lines if "event=gateway_tool_setup_resend_failed" in line]
     assert len(failed) == 1 + tool_setup_module.RESEND_ERROR_PASSES_LIMIT, "the page's own pass, then each retry"
+
+
+@pytest.mark.asyncio
+async def test_a_result_that_fails_every_time_does_not_hold_back_newer_ones(chat_setup_gateway, monkeypatch, caplog) -> None:
+    """An error on the oldest kept result keeps it and logs it; the pass goes on to the newer ones (critique C11)."""
+
+    import sqlite3
+
+    from assistant_gateway.application import tool_setup as tool_setup_module
+
+    gateway, _broker, transport, _events = chat_setup_gateway
+    setups = gateway._credential_workflow.tool_setups
+    monkeypatch.setattr(tool_setup_module, "SECURE_RESULT_RETRY_MIN_SECONDS", 0.001)
+    monkeypatch.setattr(tool_setup_module, "SECURE_RESULT_RETRY_MAX_SECONDS", 0.002)
+    requests = gateway._credential_workflow._publisher._request_service
+    original_record = requests.record
+
+    def record_failing_for_one_request(**kwargs):
+        if kwargs["correlation_id"] == "correlation_broken":
+            raise sqlite3.OperationalError("database disk image is malformed")
+        return original_record(**kwargs)
+
+    monkeypatch.setattr(requests, "record", record_failing_for_one_request)
+    _setups(gateway).record_tool_setup(
+        ToolSetupRecord(
+            setup_request_id="tool_setup_req_broken", parent_task_id=TASK, person_id=gateway.config.user.canonical_user_id,
+            tool_id="cli:github", kind="sign_in", owner_kind="person", session_key=SESSION,
+            correlation_id="correlation_broken", conversation_id="conversation_link", status="waiting",
+            created_at="2026-09-28T07:00:00+00:00",
+        )
+    )
+    assert _setups(gateway).finish_tool_setup(
+        "tool_setup_req_broken", status="expired", result_json=_result_json("tool_setup_req_broken")
+    )
+    _waiting_record(gateway, "http:portainer", "account_link", "person")
+
+    with caplog.at_level("INFO"):
+        assert await setups.recover_unwatched() == 1
+        await _until(lambda: setups._retries.count == 0)
+
+    assert [result.setup_request_id for result, _queue, _id in _setup_results(transport)] == ["tool_setup_req_old"]
+    assert _setups(gateway).get_tool_setup("tool_setup_req_broken").result_state == "unsent"
+    assert _setups(gateway).get_tool_setup("tool_setup_req_old").result_state == "sent"
+    assert _kept_lines(caplog) == [], "the newer page's own result was sent"
+    failed = [record.getMessage() for record in caplog.records if "event=gateway_tool_setup_resend_failed" in record.getMessage()]
+    assert failed and all("setup_request_id=tool_setup_req_broken" in line for line in failed)
+    assert "event=gateway_tool_setup_resend_gave_up" in caplog.text, "the retry still ends"

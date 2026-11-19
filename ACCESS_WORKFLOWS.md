@@ -88,7 +88,9 @@ words an administrator approved, never from the agent.
 
 Each setup page's card stays until that page itself ends, whatever happens
 to the plan's other pages: marking one step done never removes another step's
-card. Pages that open after the chat's first reply (usually every page but
+card. If the team lead is restarting when a page ends, the result waits in
+the gateway and the task gets it as soon as the team lead is back; the other
+steps' cards stay meanwhile, and new pages for the plan still open. Pages that open after the chat's first reply (usually every page but
 the first) also show on the workflow page and come back after a refresh. A
 page shown in the chat's first reply keeps its card in that chat until the
 page ends, but a refresh removes the card and the workflow page does not list

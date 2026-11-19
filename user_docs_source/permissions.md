@@ -1535,7 +1535,10 @@ opens (it counts toward the three). A step done outside Universal Agents does
 not expire and still waits after a restart; its card is gone, but its line in
 chat history and its **Mark Done** button on the workflow page remain. The
 agents' side keeps the setup run too, so an agent restart during the wait
-resumes the task once the pages end. Refreshing chat can recover a live page
+resumes the task once the pages end. A page that ends while the team lead
+cannot be reached keeps its result in the gateway, which sends it when a team
+lead is back (or at the gateway's next start); the task's other pages keep
+their cards meanwhile, and a copy that arrives twice is used once. Refreshing chat can recover a live page
 while the gateway is running; a restart does not recover an already-issued
 page.
 

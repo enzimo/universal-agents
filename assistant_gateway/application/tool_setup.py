@@ -277,8 +277,9 @@ class ResendPass:
     """What one pass over the kept results did (``GatewayToolSetups.resend_kept_results``).
 
     ``stopped`` is why the pass stopped before the end (no team lead known, or
-    a failed publish), and ``failed`` that it stopped on an unexpected error
-    (logged); the results after that stay kept for the next pass.
+    a failed publish); the results after that stay kept for the next pass.
+    ``failed`` says an unexpected error (logged) kept at least one result, or
+    stopped the pass when the kept results could not be listed.
     """
 
     sent: int
@@ -287,7 +288,7 @@ class ResendPass:
 
     @property
     def reason(self) -> str:
-        """Why the pass stopped, for log lines: a ``SendOutcome`` value, ``error`` or ``-``."""
+        """Why results stayed kept, for log lines: a ``SendOutcome`` value, ``error`` or ``-``."""
 
         if self.stopped is not None:
             return self.stopped.value
@@ -1218,31 +1219,42 @@ class GatewayToolSetups:
     async def _send_pass(self) -> ResendPass:
         """One pass; it never raises, so a page's ending still posts its closing line (critique C07).
 
-        An unexpected error (a database error, for example) is logged with the
-        row it happened on and stops the pass; that row stays kept and the
-        next pass tries it again.
+        A missing lead or a failed publish stops the pass: the rest would fail
+        the same way. An unexpected error on one result (a database error, for
+        example) is logged with its ids and that result stays kept, but the
+        pass goes on, so one result that fails every time never holds back the
+        results kept after it (critique C11); the pass then counts as failed,
+        which the retry follows.
         """
 
-        sent = 0
-        record: ToolSetupRecord | None = None
         try:
-            for record in self._setups.list_unsent_tool_setup_results():
+            records = self._setups.list_unsent_tool_setup_results()
+        except Exception as error:  # noqa: BLE001 - the results stay kept; the next pass reads them again
+            self._log_resend_failed(None, error)
+            return ResendPass(sent=0, failed=True)
+        sent, failed = 0, False
+        for record in records:
+            try:
                 outcome = await self._send_kept(record)
-                if outcome is SendOutcome.SENT:
-                    sent += 1
-                elif outcome is not None:
-                    return ResendPass(sent=sent, stopped=outcome)
-        except Exception as error:  # noqa: BLE001 - the result stays kept; the next pass sends it
-            self._logger.error(
-                "Sending kept setup page results stopped on an error; the result stays kept for the next pass. "
-                "event=gateway_tool_setup_resend_failed setup_request_id=%s task_id=%s error_type=%s",
-                record.setup_request_id if record is not None else "-",
-                record.parent_task_id if record is not None else "-",
-                type(error).__name__,
-                exc_info=error,
-            )
-            return ResendPass(sent=sent, failed=True)
-        return ResendPass(sent=sent)
+            except Exception as error:  # noqa: BLE001 - this result stays kept; the next pass sends it
+                self._log_resend_failed(record, error)
+                failed = True
+                continue
+            if outcome is SendOutcome.SENT:
+                sent += 1
+            elif outcome is not None:
+                return ResendPass(sent=sent, stopped=outcome, failed=failed)
+        return ResendPass(sent=sent, failed=failed)
+
+    def _log_resend_failed(self, record: ToolSetupRecord | None, error: Exception) -> None:
+        self._logger.error(
+            "A kept setup page result could not be sent because of an error; it stays kept for the next pass. "
+            "event=gateway_tool_setup_resend_failed setup_request_id=%s task_id=%s error_type=%s",
+            record.setup_request_id if record is not None else "-",
+            record.parent_task_id if record is not None else "-",
+            type(error).__name__,
+            exc_info=error,
+        )
 
     async def _send_kept(self, record: ToolSetupRecord) -> SendOutcome | None:
         """Send one kept result; None when it can never be sent (marked, logged once)."""
