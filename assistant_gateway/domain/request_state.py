@@ -116,6 +116,11 @@ class CredentialCollectionRecord:
     expires_at_utc: str
 
 
+# A setup page still waiting for the person; a finished record keeps its
+# result status (assistant_gateway.application.tool_setup).
+TOOL_SETUP_STATUS_WAITING = "waiting"
+
+
 @dataclass
 class ToolSetupRecord:
     """One setup page a task waits on (``assistant_gateway.application.tool_setup``).

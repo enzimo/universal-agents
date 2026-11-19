@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from assistant_gateway.domain.sessions import ThreadHiddenAs
 from assistant_gateway.domain.history import ConversationCut, GatewayHistoryScope
 from assistant_gateway.history_cleanup import GatewayHistoryCleanup, gateway_scope, notice_text
 from custom_messages.contracts.access_v2 import AccessNoticeKind, ChangeApprovalMode
@@ -189,6 +190,19 @@ def test_the_persons_covered_chat_records_go_and_everything_else_stays(gateway) 
     assert {"tg:alice", f"{PROACTIVE}:alice", "web:alice:asked", "web:bob"} <= sessions
     part = _sql(path, "SELECT last_task_id FROM gateway_sessions WHERE session_key='tg:alice'")[0]
     assert part["last_task_id"] == "part_t3", "a partly deleted conversation keeps its follow-up"
+
+
+def test_a_pinned_and_dismissed_thread_is_removed_like_any_other(gateway) -> None:
+    """The thread list's placement columns never reach the cleanup's SessionRecord (plan review C01)."""
+
+    repo, _uploads, path = gateway
+    _seed(gateway)
+    assert repo.set_session_pinned("web:alice:1", pinned=True)
+    assert repo.set_session_hidden("web:alice:1", hidden_as=ThreadHiddenAs.DISMISSED, hidden_until=None, seen_sequence=99)
+    deleted = repo.delete_history_records(_scope(), removable_thread=_removable(""))
+
+    sessions = {row["session_key"] for row in _sql(path, "SELECT session_key FROM gateway_sessions")}
+    assert "web:alice:1" not in sessions and deleted.sessions_removed == 1
 
 
 def test_running_the_deletion_again_changes_nothing(gateway) -> None:

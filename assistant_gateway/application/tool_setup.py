@@ -108,7 +108,7 @@ from assistant_gateway.domain.message_types import (
     TOOL_SETUP_RESULT_MESSAGE_TYPE,
     TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE,
 )
-from assistant_gateway.domain.request_state import ToolSetupRecord
+from assistant_gateway.domain.request_state import TOOL_SETUP_STATUS_WAITING, ToolSetupRecord
 from assistant_gateway.domain.sessions import SessionRecord
 from access_control.tool_setup_states import (
     HOW_OWN_LINK,
@@ -147,7 +147,7 @@ from secure_tools.auth_methods import (
 )
 
 # A waiting setup record; finished records keep the result status.
-SETUP_STATUS_WAITING = "waiting"
+SETUP_STATUS_WAITING = TOOL_SETUP_STATUS_WAITING
 REQUEST_KIND_TOOL_SETUP_RESULT = "tool_setup_result"
 
 # Why a request was refused or a page could not be used (reason_code).

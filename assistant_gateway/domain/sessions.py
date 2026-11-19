@@ -22,6 +22,19 @@ class ParallelSettingOutcome(StrEnum):
     NOT_FOUND = "not_found"
 
 
+class ThreadHiddenAs(StrEnum):
+    """How a person set a Web Chat thread aside (``gateway_sessions.hidden_as``).
+
+    Both are undone on read rather than by the code that posts messages
+    (``assistant_gateway.application.web_chat_threads``): a snoozed thread
+    wakes at its time or when the team posts after ``hidden_at_sequence``,
+    and a dismissed thread returns when anything new is posted after it.
+    """
+
+    SNOOZED = "snoozed"
+    DISMISSED = "dismissed"
+
+
 @dataclass
 class SessionRecord:
     session_key: str
@@ -104,6 +117,9 @@ class WebChatThreadRecord:
     ``parallel_thread`` is its Run concurrently setting, and
     ``has_open_request`` whether a request is open in its current
     conversation, which locks that setting (``ParallelSettingOutcome``).
+    The remaining fields are raw store values; the application derives the
+    thread's section, waiting reason and snippet from them
+    (``assistant_gateway.application.web_chat_threads``).
     """
 
     session_key: str
@@ -116,6 +132,34 @@ class WebChatThreadRecord:
     has_messages: bool
     parallel_thread: bool = False
     has_open_request: bool = False
+    # The latest ordinary message (not a system card, not a slash command),
+    # read only for the sessions route (``include_last_message``); its text is
+    # cut to ``LAST_MESSAGE_SQL_CHARACTERS`` in the query.
+    last_message_role: str | None = None
+    last_message_text: str | None = None
+    last_message_attachments_json: str | None = None
+    last_message_at: str | None = None
+    # When anything was last posted in the thread and its last session
+    # sequence (``gateway_transcript_session_sequences``); 0 with no message.
+    last_activity_at: str | None = None
+    last_sequence: int = 0
+    # What the thread may be waiting on from the person: an open question,
+    # the status of its running request, and setup pages or credential forms
+    # still open for the person in it.
+    has_open_question: bool = False
+    running_request_status: str | None = None
+    has_waiting_setup: bool = False
+    has_waiting_credential_form: bool = False
+    # The person's placement of the thread: pinned, and snoozed or dismissed
+    # (``ThreadHiddenAs``) with the snooze's wake time and the last message
+    # sequence the person had seen when setting it aside.
+    pinned: bool = False
+    hidden_as: str | None = None
+    hidden_until: str | None = None
+    hidden_at_sequence: int | None = None
+    # Whether the team posted (a non-user row) after a snoozed thread's
+    # ``hidden_at_sequence``; read only for snoozed threads.
+    team_posted_after_hiding: bool = False
 
 
 @dataclass

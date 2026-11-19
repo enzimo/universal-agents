@@ -295,12 +295,14 @@ class GatewayStateStore:
         channel_name: str,
         chat_id: str,
         limit: int,
+        include_last_message: bool = False,
     ) -> list[WebChatThreadRecord]:
         return self._repository.list_web_chat_threads(
             owner_canonical_user_id=owner_canonical_user_id,
             channel_name=channel_name,
             chat_id=chat_id,
             limit=limit,
+            include_last_message=include_last_message,
         )
 
     def search_sessions(
