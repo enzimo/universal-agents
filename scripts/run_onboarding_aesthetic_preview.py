@@ -57,8 +57,44 @@ PUBLIC_VERSION = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 # reconnects when nothing arrives for 15 (chat_live_events.mjs).
 PREVIEW_STREAM_HEARTBEAT_SECONDS = 2
 PREVIEW_THREADS_REVISION = "preview-threads:1"
-# The card --broker-page adds to the preview conversation (a running broker's page).
+# Cards --broker-page adds to the preview conversation (running broker pages).
 PREVIEW_BROKER_PAGE_ID = "preview-broker-page"
+
+
+def preview_broker_page(url: str, index: int, *, seconds: int = 15 * 60) -> dict[str, str]:
+    """One running broker page for the preview conversation, open for ``seconds``."""
+
+    now = datetime.now(timezone.utc)
+    return {
+        "id": f"{PREVIEW_BROKER_PAGE_ID}-{index}",
+        "url": url,
+        "created_at_utc": now.isoformat(),
+        "expires_at_utc": datetime.fromtimestamp(now.timestamp() + seconds, timezone.utc).isoformat(),
+    }
+
+
+def _preview_broker_card(page: dict[str, str]) -> dict[str, object]:
+    """The transient action Web Chat gets for a broker page, as the gateway sends it (conversation.py)."""
+
+    return {
+        "session_key": WEB_CHAT_PREVIEW_SESSION_KEY,
+        "kind": "tool_setup",
+        "item_id": f"tool_setup:{page['id']}",
+        "request_id": page["id"],
+        "correlation_id": page["id"],
+        "session_sequence": 1,
+        "created_at_utc": page["created_at_utc"],
+        "content": (
+            "To list your stacks, I need your Portainer API token.\n"
+            "What you enter goes straight to the secure broker, never to the agent."
+        ),
+        "action": {
+            "label": "Store your Portainer API token",
+            "url": page["url"],
+            "expires_at_utc": page["expires_at_utc"],
+            "frame_url": card_view_url(page["url"]),
+        },
+    }
 
 
 class PreviewRequestHandler(SimpleHTTPRequestHandler):
@@ -176,7 +212,10 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             self._write_json(
                 {
                     "status": "ok",
-                    "sessions": [self._preview_session_payload()],
+                    "sessions": [
+                        self._preview_session_payload(),
+                        *(self._preview_session_payload(key) for key in self._preview_new_sessions()),
+                    ],
                     "event_cursor": self._preview_event_cursor(),
                     # The live updates carry the same revision, so Web Chat
                     # reloads the thread list only when it changes.
@@ -190,10 +229,11 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.UNAUTHORIZED, "Web Chat session is invalid or expired."
                 )
                 return
+            session_key = urllib_parse.unquote(route.removeprefix("/api/web-chat/sessions/").removesuffix("/messages"))
             self._write_json(
                 {
                     "status": "ok",
-                    "messages": self._preview_messages(),
+                    "messages": [] if session_key in self._preview_new_sessions() else self._preview_messages(),
                     "before_cursor": None,
                     "has_more": False,
                     "event_cursor": self._preview_event_cursor(),
@@ -327,10 +367,12 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.UNAUTHORIZED, "Web Chat session is invalid or expired."
                 )
                 return
+            new_sessions = self._preview_new_sessions()
+            new_sessions.append(f"{WEB_CHAT_PREVIEW_SESSION_KEY}-new-{len(new_sessions) + 1}")
             self._write_json(
                 {
                     "status": "ok",
-                    "session": self._preview_session_payload(),
+                    "session": self._preview_session_payload(new_sessions[-1]),
                     "event_cursor": self._preview_event_cursor(),
                 },
                 status=HTTPStatus.CREATED,
@@ -562,7 +604,16 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             headers=headers,
         )
 
-    def _preview_session_payload(self) -> dict[str, object]:
+    def _preview_session_payload(self, session_key: str = WEB_CHAT_PREVIEW_SESSION_KEY) -> dict[str, object]:
+        if session_key != WEB_CHAT_PREVIEW_SESSION_KEY:
+            # A thread made with New Chat: empty, and unnamed until its first message.
+            return {
+                "session_key": session_key,
+                "session_alias": "",
+                "conversation_id": session_key.rsplit(":", 1)[-1],
+                "title": None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
         return {
             "session_key": WEB_CHAT_PREVIEW_SESSION_KEY,
             "session_alias": "Development Preview",
@@ -571,6 +622,15 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             "title": "Development Preview",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    def _preview_new_sessions(self) -> list[str]:
+        """Threads made with New Chat in this preview (they hold no messages)."""
+
+        sessions = getattr(self.server, "web_chat_preview_new_sessions", None)
+        if not isinstance(sessions, list):
+            sessions = []
+            setattr(self.server, "web_chat_preview_new_sessions", sessions)
+        return sessions
 
     def _preview_messages(self) -> list[dict[str, object]]:
         messages = getattr(self.server, "web_chat_preview_messages", None)
@@ -1036,32 +1096,10 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
         }
 
     def _preview_transient_actions(self) -> list[dict[str, object]]:
-        """A broker page card when the preview was started with --broker-page (a running broker's form)."""
+        """A card per running broker page the preview was given (--broker-page, preview_broker_pages)."""
 
-        page = getattr(self.server, "preview_broker_page", None)
-        if not isinstance(page, dict):
-            return []
-        return [
-            {
-                "session_key": WEB_CHAT_PREVIEW_SESSION_KEY,
-                "kind": "tool_setup",
-                "item_id": f"tool_setup:{PREVIEW_BROKER_PAGE_ID}",
-                "request_id": PREVIEW_BROKER_PAGE_ID,
-                "correlation_id": PREVIEW_BROKER_PAGE_ID,
-                "session_sequence": 1,
-                "created_at_utc": page["created_at_utc"],
-                "content": (
-                    "To list your stacks, I need your Portainer API token.\n"
-                    "What you enter goes straight to the secure broker, never to the agent."
-                ),
-                "action": {
-                    "label": "Store your Portainer API token",
-                    "url": page["url"],
-                    "expires_at_utc": page["expires_at_utc"],
-                    "frame_url": card_view_url(str(page["url"])),
-                },
-            }
-        ]
+        pages = getattr(self.server, "preview_broker_pages", None)
+        return [_preview_broker_card(page) for page in pages] if isinstance(pages, list) else []
 
     def _write_preview_event_stream(self) -> None:
         """Server-sent events like the gateway's stream, until the browser closes it.
@@ -1438,10 +1476,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--broker-page",
-        default="",
+        action="append",
+        default=[],
         help=(
             "Address of a running broker's page (for example a credential collection form) to show "
-            "as a card in the Web Chat preview; the broker must allow this preview's address to frame it."
+            "as a card in the Web Chat preview (repeat for several); the broker must allow this "
+            "preview's address to frame it."
         ),
     )
     parser.add_argument(
@@ -1465,7 +1505,7 @@ def serve(
     asset_root: Path,
     export_dir: Path,
     open_browser: bool = False,
-    broker_page: str = "",
+    broker_pages: tuple[str, ...] = (),
 ) -> int:
     if not asset_root.is_dir():
         raise SystemExit(f"Preview asset directory does not exist: {asset_root}")
@@ -1478,16 +1518,11 @@ def serve(
             f"Unable to bind onboarding aesthetic preview on {host}:{port}: {exc}"
         ) from exc
 
-    if broker_page:
-        now = datetime.now(timezone.utc)
+    if broker_pages:
         setattr(
             httpd,
-            "preview_broker_page",
-            {
-                "url": broker_page,
-                "created_at_utc": now.isoformat(),
-                "expires_at_utc": datetime.fromtimestamp(now.timestamp() + 15 * 60, timezone.utc).isoformat(),
-            },
+            "preview_broker_pages",
+            [preview_broker_page(url, index) for index, url in enumerate(broker_pages)],
         )
     actual_host, actual_port = httpd.server_address[:2]
     url = f"http://{_display_host(str(actual_host))}:{actual_port}/"
@@ -1520,7 +1555,7 @@ def main() -> int:
         asset_root=Path(args.asset_root).expanduser().resolve(),
         export_dir=Path(args.export_dir).expanduser().resolve(),
         open_browser=bool(args.open),
-        broker_page=str(args.broker_page or "").strip(),
+        broker_pages=tuple(str(url).strip() for url in args.broker_page if str(url).strip()),
     )
 
 
