@@ -1772,7 +1772,8 @@ No profile budget resets per model turn. `active_seconds` is the total
 wall-clock window for one session. `turns` counts model cycles across the
 session. `total_tokens` accumulates input plus output tokens across those
 cycles, including repeated prompt and tool-schema input. `tool_calls` counts
-all tool calls across the session. The checkpoint fields reserve subsets of
+the session's tool calls. One exception applies to all three counts: work
+after a paused call resumes is not counted yet (see below). The checkpoint fields reserve subsets of
 those totals, and the runtime withholds them from material work. If a safe boundary is reached
 without a checkpoint, it uses the reserve for a narrow checkpoint-only model
 invocation and falls back to a deterministic degraded checkpoint only if that
@@ -1780,6 +1781,21 @@ pass cannot persist the handoff. Input, output, total, and cache token usage are
 stored separately for tuning. Suggestion rules, the required skill list,
 default-profile selection, activity snapshot emission, and checkpoint retention
 are policy-wide rather than per-profile.
+
+A step can pause while it waits for a person, for example for an access
+decision or a setup step. Such a step keeps its pause even when the session
+reaches its limit or a required skill is not yet activated. The session
+records the usage up to the pause. The work after the person answers is not
+counted against the session budget yet: each resumed model call gets the
+step's per-call turn and token allowance again, and the step's tool-call
+limit is not checked after a resume. A step that pauses at the limit, once or
+several times, can therefore do more work than the budget allows; counting
+that work is planned. A required skill that is still missing stops the step
+when the person has answered, before its result is used, and the session ends
+with the runtime's degraded checkpoint. A session past its limit lets the
+step finish; when the step belongs to a plan, the session then does not start
+the next plan step and also ends with the degraded checkpoint, not the
+model's own checkpoint pass.
 
 The same policy file owns `custom_profiles`; these controls are deliberately
 separate from the main runtime config. The built-in envelope enables one-time

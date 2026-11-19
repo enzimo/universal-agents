@@ -103,7 +103,11 @@ Agents keeps waiting with its line in chat history and its **Mark Done**
 button on the workflow page.
 
 Setting the tool up yourself with `/link <tool>` while the task waits marks
-the step the same way. The task continues by itself. The agent learns only
+the step the same way. The task continues by itself: when the last page or
+decision ends, it carries on as soon as its agent is free (another request in
+the same lane, or a paused agent, can hold it back; it is not reported as
+stuck meanwhile). If the agent restarts in between, the task still continues,
+with the setup's result. The agent learns only
 whether the setup finished, never a credential. Setting a tool up grants no
 access by itself.
 

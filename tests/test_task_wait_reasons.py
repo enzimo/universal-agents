@@ -32,7 +32,8 @@ from custom_agents.task_wait_reasons import (
     saved_wait_reason,
     wait_reason,
 )
-from custom_agents.tool_setup_runs import RUN_FINISHED, RUN_STOPPED, RUN_WAITING, ToolSetupRunV1
+from custom_agents.task_human_interaction_blockers import ANSWER_HELD_AT_KEY, ANSWER_HELD_BY_KEY
+from custom_agents.tool_setup_runs import RUN_FINISHED, RUN_STOPPED, RUN_WAITING, RunPieceV1, ToolSetupRunV1
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import (
     BATCH_WAITING_EXTERNAL_RESULT,
@@ -77,8 +78,19 @@ def entry(minutes: float, **details: Any) -> TaskHistoryEntry:
     return TaskHistoryEntry(summary="event", timestamp=at(minutes), details=details)
 
 
+OWNER = "agent-lead"  # the agent process that saved the work
+
+
 def work(*records: TaskSnapshotRecord, **sections: Any) -> SavedWork:
-    return SavedWork.from_snapshot(RuntimeSnapshotV3(schema_version=3, tasks=list(records), **sections))
+    return SavedWork.from_snapshot(RuntimeSnapshotV3(schema_version=3, tasks=list(records), **sections), owner_agent_id=OWNER)
+
+
+def setup_record(run_id: str = "run-1", *, held_by: str | None = None) -> dict[str, dict[str, Any]]:
+    """The task's set_up_tools record; ``held_by`` marks its answer as held for the lane by that process."""
+    record = {"kind": "tool_setup_run", "run_id": run_id, "interrupt_id": "i1"}
+    if held_by is not None:
+        record |= {ANSWER_HELD_AT_KEY: at(3), ANSWER_HELD_BY_KEY: held_by}
+    return {"t": record}
 
 
 def interrupt(minutes: float, *, waits_on_requester: bool) -> TaskHistoryEntry:
@@ -140,9 +152,10 @@ WAITS: dict[str, tuple[WaitReason, Callable[[], SavedWork]]] = {
         WaitReason.PERSON_DECISION,
         lambda: work(record(), human_interaction_blockers={"t": {"kind": "access_request", "access_request_id": "req-1"}}),
     ),
-    "setup run": (
-        WaitReason.PERSON_DECISION,
-        lambda: work(record(), human_interaction_blockers={"t": {"kind": "tool_setup_run", "run_id": "run-1"}}),
+    # A setup-run record counts here only while this process holds its answer
+    # for the lane; otherwise the run store decides (SETUP_RUN, below).
+    "setup answer held for the lane": (
+        WaitReason.SETUP_ANSWER_HELD, lambda: work(record(), human_interaction_blockers=setup_record(held_by=OWNER))
     ),
     "outside result": (
         WaitReason.OUTSIDE_RESULT,
@@ -207,6 +220,12 @@ ENDED: dict[str, Callable[[], SavedWork]] = {
         )
     ),
     "a merged recovery": lambda: work(record(), record("rec", ProgressState.IN_PROGRESS), recovery_links=recovery("resumed")),
+    # Saved work alone cannot tell whether a setup run still waits (the store
+    # decides), and a mark from an earlier process of the agent is stale (C01).
+    "a setup-run record with no held answer": lambda: work(record(), human_interaction_blockers=setup_record()),
+    "a setup answer held by an earlier process": lambda: work(
+        record(), human_interaction_blockers=setup_record(held_by="agent-before-restart")
+    ),
     "a finished recovery task": lambda: work(record(), record("rec", ProgressState.COMPLETED), recovery_links=recovery()),
     "a queue pause marker from an earlier pause": lambda: work(queue_paused_at(at(0.5))),
     "a released lease": lambda: work(record(), runtime_leases=lease("completed")),
@@ -357,10 +376,12 @@ def schedule(name: str, *, enabled: int = 1, remaining: int | None = 1) -> dict[
     return {"schedule_name": name, "enabled": enabled, "remaining_count": remaining}
 
 
-def run(status: str) -> ToolSetupRunV1:
+def run(status: str, *, run_id: str = "run-1", page: str = "waiting") -> ToolSetupRunV1:
+    """A run with one sign-in page; waiting for it by default."""
     return ToolSetupRunV1(
-        run_id="run-1", team_id="team", person_id="jordan", task_id="t", agent_id="lead",
+        run_id=run_id, team_id="team", person_id="jordan", task_id="t", agent_id="lead",
         agent_type="TeamArchitect", tool_ids=("http:registrar",), status=status,
+        pieces=(RunPieceV1(piece_id="sign_in", tool_id="http:registrar", kind="sign_in", status=page, attempt=1),),
     )
 
 
@@ -372,7 +393,12 @@ RETRY = PROVIDER_OVERLOAD_RETRY_SCHEDULE_NAME_PREFIX
     [
         (WaitReason.ACCESS_REQUEST, Readers(), {"t"}, {}),
         (WaitReason.RETRY_TIMER, Readers(schedules=[schedule(f"{RETRY}t:pause-1")]), (), {}),
-        (WaitReason.SETUP_RUN, Readers(runs={"t": [run(RUN_WAITING)]}), (), {}),
+        (
+            WaitReason.SETUP_RUN,
+            Readers(runs={"t": [run(RUN_FINISHED, run_id="run-0"), run(RUN_WAITING)]}),
+            (),
+            {"human_interaction_blockers": setup_record()},
+        ),
         (
             WaitReason.PLAN_EXECUTION,
             Readers(plans={"plan-1": _plan(ExecutionPlanItemStatus.PLANNED, active="t")}),
@@ -394,12 +420,34 @@ def test_each_store_recorded_wait_is_found(reason, readers, waiting_access, sect
         pytest.param(Readers(schedules=[schedule(f"{RETRY}t:pause-1", remaining=0)]), id="a timer with no runs left"),
         pytest.param(Readers(schedules=[schedule("t:pause-1")]), id="a schedule of another kind"),
         pytest.param(Readers(runs={"t": [run(RUN_FINISHED), run(RUN_STOPPED)]}), id="ended setup runs"),
+        # Since 2026-11-19 a waiting run counts only through the record that names it.
+        pytest.param(Readers(runs={"t": [run(RUN_WAITING)]}), id="a waiting setup run with no record"),
         pytest.param(Readers(plans={"plan-1": _plan(ExecutionPlanItemStatus.COMPLETED, active="t")}), id="a finished plan"),
     ],
 )
 def test_store_records_that_no_longer_hold_the_task_explain_nothing(readers) -> None:
     saved = work(record(), task_to_plan_id={"t": "plan-1"})
     assert wait_reason(saved, saved.tasks["t"], readers.records(), plan_scope=SCOPE) is None
+
+
+@pytest.mark.parametrize(
+    ("record_section", "runs"),
+    [
+        pytest.param(setup_record(), [run(RUN_FINISHED)], id="its run ended"),
+        pytest.param(setup_record(), [run(RUN_STOPPED)], id="its run stopped"),
+        pytest.param(setup_record(), [], id="its run is not stored"),
+        pytest.param(setup_record(), [run(RUN_WAITING, run_id="run-2")], id="only another run waits"),
+        pytest.param(setup_record(), [run(RUN_WAITING, page="done")], id="its run waits with every page done"),
+        pytest.param(setup_record(), [run(RUN_WAITING, page="pending")], id="its run waits with a page not opened"),
+        pytest.param(
+            setup_record(held_by="agent-before-restart"), [run(RUN_FINISHED)], id="an earlier process held its answer"
+        ),
+    ],
+)
+def test_a_setup_run_record_explains_nothing_once_its_run_no_longer_waits(record_section, runs) -> None:
+    """Review CRIT-1 and C04: nothing will continue the task, so the check must be able to report it."""
+    saved = work(record(), human_interaction_blockers=record_section)
+    assert wait_reason(saved, saved.tasks["t"], Readers(runs={"t": runs}).records(), plan_scope=SCOPE) is None
 
 
 def test_a_plan_step_is_not_excused_by_its_running_plan() -> None:
@@ -420,10 +468,11 @@ def test_stores_are_read_only_when_saved_work_explains_nothing_and_schedules_onc
     assert wait_reason(queued, queued.tasks["t"], outside, plan_scope=SCOPE) is WaitReason.QUEUED
     assert readers.calls == {"schedules": 0, "runs": 0, "plans": 0}
 
-    stranded = work(record("a"), record("b"))
+    stranded = work(record("a"), record("b"), human_interaction_blockers={"b": setup_record()["t"]})
     for task_id in ("a", "b"):
         assert wait_reason(stranded, stranded.tasks[task_id], outside, plan_scope=SCOPE) is None
-    assert readers.calls == {"schedules": 1, "runs": 2, "plans": 0}
+    # Runs are read only for a task whose setup-run record the run store decides.
+    assert readers.calls == {"schedules": 1, "runs": 1, "plans": 0}
 
 
 def test_a_running_plan_never_makes_the_pass_read_every_schedule() -> None:
@@ -436,7 +485,7 @@ def test_a_running_plan_never_makes_the_pass_read_every_schedule() -> None:
 
 @pytest.mark.parametrize(("failing", "store"), [("runs", SETUP_RUN_STORE), ("plans", PLAN_STORE)])
 def test_an_unreadable_row_about_one_task_names_its_store(failing, store) -> None:
-    saved = work(record(), task_to_plan_id={"t": "plan-1"})
+    saved = work(record(), task_to_plan_id={"t": "plan-1"}, human_interaction_blockers=setup_record())
     with pytest.raises(UnreadableWaitRecord) as raised:
         wait_reason(saved, saved.tasks["t"], Readers(failing=failing).records(), plan_scope=SCOPE)
     assert (raised.value.store, raised.value.task_id) == (store, "t")

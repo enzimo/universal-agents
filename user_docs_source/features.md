@@ -468,8 +468,10 @@ Some of these are repaired automatically before you would be told: when the
 agent holding your request stops, the team lead starts another agent of the same
 kind that takes the work over; an agent waiting on your answer or on an access
 decision stays up until it gets one; an access decision made while the agent
-restarted still reaches the task; and when a request ends, any work it handed to
-other agents stops too.
+restarted still reaches the task; a finished tool setup continues its request
+even when the agent restarted before it carried on, and a request whose setup
+finished while its agent was busy with other work is not reported; and when a
+request ends, any work it handed to other agents stops too.
 
 A request that involves several agents is reported once, as your request.
 Administrators' notices name the kind of agent and what to check, never the

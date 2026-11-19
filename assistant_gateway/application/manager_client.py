@@ -1,4 +1,11 @@
-"""Manager-facing gateway client with transport-neutral lifecycle and routing."""
+"""Manager-facing gateway client with transport-neutral lifecycle and routing.
+
+A reply wait (``response_channel``) takes the messages for its correlation and
+task while it is open. A message that no wait takes goes through
+``_nothing_waiting_for_response`` or ``_nothing_waiting_for_operational``. What
+is still queued when a wait closes is passed on through the same path, as if
+it had arrived after the close (``reply_leftovers``).
+"""
 
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ from assistant_gateway.application.ports import (
     GatewayManagerRuntime,
     GatewayManagerTransport,
 )
+from assistant_gateway.application.reply_leftovers import ArrivalRoute, ReplyLeftovers, ReplyWait
 from custom_messages.contracts.control_v1 import AgentStatus, SystemStatusMessage
 from custom_messages.contracts.credentials_v1 import (
     SecureCredentialCollectionRequest,
@@ -58,6 +66,12 @@ class GatewayManagerClientSettings:
     liveness_poll_seconds: float = 5.0
     presence_stale_seconds: float = 30.0
     recovery_discovery_timeout_seconds: float = 2.0
+    # A message left on a closed reply wait whose handling fails is tried again
+    # the way the response receiver retries a message on arrival: up to this
+    # many tries in all, this many seconds apart (reply_leftovers). UserGateway
+    # passes the transport's values; the defaults try once.
+    leftover_attempts: int = 1
+    leftover_retry_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +101,7 @@ class GatewayManagerClient:
         on_manager_available: ManagerTransitionHandler | None = None,
         on_manager_unavailable: ManagerTransitionHandler | None = None,
         on_agent_presence: AgentPresenceHandler | None = None,
+        on_leftover_lost: EnvelopeHandler | None = None,
         write_manager_route: ManagerRouteWriter | None = None,
         trace_enabled: TraceEnabled | None = None,
     ) -> None:
@@ -101,6 +116,7 @@ class GatewayManagerClient:
         self._on_manager_available = on_manager_available
         self._on_manager_unavailable = on_manager_unavailable
         self._on_agent_presence = on_agent_presence
+        self._on_leftover_lost = on_leftover_lost
         self._write_manager_route = write_manager_route
         self._trace_enabled = trace_enabled or (lambda: False)
         self._manager_id = settings.initial_manager_id
@@ -109,7 +125,21 @@ class GatewayManagerClient:
         self._manager_status_lock = asyncio.Lock()
         # A schedule action keeps its originating request's correlation.
         # Distinct scheduled tasks can therefore wait for replies at once.
-        self._response_queues: dict[tuple[str, str | None], asyncio.Queue[MessageEnvelope]] = {}
+        self._response_queues: dict[tuple[str, str | None], ReplyWait] = {}
+        # What a closing wait leaves on its queue gets the handling it would
+        # have had arriving after the close, by the way it came in.
+        self._leftovers = ReplyLeftovers(
+            handlers={
+                ArrivalRoute.RESPONSE: self._nothing_waiting_for_response,
+                ArrivalRoute.OPERATIONAL: self._nothing_waiting_for_operational,
+            },
+            # Only a response-route message can be a request a task waits on;
+            # an operational one is never shown, so nothing waits on it.
+            lost_handlers={ArrivalRoute.RESPONSE: self._response_leftover_lost},
+            attempts=settings.leftover_attempts,
+            retry_seconds=settings.leftover_retry_seconds,
+            logger=logger,
+        )
         self._control_queues: dict[str, asyncio.Queue[MessageEnvelope]] = {}
 
     @property
@@ -164,6 +194,7 @@ class GatewayManagerClient:
         on_manager_available: ManagerTransitionHandler,
         on_manager_unavailable: ManagerTransitionHandler,
         on_agent_presence: AgentPresenceHandler,
+        on_leftover_lost: EnvelopeHandler,
     ) -> None:
         """Bind the composed application handlers before connecting the runtime."""
 
@@ -175,6 +206,7 @@ class GatewayManagerClient:
         self._on_manager_available = on_manager_available
         self._on_manager_unavailable = on_manager_unavailable
         self._on_agent_presence = on_agent_presence
+        self._on_leftover_lost = on_leftover_lost
 
     async def connect(self) -> None:
         """Connect the runtime and install transport-neutral inbound handlers."""
@@ -190,11 +222,21 @@ class GatewayManagerClient:
         self._lifecycle_connected = True
 
     async def close(self) -> None:
-        """Close the runtime connection."""
+        """Close the runtime connection, after stopping the passing on of leftovers."""
 
+        await self.stop_leftover_passes()
         if self._runtime is not None:
             await self._runtime.close()
         self._lifecycle_connected = False
+
+    async def stop_leftover_passes(self) -> None:
+        """Cancel passing on leftovers and refuse later ones (shutdown).
+
+        Each leftover not passed on is logged, and a setup, form or signup request
+        among them is refused to its task while the connection is still open.
+        """
+
+        await self._leftovers.stop()
 
     @asynccontextmanager
     async def response_channel(
@@ -203,7 +245,11 @@ class GatewayManagerClient:
         *,
         task_id: str | None = None,
     ) -> AsyncIterator[asyncio.Queue[MessageEnvelope]]:
-        """Register one terminal-response correlation for a bounded operation."""
+        """Register one terminal-response correlation for a bounded operation.
+
+        However the operation ends, messages still queued when it closes are
+        passed on (``unregister_response_channel``, ``reply_leftovers``).
+        """
 
         queue = self.register_response_channel(correlation_id, task_id=task_id)
         try:
@@ -238,9 +284,9 @@ class GatewayManagerClient:
             raise RuntimeError(
                 f"Response correlation {correlation_id!r} for task {task_id!r} is already registered."
             )
-        registered = queue or asyncio.Queue()
+        registered = ReplyWait(queue or asyncio.Queue())
         self._response_queues[key] = registered
-        return registered
+        return registered.queue
 
     def unregister_response_channel(
         self,
@@ -249,12 +295,22 @@ class GatewayManagerClient:
         task_id: str | None = None,
         queue: asyncio.Queue[MessageEnvelope] | None = None,
     ) -> None:
-        """Remove a response queue without deleting a newer replacement."""
+        """Remove a response queue without deleting a newer replacement, and pass on what it still holds.
+
+        This is the one place a reply wait is removed, and ``response_channel``
+        always calls it, so the leftovers are passed on however the wait ended.
+        """
 
         key = (correlation_id, task_id)
         current = self._response_queues.get(key)
-        if queue is None or current is queue:
-            self._response_queues.pop(key, None)
+        if current is None or (queue is not None and current.queue is not queue):
+            return
+        del self._response_queues[key]
+        # Drained in the same step as the removal: a message is either drained
+        # here or arrives after it and finds no wait.
+        self._leftovers.pass_on(
+            correlation_id=correlation_id, task_id=task_id, leftovers=current.drain()
+        )
 
     def register_control_channel(
         self,
@@ -316,7 +372,7 @@ class GatewayManagerClient:
         """Return the registered response queue for a correlation."""
 
         try:
-            return self._response_queues[(correlation_id, task_id)]
+            return self._response_queues[(correlation_id, task_id)].queue
         except KeyError as exc:
             raise RuntimeError(
                 f"Response correlation {correlation_id!r} for task {task_id!r} is not registered."
@@ -324,7 +380,7 @@ class GatewayManagerClient:
 
     def _response_targets(
         self, correlation_id: str, envelope: MessageEnvelope
-    ) -> tuple[asyncio.Queue[MessageEnvelope], ...]:
+    ) -> tuple[ReplyWait, ...]:
         """Match a task's own waiter before its request's general reply wait.
 
         An unmatched task must never use a sibling task's queue. Untargeted
@@ -342,23 +398,34 @@ class GatewayManagerClient:
         elif isinstance(content, UserNotification):
             task_id = content.source_task_id
         if isinstance(content, SystemStatusMessage):
-            return tuple(queue for (correlation, _), queue in self._response_queues.items() if correlation == correlation_id)
-        queue = self._response_queues.get((correlation_id, task_id))
-        if queue is None and task_id is not None:
-            queue = self._response_queues.get((correlation_id, None))
-        return (queue,) if queue is not None else ()
+            # Every wait of the correlation gets it, and each wait passes its own
+            # unread copy on when it closes (reply_leftovers). No production
+            # sender reaches two waits today: control answers use a fresh correlation.
+            return tuple(wait for (correlation, _), wait in self._response_queues.items() if correlation == correlation_id)
+        wait = self._response_queues.get((correlation_id, task_id))
+        if wait is None and task_id is not None:
+            wait = self._response_queues.get((correlation_id, None))
+        return (wait,) if wait is not None else ()
 
     async def queue_response(
         self,
         correlation_id: str,
         envelope: MessageEnvelope,
+        *,
+        route: ArrivalRoute,
     ) -> bool:
-        """Queue a synthetic or inbound response for an active correlation."""
+        """Queue a synthetic or inbound response for an active correlation.
 
-        queues = self._response_targets(correlation_id, envelope)
-        for queue in queues:
-            await queue.put(envelope)
-        return bool(queues)
+        ``route`` is how the message came in. It has no default: it decides what
+        happens to the message if its wait closes before reading it
+        (``reply_leftovers``), and a wrong default would drop a team lead's
+        message as the gateway's own notice.
+        """
+
+        waits = self._response_targets(correlation_id, envelope)
+        for wait in waits:
+            await wait.put(envelope, route)
+        return bool(waits)
 
     async def handle_response(self, envelope: MessageEnvelope) -> None:
         """Route one inbound response envelope by correlation."""
@@ -407,8 +474,17 @@ class GatewayManagerClient:
                 getattr(header, "message_id", None),
                 type(content).__name__,
             )
-        if correlation_id and await self.queue_response(correlation_id, envelope):
+        if correlation_id and await self.queue_response(correlation_id, envelope, route=ArrivalRoute.RESPONSE):
             return
+        # Go after the request's leftovers, so this message cannot overtake them.
+        # This route is handled one message at a time, so meanwhile every chat's
+        # replies wait too, at most LEFTOVER_ORDER_WAIT_SECONDS (reply_leftovers).
+        await self._leftovers.passed_on(correlation_id)
+        await self._nothing_waiting_for_response(envelope)
+
+    async def _nothing_waiting_for_response(self, envelope: MessageEnvelope) -> None:
+        """A response-route message no reply wait takes: on arrival, or left on a closed wait (reply_leftovers)."""
+
         if await self._handle_unmatched_status(envelope, source="response"):
             return
         if self._on_unsolicited is not None:
@@ -426,15 +502,26 @@ class GatewayManagerClient:
         if correlation_id and correlation_id in self._control_queues:
             await self._control_queues[correlation_id].put(envelope)
             return
-        if correlation_id and await self.queue_response(correlation_id, envelope):
+        if correlation_id and await self.queue_response(correlation_id, envelope, route=ArrivalRoute.OPERATIONAL):
             return
+        await self._nothing_waiting_for_operational(envelope)
+
+    async def _response_leftover_lost(self, envelope: MessageEnvelope) -> None:
+        """A response-route leftover given up on or cut off by shutdown: its task is told (reply_leftovers)."""
+
+        if self._on_leftover_lost is not None:
+            await self._on_leftover_lost(envelope)
+
+    async def _nothing_waiting_for_operational(self, envelope: MessageEnvelope) -> None:
+        """An operational message no reply wait takes: on arrival, or left on a closed wait (reply_leftovers)."""
+
         if await self._handle_unmatched_status(envelope, source="operational"):
             return
         self._logger.debug(
             "Gateway manager client dropped unmatched operational response "
             "type=%s correlation_id=%s.",
             type(getattr(envelope, "msg_content", None)).__name__,
-            correlation_id,
+            getattr(getattr(envelope, "msg_meta", None), "msg_correlation_id", None),
         )
 
     async def handle_presence(self, envelope: MessageEnvelope) -> None:
