@@ -17,11 +17,15 @@ code:
   (``access_workflow_setup_hooks``). A worker's access is handed on with
   ``AccessRequests.give`` once TeamLead holds it; if TeamLead may not hand it
   on, the worker asks for it itself when it starts.
-- **Results** (``on_setup_result``, ``on_access_decided``): the gateway's
-  ``ToolSetupResultV1`` and the Inbox's decisions update the run
-  (``tool_setup_runs``): an expired page, or one nobody watched after a
-  gateway restart, is offered again automatically, up to three pages; a
-  closed page or a denial stops the run.
+- **Results** (``apply_page_result`` then ``continue_after_page_result``,
+  and ``on_access_decided``): the gateway's ``ToolSetupResultV1`` and the
+  Inbox's decisions update the run (``tool_setup_runs``): an expired page, or
+  one nobody watched after a gateway restart, is offered again automatically,
+  up to three pages; a closed page or a denial stops the run. A page's result
+  is applied once, under the run's lock, before anything else looks at it:
+  the gateway keeps a result it could not send and sends it when a team lead
+  is back, so a second copy can arrive, and it is ignored and logged
+  (``event=tool_setup_result_duplicate``), even after the task ended.
 - **Resume** (``_resume``): once every piece is done, or the run stopped, the
   paused turn gets its interrupt answered and ``set_up_tools`` returns the
   compact per-tool result; after an agent restart (no live turn) the task
@@ -36,7 +40,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from functools import partial
 from typing import Any
 
@@ -67,6 +73,7 @@ from custom_agents.tool_setup_runs import (
     piece_title,
     record_access_decision,
     record_page_result,
+    result_applied,
     service_name,
     settle,
 )
@@ -356,19 +363,69 @@ async def _run_for(agent: Any, task_id: str, match: Any) -> ToolSetupRunV1 | Non
     return next((run for run in runs if match(run)), None)
 
 
-async def on_setup_result(agent: Any, result: ToolSetupResultV1, header: Any, meta: Any) -> bool:
-    """Apply a page's result to its run; False when no run waits for it."""
+class PageResultOutcome(StrEnum):
+    """What applying a page's result to its run did (``apply_page_result``)."""
 
-    run = await _run_for(agent, result.parent_task_id, lambda item: piece_for_setup(item, result.setup_request_id))
+    APPLIED = "applied"
+    # The run already applied this result: a second copy.
+    REPEAT = "repeat"
+    # No run of the task knows this page.
+    NO_RUN = "no_run"
+
+
+@dataclass(frozen=True)
+class AppliedPageResult:
+    outcome: PageResultOutcome
+    run: ToolSetupRunV1 | None = None
+    # The piece gets a fresh page (an expired or unwatched page, within the limit).
+    offer_again: bool = False
+
+
+def _knows_page(run: ToolSetupRunV1, setup_request_id: str) -> bool:
+    """The run opened this page: one of its pieces carries it, or it applied its result before a re-offer."""
+
+    return setup_request_id in run.results_applied or piece_for_setup(run, setup_request_id) is not None
+
+
+async def apply_page_result(agent: Any, result: ToolSetupResultV1) -> AppliedPageResult:
+    """Apply a page's result to the run that opened it, once, under the run's lock (module docstring).
+
+    It runs before the caller checks whether the task ended, so a copy that
+    arrives after the task ended is recognised too, and a result whose task
+    ended is still recorded on its run, so a copy of that one is recognised as
+    well.
+    """
+
+    run = await _run_for(agent, result.parent_task_id, lambda item: _knows_page(item, result.setup_request_id))
     if run is None:
-        return False
+        return AppliedPageResult(PageResultOutcome.NO_RUN)
     async with _lock(agent, run.run_id):
         current = await _load(agent, run.run_id)
         if current is None:
-            return True
+            return AppliedPageResult(PageResultOutcome.NO_RUN)
+        if result_applied(current, result.setup_request_id):
+            logger.info(
+                "A setup page's result arrived again after its run applied it; the copy is ignored. "
+                "event=tool_setup_result_duplicate run_id=%s task_id=%s setup_request_id=%s status=%s",
+                current.run_id,
+                result.parent_task_id,
+                result.setup_request_id,
+                result.status,
+            )
+            return AppliedPageResult(PageResultOutcome.REPEAT, current)
         changed, again = record_page_result(current, result)
-        if changed != current:
-            await _save(agent, changed)
+        changed = await _save(agent, changed)
+    return AppliedPageResult(PageResultOutcome.APPLIED, changed, again)
+
+
+async def continue_after_page_result(
+    agent: Any, result: ToolSetupResultV1, applied: AppliedPageResult, header: Any, meta: Any
+) -> None:
+    """After a result was applied to a running task's run: its workflow step, the history, then what comes next."""
+
+    run = applied.run
+    if run is None:
+        return
     task_info = await agent.task_manager.operations_runtime.run(agent.task_manager.get_task_info, result.parent_task_id)
     if task_info is not None:
         await asyncio.to_thread(record_setup_result, agent, result, task_info.meta)
@@ -376,7 +433,7 @@ async def on_setup_result(agent: Any, result: ToolSetupResultV1, header: Any, me
         agent,
         result.parent_task_id,
         f"Setup page ({result.kind}) for {result.tool_id}: {result.status}"
-        + ("; a new page is offered." if again else "."),
+        + ("; a new page is offered." if applied.offer_again else "."),
         {
             "event": "tool_setup_result",
             "run_id": run.run_id,
@@ -385,11 +442,10 @@ async def on_setup_result(agent: Any, result: ToolSetupResultV1, header: Any, me
             "source": result.source,
             "attempt": result.attempt,
             "reason_code": result.reason_code,
-            "offered_again": again,
+            "offered_again": applied.offer_again,
         },
     )
     await advance(agent, run.run_id, header, meta)
-    return True
 
 
 def complete_access_steps(agent: Any, run: ToolSetupRunV1) -> None:
@@ -536,11 +592,14 @@ def outcome_for(agent: Any, run: ToolSetupRunV1) -> dict[str, Any]:
 
 
 __all__ = [
+    "AppliedPageResult",
+    "PageResultOutcome",
     "advance",
+    "apply_page_result",
     "begin_run",
     "complete_access_steps",
+    "continue_after_page_result",
     "on_access_decided",
-    "on_setup_result",
     "outcome_for",
     "run_repository",
     "send_setup_request",

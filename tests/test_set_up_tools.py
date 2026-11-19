@@ -433,3 +433,97 @@ def _no_sharing_choices():
             raise AssertionError("compiling a proposal records no choice")
 
     return TeamAccountSharing(_NoChoices(), TEAM)
+
+
+@pytest.mark.asyncio
+async def test_a_second_copy_of_a_page_result_is_ignored_even_after_the_task_ended(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The gateway sends a kept result again when a team lead is back, so a copy can arrive twice (C02).
+
+    The run applies each result once, before the check for an ended task, so a
+    late copy never posts a second answer, a second history entry or a second
+    workflow event; a result whose task had already ended is recorded too, so
+    its copy is recognised as well.
+    """
+
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from custom_agents import tool_setup_runtime
+
+    lead = lead_agent(tmp_path, enabled=False)
+    answers = AsyncMock()
+    monkeypatch.setattr(tool_setup_runtime, "_publish_task_response", answers)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT, "cli:google": SIGNED_OUT | {"team_sign_in_app": "configured"}})
+    _tool_call, raised = start(lead, [GITHUB, "cli:google"], purpose="check your GitHub and Gmail for Acme")
+    await pause_turn(lead, raised.interrupt)
+    github, google = sent_pages(lead)
+    workflow_id = the_run(lead).workflow_id
+
+    def workflow_events() -> int:
+        return len(workflow_service_for(lead).repository.events(workflow_id, limit=500))
+
+    def github_history() -> list[str]:
+        entries = lead.task_manager.get_task_history_entries("task-lead", limit=None)
+        return [entry.summary for entry in entries if entry.summary.startswith("Setup page (sign_in) for cli:github")]
+
+    await gateway_result(lead, github, "completed", account_label="exampleuser")
+    events_after_first = workflow_events()
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+    assert workflow_events() == events_after_first
+    assert github_history() == ["Setup page (sign_in) for cli:github: completed."]
+    assert the_run(lead).results_applied == (github.setup_request_id,)
+
+    # The task ends while a result is still on its way, and copies keep arriving.
+    lead.task_manager.complete_task("task-lead", datetime.now(timezone.utc).isoformat())
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+        await gateway_result(lead, google, "completed", account_label="me@acme.example")
+        await gateway_result(lead, google, "completed", account_label="me@acme.example")
+
+    assert answers.await_count == 1, "only the first copy of the result whose task had ended answers"
+    assert github_history() == ["Setup page (sign_in) for cli:github: completed."]
+    assert the_run(lead).results_applied == (github.setup_request_id, google.setup_request_id)
+    duplicates = [record.getMessage() for record in caplog.records if "event=tool_setup_result_duplicate" in record.getMessage()]
+    assert len(duplicates) == 3
+    assert f"setup_request_id={google.setup_request_id} status=completed" in duplicates[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_an_expired_pages_result_is_recognised_after_the_page_was_offered_again(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The piece carries the new page's id; the run's applied ids still recognise the old result's copy.
+
+    Without them, a copy arriving after the task ended matched no run and
+    posted the orphaned-result answer ("... was not finished") to the person.
+    """
+
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from custom_agents import tool_setup_runtime
+
+    lead = lead_agent(tmp_path, enabled=False)
+    answers = AsyncMock()
+    monkeypatch.setattr(tool_setup_runtime, "_publish_task_response", answers)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT})
+    _tool_call, raised = start(lead, [GITHUB])
+    await pause_turn(lead, raised.interrupt)
+    [first] = sent_pages(lead)
+
+    await gateway_result(lead, first, "expired", attempt=1)
+    await gateway_result(lead, first, "expired", attempt=1)
+    pages = sent_pages(lead)
+    assert len(pages) == 2, "one fresh page, not two"
+    [piece] = the_run(lead).pieces
+    assert (piece.setup_request_id, piece.attempt) == (pages[-1].setup_request_id, 2)
+
+    lead.task_manager.complete_task("task-lead", datetime.now(timezone.utc).isoformat())
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, first, "expired", attempt=1)
+
+    answers.assert_not_awaited()
+    assert f"event=tool_setup_result_duplicate run_id={the_run(lead).run_id}" in caplog.text

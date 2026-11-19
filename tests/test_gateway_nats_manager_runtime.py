@@ -225,3 +225,33 @@ async def _append_async(items: list, item) -> None:
 
 async def _discard_async(_item) -> None:
     return None
+
+
+@pytest.mark.asyncio
+async def test_a_durable_message_nats_already_held_is_logged(tmp_path, caplog) -> None:
+    """NATS drops a repeated message id within its duplicate window; the gateway says so in its log."""
+
+    class _AckingAdapter(_CaptureNatsAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.acks = [SimpleNamespace(duplicate=False), SimpleNamespace(duplicate=True)]
+
+        async def publish(self, **kwargs):  # type: ignore[override]
+            self.publish_calls.append(dict(kwargs))
+            return self.acks.pop(0)
+
+    adapter = _AckingAdapter()
+    runtime = NatsGatewayManagerRuntime.from_gateway_config(
+        _config(tmp_path),
+        adapter=adapter,  # type: ignore[arg-type]
+    )
+    envelope = _envelope()
+
+    with caplog.at_level("WARNING"):
+        await runtime.publish_durable(envelope, routing_key="manager_1")
+        assert "event=gateway_durable_publish_duplicate" not in caplog.text
+        await runtime.publish_durable(envelope, routing_key="manager_1")
+
+    [line] = [record.getMessage() for record in caplog.records if "event=gateway_durable_publish_duplicate" in record.getMessage()]
+    assert "routing_key=manager_1 idempotency_key=idem_1 message_class=Task" in line
+    assert [call["options"].idempotency_key for call in adapter.publish_calls] == ["idem_1", "idem_1"]

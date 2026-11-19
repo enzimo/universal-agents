@@ -1445,12 +1445,15 @@ async def test_a_page_ending_while_another_send_waits_is_sent_once_after_it(flak
 async def test_an_error_while_sending_still_closes_the_card_and_keeps_the_result(
     chat_setup_gateway, monkeypatch, caplog
 ) -> None:
-    """A database error in a send pass is logged; the page's closing line still posts (critique C07)."""
+    """A database error in a send pass is logged; the closing line still posts (C07) and the retry sends it (C09)."""
 
     import sqlite3
 
+    from assistant_gateway.application import tool_setup as tool_setup_module
+
     gateway, _broker, transport, events = chat_setup_gateway
     setups = gateway._credential_workflow.tool_setups
+    monkeypatch.setattr(tool_setup_module, "SECURE_RESULT_RETRY_MIN_SECONDS", 0.01)
     requests = gateway._credential_workflow._publisher._request_service
     original_record = requests.record
     calls = 0
@@ -1476,6 +1479,41 @@ async def test_an_error_while_sending_still_closes_the_card_and_keeps_the_result
     assert "reason=error" in _kept_lines(caplog)[0]
     assert "event=gateway_tool_setup_recovery_failed" not in caplog.text
 
-    assert (await setups.resend_kept_results()).sent == 1
+    # The lead stays the same and no other page ends: the retry sends it by itself.
+    await _until(lambda: len(_setup_results(transport)) == 1)
+    await _until(lambda: setups._retries.count == 0)
     [(result, _queue, _message_id)] = _setup_results(transport)
     assert result.setup_request_id == "tool_setup_req_old"
+    assert _setups(gateway).get_tool_setup("tool_setup_req_old").result_state == "sent"
+
+
+@pytest.mark.asyncio
+async def test_a_result_failing_on_every_pass_ends_the_retry_with_one_line(chat_setup_gateway, monkeypatch, caplog) -> None:
+    """The retry gives up after RESEND_ERROR_PASSES_LIMIT error passes in a row; the result stays kept (C09)."""
+
+    import sqlite3
+
+    from assistant_gateway.application import tool_setup as tool_setup_module
+
+    gateway, _broker, transport, _events = chat_setup_gateway
+    setups = gateway._credential_workflow.tool_setups
+    monkeypatch.setattr(tool_setup_module, "SECURE_RESULT_RETRY_MIN_SECONDS", 0.001)
+    monkeypatch.setattr(tool_setup_module, "SECURE_RESULT_RETRY_MAX_SECONDS", 0.002)
+
+    def record_always_failing(**_kwargs):
+        raise sqlite3.OperationalError("database disk image is malformed")
+
+    monkeypatch.setattr(gateway._credential_workflow._publisher._request_service, "record", record_always_failing)
+    _waiting_record(gateway, "cli:github", "sign_in", "person")
+
+    with caplog.at_level("INFO"):
+        assert await setups.recover_unwatched() == 1
+        await _until(lambda: setups._retries.count == 0)
+
+    assert _setup_results(transport) == []
+    assert _setups(gateway).get_tool_setup("tool_setup_req_old").result_state == "unsent", "kept for the next start"
+    lines = [record.getMessage() for record in caplog.records]
+    [gave_up] = [line for line in lines if "event=gateway_tool_setup_resend_gave_up" in line]
+    assert f"error_passes={tool_setup_module.RESEND_ERROR_PASSES_LIMIT}" in gave_up
+    failed = [line for line in lines if "event=gateway_tool_setup_resend_failed" in line]
+    assert len(failed) == 1 + tool_setup_module.RESEND_ERROR_PASSES_LIMIT, "the page's own pass, then each retry"

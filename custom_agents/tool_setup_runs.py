@@ -28,7 +28,12 @@ asking first is a wasted round trip. Trusted code then does the whole routine:
    finished page or a granted request completes its piece; an expired page,
    or one the gateway could not watch after a restart, is offered again up to
    ``TOOL_SETUP_OFFER_LIMIT`` pages; a closed page, a denial, or a page that
-   cannot be offered again stops the run (``settle``).
+   cannot be offered again stops the run (``settle``). The run keeps the ids
+   of the page results it applied (``results_applied``), so a second copy of
+   a result is recognised (``result_applied``) even after its page was offered
+   again under a new id: the gateway sends a kept result again when a team
+   lead is back, and a copy can arrive twice (a crash between the send and its
+   record, or a dead lead's queue handed to its replacement).
 5. **Outcome** (``outcome``): one compact line per tool (ready or not, and
    what happened) for TeamLead.
 
@@ -140,6 +145,8 @@ class ToolSetupRunV1(BaseModel):
     status: RunStatus = RUN_WAITING
     stop_reason: str = ""
     pieces: tuple[RunPieceV1, ...] = ()
+    # The setup_request_ids of the page results this run applied (record_page_result).
+    results_applied: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     version: int = Field(default=1, ge=1)
     created_at_utc: datetime = Field(default_factory=utc_now)
@@ -439,12 +446,25 @@ def piece_for_request(run: ToolSetupRunV1, request_id: str) -> RunPieceV1 | None
     return next((piece for piece in run.pieces if piece.request_id == request_id), None)
 
 
+def result_applied(run: ToolSetupRunV1, setup_request_id: str) -> bool:
+    """Whether the run already applied this page's result: its id is recorded, or its piece no longer waits.
+
+    The piece's status covers runs stored before the ids were recorded.
+    """
+
+    if setup_request_id in run.results_applied:
+        return True
+    piece = piece_for_setup(run, setup_request_id)
+    return piece is not None and piece.status != WAITING
+
+
 def record_page_result(run: ToolSetupRunV1, result: ToolSetupResultV1) -> tuple[ToolSetupRunV1, bool]:
-    """Apply how a page ended; True when the piece should get a fresh page (module docstring)."""
+    """Apply how a page ended, once; True when the piece should get a fresh page (module docstring)."""
 
     piece = piece_for_setup(run, result.setup_request_id)
-    if piece is None or piece.status != WAITING:
+    if piece is None or result_applied(run, result.setup_request_id):
         return run, False
+    run = run.model_copy(update={"results_applied": (*run.results_applied, result.setup_request_id)})
     attempt = max(piece.attempt, result.attempt)
     if result.status == TOOL_SETUP_COMPLETED:
         changed = piece.model_copy(update={"status": DONE, "account_label": result.account_label, "attempt": attempt})
@@ -570,6 +590,7 @@ __all__ = [
     "plan_run",
     "record_access_decision",
     "record_page_result",
+    "result_applied",
     "run_id_for",
     "service_name",
     "settle",

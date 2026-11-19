@@ -205,6 +205,10 @@ REASON_STEP_UNKNOWN = "tool_setup_step_unknown"
 # Why a kept result can never be sent (event=gateway_tool_setup_result_unsendable reason=...).
 UNSENDABLE_SESSION_MISSING = "session_missing"
 UNSENDABLE_UNREADABLE = "unreadable"
+# The retry stops after this many passes in a row stopped by an unexpected
+# error (about two minutes with its backoff), so a row that fails on every
+# pass does not keep it going; the next start or lead transition tries again.
+RESEND_ERROR_PASSES_LIMIT = 8
 
 
 class SetupGuide(Protocol):
@@ -1191,14 +1195,25 @@ class GatewayToolSetups:
         afresh under the lock, so a result is never sent twice at once. A pass
         stops at the first result it cannot send for want of a lead or because
         the publish failed; a result that can never be sent is marked and
-        skipped. A publish failure while a lead is known starts the retry.
+        skipped. A failed publish or an unexpected error while a lead is known
+        starts the retry.
         """
 
         async with self._send_lock:
             sending = await self._send_pass()
-        if sending.stopped is SendOutcome.PUBLISH_FAILED and self._publisher.route_known:
+        if self._needs_retry(sending):
             self._retry_later()
         return sending
+
+    def _needs_retry(self, sending: ResendPass) -> bool:
+        """A pass that stopped on a failed publish or an unexpected error while a lead is known.
+
+        Without a lead the next team-lead-available transition sends the kept
+        results; with one, nothing else would until the next page ends, so the
+        retry does (critique C09).
+        """
+
+        return (sending.stopped is SendOutcome.PUBLISH_FAILED or sending.failed) and self._publisher.route_known
 
     async def _send_pass(self) -> ResendPass:
         """One pass; it never raises, so a page's ending still posts its closing line (critique C07).
@@ -1303,20 +1318,34 @@ class GatewayToolSetups:
         self._retries.start(self._retry_kept_results(), name="gateway_tool_setup_result_retry")
 
     async def _retry_kept_results(self) -> None:
-        """Send the kept results again with backoff until a pass has no failed publish or no lead is known.
+        """Send the kept results again with backoff while passes fail with a lead known (``_needs_retry``).
 
-        Without a lead the next team-lead-available transition sends them;
-        a NATS outage that ends without a lead change fires no transition, so
-        this retry sends them then.
+        Without a lead the next team-lead-available transition sends them; a
+        NATS outage, or a database error, that ends without a lead change
+        fires no transition, so this retry sends them then. Failed publishes
+        are retried for as long as they last; passes stopped by an unexpected
+        error only ``RESEND_ERROR_PASSES_LIMIT`` times in a row, then the retry
+        gives up with one line and the results stay kept for the next start or
+        transition.
         """
 
         delay = max(SECURE_RESULT_RETRY_MIN_SECONDS, self._poll_interval_seconds())
+        error_passes = 0
         try:
             while True:
                 await asyncio.sleep(delay)
                 async with self._send_lock:
                     sending = await self._send_pass()
-                if sending.stopped is not SendOutcome.PUBLISH_FAILED or not self._publisher.route_known:
+                if not self._needs_retry(sending):
+                    return
+                error_passes = error_passes + 1 if sending.failed else 0
+                if error_passes >= RESEND_ERROR_PASSES_LIMIT:
+                    self._logger.error(
+                        "Stopped retrying the kept setup page results after repeated errors; they stay kept for the "
+                        "next gateway start or team lead transition. event=gateway_tool_setup_resend_gave_up "
+                        "error_passes=%s",
+                        error_passes,
+                    )
                     return
                 delay = min(SECURE_RESULT_RETRY_MAX_SECONDS, delay * 2)
         finally:
