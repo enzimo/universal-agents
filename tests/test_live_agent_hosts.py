@@ -24,6 +24,7 @@ from custom_agents.agent_host import (
     lead_host_profile,
     startup_agent_host_profile,
 )
+from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
 from docker import message_hosts
@@ -434,7 +435,7 @@ async def test_a_host_on_another_contract_drains_hands_back_its_task_and_gives_u
             b_host.attach(late, agent_type="Researcher", definition=DEFINITION, nc=None)
             await asyncio.sleep(0.5)
             assert b_host.agents["researcher_late"].session is None
-            placements = await (await services_host.nc.jetstream().key_value("UA1_PLACEMENT")).keys()
+            placements = await list_keys(services_host.nc.jetstream(), "UA1_PLACEMENT")
             assert f"{TEAM}.researcher_late" not in placements
 
             # A person's command about the task B holds still reaches it, signed as its agent.
@@ -484,6 +485,6 @@ async def test_live_cleanup_removes_exact_installation_and_team_keys_only(
         await bucket.put(own, b"test record")
         await bucket.put(other, b"another installation")
         await _remove_what_the_team_left(nc, identity, TEAM)
-        keys = await bucket.keys()
+        keys = await list_keys(nc.jetstream(), "UA1_CERTS")
         assert other in keys and own not in keys
         assert not any(key.startswith(f"host.{identity}.") or key == f"revocations.{identity}" for key in keys)

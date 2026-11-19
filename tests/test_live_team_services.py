@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.kinds import PROTOCOL
 from custom_messages.wire.trust import sign_state
+from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.host_keys import ensure_host_keys, load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile
@@ -1032,9 +1033,8 @@ async def test_the_team_services_delete_sessions_receivers_have_forgotten(broker
             "started_at": format_timestamp(written), "ends_at": format_timestamp(written + timedelta(days=7))},
             sequence=1, issued_at=written)
         await services.records.put("agent_session", old_key, old)
-        certificates = await worker.nc.jetstream().key_value("UA1_CERTS")
         for _ in range(50):
-            keys = await certificates.keys()
+            keys = await list_keys(worker.nc.jetstream(), "UA1_CERTS")
             if old_key not in keys:
                 break
             await asyncio.sleep(0.1)

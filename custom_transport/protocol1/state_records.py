@@ -19,17 +19,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional
 
-from nats.js.errors import BadRequestError, KeyNotFoundError, KeyWrongLastSequenceError, NoKeysError, NotFoundError
+from nats.js.errors import BadRequestError, KeyNotFoundError, KeyWrongLastSequenceError
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.buckets import bucket_name
 from custom_messages.wire.kinds import PROTOCOL, STATE_RECORDS
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import VerifiedRecord, sign_state
+from custom_transport.protocol1.bucket_reads import list_keys, watch_keys
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from custom_transport.send_barrier import before_send
@@ -92,15 +94,20 @@ class StateRecords:
         # Reads a writer's certificate this host does not hold yet (``MessageHost.fetch_trust``).
         self._fetch_trust = fetch_trust
 
-    async def _bucket(self, record: str, key: Optional[str] = None, *, team: Optional[str] = None) -> Any:
-        """Bind the contract's bucket; a record key starts with its team for per-team buckets.
+    @staticmethod
+    def _bucket_name(record: str, key: Optional[str] = None, *, team: Optional[str] = None) -> str:
+        """The contract's bucket for ``record``; a record key starts with its team for per-team buckets.
 
         Operations without a record key must name the team explicitly. A host may
         serve several teams, so its certificate cannot choose one for the caller.
         """
 
-        name = bucket_name(STATE_RECORDS[record].bucket, team if team is not None else key.split(".", 1)[0] if key else None)
-        return await self._js.key_value(name)
+        return bucket_name(STATE_RECORDS[record].bucket, team if team is not None else key.split(".", 1)[0] if key else None)
+
+    async def _bucket(self, record: str, key: Optional[str] = None, *, team: Optional[str] = None) -> Any:
+        """Bind the contract's bucket for single-key reads and writes."""
+
+        return await self._js.key_value(self._bucket_name(record, key, team=team))
 
     def signed(self, record: str, key: str, body: Mapping[str, Any], *, sequence: int, issued_at: datetime,
                expires_at: Optional[datetime] = None) -> dict[str, Any]:
@@ -222,13 +229,14 @@ class StateRecords:
         return True
 
     async def keys(self, record: str, prefix: str, *, team: Optional[str] = None) -> list[str]:
-        """The keys of ``record``'s bucket that start with ``prefix``; none when the bucket is empty."""
+        """Every key of ``record``'s bucket that starts with ``prefix`` and holds a value, or an error.
 
-        bucket = await self._bucket(record, team=team)
-        try:
-            return [key for key in await bucket.keys() if key.startswith(prefix)]
-        except (NoKeysError, NotFoundError):
-            return []
+        An empty list means the bucket held no such key (``bucket_reads.list_keys``). A missing
+        bucket or a read that cannot finish raises, so no caller takes a failed read for an
+        empty bucket.
+        """
+
+        return await list_keys(self._js, self._bucket_name(record, team=team), prefix)
 
     async def _get(self, record: str, key: str) -> Any:
         bucket = await self._bucket(record, key)
@@ -244,19 +252,16 @@ class StateRecords:
         """Each change under ``keys`` as (key, raw record), with ``None`` when the key was deleted or purged.
 
         The caller verifies each record it uses, as ``read_report`` does, keeping the
-        sequence it holds per key. ``caught_up`` is set once the bucket's current values
-        have all been given. A record that expires by its bucket's age limit (host
-        liveness) gives no change: readers judge those by the record's own expiry.
+        sequence it holds per key. ``caught_up`` is set once every key the bucket held when
+        the watch began has been given (``bucket_reads.watch_keys``). A record that expires
+        by its bucket's age limit (host liveness) gives no change: readers judge those by the
+        record's own expiry. Closing or cancelling the watch removes its subscription at once.
         """
 
-        bucket = await self._bucket(record, team=team)
-        watcher = await bucket.watch(keys)
-        try:
-            async for entry in watcher:
-                if entry is None:
+        async with aclosing(watch_keys(self._js, self._bucket_name(record, team=team), keys)) as changes:
+            async for change in changes:
+                if change is None:
                     if caught_up is not None:
-                        caught_up.set()  # the end of the initial values
+                        caught_up.set()  # the end of the first values
                     continue
-                yield entry.key, (entry.value or None)
-        finally:
-            await watcher.stop()
+                yield change.key, (change.value or None)
