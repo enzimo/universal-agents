@@ -67,7 +67,7 @@ const attention = createChatAttention({
 });
 const appearance = createAppearance({ appearanceState, sharedState, lifecycle, requestClient, operations: { handleUnauthorizedResponse: (...args) => authentication.handleUnauthorizedResponse(...args) } });
 const diagnostics = createDiagnostics({ diagnosticsState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args) } });
-const authentication = createAuthentication({ authenticationState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args), clearOptimisticDeliveries: (...args) => clearOptimisticDeliveries(...args), clearPendingAttachments: (...args) => clearPendingAttachments(...args), configurePrincipalState: (...args) => configurePrincipalState(...args), fetchSessions: (...args) => fetchSessions(...args), loadObjectives: (...args) => runtime_views.loadObjectives(...args), parseApiResponse: (...args) => parseApiResponse(...args), refreshContextDumpStatus: (...args) => diagnostics.refreshContextDumpStatus(...args), renderMessages: (...args) => renderMessages(...args), renderSettingsAppearance: (...args) => appearance.renderSettingsAppearance(...args), renderThreads: (...args) => renderThreads(...args), setAssistantName: (name) => setAssistantName(sharedState, document, name), showSignIn: () => signInGreeting.show(), stopSignIn: () => signInGreeting.stop(), startLiveEvents: () => { liveEvents.start(); activityMesh.start(); sharedState.settingsControls.startInboxCount(); }, stopLiveEvents: () => { liveEvents.stop(); attention.clear(); activityMesh.stop(); teamActivity.clear(); }, setObjectivesStatus: (...args) => runtime_views.setObjectivesStatus(...args) } });
+const authentication = createAuthentication({ authenticationState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args), clearOptimisticDeliveries: (...args) => clearOptimisticDeliveries(...args), clearPendingAttachments: (...args) => clearPendingAttachments(...args), clearThreadListOverlays: () => clearThreadListOverlays(), configurePrincipalState: (...args) => configurePrincipalState(...args), fetchSessions: (...args) => fetchSessions(...args), loadObjectives: (...args) => runtime_views.loadObjectives(...args), parseApiResponse: (...args) => parseApiResponse(...args), refreshContextDumpStatus: (...args) => diagnostics.refreshContextDumpStatus(...args), renderMessages: (...args) => renderMessages(...args), renderSettingsAppearance: (...args) => appearance.renderSettingsAppearance(...args), renderThreads: (...args) => renderThreads(...args), setAssistantName: (name) => setAssistantName(sharedState, document, name), showSignIn: () => signInGreeting.show(), stopSignIn: () => signInGreeting.stop(), startLiveEvents: () => { liveEvents.start(); activityMesh.start(); sharedState.settingsControls.startInboxCount(); }, stopLiveEvents: () => { liveEvents.stop(); attention.clear(); activityMesh.stop(); teamActivity.clear(); }, setObjectivesStatus: (...args) => runtime_views.setObjectivesStatus(...args) } });
 const runtime_views = createRuntimeViews({ runtime_viewsState, sharedState, lifecycle, requestClient, operations: { ensureRuntimeControlsSession: (...args) => authentication.ensureRuntimeControlsSession(...args), formatShortLocalTimestamp: (...args) => formatShortLocalTimestamp(...args), parseApiResponse: (...args) => parseApiResponse(...args), timestampElement: (...args) => timestampElement(...args), uiElement: (...args) => uiElement(...args) } });
 // The team's live status, carried by every live page and shown by the
 // activity mesh, Settings → Team and the Tasks view (team_activity.mjs).
@@ -249,6 +249,11 @@ shellState.threadPreview = createThreadPreview({
   list: sharedState.threadList,
   threadFor: sessionKey => threadForSession(sessionKey),
   assistantName: () => sharedState.assistantName,
+  // Not for the chat already open beside it, nor under an open menu (C30).
+  canPreview: sessionKey => {
+    var thread = threadForSession(sessionKey);
+    return Boolean(thread) && thread.id !== sharedState.activeThreadId && !shellState.threadMenu.isOpen();
+  },
 });
 // Right-click, long press, the context-menu key or Shift+F10 on a row open its
 // menu; tracked once for the whole list so a redraw cannot orphan a press.
@@ -2021,6 +2026,15 @@ function appendRenameControls(row, thread) {
         input.setSelectionRange(draft.start, draft.end);
       }
     }, 0);
+  }
+
+// At sign-out: close the thread menu and the hover card (they live in the
+// page body, outside the list lockChat empties) and forget the preview's
+// message text and a half-typed name (plan review C29).
+function clearThreadListOverlays() {
+    shellState.threadMenu.close({ restoreFocus: false });
+    shellState.threadPreview.clear();
+    sharedState.renameDraft = null;
   }
 
 function cancelThreadRename() {

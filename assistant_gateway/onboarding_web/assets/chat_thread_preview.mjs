@@ -32,9 +32,14 @@ function attachmentName(message) {
   return (first && String(first.filename || "")) || "Attachment";
 }
 
-export function createThreadPreview({ document, window, lifecycle, requestClient, list, threadFor, assistantName, now = () => Date.now() }) {
+// `canPreview(sessionKey)` says whether a card may show now: never for the
+// chat that is open beside it, and not while the thread menu is open.
+export function createThreadPreview({ document, window, lifecycle, requestClient, list, threadFor, assistantName, canPreview = () => true, now = () => Date.now() }) {
   const cache = new Map(); // sessionKey -> { sequence, turns, turnCount }
   let hovered = "";
+  // A row just pressed is not previewed again until the pointer leaves it:
+  // the press opens that chat, and the card would cover it (plan review C30).
+  let pressed = "";
   let timer = 0;
   let card = null;
   let generation = 0;
@@ -55,6 +60,7 @@ export function createThreadPreview({ document, window, lifecycle, requestClient
   function hover(sessionKey) {
     if (sessionKey === hovered) return;
     hide();
+    if (sessionKey === pressed || !canPreview(sessionKey)) return;
     hovered = sessionKey;
     timer = lifecycle.timeout(() => {
       timer = 0;
@@ -64,7 +70,7 @@ export function createThreadPreview({ document, window, lifecycle, requestClient
 
   function show(sessionKey) {
     const thread = threadFor(sessionKey);
-    if (!thread) return hide();
+    if (!thread || !canPreview(sessionKey)) return hide();
     const cached = cache.get(sessionKey);
     if (cached && cached.sequence === Number(thread.lastSequence || 0)) {
       draw(thread, cached);
@@ -116,7 +122,10 @@ export function createThreadPreview({ document, window, lifecycle, requestClient
     const header = element("div", "thread-preview-header");
     header.appendChild(element("strong", "thread-preview-title", thread.titleFull || thread.title || ""));
     const at = Number(thread.lastActivityAt || 0);
-    if (at) header.appendChild(element("span", "thread-preview-age", "last message " + formatThreadAge(at, now()) + " ago"));
+    if (at) {
+      const age = formatThreadAge(at, now());
+      header.appendChild(element("span", "thread-preview-age", age === "now" ? "last message just now" : "last message " + age + " ago"));
+    }
     card.appendChild(header);
     if (!content) {
       card.appendChild(element("p", "thread-preview-status", "Loading…"));
@@ -161,17 +170,31 @@ export function createThreadPreview({ document, window, lifecycle, requestClient
   lifecycle.listen(list, "pointerover", event => {
     if (event.pointerType !== "mouse") return;
     const sessionKey = rowKey(event);
+    if (sessionKey !== pressed) pressed = "";
     if (sessionKey) hover(sessionKey);
     else hide();
   });
-  lifecycle.listen(list, "pointerleave", hide);
-  lifecycle.listen(list, "pointerdown", hide);
+  lifecycle.listen(list, "pointerleave", () => {
+    pressed = "";
+    hide();
+  });
+  lifecycle.listen(list, "pointerdown", event => {
+    pressed = rowKey(event);
+    hide();
+  });
   lifecycle.listen(list, "scroll", hide);
   lifecycle.listen(list, "contextmenu", hide);
   lifecycle.listen(window, "blur", hide);
 
   return {
     hide,
+    // Sign-out: no card stays on the sign-in page and no message text is
+    // kept for whoever signs in next (plan review C29).
+    clear() {
+      hide();
+      cache.clear();
+      pressed = "";
+    },
     // After the list is drawn again: keep the card beside the same thread's
     // row, or close it when that row is gone (plan review C03).
     refresh() {

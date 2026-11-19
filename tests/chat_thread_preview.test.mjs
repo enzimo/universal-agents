@@ -25,7 +25,7 @@ const NOW = Date.UTC(2026, 10, 19, 12);
 const at = minutes => new Date(NOW - minutes * 60000).toISOString();
 const message = (role, content, minutes, extra = {}) => ({ role, content, created_at_utc: at(minutes), attachments: [], ...extra });
 
-function fixture({ pages = {} } = {}) {
+function fixture({ pages = {}, canPreview = () => true } = {}) {
   const document = fakeDocument();
   const window = new EventTarget();
   Object.assign(window, { innerWidth: 1280, innerHeight: 880 });
@@ -65,17 +65,19 @@ function fixture({ pages = {} } = {}) {
     document, window, lifecycle, requestClient, list,
     threadFor: sessionKey => threads.get(sessionKey),
     assistantName: () => "Ava",
+    canPreview: sessionKey => canPreview(sessionKey),
     now: () => NOW,
   });
   // This stand-in does not bubble: deliver to the list as if from `element`.
-  const over = (element, pointerType = "mouse") => {
-    const event = Object.assign(new Event("pointerover"), { pointerType });
+  const fire = (type, element, pointerType = "mouse") => {
+    const event = Object.assign(new Event(type), { pointerType });
     Object.defineProperty(event, "target", { value: element });
     list.dispatchEvent(event);
   };
+  const over = (element, pointerType = "mouse") => fire("pointerover", element, pointerType);
   const answerAll = async () => { while (answers.length) { answers.shift()(); await settle(); } };
   const card = () => byClass(document.body, "thread-preview")[0];
-  return { document, window, list, threads, addRow, requests, runTimers, timers, preview, over, answerAll, card };
+  return { document, window, list, threads, addRow, requests, runTimers, timers, preview, over, fire, answerAll, card };
 }
 
 const FIRST_PAGE = {
@@ -219,4 +221,63 @@ test("a failed read says the preview is not available", async () => {
   runTimers();
   await answerAll();
   assert.equal(byClass(card(), "thread-preview-status")[0].textContent, "Preview not available.");
+});
+
+test("a thread with a message in the last minute reads 'last message just now' (C31)", async () => {
+  const { addRow, runTimers, over, answerAll, card } = fixture({ pages: { "": FIRST_PAGE } });
+  const row = addRow("alpha", { lastActivityAt: NOW - 12000 });
+  over(row.children[0]);
+  runTimers();
+  await answerAll();
+  assert.equal(byClass(card(), "thread-preview-age")[0].textContent, "last message just now");
+});
+
+test("the open chat, a row just pressed and rows under an open menu get no card (C30)", async () => {
+  let open = "alpha", menuOpen = false;
+  const f = fixture({ pages: { "": FIRST_PAGE }, canPreview: key => key !== open && !menuOpen });
+  const alpha = f.addRow("alpha");
+  const beta = f.addRow("beta");
+  f.over(alpha.children[0]);
+  f.runTimers();
+  assert.equal(f.requests.length, 0, "the chat open beside the list is not previewed");
+
+  // Pressing beta opens it; the list is drawn again under the resting mouse.
+  f.over(beta.children[0]);
+  f.fire("pointerdown", beta.children[0]);
+  open = "beta";
+  f.list.replaceChildren();
+  const redrawnBeta = f.addRow("beta");
+  f.over(redrawnBeta.children[0]);
+  f.runTimers();
+  assert.equal(f.card(), undefined, "no card comes back over the chat just opened");
+
+  // The menu opens on beta while the mouse rests on alpha.
+  open = "";
+  menuOpen = true;
+  f.list.replaceChildren();
+  const redrawnAlpha = f.addRow("alpha");
+  f.over(redrawnAlpha.children[0]);
+  f.runTimers();
+  assert.equal(f.card(), undefined, "no card behind an open menu");
+  menuOpen = false;
+  f.over(f.addRow("gamma").children[0]);
+  f.runTimers();
+  await f.answerAll();
+  assert.ok(f.card(), "with the menu closed a card shows again");
+});
+
+test("sign-out removes the card and forgets the cached text (C29)", async () => {
+  const { addRow, runTimers, over, answerAll, card, preview, requests, list } = fixture({ pages: { "": FIRST_PAGE } });
+  const row = addRow("alpha");
+  over(row.children[0]);
+  runTimers();
+  await answerAll();
+  assert.ok(card());
+  preview.clear();
+  assert.equal(card(), undefined);
+  list.dispatchEvent(new Event("pointerleave"));
+  over(row.children[0]);
+  runTimers();
+  await answerAll();
+  assert.equal(requests.length, 2, "a new hover reads the thread again");
 });
