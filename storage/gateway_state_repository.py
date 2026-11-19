@@ -154,12 +154,13 @@ _TRANSCRIPT_MESSAGE_COLUMNS = """
     created_at_utc
 """
 
-# Every gateway_tool_setups column, in ToolSetupRecord's field order.
-_TOOL_SETUP_COLUMNS = """
-    setup_request_id, parent_task_id, person_id, tool_id, kind, owner_kind,
-    session_key, correlation_id, conversation_id, status, created_at, finished_at,
-    result_json, result_state
-"""
+# Every gateway_tool_setups column; each is a ToolSetupRecord field of the same name.
+_TOOL_SETUP_COLUMN_NAMES = (
+    "setup_request_id", "parent_task_id", "person_id", "tool_id", "kind", "owner_kind",
+    "session_key", "correlation_id", "conversation_id", "status", "created_at", "finished_at",
+    "result_json", "result_state",
+)
+_TOOL_SETUP_COLUMNS = ", ".join(_TOOL_SETUP_COLUMN_NAMES)
 
 
 class GatewayStateRepository(
@@ -2656,7 +2657,8 @@ class _RelationalGatewayStateRepository:
             conn.commit()
 
     def record_tool_setup(self, record: ToolSetupRecord) -> None:
-        values = tuple(asdict(record).values())
+        # Values by column name, so the record's field order never matters.
+        values = tuple(getattr(record, column) for column in _TOOL_SETUP_COLUMN_NAMES)
         with self._connect() as conn:
             conn.execute(
                 f"INSERT INTO gateway_tool_setups ({_TOOL_SETUP_COLUMNS}) "

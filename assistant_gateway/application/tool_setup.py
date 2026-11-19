@@ -205,9 +205,11 @@ REASON_STEP_UNKNOWN = "tool_setup_step_unknown"
 # Why a kept result can never be sent (event=gateway_tool_setup_result_unsendable reason=...).
 UNSENDABLE_SESSION_MISSING = "session_missing"
 UNSENDABLE_UNREADABLE = "unreadable"
-# The retry stops after this many passes in a row stopped by an unexpected
-# error (about two minutes with its backoff), so a row that fails on every
-# pass does not keep it going; the next start or lead transition tries again.
+# The retry stops after this many passes in a row in which a kept result
+# failed with an unexpected error (about two minutes with its backoff), so a
+# row that fails on every pass does not keep it going; the next start or lead
+# transition tries again. A pass that could not even list the kept results (the
+# database is down) does not count: it is retried like a failed publish.
 RESEND_ERROR_PASSES_LIMIT = 8
 
 
@@ -279,12 +281,20 @@ class ResendPass:
     ``stopped`` is why the pass stopped before the end (no team lead known, or
     a failed publish); the results after that stay kept for the next pass.
     ``failed`` says an unexpected error (logged) kept at least one result, or
-    stopped the pass when the kept results could not be listed.
+    stopped the pass when the kept results could not be listed
+    (``listing_failed`` too).
     """
 
     sent: int
     stopped: SendOutcome | None = None
     failed: bool = False
+    listing_failed: bool = False
+
+    @property
+    def result_failed(self) -> bool:
+        """A kept result failed with an unexpected error (what the retry's give-up counts)."""
+
+        return self.failed and not self.listing_failed
 
     @property
     def reason(self) -> str:
@@ -435,12 +445,15 @@ class GatewayToolSetups:
         # apart from the page watches, which pending_count counts.
         self._retries = BrokerSessionWatches(owner="tool_setup_results", logger=self._logger)
         self._retrying = False
+        # Set by close(): no retry starts after the gateway began to stop.
+        self._closed = False
 
     @property
     def pending_count(self) -> int:
         return self._watches.count
 
     async def close(self) -> None:
+        self._closed = True
         await self._watches.close()
         await self._retries.close()
 
@@ -1231,7 +1244,7 @@ class GatewayToolSetups:
             records = self._setups.list_unsent_tool_setup_results()
         except Exception as error:  # noqa: BLE001 - the results stay kept; the next pass reads them again
             self._log_resend_failed(None, error)
-            return ResendPass(sent=0, failed=True)
+            return ResendPass(sent=0, failed=True, listing_failed=True)
         sent, failed = 0, False
         for record in records:
             try:
@@ -1322,8 +1335,16 @@ class GatewayToolSetups:
         )
 
     def _retry_later(self) -> None:
-        """Start the retry after a failed publish, unless it already runs."""
+        """Start the retry after a failed send, unless it already runs or the gateway is stopping."""
 
+        if self._closed:
+            # A pass still running while the gateway stops (a lead announced
+            # itself during close) must not start a retry that outlives it.
+            self._logger.info(
+                "Kept setup page results are not retried because the gateway is stopping; the next start sends "
+                "them. event=gateway_tool_setup_retry_skipped_closed"
+            )
+            return
         if self._retrying:
             return
         self._retrying = True
@@ -1335,7 +1356,8 @@ class GatewayToolSetups:
         Without a lead the next team-lead-available transition sends them; a
         NATS outage, or a database error, that ends without a lead change
         fires no transition, so this retry sends them then. Failed publishes
-        are retried for as long as they last; passes stopped by an unexpected
+        and failed listings (the database is down) are retried for as long as
+        they last; passes in which a kept result failed with an unexpected
         error only ``RESEND_ERROR_PASSES_LIMIT`` times in a row, then the retry
         gives up with one line and the results stay kept for the next start or
         transition.
@@ -1350,7 +1372,7 @@ class GatewayToolSetups:
                     sending = await self._send_pass()
                 if not self._needs_retry(sending):
                     return
-                error_passes = error_passes + 1 if sending.failed else 0
+                error_passes = error_passes + 1 if sending.result_failed else 0
                 if error_passes >= RESEND_ERROR_PASSES_LIMIT:
                     self._logger.error(
                         "Stopped retrying the kept setup page results after repeated errors; they stay kept for the "

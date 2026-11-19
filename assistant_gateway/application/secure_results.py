@@ -110,12 +110,16 @@ class SecureResultPublisher:
         request_text: str,
         parent_task_id: str | None,
     ) -> SendOutcome:
-        """Send the result to the team lead known now (module docstring); a failure is logged, never raised.
+        """Send the result to the team lead known now (module docstring) and say how the send went.
 
-        When a lead is known, the chat request is recorded as waiting for the
-        resumed task's reply before the publish, so a fast reply cannot be
-        overwritten by it; a failed publish leaves that waiting status (never a
-        finished one) while the caller keeps the result.
+        A missing lead or a failed publish is logged and returned as the
+        outcome, not raised. When a lead is known, the chat request is recorded
+        as waiting for the resumed task's reply before the publish, so a fast
+        reply cannot be overwritten by it; a failed publish leaves that waiting
+        status (never a finished one) while the caller keeps the result. An
+        error recording that wait (a database error) is raised: every caller
+        keeps the result and logs it (the setup pages' send pass, the
+        credential form watcher, the refusal path).
         """
 
         manager_id = self._manager_client.manager_id

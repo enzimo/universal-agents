@@ -1565,3 +1565,80 @@ async def test_a_result_that_fails_every_time_does_not_hold_back_newer_ones(chat
     failed = [record.getMessage() for record in caplog.records if "event=gateway_tool_setup_resend_failed" in record.getMessage()]
     assert failed and all("setup_request_id=tool_setup_req_broken" in line for line in failed)
     assert "event=gateway_tool_setup_resend_gave_up" in caplog.text, "the retry still ends"
+
+
+def _kept_result_row(gateway: UserGateway, setup_request_id: str) -> None:
+    """A page that ended earlier and whose result is kept, unsent."""
+
+    _setups(gateway).record_tool_setup(
+        ToolSetupRecord(
+            setup_request_id=setup_request_id, parent_task_id=TASK, person_id=gateway.config.user.canonical_user_id,
+            tool_id="cli:github", kind="sign_in", owner_kind="person", session_key=SESSION,
+            correlation_id=CHAT_REQUEST, conversation_id="conversation_link", status="waiting",
+            created_at="2026-09-28T07:00:00+00:00",
+        )
+    )
+    assert _setups(gateway).finish_tool_setup(
+        setup_request_id, status="expired", result_json=_result_json(setup_request_id)
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_database_outage_longer_than_the_give_up_does_not_end_the_retry(
+    chat_setup_gateway, monkeypatch, caplog
+) -> None:
+    """Passes that cannot even list the kept results do not count toward the give-up (review FAIL-2)."""
+
+    import sqlite3
+
+    from assistant_gateway.application import tool_setup as tool_setup_module
+
+    gateway, _broker, transport, _events = chat_setup_gateway
+    setups = gateway._credential_workflow.tool_setups
+    monkeypatch.setattr(tool_setup_module, "SECURE_RESULT_RETRY_MIN_SECONDS", 0.001)
+    monkeypatch.setattr(tool_setup_module, "SECURE_RESULT_RETRY_MAX_SECONDS", 0.002)
+    _kept_result_row(gateway, "tool_setup_req_kept")
+    store = _setups(gateway)
+    real_listing = store.list_unsent_tool_setup_results
+    outage = tool_setup_module.RESEND_ERROR_PASSES_LIMIT + 3
+    listings = 0
+
+    def listing_during_an_outage():
+        nonlocal listings
+        listings += 1
+        if listings <= outage:
+            raise sqlite3.OperationalError("unable to open database file")
+        return real_listing()
+
+    monkeypatch.setattr(store, "list_unsent_tool_setup_results", listing_during_an_outage)
+
+    with caplog.at_level("INFO"):
+        sending = await setups.resend_kept_results()
+        assert (sending.failed, sending.listing_failed, sending.result_failed) == (True, True, False)
+        await _until(lambda: len(_setup_results(transport)) == 1)
+        await _until(lambda: setups._retries.count == 0)
+
+    assert listings == outage + 1, "the retry kept going through the outage and sent the result after it"
+    assert "event=gateway_tool_setup_resend_gave_up" not in caplog.text
+    assert _setups(gateway).get_tool_setup("tool_setup_req_kept").result_state == "sent"
+
+
+@pytest.mark.asyncio
+async def test_no_retry_starts_after_the_gateway_began_to_stop(flaky_gateway, caplog) -> None:
+    """A lead announcing itself while the gateway stops must not leave a retry running after close (review CONC-02)."""
+
+    gateway, transport, _events = flaky_gateway
+    setups = gateway._credential_workflow.tool_setups
+    transport.failures = 100  # NATS is closing: every publish fails while the route is still known
+    _kept_result_row(gateway, "tool_setup_req_kept")
+
+    await setups.close()
+    with caplog.at_level("INFO"):
+        sending = await setups.resend_kept_results()
+
+    assert sending.stopped is not None and sending.stopped.value == "publish_failed"
+    assert (setups._retries.count, setups._retrying) == (0, False)
+    assert "event=gateway_tool_setup_retry_skipped_closed" in caplog.text
+    await asyncio.sleep(0.05)
+    assert len(transport.attempts) == 1, "nothing tries again after close"
+    assert _setups(gateway).get_tool_setup("tool_setup_req_kept").result_state == "unsent", "kept for the next start"

@@ -2839,9 +2839,13 @@ person which command to run or asking whether to start:
    team-lead-available transition (`manager_transitions.handle_available`,
    after the notice and the apps' hook), and by a retry with backoff (1 to 30
    seconds) after a failed publish or an unexpected error while a lead is
-   known; the retry gives up after eight error passes in a row
-   (`event=gateway_tool_setup_resend_gave_up`) and the next start or
-   transition tries again. One pass at a time sends them, oldest first, and
+   known; the retry gives up after eight passes in a row in which a kept
+   result failed with an error (`event=gateway_tool_setup_resend_gave_up`)
+   and the next start or transition tries again, while a pass that cannot
+   even list the kept results (the database is down) is retried like a
+   failed publish. No retry starts once the gateway began to stop
+   (`event=gateway_tool_setup_retry_skipped_closed`); the next start sends
+   what is still kept. One pass at a time sends them, oldest first, and
    reads them afresh, so a result is never sent from two places at once; a
    missing lead or a failed publish stops the pass, while an error on one
    result is logged (`event=gateway_tool_setup_resend_failed`) and the pass
