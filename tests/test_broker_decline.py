@@ -260,7 +260,9 @@ async def test_declining_a_running_github_sign_in_stays_declined(broker, monkeyp
     assert payload["failure_reason"] is None
     assert finalized == []
     assert "event=broker_auth_process_failed" not in caplog.text
-    assert "event=broker_auth_process_ended_after_decline" in caplog.text
+    # gh that ended with 0 as it was stopped may keep its own sign-in: the log says so.
+    expected_event = "broker_auth_signed_in_after_decline" if finishes_on_stop else "broker_auth_process_ended_after_decline"
+    assert f"event={expected_event}" in caplog.text
 
 
 def test_declining_a_running_google_sign_in_stays_declined(tmp_path: Path, caplog) -> None:
@@ -317,3 +319,103 @@ async def test_a_cross_site_post_without_the_private_link_is_refused(broker, pat
     for headers in ({"Origin": "https://evil.example"}, FROM_CARD):
         forged = await client.post(path, data={**DECLINE, "token": "x"}, headers=headers)
         assert forged.status == 404
+
+
+# -- Decline only while a page is open and offers it (C15, C16) -----------------------
+
+
+async def _running_github_sign_in(client: TestClient, service: SecureToolBrokerService) -> tuple[str, BrokerAuthSession]:
+    path = await _sign_in(client, "github", "web")
+    assert (await client.get(card_view_url(path))).status == 200
+    return path, next(iter(service._auth_sessions.values()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ended", ["success", "error"])
+async def test_a_stale_decline_never_changes_an_ended_sign_in(broker, caplog, ended) -> None:
+    """A second view (the card and its own tab) may still show Decline after the sign-in ended."""
+
+    client, service = broker
+    caplog.set_level(logging.INFO)
+    path, session = await _running_github_sign_in(client, service)
+    session.state["status"] = ended
+
+    answer = await client.post(card_view_url(path), data=DECLINE, headers=FROM_CARD)
+    assert answer.status == 200
+    assert _outcome(await answer.text()) == ("finished" if ended == "success" else None)
+    assert (await (await client.get(f"{path}/status")).json())["status"] == ended
+    assert not session.used
+    assert "event=broker_auth_decline_ignored" in caplog.text
+    assert "reason=page_already_ended" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_decline_after_the_sign_in_process_finished_reports_the_real_result(broker, caplog) -> None:
+    client, service = broker
+    caplog.set_level(logging.INFO)
+    path, session = await _running_github_sign_in(client, service)
+    session.process.terminate()  # stands in for gh having exited...
+    session.process.wait()
+    session.thread.join(timeout=10)
+    finished = subprocess.Popen(["true"])  # ...with exit code 0
+    finished.wait()
+    session.process = finished
+    session.state["status"] = "pending"
+
+    await client.post(card_view_url(path), data=DECLINE, headers=FROM_CARD)
+    assert session.state["status"] != "declined"
+    assert not session.used
+    assert "reason=sign_in_already_finished" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_pages_with_their_own_close_ignore_a_decline(broker) -> None:
+    from secure_tool_broker import team_export_page
+
+    client, service = broker
+    keys = await client.post(
+        "/v1/auth/model/sessions", headers=gateway_headers(), json={"context": _context(["admin"]), "method": "team"}
+    )
+    export = await client.post(
+        "/v1/auth/team/sessions", headers=gateway_headers(), json={"context": _context(["owner"]), "method": "export"}
+    )
+    for created in (keys, export):
+        path = _path((await created.json())["login_url"])
+        session = service._auth_sessions[path.rsplit("/", 1)[1]]
+        if session.provider == "team":
+            # An export is running: the page must stay to hear how it ends.
+            session.state[team_export_page._STATUS] = team_export_page.STATUS_EXPORTING
+        before = dict(session.state)
+        answer = await client.post(card_view_url(path), data=DECLINE)
+        assert answer.status == 200
+        assert _outcome(await answer.text()) is None
+        assert session.state == before
+        assert not session.used
+
+
+def test_a_decline_while_the_sign_in_is_being_stored_keeps_the_page_declined(monkeypatch, caplog) -> None:
+    """The process exited 0 and the broker is storing the sign-in when Decline arrives."""
+
+    caplog.set_level(logging.INFO)
+    now = datetime.now(timezone.utc)
+    session = BrokerAuthSession(
+        provider="github",
+        method="web",
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+        owner_canonical_user_id="user-1",
+        state={"status": "pending"},
+    )
+
+    def finalize_while_declined(held: BrokerAuthSession, _logger) -> bool:
+        held.state["status"] = "declined"  # Decline lands during the store
+        return True
+
+    monkeypatch.setattr(auth_flows, "_finalize_github_web_auth", finalize_while_declined)
+    session.process = subprocess.Popen(
+        ["sh", "-c", "exit 0"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+    auth_flows._monitor_web_auth_process(session=session, timeout_seconds=30, logger=logging.getLogger("test"))
+
+    assert session.state["status"] == "declined"
+    assert "event=broker_auth_signed_in_after_decline" in caplog.text

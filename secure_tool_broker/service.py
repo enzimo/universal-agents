@@ -2623,14 +2623,51 @@ class SecureToolBrokerService:
     def _auth_display_name(provider: str) -> str:
         return AUTH_PROVIDER_DISPLAY_NAMES.get(provider, provider.title())
 
+    @staticmethod
+    def _decline_refusal(session: BrokerAuthSession, flow: Any) -> str | None:
+        """Why this sign-in page cannot be declined now, or None while it is open and offers Decline.
+
+        A page whose sign-in already ended (success, error or declined) keeps
+        that ending: a Decline from a stale second view (the card and its own
+        tab) must not turn a stored sign-in into "declined". The long-lived
+        pages (/auth model, /upgrade) have their own Close and no Decline. A
+        sign-in process that already exited 0 has finished signing in; its real
+        result is reported instead.
+        """
+
+        if flow is not None and not getattr(flow, "declinable", True):
+            return "page_without_decline"
+        if str(session.state.get("status") or "") in SIGN_IN_FINAL_STATUSES:
+            return "page_already_ended"
+        process = session.process
+        if process is not None and process.poll() == 0:
+            return "sign_in_already_finished"
+        return None
+
     async def _decline_auth_session(self, session_id: str, session: BrokerAuthSession, flow: Any) -> web.Response:
         """The person declined a sign-in page: it ends as declined and its sign-in process stops.
 
         "declined" is set before the process is stopped, so the process monitor
-        (auth_flows._monitor_web_auth_process) leaves it and stores nothing.
+        (auth_flows._monitor_web_auth_process) leaves it and stores nothing. A
+        page that cannot be declined now (``_decline_refusal``) is answered as it
+        stands and does not change.
         """
 
         _claim_auth_form_submission(session, prune_expired=self._prune_auth_sessions)
+        refusal = self._decline_refusal(session, flow)
+        if refusal is not None:
+            _finish_form_submission(session)
+            self._logger.info(
+                "A Decline was not applied to a sign-in page. event=broker_auth_decline_ignored provider=%s method=%s "
+                "reason=%s session_id_prefix=%s",
+                session.provider,
+                session.method,
+                refusal,
+                session_id[:12],
+            )
+            if flow is None:
+                raise web.HTTPConflict(text="This page can no longer be declined.")
+            return web.Response(text=flow.render(session), content_type="text/html")
         session.state["status"] = SIGN_IN_STATUS_DECLINED
         session.state["message"] = "The person declined this page."
         session.used = True

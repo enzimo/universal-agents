@@ -551,6 +551,28 @@ def _auth_failure_details_html(session: BrokerAuthSession) -> str:
     )
 
 
+def _log_ended_after_decline(session: BrokerAuthSession, logger: logging.Logger, *, exit_code: int) -> None:
+    """A declined sign-in's process ended; exit code 0 means its CLI may still hold a sign-in."""
+
+    if exit_code == 0:
+        logger.warning(
+            "A declined sign-in's process finished signing in just before it was stopped; the page stays declined, "
+            "but a sign-in may remain. Check with /auth status. event=broker_auth_signed_in_after_decline "
+            "provider=%s method=%s person_id=%s",
+            session.provider,
+            session.method,
+            session.owner_canonical_user_id,
+        )
+        return
+    logger.info(
+        "A declined sign-in's process ended; nothing was stored. event=broker_auth_process_ended_after_decline "
+        "provider=%s method=%s exit_code=%s",
+        session.provider,
+        session.method,
+        exit_code,
+    )
+
+
 def _monitor_web_auth_process(
     *,
     session: BrokerAuthSession,
@@ -616,22 +638,26 @@ def _monitor_web_auth_process(
         session.state.setdefault("completed_at", datetime.utcnow().isoformat() + "Z")
         if session.state.get("status") == SIGN_IN_STATUS_DECLINED:
             # The person declined the page, and Decline stopped this process
-            # (service._decline_auth_session). The page stays declined and nothing
-            # is stored, even when the process had already finished the sign-in
-            # (exit code 0): a declined sign-in never becomes the person's.
-            logger.info(
-                "A declined sign-in's process ended; nothing was stored. event=broker_auth_process_ended_after_decline "
-                "provider=%s method=%s exit_code=%s",
-                session.provider,
-                session.method,
-                exit_code,
-            )
+            # (service._decline_auth_session). The page stays declined and the
+            # broker stores nothing. Decline is refused once the process exited
+            # 0, so exit code 0 here means the CLI finished in the moment before
+            # it was stopped and may have kept its own sign-in.
+            _log_ended_after_decline(session, logger, exit_code=exit_code)
         elif session.state.get("status") != "error":
             if exit_code == 0:
                 session.state["auth_stage"] = "credential_verification_and_storage"
-                if session.provider == "github" and not _finalize_github_web_auth(session, logger):
-                    session.state["status"] = "error"
-                elif session.provider == "google" and not _finalize_google_web_auth(session, logger):
+                finalized = (
+                    _finalize_github_web_auth(session, logger)
+                    if session.provider == "github"
+                    else _finalize_google_web_auth(session, logger)
+                    if session.provider == "google"
+                    else True
+                )
+                if session.state.get("status") == SIGN_IN_STATUS_DECLINED:
+                    # Declined while the sign-in was being stored: the page stays
+                    # declined, and the log says a sign-in may remain.
+                    _log_ended_after_decline(session, logger, exit_code=exit_code)
+                elif not finalized:
                     session.state["status"] = "error"
                 else:
                     session.state["status"] = "success"

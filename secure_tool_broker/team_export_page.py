@@ -348,6 +348,8 @@ class TeamExportFlow:
     display_name = "Team export"
     kind = "form"
     page_seconds = TEAM_EXPORT_PAGE_SECONDS
+    # Ends with its own Close; the service's Decline is refused here (SecureToolBrokerService._decline_refusal).
+    declinable = False
 
     def opening_refusal(self, roles: tuple[str, ...]) -> str | None:
         """Checked when the page opens, with the roles the gateway vouched for."""
