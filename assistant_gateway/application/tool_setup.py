@@ -139,7 +139,7 @@ from custom_messages.contracts.credentials_v1 import (
 )
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.tool_setup_spec_v1 import ExternalSetupStepV1
-from secure_tool_broker.defaults import (
+from secure_tools.broker_pages import (
     SIGN_IN_FINAL_STATUSES,
     SIGN_IN_STATUS_DECLINED,
     SIGN_IN_STATUS_ERROR,

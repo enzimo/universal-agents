@@ -24,7 +24,8 @@ from aiohttp.test_utils import TestClient, TestServer, unused_port
 
 from secure_tool_broker import auth_flows
 from secure_tool_broker.auth_flows import BrokerAuthSession, GoogleWebAuthFlow, get_auth_flow
-from secure_tool_broker.defaults import DECLINE_FIELD, card_view_url
+from secure_tool_broker.defaults import DECLINE_FIELD
+from secure_tools.broker_pages import card_view_url
 from custom_messages.contracts.credentials_v1 import CREDENTIAL_DECLINED
 from secure_tool_broker.service import SecureToolBrokerService
 from secure_tools.providers import ToolResult

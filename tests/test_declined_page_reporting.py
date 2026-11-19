@@ -28,7 +28,8 @@ from custom_messages.contracts.credentials_v1 import (
     SecureCredentialCollectionResult,
     SecureCredentialResultStatus,
 )
-from secure_tool_broker.defaults import DECLINE_FIELD, SIGN_IN_FINAL_STATUSES, SIGN_IN_STATUS_DECLINED
+from secure_tool_broker.defaults import DECLINE_FIELD
+from secure_tools.broker_pages import SIGN_IN_FINAL_STATUSES, SIGN_IN_STATUS_DECLINED
 from secure_tool_broker.service import SecureToolBrokerService
 from tests.broker_access_support import BROKER_ROOT, TEST_TEAM, gateway_headers, open_gate
 

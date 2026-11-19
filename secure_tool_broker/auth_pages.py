@@ -14,11 +14,31 @@ from pathlib import Path
 
 from runtime_hosting.page_icon import favicon_link_tag
 from runtime_settings.appearance import dark_appearance_css_declarations
+from custom_messages.contracts.model_keys_v1 import MODEL_KEY_AUTH_PROVIDER
 from secure_tool_broker.defaults import DECLINE_FIELD, DECLINE_VALUE
+from secure_tools.auth_methods import X_SIGN_IN_PROVIDER
 from secure_tool_broker.page_view import current_view
 
 LOGGER = logging.getLogger(__name__)
 BROKER_APPEARANCE_ENV = "SECURE_TOOL_BROKER_APPEARANCE_JSON"
+# How broker pages name a sign-in provider.
+AUTH_PROVIDER_DISPLAY_NAMES = {
+    "github": "GitHub",
+    "google": "Google",
+    "bitwarden": "Bitwarden",
+    "onepassword": "1Password",
+    "keepass": "KeePass/KeePassXC",
+    "vault": "HashiCorp Vault",
+    "sealbox": "Sealbox",
+    X_SIGN_IN_PROVIDER: "X",
+    MODEL_KEY_AUTH_PROVIDER: "model provider",
+}
+
+
+def auth_display_name(provider: str) -> str:
+    """The provider's name on a broker page ("GitHub"), or its id title-cased."""
+
+    return AUTH_PROVIDER_DISPLAY_NAMES.get(provider, provider.title())
 
 # How a page shown as a card in Web Chat ended (page_assets/card_bridge.js tells
 # the chat, which then shrinks the card to one line). Only the handler that knows

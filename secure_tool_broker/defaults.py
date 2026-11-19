@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 DEFAULT_BIND_HOST = "0.0.0.0"
 DEFAULT_BIND_PORT = 18600
@@ -67,43 +66,10 @@ MODEL_KEY_STATUS_ROUTE = "/v1/auth/model-keys/status"
 
 # -- Broker pages people open in a browser ------------------------------------------
 #
-# Sign-ins (/auth/...), credential collection and deletion forms
-# (/credential-collection/...) and account link forms (/account-link/...). Each
-# address holds the page's private link; the caller-token middleware lets these
-# paths through and the page itself checks the link (secure_tool_broker.service).
-BROKER_PAGE_PREFIXES = ("/auth/", "/credential-collection/", "/account-link/")
+# Which paths are pages, the card view and the sign-in statuses are shared with
+# the gateway in secure_tools.broker_pages.
 # The status a sign-in page's own script polls (sign_in_pages.sign_in_wait_script).
 AUTH_PAGE_STATUS_ROUTE = "/auth/{provider}/{session_id}/status"
-
-# Web Chat shows a broker page inside the chat as a card: the same address with
-# ``?view=card`` (secure_tool_broker.page_view). Only the Web Chat's own address
-# may frame that view, and the page is always sandboxed.
-CARD_VIEW_PARAM = "view"
-CARD_VIEW_VALUE = "card"
-# The sandbox both for the card view's Content-Security-Policy and for the
-# iframe Web Chat builds (assistant_gateway/onboarding_web/assets/broker_card.js).
-# Never allow-same-origin: behind a reverse proxy the broker shares the chat's
-# address, and only an opaque origin keeps the chat page from reading the form.
-CARD_FRAME_SANDBOX = "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
-
-
-def card_view_url(url: str) -> str:
-    """The card view of a broker page address: the same address with ``view=card``."""
-
-    parts = urlsplit(url)
-    query = [(name, value) for name, value in parse_qsl(parts.query, keep_blank_values=True) if name != CARD_VIEW_PARAM]
-    query.append((CARD_VIEW_PARAM, CARD_VIEW_VALUE))
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
-
-# -- How a broker page ended ----------------------------------------------------------
-#
-# A sign-in page's status (its own status route; the gateway's watchers read it
-# in assistant_gateway.application.tool_setup and link_results): one of these
-# ends the page. "declined" means the person chose Decline on the page.
-SIGN_IN_STATUS_SUCCESS = "success"
-SIGN_IN_STATUS_ERROR = "error"
-SIGN_IN_STATUS_DECLINED = "declined"
-SIGN_IN_FINAL_STATUSES = frozenset({SIGN_IN_STATUS_SUCCESS, SIGN_IN_STATUS_ERROR, SIGN_IN_STATUS_DECLINED})
 # The hidden field of a page's Decline form (auth_pages.render_broker_auth_page).
 # Decline is its own small form, so no value typed into the page travels with it.
 DECLINE_FIELD = "ua_decline"

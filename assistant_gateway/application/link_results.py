@@ -61,7 +61,7 @@ from assistant_gateway.application.ports import (
 )
 from assistant_gateway.domain.message_types import LINK_RESULT_MESSAGE_TYPE
 from assistant_gateway.ports.repositories import SessionRepository
-from secure_tool_broker.defaults import (
+from secure_tools.broker_pages import (
     SIGN_IN_FINAL_STATUSES,
     SIGN_IN_STATUS_DECLINED,
     SIGN_IN_STATUS_ERROR,

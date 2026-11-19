@@ -34,29 +34,25 @@ and returns no secret.
 
 from __future__ import annotations
 
-import ipaddress
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
-from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from secure_tool_broker.defaults import (
-    AUTH_PAGE_STATUS_ROUTE,
+from secure_tool_broker.defaults import AUTH_PAGE_STATUS_ROUTE
+from secure_tools.broker_pages import (
     BROKER_PAGE_PREFIXES,
     CARD_FRAME_SANDBOX,
     CARD_VIEW_PARAM,
     CARD_VIEW_VALUE,
+    policy_origin,
 )
 
 LOGGER = logging.getLogger(__name__)
 
 FULL_PAGE_CSP = "frame-ancestors 'none'"
-# A host name or IPv4 address as it may appear in a Content-Security-Policy source.
-_HOST_NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
 # The browser sends this Origin for a request from a sandboxed (opaque-origin) document.
 OPAQUE_ORIGIN = "null"
 
@@ -80,45 +76,19 @@ def current_view() -> PageView:
 
 
 def web_chat_origin(base_url: str | None) -> str | None:
-    """The origin (scheme, host, port) of the Web Chat's public base address, or None if unusable.
+    """The Web Chat's origin for ``frame-ancestors`` (``broker_pages.policy_origin``), or None with a warning.
 
-    The origin goes into a Content-Security-Policy header, so it is rebuilt from
-    checked parts, never copied: a host of letters, digits, dots and hyphens (or
-    an IPv6 address) and a numeric port. Anything else (a semicolon that would
-    start another directive, a space, a comma, a bad port) turns the card view
-    off with a warning instead of changing the policy.
+    An address that could change the policy (a semicolon, a space, a comma, a
+    bad port) turns the card view off instead.
     """
 
-    text = str(base_url or "").strip()
-    if not text:
-        return None
-    parts = urlsplit(text)
-    host = parts.hostname or ""
-    try:
-        port = parts.port
-    except ValueError:
-        port = None
-        host = ""
-    if (
-        parts.scheme not in {"http", "https"}
-        or parts.username
-        or parts.password
-        or not (_HOST_NAME.fullmatch(host) or _is_ipv6(host))
-    ):
+    origin = policy_origin(base_url)
+    if origin is None and str(base_url or "").strip():
         LOGGER.warning(
             "The Web Chat address is not a plain http(s) address; broker pages will not show inside the chat. "
             "event=broker_card_view_origin_unusable",
         )
-        return None
-    shown_host = f"[{host}]" if _is_ipv6(host) else host
-    return f"{parts.scheme}://{shown_host}" + (f":{port}" if port is not None else "")
-
-
-def _is_ipv6(host: str) -> bool:
-    try:
-        return isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
-    except ValueError:
-        return False
+    return origin
 
 
 def card_view_headers(parent_origin: str) -> dict[str, str]:

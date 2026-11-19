@@ -25,7 +25,7 @@ from secure_tool_broker.auth_pages import (
     render_session_countdown,
 )
 from secure_tool_broker.credential_state import credential_owner_environment
-from secure_tool_broker.defaults import SIGN_IN_STATUS_DECLINED
+from secure_tools.broker_pages import SIGN_IN_STATUS_DECLINED
 from secure_tool_broker.credential_state_store import (
     credential_state_backend_mode,
     read_credential_state,

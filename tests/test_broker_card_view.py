@@ -19,7 +19,7 @@ import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer, unused_port
 
 from secure_tool_broker.auth_flows import get_auth_flow
-from secure_tool_broker.defaults import CARD_FRAME_SANDBOX, card_view_url
+from secure_tools.broker_pages import CARD_FRAME_SANDBOX, card_view_url
 from secure_tool_broker.model_key_page import model_key_reports, team_model_key_store
 from secure_tool_broker.page_view import web_chat_origin
 from secure_tool_broker.service import SecureToolBrokerService
