@@ -1011,11 +1011,6 @@ class _RelationalGatewayStateRepository:
 
         raise NotImplementedError
 
-    def _ensure_column(self, conn: Any, table_name: str, column_name: str, column_type: str) -> None:
-        """Add a column an existing table lacks when the store opens (each database adds it differently)."""
-
-        raise NotImplementedError
-
 
     def _connect(self) -> sqlite3.Connection | _BorrowedConnection:
         active = self._active_transaction.get()
@@ -1170,8 +1165,9 @@ class _RelationalGatewayStateRepository:
             )
             # A finished page keeps its result until it is sent
             # (ToolSetupRecord); tables from before this have neither column.
-            self._ensure_column(conn, "gateway_tool_setups", "result_json", "TEXT")
-            self._ensure_column(conn, "gateway_tool_setups", "result_state", "TEXT")
+            # Added before the indexes below, one of which reads result_state.
+            ensure_column(conn, "gateway_tool_setups", "result_json", "TEXT", logger=self._logger)
+            ensure_column(conn, "gateway_tool_setups", "result_state", "TEXT", logger=self._logger)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_gateway_tool_setups_status

@@ -140,7 +140,7 @@ def test_an_unsent_result_is_marked_sent_or_unsendable_once_and_its_copy_dropped
     assert unsent.result_json == _result("page_3"), "an unsent result keeps its copy"
 
 
-def test_a_table_from_before_kept_results_gains_their_columns_when_the_store_opens(settings) -> None:
+def test_a_table_from_before_kept_results_gains_their_columns_when_the_store_opens(settings, caplog) -> None:
     _execute(settings, _TABLE_BEFORE_KEPT_RESULTS)
     columns = "setup_request_id, parent_task_id, person_id, tool_id, kind, owner_kind, session_key, " \
         "correlation_id, conversation_id, status, created_at, finished_at"
@@ -155,8 +155,15 @@ def test_a_table_from_before_kept_results_gains_their_columns_when_the_store_ope
              "conv_alpha", status, "2026-11-18T09:00:00+00:00", finished_at),
         )
 
-    repo = _open(settings)
+    with caplog.at_level(logging.INFO):
+        repo = _open(settings)
 
+    # The shared upgrade step (storage.table_columns.ensure_column) adds and logs each column once.
+    added = [record.getMessage() for record in caplog.records if "event=storage_column_added" in record.getMessage()]
+    assert [line.rsplit(" table=", 1)[1] for line in added] == [
+        "gateway_tool_setups column=result_json",
+        "gateway_tool_setups column=result_state",
+    ]
     old = repo.get_tool_setup("page_old")
     assert (old.status, old.result_json, old.result_state) == ("completed", None, None)
     assert repo.list_unsent_tool_setup_results() == [], "a result finished before this version is unknown, never resent"
@@ -168,7 +175,10 @@ def test_a_table_from_before_kept_results_gains_their_columns_when_the_store_ope
         indexes = _execute(settings, "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'gateway_tool_setups'")
     assert ("idx_gateway_tool_setups_unsent",) in indexes
     # Opening the store again changes nothing.
-    assert _open(settings).get_tool_setup("page_open").result_unsent
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert _open(settings).get_tool_setup("page_open").result_unsent
+    assert "event=storage_column_added" not in caplog.text
 
 
 def test_a_removed_persons_setup_pages_go_with_their_chat_sessions(settings) -> None:
