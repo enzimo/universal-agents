@@ -24,6 +24,7 @@ from assistant_gateway.application.pending_questions import (
     GatewayPendingQuestions,
     QuestionDisplay,
 )
+from assistant_gateway.application.reply_leftovers import ArrivalRoute
 from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.application.response_models import GatewayResponse
 from assistant_gateway.domain.request_state import REQUEST_STATUS_WAITING_FOR_STEERING
@@ -439,6 +440,7 @@ class GatewayResponseCoordinator:
                     agent_signature="",
                 ),
             ),
+            route=ArrivalRoute.GATEWAY,
         )
 
     def _response(

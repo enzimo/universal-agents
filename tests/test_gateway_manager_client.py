@@ -9,6 +9,7 @@ from assistant_gateway.application.manager_client import (
     GatewayManagerClient,
     GatewayManagerClientSettings,
 )
+from assistant_gateway.application.reply_leftovers import ArrivalRoute
 from custom_messages.contracts.control_v1 import AgentStatus, ManagerMemoryCommand, PinnedMemoryCommandPayload, SystemStatusMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -242,7 +243,7 @@ async def test_task_reply_waits_share_a_correlation_without_consuming_sibling_re
             assert len(unsolicited) == (1 if channel == "response" else 0)
             # A service-wide availability notice must release every wait,
             # even though only one correlation is exposed to the watcher.
-            await client.queue_response("corr_shared", _system_envelope("corr_shared"))
+            await client.queue_response("corr_shared", _system_envelope("corr_shared"), route=ArrivalRoute.GATEWAY)
             assert (await first.get()).msg_content.system_status == "ok"
             assert (await second.get()).msg_content.system_status == "ok"
         assert client.has_pending_response("corr_shared")
