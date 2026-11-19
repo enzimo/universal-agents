@@ -46,7 +46,10 @@ gateway's response route is handled one message at a time, so while such a
 message waits, replies for every other chat wait behind it, as they do while a
 message is handled on arrival. The wait therefore gives up after
 ``LEFTOVER_ORDER_WAIT_SECONDS`` with a warning, and the message goes on out of
-order rather than hold every person's replies. Two cases are not ordered,
+order rather than hold every person's replies. While a leftover is tried
+again after a failure (see "Failures"), later messages for its request do not
+wait at all: it has lost its place, as a message that fails on arrival does.
+So one pass holds the route at most once. Two cases are not ordered,
 because nothing a person sees depends on it:
 
 - a message that a newly opened wait of the same request takes goes to that
@@ -63,7 +66,8 @@ response receiver retries a message on arrival: up to the transport's
 ``max_deliver`` tries, ``HANDLING_RETRY_DELAY_SECONDS`` apart
 (``assistant_gateway.nats_manager_runtime``, passed in through
 ``GatewayManagerClientSettings``). The pass holds the request's later
-leftovers meanwhile, so their order is kept. After the last try an error is
+leftovers meanwhile, so their order among themselves is kept; later messages
+that no wait takes do not wait for the retries ("Order"). After the last try an error is
 logged, and the task is told through the route's lost handler: a setup, form
 or signup request is refused to its task, unless its setup page already has a
 record (``GatewayResponseCoordinator.fail_lost_credential_request``). The
@@ -177,6 +181,9 @@ class _Pass:
     correlation_id: str
     task_id: str | None
     remaining: list[Leftover]
+    # True while its leftover in hand is tried again after a failure: later
+    # messages for the request do not wait for it (ReplyLeftovers.passed_on).
+    retrying: bool = False
 
 
 class ReplyLeftovers:
@@ -241,13 +248,24 @@ class ReplyLeftovers:
 
         if not correlation_id or (latest := self._latest.get(correlation_id)) is None:
             return
+        passes = [batch for batch in self._passes.values() if batch.correlation_id == correlation_id]
+        if any(batch.retrying for batch in passes):
+            # A leftover that failed has lost its place, as a message that fails
+            # on arrival does, so later messages do not wait through its retries.
+            # A pass therefore holds the response route at most once.
+            self._logger.debug(
+                "Not waiting for a request's leftover messages while one is tried again. "
+                "event=gateway_reply_leftover_order_wait_skipped correlation_id=%s reason=retrying",
+                correlation_id,
+            )
+            return
         done, _ = await asyncio.wait({latest}, timeout=LEFTOVER_ORDER_WAIT_SECONDS)
         if not done:
             self._logger.warning(
                 "Stopped waiting for a request's leftover messages; the next message goes on out of order. "
                 "event=gateway_reply_leftover_order_wait_expired correlation_id=%s pending=%s waited_seconds=%s",
                 correlation_id,
-                sum(len(batch.remaining) for batch in self._passes.values() if batch.correlation_id == correlation_id),
+                sum(len(batch.remaining) for batch in passes),
                 LEFTOVER_ORDER_WAIT_SECONDS,
             )
 
@@ -346,24 +364,27 @@ class ReplyLeftovers:
         """Try the handler as the response receiver tries a message on arrival; False once it gave up."""
 
         error: Exception | None = None
-        for attempt in range(1, self._attempts + 1):
-            try:
-                await handler(leftover.envelope)
-                return True
-            except Exception as exc:
-                error = exc
-                if attempt == self._attempts:
-                    break
-                self._logger.warning(
-                    "Could not pass on a message left on a closed reply wait; trying again. "
-                    "event=gateway_reply_leftover_failed attempt=%s attempts=%s retry_in_seconds=%s " + _FIELDS,
-                    attempt,
-                    self._attempts,
-                    self._retry_seconds,
-                    *_fields(batch, leftover),
-                    exc_info=True,
-                )
-                await asyncio.sleep(self._retry_seconds)
+        try:
+            for attempt in range(1, self._attempts + 1):
+                try:
+                    await handler(leftover.envelope)
+                    return True
+                except Exception as exc:
+                    error = exc
+                if attempt < self._attempts:
+                    batch.retrying = True
+                    self._logger.warning(
+                        "Could not pass on a message left on a closed reply wait; trying again. "
+                        "event=gateway_reply_leftover_failed attempt=%s attempts=%s retry_in_seconds=%s " + _FIELDS,
+                        attempt,
+                        self._attempts,
+                        self._retry_seconds,
+                        *_fields(batch, leftover),
+                        exc_info=error,
+                    )
+                    await asyncio.sleep(self._retry_seconds)
+        finally:
+            batch.retrying = False
         self._logger.error(
             "Gave up passing on a message left on a closed reply wait. "
             "event=gateway_reply_leftover_gave_up attempts=%s " + _FIELDS,

@@ -3235,7 +3235,11 @@ response route is handled one message at a time, so meanwhile every chat's
 replies wait too. That wait therefore gives up after
 `LEFTOVER_ORDER_WAIT_SECONDS` (20 seconds, the longest broker call a leftover
 makes plus delivery), logs `event=gateway_reply_leftover_order_wait_expired`,
-and lets the message go on out of order.
+and lets the message go on out of order. The bound is per held message. While
+a leftover is being tried again after a failure, later messages for its
+request do not wait at all: the leftover has lost its place, as a message
+that fails on arrival does. So one pass holds the route at most once, for at
+most that bound.
 
 Each leftover is logged: `event=gateway_reply_leftover_passed_on` or
 `event=gateway_reply_leftover_not_passed_on` with a reason.

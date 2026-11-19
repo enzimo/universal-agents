@@ -602,11 +602,10 @@ async def test_leftovers_are_passed_on_however_the_wait_ends(ending, raised) -> 
     assert client.pending_response_ids == ()
 
 
-@pytest.mark.asyncio
-def _retrying_client(*, attempts: int):
+def _retrying_client(*, attempts: int, retry_seconds: float = 0.01):
     """A client that retries a leftover as the response receiver would, quickly."""
 
-    settings = dataclasses.replace(_settings(), leftover_attempts=attempts, leftover_retry_seconds=0.01)
+    settings = dataclasses.replace(_settings(), leftover_attempts=attempts, leftover_retry_seconds=retry_seconds)
     client = _client(_FakeManagerRuntime(), settings=settings)
     lost: list[MessageEnvelope] = []
 
@@ -750,6 +749,40 @@ async def test_a_later_arrival_stops_waiting_for_leftovers_after_the_bound(monke
     chat.release.set()
     await _passed_on(client)
     assert chat.handled == [later, other, first, second]
+
+
+@pytest.mark.asyncio
+async def test_later_messages_do_not_wait_through_a_leftovers_retries(caplog) -> None:
+    """A leftover whose chat send keeps failing is tried again for a while; the response route keeps moving."""
+
+    caplog.set_level(logging.DEBUG, logger="test.gateway.manager_client")
+    client, lost = _retrying_client(attempts=3, retry_seconds=30.0)
+    handled: list[MessageEnvelope] = []
+    failing = _notice("The chat send keeps failing.")
+
+    async def chat(envelope: MessageEnvelope) -> None:
+        if envelope is failing:
+            raise RuntimeError("The chat could not be reached.")
+        handled.append(envelope)
+
+    client._on_unsolicited = chat
+    await _leave(client, failing)
+    await _let_others_run()  # Its first try fails; the next is 30 s away.
+    later, final, other = _notice("Sent after the close."), _notice("The final reply."), _for_another_request("Next chat.")
+
+    async def receiver() -> None:
+        # One at a time, as the response route hands them over.
+        for envelope in (later, final, other):
+            await client.handle_response(envelope)
+
+    # None waits through the retries (the order bound alone would hold each for 20 s).
+    await asyncio.wait_for(receiver(), timeout=2.0)
+    assert handled == [later, final, other]
+    assert f"event=gateway_reply_leftover_order_wait_skipped correlation_id={CORRELATION} reason=retrying" in caplog.text
+    assert lost == []  # Still being tried.
+
+    await client.stop_leftover_passes()
+    assert lost == [failing]
 
 
 @pytest.mark.asyncio
