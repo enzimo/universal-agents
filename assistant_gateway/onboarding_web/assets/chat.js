@@ -1788,8 +1788,8 @@ function loadEarlierHistory() {
 function renderThreads() {
     hideThreadTitleTooltip();
     // The list is drawn again on many events; keyboard focus stays on the
-    // same thread's row (plan review C03).
-    var focusedKey = focusedThreadRowKey();
+    // same thread's row or section header (plan review C03, C25).
+    var focusTarget = focusedThreadListTarget();
     var unreadStateChanged = false;
     sharedState.threads.forEach(function (thread) {
       if (isReadingThread(thread) && thread.hasUnreadReply) {
@@ -1814,7 +1814,7 @@ function renderThreads() {
         collapse: threadSectionCollapse(),
         renderRow: threadRow,
       });
-      restoreThreadRowFocus(focusedKey);
+      restoreThreadListFocus(focusTarget);
     }
     if (unreadStateChanged) {
       saveThreads();
@@ -1863,7 +1863,9 @@ function threadRow(thread) {
     button.appendChild(titleLine);
     var detail = threadDetail(thread, sharedState.assistantName);
     if (detail) {
-      button.appendChild(uiElement("span", "thread-line thread-detail" + (detail.kind === "waiting" ? " is-waiting" : ""), detail.text));
+      var detailLine = uiElement("span", "thread-line thread-detail" + (detail.kind === "waiting" ? " is-waiting" : ""), detail.text);
+      if (detail.description) detailLine.title = detail.description;
+      button.appendChild(detailLine);
     }
     lifecycle.listen(button, "mouseenter", function () {
       scheduleThreadTitleTooltip(title, fullThreadTitle(thread));
@@ -1902,17 +1904,31 @@ function threadActivityIndicator(thread) {
     return indicator;
   }
 
-// The name field with Save and Cancel; Enter saves and Escape cancels.
+// The name field with Save and Cancel; Enter saves and Escape cancels. What
+// the person typed and the caret live in sharedState.renameDraft, so a list
+// drawn again while they type keeps both (plan review C25).
 function appendRenameControls(row, thread) {
+    var draft = sharedState.renameDraft;
+    if (!draft || draft.threadId !== thread.id) {
+      draft = sharedState.renameDraft = { threadId: thread.id, value: fullThreadTitle(thread), start: -1, end: -1 };
+    }
     var form = document.createElement("form");
     form.className = "thread-rename-form";
     var input = document.createElement("input");
     input.className = "thread-rename-input";
     input.type = "text";
     input.maxLength = 80;
-    input.value = fullThreadTitle(thread);
+    input.value = draft.value;
     input.setAttribute("aria-label", "Thread name");
     form.appendChild(input);
+    var keepDraft = function () {
+      draft.value = input.value;
+      draft.start = input.selectionStart;
+      draft.end = input.selectionEnd;
+    };
+    lifecycle.listen(input, "input", keepDraft);
+    lifecycle.listen(input, "keyup", keepDraft);
+    lifecycle.listen(input, "select", keepDraft);
     lifecycle.listen(form, "submit", function (event) {
       event.preventDefault();
       renameThread(thread.id, input.value);
@@ -1948,12 +1964,17 @@ function appendRenameControls(row, thread) {
     row.appendChild(cancel);
     lifecycle.timeout(function () {
       input.focus();
-      input.select();
+      if (draft.start < 0) {
+        input.select();
+      } else {
+        input.setSelectionRange(draft.start, draft.end);
+      }
     }, 0);
   }
 
 function cancelThreadRename() {
     sharedState.editingThreadId = "";
+    sharedState.renameDraft = null;
     renderThreads();
   }
 
@@ -1964,24 +1985,48 @@ function threadSectionCollapse() {
     return sharedState.sectionCollapse;
   }
 
-function focusedThreadRowKey() {
+// What has keyboard focus in the list: a thread's row (by session key) or
+// a section header (by section). A rename field refocuses itself.
+function focusedThreadListTarget() {
     var active = document.activeElement;
-    var row = active && typeof active.closest === "function" ? active.closest(".thread-row") : null;
-    return row && sharedState.threadList.contains(row) ? String(row.dataset.sessionKey || "") : "";
+    if (!active || typeof active.closest !== "function" || !sharedState.threadList.contains(active)) {
+      return null;
+    }
+    var header = active.closest(".thread-section-header");
+    if (header) {
+      var section = header.closest(".thread-section");
+      return section ? { section: String(section.dataset.section || "") } : null;
+    }
+    var row = active.closest(".thread-row");
+    return row && active.classList.contains("thread-button") ? { sessionKey: String(row.dataset.sessionKey || "") } : null;
   }
 
-function restoreThreadRowFocus(sessionKey) {
-    if (!sessionKey) {
+function restoreThreadListFocus(target) {
+    if (!target) {
       return;
     }
+    var element = null;
+    if (target.section) {
+      var sections = sharedState.threadList.querySelectorAll(".thread-section");
+      for (var sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+        if (sections[sectionIndex].dataset.section === target.section) {
+          element = sections[sectionIndex].querySelector(".thread-section-header");
+        }
+      }
+    } else {
+      element = threadRowButton(target.sessionKey);
+    }
+    if (element && !element.closest("[hidden]")) element.focus();
+  }
+
+function threadRowButton(sessionKey) {
     var rows = sharedState.threadList.querySelectorAll(".thread-row");
     for (var index = 0; index < rows.length; index += 1) {
       if (rows[index].dataset.sessionKey === sessionKey) {
-        var button = rows[index].querySelector(".thread-button");
-        if (button && !button.closest("[hidden]")) button.focus();
-        return;
+        return rows[index].querySelector(".thread-button");
       }
     }
+    return null;
   }
 
 function lastActivityTimestamp(thread) {
@@ -2033,23 +2078,50 @@ function applyEventToThreadRow(thread, event) {
   }
 
 // A woke thread loses its mark once the person reads it (the rule the
-// unread dot uses), with one request until the list shows it restored.
+// unread dot uses), with one request until the list shows it restored. The
+// person did not ask for it, so a failure shows nothing and is tried again
+// after half a minute, never on every draw (plan review C23).
 function restoreWokeThreadWhenRead(thread) {
-    if (thread.listState !== LIST_STATE.WOKE || thread.restoreRequested || !isReadingThread(thread)) {
+    var retryAfterMs = 30 * 1000;
+    if (thread.listState !== LIST_STATE.WOKE || thread.restoreRequested || !isReadingThread(thread)
+      || Date.now() < Number(thread.restoreRetryAt || 0)) {
       return;
     }
     thread.restoreRequested = true;
-    changeThreadPlacement(thread, "restore");
+    sendThreadPlacement(thread, "restore").then(function () {
+      return fetchSessions();
+    }).catch(function () {
+      thread.restoreRequested = false;
+      thread.restoreRetryAt = Date.now() + retryAfterMs;
+    });
   }
 
 // Pin, unpin, snooze, dismiss or restore a thread on the server, then reload
 // the list; every open page follows through the list's revision. Snooze and
 // dismiss send the last message this page showed, so a message it never
 // showed brings the thread back. A refusal keeps the row and shows why.
+// A failure is shown where the person is looking: in the open chat, naming
+// the chat that was not moved when it is another one (plan review C23).
 function changeThreadPlacement(thread, action, extra) {
     if (!thread || !thread.persisted || !thread.sessionKey || !sharedState.authSessionActive) {
       return Promise.resolve(false);
     }
+    return sendThreadPlacement(thread, action, extra).then(function () {
+      clearSystemError(null, shellState.SYSTEM_ERROR_SOURCE.THREAD_PLACEMENT);
+      return fetchSessions();
+    }).then(function () {
+      return true;
+    }).catch(function (error) {
+      var named = thread.id === sharedState.activeThreadId ? "This chat" : "\u201c" + fullThreadTitle(thread) + "\u201d";
+      appendSystemError(null, shellState.SYSTEM_ERROR_SOURCE.THREAD_PLACEMENT,
+        named + " was not moved. " + (error.message || "Try again."));
+      renderMessages();
+      return false;
+    });
+  }
+
+// One placement request; rejects with the gateway's reason when refused.
+function sendThreadPlacement(thread, action, extra) {
     var body = Object.assign({ thread_action: action }, extra || {});
     if (action === "snooze" || action === "dismiss") {
       body.seen_sequence = Number(thread.lastSequence || 0);
@@ -2066,16 +2138,6 @@ function changeThreadPlacement(thread, action, extra) {
           throw new Error(placementRefusal(text));
         }
       });
-    }).then(function () {
-      clearSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.THREAD_PLACEMENT);
-      return fetchSessions();
-    }).then(function () {
-      return true;
-    }).catch(function (error) {
-      appendSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.THREAD_PLACEMENT,
-        error.message || "This chat was not moved. Try again.");
-      renderMessages();
-      return false;
     });
   }
 
@@ -2090,7 +2152,7 @@ function placementRefusal(text) {
         reason = "";
       }
     }
-    return "This chat was not moved. " + (reason || "Try again.");
+    return reason || "Try again.";
   }
 
 // The unsaved "New Chat" row: selected, with no rename or archive, since
@@ -2159,6 +2221,7 @@ function renameThread(threadId, value) {
     thread.sessionAlias = title;
     thread.updatedAt = Date.now();
     sharedState.editingThreadId = "";
+    sharedState.renameDraft = null;
     saveThreads();
     renderThreads();
     if (!thread.persisted) {

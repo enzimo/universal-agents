@@ -70,8 +70,9 @@ function harness() {
   };
   loadFunctions(sandbox, [
     "fetchSessions", "threadIsBusy", "applyThreadStates", "applyServerThreadRow", "applyEventToThreadRow",
-    "restoreWokeThreadWhenRead", "changeThreadPlacement", "placementRefusal",
+    "restoreWokeThreadWhenRead", "changeThreadPlacement", "sendThreadPlacement", "placementRefusal",
   ]);
+  sandbox.fullThreadTitle = item => item.title;
   const thread = key => sandbox.sharedState.threads.find(item => item.sessionKey === key);
   const page = (busy = [], revision = server.revision, open = []) => ({
     threads_revision: revision, busy_session_keys: busy, open_request_session_keys: open });
@@ -207,7 +208,7 @@ function listHarness() {
     hideThreadTitleTooltip() {},
     saveThreads() {},
   };
-  loadFunctions(sandbox, ["renderThreads", "unsavedThreadRow", "focusedThreadRowKey", "restoreWokeThreadWhenRead"]);
+  loadFunctions(sandbox, ["renderThreads", "unsavedThreadRow", "focusedThreadListTarget", "restoreWokeThreadWhenRead"]);
   const click = target => listeners.filter(item => item.target === target && item.type === "click")
     .forEach(item => item.handler());
   return { sandbox, rows: () => sandbox.sharedState.threadList.children, click, focused: () => focused };
@@ -313,14 +314,135 @@ test("snooze and dismiss send the last message this page showed", async () => {
 
 test("a refused change keeps the row where it was and tells the person why", async () => {
   const { sandbox, server, calls, errors, thread } = harness();
-  server.sessions = [{ ...SNOOZED, list_state: null }];
+  server.sessions = [{ ...SNOOZED, list_state: null }, { session_key: "alpha", updated_at: "2026-11-19T09:00:00Z" }];
   await sandbox.fetchSessions();
+  assert.equal(sandbox.sharedState.activeThreadId, "alpha");
   const reads = calls.length;
   server.refusal = "Choose a time in the future to snooze until.";
   assert.equal(await sandbox.changeThreadPlacement(thread("gamma"), "snooze", { snooze_until: "2020-01-01T00:00:00Z" }), false);
   assert.equal(thread("gamma").listState, "");
   assert.equal(calls.length, reads, "the list is not reloaded");
-  assert.deepEqual(errors.map(item => [item.target.id, item.source, item.message]), [
-    ["gamma", "thread_placement", "This chat was not moved. Choose a time in the future to snooze until."],
+  // Shown in the open chat, naming the chat that was not moved (C23).
+  assert.deepEqual(errors.map(item => [item.target, item.source, item.message]), [
+    [null, "thread_placement", "\u201cRenew the certificate\u201d was not moved. Choose a time in the future to snooze until."],
   ]);
+  sandbox.sharedState.activeThreadId = "gamma";
+  await sandbox.changeThreadPlacement(thread("gamma"), "dismiss");
+  assert.equal(errors[1].message, "This chat was not moved. Choose a time in the future to snooze until.");
+});
+
+test("a failed automatic restore shows nothing and is tried again later, not on every draw (C23)", async () => {
+  const { sandbox, server, patches, errors, thread } = harness();
+  server.sessions = [{ ...SNOOZED, list_state: "woke", snoozed_until: null }];
+  sandbox.sharedState.activeThreadId = "gamma";
+  await sandbox.fetchSessions();
+  server.refusal = "Thread not found.";
+  sandbox.restoreWokeThreadWhenRead(thread("gamma"));
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(patches.length, 1);
+  assert.equal(errors.length, 0, "the person did not ask for it, so nothing is shown");
+  sandbox.restoreWokeThreadWhenRead(thread("gamma"));
+  assert.equal(patches.length, 1, "no retry on the next draw");
+  thread("gamma").restoreRetryAt = 0;
+  server.refusal = "";
+  sandbox.restoreWokeThreadWhenRead(thread("gamma"));
+  assert.equal(patches.length, 2, "tried again once the wait is over");
+});
+
+// Keyboard focus and a rename draft survive the list being drawn again (C25).
+
+const fakeDom = require("./fake_dom.mjs");
+
+function domHarness() {
+  const document = fakeDom.fakeDocument();
+  const proto = Object.getPrototypeOf(document.body);
+  const matches = (node, selector) => selector === "[hidden]" ? node.hidden : node.classList.contains(selector.slice(1));
+  if (!proto.closest) {
+    proto.closest = function (selector) {
+      for (let node = this; node; node = node.parentNode) if (node.classList && matches(node, selector)) return node;
+      return null;
+    };
+    proto.querySelectorAll = function (selector) {
+      return fakeDom.descendants(this).filter(node => matches(node, selector));
+    };
+    proto.querySelector = function (selector) { return this.querySelectorAll(selector)[0] || null; };
+  }
+  // The rename buttons' icons are trusted markup from chat.js; this stand-in ignores it.
+  Object.defineProperty(proto, "innerHTML", { configurable: true, set() {}, get() { return ""; } });
+  const list = document.createElement("div");
+  document.body.appendChild(list);
+  const timers = [];
+  const sandbox = {
+    document,
+    sharedState: { threadList: list, threads: [] },
+    lifecycle: { listen: (target, type, handler) => target.addEventListener(type, handler), timeout: fn => timers.push(fn) },
+    fullThreadTitle: item => item.title,
+    renameThread() {},
+    renderThreads() {},
+    checkIconMarkup: () => "",
+    closeIconMarkup: () => "",
+  };
+  loadFunctions(sandbox, ["focusedThreadListTarget", "restoreThreadListFocus", "threadRowButton", "appendRenameControls"]);
+  return { sandbox, document, list, runTimers: () => timers.splice(0).forEach(fn => fn()) };
+}
+
+function drawSections(document, list, sessionKeys) {
+  list.replaceChildren();
+  for (const id of ["recent", "snoozed"]) {
+    const section = Object.assign(document.createElement("section"), { className: "thread-section" });
+    section.dataset.section = id;
+    const header = Object.assign(document.createElement("button"), { className: "thread-section-header" });
+    section.appendChild(header);
+    for (const key of sessionKeys[id] || []) {
+      const row = Object.assign(document.createElement("div"), { className: "thread-row" });
+      row.dataset.sessionKey = key;
+      row.appendChild(Object.assign(document.createElement("button"), { className: "thread-button" }));
+      section.appendChild(row);
+    }
+    list.appendChild(section);
+  }
+}
+
+test("a focused section header or row is focused again after the list is drawn again", () => {
+  const { sandbox, document, list } = domHarness();
+  drawSections(document, list, { recent: ["alpha"], snoozed: ["beta"] });
+  list.children[1].children[0].focus();
+  const header = sandbox.focusedThreadListTarget();
+  assert.deepEqual({ ...header }, { section: "snoozed" });
+  drawSections(document, list, { recent: ["alpha"], snoozed: ["beta"] });
+  sandbox.restoreThreadListFocus(header);
+  assert.equal(document.activeElement, list.children[1].children[0]);
+
+  list.children[0].children[1].children[0].focus();
+  const row = sandbox.focusedThreadListTarget();
+  assert.deepEqual({ ...row }, { sessionKey: "alpha" });
+  drawSections(document, list, { recent: ["alpha"], snoozed: ["beta"] });
+  sandbox.restoreThreadListFocus(row);
+  assert.equal(document.activeElement, list.children[0].children[1].children[0]);
+});
+
+test("what the person typed in a rename field survives a redraw", () => {
+  const { sandbox, document, runTimers } = domHarness();
+  const thread = { id: "alpha", title: "Old name" };
+  const firstRow = document.createElement("div");
+  sandbox.appendRenameControls(firstRow, thread);
+  const input = firstRow.children[0].children[0];
+  input.setSelectionRange = (start, end) => { input.selected = [start, end]; };
+  input.select = () => { input.selected = "all"; };
+  runTimers();
+  assert.equal(input.selected, "all", "a new rename starts with the name selected");
+  input.value = "New na";
+  input.selectionStart = 6;
+  input.selectionEnd = 6;
+  input.dispatchEvent(new Event("input"));
+
+  const secondRow = document.createElement("div");
+  sandbox.appendRenameControls(secondRow, thread);
+  const redrawn = secondRow.children[0].children[0];
+  redrawn.setSelectionRange = (start, end) => { redrawn.selected = [start, end]; };
+  runTimers();
+  assert.equal(redrawn.value, "New na");
+  assert.deepEqual(redrawn.selected, [6, 6], "the caret stays where it was");
+  assert.equal(document.activeElement, redrawn);
 });

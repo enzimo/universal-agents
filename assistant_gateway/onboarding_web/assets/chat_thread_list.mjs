@@ -36,12 +36,20 @@ export const SECTION_LABELS = Object.freeze({
 export const LIST_STATE = Object.freeze({ SNOOZED: "snoozed", WOKE: "woke", DISMISSED: "dismissed" });
 
 // The gateway's `needs_you` values (web_chat_threads.NeedsYouReason) and the
-// row's second line for each.
+// row's second line for each, short enough to fit the line beside part 2's
+// agent trail; the full sentence is the line's title (plan review C24).
 export const NEEDS_YOU_LABELS = Object.freeze({
   question: "Waiting for your answer",
   reply: "Waiting for your reply",
-  setup: "Waiting for you to finish a setup page",
-  credential: "Waiting for a sign-in or key you enter",
+  setup: "Needs you to finish setup",
+  credential: "Needs a sign-in or key",
+});
+
+export const NEEDS_YOU_DESCRIPTIONS = Object.freeze({
+  question: "The team asked you a question and is waiting for your answer.",
+  reply: "The team paused this request and is waiting for your reply.",
+  setup: "A setup page in this chat is waiting for you to finish it.",
+  credential: "A form in this chat is waiting for a sign-in or key you enter.",
 });
 
 // Sections that start collapsed until the person opens them.
@@ -173,7 +181,7 @@ export function messageSnippet(message) {
 // The row's second line: what the thread waits on, else its latest message.
 export function threadDetail(thread, assistantName) {
   const waiting = thread.needsYou ? NEEDS_YOU_LABELS[thread.needsYou] : "";
-  if (waiting) return { kind: "waiting", text: waiting };
+  if (waiting) return { kind: "waiting", text: waiting, description: NEEDS_YOU_DESCRIPTIONS[thread.needsYou] };
   const message = thread.lastMessage;
   if (!message || !message.text) return null;
   const who = message.role === "user" ? "You" : String(assistantName || "Assistant");

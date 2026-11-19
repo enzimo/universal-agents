@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   LIST_STATE,
+  NEEDS_YOU_DESCRIPTIONS,
   NEEDS_YOU_LABELS,
   SECTION_ORDER,
   THREAD_SECTION,
@@ -132,13 +133,17 @@ test("long messages are cut to one line", () => {
 
 test("a row's second line is the waiting reason, else the latest message with who wrote it", () => {
   assert.deepEqual(threadDetail(thread("a", { needsYou: "credential", lastMessage: { role: "assistant", text: "Hi" } }), "Ava"),
-    { kind: "waiting", text: NEEDS_YOU_LABELS.credential });
+    { kind: "waiting", text: NEEDS_YOU_LABELS.credential, description: NEEDS_YOU_DESCRIPTIONS.credential });
   assert.deepEqual(threadDetail(thread("b", { lastMessage: { role: "assistant", text: "Draft ready" } }), "Ava"),
     { kind: "message", text: "Ava: Draft ready" });
   assert.deepEqual(threadDetail(thread("c", { lastMessage: { role: "user", text: "Thanks" } }), "Ava"),
     { kind: "message", text: "You: Thanks" });
   assert.equal(threadDetail(thread("d"), "Ava"), null);
-  for (const reason of ["question", "reply", "setup", "credential"]) assert.ok(NEEDS_YOU_LABELS[reason]);
+  for (const reason of ["question", "reply", "setup", "credential"]) {
+    // Short enough to fit the row's second line beside part 2's agent trail (C24).
+    assert.ok(NEEDS_YOU_LABELS[reason].length <= 28, reason);
+    assert.ok(NEEDS_YOU_DESCRIPTIONS[reason].endsWith("."), reason);
+  }
 });
 
 test("ages read now, minutes, hours, days, weeks and years", () => {

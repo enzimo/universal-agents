@@ -8215,9 +8215,11 @@ body.is-theme-customizing {
     gap: 2px;
   }
 
-  /* Room for the section headers and a few two-line rows (plan review C10). */
+  /* The app grows with its content here, so the sidebar gets a real height:
+     a max-height alone left the thread list 0 px tall (plan review C10, C22).
+     About four two-line rows fit, and the list scrolls. */
   .chat-sidebar {
-    max-height: min(420px, 50vh);
+    height: min(460px, 60vh);
   }
 
   .message-form {
