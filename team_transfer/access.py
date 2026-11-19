@@ -833,8 +833,10 @@ def _renamed_subject(subject: Any, team_ids: TeamIds) -> Any:
     subject_id = subject.get("id")
     renamed = team_ids.rename(subject_id, _SUBJECT_TEAM_SEPARATOR)
     if subject.get("kind") == SubjectKind.SCHEDULE.value and renamed != subject_id:
-        team, _, schedule_id = renamed.partition(_SUBJECT_TEAM_SEPARATOR)
-        renamed = f"{team}{_SUBJECT_TEAM_SEPARATOR}{renamed_schedule_id(team_ids, schedule_id)}"
+        team, separator, schedule_id = renamed.partition(_SUBJECT_TEAM_SEPARATOR)
+        # A malformed subject holding only the team id has no schedule part to map.
+        if separator:
+            renamed = f"{team}{separator}{renamed_schedule_id(team_ids, schedule_id)}"
     return {**subject, "id": renamed}
 
 

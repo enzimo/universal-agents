@@ -140,7 +140,11 @@ def test_access_records_follow_the_new_id_in_every_field_and_subject_that_names_
 
     maintenance = {"kind": "grant", "record_id": "g4", "document": {
         "team_id": OLD, "subject": _subject("schedule", f"{OLD}/{internal_improvement_schedule_id(OLD)}"),
-        "delegate_to": [_subject("schedule", f"{OTHER}/{internal_improvement_schedule_id(OLD)}")],
+        "delegate_to": [
+            _subject("schedule", f"{OTHER}/{internal_improvement_schedule_id(OLD)}"),
+            # Malformed: a schedule subject holding only the team id. The team follows; nothing is added.
+            _subject("schedule", OLD),
+        ],
     }}
     records = [grant, team_link, person_link, folder, *others, third_team, maintenance]
 
@@ -164,7 +168,7 @@ def test_access_records_follow_the_new_id_in_every_field_and_subject_that_names_
     # The team's maintenance schedule's id is built from the team id, so a grant to it follows that id too;
     # another team's subject that happens to name the same schedule id keeps both parts.
     assert renamed[8]["document"]["subject"]["id"] == f"{NEW}/{internal_improvement_schedule_id(NEW)}"
-    assert renamed[8]["document"]["delegate_to"] == maintenance["document"]["delegate_to"]
+    assert renamed[8]["document"]["delegate_to"] == [maintenance["document"]["delegate_to"][0], _subject("schedule", NEW)]
     assert [record["record_id"] for record in renamed] == [record["record_id"] for record in records]
     assert records[0]["document"]["team_id"] == OLD, "the records read from the file are not changed"
 
@@ -280,6 +284,7 @@ def test_schedules_follow_the_new_id_with_the_maintenance_schedule_and_another_t
         internal_improvement_schedule_name,
         internal_improvement_task_id,
     )
+    from custom_agents.local_schedule_policy import local_schedule_service_id
     from custom_agents.schedule_execution_identity import execution_digest
     from custom_messages.contracts.routing_v1 import MessageHeader
     from tests.test_team_transfer_schedules import _schedule
@@ -294,9 +299,10 @@ def test_schedules_follow_the_new_id_with_the_maintenance_schedule_and_another_t
     maintenance = _maintenance_schedule(OLD)
     old_id, new_id = internal_improvement_schedule_id(OLD), internal_improvement_schedule_id(NEW)
 
-    def binding(schedule: Any, digest: str) -> dict[str, Any]:
+    def binding(schedule: Any, digest: str, actor: str) -> dict[str, Any]:
         return {"kind": "worker_binding", "record_id": schedule.schedule_id, "document": {
-            "schedule_id": schedule.schedule_id, "team_id": OLD, "definition_digest": "d" * 64, "execution_digest": digest}}
+            "schedule_id": schedule.schedule_id, "team_id": OLD, "definition_digest": "d" * 64, "execution_digest": digest,
+            "actor_principal_id": actor, "authority_mode": "runtime_default"}}
 
     third_record = _schedule_record(third)
     daily_target = {"kind": "scheduled_target", "record_id": "sched_daily",
@@ -306,7 +312,9 @@ def test_schedules_follow_the_new_id_with_the_maintenance_schedule_and_another_t
         "record_id": "svc1", "name": "Site", "owner_kind": "user", "owner_id": "usr_ana"}}
     records = [
         # Bindings come before their schedules here: the rename reads every schedule first.
-        binding(daily, execution_digest(daily, "d" * 64)), binding(changed, "0" * 64),
+        # The first is set up by the runtime itself (local_schedule_policy.install_schedule_default).
+        binding(daily, execution_digest(daily, "d" * 64), local_schedule_service_id(OLD)),
+        binding(changed, "0" * 64, local_schedule_service_id(OTHER)),
         _schedule_record(daily), _schedule_record(changed), third_record, _schedule_record(maintenance),
         {"kind": "scheduled_target", "record_id": old_id,
          "target": {"schedule_id": old_id, "session_key": "sess_ana", "owner_person_id": "usr_ana"}},
@@ -342,10 +350,11 @@ def test_schedules_follow_the_new_id_with_the_maintenance_schedule_and_another_t
     assert renamed[("scheduled_target", "sched_daily")] == daily_target
 
     matched = renamed[("worker_binding", "sched_daily")]["document"]
-    assert matched["team_id"] == NEW
+    assert (matched["team_id"], matched["actor_principal_id"]) == (NEW, local_schedule_service_id(NEW))
     assert matched["execution_digest"] == execution_digest(new_daily, "d" * 64) != execution_digest(daily, "d" * 64)
     unmatched = renamed[("worker_binding", "sched_changed")]["document"]
     assert (unmatched["team_id"], unmatched["execution_digest"]) == (NEW, "0" * 64), "it still waits for review"
+    assert unmatched["actor_principal_id"] == local_schedule_service_id(OTHER), "another team's runtime keeps its id"
 
     assert renamed[("pool_limit", "*")]["document"]["team_id"] == NEW
     assert renamed[("pool_limit", "Writer")] == other_pool
@@ -354,6 +363,45 @@ def test_schedules_follow_the_new_id_with_the_maintenance_schedule_and_another_t
 
     ours = [record for key, record in renamed.items() if key not in {("schedule", "sched_third"), ("pool_limit", "Writer")}]
     assert _naming(ours, OLD) == [] and _naming(list(renamed.values()), old_id) == []
+
+
+# A schedule this version cannot read, in the two ways it fails: its YAML names a setting the model does not
+# have (parse_schedule refuses it, so the whole import stops), or the model refuses a value (the planner
+# refuses the record). Both are made from a valid person's schedule's Markdown.
+_UNREADABLE = {
+    "unknown setting": ("schedule_name: {id}", "schedule_name: {id}\nnot_a_setting: 1"),
+    "model refuses": ("management_class: user", "management_class: retired_class"),
+}
+
+
+def _unreadable(markdown: str, schedule_id: str, kind: str) -> str:
+    before, after = (part.format(id=schedule_id) for part in _UNREADABLE[kind])
+    assert before in markdown, kind
+    return markdown.replace(before, after)
+
+
+@pytest.mark.parametrize("kind", sorted(_UNREADABLE))
+def test_a_schedule_the_rename_cannot_read_keeps_the_exported_id_and_is_logged(
+    kind: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    from tests.test_team_transfer_schedules import _schedule
+
+    record = _schedule_record(_schedule("sched_bad", "usr_ana", claim_team_id=OLD))
+    record["schedule"]["markdown"] = _unreadable(record["schedule"]["markdown"], "sched_bad", kind)
+    binding = {"kind": "worker_binding", "record_id": "sched_bad", "document": {
+        "schedule_id": "sched_bad", "team_id": OLD, "definition_digest": "d" * 64, "execution_digest": "0" * 64}}
+    target = {"kind": "scheduled_target", "record_id": "sched_bad", "target": {"schedule_id": "sched_bad"}}
+    pool = {"kind": "pool_limit", "record_id": "*", "document": {"team_id": OLD, "scope": "*"}}
+
+    with caplog.at_level("WARNING", logger="team_transfer.schedule_team_ids"):
+        renamed = renamed_records("schedules", [record, binding, target, pool], IDS)
+
+    assert renamed[0] == record, "left as exported: the planner refuses it or the import stops"
+    warnings = [entry.getMessage() for entry in caplog.records]
+    assert len(warnings) == 1 and "event=team_transfer_schedule_rename_skipped record_id=sched_bad" in warnings[0]
+    assert renamed[1]["document"]["team_id"] == NEW, "its binding still follows the new id"
+    assert renamed[1]["document"]["execution_digest"] == "0" * 64, "no schedule to compute the digest with"
+    assert renamed[2] == target and renamed[3]["document"]["team_id"] == NEW
 
 
 # -- imports under a new id ------------------------------------------------------------------
@@ -531,6 +579,7 @@ def test_schedules_imported_under_a_new_id_are_the_new_teams_and_its_runtime_fin
         internal_improvement_schedule_id,
         internal_improvement_schedule_name,
     )
+    from custom_agents.local_schedule_policy import local_schedule_service_id
     from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
     from custom_agents.schedule_execution_identity import execution_digest
     from custom_agents.schedule_store import ScheduleStore
@@ -595,6 +644,7 @@ def test_schedules_imported_under_a_new_id_are_the_new_teams_and_its_runtime_fin
         # Its worker setup and the pool sizes are the new team's; the binding still matches its schedule.
         binding = store.worker_records.get_binding("sched_worker", team_id=NEW)
         assert binding is not None and store.worker_records.get_binding("sched_worker", team_id=OLD) is None
+        assert binding.actor_principal_id == local_schedule_service_id(NEW), "set up by the new team's runtime"
         assert execution_digest(store.get_scheduled_message("sched_worker"), binding.definition_digest) == binding.execution_digest
         pools = WorkerPoolRepository(config.manager_storage_settings)
         assert {limit.scope for limit in pools.list_limits(NEW)} == {"*", WORKER} and not pools.list_limits(OLD)
@@ -641,3 +691,50 @@ def test_schedules_imported_under_a_new_id_are_the_new_teams_and_its_runtime_fin
 
     assert _stored_naming(tmp_path / "new", (OLD, old_id)) == []
     assert _stored_naming(tmp_path / "kept", (OLD, old_id)), "the search finds the ids where they are kept"
+
+
+@pytest.mark.parametrize("kind", sorted(_UNREADABLE))
+def test_a_schedule_this_version_cannot_read_gets_the_same_outcome_under_a_new_id(
+    kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rename leaves it under the export's id, so only the planner's refusal keeps the old id out."""
+
+    import team_transfer.schedule_markdown as schedule_markdown
+    from team_transfer.crypto import new_key_derivation
+    from team_transfer.errors import TransferError
+    from team_transfer.service import export_source, export_team, import_team
+    from tests.test_team_transfer_schedules import PASSPHRASE, SECTIONS, _old_instance
+
+    config_path, _store = _old_instance(tmp_path / "old")
+    render = schedule_markdown.render_schedule
+
+    def exported_unreadable(document: dict[str, Any]) -> str:
+        markdown = render(document)
+        return _unreadable(markdown, "sched_worker", kind) if document["schedule_id"] == "sched_worker" else markdown
+
+    out = tmp_path / "team.uatransfer"
+    # Only the export writes the broken schedule; the import runs this version's code unchanged.
+    with monkeypatch.context() as patched:
+        patched.setattr(schedule_markdown, "render_schedule", exported_unreadable)
+        export_team(export_source(config_path), out, PASSPHRASE, owner_person_id="usr_ana", sections=SECTIONS,
+                    key_derivation=new_key_derivation(opslimit=1, memlimit=8192))
+
+    def imported(team_ids: TeamIds, target: Path) -> Any:
+        with TransferReader.open(out, PASSPHRASE) as reader:
+            try:
+                plan = import_team(reader.with_team_ids(team_ids), target, dry_run=False, sections=SECTIONS)
+            except TransferError as exc:
+                return str(exc)
+        return {r.key: (r.outcome, r.reason) for r in plan.records if r.section == "schedules"}
+
+    kept, renamed = imported(TeamIds.unchanged(OLD), tmp_path / "kept"), imported(IDS, tmp_path / "new")
+
+    assert renamed == kept
+    if kind == "unknown setting":
+        assert "Unknown schedule settings: not_a_setting" in renamed
+        assert not (tmp_path / "new").exists(), "the import stops before writing anything"
+        return
+    assert renamed["schedule/sched_worker"][0] is RecordOutcome.REFUSED
+    assert renamed["schedule/sched_worker"][1].startswith("this version refuses it")
+    assert renamed["worker_binding/sched_worker"] == (RecordOutcome.REFUSED, "its schedule sched_worker is not imported")
+    assert _stored_naming(tmp_path / "new", (OLD,)) == []

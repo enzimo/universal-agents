@@ -25,9 +25,12 @@ What follows the new id, and why:
   schedule again for the new team when the old key vouched for it, as without a new id, and the
   gateway signs system schedules again at its first start.
 - **Worker bindings and pool sizes.** ``team_id``; a binding's ``schedule_id`` follows its
-  schedule. A binding's ``execution_digest`` covers the schedule's team, task and reply route, so
-  it is computed again for the renamed schedule, but only when it matched the schedule as
-  exported: a binding that did not match keeps its digest and waits for review, as it does today.
+  schedule. When the runtime set the binding up itself (the usual binding of a person's
+  schedule nobody set up by hand), its ``actor_principal_id`` is ``local_schedule_runtime:<team>``
+  (``local_schedule_policy.local_schedule_service_id``) and follows the new id too. A binding's
+  ``execution_digest`` covers the schedule's team, task and reply route, so it is computed again
+  for the renamed schedule, but only when it matched the schedule as exported: a binding that
+  did not match keeps its digest and waits for review, as it does today.
 - **Automation jobs and managed services** are only listed (never imported); a team owner is
   shown under the new id.
 
@@ -156,12 +159,16 @@ class _Schedules:
 
 
 def _renamed_binding(raw: dict[str, Any], schedules: _Schedules, team_ids: TeamIds) -> dict[str, Any]:
+    from custom_agents.local_schedule_policy import local_schedule_service_id
+
     document = raw.get("document")
     if not isinstance(document, dict):
         return raw
     digest = schedules.binding_digest(document)
     changed = team_ids.renamed_fields(document, ("team_id",))
     changed = _changed(changed, "schedule_id", renamed_schedule_id(team_ids, document.get("schedule_id")))
+    actor = team_ids.rename_derived(document.get("actor_principal_id"), local_schedule_service_id)
+    changed = _changed(changed, "actor_principal_id", actor)
     if digest is not None:
         changed = _changed(changed, "execution_digest", digest)
     return {**raw, "record_id": renamed_schedule_id(team_ids, raw.get("record_id")), "document": changed}
