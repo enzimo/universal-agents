@@ -9,7 +9,7 @@ the export under the recorded id and refuses a caller that requires another one,
 reviewed import, a later batch and the review page all write the same id.
 
 The one exception is onboarding's Import, whose review folder is fixed per export
-(``state/team-import/review/<signature>``): an owner who chose an id and opens the export again
+(``runtime/team-import/review/<signature>``): an owner who chose an id and opens the export again
 may still correct it before the import (``prepare_review(restart_for_another_id=True)``), since a
 team id cannot be changed afterwards. The page offers the saved id first
 (``saved_review_team_id``). On the command line the operator names another review folder instead.

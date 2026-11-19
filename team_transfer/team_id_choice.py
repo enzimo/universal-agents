@@ -9,7 +9,7 @@ module decides the mapping:
   cut to fit (``suggested_team_id``).
 - After that the id comes from what the first choice recorded: the review folder
   (``review.ImportReviewV1.team_id``, read by ``review.ReviewFiles.open``) for an import of a
-  prepared review, and the first import's receipt (``state/team-import/receipt.json``, read
+  prepared review, and the first import's receipt (``runtime/team-import/receipt.json``, read
   only through ``batches.import_receipt``, which also checks it came from the same backup;
   ``recorded_team_ids``) for later batches and credentials. ``target_team_ids`` decides the ids
   of a new review or a dry run from both.
