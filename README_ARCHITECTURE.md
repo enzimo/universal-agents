@@ -3237,19 +3237,37 @@ replies wait too. That wait therefore gives up after
 makes plus delivery), logs `event=gateway_reply_leftover_order_wait_expired`,
 and lets the message go on out of order.
 
-Each leftover is logged: `event=gateway_reply_leftover_passed_on`,
-`event=gateway_reply_leftover_not_passed_on` with a reason, or
-`event=gateway_reply_leftover_failed`. When the gateway stops, it stops
-passing leftovers on before it stops its page watches, so a page cannot open
-with nothing watching it. Each leftover not passed on is logged. A leftover
-was acknowledged to NATS when it was first queued, so one lost to a crash is
-not delivered again.
+Each leftover is logged: `event=gateway_reply_leftover_passed_on` or
+`event=gateway_reply_leftover_not_passed_on` with a reason.
+
+A leftover whose handling fails is tried again the way the response receiver
+retries a message on arrival: up to the transport's `max_deliver` tries, 10
+seconds apart, with `event=gateway_reply_leftover_failed` for each failed
+try. The request's later leftovers wait meanwhile. After the last try the
+gateway logs `event=gateway_reply_leftover_gave_up` at error level, and the
+task is told rather than left waiting: a setup, form or signup request is
+refused to its task with a `tool_setup_chat_not_waiting` or failed-form
+result, unless its setup page already has a record, in which case that page's
+own result, expiry or restart recovery reaches the task
+(`GatewayResponseCoordinator.fail_lost_credential_request`).
+
+When the gateway stops, it stops passing leftovers on before it stops its
+page watches, so a page cannot open with nothing watching it. Every leftover
+not passed on, whether its pass was running or had not started, is logged and
+its task is told the same way, while the connection to NATS is still open.
+`GatewayManagerClient.close` repeats this for waits that closed in between. A
+leftover was acknowledged to NATS when it was first queued, so one lost to a
+crash is not delivered again.
 
 Rationale (review of 2026-11-16): closing a wait discarded what it still
 held, so the second page of a setup run got no record, card, result or log
 line, and the run waited forever. Passing leftovers on outside the closing
-task means a cancelled or timed-out waiter never waits on broker calls, and
-the caller records the reply that ended the wait before any leftover.
+task means a cancelled or timed-out waiter never waits on broker calls. The
+caller records the reply that ended the wait before any leftover, because it
+does so before it next pauses (interactive submission, and Web Chat's answer
+to a question). The retries and the result to the task at give-up and
+shutdown follow the project review of PR #161: a leftover that failed once,
+or was cut off by a restart, must not leave its task waiting forever.
 
 Delivery receipts use the durable team-lead route, so they can wait for a
 replacement lead before discovery completes. Repeated publication of one

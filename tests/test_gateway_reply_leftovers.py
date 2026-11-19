@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from custom_messages.contracts.control_v1 import AgentStatus, SystemStatusMessage
-from custom_messages.contracts.credentials_v1 import ToolSetupResultV1
+from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1, ToolSetupResultV1
 from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
@@ -116,6 +116,196 @@ async def test_a_second_setup_page_queued_on_the_live_reply_opens_with_its_card(
         f"message_id={second.msg_header.message_id} content_type=ToolSetupRequestV1 "
         "content_id=tool_setup_req_second route=response"
     ) in caplog.text
+
+
+async def _live_reply_with_two_pages(gateway, envelope) -> tuple[MessageEnvelope, MessageEnvelope]:
+    """The first page ends the live reply's wait; the second is still queued on it when it closes."""
+
+    client = gateway._manager_client
+    first = _page(envelope, "tool_setup_req_first", tool_id="cli:huggingface")
+    second = _page(envelope, "tool_setup_req_second", tool_id="http:registrar_two")
+    async with client.response_channel(CHAT_REQUEST, task_id=TASK):
+        await client.handle_response(first)
+        await client.handle_response(second)
+        await gateway._response_coordinator.await_terminal_response(
+            correlation_id=CHAT_REQUEST, session_key=SESSION, query_handler=None, response_task_id=TASK
+        )
+    return first, second
+
+
+def _results(transport) -> list[tuple[str, str, str | None]]:
+    """The setup results sent to the task: (page, status, reason)."""
+
+    return [
+        (e.msg_content.setup_request_id, e.msg_content.status, e.msg_content.reason_code)
+        for e, _ in transport.durable
+        if isinstance(e.msg_content, ToolSetupResultV1)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opening", ["fails_once", "fails_every_try"])
+async def test_a_leftover_setup_page_that_fails_to_open_is_tried_again_or_refused_to_its_task(
+    chat, monkeypatch, opening
+):
+    gateway, envelope, _create, transport = chat
+    leftovers = gateway._manager_client._leftovers
+    # The response receiver waits 10 s between tries; the same number of tries, quickly.
+    leftovers._retry_seconds = 0.01
+    handoffs = gateway._credential_handoffs
+    present = handoffs.try_present
+    tries: list[str] = []
+
+    async def flaky_present(page: MessageEnvelope) -> bool:
+        tries.append(page.msg_content.setup_request_id)
+        if opening == "fails_every_try" or len(tries) == 1:
+            raise RuntimeError("The gateway's storage was briefly unavailable.")
+        return await present(page)
+
+    monkeypatch.setattr(handoffs, "try_present", flaky_present)
+
+    await _live_reply_with_two_pages(gateway, envelope)
+    await leftovers.passed_on(CHAT_REQUEST)
+
+    setups = gateway.state_store.tool_setup_repository
+    if opening == "fails_once":
+        assert tries == ["tool_setup_req_second"] * 2
+        assert _listed(gateway) == ["tool_setup_req_second"]
+        assert setups.get_tool_setup("tool_setup_req_second").status == "waiting"
+        assert _results(transport) == []
+    else:
+        # Every try the response receiver would have made, then the task is told rather than left waiting.
+        assert leftovers._attempts > 1
+        assert tries == ["tool_setup_req_second"] * leftovers._attempts
+        assert setups.get_tool_setup("tool_setup_req_second") is None
+        assert _results(transport) == [("tool_setup_req_second", "unavailable", "tool_setup_chat_not_waiting")]
+
+
+# Shutdown --------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_leftover_setup_page_cut_off_by_shutdown_is_refused_to_its_task(chat, caplog):
+    """A planned restart while the second page of a set_up_tools wave is being opened."""
+
+    gateway, envelope, create, transport = chat
+    caplog.set_level(logging.WARNING)
+    opened = create.return_value
+    second_opening = asyncio.Event()
+
+    async def broker_call(request):
+        if request.request_id == "tool_setup_req_second":
+            second_opening.set()
+            await asyncio.Event().wait()  # The broker is slow; the gateway stops meanwhile.
+        return opened
+
+    create.side_effect = broker_call
+    _first, second = await _live_reply_with_two_pages(gateway, envelope)
+    await asyncio.wait_for(second_opening.wait(), timeout=5)
+
+    await gateway.close()
+
+    assert gateway.state_store.tool_setup_repository.get_tool_setup("tool_setup_req_second") is None
+    assert _results(transport) == [("tool_setup_req_second", "unavailable", "tool_setup_chat_not_waiting")]
+    assert (
+        f"event=gateway_reply_leftover_not_passed_on reason=gateway_stopping correlation_id={CHAT_REQUEST} "
+        f"task_id={TASK} message_id={second.msg_header.message_id} content_type=ToolSetupRequestV1 "
+        "content_id=tool_setup_req_second route=response"
+    ) in caplog.text
+
+
+# The chat history keeps the team lead's order (a real Web Chat send) --------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival", ["before_the_wait", "during_the_first_pages_broker_call"])
+async def test_two_setup_pages_through_a_web_chat_send_keep_their_order(chat, monkeypatch, arrival):
+    """application.send_user_message -> interactive_submission -> the reply wait -> the coordinator.
+
+    Interactive submission records the reply that ended the wait before it next
+    pauses, and the leftover pass starts only after that pause.
+    """
+
+    gateway, _envelope, create, _transport = chat
+    owner = gateway.config.user.canonical_user_id
+    gateway.state_store.create_session(
+        session_key="session_send",
+        conversation_id="conversation_send",
+        manager_agent_id=gateway.config.manager.manager_agent_id,
+        channel_name="website",
+        user_id=owner,
+        chat_id="web-chat",
+        owner_canonical_user_id=owner,
+    )
+    client = gateway._manager_client
+    opened = create.return_value
+    pages: dict[str, MessageEnvelope] = {}
+
+    def page_for(published: MessageEnvelope, setup_request_id: str, tool_id: str) -> MessageEnvelope:
+        meta = published.msg_meta
+        return MessageEnvelope(
+            msg_content=ToolSetupRequestV1(
+                setup_request_id=setup_request_id,
+                parent_task_id=published.msg_content.task_id,
+                tool_id=tool_id,
+                kind="account_link",
+                owner="person",
+                reason=f"Set up {tool_id} so I can compare the two accounts.",
+            ),
+            msg_meta=MessageMeta(
+                msg_correlation_id=meta.msg_correlation_id,
+                conversation_id=meta.conversation_id,
+                gateway_context=GatewayContext(
+                    session_key="session_send", canonical_user_id=owner, channel_name="website", chat_id="web-chat"
+                ),
+            ),
+            msg_header=MessageHeader(
+                from_agent_id=gateway.config.manager.manager_agent_id,
+                to_routing_path=gateway.config.manager.response_queue_name,
+                agent_signature="",
+            ),
+        )
+
+    async def broker_call(request):
+        if arrival == "during_the_first_pages_broker_call" and request.request_id == "send_first":
+            await client.handle_response(pages["second"])
+        return dict(opened, tool_display_name=f"Tool for {request.request_id}")
+
+    create.side_effect = broker_call
+
+    async def publish(envelope: MessageEnvelope, routing_key: str) -> None:
+        # The team lead answers the published request with two pages at once.
+        if not isinstance(envelope.msg_content, Task) or pages:
+            return
+        pages["first"] = page_for(envelope, "send_first", "cli:huggingface")
+        pages["second"] = page_for(envelope, "send_second", "http:registrar_two")
+        await client.handle_response(pages["first"])
+        if arrival == "before_the_wait":
+            await client.handle_response(pages["second"])
+
+    monkeypatch.setattr(client, "publish_durable", publish)
+
+    response = await gateway.application.send_user_message(
+        "compare the two registrar accounts",
+        session_key="session_send",
+        channel_name="website",
+        user_id=owner,
+        chat_id="web-chat",
+        canonical_user_id=owner,
+    )
+    assert response.transient_action is not None
+    assert response.transient_action.request_id == "send_first"
+    await _until(lambda: _listed(gateway) == ["send_second"], what="the second page's card is listed")
+
+    assert gateway.state_store.tool_setup_repository.get_tool_setup("send_second").status == "waiting"
+    history = gateway.application.transcripts.list_messages(
+        owner_canonical_user_id=owner, session_key="session_send", before_cursor=None, limit=20
+    )
+    assert [(message.message_type, message.content) for message in history.messages] == [
+        ("user_message", "compare the two registrar accounts"),
+        ("tool_setup", "Account link form opened for Tool for send_first (your account)."),
+        ("tool_setup", "Account link form opened for Tool for send_second (your account)."),
+    ]
 
 
 # A2: a kind other than a setup page ------------------------------------------------------
@@ -413,28 +603,60 @@ async def test_leftovers_are_passed_on_however_the_wait_ends(ending, raised) -> 
 
 
 @pytest.mark.asyncio
-async def test_one_failing_leftover_does_not_stop_the_others(caplog) -> None:
-    caplog.set_level(logging.INFO, logger="test.gateway.manager_client")
-    delivered: list[MessageEnvelope] = []
-    client = _client(_FakeManagerRuntime())
-    broken, fine = _notice("This one fails."), _notice("This one arrives.")
+def _retrying_client(*, attempts: int):
+    """A client that retries a leftover as the response receiver would, quickly."""
 
-    async def on_unsolicited(envelope: MessageEnvelope) -> None:
-        if envelope is broken:
+    settings = dataclasses.replace(_settings(), leftover_attempts=attempts, leftover_retry_seconds=0.01)
+    client = _client(_FakeManagerRuntime(), settings=settings)
+    lost: list[MessageEnvelope] = []
+
+    async def on_leftover_lost(envelope: MessageEnvelope) -> None:
+        lost.append(envelope)
+
+    client._on_leftover_lost = on_leftover_lost
+    return client, lost
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failures", [2, 3], ids=["fails_twice_then_works", "fails_every_try"])
+async def test_a_failing_leftover_is_tried_again_like_on_arrival_and_its_task_told_when_given_up(
+    caplog, failures
+) -> None:
+    caplog.set_level(logging.INFO, logger="test.gateway.manager_client")
+    client, lost = _retrying_client(attempts=3)
+    delivered: list[MessageEnvelope] = []
+    tries: list[MessageEnvelope] = []
+    flaky, after = _notice("The chat send fails at first."), _notice("Next in line.")
+
+    async def chat(envelope: MessageEnvelope) -> None:
+        tries.append(envelope)
+        if envelope is flaky and tries.count(flaky) <= failures:
             raise RuntimeError("The chat could not be reached.")
         delivered.append(envelope)
 
-    client._on_unsolicited = on_unsolicited
+    client._on_unsolicited = chat
     async with client.response_channel(CORRELATION, task_id=WAITING_TASK):
-        await client.handle_response(broken)
-        await client.handle_response(fine)
+        await client.handle_response(flaky)
+        await client.handle_response(after)
     await _passed_on(client)
 
-    assert delivered == [fine]
-    assert (
-        f"event=gateway_reply_leftover_failed correlation_id={CORRELATION} task_id={WAITING_TASK} "
-        f"message_id={broken.msg_header.message_id} content_type=UserNotification"
-    ) in caplog.text
+    ids = (
+        f"correlation_id={CORRELATION} task_id={WAITING_TASK} "
+        f"message_id={flaky.msg_header.message_id} content_type=UserNotification"
+    )
+    assert "event=gateway_reply_leftover_failed attempt=1 attempts=3 retry_in_seconds=0.01 " + ids in caplog.text
+    assert "event=gateway_reply_leftover_failed attempt=2 attempts=3 retry_in_seconds=0.01 " + ids in caplog.text
+    if failures == 2:
+        # Tried again, in order: the next leftover waits for it.
+        assert delivered == [flaky, after]
+        assert lost == []
+        assert "gateway_reply_leftover_gave_up" not in caplog.text
+    else:
+        assert delivered == [after]
+        assert lost == [flaky]
+        [gave_up] = [record for record in caplog.records if "event=gateway_reply_leftover_gave_up" in record.message]
+        assert gave_up.levelno == logging.ERROR
+        assert "event=gateway_reply_leftover_gave_up attempts=3 " + ids in gave_up.message
 
 
 # A4: order and races ---------------------------------------------------------------------
@@ -590,7 +812,8 @@ async def test_stopping_the_client_ends_passes_and_refuses_later_ones(caplog) ->
     caplog.set_level(logging.WARNING, logger="test.gateway.manager_client")
     first, second, later = _notice("Being passed on."), _notice("Not yet passed on."), _notice("Sent after the close.")
     chat = _Chat(hold=first)
-    client = _client_for(chat)
+    client, lost = _retrying_client(attempts=1)
+    client._on_unsolicited = chat
     await _leave(client, first, second)
     held = asyncio.create_task(client.handle_response(later))
     await _let_others_run()
@@ -599,12 +822,43 @@ async def test_stopping_the_client_ends_passes_and_refuses_later_ones(caplog) ->
     # Nothing is raised into the held message, which goes on.
     await held
     assert chat.handled == [later]
+    # The one in hand and the one behind it: each is reported to its task.
+    assert lost == [first, second]
 
     after_stop = _notice("Left on a wait that closed after the stop.")
     await _leave(client, after_stop)
-    assert client._leftovers._running == set()
+    assert client._leftovers._passes == {}
     assert chat.handled == [later]
+    # Told at the next stop, which GatewayManagerClient.close makes before the connection closes.
+    await client.stop_leftover_passes()
+    assert lost == [first, second, after_stop]
     for envelope in (first, second, after_stop):
+        assert (
+            f"event=gateway_reply_leftover_not_passed_on reason=gateway_stopping correlation_id={CORRELATION} "
+            f"task_id={WAITING_TASK} message_id={envelope.msg_header.message_id}"
+        ) in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stopping_before_a_pass_starts_still_reports_its_leftovers(caplog) -> None:
+    """The wait closes and the gateway stops in the same turn of the event loop, before the pass runs."""
+
+    caplog.set_level(logging.WARNING, logger="test.gateway.manager_client")
+    client, lost = _retrying_client(attempts=1)
+    delivered: list[MessageEnvelope] = []
+
+    async def chat(envelope: MessageEnvelope) -> None:
+        delivered.append(envelope)
+
+    client._on_unsolicited = chat
+    first, second = _notice("Left over."), _notice("Also left over.")
+    await _leave(client, first, second)  # No pause: the pass has not started.
+
+    await client.stop_leftover_passes()
+
+    assert delivered == []
+    assert lost == [first, second]
+    for envelope in (first, second):
         assert (
             f"event=gateway_reply_leftover_not_passed_on reason=gateway_stopping correlation_id={CORRELATION} "
             f"task_id={WAITING_TASK} message_id={envelope.msg_header.message_id}"

@@ -58,9 +58,26 @@ Waiting on a pass never links the tasks (``asyncio.wait``): cancelling a held
 message leaves the pass running, and a cancelled or failed pass raises nothing
 into the message's handling.
 
-Shutdown. ``stop`` cancels the running passes and refuses later ones; every
-leftover not passed on is logged. A leftover was acknowledged to NATS when it
-was first queued, so one lost to shutdown or a crash is not delivered again.
+Failures. A leftover whose handling raises is tried again the way the
+response receiver retries a message on arrival: up to the transport's
+``max_deliver`` tries, ``HANDLING_RETRY_DELAY_SECONDS`` apart
+(``assistant_gateway.nats_manager_runtime``, passed in through
+``GatewayManagerClientSettings``). The pass holds the request's later
+leftovers meanwhile, so their order is kept. After the last try an error is
+logged, and the task is told through the route's lost handler: a setup, form
+or signup request is refused to its task, unless its setup page already has a
+record (``GatewayResponseCoordinator.fail_lost_credential_request``). The
+arrival path instead gives a message that fails on its last delivery to the
+dead-letter store; a leftover was already acknowledged, so it has no message
+there to set aside.
+
+Shutdown. ``stop`` cancels the running passes and refuses later ones. Every
+leftover not passed on, whether its pass was running or had not started, is
+logged, and its task is told the same way, while the connection to NATS is
+still open: ``UserGateway.close`` stops the passes first, and
+``GatewayManagerClient.close`` stops them again, for waits that closed in
+between, before it closes the connection. A leftover was acknowledged to NATS
+when it was first queued, so one lost to a crash is not delivered again.
 """
 
 from __future__ import annotations
@@ -149,6 +166,19 @@ class ReplyWait:
         return tuple(leftovers)
 
 
+@dataclass
+class _Pass:
+    """One closed wait's leftovers, oldest first, until each is passed on.
+
+    Kept outside the pass's coroutine, so ``stop`` can report the leftovers of a
+    pass it cancelled, whether or not the pass had started.
+    """
+
+    correlation_id: str
+    task_id: str | None
+    remaining: list[Leftover]
+
+
 class ReplyLeftovers:
     """Pass on what closed reply waits left behind (module docstring)."""
 
@@ -156,17 +186,25 @@ class ReplyLeftovers:
         self,
         *,
         handlers: Mapping[ArrivalRoute, LeftoverHandler],
+        lost_handlers: Mapping[ArrivalRoute, LeftoverHandler],
+        attempts: int,
+        retry_seconds: float,
         logger: logging.Logger,
     ) -> None:
         # The "nothing is waiting for this" path per route; a route without one is not passed on.
         self._handlers = dict(handlers)
+        # What tells the task about a leftover given up on or cut off by shutdown, per route.
+        self._lost_handlers = dict(lost_handlers)
+        # The response receiver's own retry policy for a message on arrival.
+        self._attempts = max(1, attempts)
+        self._retry_seconds = retry_seconds
         self._logger = logger
-        # Strong references: asyncio keeps only weak references to running tasks.
-        self._running: set[asyncio.Task[None]] = set()
-        # Per request (correlation id): its latest pass, which runs after the
-        # earlier ones, and how many of its leftovers are not passed on yet.
+        # Running passes. Also the strong references asyncio needs: it keeps only weak ones.
+        self._passes: dict[asyncio.Task[None], _Pass] = {}
+        # Per request (correlation id): its latest pass, which runs after the earlier ones.
         self._latest: dict[str, asyncio.Task[None]] = {}
-        self._pending: dict[str, int] = {}
+        # Leftovers of waits that closed after stop(); the next stop() reports them.
+        self._refused: list[_Pass] = []
         self._stopped = False
 
     def pass_on(
@@ -180,18 +218,17 @@ class ReplyLeftovers:
 
         if not leftovers:
             return
+        batch = _Pass(correlation_id, task_id, list(leftovers))
         if self._stopped:
-            for leftover in leftovers:
-                self._log_stopping(correlation_id, task_id, leftover)
+            for leftover in batch.remaining:
+                self._log_stopping(batch, leftover)
+            # Their tasks are told by the next stop(), while the connection is still open.
+            self._refused.append(batch)
             return
         earlier = self._latest.get(correlation_id)
-        task = asyncio.create_task(
-            self._run(correlation_id, task_id, list(leftovers), earlier),
-            name=f"gateway_reply_leftovers:{correlation_id}",
-        )
+        task = asyncio.create_task(self._run(batch, earlier), name=f"gateway_reply_leftovers:{correlation_id}")
+        self._passes[task] = batch
         self._latest[correlation_id] = task
-        self._pending[correlation_id] = self._pending.get(correlation_id, 0) + len(leftovers)
-        self._running.add(task)
         task.add_done_callback(partial(self._finished, correlation_id))
 
     async def passed_on(self, correlation_id: str | None) -> None:
@@ -210,56 +247,61 @@ class ReplyLeftovers:
                 "Stopped waiting for a request's leftover messages; the next message goes on out of order. "
                 "event=gateway_reply_leftover_order_wait_expired correlation_id=%s pending=%s waited_seconds=%s",
                 correlation_id,
-                self._pending.get(correlation_id, 0),
+                sum(len(batch.remaining) for batch in self._passes.values() if batch.correlation_id == correlation_id),
                 LEFTOVER_ORDER_WAIT_SECONDS,
             )
 
     async def stop(self) -> None:
-        """Cancel the running passes and refuse later ones for the life of this client (the gateway is stopping)."""
+        """Cancel the running passes and refuse later ones for the life of this client (the gateway is stopping).
+
+        Every leftover not passed on, in a pass that was running, had not started
+        yet, or was refused since the last call, is logged, and its task is told
+        through the lost handlers. The caller still has its connection open. Called
+        again before the connection closes, for waits that closed in between.
+        """
 
         self._stopped = True
-        running = tuple(self._running)
-        for task in running:
+        cancelled = dict(self._passes)
+        for task in cancelled:
             task.cancel()
-        if running:
-            await asyncio.wait(running)
+        if cancelled:
+            await asyncio.wait(cancelled)
+        refused, self._refused = self._refused, []
+        for batch in cancelled.values():
+            for leftover in batch.remaining:
+                self._log_stopping(batch, leftover)
+                await self._report_lost(batch, leftover)
+        for batch in refused:
+            for leftover in batch.remaining:
+                await self._report_lost(batch, leftover)
 
-    async def _run(
-        self,
-        correlation_id: str,
-        task_id: str | None,
-        remaining: list[Leftover],
-        earlier: asyncio.Task[None] | None,
-    ) -> None:
-        try:
-            if earlier is not None:
-                await asyncio.wait({earlier})
-            # Oldest first, one at a time: the order the team lead sent them.
-            while remaining:
-                await self._pass_one(correlation_id, task_id, remaining[0])
-                remaining.pop(0)
-                self._settle(correlation_id, 1)
-        except asyncio.CancelledError:
-            for leftover in remaining:
-                self._log_stopping(correlation_id, task_id, leftover)
-            raise
-        finally:
-            self._settle(correlation_id, len(remaining))
-
-    def _settle(self, correlation_id: str, count: int) -> None:
-        left = self._pending.get(correlation_id, 0) - count
-        if left > 0:
-            self._pending[correlation_id] = left
-        else:
-            self._pending.pop(correlation_id, None)
+    async def _run(self, batch: _Pass, earlier: asyncio.Task[None] | None) -> None:
+        if earlier is not None:
+            await asyncio.wait({earlier})
+        # Oldest first, one at a time: the order the team lead sent them. A
+        # leftover leaves the list only once handled, so stop() sees the one in hand.
+        while batch.remaining:
+            await self._pass_one(batch, batch.remaining[0])
+            batch.remaining.pop(0)
 
     def _finished(self, correlation_id: str, task: asyncio.Task[None]) -> None:
-        self._running.discard(task)
+        batch = self._passes.pop(task, None)
         if self._latest.get(correlation_id) is task:
             del self._latest[correlation_id]
+        if task.cancelled():
+            if not self._stopped and batch is not None and batch.remaining:
+                # Only stop() cancels a pass; anything else is an anomaly.
+                self._logger.error(
+                    "Passing on leftover messages was cancelled outside shutdown. "
+                    "event=gateway_reply_leftovers_stopped_with_error correlation_id=%s error_type=CancelledError "
+                    "remaining=%s",
+                    correlation_id,
+                    len(batch.remaining),
+                )
+            return
         # Nothing awaits a pass's result (asyncio.wait does not read it), so an
         # unexpected error is reported here. Handler errors never get this far.
-        if not task.cancelled() and (error := task.exception()) is not None:
+        if (error := task.exception()) is not None:
             self._logger.error(
                 "Passing on leftover messages stopped with an error. "
                 "event=gateway_reply_leftovers_stopped_with_error correlation_id=%s error_type=%s",
@@ -268,20 +310,15 @@ class ReplyLeftovers:
                 exc_info=error,
             )
 
-    def _log_stopping(self, correlation_id: str, task_id: str | None, leftover: Leftover) -> None:
+    def _log_stopping(self, batch: _Pass, leftover: Leftover) -> None:
         self._logger.warning(
             "Did not pass on a message left on a closed reply wait. "
             "event=gateway_reply_leftover_not_passed_on reason=%s " + _FIELDS,
             NOT_PASSED_ON_GATEWAY_STOPPING,
-            *_fields(correlation_id, task_id, leftover),
+            *_fields(batch, leftover),
         )
 
-    async def _pass_one(
-        self,
-        correlation_id: str,
-        task_id: str | None,
-        leftover: Leftover,
-    ) -> None:
+    async def _pass_one(self, batch: _Pass, leftover: Leftover) -> None:
         handler = self._handlers.get(leftover.route) if leftover.route is not None else None
         if handler is None:
             reason = NOT_PASSED_ON_ARRIVAL_UNKNOWN if leftover.route is None else NOT_PASSED_ON_GATEWAY_NOTICE
@@ -290,7 +327,7 @@ class ReplyLeftovers:
                 "Did not pass on a message left on a closed reply wait. "
                 "event=gateway_reply_leftover_not_passed_on reason=%s " + _FIELDS,
                 reason,
-                *_fields(correlation_id, task_id, leftover),
+                *_fields(batch, leftover),
             )
             return
         # Every agent answers the gateway's discovery request and only the first
@@ -300,29 +337,68 @@ class ReplyLeftovers:
             logging.DEBUG if routine else logging.INFO,
             "Passing on a message left on a closed reply wait. "
             "event=gateway_reply_leftover_passed_on " + _FIELDS,
-            *_fields(correlation_id, task_id, leftover),
+            *_fields(batch, leftover),
         )
+        if not await self._handle_with_retries(handler, batch, leftover):
+            await self._report_lost(batch, leftover)
+
+    async def _handle_with_retries(self, handler: LeftoverHandler, batch: _Pass, leftover: Leftover) -> bool:
+        """Try the handler as the response receiver tries a message on arrival; False once it gave up."""
+
+        error: Exception | None = None
+        for attempt in range(1, self._attempts + 1):
+            try:
+                await handler(leftover.envelope)
+                return True
+            except Exception as exc:
+                error = exc
+                if attempt == self._attempts:
+                    break
+                self._logger.warning(
+                    "Could not pass on a message left on a closed reply wait; trying again. "
+                    "event=gateway_reply_leftover_failed attempt=%s attempts=%s retry_in_seconds=%s " + _FIELDS,
+                    attempt,
+                    self._attempts,
+                    self._retry_seconds,
+                    *_fields(batch, leftover),
+                    exc_info=True,
+                )
+                await asyncio.sleep(self._retry_seconds)
+        self._logger.error(
+            "Gave up passing on a message left on a closed reply wait. "
+            "event=gateway_reply_leftover_gave_up attempts=%s " + _FIELDS,
+            self._attempts,
+            *_fields(batch, leftover),
+            exc_info=error,
+        )
+        return False
+
+    async def _report_lost(self, batch: _Pass, leftover: Leftover) -> None:
+        """Tell the task about a leftover that was not passed on, where its route has a way to."""
+
+        handler = self._lost_handlers.get(leftover.route) if leftover.route is not None else None
+        if handler is None:
+            return
         try:
             await handler(leftover.envelope)
         except Exception:
-            # One failure must not lose the leftovers after it.
             self._logger.exception(
-                "Could not pass on a message left on a closed reply wait. "
-                "event=gateway_reply_leftover_failed " + _FIELDS,
-                *_fields(correlation_id, task_id, leftover),
+                "Could not tell the task about a message that was not passed on. "
+                "event=gateway_reply_leftover_lost_report_failed " + _FIELDS,
+                *_fields(batch, leftover),
             )
 
 
 _FIELDS = "correlation_id=%s task_id=%s message_id=%s content_type=%s content_id=%s route=%s"
 
 
-def _fields(correlation_id: str, task_id: str | None, leftover: Leftover) -> tuple[str, ...]:
+def _fields(batch: _Pass, leftover: Leftover) -> tuple[str, ...]:
     """The identifiers each leftover log line carries; never the message's text or a page link."""
 
     content = leftover.envelope.msg_content
     return (
-        correlation_id,
-        task_id or "-",
+        batch.correlation_id,
+        batch.task_id or "-",
         leftover.envelope.msg_header.message_id,
         type(content).__name__,
         _content_id(content),

@@ -66,6 +66,12 @@ class GatewayManagerClientSettings:
     liveness_poll_seconds: float = 5.0
     presence_stale_seconds: float = 30.0
     recovery_discovery_timeout_seconds: float = 2.0
+    # A message left on a closed reply wait whose handling fails is tried again
+    # the way the response receiver retries a message on arrival: up to this
+    # many tries in all, this many seconds apart (reply_leftovers). UserGateway
+    # passes the transport's values; the defaults try once.
+    leftover_attempts: int = 1
+    leftover_retry_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -95,6 +101,7 @@ class GatewayManagerClient:
         on_manager_available: ManagerTransitionHandler | None = None,
         on_manager_unavailable: ManagerTransitionHandler | None = None,
         on_agent_presence: AgentPresenceHandler | None = None,
+        on_leftover_lost: EnvelopeHandler | None = None,
         write_manager_route: ManagerRouteWriter | None = None,
         trace_enabled: TraceEnabled | None = None,
     ) -> None:
@@ -109,6 +116,7 @@ class GatewayManagerClient:
         self._on_manager_available = on_manager_available
         self._on_manager_unavailable = on_manager_unavailable
         self._on_agent_presence = on_agent_presence
+        self._on_leftover_lost = on_leftover_lost
         self._write_manager_route = write_manager_route
         self._trace_enabled = trace_enabled or (lambda: False)
         self._manager_id = settings.initial_manager_id
@@ -125,6 +133,11 @@ class GatewayManagerClient:
                 ArrivalRoute.RESPONSE: self._nothing_waiting_for_response,
                 ArrivalRoute.OPERATIONAL: self._nothing_waiting_for_operational,
             },
+            # Only a response-route message can be a request a task waits on;
+            # an operational one is never shown, so nothing waits on it.
+            lost_handlers={ArrivalRoute.RESPONSE: self._response_leftover_lost},
+            attempts=settings.leftover_attempts,
+            retry_seconds=settings.leftover_retry_seconds,
             logger=logger,
         )
         self._control_queues: dict[str, asyncio.Queue[MessageEnvelope]] = {}
@@ -181,6 +194,7 @@ class GatewayManagerClient:
         on_manager_available: ManagerTransitionHandler,
         on_manager_unavailable: ManagerTransitionHandler,
         on_agent_presence: AgentPresenceHandler,
+        on_leftover_lost: EnvelopeHandler,
     ) -> None:
         """Bind the composed application handlers before connecting the runtime."""
 
@@ -192,6 +206,7 @@ class GatewayManagerClient:
         self._on_manager_available = on_manager_available
         self._on_manager_unavailable = on_manager_unavailable
         self._on_agent_presence = on_agent_presence
+        self._on_leftover_lost = on_leftover_lost
 
     async def connect(self) -> None:
         """Connect the runtime and install transport-neutral inbound handlers."""
@@ -215,7 +230,11 @@ class GatewayManagerClient:
         self._lifecycle_connected = False
 
     async def stop_leftover_passes(self) -> None:
-        """Cancel passing on leftovers and refuse later ones; each one not passed on is logged (shutdown)."""
+        """Cancel passing on leftovers and refuse later ones (shutdown).
+
+        Each leftover not passed on is logged, and a setup, form or signup request
+        among them is refused to its task while the connection is still open.
+        """
 
         await self._leftovers.stop()
 
@@ -483,6 +502,12 @@ class GatewayManagerClient:
         if correlation_id and await self.queue_response(correlation_id, envelope, route=ArrivalRoute.OPERATIONAL):
             return
         await self._nothing_waiting_for_operational(envelope)
+
+    async def _response_leftover_lost(self, envelope: MessageEnvelope) -> None:
+        """A response-route leftover given up on or cut off by shutdown: its task is told (reply_leftovers)."""
+
+        if self._on_leftover_lost is not None:
+            await self._on_leftover_lost(envelope)
 
     async def _nothing_waiting_for_operational(self, envelope: MessageEnvelope) -> None:
         """An operational message no reply wait takes: on arrival, or left on a closed wait (reply_leftovers)."""
