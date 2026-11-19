@@ -26,6 +26,7 @@ from assistant_gateway.application.operational_control import (
     GatewayStopControlRequest,
 )
 from assistant_gateway.application.ports import (
+    GatewayClock,
     GatewayEventOutput,
     GatewayPrivateResourceAuthorizer,
 )
@@ -50,9 +51,12 @@ from assistant_gateway.application.session_service import (
 )
 from assistant_gateway.application.transient_presentation import PendingCredentialAction
 from assistant_gateway.application.transcript_service import GatewayTranscriptService
-from assistant_gateway.domain.sessions import ParallelSettingOutcome
+from assistant_gateway.domain.sessions import ParallelSettingOutcome, ThreadHiddenAs
 from assistant_gateway.application.website_application import (
+    WEB_CHAT_THREAD_LIST_LIMIT,
     WebChatParallelSettingResult,
+    WebChatThreadAction,
+    WebChatThreadPlacementResult,
     ActivatedWebEnrollmentTokenV1,
     WEB_CHAT_CHAT_ID,
     WebChatThreadStatesV1,
@@ -100,7 +104,12 @@ from assistant_gateway.application.workspace_browser import (
     GatewayWorkspaceAccess,
     WebsiteWorkspaceBrowser,
 )
-from assistant_gateway.application.web_chat_threads import WebChatThread, web_chat_thread
+from assistant_gateway.application.web_chat_threads import (
+    InvalidThreadPlacement,
+    WebChatThread,
+    snooze_wake_time,
+    web_chat_thread,
+)
 from assistant_gateway.domain.sessions import SessionListRecord, SessionRecord, WebChatThreadRecord
 from assistant_gateway.domain.transcript import (
     TRANSCRIPT_ROLE_USER,
@@ -352,6 +361,7 @@ class WebsiteSessionApplication:
         team_id: str,
         awaiting_reply_session_keys: Callable[[], frozenset[str]],
         proactive_session_key: str,
+        clock: GatewayClock,
     ) -> None:
         self._sessions = sessions
         self._session_repository = session_repository
@@ -366,6 +376,9 @@ class WebsiteSessionApplication:
         # The configured key of the team's proactive session (heartbeat.
         # session_key): its threads are listed as "Updates" (web_chat_threads).
         self._proactive_session_key = proactive_session_key
+        # When snoozes wake (web_chat_threads.thread_list_state) and whether a
+        # snooze time is in the future.
+        self._clock = clock
 
     def _owner_allows(
         self,
@@ -388,21 +401,28 @@ class WebsiteSessionApplication:
     def list_web_chat_threads(
         self,
         *,
-        owner_canonical_user_id: str | None,
-        limit: int = 50,
+        owner_canonical_user_id: str,
+        limit: int = WEB_CHAT_THREAD_LIST_LIMIT,
+        include_last_message: bool = False,
     ) -> list[WebChatThread]:
-        """The person's Web Chat threads as the sidebar lists them (web_chat_threads)."""
+        """The person's Web Chat threads as the sidebar lists them (web_chat_threads).
+
+        Only the sessions route asks for each thread's latest message; the
+        live read every two seconds needs what the revision covers.
+        """
 
         threads: list[WebChatThread] = []
+        now = self._clock.now_utc()
         for record in self._session_repository.list_web_chat_threads(
             owner_canonical_user_id=owner_canonical_user_id,
             channel_name=DELIVERY_CHANNEL_WEBSITE,
             chat_id=WEB_CHAT_CHAT_ID,
             limit=limit,
+            include_last_message=include_last_message,
         ):
             if not self._owner_allows(record, owner_canonical_user_id):
                 continue
-            thread = web_chat_thread(record, proactive_session_key=self._proactive_session_key)
+            thread = web_chat_thread(record, proactive_session_key=self._proactive_session_key, now=now)
             if thread is not None:
                 threads.append(thread)
         return threads
@@ -410,7 +430,7 @@ class WebsiteSessionApplication:
     def web_chat_thread_states(
         self,
         *,
-        owner_canonical_user_id: str | None,
+        owner_canonical_user_id: str,
     ) -> WebChatThreadStatesV1:
         threads = self.list_web_chat_threads(
             owner_canonical_user_id=owner_canonical_user_id,
@@ -505,6 +525,68 @@ class WebsiteSessionApplication:
             parallel_thread,
         )
         return WebChatParallelSettingResult(outcome.value)
+
+    def set_web_chat_thread_placement(
+        self,
+        *,
+        session_key: str,
+        action: WebChatThreadAction,
+        owner_canonical_user_id: str | None,
+        snooze_until: str | None = None,
+        seen_sequence: int | None = None,
+    ) -> WebChatThreadPlacementResult:
+        """Pin, unpin, snooze, dismiss or restore one of the person's Web Chat threads.
+
+        Checked like rename and archive: a Web Chat thread on the website
+        channel that the person may update; someone else's or a missing thread
+        reads as not found. Snooze and dismiss take ``seen_sequence``, the last
+        message the page showed, so a message the person never saw brings the
+        thread back (``set_session_hidden``). The state is stored on the
+        thread, so every device the person uses shows the same list.
+        """
+
+        session = self._session_repository.resolve_session_reference(session_key)
+        if (
+            session is None
+            or session.channel_name != DELIVERY_CHANNEL_WEBSITE
+            or session.chat_id != WEB_CHAT_CHAT_ID
+            or not self._owner_allows(session, owner_canonical_user_id, action=PRIVATE_ACTION_UPDATE)
+        ):
+            saved = False
+        else:
+            saved = self._place_thread(session.session_key, action, snooze_until, seen_sequence)
+        result = WebChatThreadPlacementResult.SAVED if saved else WebChatThreadPlacementResult.NOT_FOUND
+        LOGGER.info(
+            "Web Chat thread placement change. event=web_chat_thread_placement outcome=%s "
+            "session_key=%s action=%s",
+            result.value,
+            session.session_key if session is not None else session_key,
+            action.value,
+        )
+        return result
+
+    def _place_thread(
+        self,
+        session_key: str,
+        action: WebChatThreadAction,
+        snooze_until: str | None,
+        seen_sequence: int | None,
+    ) -> bool:
+        repository = self._session_repository
+        if action is WebChatThreadAction.PIN or action is WebChatThreadAction.UNPIN:
+            return repository.set_session_pinned(session_key, pinned=action is WebChatThreadAction.PIN)
+        if action is WebChatThreadAction.RESTORE:
+            return repository.clear_session_hidden(session_key)
+        if seen_sequence is None or seen_sequence < 0:
+            raise InvalidThreadPlacement("Reload the chat and try again.")
+        if action is WebChatThreadAction.SNOOZE:
+            wake = snooze_wake_time(snooze_until, now=self._clock.now_utc())
+            return repository.set_session_hidden(
+                session_key, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until=wake, seen_sequence=seen_sequence
+            )
+        return repository.set_session_hidden(
+            session_key, hidden_as=ThreadHiddenAs.DISMISSED, hidden_until=None, seen_sequence=seen_sequence
+        )
 
     def rename_web_chat_session(
         self,

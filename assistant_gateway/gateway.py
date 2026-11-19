@@ -1376,6 +1376,7 @@ class UserGateway:
                 self._manager_client.pending_response_correlation_ids()
             ),
             proactive_session_key=config.heartbeat.session_key,
+            clock=self._clock,
         )
         website_operations = WebsiteOperationsApplication(
             team=self.team_presence,

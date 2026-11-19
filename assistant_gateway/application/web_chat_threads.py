@@ -9,6 +9,18 @@ exist at every start, so a newly set-up Web Chat used to list two empty
 (owner's report, 2026-10-09). Now a delivery thread is listed only once
 something has arrived in it, under a fixed name.
 
+Each row also shows the thread's latest ordinary message (not a system card,
+not a slash command), when anything was last posted, what the thread waits on
+from the person ("Needs you"), and where the person placed it: pinned, snoozed
+or dismissed. Placement is stored as a baseline on the thread
+(``gateway_sessions``) and undone here, when the list is read, never by the
+code that posts messages: a snoozed thread wakes at its time or when the team
+posts after it was snoozed, and stays marked "woke" until the person opens it
+(the page then restores it); a dismissed thread comes back as soon as
+anything new is posted. Open pages read the list every two seconds
+(``web_chat_thread_states``), so a wake shows within seconds without a
+background job.
+
 A thread's name is fixed once given (owner's request, 2026-10-09; it used to
 follow the latest message): the name the person gave it, otherwise the
 delivery thread's fixed name, otherwise the first ordinary message the person
@@ -22,11 +34,16 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 
 from assistant_gateway.application.person_maintenance import is_person_maintenance_session_key
 from assistant_gateway.application.proactive_delivery import is_proactive_session_key
-from assistant_gateway.domain.sessions import WebChatThreadRecord
+from assistant_gateway.domain.request_state import (
+    REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
+    REQUEST_STATUS_WAITING_FOR_STEERING,
+)
+from assistant_gateway.domain.sessions import ThreadHiddenAs, WebChatThreadRecord
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +51,11 @@ LOGGER = logging.getLogger(__name__)
 # and the full name in a tooltip, so more would only grow every list read.
 TITLE_MAX_CHARACTERS = 200
 ATTACHMENT_TITLE = "Attachment"
+# The row's second line shows about one line of the latest message.
+LAST_MESSAGE_MAX_CHARACTERS = 160
+# The furthest ahead a snooze may wake (the page offers up to next week, or a
+# picked time).
+SNOOZE_MAX_AHEAD = timedelta(days=366)
 
 
 class WebChatThreadKind(StrEnum):
@@ -49,6 +71,43 @@ DELIVERY_THREAD_NAMES = {
     WebChatThreadKind.UPDATES: "Updates",
     WebChatThreadKind.MEMORY_REVIEW: "Memory review",
 }
+
+
+class NeedsYouReason(StrEnum):
+    """What a thread waits on from the person, in the order the list checks them.
+
+    A setup page comes before a credential wait because a page opened by the
+    request's own task also sets the request to waiting for a credential
+    (``tool_setup``), and the same card should get the same label.
+    """
+
+    QUESTION = "question"
+    REPLY = "reply"
+    SETUP = "setup"
+    CREDENTIAL = "credential"
+
+
+class ThreadListState(StrEnum):
+    """Where a thread the person set aside stands now (``thread_list_state``)."""
+
+    SNOOZED = "snoozed"
+    # The snooze ended (its time came or the team posted); shown in its usual
+    # section with a mark until the person opens the thread.
+    WOKE = "woke"
+    DISMISSED = "dismissed"
+
+
+class InvalidThreadPlacement(ValueError):
+    """A pin, snooze or dismiss change the gateway refuses; the message is for the person."""
+
+
+@dataclass(frozen=True)
+class WebChatThreadMessage:
+    """The latest ordinary message, as the row's second line shows it."""
+
+    role: str
+    text: str
+    created_at: str | None
 
 
 @dataclass(frozen=True)
@@ -68,6 +127,15 @@ class WebChatThread:
     kind: WebChatThreadKind
     parallel_thread: bool = False
     has_open_request: bool = False
+    # Read only for the sessions route (the live read leaves it out).
+    last_message: WebChatThreadMessage | None = None
+    last_activity_at: str | None = None
+    last_sequence: int = 0
+    needs_you: NeedsYouReason | None = None
+    pinned: bool = False
+    list_state: ThreadListState | None = None
+    # The snooze's wake time while the thread is snoozed.
+    snoozed_until: str | None = None
 
 
 def thread_kind(session_key: str, *, proactive_session_key: str) -> WebChatThreadKind:
@@ -88,13 +156,20 @@ def _shortened(text: str) -> str:
 
 
 def _first_attachment_name(record: WebChatThreadRecord) -> str | None:
+    return _attachment_name(record.first_message_attachments_json, record.session_key, "first")
+
+
+def _attachment_name(attachments_json: str | None, session_key: str, which: str) -> str | None:
+    """The first attachment's file name, ``Attachment`` when unreadable, or ``None`` without one."""
+
     try:
-        references = json.loads(record.first_message_attachments_json or "[]")
+        references = json.loads(attachments_json or "[]")
     except json.JSONDecodeError:
         LOGGER.warning(
-            "A Web Chat thread's first message has unreadable attachment references; it is named "
-            "'Attachment'. event=web_chat_thread_title_attachments_unreadable session_key=%s",
-            record.session_key,
+            "A Web Chat thread's %s message has unreadable attachment references; it shows "
+            "'Attachment'. event=web_chat_thread_attachments_unreadable session_key=%s",
+            which,
+            session_key,
         )
         return ATTACHMENT_TITLE
     if not references:
@@ -113,14 +188,102 @@ def first_message_title(record: WebChatThreadRecord) -> str | None:
     return _shortened(name) if name else None
 
 
-def web_chat_thread(record: WebChatThreadRecord, *, proactive_session_key: str) -> WebChatThread | None:
-    """The thread-list row for one session, or ``None`` when it is not listed."""
+def last_message(record: WebChatThreadRecord) -> WebChatThreadMessage | None:
+    """The row's second line: the latest ordinary message, shortened, or its first file's name."""
+
+    if not record.last_message_role:
+        return None
+    text = " ".join((record.last_message_text or "").split())
+    if not text:
+        text = _attachment_name(record.last_message_attachments_json, record.session_key, "latest") or ""
+    if len(text) > LAST_MESSAGE_MAX_CHARACTERS:
+        text = text[: LAST_MESSAGE_MAX_CHARACTERS - 1].rstrip() + "…"
+    return WebChatThreadMessage(role=record.last_message_role, text=text, created_at=record.last_message_at)
+
+
+def needs_you_reason(record: WebChatThreadRecord) -> NeedsYouReason | None:
+    """What the thread waits on from the person, or ``None``."""
+
+    if record.has_open_question:
+        return NeedsYouReason.QUESTION
+    if record.running_request_status == REQUEST_STATUS_WAITING_FOR_STEERING:
+        return NeedsYouReason.REPLY
+    if record.has_waiting_setup:
+        return NeedsYouReason.SETUP
+    if record.has_waiting_credential_form or record.running_request_status == REQUEST_STATUS_WAITING_FOR_CREDENTIAL:
+        return NeedsYouReason.CREDENTIAL
+    return None
+
+
+def thread_list_state(record: WebChatThreadRecord, *, now: datetime) -> ThreadListState | None:
+    """Whether a thread is snoozed, woke from a snooze, dismissed, or none of these, at ``now``."""
+
+    if record.hidden_as is None:
+        return None
+    if record.hidden_as == ThreadHiddenAs.DISMISSED:
+        # Anything posted after the last message the person had seen brings it back.
+        returned = record.last_sequence > (record.hidden_at_sequence or 0)
+        return None if returned else ThreadListState.DISMISSED
+    if record.hidden_as == ThreadHiddenAs.SNOOZED:
+        if record.team_posted_after_hiding:
+            return ThreadListState.WOKE
+        wake = _stored_time(record.hidden_until)
+        if wake is None:
+            # Never hide a thread on a time nobody can read: show it as woke.
+            LOGGER.warning(
+                "A snoozed Web Chat thread has an unreadable wake time; it is shown as woke. "
+                "event=web_chat_thread_snooze_unreadable session_key=%s hidden_until=%r",
+                record.session_key,
+                record.hidden_until,
+            )
+            return ThreadListState.WOKE
+        return ThreadListState.WOKE if now >= wake else ThreadListState.SNOOZED
+    LOGGER.warning(
+        "A Web Chat thread has an unknown placement; it is listed as usual. "
+        "event=web_chat_thread_placement_unknown session_key=%s hidden_as=%r",
+        record.session_key,
+        record.hidden_as,
+    )
+    return None
+
+
+def _stored_time(value: str | None) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def snooze_wake_time(value: object, *, now: datetime) -> str:
+    """The UTC wake time to store for a snooze the page asked for, or ``InvalidThreadPlacement``.
+
+    The page works out "this evening" and the other choices in the person's
+    own time and sends one moment with its offset; the gateway only checks
+    that it is later than now and within ``SNOOZE_MAX_AHEAD``.
+    """
+
+    wake = _stored_time(value if isinstance(value, str) else None)
+    if wake is None:
+        raise InvalidThreadPlacement("Choose a date and time to snooze until.")
+    if wake <= now:
+        raise InvalidThreadPlacement("Choose a time in the future to snooze until.")
+    if wake - now > SNOOZE_MAX_AHEAD:
+        raise InvalidThreadPlacement("Snooze for at most a year.")
+    return wake.astimezone(timezone.utc).isoformat()
+
+
+def web_chat_thread(
+    record: WebChatThreadRecord, *, proactive_session_key: str, now: datetime
+) -> WebChatThread | None:
+    """The thread-list row for one session at ``now``, or ``None`` when it is not listed."""
 
     kind = thread_kind(record.session_key, proactive_session_key=proactive_session_key)
     if kind is not WebChatThreadKind.CONVERSATION and not record.has_messages:
         return None
     alias = (record.session_alias or "").strip() or None
     title = alias or DELIVERY_THREAD_NAMES.get(kind) or first_message_title(record)
+    list_state = thread_list_state(record, now=now)
     return WebChatThread(
         session_key=record.session_key,
         session_alias=record.session_alias,
@@ -130,16 +293,33 @@ def web_chat_thread(record: WebChatThreadRecord, *, proactive_session_key: str) 
         kind=kind,
         parallel_thread=record.parallel_thread,
         has_open_request=record.has_open_request,
+        last_message=last_message(record),
+        last_activity_at=record.last_activity_at,
+        last_sequence=record.last_sequence,
+        needs_you=needs_you_reason(record),
+        pinned=record.pinned,
+        list_state=list_state,
+        snoozed_until=record.hidden_until if list_state is ThreadListState.SNOOZED else None,
     )
 
 
 __all__ = [
     "ATTACHMENT_TITLE",
     "DELIVERY_THREAD_NAMES",
+    "InvalidThreadPlacement",
+    "LAST_MESSAGE_MAX_CHARACTERS",
+    "NeedsYouReason",
+    "SNOOZE_MAX_AHEAD",
+    "ThreadListState",
     "TITLE_MAX_CHARACTERS",
     "WebChatThread",
     "WebChatThreadKind",
+    "WebChatThreadMessage",
     "first_message_title",
+    "last_message",
+    "needs_you_reason",
+    "snooze_wake_time",
     "thread_kind",
+    "thread_list_state",
     "web_chat_thread",
 ]

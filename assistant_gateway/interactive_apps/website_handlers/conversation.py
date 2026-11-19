@@ -18,6 +18,7 @@ from assistant_gateway.application.gateway_application import (
 )
 from assistant_gateway.application.transcript_service import TranscriptCursorError
 from assistant_gateway.application.website_application import (
+    WEB_CHAT_THREAD_LIST_LIMIT,
     GatewaySessionAliasConflict,
     WebChatParallelSettingResult,
     WebTranscriptMessageV1,
@@ -70,9 +71,11 @@ class WebsiteConversationHandlers:
         web_session = self.operations._require_web_chat_session(request)
         owner = self.operations._required_web_chat_owner(web_session)
         event_cursor = self.application.transcripts.snapshot_cursor()
+        # The live read lists the same number of threads (one constant), so
+        # both give the same revision.
         listed = self.application.sessions.list_web_chat_threads(
             owner_canonical_user_id=owner,
-            limit=50,
+            limit=WEB_CHAT_THREAD_LIST_LIMIT,
         )
         # `title` is the thread's fixed name (web_chat_threads); null until
         # its first ordinary message, and the page shows "New Chat" then.

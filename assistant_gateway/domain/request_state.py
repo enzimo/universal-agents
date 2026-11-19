@@ -29,6 +29,9 @@ RUN_STATE_FINISHED = "finished"
 # The running request paused with a question for the person (a manager
 # interrupt request); the person's next message answers it.
 REQUEST_STATUS_WAITING_FOR_STEERING = "waiting_for_steering"
+# The chat request waits for a credential form or setup page the person is
+# filling in (assistant_gateway.application.secure_results, tool_setup).
+REQUEST_STATUS_WAITING_FOR_CREDENTIAL = "waiting_for_credential"
 
 # Guidance request statuses the gateway sets itself. The lead's answers use
 # TaskSteeringStatus values (accepted, rejected, stale, expired).
