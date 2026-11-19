@@ -792,10 +792,11 @@ async def resume_ended_setup_runs(agent: Any, *, now: float | None = None, at_st
 
     A pass leaves a run alone while another step of this process works on
     it (its lock is held) or just saved it (``RECENT_RUN_SECONDS``), so its
-    warnings name only real lost wake-ups. ``at_start``: no step of the new
-    process can be part-way through a run, so a recent one is recovered at
-    once; and startup wakes the drain itself once it is ready, so recovery
-    only queues tasks.
+    warnings name only real lost wake-ups. ``at_start``: the steps of the
+    process that saved a recent run stopped with it, so the run is recovered
+    at once (a result that arrives during startup is still kept apart by
+    the run's lock, and at worst adds one needless warning); and startup
+    wakes the drain itself once it is ready, so recovery only queues tasks.
     """
 
     import time

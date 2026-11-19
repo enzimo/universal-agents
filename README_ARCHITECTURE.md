@@ -717,13 +717,18 @@ A task waiting on nothing is not running (waiting, paused or ready), is not in
 its agent's queue, and has no reason to wait. Every legitimate reason is listed
 in one place, `custom_agents.task_wait_reasons`, each read from the record the
 runtime saves for it: from the agent's saved work (queue, delegated work, a
-question, a recoverable pause, a person's decision on an access request or a
-`set_up_tools` run, an outside result such as a credential form, an interrupt
-sent to the requester, a running action batch or held reply, an isolated
-recovery, a queue pause), and from team stores, read only when saved work
-explains nothing (a waiting access request, a running plan, a waiting setup run,
-a provider retry timer). A new kind of wait must save a record one of these
-rules can find. No saved record says when the last reason ended, and accepted
+question, a recoverable pause, a person's decision on an access request, a
+finished `set_up_tools` run whose answer the agent holds for the task's lane,
+an outside result such as a credential form, an interrupt sent to the
+requester, a running action batch or held reply, an isolated recovery, a queue
+pause), and from team stores, read only when saved work explains nothing (a
+waiting access request, a running plan, the setup run the task's record names
+while it still waits, a provider retry timer). A new kind of wait must save a
+record one of these rules can find. A setup-run record excuses a task only
+while its run waits or its answer is held for the lane, by the agent process
+that saved the work (agent ids are new for each process, so a mark left from
+before a restart does not count); a record whose run ended or is missing is
+reported once nothing has resumed the task. No saved record says when the last reason ended, and accepted
 guidance adds history to such a task without moving it, so the wait counts from
 the first pass that sees it: the stuck-work engine takes a per-finding wait
 (`StuckFinding.notice_after`, here `no_progress_after_seconds`), and a pass that
@@ -766,6 +771,15 @@ Four repairs keep work from getting stuck in the first place:
   task waits on it accepts the notice, and each agent periodically resumes tasks
   whose requests were decided while the notice went to a previous agent
   (`access_request_runtime.resume_decided_access_waits`).
+- A finished tool setup follows its task the same way: at start, after restart
+  recovery, and on each scheduler pass (at most once a minute), each agent
+  resumes its own tasks whose `set_up_tools` run ended without resuming them
+  (a restart while the answer waited for the lane, a lost wake-up, a run that
+  is not stored, a result whose next step was lost), from a note with the
+  run's result (`tool_setup_run_runtime.resume_ended_setup_runs`). It leaves
+  a run another step is working on, or saved in the last 30 seconds, to the
+  next pass, so its warnings (`event=tool_setup_run_recovered`) name only
+  real lost wake-ups.
 - A task that ends with delegated work still running stops it
   (`custom_agents.orphaned_subtasks`), and a worker still reporting on work whose
   request ended is told to stop.
@@ -2796,6 +2810,17 @@ person which command to run or asking whether to start:
    denial, and resumes the turn: the live interrupt is answered, or after an
    agent restart the task resumes from a directive with the same compact
    result. The call returns per tool `ready` and `what_happened`.
+   The task's record of the wait (its `tool_setup_run` blocker) stays until
+   the turn really resumes. A live turn's answer waits in memory until the
+   task's lane is free and the agent is not paused, so the record is first
+   marked with the agent process that holds the answer, and the resumed turn
+   removes only that record just before it runs (matched by run and
+   interrupt id; `task_human_interaction_blockers.clear_answered_blocker`).
+   An answer the paused turn cannot take, because the turn is gone or the
+   answer cannot be converted, resumes the task from the directive instead.
+   Why: until 2026-11-19 the record was deleted when the run ended, so a
+   task whose answer waited behind a busy lane was reported as stuck, and a
+   restart in that window lost the run's result.
 5. The gateway (`assistant_gateway/application/tool_setup.py`) opens the
    matching page through the same broker calls as `/link` and `/auth`, and
    several pages of one task side by side (a sibling page of a task that
