@@ -1412,6 +1412,9 @@ class UserGateway:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks = []
+        # Before the page watches stop: a leftover passed on later could open a
+        # page that nothing watches (reply_leftovers).
+        await self._manager_client.stop_leftover_passes()
         await self._credential_workflow.close()
         self._credential_handoffs.clear()
         await self._activity_notices.close()

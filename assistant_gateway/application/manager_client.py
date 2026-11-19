@@ -200,11 +200,17 @@ class GatewayManagerClient:
         self._lifecycle_connected = True
 
     async def close(self) -> None:
-        """Close the runtime connection."""
+        """Close the runtime connection, after stopping the passing on of leftovers."""
 
+        await self.stop_leftover_passes()
         if self._runtime is not None:
             await self._runtime.close()
         self._lifecycle_connected = False
+
+    async def stop_leftover_passes(self) -> None:
+        """Cancel passing on leftovers and refuse later ones; each one not passed on is logged (shutdown)."""
+
+        await self._leftovers.stop()
 
     @asynccontextmanager
     async def response_channel(
@@ -441,6 +447,10 @@ class GatewayManagerClient:
             )
         if correlation_id and await self.queue_response(correlation_id, envelope, route=ArrivalRoute.RESPONSE):
             return
+        # Go after the request's leftovers, so this message cannot overtake them.
+        # This route is handled one message at a time, so meanwhile every chat's
+        # replies wait too, at most LEFTOVER_ORDER_WAIT_SECONDS (reply_leftovers).
+        await self._leftovers.passed_on(correlation_id)
         await self._nothing_waiting_for_response(envelope)
 
     async def _nothing_waiting_for_response(self, envelope: MessageEnvelope) -> None:

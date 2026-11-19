@@ -261,10 +261,10 @@ def _notice(text: str) -> MessageEnvelope:
     return _envelope(UserNotification(text=text, source_task_id=WAITING_TASK))
 
 
-async def _passed_on(client) -> None:
-    """Wait until every leftover the client is passing on has been handled."""
+async def _passed_on(client, correlation_id: str = CORRELATION) -> None:
+    """Wait until the request's leftovers have been passed on (the wait a later arrival uses)."""
 
-    await asyncio.gather(*tuple(client._leftovers._running))
+    await client._leftovers.passed_on(correlation_id)
 
 
 @pytest.mark.asyncio
@@ -348,7 +348,7 @@ async def test_a_leftover_agent_status_is_applied_without_noting_presence_again(
 
     assert await client.discover_manager_id(timeout_seconds=1.0) == "manager_1"
     assert client.manager_id is None  # Discovery itself only reports the id.
-    await _passed_on(client)
+    await _passed_on(client, runtime.operational[-1][0].msg_meta.msg_correlation_id)
 
     # Each status was noted once, when it arrived.
     assert [(status.last_seen_at, source) for status, _at, source in presence] == [
@@ -435,3 +435,200 @@ async def test_one_failing_leftover_does_not_stop_the_others(caplog) -> None:
         f"event=gateway_reply_leftover_failed correlation_id={CORRELATION} task_id={WAITING_TASK} "
         f"message_id={broken.msg_header.message_id} content_type=UserNotification"
     ) in caplog.text
+
+
+# A4: order and races ---------------------------------------------------------------------
+
+
+class _Chat:
+    """The "nothing is waiting" delivery; it holds one message until released."""
+
+    def __init__(self, hold: MessageEnvelope | None = None) -> None:
+        self.started: list[MessageEnvelope] = []
+        self.handled: list[MessageEnvelope] = []
+        self.release = asyncio.Event()
+        self._hold = hold
+
+    async def __call__(self, envelope: MessageEnvelope) -> None:
+        self.started.append(envelope)
+        if envelope is self._hold:
+            await self.release.wait()
+        self.handled.append(envelope)
+
+
+def _client_for(chat: _Chat):
+    client = _client(_FakeManagerRuntime())
+    client._on_unsolicited = chat
+    return client
+
+
+async def _leave(client, *leftovers: MessageEnvelope) -> None:
+    """Close the request's wait with these messages still on it."""
+
+    async with client.response_channel(CORRELATION, task_id=WAITING_TASK):
+        for envelope in leftovers:
+            await client.handle_response(envelope)
+
+
+async def _let_others_run() -> None:
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
+def _for_another_request(text: str) -> MessageEnvelope:
+    envelope = _notice(text)
+    envelope.msg_meta.msg_correlation_id = "corr_other"
+    return envelope
+
+
+@pytest.mark.asyncio
+async def test_leftovers_pass_on_oldest_first_and_a_later_arrival_waits_for_them() -> None:
+    first, second, third = _notice("First."), _notice("Second."), _notice("Third.")
+    later, other = _notice("Sent after the close."), _for_another_request("Another chat's reply.")
+    chat = _Chat(hold=first)
+    client = _client_for(chat)
+    await _leave(client, first, second, third)
+
+    async def receiver() -> None:
+        # The response route hands over one message at a time (custom_transport.nats_pull).
+        for envelope in (later, other):
+            await client.handle_response(envelope)
+
+    receiving = asyncio.create_task(receiver())
+    await _let_others_run()
+    # The later message waits for the leftovers, and the next chat's message waits behind it.
+    assert chat.started == [first]
+    assert not receiving.done()
+
+    chat.release.set()
+    await receiving
+    assert chat.handled == [first, second, third, later, other]
+
+
+@pytest.mark.asyncio
+async def test_a_later_arrival_stops_waiting_for_leftovers_after_the_bound(monkeypatch, caplog) -> None:
+    from assistant_gateway.application import reply_leftovers
+
+    monkeypatch.setattr(reply_leftovers, "LEFTOVER_ORDER_WAIT_SECONDS", 0.05)
+    caplog.set_level(logging.WARNING, logger="test.gateway.manager_client")
+    first, second = _notice("Stuck."), _notice("Behind the stuck one.")
+    later, other = _notice("Sent after the close."), _for_another_request("Another chat's reply.")
+    chat = _Chat(hold=first)
+    client = _client_for(chat)
+    await _leave(client, first, second)
+
+    for envelope in (later, other):
+        await client.handle_response(envelope)
+
+    # Out of order rather than holding every chat's replies.
+    assert chat.handled == [later, other]
+    assert (
+        f"event=gateway_reply_leftover_order_wait_expired correlation_id={CORRELATION} pending=2 waited_seconds=0.05"
+    ) in caplog.text
+    chat.release.set()
+    await _passed_on(client)
+    assert chat.handled == [later, other, first, second]
+
+
+@pytest.mark.asyncio
+async def test_a_later_wait_of_the_same_request_passes_on_after_the_earlier() -> None:
+    from_first, from_second = _notice("Left on the first wait."), _notice("Left on the second wait.")
+    chat = _Chat(hold=from_first)
+    client = _client_for(chat)
+    await _leave(client, from_first)
+    # The same task's wait opens again, as for the answer to a question, and closes with its own leftover.
+    await _leave(client, from_second)
+    await _let_others_run()
+    assert chat.started == [from_first]
+
+    chat.release.set()
+    await _passed_on(client)
+    assert chat.handled == [from_first, from_second]
+
+
+@pytest.mark.asyncio
+async def test_the_caller_handles_the_reply_that_ended_the_wait_before_any_leftover() -> None:
+    events: list[str] = []
+
+    async def chat(_envelope: MessageEnvelope) -> None:
+        events.append("leftover passed on")
+
+    client = _client(_FakeManagerRuntime())
+    client._on_unsolicited = chat
+    async with client.response_channel(CORRELATION, task_id=WAITING_TASK) as queue:
+        await client.handle_response(_reply("Here it is."))
+        await client.handle_response(_notice("One more thing."))
+        await queue.get()
+    # What the caller does with the reply before it next yields: interactive
+    # submission records it in the chat history.
+    events.append("reply recorded")
+    await _passed_on(client)
+
+    assert events == ["reply recorded", "leftover passed on"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_held_arrival_leaves_the_leftovers_pass_running() -> None:
+    leftover, later = _notice("Left over."), _notice("Sent after the close.")
+    chat = _Chat(hold=leftover)
+    client = _client_for(chat)
+    await _leave(client, leftover)
+    held = asyncio.create_task(client.handle_response(later))
+    await _let_others_run()
+
+    held.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await held
+    chat.release.set()
+    await _passed_on(client)
+
+    assert chat.handled == [leftover]
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_client_ends_passes_and_refuses_later_ones(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="test.gateway.manager_client")
+    first, second, later = _notice("Being passed on."), _notice("Not yet passed on."), _notice("Sent after the close.")
+    chat = _Chat(hold=first)
+    client = _client_for(chat)
+    await _leave(client, first, second)
+    held = asyncio.create_task(client.handle_response(later))
+    await _let_others_run()
+
+    await client.close()
+    # Nothing is raised into the held message, which goes on.
+    await held
+    assert chat.handled == [later]
+
+    after_stop = _notice("Left on a wait that closed after the stop.")
+    await _leave(client, after_stop)
+    assert client._leftovers._running == set()
+    assert chat.handled == [later]
+    for envelope in (first, second, after_stop):
+        assert (
+            f"event=gateway_reply_leftover_not_passed_on reason=gateway_stopping correlation_id={CORRELATION} "
+            f"task_id={WAITING_TASK} message_id={envelope.msg_header.message_id}"
+        ) in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_closing_the_gateway_stops_leftovers_before_the_page_watches(chat, monkeypatch) -> None:
+    gateway, _envelope_unused, _create, _transport = chat
+    order: list[str] = []
+
+    def recording(name: str, method):
+        async def call(*args, **kwargs):
+            order.append(name)
+            return await method(*args, **kwargs)
+
+        return call
+
+    client = gateway._manager_client
+    monkeypatch.setattr(client, "stop_leftover_passes", recording("leftovers", client.stop_leftover_passes))
+    workflow = gateway._credential_workflow
+    monkeypatch.setattr(workflow, "close", recording("page watches", workflow.close))
+
+    await gateway.close()
+
+    # A leftover passed on after the page watches stopped could open a page nothing watches.
+    assert order.index("leftovers") < order.index("page watches")

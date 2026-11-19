@@ -37,6 +37,30 @@ cut a half-opened page short. It also means the waiter's caller handles the
 reply that ended the wait first. Interactive submission records that reply in
 the chat history before it next yields to the event loop, so the history
 keeps the order the team lead sent.
+
+Order. Passes of one request run one after another: a pass started by a later
+close waits for the earlier one. A message that arrives after the close and
+that no wait takes waits for its request's leftovers before it is handled
+(``GatewayManagerClient.handle_response``), so it cannot overtake them. The
+gateway's response route is handled one message at a time, so while such a
+message waits, replies for every other chat wait behind it, as they do while a
+message is handled on arrival. The wait therefore gives up after
+``LEFTOVER_ORDER_WAIT_SECONDS`` with a warning, and the message goes on out of
+order rather than hold every person's replies. Two cases are not ordered,
+because nothing a person sees depends on it:
+
+- a message that a newly opened wait of the same request takes goes to that
+  wait at once (another consumer);
+- an operational message that no wait takes only updates the team lead's
+  status (ordered by its own timestamp) or is dropped.
+
+Waiting on a pass never links the tasks (``asyncio.wait``): cancelling a held
+message leaves the pass running, and a cancelled or failed pass raises nothing
+into the message's handling.
+
+Shutdown. ``stop`` cancels the running passes and refuses later ones; every
+leftover not passed on is logged. A leftover was acknowledged to NATS when it
+was first queued, so one lost to shutdown or a crash is not delivered again.
 """
 
 from __future__ import annotations
@@ -46,6 +70,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import partial
 
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -69,6 +94,15 @@ NOT_PASSED_ON_GATEWAY_NOTICE = "gateway_notice"
 # Anomaly: a message put into the queue without recording how it came in (only
 # a test putting into the queue directly does this).
 NOT_PASSED_ON_ARRIVAL_UNKNOWN = "arrival_unknown"
+# The gateway is stopping (ReplyLeftovers.stop).
+NOT_PASSED_ON_GATEWAY_STOPPING = "gateway_stopping"
+
+# How long a message that no wait takes waits for its request's leftovers
+# before it goes on out of order (module docstring, "Order"). While it waits,
+# the response route waits too. This is the longest broker call these
+# leftovers make: executing an approved signup allows 30 s; opening a sign-in
+# or account link page allows 15 s.
+LEFTOVER_ORDER_WAIT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -127,6 +161,11 @@ class ReplyLeftovers:
         self._logger = logger
         # Strong references: asyncio keeps only weak references to running tasks.
         self._running: set[asyncio.Task[None]] = set()
+        # Per request (correlation id): its latest pass, which runs after the
+        # earlier ones, and how many of its leftovers are not passed on yet.
+        self._latest: dict[str, asyncio.Task[None]] = {}
+        self._pending: dict[str, int] = {}
+        self._stopped = False
 
     def pass_on(
         self,
@@ -135,26 +174,105 @@ class ReplyLeftovers:
         task_id: str | None,
         leftovers: Sequence[Leftover],
     ) -> None:
-        """Start passing on one closed wait's leftovers in a task of their own."""
+        """Start passing on one closed wait's leftovers in a task of their own, after the request's earlier ones."""
 
         if not leftovers:
             return
+        if self._stopped:
+            for leftover in leftovers:
+                self._log_stopping(correlation_id, task_id, leftover)
+            return
+        earlier = self._latest.get(correlation_id)
         task = asyncio.create_task(
-            self._run(correlation_id, task_id, tuple(leftovers)),
+            self._run(correlation_id, task_id, list(leftovers), earlier),
             name=f"gateway_reply_leftovers:{correlation_id}",
         )
+        self._latest[correlation_id] = task
+        self._pending[correlation_id] = self._pending.get(correlation_id, 0) + len(leftovers)
         self._running.add(task)
-        task.add_done_callback(self._running.discard)
+        task.add_done_callback(partial(self._finished, correlation_id))
+
+    async def passed_on(self, correlation_id: str | None) -> None:
+        """Wait until the request's leftovers have been passed on, at most ``LEFTOVER_ORDER_WAIT_SECONDS``.
+
+        Its latest pass ends only after the earlier ones. ``asyncio.wait`` never
+        links the tasks: cancelling this caller leaves the pass running, and a
+        cancelled or failed pass raises nothing here.
+        """
+
+        if not correlation_id or (latest := self._latest.get(correlation_id)) is None:
+            return
+        done, _ = await asyncio.wait({latest}, timeout=LEFTOVER_ORDER_WAIT_SECONDS)
+        if not done:
+            self._logger.warning(
+                "Stopped waiting for a request's leftover messages; the next message goes on out of order. "
+                "event=gateway_reply_leftover_order_wait_expired correlation_id=%s pending=%s waited_seconds=%s",
+                correlation_id,
+                self._pending.get(correlation_id, 0),
+                LEFTOVER_ORDER_WAIT_SECONDS,
+            )
+
+    async def stop(self) -> None:
+        """Cancel the running passes and refuse later ones for the life of this client (the gateway is stopping)."""
+
+        self._stopped = True
+        running = tuple(self._running)
+        for task in running:
+            task.cancel()
+        if running:
+            await asyncio.wait(running)
 
     async def _run(
         self,
         correlation_id: str,
         task_id: str | None,
-        leftovers: tuple[Leftover, ...],
+        remaining: list[Leftover],
+        earlier: asyncio.Task[None] | None,
     ) -> None:
-        # Oldest first, one at a time: the order the team lead sent them.
-        for leftover in leftovers:
-            await self._pass_one(correlation_id, task_id, leftover)
+        try:
+            if earlier is not None:
+                await asyncio.wait({earlier})
+            # Oldest first, one at a time: the order the team lead sent them.
+            while remaining:
+                await self._pass_one(correlation_id, task_id, remaining[0])
+                remaining.pop(0)
+                self._settle(correlation_id, 1)
+        except asyncio.CancelledError:
+            for leftover in remaining:
+                self._log_stopping(correlation_id, task_id, leftover)
+            raise
+        finally:
+            self._settle(correlation_id, len(remaining))
+
+    def _settle(self, correlation_id: str, count: int) -> None:
+        left = self._pending.get(correlation_id, 0) - count
+        if left > 0:
+            self._pending[correlation_id] = left
+        else:
+            self._pending.pop(correlation_id, None)
+
+    def _finished(self, correlation_id: str, task: asyncio.Task[None]) -> None:
+        self._running.discard(task)
+        if self._latest.get(correlation_id) is task:
+            del self._latest[correlation_id]
+        # Nothing awaits a pass's result (asyncio.wait does not read it), so an
+        # unexpected error is reported here. Handler errors never get this far.
+        if not task.cancelled() and (error := task.exception()) is not None:
+            self._logger.error(
+                "Passing on leftover messages stopped with an error. "
+                "event=gateway_reply_leftovers_stopped_with_error correlation_id=%s error_type=%s",
+                correlation_id,
+                type(error).__name__,
+                exc_info=error,
+            )
+
+    def _log_stopping(self, correlation_id: str, task_id: str | None, leftover: Leftover) -> None:
+        self._logger.warning(
+            "Did not pass on a message left on a closed reply wait. "
+            "event=gateway_reply_leftover_not_passed_on reason=%s " + _FIELDS,
+            NOT_PASSED_ON_GATEWAY_STOPPING,
+            *_fields(correlation_id, task_id, leftover),
+        )
 
     async def _pass_one(
         self,
