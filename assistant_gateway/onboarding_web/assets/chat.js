@@ -31,6 +31,7 @@ import {
   threadDetail,
 } from "./chat_thread_list.mjs";
 import { THREAD_MENU_ACTION, attachThreadMenuTriggers, createThreadMenu } from "./chat_thread_menu.mjs";
+import { createThreadPreview } from "./chat_thread_preview.mjs";
 
 function mountPage() {
 "use strict";
@@ -241,6 +242,13 @@ shellState.threadMenu = createThreadMenu({
     var button = threadRowButton(sessionKey);
     if (button) button.focus();
   },
+});
+// A mouse resting on a row previews the thread's last turns (chat_thread_preview.mjs).
+shellState.threadPreview = createThreadPreview({
+  document, window, lifecycle, requestClient,
+  list: sharedState.threadList,
+  threadFor: sessionKey => threadForSession(sessionKey),
+  assistantName: () => sharedState.assistantName,
 });
 // Right-click, long press, the context-menu key or Shift+F10 on a row open its
 // menu; tracked once for the whole list so a redraw cannot orphan a press.
@@ -1825,6 +1833,8 @@ function renderThreads() {
       });
       restoreThreadListFocus(focusTarget);
     }
+    // The preview stays beside the same thread's row, or closes when it is gone.
+    shellState.threadPreview.refresh();
     if (unreadStateChanged) {
       saveThreads();
     }
@@ -1876,10 +1886,8 @@ function threadRow(thread) {
       if (detail.description) detailLine.title = detail.description;
       button.appendChild(detailLine);
     }
-    lifecycle.listen(button, "mouseenter", function () {
-      scheduleThreadTitleTooltip(title, fullThreadTitle(thread));
-    });
-    lifecycle.listen(button, "mouseleave", hideThreadTitleTooltip);
+    // The full title shows on keyboard focus; mouse users get the hover
+    // preview, which shows it too (plan review C03).
     lifecycle.listen(button, "focus", function () {
       scheduleThreadTitleTooltip(title, fullThreadTitle(thread));
     });
@@ -1903,6 +1911,7 @@ function openThreadMenu(thread, point) {
       return;
     }
     hideThreadTitleTooltip();
+    shellState.threadPreview.hide();
     shellState.threadMenu.open({
       sessionKey: thread.sessionKey,
       title: fullThreadTitle(thread),

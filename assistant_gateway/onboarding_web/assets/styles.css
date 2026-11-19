@@ -6354,6 +6354,94 @@ body.is-theme-customizing {
   }
 }
 
+/* The hover preview (chat_thread_preview.mjs): the thread's last turns beside
+   its row, two lines each, with who wrote them and when. */
+.thread-preview {
+  position: fixed;
+  z-index: 35;
+  display: grid;
+  gap: 8px;
+  width: min(340px, calc(100vw - 16px));
+  border: 1px solid rgba(7, 89, 133, 0.26);
+  border-radius: 10px;
+  background: rgba(247, 255, 252, 0.88);
+  box-shadow: 0 18px 44px rgba(3, 28, 42, 0.24);
+  backdrop-filter: blur(22px) saturate(140%);
+  color: var(--ink);
+  padding: 10px 12px;
+  pointer-events: none;
+}
+
+.thread-preview-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid rgba(28, 69, 60, 0.14);
+  padding-bottom: 6px;
+}
+
+.thread-preview-title {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.84rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-preview-age,
+.thread-preview-count,
+.thread-preview-status {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.thread-preview-turn {
+  display: grid;
+  gap: 2px;
+}
+
+.thread-preview-who {
+  color: var(--ocean);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.thread-preview-who.is-user {
+  color: var(--ink);
+}
+
+.thread-preview-text {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+:root[data-color-mode="dark"] .thread-preview {
+  border-color: var(--dark-border);
+  background: rgba(11, 21, 27, 0.95);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+}
+
+:root[data-color-mode="dark"] .thread-preview-header {
+  border-color: rgba(98, 213, 243, 0.16);
+}
+
+:root[data-color-mode="dark"] .thread-preview-who {
+  color: var(--ocean-light);
+}
+
+:root[data-color-mode="dark"] .thread-preview-who.is-user {
+  color: var(--ink);
+}
+
 /* The thread menu (chat_thread_menu.mjs): a compact frosted list placed where
    it was opened, with Snooze's choices in a submenu beside it. */
 .thread-menu,

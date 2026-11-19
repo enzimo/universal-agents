@@ -208,6 +208,7 @@ function listHarness() {
     attention: { refresh() {} },
     hideThreadTitleTooltip() {},
     saveThreads() {},
+    shellState: { threadPreview: { refresh() {} } },
   };
   loadFunctions(sandbox, ["renderThreads", "unsavedThreadRow", "focusedThreadListTarget", "restoreWokeThreadWhenRead"]);
   const click = target => listeners.filter(item => item.target === target && item.type === "click")
