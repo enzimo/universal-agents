@@ -8,11 +8,15 @@ const { test } = require("node:test");
 const source = fs.readFileSync(path.join(__dirname,
   "../assistant_gateway/onboarding_web/assets/chat.js"), "utf8");
 
+// The thread list module chat.js imports (sections, snippets, default thread).
+const threadList = require("../assistant_gateway/onboarding_web/assets/chat_thread_list.mjs");
+
 // The page's name for an unnamed thread, read from chat.js itself.
 const NEW_CHAT_TITLE = source.match(/const NEW_CHAT_TITLE = "([^"]+)";/)[1];
 
 function loadFunctions(sandbox, names) {
   if (!("NEW_CHAT_TITLE" in sandbox)) sandbox.NEW_CHAT_TITLE = NEW_CHAT_TITLE;
+  for (const [name, value] of Object.entries(threadList)) if (!(name in sandbox)) sandbox[name] = value;
   vm.createContext(sandbox);
   for (const name of names) {
     const start = source.indexOf(`function ${name}(`);
@@ -31,14 +35,18 @@ function harness() {
     ],
   };
   const calls = [];
+  const patches = [];
+  const errors = [];
   let renders = 0, switchRenders = 0;
   const sandbox = {
     AbortSignal,
     Set,
     sharedState: { authSessionActive: true, authSessionGeneration: 1, activeThreadId: "alpha",
       editingThreadId: "", threads: [], asyncEventCursor: "", threadsRevision: "" },
-    shellState: { SYSTEM_ERROR_SOURCE: { FETCH_SESSIONS: "sessions" } },
+    shellState: { SYSTEM_ERROR_SOURCE: { FETCH_SESSIONS: "sessions", THREAD_PLACEMENT: "thread_placement" } },
     authentication: { handleUnauthorizedResponse() {} },
+    // The person is reading the selected thread.
+    isReadingThread: item => item.id === sandbox.sharedState.activeThreadId,
     normalizeThreadTitle: value => String(value || ""),
     threadFromSeed: seed => ({ ...seed, messages: [], pendingReply: false, pendingReplyCount: 0 }),
     saveThreads() {},
@@ -46,21 +54,30 @@ function harness() {
     renderMessages() {},
     renderParallelSwitch() { switchRenders += 1; },
     clearSystemError() { return false; },
-    appendSystemError() {},
+    appendSystemError(target, source, message) { errors.push({ target, source, message }); },
     ensureActiveThreadHistory: () => Promise.resolve(),
-    requestClient: { async fetch(url) {
+    requestClient: { async fetch(url, init = {}) {
+      if (init.method === "PATCH") {
+        patches.push({ url, body: JSON.parse(init.body) });
+        const refusal = server.refusal;
+        return { ok: !refusal, status: refusal ? 400 : 200, text: async () => refusal || "{}" };
+      }
       calls.push(url);
       return { ok: true, json: async () => ({
         sessions: server.sessions, event_cursor: "snapshot", threads_revision: server.revision,
       }) };
     } },
   };
-  loadFunctions(sandbox, ["fetchSessions", "threadIsBusy", "applyThreadStates"]);
+  loadFunctions(sandbox, [
+    "fetchSessions", "threadIsBusy", "applyThreadStates", "applyServerThreadRow", "applyEventToThreadRow",
+    "restoreWokeThreadWhenRead", "changeThreadPlacement", "placementRefusal",
+  ]);
   const thread = key => sandbox.sharedState.threads.find(item => item.sessionKey === key);
   const page = (busy = [], revision = server.revision, open = []) => ({
     threads_revision: revision, busy_session_keys: busy, open_request_session_keys: open });
   const settle = () => sandbox.fetchSessions();
-  return { sandbox, server, calls, thread, page, settle, renders: () => renders, switchRenders: () => switchRenders };
+  return { sandbox, server, calls, patches, errors, thread, page, settle,
+    renders: () => renders, switchRenders: () => switchRenders };
 }
 
 test("a task running for another page shows the busy dot here too", async () => {
@@ -190,7 +207,7 @@ function listHarness() {
     hideThreadTitleTooltip() {},
     saveThreads() {},
   };
-  loadFunctions(sandbox, ["renderThreads", "unsavedThreadRow"]);
+  loadFunctions(sandbox, ["renderThreads", "unsavedThreadRow", "focusedThreadRowKey", "restoreWokeThreadWhenRead"]);
   const click = target => listeners.filter(item => item.target === target && item.type === "click")
     .forEach(item => item.handler());
   return { sandbox, rows: () => sandbox.sharedState.threadList.children, click, focused: () => focused };
@@ -212,4 +229,98 @@ test("with no thread yet the list shows one unsaved New Chat row, once the serve
   // Drawing again replaces it rather than adding a second one.
   sandbox.renderThreads();
   assert.equal(rows().length, 1);
+});
+
+
+// Pin, snooze and dismiss on the page (A5, plan review C02, C09, C10).
+
+const SNOOZED = { session_key: "gamma", title: "Renew the certificate", updated_at: "2026-11-19T10:00:00Z",
+  list_state: "snoozed", snoozed_until: "2026-11-19T12:00:00+00:00", last_sequence: 4,
+  last_activity_at: "2026-11-19T10:00:00Z", last_message: { role: "assistant", text: "**Staging** expires soon" } };
+
+test("the server's row fields reach the thread, with the plain snippet", async () => {
+  const { sandbox, server, thread } = harness();
+  server.sessions = [SNOOZED, { session_key: "delta", updated_at: "2026-11-19T09:00:00Z", pinned: true, needs_you: "question" }];
+  await sandbox.fetchSessions();
+  const gamma = thread("gamma");
+  assert.equal(gamma.listState, "snoozed");
+  assert.equal(gamma.snoozedUntil, SNOOZED.snoozed_until);
+  assert.equal(gamma.lastSequence, 4);
+  assert.deepEqual({ ...gamma.lastMessage }, { role: "assistant", text: "Staging expires soon" });
+  assert.equal(gamma.lastActivityAt, Date.parse(SNOOZED.last_activity_at));
+  assert.equal(thread("delta").pinned, true);
+  assert.equal(thread("delta").needsYou, "question");
+});
+
+test("with no selection the page opens the first visible thread, never a hidden one (C02)", async () => {
+  const { sandbox, server } = harness();
+  sandbox.sharedState.activeThreadId = "";
+  server.sessions = [
+    { session_key: "hidden", updated_at: "2026-11-19T12:00:00Z", list_state: "dismissed" },
+    { session_key: "older", updated_at: "2026-11-19T08:00:00Z" },
+  ];
+  await sandbox.fetchSessions();
+  assert.equal(sandbox.sharedState.activeThreadId, "older");
+});
+
+test("a snooze that wakes moves the thread to Recent marked Woke, and reading it restores it once (A5)", async () => {
+  const { sandbox, server, calls, patches, thread, page } = harness();
+  server.sessions = [SNOOZED, { session_key: "alpha", updated_at: "2026-11-19T09:00:00Z" }];
+  await sandbox.fetchSessions();
+  assert.equal(threadList.threadSection(thread("gamma")), threadList.THREAD_SECTION.SNOOZED);
+
+  // The wake time passes: the next live page carries a new revision and the list reloads.
+  server.sessions = [{ ...SNOOZED, list_state: "woke", snoozed_until: null }, server.sessions[1]];
+  server.revision = "rev-woke";
+  sandbox.applyThreadStates(page());
+  await new Promise(resolve => setImmediate(resolve));
+  await sandbox.fetchSessions();
+  assert.equal(calls.length >= 2, true);
+  assert.equal(thread("gamma").listState, "woke");
+  assert.equal(threadList.threadSection(thread("gamma")), threadList.THREAD_SECTION.RECENT);
+
+  // Not read yet: nothing is sent.
+  sandbox.restoreWokeThreadWhenRead(thread("gamma"));
+  assert.equal(patches.length, 0);
+  // The person opens it: one restore, however often the list is drawn meanwhile.
+  sandbox.sharedState.activeThreadId = "gamma";
+  sandbox.restoreWokeThreadWhenRead(thread("gamma"));
+  sandbox.restoreWokeThreadWhenRead(thread("gamma"));
+  assert.equal(patches.length, 1);
+  assert.deepEqual(patches[0].body, { thread_action: "restore" });
+  assert.match(patches[0].url, /\/api\/web-chat\/sessions\/gamma$/);
+});
+
+test("snooze and dismiss send the last message this page showed", async () => {
+  const { sandbox, server, patches, thread } = harness();
+  server.sessions = [{ ...SNOOZED, list_state: null }];
+  await sandbox.fetchSessions();
+  // A live reply arrives after the list was read.
+  sandbox.applyEventToThreadRow(thread("gamma"), { session_sequence: 5, role: "assistant", content: "Renewed.", created_at_utc: "2026-11-19T10:05:00Z" });
+  // A card later in the thread moves the time but not the line.
+  sandbox.applyEventToThreadRow(thread("gamma"), { session_sequence: 6, role: "system", content: "Status: idle", created_at_utc: "2026-11-19T10:06:00Z" });
+  // An older event never moves it back.
+  sandbox.applyEventToThreadRow(thread("gamma"), { session_sequence: 3, role: "user", content: "old", created_at_utc: "2026-11-19T09:00:00Z" });
+  assert.deepEqual({ ...thread("gamma").lastMessage }, { role: "assistant", text: "Renewed." });
+  assert.equal(thread("gamma").lastSequence, 6);
+  assert.equal(await sandbox.changeThreadPlacement(thread("gamma"), "dismiss"), true);
+  assert.deepEqual(patches[0].body, { thread_action: "dismiss", seen_sequence: 6 });
+  await sandbox.changeThreadPlacement(thread("gamma"), "snooze", { snooze_until: "2026-11-20T09:00:00+01:00" });
+  assert.deepEqual(patches[1].body, { thread_action: "snooze", snooze_until: "2026-11-20T09:00:00+01:00", seen_sequence: 6 });
+  await sandbox.changeThreadPlacement(thread("gamma"), "pin");
+  assert.deepEqual(patches[2].body, { thread_action: "pin" });
+});
+
+test("a refused change keeps the row where it was and tells the person why", async () => {
+  const { sandbox, server, calls, errors, thread } = harness();
+  server.sessions = [{ ...SNOOZED, list_state: null }];
+  await sandbox.fetchSessions();
+  const reads = calls.length;
+  server.refusal = "Choose a time in the future to snooze until.";
+  assert.equal(await sandbox.changeThreadPlacement(thread("gamma"), "snooze", { snooze_until: "2020-01-01T00:00:00Z" }), false);
+  assert.equal(thread("gamma").listState, "");
+  assert.equal(calls.length, reads, "the list is not reloaded");
+  assert.deepEqual(errors.map(item => [item.target.id, item.source, item.message]), [
+    ["gamma", "thread_placement", "This chat was not moved. Choose a time in the future to snooze until."],
+  ]);
 });

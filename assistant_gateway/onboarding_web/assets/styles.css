@@ -2047,6 +2047,37 @@ h1 {
   color: var(--ocean-light);
 }
 
+/* Thread list in dark mode: Deep Ocean levels with Ember for waiting. */
+:root[data-color-mode="dark"] .thread-row.is-active .thread-title,
+:root[data-color-mode="dark"] .thread-row:hover .thread-title {
+  color: var(--ocean-light);
+}
+
+:root[data-color-mode="dark"] .thread-detail.is-waiting,
+:root[data-color-mode="dark"] .thread-section.is-needs-you .thread-section-header {
+  color: var(--dark-ember);
+}
+
+:root[data-color-mode="dark"] .thread-section.is-needs-you {
+  border-color: rgba(240, 163, 90, 0.42);
+  background: rgba(240, 163, 90, 0.08);
+}
+
+:root[data-color-mode="dark"] .thread-section-header:hover,
+:root[data-color-mode="dark"] .thread-section-header:focus-visible {
+  background: var(--dark-raised);
+  color: var(--ocean-light);
+}
+
+:root[data-color-mode="dark"] .thread-section-header:focus-visible {
+  box-shadow: 0 0 0 2px var(--dark-focus);
+}
+
+:root[data-color-mode="dark"] .thread-woke-badge {
+  border-color: rgba(98, 213, 243, 0.48);
+  color: var(--dark-focus);
+}
+
 :root[data-color-mode="dark"] .settings-status,
 :root[data-color-mode="dark"] .runtime-test-status,
 :root[data-color-mode="dark"] .generated-token-message,
@@ -4425,12 +4456,20 @@ body.is-theme-customizing {
   margin-top: 22px;
 }
 
+/* Web Chat fills the window's height with about 6 px around and between its
+   panes (owner's request, 2026-11-19: more threads in view). The sign-in page
+   keeps the wider padding. */
+.chat-preview:has(> .chat-app:not([hidden])) {
+  padding: 6px;
+}
+
 .chat-app {
   width: min(1450px, 100%);
-  height: min(1100px, calc(100vh - 24px));
+  height: calc(100vh - 12px);
+  height: calc(100dvh - 12px);
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
-  gap: 14px;
+  gap: 6px;
 }
 
 .objectives-app {
@@ -5325,8 +5364,8 @@ body.is-theme-customizing {
 .chat-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px;
+  gap: 8px;
+  padding: 10px;
 }
 
 .chat-sidebar-header {
@@ -5454,20 +5493,94 @@ body.is-theme-customizing {
   gap: 8px;
 }
 
-.chat-thread-search {
-  color: var(--muted);
-  font-size: 0.82rem;
-  font-weight: 820;
-  text-transform: uppercase;
-}
-
 .thread-list {
   display: grid;
   flex: 1 1 auto;
   align-content: start;
-  gap: 8px;
+  gap: 4px;
   min-height: 0;
   overflow: auto;
+}
+
+/* Thread list sections (chat_thread_list.mjs): Needs you, Pinned, Recent,
+   Snoozed, Dismissed. Each header is a button with the count that opens and
+   closes its rows. */
+.thread-section {
+  display: grid;
+  gap: 1px;
+}
+
+.thread-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 820;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.thread-section-header:hover,
+.thread-section-header:focus-visible {
+  color: var(--ocean);
+  outline: none;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.thread-section-header:focus-visible {
+  box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.34);
+}
+
+.thread-section-label {
+  flex: 1 1 auto;
+}
+
+.thread-section-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A chevron that points down when the section is open. */
+.thread-section-header::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 160ms ease;
+}
+
+.thread-section-header[aria-expanded="false"]::after {
+  transform: rotate(-45deg);
+}
+
+.thread-section-rows {
+  display: grid;
+  gap: 2px;
+}
+
+.thread-section-rows[hidden] {
+  display: none;
+}
+
+/* Needs you: a highlighted box in the attention gold the unread dot uses. */
+.thread-section.is-needs-you {
+  border: 1px solid rgba(183, 121, 31, 0.42);
+  border-radius: 10px;
+  background: rgba(255, 214, 10, 0.10);
+  padding: 2px 4px 4px;
+}
+
+.thread-section.is-needs-you .thread-section-header {
+  color: var(--amber);
 }
 
 .chat-debug-controls {
@@ -6056,11 +6169,27 @@ body.is-theme-customizing {
 
 .thread-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 18px 34px 34px;
+  grid-template-columns: 12px minmax(0, 1fr);
   align-items: center;
-  gap: 4px;
   border: 1px solid transparent;
   border-radius: 7px;
+  /* A long press opens the row's menu; no text selection or callout. */
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+.thread-row.is-renaming {
+  grid-template-columns: 12px minmax(0, 1fr) 30px 30px;
+  gap: 2px;
+}
+
+/* The unsaved New Chat row has no indicator: its button takes the row. */
+.thread-row.is-unsaved {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.thread-row.is-unsaved .thread-button {
+  padding-left: 12px;
 }
 
 .thread-row:hover,
@@ -6083,29 +6212,86 @@ body.is-theme-customizing {
     0 0 16px rgba(255, 214, 10, 0.32);
 }
 
+/* Two lines: the title, a Woke mark and the time since the last message,
+   then what the thread waits on or its latest message. */
 .thread-button {
-  min-height: 42px;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
   border: 0;
   border-radius: 7px;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  font-weight: 760;
-  overflow: hidden;
-  padding: 0 12px;
+  font: inherit;
+  padding: 4px 8px 5px 2px;
   text-align: left;
+}
+
+.thread-line {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.thread-title-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.thread-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.88rem;
+  font-weight: 780;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-age {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.thread-woke-badge {
+  flex: 0 0 auto;
+  border: 1px solid rgba(2, 132, 199, 0.42);
+  border-radius: 999px;
+  color: var(--ocean);
+  font-size: 0.66rem;
+  font-weight: 820;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.thread-detail {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 560;
+}
+
+.thread-detail.is-waiting {
+  color: var(--amber);
+  font-weight: 700;
+}
+
 .thread-row:hover .thread-button,
-.thread-row.is-active .thread-button {
+.thread-row.is-active .thread-button,
+.thread-row.is-active .thread-title {
   color: var(--ocean);
 }
 
 .thread-active-indicator {
-  width: 18px;
-  height: 34px;
+  width: 12px;
+  height: 100%;
+  min-height: 18px;
   display: grid;
   place-items: center;
   opacity: 0;
@@ -6212,8 +6398,8 @@ body.is-theme-customizing {
 }
 
 .thread-action-button {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
   border: 1px solid transparent;
@@ -8029,8 +8215,9 @@ body.is-theme-customizing {
     gap: 2px;
   }
 
+  /* Room for the section headers and a few two-line rows (plan review C10). */
   .chat-sidebar {
-    max-height: 280px;
+    max-height: min(420px, 50vh);
   }
 
   .message-form {

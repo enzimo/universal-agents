@@ -7,13 +7,19 @@ const { test } = require("node:test");
 const source = fs.readFileSync(path.join(__dirname,
   "../assistant_gateway/onboarding_web/assets/chat.js"), "utf8");
 
+// The thread list module chat.js imports, and the row helpers that list
+// reads and live events call (chat_thread_list.mjs).
+const threadList = require("../assistant_gateway/onboarding_web/assets/chat_thread_list.mjs");
+const THREAD_ROW_HELPERS = ["applyServerThreadRow", "applyEventToThreadRow"];
+
 // The page's name for an unnamed thread, read from chat.js itself.
 const NEW_CHAT_TITLE = source.match(/const NEW_CHAT_TITLE = "([^"]+)";/)[1];
 
 function loadFunctions(sandbox, names) {
   if (!("NEW_CHAT_TITLE" in sandbox)) sandbox.NEW_CHAT_TITLE = NEW_CHAT_TITLE;
+  for (const [name, value] of Object.entries(threadList)) if (!(name in sandbox)) sandbox[name] = value;
   vm.createContext(sandbox);
-  for (const name of names) {
+  for (const name of [...names, ...THREAD_ROW_HELPERS]) {
     const start = source.indexOf(`function ${name}(`);
     if (start < 0) continue;
     const end = source.indexOf("\nfunction ", start + 1);
