@@ -24,7 +24,8 @@ from aiohttp.test_utils import TestClient, TestServer, unused_port
 
 from secure_tool_broker import auth_flows
 from secure_tool_broker.auth_flows import BrokerAuthSession, GoogleWebAuthFlow, get_auth_flow
-from secure_tool_broker.defaults import CREDENTIAL_DECLINED_STATUS, DECLINE_FIELD, card_view_url
+from secure_tool_broker.defaults import DECLINE_FIELD, card_view_url
+from custom_messages.contracts.credentials_v1 import CREDENTIAL_DECLINED
 from secure_tool_broker.service import SecureToolBrokerService
 from secure_tools.providers import ToolResult
 from tests.broker_access_support import BROKER_ROOT, TEST_TEAM, gateway_headers
@@ -156,8 +157,8 @@ async def test_a_declined_credential_form_stores_nothing_and_reports_declined(br
     assert _outcome(await (await client.get(page)).text()) == "declined", "a reload still says declined"
 
     status = await (await client.get(_path(session["status_url"]), headers=gateway_headers())).json()
-    assert status["status"] == CREDENTIAL_DECLINED_STATUS
-    assert status["result"]["content"]["status"] == CREDENTIAL_DECLINED_STATUS
+    assert status["status"] == CREDENTIAL_DECLINED
+    assert status["result"]["content"]["status"] == CREDENTIAL_DECLINED
 
     answered = await client.post(
         page, data={"field__username": "me", "field__password": "pw", "confirm_delete": "yes"}, headers=FROM_CARD

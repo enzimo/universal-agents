@@ -18,6 +18,7 @@ from custom_messages.contracts.control_v1 import (
     SystemStatusMessage,
 )
 from custom_messages.contracts.credentials_v1 import (
+    CREDENTIAL_DECLINED,
     TOOL_SETUP_COMPLETED,
     SecureCredentialCollectionRequest,
     SecureCredentialCollectionResult,
@@ -63,6 +64,8 @@ def _render_credential_result_fallback(
         return f"Your credentials{service_suffix} were stored successfully."
     if content.status == "credential_deleted":
         return f"Your saved credentials{service_suffix} were deleted successfully."
+    if content.status == CREDENTIAL_DECLINED:
+        return f"You declined the secure form{service_suffix}, so nothing was stored or deleted."
     if content.status == "signup_completed":
         service = " ".join(str(content.service_name or "").split()).strip(" .")
         account = f"Your {service} account" if service else "Your account"

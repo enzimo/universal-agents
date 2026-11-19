@@ -1547,7 +1547,7 @@ class CredentialFormResultBody(WireModel):
 
     form_id: RecordId
     task_id: RecordId
-    status: Literal['signup_completed', 'manual_signup_required', 'manual_signup_collected', 'signup_failed', 'credential_stored', 'credential_deleted', 'credential_unavailable']
+    status: Literal['signup_completed', 'manual_signup_required', 'manual_signup_collected', 'signup_failed', 'credential_stored', 'credential_deleted', 'credential_unavailable', 'credential_declined']
     continue_task: bool
     credential_key: CredentialKey
     service_name: Annotated[str, StringConstraints(min_length=1, max_length=200)]

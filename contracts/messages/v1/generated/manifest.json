@@ -1704,7 +1704,7 @@
     "contracts/messages/v1/examples/valid/wait.ended/record-removed.json": "7f039bbb58df8e24840d026a36b1dec0c73b1ada3fa33ff3a9e1c0f590293097",
     "contracts/messages/v1/examples/valid/wait.ended/request-ended.json": "cba05f66ef085d11e1c660b63d143848fa61edb4eeed44a93ec6885ed499bf86",
     "contracts/messages/v1/generated/asyncapi.json": "3e26fdfe84abaaada7e5ee70fe5f8d6bdcb7e73b2d125cc9cd9ac93d08f358b0",
-    "contracts/messages/v1/generated/compatibility.json": "1648219eb8543cf516fb5ae50b197857abf7dba39fae54b23cd4a668dfba4539",
+    "contracts/messages/v1/generated/compatibility.json": "7d31299aa5f64b1aee1ab3b673f262b2cbcd09cf96fb471c9f442882dd1b66c5",
     "contracts/messages/v1/generated/permissions/edge_adapter.json": "944597421bc30d289b2158caf94023a24e07787f5cdc5715fb782571d05a939b",
     "contracts/messages/v1/generated/permissions/gateway.json": "f21f5d8c2a7f22ebeea7af6ff95944f01eef49d8278e9a2c24478da72cb2731f",
     "contracts/messages/v1/generated/permissions/installation_authority.json": "f99f33808af9a8b614510761d7b62541031da2559c271bb303234333a8b011cc",
@@ -1732,7 +1732,7 @@
     "contracts/messages/v1/schemas/bodies/agent.status.reply.schema.json": "2e6f87abe3b7cb0b628935cdd9b1a0b4c76c7b91819f4c85e33125e12274d4e5",
     "contracts/messages/v1/schemas/bodies/agent.status.schema.json": "e354b3556b266d87c5a7ca454e6fa86b3cb1ce4f7347522bf3c308961def63e7",
     "contracts/messages/v1/schemas/bodies/credential.form.request.schema.json": "e478bdffdecc05bb02509dea30debc1faf4a1a06bbfdd382753e3560ccd9bf27",
-    "contracts/messages/v1/schemas/bodies/credential.form.result.schema.json": "c8de5f94875232e403ed7b123f2536ce49262b2d2f976fb63e93af0d547bc4dd",
+    "contracts/messages/v1/schemas/bodies/credential.form.result.schema.json": "8abe7a0cea7cefe2a41712837fec32f0e06f9e54d55ee2353d858737b9906cab",
     "contracts/messages/v1/schemas/bodies/custody.confirmed.schema.json": "d39b5432eec5ee25dd1c9d469c4e17f980ad1669143e0fd9bbd155b1434766f4",
     "contracts/messages/v1/schemas/bodies/custody.decide.reply.schema.json": "114974f126f59a6b6f05e2a2f69553dfe2dcb6f2dc44e8c2b180030b79af767a",
     "contracts/messages/v1/schemas/bodies/custody.decide.schema.json": "b4bd7efac9926ec7848b5092303260102b6971c0ba99b9fb793c903cc27d5829",
@@ -1970,8 +1970,8 @@
     "contracts/messages/v1/signing-vectors/vectors.json": "246891a0db4b3bc6bcbb57c5e81518a68aae0110c324356c0d9e6d72e6335396",
     "contracts/messages/v1/team-topologies.yaml": "912a29719c2e75421a3b5172fa941f2d7d21122f603439de7f4465a196d174f1",
     "contracts/messages/v1/transport.yaml": "51c3f0beccea2feaebcf84bd818f15ced0faa16a5cef055d1b627aab11ffb29e",
-    "custom_messages/wire/kinds.py": "8a2d8070daeae1215f709ee4cc875faed699e55862de8a356358a4b71000ed0c",
-    "custom_messages/wire/models.py": "2333f32f0d55e8f1b9f6620950b36553e946d2a5e801977aafb179c24c2c1daa"
+    "custom_messages/wire/kinds.py": "8ca55c86c84f542b4335a4842e4dcf8ac88a38c1f36477f8b5be1d459bfa1cbe",
+    "custom_messages/wire/models.py": "1420e23b66664eda279a9c5bba7712d3858db49bae19d3abf2c634a16a19b835"
   },
   "protocol": "1.0-pre"
 }

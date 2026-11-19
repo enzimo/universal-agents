@@ -104,9 +104,6 @@ SIGN_IN_STATUS_SUCCESS = "success"
 SIGN_IN_STATUS_ERROR = "error"
 SIGN_IN_STATUS_DECLINED = "declined"
 SIGN_IN_FINAL_STATUSES = frozenset({SIGN_IN_STATUS_SUCCESS, SIGN_IN_STATUS_ERROR, SIGN_IN_STATUS_DECLINED})
-# A credential collection or deletion form the person declined (the
-# SecureCredentialCollectionResult status the waiting task receives).
-CREDENTIAL_DECLINED_STATUS = "credential_declined"
 # The hidden field of a page's Decline form (auth_pages.render_broker_auth_page).
 # Decline is its own small form, so no value typed into the page travels with it.
 DECLINE_FIELD = "ua_decline"

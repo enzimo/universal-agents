@@ -61,15 +61,18 @@ from assistant_gateway.application.ports import (
 )
 from assistant_gateway.domain.message_types import LINK_RESULT_MESSAGE_TYPE
 from assistant_gateway.ports.repositories import SessionRepository
+from secure_tool_broker.defaults import (
+    SIGN_IN_FINAL_STATUSES,
+    SIGN_IN_STATUS_DECLINED,
+    SIGN_IN_STATUS_ERROR,
+    SIGN_IN_STATUS_SUCCESS,
+)
 from custom_messages.contracts.credentials_v1 import (
     TOOL_SETUP_ACCOUNT_LINK,
     TOOL_SETUP_SIGN_IN,
     TOOL_SETUP_TEAM_SIGN_IN_APP,
 )
 
-SIGN_IN_STATUS_SUCCESS = "success"
-SIGN_IN_STATUS_ERROR = "error"
-_SIGN_IN_FINAL_STATUSES = frozenset({SIGN_IN_STATUS_SUCCESS, SIGN_IN_STATUS_ERROR})
 ACCESS_PAGE_BY_TOOL = "Settings → Access → By Tool"
 SIGN_IN_STATUS_COMMAND = "/auth status"
 SIGN_IN_NO_ACCESS_NOTE = "Signing in gives nobody access by itself."
@@ -208,8 +211,10 @@ def sign_in_result_text(
     if outcome.ending == WATCH_EXPIRED:
         return f"The {what} page expired before it was finished. Run {restart_command} again."
     status = str(outcome.payload.get("status") or "")
-    if outcome.ending != WATCH_FINISHED or status not in _SIGN_IN_FINAL_STATUSES:
+    if outcome.ending != WATCH_FINISHED or status not in SIGN_IN_FINAL_STATUSES:
         return f"Couldn't confirm whether the {what} finished. Check with {SIGN_IN_STATUS_COMMAND}."
+    if status == SIGN_IN_STATUS_DECLINED:
+        return f"You closed the {what} page without finishing. Run {restart_command} to try again."
     if status == SIGN_IN_STATUS_ERROR:
         page = "sign-in page" if not team_app else "page"
         return f"The {what} did not finish; the {page} says why. Run {restart_command} to try again."
@@ -374,7 +379,7 @@ class GatewayLinkResults:
     ) -> None:
         outcome = await watch_broker_session(
             read_status=lambda: self._broker.get_sign_in_status(status_url=page.status_url),
-            is_final=lambda payload: str(payload.get("status") or "") in _SIGN_IN_FINAL_STATUSES,
+            is_final=lambda payload: str(payload.get("status") or "") in SIGN_IN_FINAL_STATUSES,
             deadline=watch_deadline(page.expires_at_utc),
             clock=self._clock,
             poll_interval_seconds=self._poll_interval_seconds,

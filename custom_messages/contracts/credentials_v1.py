@@ -20,7 +20,10 @@ SecureCredentialResultStatus = Literal[
     "credential_stored",
     "credential_deleted",
     "credential_unavailable",
+    # The person chose Decline on the broker's form: nothing was stored or deleted.
+    "credential_declined",
 ]
+CREDENTIAL_DECLINED: SecureCredentialResultStatus = "credential_declined"
 
 
 class CredentialFormFieldSpec(BaseModel):

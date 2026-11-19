@@ -65,12 +65,12 @@ from secure_tool_broker.account_links import (
     used_by_text,
 )
 from custom_messages.contracts.access_v2 import AccountLinkRequestV1, PersonCredentialDeletionV1
+from custom_messages.contracts.credentials_v1 import CREDENTIAL_DECLINED
 from secure_tool_broker.credential_transfer_api import add_transfer_routes
 from secure_tool_broker.team_export_page import add_team_export_routes
 from secure_tool_broker.defaults import (
     AUTH_PAGE_STATUS_ROUTE,
     BROKER_PAGE_PREFIXES,
-    CREDENTIAL_DECLINED_STATUS,
     SIGN_IN_FINAL_STATUSES,
     SIGN_IN_STATUS_DECLINED,
     is_decline,
@@ -2007,7 +2007,7 @@ class SecureToolBrokerService:
     def _credential_collection_ended_html(session: CredentialCollectionSession) -> str:
         """A used form's page: declined, or how it succeeded."""
 
-        if session.status == CREDENTIAL_DECLINED_STATUS:
+        if session.status == CREDENTIAL_DECLINED:
             deletion = SecureToolBrokerService._is_credential_deletion_request(session.request_payload)
             return _declined_page("Secure Credential Deletion" if deletion else "Secure Credential Collection")
         return SecureToolBrokerService._credential_collection_success_html(session)
@@ -2017,11 +2017,11 @@ class SecureToolBrokerService:
 
         _claim_credential_collection_submission(session, prune_expired=self._prune_credential_collection_sessions)
         try:
-            session.status = CREDENTIAL_DECLINED_STATUS
+            session.status = CREDENTIAL_DECLINED
             session.result = {
                 "status": "declined",
                 "content": {
-                    "status": CREDENTIAL_DECLINED_STATUS,
+                    "status": CREDENTIAL_DECLINED,
                     "message": "The person declined the form; nothing was stored or deleted.",
                 },
             }

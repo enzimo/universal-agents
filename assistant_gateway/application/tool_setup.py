@@ -139,6 +139,11 @@ from custom_messages.contracts.credentials_v1 import (
 )
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.tool_setup_spec_v1 import ExternalSetupStepV1
+from secure_tool_broker.defaults import (
+    SIGN_IN_FINAL_STATUSES,
+    SIGN_IN_STATUS_DECLINED,
+    SIGN_IN_STATUS_ERROR,
+)
 from secure_tools.auth_methods import (
     TEAM_CLIENT_METHOD,
     ToolSignIn,
@@ -164,9 +169,6 @@ REASON_LINK_MISMATCH = "tool_setup_link_mismatch"
 # The gateway restarted while the page was open (custom_agents.tool_setup_runtime).
 REASON_PAGE_NOT_WATCHED = "tool_setup_page_not_watched"
 
-SIGN_IN_STATUS_SUCCESS = "success"
-SIGN_IN_STATUS_ERROR = "error"
-_SIGN_IN_FINAL = frozenset({SIGN_IN_STATUS_SUCCESS, SIGN_IN_STATUS_ERROR})
 _BROKER_NOTE = "What you enter goes straight to the secure broker, never to the agent."
 
 TeamRolesResolver = Callable[[str], tuple[str, ...]]
@@ -286,8 +288,11 @@ def sign_in_page_ending(outcome: BrokerSessionOutcome, *, what: str) -> PageEndi
     if outcome.ending == WATCH_EXPIRED:
         return PageEnding(TOOL_SETUP_EXPIRED, f"The page for {what} expired before it was finished.")
     status = str(outcome.payload.get("status") or "")
-    if outcome.ending != WATCH_FINISHED or status not in _SIGN_IN_FINAL:
+    if outcome.ending != WATCH_FINISHED or status not in SIGN_IN_FINAL_STATUSES:
         return PageEnding(TOOL_SETUP_UNAVAILABLE, _unconfirmed(what), reason_code=REASON_PAGE_UNCONFIRMED)
+    if status == SIGN_IN_STATUS_DECLINED:
+        # The person chose Decline on the page; no further page for this tool opens in the task.
+        return PageEnding(TOOL_SETUP_DECLINED, f"{_capitalized(what)} was closed without finishing.")
     if status == SIGN_IN_STATUS_ERROR:
         why = _sentence(str(outcome.payload.get("message") or ""))[:300]
         return PageEnding(
@@ -644,7 +649,7 @@ class GatewayToolSetups:
         async def watch() -> PageEnding:
             outcome = await watch_broker_session(
                 read_status=lambda: self._broker.get_sign_in_status(status_url=page.status_url),
-                is_final=lambda payload: str(payload.get("status") or "") in _SIGN_IN_FINAL,
+                is_final=lambda payload: str(payload.get("status") or "") in SIGN_IN_FINAL_STATUSES,
                 deadline=watch_deadline(page.expires_at_utc),
                 clock=self._clock,
                 poll_interval_seconds=self._poll_interval_seconds(),

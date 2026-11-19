@@ -77,6 +77,7 @@ from custom_agents.turn_failure_runtime import (
     settle_failed_turn,
 )
 from custom_messages.contracts.credentials_v1 import (
+    CREDENTIAL_DECLINED,
     SecureCredentialCollectionRequest,
     SecureCredentialCollectionResult,
     SignupAutomationRequest,
@@ -321,6 +322,19 @@ def _credential_deletion_result_answer(
     )
 
 
+def _credential_declined_answer(credential_result: SecureCredentialCollectionResult) -> str:
+    """The person declined the broker's form: what did not happen, without asking to try again.
+
+    A decline is the person's choice, so the task ends as completed with this
+    answer, for every flow (collection, deletion, manual sign-up).
+    """
+
+    service_suffix = _credential_service_suffix(credential_result)
+    if _is_credential_deletion_result(credential_result):
+        return f"You declined the secure form, so your saved credentials{service_suffix} were not deleted."
+    return f"You declined the secure form{service_suffix}, so nothing was stored."
+
+
 def _is_terminal_credential_collection_result(
     credential_result: SecureCredentialCollectionResult,
 ) -> bool:
@@ -369,7 +383,9 @@ def _credential_result_resume_directive(
         "user-visible outcome in short, natural language that names the service. "
         "Do not quote status identifiers, credential keys, broker metadata, opaque "
         "ids, or secret-handling mechanics. Do not repeat a completed collection or "
-        "signup action. When the credential was stored, go on with the next step of "
+        "signup action. When the person declined the form, do not ask for it again in "
+        "this task: say what could not be done without it. "
+        "When the credential was stored, go on with the next step of "
         "the task, for example set_up_tools for the tool so the person chooses it in the "
         "account link form, then use the tool. Start a manual credential step "
         "only when the result explicitly requires manual signup and the original task "
@@ -383,7 +399,9 @@ def _orphaned_credential_collection_response(
 ) -> tuple[str, list[str]]:
     """Render a secret-free terminal result when the original task is gone."""
 
-    if _is_credential_deletion_result(credential_result):
+    if credential_result.status == CREDENTIAL_DECLINED:
+        answer, succeeded = _credential_declined_answer(credential_result), False
+    elif _is_credential_deletion_result(credential_result):
         answer, succeeded = _credential_deletion_result_answer(credential_result)
     elif _is_terminal_credential_collection_result(credential_result):
         answer, succeeded = _credential_collection_result_answer(credential_result)
@@ -658,6 +676,9 @@ async def _handle_secure_credential_collection_result(
         # The task has more to do after the form (it said so in its request):
         # it resumes through the model below instead of ending here.
         pass
+    elif credential_result.status == CREDENTIAL_DECLINED:
+        terminal_result_kind = "declined credential form"
+        terminal_answer, terminal_succeeded = _credential_declined_answer(credential_result), True
     elif _is_credential_deletion_result(credential_result):
         terminal_result_kind = "credential deletion"
         terminal_answer, terminal_succeeded = _credential_deletion_result_answer(
