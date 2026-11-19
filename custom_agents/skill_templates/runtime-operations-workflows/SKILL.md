@@ -361,8 +361,14 @@ the old one on the same data folder and settings (with the installer, the
 original install command with all its options plus `--replace`), after reading
 the skipped releases' Breaking Changes and the page's limits (from 0.9.3 or
 earlier the team transfer is the way; from 0.9.6 or earlier, schedule changes
-waiting in the Inbox are decided first). The stores add what they need on the
-first start.
+waiting in the Inbox are decided first; from 0.9 to 0.10, the team id and agent
+types must fit 24 characters and waiting agent ids 32 (a team transfer keeps
+them, so its import refuses such an export too), each team needs about 3 GiB
+free on the disk for its message streams, an external NATS server gets its
+partition mappings, room and an account consumer limit of 4,096 or none first,
+and the first start goes through the launcher, not `migrate-config`, so the id
+check runs before the file changes).
+The stores add what they need on the first start.
 
 To move the team to another machine or a fresh instance, or across a longer
 jump, point them to the team transfer ("Moving a team to a fresh instance" in

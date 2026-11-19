@@ -33,7 +33,8 @@ def zero_nine_instance(tmp_path: Path, name: str, team_id: str) -> Path:
     0.9 onboarding wrote every default out, ``transport.presence_max_age_seconds`` included;
     the presence stream it sized was removed in message contract step 7d. 0.9.4's onboarding
     also wrote ``agent.max_concurrent_top_level_tasks: 1``, and later 0.9 releases kept that
-    ignored key in saved files; 0.10 removes it (instance config 13 -> 14).
+    ignored key in saved files; 0.10 removes it (instance config 13 -> 14). 0.9 had no
+    ``transport.queues``; 0.10 writes the partition count in (instance config 14 -> 15).
     """
 
     import yaml
@@ -43,6 +44,7 @@ def zero_nine_instance(tmp_path: Path, name: str, team_id: str) -> Path:
     saved["schema_version"] = 12
     saved["transport"]["presence_max_age_seconds"] = 600.0
     saved["agent"]["max_concurrent_top_level_tasks"] = 1
+    del saved["transport"]["queues"]
     path.write_text(yaml.safe_dump(saved, sort_keys=False), encoding="utf-8")
     return path
 

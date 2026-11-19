@@ -13,11 +13,14 @@ from pathlib import Path
 
 from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, MAX_PARTITION_COUNT, PARTITIONED_ADDRESSES
 from custom_messages.wire.partitions import (
+    account_mappings,
     agent_partition,
     agent_record_key,
     arrival_subject,
     check_partition_count,
     every_partition,
+    mapping_line,
+    mapping_source,
     partition_owner_key,
     signed_subject_of,
 )
@@ -70,6 +73,11 @@ def test_every_partition_covers_each_team_whole() -> None:
 def test_the_mapped_addresses_are_the_ones_the_account_maps() -> None:
     mapped = {source.split(".", 4)[4].replace("*", "{agent}") for source in TRANSPORT["partitions"]["account_mappings"]}
     assert mapped == set(PARTITIONED_ADDRESSES) == {"work.agent.{agent}", "work.control.{agent}", "ctl.agent.{agent}"}
+    # Each mapped address names its own line, which the mapping check judges by itself.
+    assert {mapping_source(address) for address in PARTITIONED_ADDRESSES} == set(account_mappings(7))
+    with pytest.raises(ValueError, match="not an address the account maps"):
+        mapping_source("work.pool.{pool}")
+    assert mapping_line("ua.v1.*.*.ctl.agent.*", "ua.v1.x") == '"ua.v1.*.*.ctl.agent.*": "ua.v1.x"'
 
 
 @pytest.mark.parametrize("address", ["work.agent", "work.control", "ctl.agent"])

@@ -17,8 +17,9 @@ Docker). The root is split by who may touch each area:
     records of published pages (which folder, whose, and the SHA-256 of each
     file), model failover state, diagnostics, execution artifacts, and the
     folders of people removed from the team, held until they are restored or
-    purged (``held_people/``, ``access_control.held_person_folders``), and
-    when storage warning levels were entered (``storage_levels.json``).
+    purged (``held_people/``, ``access_control.held_person_folders``), when
+    storage warning levels were entered (``storage_levels.json``), and the
+    problems the Status page's previous check found (``status_problems.json``).
     Trusted maintenance deletes old offloaded tool results here, and old
     conversation artifacts in ``dbs/`` (``custom_agents.output_retention``).
 ``workspaces/``
@@ -150,6 +151,7 @@ UPGRADES_DIRNAME = "upgrades"
 ADAPTER_HOST_FILES_UPGRADE_FILENAME = "adapter-host-files.json"
 ADAPTER_HOST_FILES_UPGRADE_PROGRESS_FILENAME = "adapter-host-files.started"
 ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME = "adapter-host-files.lock"
+PROTOCOL1_IDS_CHECK_FILENAME = "protocol1-ids.json"
 # /upgrade: team exports the supervisor wrote, and the requests it reads
 # (team_transfer.export_requests).
 EXPORTS_DIRNAME = "exports"
@@ -688,6 +690,17 @@ class InstanceLayout:
         return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME
 
     @property
+    def protocol1_ids_check_path(self) -> Path:
+        """The record that every id protocol 1 carries fitted its cap at the first start of 0.10.
+
+        The launchers' id check (``instance_upgrades.protocol1_ids``) writes it, with the
+        time and the version, only when the team id, the agent catalog's types and the
+        stored agent ids all fit, and runs only while it is missing. Under ``state/``, so
+        no agent tool or sandboxed code can reach it."""
+
+        return self.state_dir / UPGRADES_DIRNAME / PROTOCOL1_IDS_CHECK_FILENAME
+
+    @property
     def storage_levels_path(self) -> Path:
         """When each disk or message store entered a storage warning level on the Status page.
 
@@ -695,6 +708,15 @@ class InstanceLayout:
         restart neither repeats an administrators' notice nor forgets one."""
 
         return self.state_dir / "storage_levels.json"
+
+    @property
+    def status_problems_path(self) -> Path:
+        """The problems the Status page's previous check found, by finding id.
+
+        Written by the gateway (assistant_gateway.status_page), so administrators get a notice
+        only for a problem the previous check did not find, after a restart too."""
+
+        return self.state_dir / "status_problems.json"
 
     @property
     def attachment_copies_dir(self) -> Path:

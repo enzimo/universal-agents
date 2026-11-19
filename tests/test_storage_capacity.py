@@ -244,7 +244,9 @@ def test_stored_messages_are_measured_against_the_accounts_limit_or_noted_withou
     assert limited.finding_id.startswith("storage_nearing_limit:message_storage:file:")
     assert limited.title == "The message server's storage is 90% full"
     assert "refuses new messages" in limited.summary and "Stored messages (JetStream): 9 GB" in limited.details
-    assert "counts the bytes stored, not the space streams reserve" in limited.summary
+    assert "counts the bytes stored, not the space streams set aside" in limited.summary
+    assert "refuse a new or changed stream well before then" in limited.summary
+    assert "transport.queues.max_bytes" in limited.action
     assert unlimited.finding_id == NO_MESSAGE_LIMIT_FINDING_ID
     assert unlimited.severity is StatusSeverity.NOTE
     assert "no limit for stored messages (JetStream), which take 12 MB now" in unlimited.summary

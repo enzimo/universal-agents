@@ -834,9 +834,12 @@ def test_large_facades_cannot_grow(
 # to request/reply and event addresses (custom_transport.protocol1.live.serve), which
 # hold no queued work; its queued kinds are pulled like today's. Bucket reads subscribe
 # with ordered consumers to key-value buckets (listings and watches of state records),
-# which hold state, never work.
+# which hold state, never work. The partition mapping check holds one subscription to its
+# own probe addresses while it waits for them, and no stream stores those
+# (custom_transport.protocol1.mapping_check).
 NATS_SUBSCRIBERS = {"custom_transport/nats_adapter.py", "custom_transport/nats_pull.py",
-                    "custom_transport/protocol1/live.py", "custom_transport/protocol1/bucket_reads.py"}
+                    "custom_transport/protocol1/live.py", "custom_transport/protocol1/bucket_reads.py",
+                    "custom_transport/protocol1/mapping_check.py"}
 # The names a raw NATS connection or JetStream context goes by; ``nats_connection`` is the
 # adapter's property that hands the connection to the protocol 1 kernel.
 NATS_CLIENT_NAMES = ("_js", "js", "jetstream", "_nc", "nc", "nats_client", "nats_connection")
@@ -863,7 +866,9 @@ NATS_CLIENT_MODULES = {
     "custom_transport/protocol1/state_records.py": "protocol 1 signed records in key-value buckets",
     "custom_transport/protocol1/bucket_reads.py": "key-value listings and watches that cannot end early",
     "custom_transport/protocol1/joining.py": "a host's join request, signed before it has a certificate",
+    "custom_transport/protocol1/mapping_check.py": "the partition mapping check: unsigned probes on its own probe addresses",
     "installation_authority/service.py": "the topology owner's buckets, and the certificates it keeps in UA1_CERTS",
+    "installation_authority/queues.py": "the topology owner's work and dead-letter streams and team consumers",
     "team_services/lock.py": "the team services' single-instance lock in UA1_LOCKS, an unsigned lease",
 }
 

@@ -231,6 +231,41 @@ class JetStreamAccountUsage:
     max_memory: int | None
 
 
+# The stream list request: every stream with its configuration and state, up to 256 a page.
+STREAM_LIST_SUBJECT = "$JS.API.STREAM.LIST"
+# The longest one page of the stream list may take to arrive. In a cluster the server waits up to
+# 4 seconds for the servers holding the streams and then names those that did not answer as
+# missing; twice that lets such a reply arrive instead of turning a slow cluster into a timeout.
+STREAM_LIST_TIMEOUT_SECONDS = 8.0
+
+
+@dataclass(frozen=True)
+class JetStreamStreamUsage:
+    """One stream's byte limit and what it stores, as the stream list reports them (metadata only).
+
+    ``max_bytes`` is None when the stream has no byte limit (the server reports -1).
+    """
+
+    name: str
+    max_bytes: int | None
+    stored_bytes: int
+    messages: int
+
+
+@dataclass(frozen=True)
+class JetStreamStreamList:
+    """The stream list's answer: the streams the server measured, and those it could not.
+
+    ``missing`` names streams the server knows but could not read: in a cluster, streams whose
+    servers did not answer in time or are all offline; on any server, streams it cannot load
+    (the reply's ``missing``, which also covers its ``offline``). Their sizes are unknown, so
+    they are never in ``streams``.
+    """
+
+    streams: list[JetStreamStreamUsage]
+    missing: tuple[str, ...] = ()
+
+
 def _positive_limit(value: Any) -> int | None:
     """A JetStream account limit, or None for "no limit" (-1) and "not allowed here" (0)."""
 
@@ -658,6 +693,54 @@ class NatsTransportAdapter:
             max_storage=_positive_limit(getattr(limits, "max_storage", None)),
             max_memory=_positive_limit(getattr(limits, "max_memory", None)),
         )
+
+    async def jetstream_streams(self, *, subject: str) -> Optional[JetStreamStreamList]:
+        """Each stream with a subject that overlaps ``subject``, its byte limit and what it stores.
+
+        For the gateway's size warning (``assistant_gateway.queue_capacity``): one stream list
+        request (``$JS.API.STREAM.LIST``, the size check's grant in the message contract) per
+        256 streams, metadata only, never a message. None while JetStream is not in use here;
+        a server that does not answer, or answers with an error, raises, so the Status page can
+        say the message server is unavailable. Streams the server names as missing are returned
+        by name only (``JetStreamStreamList``), so the caller can say they were not measured.
+        """
+
+        if self._js is None or self._nc is None:
+            return None
+        from nats.js.errors import APIError
+
+        streams: dict[str, JetStreamStreamUsage] = {}
+        missing: set[str] = set()
+        offset = 0
+        while True:
+            request = json.dumps({"subject": subject, "offset": offset}).encode()
+            reply = json.loads(
+                (await self._nc.request(STREAM_LIST_SUBJECT, request, timeout=STREAM_LIST_TIMEOUT_SECONDS)).data
+            )
+            if "error" in reply:
+                APIError.from_error(reply["error"])  # raises the error's kind
+            page_missing = {str(name) for name in reply.get("missing") or ()}
+            page_names: set[str] = set(page_missing)
+            for item in reply.get("streams") or []:
+                config, state = item.get("config") or {}, item.get("state") or {}
+                name = str(config.get("name", ""))
+                page_names.add(name)
+                if name in page_missing:
+                    # A cluster lists a stream whose servers are all offline with its configuration
+                    # and no state, and names it as missing too: its size is unknown.
+                    continue
+                streams[name] = JetStreamStreamUsage(
+                    name=name,
+                    max_bytes=_positive_limit(config.get("max_bytes")),
+                    stored_bytes=int(state.get("bytes") or 0),
+                    messages=int(state.get("messages") or 0),
+                )
+            missing |= page_missing
+            # Every stream of the page is listed, named as missing, or both, so the next page
+            # starts after this page's distinct names.
+            offset += len(page_names)
+            if not page_names or offset >= int(reply.get("total") or 0):
+                return JetStreamStreamList(streams=list(streams.values()), missing=tuple(sorted(missing)))
 
     async def worker_queue_state(self, named_agent_type: str) -> Optional[ConsumerQueueState]:
         """Waiting tasks, idle workers asking, and handed-out tasks; None if absent."""

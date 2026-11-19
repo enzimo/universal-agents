@@ -51,14 +51,20 @@ Rules from the message contract's README ("Installation traffic", "Trust over ti
   newest revocations record in its own trust folder (``ledger.IssueLedger``). Each record
   is checked by its own trust store, then kept there, and only then written to the bucket,
   so nothing the authority would refuse itself is ever published.
-- **The bootstrap bundle** carries the authority keys, the authority's own
-  certificate and the newest revocations record, so a host can check a join reply
-  before it has a certificate. The authority writes it just before it serves, so every
-  reply it signs comes from a certificate the bundle already holds; a host that joins in
-  between waits for the authority to answer (``joining.join``).
-- **Topology.** The authority creates the key-value buckets, with the operator's replica
-  count. The queued work streams come with queued work, and each team's dead-letter stream
-  with the dead letters of phase 3 (plan decision 71).
+- **The bootstrap bundle** carries the authority keys, the installation's partition
+  count, the authority's own certificate and the newest revocations record, so a host can
+  check a join reply before it has a certificate. The launcher writes the count from the
+  saved settings; the authority refuses to start when its own setting differs, before it
+  changes anything (``PartitionCountMismatch``). The authority writes its records into the
+  bundle just before it serves, so every reply it signs comes from a certificate the
+  bundle already holds; a host that joins in between waits for the authority to answer
+  (``joining.join``).
+- **Topology.** Before anything else changes, the authority creates and keeps current
+  every team's work and dead-letter streams and their team consumers (``queues``), with the
+  instance's byte limits, per-subject cap and replica count, and refuses to start when they
+  cannot be (another partition count, a lowered cap that would drop messages, no room);
+  then the key-value buckets, with the same replica count. Agents' consumers follow
+  placements; nothing publishes to the streams yet.
 """
 
 from __future__ import annotations
@@ -73,27 +79,40 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 import rfc8785
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from nats.js.api import StorageType, StreamConfig
-from nats.js.errors import KeyNotFoundError, NotFoundError
+from nats.js.errors import KeyNotFoundError
 from pydantic import ValidationError
 
-from custom_messages.wire.buckets import TEAM_PLACEHOLDER, bucket_name, bucket_stream
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.frame import Receiver, VerifiedFrame, body_model, expected_idempotency_key
 from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, KINDS, PROTOCOL, SINGLE_TEAM_ROLES
+from custom_messages.wire.partitions import check_partition_count
+from custom_messages.wire.queues import QueueLimits
 from custom_messages.wire.refusals import FrameRefused
-from custom_messages.wire.trust import CERTIFICATE, AuthorityKey, HostCertificate, TrustStore, kept_for, sign_state
+from custom_messages.wire.trust import (
+    CERTIFICATE,
+    PLACEMENT,
+    AuthorityKey,
+    HostCertificate,
+    TrustStore,
+    kept_for,
+    sign_state,
+)
 from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.contract_files import transport
+from custom_transport.protocol1.mapping_check import PartitionMappingError, check_partition_mapping
 from custom_transport.protocol1.host_keys import AuthorityKeys, HostKeys
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.joining import AUTHORITY_SERVICE_ID, HostProfile
 from custom_transport.protocol1.live import LiveHost, Unsupported, utc_now
+from custom_transport.protocol1.state_records import StateRecords
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts
 from installation_authority.ledger import ISSUED_FILENAME, IssueLedger
+from installation_authority.placements import PlacedConsumers
+from installation_authority.queues import QueueTopology
+from installation_authority.refusals import AuthorityStartRefused
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
 
@@ -113,7 +132,6 @@ CERTIFICATES_BUCKET = "UA1_CERTS"
 # common.schema.json "epoch".
 MAX_EPOCH = 2**53 - 1
 _INSTALLATION_ADDRESS = "_install.{sender}.svc"
-_STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -125,16 +143,20 @@ def revocations_key(installation: str) -> str:
     return f"revocations.{installation}"
 
 
-class AuthorityStartRefused(RuntimeError):
-    """The authority cannot start without risking trust; the message says what the operator can do."""
-
-
 class RevocationsUnverified(AuthorityStartRefused):
     """The stored revocations record does not verify and the authority has verified none, so it cannot sign the next one."""
 
 
 class AuthorityClockBehind(AuthorityStartRefused):
     """The newest revocations record was signed later than this machine's clock says it is now."""
+
+
+class PartitionCountMismatch(AuthorityStartRefused):
+    """The bootstrap bundle's partition count, which every host uses, is not the authority's setting."""
+
+
+class PartitionMappingRefused(AuthorityStartRefused):
+    """The NATS server does not map agents' addresses at the installation's partition count."""
 
 
 class AuthorityDisconnected(RuntimeError):
@@ -166,17 +188,22 @@ class CertificateRequest:
 class InstallationAuthority:
     """One installation's authority: it signs with ``authority`` and speaks as the host ``host_keys``."""
 
-    def __init__(self, layout: InstanceLayout, authority: AuthorityKeys, host_keys: HostKeys, *,
-                 clock: Callable[[], datetime] = utc_now, logger: logging.Logger = _LOGGER,
-                 contract_sha256: str = CONTRACT_SHA256, replicas: int = 1,
+    def __init__(self, layout: InstanceLayout, authority: AuthorityKeys, host_keys: HostKeys, *, partitions: int,
+                 queues: QueueLimits, clock: Callable[[], datetime] = utc_now, logger: logging.Logger = _LOGGER,
+                 contract_sha256: str = CONTRACT_SHA256,
                  catalog_agent_types: Callable[[], frozenset[str]] = frozenset) -> None:
         """``contract_sha256`` is the contract this authority runs: its code's, unless a test gives another.
 
-        ``replicas`` is the operator's JetStream replica count (``transport.replicas``) for the buckets.
+        ``partitions`` is the installation's partition count (``transport.queues.partitions``),
+        which the launcher also writes into the bootstrap bundle every host starts from.
+        ``queues`` holds the streams' byte limits, the partition streams' per-subject cap and the
+        operator's JetStream replica count (``transport.queues``, ``transport.replicas``), which
+        the buckets use too.
         """
 
         if host_keys.runtime != AUTHORITY_RUNTIME:
             raise ValueError(f"the authority speaks as host {AUTHORITY_RUNTIME!r}")
+        self.partitions = check_partition_count(partitions)
         self.contract_sha256 = contract_sha256
         self.layout = layout
         self.authority = authority
@@ -185,10 +212,15 @@ class InstallationAuthority:
         self.logger = logger
         # The instance's agent types, read at each join of a host listed with agent_types_from_catalog.
         self.catalog_agent_types = catalog_agent_types
-        self.replicas = max(1, int(replicas))
+        self.queues = queues
         self.live: Optional[LiveHost] = None
         self._nc: Any = None
         self._js: Any = None
+        self._teams: tuple[str, ...] = ()
+        # The teams' streams, buckets and consumers on the authority's connection (set up at start).
+        self._topology: Optional[QueueTopology] = None
+        # Each placed agent's consumers, while ``follow_placements`` runs.
+        self.placements: Optional[PlacedConsumers] = None
         self._own: dict[str, Any] = {}
         self._revocations: dict[str, Any] = {}
         self._lock = asyncio.Lock()
@@ -251,18 +283,27 @@ class InstallationAuthority:
         """Set up the topology for ``teams``, the authority's own certificate and revocations, then answer joins.
 
         The bundle is written before the authority serves, so it holds the certificate
-        of every reply; the launcher waits for it.
+        of every reply; the launcher waits for it. Before anything changes, the bundle's
+        partition count must be the authority's (``PartitionCountMismatch``) and the NATS
+        server must map agents' addresses at that count (``PartitionMappingRefused``). The
+        teams' streams come next, before the authority's own records change, so a start the
+        streams refuse (``queues``) changes nothing else either.
         """
 
+        bundle = self._bundle_with_own_count()
+        try:
+            await check_partition_mapping(nc, sender=AUTHORITY_RUNTIME, count=self.partitions)
+        except PartitionMappingError as error:
+            raise PartitionMappingRefused(str(error)) from error
         self._nc = nc
         self._js = nc.jetstream()
         teams = sorted(set(teams))
+        self._teams = tuple(teams)
+        await self.ensure_topology(teams)
         self._ledger = IssueLedger.open(self.layout.host_trust_dir(AUTHORITY_RUNTIME), self.installation,
                                         logger=self.logger)
-        await self.ensure_topology(teams)
         now = self.clock()
-        trust = self._trust = PersistentTrustStore.open(read_bundle(self.layout.trust_bootstrap_path),
-                                                        self.layout.host_trust_dir(AUTHORITY_RUNTIME), now)
+        trust = self._trust = PersistentTrustStore.open(bundle, self.layout.host_trust_dir(AUTHORITY_RUNTIME), now)
         trust.store.contract_sha256 = self.contract_sha256
         revocations = await self._sign_revocations(now)
         self._own = await self._own_certificate(teams, int(revocations["body"]["revocation_epoch"]), now)
@@ -276,35 +317,50 @@ class InstallationAuthority:
         self.logger.info("The installation authority is serving. event=installation_authority_ready installation=%s "
                          "membership_epoch=%s teams=%s", self.installation, certificate.membership_epoch, ",".join(teams))
 
-    async def ensure_topology(self, teams: Iterable[str]) -> None:
-        """Create what the contract's topology owner owns in phase 2: the key-value buckets."""
+    def _bundle_with_own_count(self) -> BootstrapBundle:
+        """The bootstrap bundle, when it holds this authority's partition count; refuse the start otherwise.
 
-        spec = transport()
-        teams = tuple(teams)
-        for bucket in spec["key_value"]:
-            for team in teams if TEAM_PLACEHOLDER in bucket else (None,):
-                await self._ensure_bucket(spec, bucket, team)
-
-    async def _ensure_bucket(self, spec: Mapping[str, Any], bucket: str, team: Optional[str]) -> None:
-        """Create or reconcile the contract's stream, without bucket-wide rollup or deletion.
-
-        The client's bucket-creation helper enables rollup headers, which would
-        let a writer of one key erase other keys. Bind it as a bucket only after
-        creating its stream with the contract's restrictions.
+        The launcher writes the saved count into the bundle before it starts the authority, and
+        every host computes agents' partitions with the bundle's count, so the two differ only
+        when the settings changed while the instance started or the authority was started by
+        hand. Streams and consumers made with one count and hosts working with another would
+        put an agent's queues where its host does not read them.
         """
 
-        settings = bucket_stream(spec, bucket, team)
-        settings["storage"] = _STORAGE[settings["storage"]]
-        settings["num_replicas"] = self.replicas
-        config = StreamConfig(**settings)
-        try:
-            await self._js.stream_info(config.name)
-        except NotFoundError:
-            await self._js.add_stream(config=config)
-            self.logger.info("Created a key-value bucket. event=protocol1_bucket_created bucket=%s replicas=%s",
-                             bucket_name(bucket, team), self.replicas)
-        else:
-            await self._js.update_stream(config=config)
+        bundle = read_bundle(self.layout.trust_bootstrap_path)
+        if bundle.partitions != self.partitions:
+            raise PartitionCountMismatch(
+                f"The bootstrap bundle {self.layout.trust_bootstrap_path} holds partition count {bundle.partitions}, "
+                f"but this authority's transport.queues.partitions is {self.partitions}. The launcher writes the setting "
+                "into the bundle "
+                "before it starts the authority; restart the instance so both use the saved setting.")
+        return bundle
+
+    async def ensure_topology(self, teams: Iterable[str]) -> None:
+        """Create what the contract's topology owner owns: every team's streams, the buckets and the team consumers.
+
+        One plan for all of them (``queues.QueueTopology``): its checks refuse a start before
+        anything changes, and a stream whose settings already match is not sent to NATS.
+        """
+
+        self._topology = QueueTopology(self._nc, self._js, transport=transport(), limits=self.queues,
+                                       partitions=self.partitions, logger=self.logger)
+        await self._topology.ensure(teams)
+
+    async def follow_placements(self, stop: asyncio.Event) -> None:
+        """Keep each placed agent's inbox and control consumers in step with its team's placements, until ``stop``.
+
+        ``placements.PlacedConsumers`` reads ``UA1_PLACEMENT`` and checks each record with the
+        authority's own trust store, which holds every certificate it issued.
+        """
+
+        assert self._topology is not None and self._trust is not None and self.live is not None, "start() first"
+        trust, live = self._trust, self.live
+        records = StateRecords(self._js, lambda: live.identity, trust)
+        self.placements = PlacedConsumers(
+            records, self._topology, teams=self._teams, logger=self.logger,
+            verify=lambda raw: trust.store.verify(raw, record=PLACEMENT, now=self.clock()))
+        await self.placements.run(stop)
 
     async def _records(self) -> Any:
         return await self._js.key_value(CERTIFICATES_BUCKET)
@@ -333,7 +389,7 @@ class InstallationAuthority:
         """
 
         own_key = AuthorityKey(self.installation, self.authority.key_id, self.authority.private_key.public_key())
-        TrustStore(self.installation, [own_key]).add(data, now=now)
+        TrustStore(self.installation, [own_key], partition_count=self.partitions).add(data, now=now)
         document: dict[str, Any] = json.loads(data)
         if document["record"] != record or document["key"] != key:
             raise FrameRefused("invalid_body", f"a {document['record']} record of {document['key']} is stored under {key}",

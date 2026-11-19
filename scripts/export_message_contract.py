@@ -1281,7 +1281,9 @@ def check_transport(transport: dict[str, Any]) -> None:
 # the account mapping's last token computes, and the step max_count is a multiple of.
 PARTITION_SETTING = "transport.queues.partitions"
 PARTITION_PLACEHOLDER = "partition"
-PARTITION_FUNCTION = "{{partition(COUNT,1,3)}}"
+# The account mappings name the count by this token; a server's configuration has the installation's count there.
+PARTITION_COUNT_TOKEN = "COUNT"
+PARTITION_FUNCTION = "{{partition(" + PARTITION_COUNT_TOKEN + ",1,3)}}"
 PARTITION_COUNT_STEP = 32
 # A stream name that holds a partition joins it to its team with ~, which ids cannot hold.
 PARTITION_STREAM_PART = "{team}~{partition}"
@@ -1328,21 +1330,41 @@ def subscribe_subject(address: str, transport: dict[str, Any]) -> str:
     return subject.replace("{agent}", "*") if address in partitioned_addresses(transport) else subject
 
 
+def probe_grant(transport: dict[str, Any]) -> str:
+    """The topology owner's publish and subscribe grant for the mapping check (README, "Partitions").
+
+    Every mapped address of its own probe agents under the probe scope (the inbox, the control
+    queue and live control), mapped (with the partition token) or not, so the check judges each
+    of the account's mapping lines and also sees a server that does not map. No stream stores
+    a subject under the probe scope, since every stream's subjects name a team id, so these are
+    plain messages.
+    """
+
+    return f"{SUBJECT_ROOT}{transport['partitions']['probe_scope']}.{{self}}.>"
+
+
 def check_partitions(transport: dict[str, Any]) -> None:
     """The partition count's setting and limits, and the account mappings that put each agent's addresses in its partition.
 
     The mappings must be exactly the ones the contract derives from the agent addresses: a
     mapping that missed one would leave its subjects unmapped, stored in no partition stream,
     and one that hashed other tokens would put an agent's queues where its host does not read.
+    The probe scope cannot be a team id or the installation scope, so a probe never reaches
+    a team's receivers or streams.
     """
 
     where = "transport.yaml partitions"
     spec = transport.get("partitions")
     if not isinstance(spec, dict) \
-            or set(spec) != {"count_setting", "default_count", "max_count", "handover_seconds", "account_mappings"} \
+            or set(spec) != {"count_setting", "default_count", "max_count", "handover_seconds", "account_mappings",
+                             "probe_scope"} \
             or spec["count_setting"] != PARTITION_SETTING:
         raise ContractError(f"{where}: names the setting {PARTITION_SETTING}, the default and largest counts, the "
-                            "handover deadline and the account mappings")
+                            "handover deadline, the account mappings and the probe scope")
+    probe = spec["probe_scope"]
+    if not isinstance(probe, str) or not re.fullmatch(r"_[a-z][a-z0-9_]*", probe) or probe == INSTALLATION_SCOPE:
+        raise ContractError(f"{where}: probe_scope is a token starting with _ (no team id can), other than "
+                            "installation_scope")
     handover = spec["handover_seconds"]
     if type(handover) is not int or not 2 * transport["clock_skew_seconds"] < handover <= 3600:
         # Bounded so a host never holds back a renewal its credential or certificate needs for long.
@@ -1360,7 +1382,8 @@ def check_partitions(transport: dict[str, Any]) -> None:
 
 # The instance settings that size the streams (transport.yaml queues).
 QUEUE_SETTINGS = {"max_bytes_setting": "transport.queues.max_bytes",
-                  "warn_at_percent_setting": "transport.queues.warn_at_percent"}
+                  "warn_at_percent_setting": "transport.queues.warn_at_percent",
+                  "max_messages_per_subject_setting": "transport.queues.max_messages_per_subject"}
 
 
 def check_stream_sizes(transport: dict[str, Any]) -> None:
@@ -1373,8 +1396,9 @@ def check_stream_sizes(transport: dict[str, Any]) -> None:
     queues = transport.get("queues")
     if not isinstance(queues, dict) or set(queues) != {*QUEUE_SETTINGS, "size_kinds", "warn_at_percent_default"} \
             or any(queues[key] != name for key, name in QUEUE_SETTINGS.items()):
-        raise ContractError("transport.yaml: queues names the settings transport.queues.max_bytes and "
-                            "transport.queues.warn_at_percent, the size kinds and the warning's default")
+        raise ContractError("transport.yaml: queues names the settings transport.queues.max_bytes, "
+                            "transport.queues.warn_at_percent and transport.queues.max_messages_per_subject, the size "
+                            "kinds and the warning's default")
     kinds = queues["size_kinds"]
     if not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) \
             or not all(isinstance(kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", kind) for kind in kinds):
@@ -1397,6 +1421,43 @@ def check_stream_sizes(transport: dict[str, Any]) -> None:
     if used != set(kinds):
         raise ContractError(f"transport.yaml: queues.size_kinds names only kinds a stream uses; unused "
                             f"{sorted(set(kinds) - used)}")
+    check_per_subject_caps(transport)
+
+
+def check_per_subject_caps(transport: dict[str, Any]) -> None:
+    """The streams of agents' queues cap each sender's waiting messages per agent from the settings, refusing past it.
+
+    Review point FA-3 of PR #151: one agent's backlog could fill its partition stream, and
+    then its partition's control messages were refused too. The stored subject names the
+    sender and the agent, so a per-subject cap bounds one sender's backlog for one agent's
+    queue; with discard_new_per_subject a sender at the cap is refused (10077) instead of the
+    oldest message being dropped, and the stream still takes other subjects (NATS also needs
+    discard: new, which check_stream_sizes requires of every queued stream). A stream with a
+    fixed cap keeps one message per subject, the latest (README, "Stream sizes"), so it must
+    not set discard_new_per_subject: the dead letters' retried set-aside would be refused
+    (10077) instead of replacing its copy.
+    """
+
+    setting = transport["queues"]["max_messages_per_subject_setting"]
+    stored = [stored_subject(address, "*", transport) for address in transport["agent_queues"].values()]
+    for name, stream in transport["streams"].items():
+        named = stream.get("max_msgs_per_subject_setting")
+        holds_agent_queues = any(subject_covers(pattern, subject) for pattern in stream["subjects"] for subject in stored)
+        if holds_agent_queues and named != setting:
+            raise ContractError(f"transport.yaml: stream {name} stores agents' queues, so it caps each sender's waiting "
+                                f"messages per agent (max_msgs_per_subject_setting: {setting})")
+        if named is not None and (named != setting or "max_msgs_per_subject" in stream):
+            raise ContractError(f"transport.yaml: stream {name} takes its per-subject cap from {setting} alone")
+        per_subject = stream.get("discard_new_per_subject", False)
+        if not isinstance(per_subject, bool) or (named is not None and not per_subject):
+            raise ContractError(f"transport.yaml: stream {name} refuses a sender's next message at a cap from the "
+                                "settings (discard_new_per_subject: true), so queued work is never dropped")
+        # NATS needs a cap for discard_new_per_subject, and with a fixed cap it would refuse the
+        # dead letters' retried set-aside instead of replacing its copy, so only the cap from the
+        # settings takes it.
+        if per_subject and named is None:
+            raise ContractError(f"transport.yaml: stream {name} sets discard_new_per_subject only with its cap from "
+                                f"{setting}; a fixed cap without it keeps the latest message per subject")
 
 
 def check_agent_queues(transport: dict[str, Any]) -> None:
@@ -2361,6 +2422,9 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                 else:
                     subscribe.add(subscribe_subject(address, transport))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
+        if role == transport["topology_owner"]:
+            publish.add(probe_grant(transport))
+            subscribe.add(probe_grant(transport))
         if any("{agent}" in subject for subject in publish | subscribe):
             raise ContractError(f"{role}: generated grants name partitions, not agents (README, \"Partitions\")")
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
@@ -2775,6 +2839,9 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
         f"DEFAULT_PARTITION_COUNT = {transport['partitions']['default_count']!r}\n"
         f"MAX_PARTITION_COUNT = {transport['partitions']['max_count']!r}\n"
+        f"PARTITION_COUNT_TOKEN = {PARTITION_COUNT_TOKEN!r}\n"
+        f"PARTITION_ACCOUNT_MAPPINGS = {dict(sorted(transport['partitions']['account_mappings'].items()))!r}\n"
+        f"PARTITION_PROBE_SCOPE = {transport['partitions']['probe_scope']!r}\n"
         f"SINGLE_TEAM_ROLES = {tuple(transport['single_team_roles'])!r}\n"
         f"PARTITIONED_ADDRESSES = {tuple(sorted(partitioned_addresses(transport)))!r}\n"
         f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"

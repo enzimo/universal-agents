@@ -55,6 +55,7 @@ from team_transfer.container import TransferFileError, TransferReader
 from team_transfer.crypto import TransferKeyError
 from team_transfer.errors import TransferError
 from team_transfer.format import TransferModel
+from team_transfer.protocol1_ids import require_protocol1_ids
 from team_transfer.review_session import ReviewApplyV1, ReviewSession, ReviewUpdateV1
 from team_transfer.sections import DestinationChoices
 
@@ -184,6 +185,8 @@ class TeamImport:
 
         reader = TransferReader.open(path, passphrase)
         try:
+            # Before the review is prepared: a team this version cannot run is refused on the page.
+            require_protocol1_ids(reader)
             review_dir = layout.team_import_review_dir / reader.manifest.mac[:24]
             _private_folder(review_dir.parent)
             # Reopening the same export keeps the selections and edits made so far.

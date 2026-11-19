@@ -90,6 +90,7 @@ partitions:
   default_count: 96
   max_count: 128
   handover_seconds: 600   # a handover's step 2 ends this long after the released record's issued_at at the latest; tasks still held are handed back (README, "Credentials follow ownership")
+  probe_scope: _probe     # the mapping check's scope token, where a team id goes: the topology owner probes its own probe agents' mapped addresses under it (README, "Partitions"); team ids cannot start with _
   account_mappings:
     "ua.v1.*.*.work.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.agent.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
     "ua.v1.*.*.work.control.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.work.control.{{wildcard(3)}}.{{partition(COUNT,1,3)}}"
@@ -130,9 +131,10 @@ nats_account:
 
 # Stream sizes (README, "Stream sizes"). Every work and dead-letter stream has a byte limit
 # besides its age limit. The installation authority, which creates the streams, reads the
-# limits from the instance's settings named here (config.yaml and instance_config.yaml); their
-# schema entries and default values come with the code that first reads them (13C.10 step 2),
-# so the contract names the settings, not numbers. Each stream names its entry in the byte
+# limits from the instance's settings named here (config.yaml and instance_config.yaml, where
+# they have their measured defaults), so the contract names the settings, not numbers. The
+# partition streams also cap each sender's waiting messages for one agent queue, from the
+# setting max_messages_per_subject_setting names. Each stream names its entry in the byte
 # limits as its size_kind, and a kind's limit applies to each stream of that kind, each
 # team's apart. NATS sets aside every stream's whole limit from the server's and the
 # account's storage when it creates the stream (error 10047 when it does not fit), so the
@@ -147,6 +149,7 @@ nats_account:
 # finds such messages is step 4's (README, "Dead letters").
 queues:
   max_bytes_setting: transport.queues.max_bytes                # one byte limit per size kind
+  max_messages_per_subject_setting: transport.queues.max_messages_per_subject   # the partition streams' cap per stored subject
   size_kinds: [partition, pool, edge, team_services, dead_letter]
   warn_at_percent_setting: transport.queues.warn_at_percent
   warn_at_percent_default: 80
@@ -215,6 +218,12 @@ streams:
     max_message_bytes: 263168   # max_frame_bytes plus max_header_bytes: JetStream counts headers in a message's size
     size_kind: partition
     discard: new                # a full stream refuses new work and control messages alike; senders keep them in their outboxes until they expire
+    # The stored subject names the sender and the agent, so this caps one sender's waiting
+    # messages for one agent's inbox or control queue. A sender at the cap is refused (10077),
+    # not the oldest dropped, and the stream still takes other subjects: one agent's backlog
+    # leaves room for its own and its neighbours' control messages (README, "Stream sizes").
+    max_msgs_per_subject_setting: transport.queues.max_messages_per_subject
+    discard_new_per_subject: true
   UA1_POOL_WORK_{team}:
     # One team's worker pools and nothing else; each host reads only its own pools' consumers
     # here, and the worker pool controller's host reads every pool consumer's information.

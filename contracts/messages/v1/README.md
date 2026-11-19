@@ -793,8 +793,10 @@ count is the installation setting `transport.queues.partitions` (`partitions` in
 `transport.yaml`): 96 unless chosen otherwise, at most 128 ("Credential size"), and fixed when
 the installation is created, because another count would put every queued message in another
 stream; changing it needs an upgrade that drains the queues. Every process of an installation
-uses the same count: its trust store holds it, and agent record keys and the arrival check
-below are computed with it.
+uses the same count: the launcher writes the saved setting into the bootstrap bundle every
+host starts from ("Starting a host"), each host's trust store takes it from there, and agent
+record keys and the arrival check below are computed with it. The installation authority
+refuses to start when its own setting and the bundle's count differ.
 - **The mapping.** The installation's NATS account maps three addresses, an agent's inbox
   (`work.agent.<agent>`), its control queue (`work.control.<agent>`) and its live control
   address (`ctl.agent.<agent>`), to the same subject with one more token, the agent's
@@ -813,8 +815,33 @@ below are computed with it.
   another partition token, and the server stores or delivers it in that partition. Its
   receiver refuses it as `subject_mismatch`; a queued one waits unread until the stream's
   `max_age`, like work for an unknown agent, and counts against that stream's byte limit.
-  The bundled server applies no mapping yet, so today's receivers compare exact subjects; the
-  release that installs the mapping switches them to this rule.
+  The bundled server's generated configuration carries the mappings at the installation's
+  count (the launcher writes them at every start), and receivers apply this rule: a host
+  serving an agent's live control address subscribes to it with the agent's partition token.
+- **The mapping check.** Before it serves, the installation authority checks that the server
+  maps every agent address at the installation's count, since an external server's operator
+  writes the three mapping lines by hand. A missing or wrong live control line leaves every
+  agent's control requests unanswered; a missing or wrong inbox or control-queue line would
+  store queued work in no partition stream, or in one whose host does not read that agent,
+  where it waits unread until the stream's `max_age`. It subscribes to its own probe
+  addresses, `ua.v1.<probe scope>.<its runtime>.>` (`probe_scope` in `transport.yaml`,
+  `_probe`; no team id starts with `_`, so no team's receivers see them, and no stream stores
+  them since every stream's subjects name a team), and publishes an unsigned message to each
+  mapped address (inbox, control queue and live control) of at least 16 probe agents, chosen
+  so that every other count up to `max_count` gives at least one of them another partition
+  token; the minimum catches a larger count too, a multiple of the installation's count
+  passing at most one check in 65,536. It judges each mapping line by its own probes, which
+  must all arrive with the token the installation's count gives: one that arrives without a
+  token means that line is missing; another token means it maps with another count; probes
+  of a line that never come back mean its target sends them elsewhere. When nothing comes
+  back at all, the authority's login may not publish or subscribe there, or the connection
+  was lost. Each refuses the start naming the failing lines, with the three lines at the
+  installation's count as a server's configuration writes them. Its generated grants hold the
+  probe subjects (`custom_transport.protocol1.mapping_check`). The check sees the server the
+  authority's connection is on: a server applies the mappings to what its own clients
+  publish, and a message arriving from another server of a cluster is not mapped again, so
+  with accounts kept in the servers' configuration files every server of a cluster needs the
+  lines (an account in a signed account record, operator mode, carries them to every server).
 - **Streams.** The inboxes and control queues of a team's agents in partition `p` are stored
   in `UA1_PART_<team>~<p>`, one stream per team and partition, each agent with its own two
   consumers there; worker pools in `UA1_POOL_WORK_<team>`. An agent with a long backlog fills
@@ -1085,15 +1112,24 @@ the installation authority. It already decides which hosts serve which teams, pa
 and pools, since it issues their certificates and credentials, so it knows when a team,
 agent or pool appears or leaves, and it runs no model. It creates a team's streams with the
 team (a stream per partition, its pool stream, its edge stream, its team services' inbox
-stream and its dead-letter stream), each agent's two
-consumers in its partition's stream when the agent is placed, each pool's consumer with the
-pool, and the key-value buckets and the object store. Its generated grants name every stream
+stream and its dead-letter stream) and the team services' inbox and dead-letter notice
+consumers, before it serves, so no host joins a team whose streams are missing; each agent's
+two consumers in its partition's stream when the team services place the agent (a placement
+record that verifies with the authority's trust store), removed when the placement ends and
+both queues hold nothing, neither waiting, delivered and unacknowledged, nor stored on their
+subjects (a message past its last delivery is the last kind), and kept with a log line, checked
+every minute, while they hold work; it catches up at start on placements that changed while
+it was down (`installation_authority.placements`); each pool's consumer with
+the pool and each edge's with the edge, once a later step names pools and edges (edges with
+the gateways' routes: step 2b names gateways, step 6 delivers to their routes); and the
+key-value buckets and the object store (`installation_authority.queues`). Its generated grants name every stream
 of the account rather than a line per team and partition, which would grow with both: it
 reads the account's information (`$JS.API.INFO`, the storage check of "Stream sizes"),
 creates, updates, inspects and deletes streams, creates, inspects, lists and deletes their
 consumers (bucket watches that readers left behind among them), and reads and deletes
-single messages (a team's removal, and the old streams at an upgrade). This adds no power:
-it holds the account's signing key and could issue itself any permission.
+single messages (a team's removal, and the old streams at an upgrade). It also publishes
+and subscribes under the probe scope for the mapping check ("Partitions"). This adds no
+power: it holds the account's signing key and could issue itself any permission.
 
 **Withdrawing queued work.** The team services withdraw a task queued for one of their
 team's agents, worker pools or outside agents by deleting its message from one of the team's
@@ -1163,43 +1199,119 @@ any other). That stream fills only when the team services stop reading; then eve
 kind of the team is refused until they read again or an administrator raises the
 `team_services` limit. The team's work needs the team services' custody answers anyway, so it
 waits on them either way. Readers that share a partition, pool or edge stream do share its
-room: see "Control messages share their stream's room" below. These settings enter the `config.yaml` and
-`instance_config.yaml` schemas, with their measured defaults, in the step whose code first
-reads them; `transport.yaml` names them so that step builds on a fixed contract.
+room: see "Control messages share their stream's room" below. These settings are in the
+`config.yaml` and `instance_config.yaml` schemas (`transport.queues`, with their defaults);
+`transport.yaml` names them, never their numbers.
 
 - **Limits are set aside when a stream is created.** NATS reserves a stream's whole byte
-  limit from the server's JetStream file storage (`max_file_store`, which a server that
-  does not set it derives from the free disk) and, in operator mode, from the account's
-  storage limit, when it creates the stream, not as the stream fills. A stream whose limit
-  does not fit what is left is refused with JetStream error code 10047 ("insufficient
-  storage resources"). The installation therefore sets aside the limits of every team's
-  streams: teams times each team's streams' limits. The account
-  information reports what is set aside (`reserved_storage`) and the account's limit
-  (`limits.max_storage`, -1 when only the server's own limit applies). Before it creates
-  or enlarges any stream, the authority checks that the new limits fit the account's
-  limit, and stops with a message naming the `transport.queues.max_bytes` entry to lower
-  when they do not. An account without a limit of its own reports none to check against,
-  so there the server's 10047 refusal is the check, and it stops the authority the same
-  way. The server can also refuse when the account's check passed, because other accounts
-  or other uses share the server's storage. A refusal partway through a team's streams
-  leaves the streams already made in place, with their limits still set aside, and the
-  team only partly set up. The authority's next run, after the operator lowers the
-  `max_bytes` entry it named, applies the lower limits to those streams (which gives back
-  the room they had set aside and drops nothing) and creates the missing ones, so running
-  it again finishes a team it stopped partway through. Defaults are measured against what
-  they set aside, not only against the expected backlog.
-- **Lowering a limit drops nothing.** A stream that holds more than a lowered limit keeps
-  every message and refuses new ones until it falls below the limit.
+  limit from the server's JetStream file storage (`max_file_store`) and, in operator mode,
+  from the account's storage limit, when it creates the stream, not as the stream fills. A
+  stream whose limit does not fit what is left is refused with JetStream error code 10047
+  ("insufficient storage resources"). The installation therefore sets aside the limits of
+  every team's streams: teams times each team's streams' limits. The account information
+  reports what is set aside (`reserved_storage`) and the account's limits
+  (`limits.max_storage`, -1 when only the server's own limit applies, and
+  `limits.max_streams`). Measured on nats-server 2.15.1, one server and three in a cluster:
+  an account with one set of limits counts every copy of a stream (`transport.replicas`)
+  against its storage limit but reports what is set aside once per stream; an account whose
+  limits are kept per replica tier (`R1`, `R3`, as hosted NATS services set them) reports
+  each tier under `tiers`, with top-level limits of 0, and counts a stream once in its tier;
+  a missing tier answers error 10120, and an account at its stream limit 10027. Before it
+  creates or changes any stream, the authority checks the account's limits (the tier of
+  `transport.replicas` when there are tiers, otherwise what is reported times the copies,
+  exact for the installation's own account, where every stream has that many copies): the
+  streams it would add against the stream limit (a team needs 100 streams and 2 buckets at
+  the default count, and the installation 5 buckets), and the new and enlarged limits
+  against the storage limit. It stops, changing nothing, with the totals and the setting to
+  change when they do not fit, and when the account has no tier for the replica count. An
+  account without a storage limit of its own reports none to check against, so there the
+  server's refusal is the check, and it stops the authority the same way, naming the
+  stream and the setting: 10047 from one server; from a cluster, 10005 "no suitable peers
+  for placement, insufficient storage" for a new stream and 10047, as from one server, for
+  a raised limit of an existing one (measured on three-server 2.15.1 clusters: each server
+  that keeps a copy needs room for the stream's whole limit, and a new stream too large for
+  enough servers gets 10005, with one copy too). The authority also
+  checks the account's consumer limit (`limits.max_consumers`, a cap on each stream's
+  consumers, measured on 2.15.1): the server
+  refuses a stream whose own `max_consumers` is above it (10026), so an account allows 4,096
+  consumers per stream (the buckets' streams) or has no limit. Other refusals name a setting
+  or a limit only where it fixes the cause: copies the servers cannot hold (10074 on one
+  server, and in a cluster a 10005 that gives no reason after "no suitable peers for
+  placement") name `transport.replicas`, subjects another stream of the account takes
+  (10065) name that conflict, and a request no JetStream answers, or an account without
+  JetStream (10039), says to enable it; any other error, a 10005 with another reason such
+  as "peer offline" included, and a request the server does not answer, stops the authority
+  with the server's own words. The server can also refuse when the account's check passed,
+  because other accounts or other uses share the server's storage. A refusal partway
+  through a team's streams leaves the streams already made in place, with their limits
+  still set aside, and the team only partly set up. The authority's next run, after the
+  operator lowers the `max_bytes` entry it named, applies the lower limits to those streams
+  (which gives back the room they had set aside and drops nothing) and creates the missing
+  ones, so running it again finishes a team it stopped partway through. Defaults are
+  measured against what they set aside, not only against the expected backlog.
+- **The defaults** (`transport.queues`, measured on nats-server 2.15.1 with
+  `sync_interval: always`): `partition` 16 MiB, `pool` 128 MiB, `edge` 128 MiB,
+  `team_services` 256 MiB and `dead_letter` 128 MiB, 8 messages per subject
+  (`max_messages_per_subject`) and 96 partitions. One team's streams then set aside
+  2,281,701,376 bytes (2.125 GiB: 96 times 16 MiB, plus 640 MiB), which is what the
+  account reported as `reserved_storage` for them. The largest message a work stream
+  stores is 263,168 bytes, headers included (`max_message_bytes`), so one sender's backlog
+  for one agent at the cap holds at most 2,105,344 bytes, and the settings refuse a
+  `partition` limit below five such backlogs (10,526,720 bytes at a cap of 8; "Control
+  messages share their stream's room"). Review point FA-3 of step 1, measured: four
+  senders (a gateway, the lead host, the team services and the scheduler, each under its
+  own runtime id) each queued 8 messages of the largest size for one agent. Its partition
+  stream then held 32 messages, 8,423,984 of its 16,777,216 bytes; a ninth from one of
+  them was refused with 10077 "maximum messages per subject exceeded", while that agent's
+  control message and a neighbour's inbox and control messages were stored, and a fifth
+  sender still stored all 8 of its own (11,319,729 bytes in the end).
+- **The room is needed at every start of NATS.** A server that does not set
+  `max_file_store`, as the bundled one does not, gives JetStream three quarters of the
+  disk's free space, measured each time it starts (measured: 0.750). So the disk needs a
+  third more free space than the streams set aside, at the first start and at every later
+  one. A server that starts with less storage than its streams already set aside (or an
+  account whose limit was lowered below it) keeps serving those streams and takes new
+  messages, but refuses every new or changed stream with 10047, an unchanged update and a
+  lowered limit included, so lowering a limit cannot help then: only more room can, which
+  on the bundled server means freeing disk space and restarting the instance. A start that
+  asks NATS for no change still serves there, which is why every start changes only what
+  differs (below). The authority's refusals say which case applies and, without an account
+  limit, the free disk space the bundled server needs.
+- **Lowering a limit drops nothing.** A stream that holds more than a lowered byte limit keeps
+  every message and refuses new ones until it falls below the limit. The per-subject cap is
+  the exception: NATS drops the oldest messages of a subject above a lowered
+  `max_msgs_per_subject` (measured on nats-server 2.15.1), so the authority refuses to start,
+  changing nothing, when a partition stream holds more on one subject than the lowered
+  `transport.queues.max_messages_per_subject`, and names the stream and subject; the cap can
+  be lowered once those queues drain.
+- **Every start checks before it changes.** The authority reads every stream it wants, the
+  buckets' streams included, before it changes any. A team's partition streams record the
+  partition count they were made with (metadata `ua.partitions`; the server's own `_nats.`
+  keys are left aside), and a start with another `transport.queues.partitions` is refused,
+  changing nothing. It updates only a stream whose settings differ in a field the contract
+  sets, keeping metadata keys it does not own, so a restart with the same settings sends NATS
+  no change and no account request; it lowers limits before it creates or enlarges streams,
+  so the room they give back serves the others. An update sends the stream's whole
+  configuration, so a setting an operator added by hand that the contract does not set (a
+  description, placement tags) goes back to the server's default when the authority next
+  changes that stream: the streams' settings are the authority's. Measured on nats-server
+  2.15.1 (sync_interval always): a team's first start (every stream missing) takes about
+  1.8 s with one copy of each stream on one server, a later one 0.02 s; on three clustered
+  servers sharing one disk, 3.7 s with one copy, 20.7 s with three, and 23.5 s to change a
+  team from one copy to three. The launcher waits up to 30 s per team for one copy and 300 s
+  for more (`docker.message_hosts`).
 - **The size warning** follows the rules of the existing storage warnings
   (`assistant_gateway.storage_capacity`), and the gateway runs it with them (`size_check` in
   `transport.yaml`). It already reads the account's JetStream usage for those warnings
   (`$JS.API.INFO`), and
   its grants add one list of every stream with its limit and current size
   (`$JS.API.STREAM.LIST`): two lines whatever the number of teams and partitions, metadata
-  only, never a message. It checks every work and dead-letter stream every minute, and when a stream first holds more than `transport.queues.warn_at_percent`
-  of its limit (80 by default), administrators get one Inbox notice and the Status page
-  shows a problem; the warning ends only once the stream falls a release margin below that
-  level, so a stream hovering at the level does not send a notice on every crossing. The
+  only, never a message. Each gateway checks its own team's work and dead-letter streams
+  with the Status page's check, every five minutes (`assistant_gateway.queue_capacity`), and
+  when a stream first holds `transport.queues.warn_at_percent` of its limit (80 by default),
+  administrators get one Inbox notice and the Status page shows a problem; the warning ends
+  only once the stream falls a release margin (3 percentage points) below that level, so a
+  stream hovering at the level does not send a notice on every crossing. The
   setting is a transport setting, not a level of `gateway.storage_warnings`, because it
   measures a stream against its own limit rather than a disk or the server's storage.
 
@@ -1208,7 +1320,8 @@ because dropping would lose queued work, or set-aside copies and notices nobody 
 yet, without anyone being told:
 - **A full work stream** refuses the publish with JetStream error code 10077 (the code
   NATS gives when a stream's byte, message or per-subject limit is reached; work streams
-  set only the byte limit). This refusal is the retryable "full" case. The sender keeps
+  set the byte limit, and partition streams also the per-subject cap below). This refusal
+  is the retryable "full" case. The sender keeps
   the saved frame in its outbox and publishes it again with growing pauses while the frame
   is still valid (until its `expires_at`); retries are the same frame ("Task dispatch and
   retries"). When the frame expires unsent, the sender records the dispatch as failed,
@@ -1234,16 +1347,33 @@ yet, without anyone being told:
   withdraw queued work (a person's stop does this without publishing into the full stream),
   or when an administrator raises the limit. The size warning reaches administrators
   before a stream is full, and defaults are measured so that it leaves time to act. NATS
-  2.15.1 has no byte limit per subject. A cap on messages per subject
-  (`max_msgs_per_subject` with `discard_new_per_subject`, refused with the same 10077)
-  would stop one sender's backlog for one agent at a fixed count without changing this
-  layout; it counts per sender and agent, since the sender's runtime is a subject token.
-  Step 2 measures it against the byte limits it needs and sets it. The two queues keep
-  control messages from waiting behind new work; they do not reserve room for them.
+  2.15.1 has no byte limit per subject, so the partition streams cap the messages per
+  subject instead: `transport.queues.max_messages_per_subject` (`max_msgs_per_subject`
+  with `discard_new_per_subject`, refused with the same 10077, the oldest never dropped).
+  It counts per sender and agent, since the stored subject names the sender's runtime and
+  the agent, and it applies to the control queue too. Six host roles may send to an agent's
+  queues (the generated permissions name them: gateway, lead host, team services,
+  scheduler, worker host and edge adapter), and each running host is a sender of its own,
+  so a team has one sender per gateway, per worker host and per edge adapter beside its
+  lead host, team services and scheduler; their number grows with the team's hosts. The
+  cap keeps room only while the stream can hold the senders' backlog at it, so the
+  settings refuse a partition limit below five senders' waiting messages for one agent at
+  the cap, each of the largest message size (`max_message_bytes`). That is what the rule
+  guarantees: while at most four senders are at the cap for one agent with messages of the
+  largest size, a fifth sender's worth of room stays free for control messages. It does
+  not guarantee room when more senders are at the cap at once, such as many worker hosts
+  returning results to a busy lead: then the stream relies on real messages being smaller
+  than the largest size, and on the size warning reaching administrators first. The two
+  queues keep control messages from waiting behind new work; the cap keeps one agent's
+  backlog from taking the room they need.
 - **A full dead-letter stream** refuses a set-aside: see "Dead letters".
 
 The generator refuses a work or dead-letter stream without a size kind or with any other
-discard policy.
+discard policy, and a stream of agents' queues without the per-subject cap from
+`transport.queues.max_messages_per_subject` or with one that drops the oldest message. It
+also refuses `discard_new_per_subject` on any stream without that cap: the dead-letter
+stream's fixed cap of one keeps the latest copy per subject, so a retried set-aside
+replaces its copy instead of being refused.
 
 A receiver accepts a frame from `issued_at` (or a later `not_before`) through the earlier
 of `expires_at` and `issued_at + expiry_seconds` for its kind, with the end exclusive.
@@ -1487,6 +1617,7 @@ Joining an installation and renewing a certificate use the address `ua.v1._insta
 
 **Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it. The bundle holds:
 - the installation's authority keys;
+- the installation's partition count ("Partitions"), which the host's trust store takes; a host does not start from a bundle without one, since another count would put its agents' records and queues where other hosts do not look;
 - the certificates of the installation authority's hosts, so the host can check the authority's replies before it has a certificate of its own, and the installation's revocations record. The authority's replies need no current record, so a bundle older than a day still lets the host join; the host reads the current record before it accepts other hosts' frames;
 - the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`, with its private NATS key, so a bundle is a secret and reaches the host privately. With it the host can publish its own installation requests and read the replies under `_INBOX.<runtime>.join.`, and nothing else; it ends after the credential lifetime, so a bundle that waits longer is made again. Of those requests only a join can succeed: a renewal needs a certificate the host does not have yet (`unknown_key`).
 

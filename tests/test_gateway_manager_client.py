@@ -90,6 +90,9 @@ class _FakeManagerRuntime:
     async def jetstream_usage(self) -> None:
         return None
 
+    async def team_streams(self, team: str) -> None:
+        return None
+
     async def put_object(self, **kwargs) -> object:
         self.put_calls.append(dict(kwargs))
         return object()

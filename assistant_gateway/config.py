@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, cast
+from typing import Any, Callable, Dict, Mapping, Optional, cast
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from config_backup_retention import prune_config_backups
@@ -94,10 +94,15 @@ from runtime_settings.retired_concurrency import (
     drop_retired_concurrency_setting, refuse_retired_concurrency_setting,
 )
 from runtime_settings.transport import (
+    PARTITION_COUNT_SETTING,
     TransportSettings,
     drop_retired_presence_setting,
     refuse_retired_presence_setting,
+    replicas_step,
+    store_partition_count,
+    write_upgraded_replicas,
 )
+from runtime_settings.values import whole_number
 from runtime_settings.voice import VoiceSettings
 from runtime_settings.workspace import WorkspaceSettings
 from secure_tools.chat_commands import ACCOUNTS_MODEL_SUBJECT, ACCOUNTS_PRIVATE, ACCOUNTS_SHARE, accounts_command
@@ -109,7 +114,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_INSTANCE_ROOT = Path.home() / GATEWAY_DEFAULTS.instance_root_name.value
 
 
-INSTANCE_CONFIG_SCHEMA_VERSION = 14
+INSTANCE_CONFIG_SCHEMA_VERSION = 15
 
 
 DIRECTLY_COMPATIBLE_INSTANCE_CONFIG_VERSIONS = {INSTANCE_CONFIG_SCHEMA_VERSION}
@@ -389,12 +394,22 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "transport.jetstream_enabled": "Use JetStream for durable work and reply messages.",
     "transport.subject_prefix": "Team subject prefix. Empty uses team_id, e.g. team_303. Use per-team values for external NATS ACLs.",
     "transport.storage": 'JetStream storage: "file" or "memory".',
-    "transport.replicas": "JetStream stream replica count.",
+    "transport.replicas": "JetStream stream replica count (1 to 5).",
     "transport.ack_wait_seconds": "Delivery ack wait for long-running agent work.",
     "transport.max_deliver": "Maximum redelivery attempts before termination.",
     "transport.duplicate_window_seconds": "JetStream duplicate message-id window.",
     "transport.work_max_age_seconds": "Durable work/reply retention age.",
     "transport.process_consumer_inactive_threshold_seconds": "Expiry delay for unbound process-scoped JetStream consumers.",
+    "transport.queues": "Every team's protocol 1 work and dead-letter streams. NATS sets each stream's whole byte limit aside when it creates the stream, so a team reserves partitions x partition plus the other four limits.",
+    "transport.queues.max_bytes": "Byte limit of each stream, by kind (1 MiB = 1,048,576 bytes; at least 1 MiB). Lowering one drops nothing: a stream above it refuses new messages until it drains.",
+    "transport.queues.max_bytes.partition": "Each of a team's partition streams, which hold the inboxes and control queues of the partition's agents. Must be at least 5 x max_messages_per_subject x 263,168 bytes (10,526,720 at a cap of 8), so lower the cap with it.",
+    "transport.queues.max_bytes.pool": "A team's worker pool stream.",
+    "transport.queues.max_bytes.edge": "A team's edge stream: work for people's chat routes and outside agents.",
+    "transport.queues.max_bytes.team_services": "A team's team-services stream: the copies of every task, result and handback the team services record.",
+    "transport.queues.max_bytes.dead_letter": "A team's dead-letter stream: set-aside copies and notices.",
+    "transport.queues.warn_at_percent": "Administrators get an Inbox notice and the Status page shows a problem when a stream holds this percent of its limit (10 to 99).",
+    "transport.queues.partitions": "Partition streams per team (1 to 128). Fixed when the instance is created: the instance refuses to start with another count.",
+    "transport.queues.max_messages_per_subject": "Most messages one sender may have waiting in one agent's inbox or control queue; more are refused, so one busy agent leaves room for the others. max_bytes.partition must be at least 5 x this x 263,168 bytes, so raise it with the cap.",
     "mcp": "Installed MCP connection, transport, authorization, and managed-host settings.",
     "mcp.enabled": "Run the brokered MCP control/data plane before the first dynamic proposal exists.",
     "mcp.protocol_adapter": "Protocol adapter seam; use mcp_v1 until Strands supports MCP v2.",
@@ -1542,7 +1557,28 @@ def _migrate_instance_config_dict(
         )
         version = 14
 
+    if version == 14:
+        # The protocol 1 partition count is fixed when an installation is created, so it is
+        # written into the file rather than left to the code's default
+        # (runtime_settings.transport.store_partition_count). A replica count earlier releases
+        # read but this one refuses (0, which they read as one copy, "3", 1.0, true) is written
+        # as the whole number they read (runtime_settings.transport.write_upgraded_replicas).
+        stored = store_partition_count(migrated)
+        partitions = migrated["transport"]["queues"]["partitions"] if stored else None
+        replicas = write_upgraded_replicas(migrated)
+        migrated["schema_version"] = 15
+        applied_steps.append(
+            "14 -> 15: store the protocol 1 partition count"
+            + (f"; {'.'.join(PARTITION_COUNT_SETTING)} set to {partitions}" if stored else "")
+            + replicas_step(replicas)
+        )
+        version = 15
+
     return migrated, tuple(applied_steps)
+
+
+# Changes upgraded settings before validation, in memory only (``GatewayInstanceConfig.load``).
+SettingsPreparation = Callable[[Dict[str, Any]], Dict[str, Any]]
 
 
 def read_upgraded_instance_config(path: str | Path) -> Dict[str, Any]:
@@ -1621,11 +1657,12 @@ class StartupAgentSettings(BaseModel):
             raise ValueError(
                 "gateway.startup_agents.named_agent_type must be non-empty."
             )
-        from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN
+        from custom_messages.wire.ids import AGENT_TYPE
 
-        if not AGENT_TYPE_PATTERN.fullmatch(normalized):
-            raise ValueError("A startup agent type must use 1 to 24 letters, digits, '-' or '_', "
-                             "starting with a letter or digit, so its message host can name it.")
+        problem = AGENT_TYPE.problem(normalized)
+        if problem is not None:
+            raise ValueError(f"The startup agent type {normalized!r} {problem}, so its message host cannot "
+                             "name it.")
         return normalized
 
     @field_validator("count", mode="before")
@@ -1722,16 +1759,6 @@ class GatewayUsersSettings(BaseModel):
         return parsed
 
 
-def _whole_number(value: Any, *, name: str) -> int:
-    """An int, or a string of digits, as a whole number; refuses true/false and fractions."""
-
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
-    raise ValueError(f"{name} must be a whole number.")
-
-
 class StorageWarningSettings(BaseModel):
     """When people hear that the data the team stores for them has grown (``assistant_gateway.storage_usage``)."""
 
@@ -1743,7 +1770,7 @@ class StorageWarningSettings(BaseModel):
     @classmethod
     def _step_in_range(cls, value: Any) -> int:
         name = "gateway.storage_warnings.person_step_gb"
-        parsed = _whole_number(value, name=name)
+        parsed = whole_number(value, name=name)
         if not 0 <= parsed <= MAX_STORAGE_WARNING_STEP_GB:
             raise ValueError(f"{name} must be from 0 (no notices) to {MAX_STORAGE_WARNING_STEP_GB}.")
         return parsed
@@ -1752,7 +1779,7 @@ class StorageWarningSettings(BaseModel):
     @classmethod
     def _percent_in_range(cls, value: Any, info: Any) -> int:
         name = f"gateway.storage_warnings.{info.field_name}"
-        parsed = _whole_number(value, name=name)
+        parsed = whole_number(value, name=name)
         if not 1 <= parsed <= 100:
             raise ValueError(f"{name} must be from 1 to 100.")
         return parsed
@@ -2501,18 +2528,29 @@ class GatewayInstanceConfig(BaseModel):
         return config_path
 
     @classmethod
-    def load(cls, path: str | Path) -> "GatewayInstanceConfig":
+    def load(cls, path: str | Path, *, prepare: SettingsPreparation | None = None) -> "GatewayInstanceConfig":
+        """The file's settings, upgraded in memory and validated.
+
+        ``prepare`` changes the upgraded settings before validation, in memory only. It is
+        for the protocol 1 id check, which must read a file whose startup agents this version
+        refuses so it can name them with every other id
+        (``instance_upgrades.protocol1_ids.load_saved_for_check``); a configuration loaded
+        with it is never saved.
+        """
+
         config_path = Path(path).expanduser().resolve()
         content = config_path.read_bytes()
         data = _parse_instance_config_yaml(content, config_path)
         migrated, _ = _migrate_instance_config_dict(data, source_path=config_path)
+        if prepare is not None:
+            migrated = prepare(migrated)
         config = cls.model_validate(migrated)
         config._config_path = config_path
         config._source_revision = config_revision(content)
         return config
 
     @classmethod
-    def load_saved(cls, path: str | Path) -> "GatewayInstanceConfig":
+    def load_saved(cls, path: str | Path, *, prepare: SettingsPreparation | None = None) -> "GatewayInstanceConfig":
         """The saved instance configuration, exactly as stored, for a process started from ``path``.
 
         Owner's decision (2026-09-29): one saved settings file,
@@ -2522,13 +2560,13 @@ class GatewayInstanceConfig(BaseModel):
         method, changes only its own fields and saves it back. A process started
         from another file (for example ``TEAM_INSTANCE_CONFIG`` pointing
         elsewhere) still reads and writes the saved file when one exists.
-        Processes that run from it use ``load_for_process``.
+        Processes that run from it use ``load_for_process``. ``prepare`` is ``load``'s.
         """
 
-        loaded = cls.load(path)
+        loaded = cls.load(path, prepare=prepare)
         saved = loaded.layout.instance_config_path
         if saved.is_file() and saved != loaded.config_path:
-            return cls.load(saved)
+            return cls.load(saved, prepare=prepare)
         return loaded
 
     @classmethod

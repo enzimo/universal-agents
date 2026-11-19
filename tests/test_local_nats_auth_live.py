@@ -21,6 +21,7 @@ import nats
 import pytest
 
 import docker.nats_service as nats_service
+from custom_transport.protocol1.mapping_check import check_partition_mapping
 from tests.owned_processes import stopped_at_exit
 
 
@@ -59,6 +60,7 @@ def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatc
         env=env,
         logger=logging.getLogger("test_local_nats_auth_live"),
         cwd=tmp_path,
+        partitions=7,
         service_root=tmp_path / "nats",
     )
     jetstream, control_line, _minimum = nats_service.contract_server_settings()
@@ -86,6 +88,8 @@ def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatc
                 connect_timeout=2,
                 allow_reconnect=False,
             )
+            # The partition mappings are in force at the saved count (contract README, "Partitions").
+            await check_partition_mapping(client, sender="authority", count=7)
             await client.close()
             # The contract's server settings are in force (docker.nats_service.contract_server_settings).
             # Straight to the local server, whatever HTTP proxy the environment names.

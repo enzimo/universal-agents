@@ -958,6 +958,17 @@ delivered (a crashed process loses nothing either way). So:
   the disk too (about 4 ms per confirmed message or acknowledgement on that
   disk), and a `max_control_line` that fits the largest host credential the
   message contract allows (`docker.nats_service.contract_server_settings`).
+  It also carries the account's partition mappings at the saved
+  `transport.queues.partitions` (`docker.nats_service.mappings_block`), which
+  add the agent's partition to each agent's inbox, control queue and live
+  control address; hosts subscribe to an agent's live control address with
+  that partition token. The installation authority checks that the server
+  applies them before it serves (`custom_transport.protocol1.mapping_check`);
+  an external server's operator adds the same lines inside the installation's
+  account, as the authority's refusal prints them (the configuration guide's
+  "Message Broker"; in a source checkout
+  `scripts/write_nats_mapping_config.py --partitions N` writes them as a
+  top-level block, for a server without named accounts).
 - All of it needs storage that flushes when asked: a local disk, or a network
   share that passes the request on. Slow commits and flushes are logged
   (`sqlite_commit_slow`, `sqlite_flush_slow`). The hermetic tests commit with
@@ -4358,11 +4369,21 @@ MCP servers that do not load, degraded memory search, skill refresh errors,
 schedules for administrators, receive loops that stopped, and knowledge too long
 to open in Web Chat, which only the team lead counts, at most every ten minutes and
 in a thread of its own, `custom_agents/long_knowledge.py`), whether TeamLead
-reports, its own configuration and receive loops, and storage filling up
-(`assistant_gateway/storage_capacity.py`). A source that does not answer is listed and shown as a
+reports, its own configuration and receive loops, storage filling up
+(`assistant_gateway/storage_capacity.py`), and the team's message streams
+filling up (`assistant_gateway/queue_capacity.py`). A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
-gateway sends administrators one Inbox notice per new set of problems
-(`status_problems`), linking to the page. A notice records what
+gateway checks, and sends administrators one Inbox notice (`status_problems`),
+linking to the page, when the check finds a problem the previous check did
+not. The notice lists every current problem, and its id is the digest of
+their ids, so the store never keeps the same notice twice. A problem that goes
+away, or stays while another goes away, sends nothing. The previous check's
+problem ids are kept in `state/status_problems.json` (`PreviousProblems`), so
+a restart neither repeats nor forgets a notice, and while a source cannot be
+asked the problems it found before stay remembered, so they are not
+announced again when it answers. Why: with a notice per new set, one full
+stream draining while another stayed full sent a notice repeating the one
+still full. A notice records what
 administrators were told and stays when its problems go away, so the first
 check after a start waits for the gateway's onboarding key hand-over
 (`StatusPage.run`, `assistant_gateway/onboarding_account_keys.py`). Checked
@@ -4400,12 +4421,37 @@ the findings' details. The bundled NATS server sets no JetStream limit
 none; the page then shows a note with the stored size instead of inventing a
 limit. Without `max_file_store` the server itself stops storing at three
 quarters of the disk space that was free when it started. The percentage
-counts bytes stored, not the space streams reserve, which the account
-information does not report, and the finding says so. An account limit must
-leave room for the streams' own reservations: the server refuses to create
-the dead-letter stream (64 MB) in an account allowed less. People's
+counts bytes stored, not the space streams set aside, and the finding says
+so: every stream sets its whole byte limit aside when it is created, each
+team's protocol 1 work and dead-letter streams about 2.1 GiB at the default
+`transport.queues.max_bytes` and the 0.9 dead-letter stream 64 MB, and the
+server refuses a new or changed stream in an account allowed less (the
+authority checks before it creates any, `installation_authority/queues.py`). People's
 stored-data totals that the manager stopped measuring are a warning on the
 page too (`StorageUsageNotices.stale_finding`).
+
+Queue stream findings (`assistant_gateway/queue_capacity.py`) exist because a
+full work or dead-letter stream refuses new messages (`discard: new`):
+senders keep refused work and send it again until it expires, and receivers
+hold what they would set aside. On each check the gateway lists its team's
+streams in one stream list request filtered to `ua.v1.<team>.>`
+(`$JS.API.STREAM.LIST`, `NatsTransportAdapter.jetstream_streams`, metadata
+only) and measures each work and dead-letter stream the contract names for
+the team against its own limit. At `transport.queues.warn_at_percent` (80 by
+default) a stream is a problem whose id names the stream and when it entered
+the level (`queue_filling:UA1_PART_team_a~7:20261118T120000Z`). When it
+entered is kept with the storage levels, through the storage check's own
+`StorageLevels` object (each object holds and rewrites the whole file, so two
+would overwrite each other), and the level ends three points below its
+threshold. A stream list that fails marks the message server unavailable.
+So does a list that names one of the team's streams as missing: in a NATS
+cluster, the server answering the list names the streams whose servers did not
+answer within its 4 seconds or are all offline, and lists the offline ones with
+no state. Those are never measured as empty; the streams that were measured are
+still judged, and the missing stream's level and earlier problem are kept until
+it can be measured again. The next page of the list starts after the distinct
+names of the last page, since a stream can be listed and named missing at once.
+Each gateway checks only its own team.
 
 ### Knowledge page
 
@@ -4880,6 +4926,66 @@ the desktop app never offers an older version.
   by default); work still queued when the team lead starts is reported on the
   first pass after an agent takes it; work whose request has ended is not
   reported. The condition goes with the other upgrade steps from 0.9.
+- **Ids protocol 1 carries, checked first.** Protocol 1 puts the team id, each
+  agent's type and each agent's id into NATS subjects, consumer names, record
+  keys and host credentials, with caps of 24, 24 and 32 characters (plan
+  decisions 56 and 98, `custom_messages.wire.ids`). Phase 3's later upgrade
+  steps convert the records that hold agent ids and move queued work into the
+  partition streams, so an id over its cap would fail part-way through. The
+  launchers therefore check every id before anything changes
+  (`instance_upgrades.protocol1_ids`, plan 13C.9 step 1): the headless launcher
+  first in `main`, before the configuration file's upgrade; the Docker bundle as
+  soon as its PostgreSQL answers (stored ids may be there) and before it
+  upgrades the file or starts NATS or the launcher, which is why the bundle no
+  longer upgrades the file before loading it. The check reads the team id, the
+  agent catalog's types (with the file that defines each), the types
+  `gateway.startup_agents` names and agent ids over 32 characters in the records
+  phase 3 converts: running tasks and their saved progress, waiting messages,
+  task custody and handbacks the team lead has not dealt with (settled handbacks
+  stay as history, which nothing on 0.9 removes). The configuration refuses a
+  startup agent type that does not fit, so both launchers load the file with
+  those entries set aside (`protocol1_ids.load_saved_for_check`) and the check
+  names them with every other id; nothing starts without them, because the
+  check then refuses. It reads only (SQLite `mode=ro`, a read-only PostgreSQL
+  transaction; the bundle reads its PostgreSQL as the administrator, since the
+  team's role may not exist before seeding), leaves out other teams' rows in a
+  shared database, and fails closed when a store that exists cannot be read.
+  When an id does not fit, startup stops with one line per id saying what to do
+  (`event=protocol1_ids_over_caps`). When all fit and the instance can run as it
+  is (onboarded, with no old-layout moves left, since onboarding writes the team
+  id and those moves bring the task database to where the check reads it), it
+  records `InstanceLayout.protocol1_ids_check_path`
+  (`state/upgrades/protocol1-ids.json`) with the team id and does not run again
+  for that team id, so an agent type added later does not stop the instance:
+  the agent host gives it no session and the Status page says why. A record of
+  any kind means 0.10 has started there, so its stores may already be changed
+  and 0.9 is no longer the way back: with a record for the current team id, a
+  startup agent type that does not fit (which the configuration refuses) stops
+  the start with a short message naming only those entries and what to change
+  (`event=protocol1_startup_agent_types_over_cap`), without reading the
+  catalog or the store; the launchers pass the check a function that finds the
+  store, called only when the whole check runs. Both
+  onboarding routes, the page and the command-line `onboard`, cut the team id
+  they derive to 24 characters and refuse a typed one that does not fit
+  (`onboarding_engine.team_id_answer`), so a new instance never stops here.
+  A team transfer keeps the team id and the agent types, so a fresh import
+  applies the same caps before it writes anything (`team_transfer.protocol1_ids`,
+  G1 of pull request 152's review): onboarding's Import when the export is
+  opened, before its review is prepared, and every plan for a fresh root
+  (`team_transfer.service._import_context`, which covers the command-line
+  import and the review pages). It checks the export's team id and every agent
+  type its control section defines, selected or not, as the launcher checks the
+  whole catalog, and refuses with advice for the instance the export came from
+  (`event=team_import_ids_over_caps`). A later batch into an instance that
+  exists is not checked: its team id is the instance's, and a type added there
+  later is handled as any type added later.
+  `assistant_cli.py migrate-config` and the command-line tool's offer to upgrade
+  the file run no check, since the check belongs to starting the instance and
+  the command-line tool has no store settings of its own; when such an upgrade
+  came first, the refusal names the backup 0.9 reads
+  (`instance_config.yaml.bak.v12`) to put back before starting 0.9 again, but
+  only while no record exists (the launcher's own upgrade after a check that
+  passed on an instance that was not ready yet leaves the same backup).
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the
@@ -5191,10 +5297,16 @@ loss", and what the NATS login needs in the Docker guide's "Message host trust".
   own. All processes run as one operating-system user, so this keeps keys apart by
   path, not by permission: a broken-into process could read another host's key file.
   Remote hosts keep their keys on their own machines.
-- **The bootstrap bundle** (`bootstrap`): the authority public keys and the records a
-  new host needs before it has a certificate. The authority keys are the root of
-  trust, so only the launcher and the installation authority write the file, in the
-  owner-only trust folder; the records in it are verified like any other copy.
+- **The bootstrap bundle** (`bootstrap`): the authority public keys, the installation's
+  partition count and the records a new host needs before it has a certificate. The
+  authority keys are the root of trust, so only the launcher and the installation
+  authority write the file, in the owner-only trust folder; the records in it are
+  verified like any other copy. The launcher writes the partition count from the saved
+  `transport.queues.partitions` at every start, and each host's trust store takes it
+  from the bundle, so every process computes agents' partitions with one count. No
+  release wrote a bundle without a count, so one that lacks it is refused like a damaged
+  one and the launcher writes a new bundle at the next start (the authority signs its
+  records into it again from its own folder).
 - **Kept trust records** (`trust_state`): the revocations record the host holds, plus
   any older one that still lists an entry the newer one left out early, and the
   highest block-list sequence of each team survive a restart, as the contract
@@ -5212,7 +5324,11 @@ loss", and what the NATS login needs in the Docker guide's "Message host trust".
   requests answered at once with only the refusal's code and known pointer. A served
   address answers only on the requester's own inbox (`answer_subject`): NATS lets a
   receiver answer once past its own grants, so an answer on a subject the requester
-  named, such as a JetStream API subject, would act with the receiver's rights. Each
+  named, such as a JetStream API subject, would act with the receiver's rights. An
+  agent's live control address is mapped to its partition, so the host subscribes to it
+  with the agent's partition token at its trust store's count and takes the token off the
+  arrival subject before the subject check
+  (`custom_messages.wire.partitions.signed_subject_of`). Each
   request is handled in a task of its own: kinds run one at a time in arrival order
   unless the caller lets them run side by side (handlers that only wait on another
   host), an address holds at most 64 requests, and one that waited past its expiry is
@@ -5317,19 +5433,69 @@ prepares the trust folder first (`docker.message_hosts`): it keeps the installat
 id, which the authority's key file holds (a missing key file gives a new id, since a new
 key could check nothing the old one signed), creates any missing key, writes the hosts it
 starts with their public keys (`expected-hosts.json`; empty until the launcher starts
-message hosts) and the bundle's authority keys. It starts the authority once NATS and the
-team's message streams are ready and waits until the bundle carries the authority's
-certificate and a freshly signed revocations record; a host that joins before the authority
-serves waits for it (`joining.join`). A failed or interrupted start stops the authority and the services already
-started. The authority gets only the NATS login (`env_secrets`, renamed secrets included).
-The authority:
+message hosts), and the bundle's authority keys and partition count, from the saved
+configuration as it is at each start. It starts the authority once NATS and the message
+streams the current runtime uses are ready (`prepare_message_streams_before_services`)
+and waits until the bundle carries the authority's certificate and a freshly signed
+revocations record; a host that joins before the authority serves waits for it
+(`joining.join`). How long it waits grows with `transport.replicas`
+(`docker.message_hosts.authority_ready_timeout`): 60 seconds for the mapping check and the
+records, plus 30 seconds for the team's streams with one copy each or 300 with more,
+measured on nats-server 2.15.1 with room for a disk about 15 times slower; the team
+services' wait grows by the same. A failed or interrupted start stops the authority and
+the services already started. The authority gets only the NATS login (`env_secrets`,
+renamed secrets included). The authority:
 
-- creates the key-value buckets, with the operator's `transport.replicas`. It is the
-  contract's topology owner: queued work streams come with queued work, and each team's
-  dead-letter stream with phase 3's dead letters (plan decision 71). Per-team buckets use
+- checks, before it changes anything, that the bundle holds its own
+  `transport.queues.partitions` (`PartitionCountMismatch`) and that the NATS server maps
+  agents' addresses to their partitions at that count
+  (`custom_transport.protocol1.mapping_check`, `PartitionMappingRefused`), with probe
+  messages that name the mapping line that is missing or maps with another count;
+- creates, or brings up to date at each start before it serves, what the contract's
+  topology owner owns (plan decision 71, `installation_authority/queues.py`,
+  `QueueTopology`): every team's work and dead-letter streams from
+  `custom_messages.wire.queues` (a stream per partition,
+  the pool, edge, team-services and dead-letter streams; 100 streams at the default 96
+  partitions), the key-value buckets, and the two consumers each team has once (the team
+  services' inbox and dead-letter notices), with the instance's `transport.queues` byte
+  limits and per-subject cap and `transport.replicas`. It first reads every stream it wants
+  and refuses the start, changing nothing, when a team's partition streams were made with
+  another partition count (each records its count, `PARTITION_COUNT_METADATA`), when a
+  lowered per-subject cap would drop queued messages (NATS keeps messages above a lowered
+  byte limit but drops the oldest above a lowered `max_msgs_per_subject`), or when the NATS
+  account or server has no room or too few streams left, or the account allows fewer
+  consumers per stream than a stream takes (NATS refuses such a stream, 10026); each
+  refusal names the stream, the limit and the setting to change
+  (`event=installation_authority_start_refused`). Then it lowers the streams whose limits
+  go down, which gives back the room they set aside, and creates or enlarges the others.
+  The server's own refusals, and requests it does not answer, stop the start the same
+  way (`QueueTopology._server_refusal`, FA-3 of pull request 152's review): one table
+  names a setting or limit only for the errors it fixes (storage, streams, consumers,
+  subjects another stream takes, copies the servers cannot hold), says to enable
+  JetStream when none answers or the account has none (10039), and shows any other
+  error as the server sent it. A cluster's 10005 is read by its reason: "insufficient
+  storage" (how a cluster refuses a new stream too large for its servers; a raised limit
+  of an existing stream gets 10047 there, as on one server) gets the storage refusal, no
+  reason means fewer servers than copies, and any other reason is shown as sent. A
+  stream whose fields the contract sets already
+  match is not sent to NATS, so a restart with the same settings asks for no change: a
+  server whose storage is now smaller than what its streams set aside (the bundled server
+  measures it from the disk's free space at every start) keeps serving the streams it has
+  but refuses every new or changed one. Per-team buckets use
   `custom_messages.wire.buckets.bucket_name` and every bucket's stream `bucket_stream`.
   The contract disables rollup, stream deletion and purge, so writing one key cannot
   erase the bucket. Repeated setup reconciles those settings without discarding records;
+- follows each team's placements in `UA1_PLACEMENT` (`installation_authority/placements.py`,
+  `PlacedConsumers`) once it serves: a placement that verifies gets the agent's inbox and
+  control consumers in its partition's stream. A deleted placement removes them only once
+  the agent's queues hold nothing (nothing waiting, delivered and unacknowledged, or stored
+  on their subjects); while they hold work they stay (`event=agent_consumers_kept`) and are
+  checked again every minute. At start and whenever its watch opens again, one sweep ends
+  the agent consumers of agents with no placement by the same rule, which covers placements
+  that ended while the authority was down. One lock serialises every consumer change, and
+  each change acts on the placement key as it is then, so an answer read earlier never
+  undoes a newer placement. Pools' and edges' consumers come with the steps that name
+  them, and nothing publishes to the work streams or reads them yet;
 - keeps its records current by the wall clock, checking every minute (`keep_current`), so
   a laptop or a paused virtual machine that slept wakes to a current record within a
   minute: it signs the revocations record again once it is six hours old (it lasts a day,
@@ -5750,8 +5916,9 @@ has no address, so nothing can ask it anything and its exit goes unseen. So:
   repeating an open replaces its placement and session. A refused renewal opens a new session.
 
 **Agent records and who is live** (step 7a): each agent's host signs the agent's state into
-`UA1_AGENTS` (key `<team>.<partition>.<agent>`, the partition computed with the contract's
-default count by `custom_messages.wire.partitions.agent_record_key`, so a host's grant can
+`UA1_AGENTS` (key `<team>.<partition>.<agent>`, the partition computed by
+`custom_messages.wire.partitions.agent_record_key` with the count the host's trust store took
+from the bootstrap bundle, the saved `transport.queues.partitions`, so a host's grant can
 name the partitions it owns: starting, idle, busy, paused or exiting, whether it
 accepts work, and its `display_name`, plan decision 69) when the agent reports a change
 (`custom_agents.agent_host.report_agent_state`, called wherever the agent refreshes its own
@@ -6002,7 +6169,20 @@ The same rule now removes the ignored `agent.max_concurrent_top_level_tasks` set
 instance configuration 13 -> 14 and `config.yaml` 11 -> 12 drop it before validation or
 export, current-format files refuse it by name, and settings section version 11 removes it
 from older transfers (`RETIRED_CONCURRENCY_SETTING`). Worker pools control concurrency; the
-obsolete value had no effect.
+obsolete value had no effect. Instance configuration 14 -> 15 writes the protocol 1
+partition count (`transport.queues.partitions`) into a file that holds none
+(`runtime_settings.transport.store_partition_count`): the count is fixed when an
+installation is created, and the launcher's upgrade writes the upgraded settings as they
+are rather than saving them through the settings model, so without this step an upgraded
+instance would follow the code's default and a release with another default would stop
+its start. The same step, `config.yaml` 12 -> 13 and the team transfer's settings
+conversion from versions before 12 write a saved `transport.replicas` as the whole number
+earlier releases read (`runtime_settings.transport.upgraded_replicas`): they read the
+setting as a pydantic `int`, which also takes `"3"`, `1.0` and `true`, and made every
+stream with `int(replicas or 1)` copies, so 0 meant one. The settings now accept only a
+whole number from 1 to 5, so that every stream the installation authority makes has the
+count they name; a value earlier releases refused, or one outside 1 to 5, is left for
+validation to refuse by name.
 
 The watchdog, delegated-work progress notes and check-back timers find records by parents
 in the recovered task tree, rather than by the requester's earlier agent id. The check-back

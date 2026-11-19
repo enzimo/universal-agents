@@ -24,6 +24,7 @@ from custom_agents.agent_host import (
     lead_host_profile,
     startup_agent_host_profile,
 )
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
 from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
@@ -33,6 +34,7 @@ from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
 from team_services.relays import AGENT_UNAVAILABLE_TEXT, Relays
 from tests.test_live_team_services import TEAM, broker, connect, installation  # noqa: F401 - broker is a fixture
+from tests.queue_limits_support import TEST_QUEUE_LIMITS
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 
@@ -189,8 +191,10 @@ async def _team_with_a_lead_host(stack: AsyncExitStack, broker: str, layout: Ins
     services_profile = team_services_profile(TEAM)
     message_hosts.prepare_message_host_trust(layout, {
         services_profile.runtime: message_hosts.expected_host(layout, services_profile),
-        lead_profile.runtime: message_hosts.expected_host(layout, lead_profile, agent_types_from_catalog=True)})
+        lead_profile.runtime: message_hosts.expected_host(layout, lead_profile, agent_types_from_catalog=True)},
+        partitions=DEFAULT_PARTITION_COUNT)
     authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
+                                      partitions=DEFAULT_PARTITION_COUNT, queues=TEST_QUEUE_LIMITS,
                                       catalog_agent_types=lambda: frozenset(catalog))
     await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
     services = MessageHost(layout, services_profile, await connect(stack, broker, TEAM_SERVICES_RUNTIME))
@@ -478,7 +482,7 @@ async def test_live_cleanup_removes_exact_installation_and_team_keys_only(
     async with AsyncExitStack() as stack:
         await installation(stack, broker, layout, team_services_profile(TEAM))
         nc = await connect(stack, broker, "cleanup")
-        identity = message_hosts.prepare_message_host_trust(layout)
+        identity = message_hosts.prepare_message_host_trust(layout, partitions=DEFAULT_PARTITION_COUNT)
         bucket = await nc.jetstream().key_value("UA1_CERTS")
         own = f"session.{identity}.{TEAM}.session-test"
         other = "host.other_install.foreign.1"

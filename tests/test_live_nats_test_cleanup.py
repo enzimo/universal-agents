@@ -31,7 +31,10 @@ from nats.js.api import ObjectStoreConfig, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
 from nats.js.manager import JetStreamManager
 
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
+from custom_messages.wire.queues import team_queue_streams
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+from custom_transport.protocol1.contract_files import transport
 from custom_transport.subjects import NatsSubjectMapper
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import team_services_profile
@@ -164,8 +167,8 @@ async def test_a_stream_another_run_creates_between_the_look_up_and_the_create_s
         answered = await mine.jetstream().add_stream(config)  # the same settings: answered as without the recorder
         assert answered.config.name == "RACED"
         if afterwards == "a look-up and an update":
-            # What InstallationAuthority._ensure_bucket does when it runs again. The name is
-            # one this test tried, but the stream it updates is another run's: not claimed.
+            # What QueueTopology.ensure does when it runs again with changed settings. The name
+            # is one this test tried, but the stream it updates is another run's: not claimed.
             await mine.jetstream().stream_info("RACED")
             await mine.jetstream().update_stream(config)
 
@@ -200,8 +203,8 @@ async def test_a_create_whose_reply_was_lost_is_deleted(
         if afterwards == "the same create again":
             await jetstream.add_stream(config)
         elif afterwards == "a look-up and an update":
-            # What InstallationAuthority._ensure_bucket does when it runs again. The update
-            # drops the token, so only the generation recorded before it proves ownership.
+            # What QueueTopology.ensure does when it runs again with changed settings. The
+            # update drops the token, so only the generation recorded before it proves ownership.
             await jetstream.stream_info("LOST")
             await jetstream.update_stream(config)
             assert OWNER_METADATA_KEY not in ((await jetstream.stream_info("LOST")).config.metadata or {})
@@ -296,14 +299,16 @@ async def test_the_shared_names_are_the_contracts_names_without_a_team_and_the_w
 async def test_buckets_every_installation_shares_are_neither_marked_nor_deleted(
     server: str, connections: tuple[Client, Client], tmp_path: Path
 ) -> None:
-    """The installation authority creates the contract's buckets: the team's are this test's, the rest the server's."""
+    """The installation authority creates the contract's buckets and the team's streams: the team's are this test's,
+    the rest the server's."""
 
     mine, _ = connections
     with _recording(server) as ownership:
         async with AsyncExitStack() as stack:
             await installation(stack, server, InstanceLayout.at(tmp_path / "instance"), team_services_profile(TEAM))
 
-    assert set(ownership.tried) == {f"KV_UA1_BLOCK_LIST_{TEAM}", f"KV_UA1_TEAM_VIEW_{TEAM}"}
+    team_streams = {stream.name for stream in team_queue_streams(transport(), TEAM, DEFAULT_PARTITION_COUNT)}
+    assert set(ownership.tried) == {f"KV_UA1_BLOCK_LIST_{TEAM}", f"KV_UA1_TEAM_VIEW_{TEAM}"} | team_streams
     assert await _stream_names(mine) == INSTALLATION_WIDE_BUCKETS
     for name in INSTALLATION_WIDE_BUCKETS:
         assert OWNER_METADATA_KEY not in ((await mine.jetstream().stream_info(name)).config.metadata or {})

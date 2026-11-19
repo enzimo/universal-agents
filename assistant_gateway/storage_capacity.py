@@ -12,9 +12,12 @@ is reached (owner's decision of 2026-10-27). The Status page
   problem; other disks and the message server are still checked.
 - **Message storage.** The NATS account's JetStream use against the account's
   limit (``js.account_info()``), when the account has one. The percentage
-  counts bytes stored, not the space streams reserve (the account
-  information does not report reservations; the set-aside stream reserves
-  64 MB, ``custom_transport.nats_topology``), and the finding says so. The bundled server
+  counts bytes stored, not the space streams set aside: every stream sets its
+  whole byte limit aside when it is created, each team's protocol 1 work and
+  dead-letter streams about 2.1 GiB at the default ``transport.queues.max_bytes``
+  (``installation_authority.queues``), and the 0.9 set-aside stream 64 MB
+  (``custom_transport.nats_topology``), so the finding says so. How full each of
+  those streams is against its own limit is ``assistant_gateway.queue_capacity``'s. The bundled server
   runs without one (``docker/nats_service.py`` sets no ``max_file_store``), so
   then a note says so plainly instead of inventing a limit. A server that does
   not answer is listed as unavailable on the page.
@@ -235,8 +238,9 @@ class _StorageLevelsFile(BaseModel):
 class StorageLevels:
     """When each place entered each level, kept in a file so a restart remembers it.
 
-    Bounded: one entry per measured place (a few disks and the message
-    server), each with at most the two levels.
+    Bounded: one entry per measured place at a level (a few disks and the
+    message server, each with at most the two levels, and the team's queue
+    streams that are filling, each with the one level of ``track_one``).
     """
 
     def __init__(self, path: Path) -> None:
@@ -249,19 +253,37 @@ class StorageLevels:
     ) -> dict[str, tuple[Level, datetime]]:
         """Each place's level now and when it was entered, for places at a level; saves what changed."""
 
+        return self._track(readings, ((NEARLY_FULL, nearly_full), (NEARING_LIMIT, nearing)), now)
+
+    def track_one(self, readings: Iterable[tuple[str, float]], *, threshold: int, now: datetime) -> dict[str, datetime]:
+        """When each place at its one level entered it; saves what changed.
+
+        For places with a single warning level, such as a queue stream against its own limit
+        (``assistant_gateway.queue_capacity``). The level is kept under the nearing-limit name
+        in the same file, with the same ``RELEASE_POINTS`` margin; callers give their places
+        keys of their own, so the two tracks never share an entry.
+        """
+
+        return {key: since for key, (_, since) in self._track(readings, ((NEARING_LIMIT, threshold),), now).items()}
+
+    def _track(
+        self, readings: Iterable[tuple[str, float]], thresholds: Sequence[tuple[Level, int]], now: datetime
+    ) -> dict[str, tuple[Level, datetime]]:
+        """Move each place's levels (``thresholds`` from the highest level down); the highest it is at now."""
+
         with self._lock:
             entries = self._load()
             before = {key: dict(levels) for key, levels in entries.items()}
             current: dict[str, tuple[Level, datetime]] = {}
             for key, percent in readings:
                 levels = entries.setdefault(key, {})
-                _move(levels, NEARLY_FULL, percent, nearly_full, now)
-                _move(levels, NEARING_LIMIT, percent, nearing, now)
+                for level, threshold in thresholds:
+                    _move(levels, level, percent, threshold, now)
                 if not levels:
                     del entries[key]
                     continue
-                level: Level = NEARLY_FULL if NEARLY_FULL in levels else NEARING_LIMIT
-                current[key] = (level, levels[level])
+                highest = next(level for level, _ in thresholds if level in levels)
+                current[key] = (highest, levels[highest])
             if entries != before:
                 self._save(entries)
             return current
@@ -329,7 +351,8 @@ class StorageCapacity:
     ) -> None:
         self._disks = disks
         self._databases = databases
-        self._levels = levels
+        # Shared with the queue streams' check (queue_capacity): one object per file.
+        self.levels = levels
         self.nearing_limit_percent = nearing_limit_percent
         self.nearly_full_percent = nearly_full_percent
         self._message_storage_kind = message_storage_kind
@@ -351,7 +374,7 @@ class StorageCapacity:
                 )
             )
         nearing, nearly_full = self.nearing_limit_percent, self.nearly_full_percent
-        levels = self._levels.track(
+        levels = self.levels.track(
             ((space.key, space.percent) for space in spaces), nearing=nearing, nearly_full=nearly_full, now=self._now()
         )
         sizes = list(self._databases())
@@ -389,12 +412,14 @@ def space_finding(
     if message_server:
         effect = (
             "When it is full, the message server refuses new messages, so requests, replies and agents' work stop. "
-            "The percentage counts the bytes stored, not the space streams reserve for themselves, so the server "
-            "can refuse a new stream somewhat earlier."
+            "The percentage counts the bytes stored, not the space streams set aside: every stream sets its "
+            "whole limit aside when it is created, so the server can refuse a new or changed stream well before "
+            "then."
         )
         fix = (
             "Raise this account's JetStream limit in the NATS server's configuration, then restart the server. "
-            "Leave room for the streams' reservations (64 MB for set-aside messages)."
+            "Leave room for what the streams set aside: each team's work and dead-letter streams set aside their "
+            "whole limits (transport.queues.max_bytes), and the set-aside stream 64 MB."
         )
     else:
         effect = (

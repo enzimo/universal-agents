@@ -19,14 +19,27 @@ TRANSPORT = json.loads(nats_service.CONTRACT_TRANSPORT_PATH.read_text(encoding="
 
 
 def test_the_server_configuration_applies_the_contracts_server_settings(tmp_path: Path) -> None:
-    config = nats_service.write_local_nats_server_config(tmp_path, user="ua-runtime", password='p"w')
+    config = nats_service.write_local_nats_server_config(tmp_path, user="ua-runtime", password='p"w', partitions=7)
     text = config.read_text(encoding="utf-8")
+    # The account mappings at the installation's count (contract README, "Partitions").
+    assert text.endswith(nats_service.mappings_block(7))
+    assert ('  "ua.v1.*.*.ctl.agent.*": "ua.v1.{{wildcard(1)}}.{{wildcard(2)}}.ctl.agent.{{wildcard(3)}}.'
+            '{{partition(7,1,3)}}"\n') in text
+    assert text.count("{{partition(7,1,3)}}") == len(TRANSPORT["partitions"]["account_mappings"]) == 3
+    assert "COUNT" not in text
     assert 'password: "p\\"w"' in text
     assert "jetstream {\n  sync_interval: \"always\"\n}\n" in text
     control_line = TRANSPORT["limits"]["max_credential_bytes"] + nats_service.CONNECT_LINE_ROOM_BYTES
     assert f"max_control_line: {control_line}\n" in text
     assert TRANSPORT["server"]["jetstream"] == {"sync_interval": "always"}
     assert config.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("count", [0, 129, True, "96"])
+def test_no_server_configuration_is_written_for_a_count_no_installation_may_choose(tmp_path: Path, count) -> None:
+    with pytest.raises(ValueError, match="a partition count is a whole number from 1 to 128"):
+        nats_service.write_local_nats_server_config(tmp_path, user="ua-runtime", password="pw", partitions=count)
+    assert not (tmp_path / "auth").exists()
 
 
 @pytest.mark.parametrize(("output", "reported"), [

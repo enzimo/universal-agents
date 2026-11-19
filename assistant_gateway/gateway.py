@@ -16,6 +16,7 @@ from assistant_gateway.account_sharing import GatewayAccountSharing
 from assistant_gateway.status_page import StatusPage
 from assistant_gateway.file_retention import GatewayFileRetention
 from assistant_gateway.inbound_attachments import resolve_inbound_attachment_cache_dir
+from assistant_gateway.queue_capacity import build_queue_capacity
 from assistant_gateway.storage_capacity import StorageCapacity, build_storage_capacity
 from assistant_gateway.storage_usage import StorageUsageNotices, build_storage_usage_notices
 from assistant_gateway.upload_retention import UploadRetention
@@ -1435,6 +1436,8 @@ class UserGateway:
                 storage=self.stored_data.capacity,
                 person_storage_totals=self.stored_data.usage.stale_finding,
                 jetstream_usage=resolved_manager_runtime.jetstream_usage,
+                queues=build_queue_capacity(config, storage=self.stored_data.capacity),
+                team_streams=lambda: resolved_manager_runtime.team_streams(config.manager.team_id),
                 # Without a team view (command-line runs) the gateway does not judge the team (review F11).
                 **(
                     {"team_findings": self._team_view.team_findings, "agent_findings": self._team_view.agent_findings}

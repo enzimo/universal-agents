@@ -346,6 +346,7 @@ def test_start_local_nats_captures_early_server_output(
         env={},
         logger=types.SimpleNamespace(info=lambda *args: None),
         cwd=Path.cwd(),
+        partitions=96,
         service_root=tmp_path,
     )
 
@@ -401,6 +402,7 @@ def test_start_local_nats_uses_configured_auth_without_logging_password(
         env={"NATS_USER": "team", "NATS_PASSWORD": "super-secret", "WEB_CHAT_AUTH_TOKEN": "web", "PATH": "/usr/bin"},
         logger=FakeLogger(),
         cwd=Path.cwd(),
+        partitions=96,
         service_root=tmp_path,
     )
 
@@ -442,7 +444,8 @@ def test_start_local_nats_generates_and_reuses_credentials(tmp_path: Path, monke
     from docker.nats_service import ensure_local_nats_credentials, start_local_nats
 
     first_env = {"NATS_USER": "", "NATS_PASSWORD": ""}
-    start_local_nats(env=first_env, logger=logging.getLogger("test"), cwd=Path.cwd(), service_root=tmp_path)
+    start_local_nats(env=first_env, logger=logging.getLogger("test"), cwd=Path.cwd(), partitions=96,
+                     service_root=tmp_path)
     assert first_env["NATS_USER"] == "ua-runtime"
     assert len(first_env["NATS_PASSWORD"]) >= 32
     credentials = tmp_path / "auth" / "credentials.json"
@@ -450,7 +453,8 @@ def test_start_local_nats_generates_and_reuses_credentials(tmp_path: Path, monke
     assert first_env["NATS_PASSWORD"] not in popen_commands[0]
 
     second_env: dict[str, str] = {}
-    start_local_nats(env=second_env, logger=logging.getLogger("test"), cwd=Path.cwd(), service_root=tmp_path)
+    start_local_nats(env=second_env, logger=logging.getLogger("test"), cwd=Path.cwd(), partitions=96,
+                     service_root=tmp_path)
     assert second_env == {"NATS_USER": "ua-runtime", "NATS_PASSWORD": first_env["NATS_PASSWORD"]}
 
     client_env: dict[str, str] = {}
@@ -483,6 +487,7 @@ def test_start_local_nats_rejects_partial_auth(tmp_path: Path, monkeypatch) -> N
                 info=lambda *args: None, warning=lambda *args: None
             ),
             cwd=Path.cwd(),
+            partitions=96,
             service_root=tmp_path,
         )
 
@@ -595,6 +600,7 @@ def test_run_supervised_bundle_skips_postgres_for_sqlite_runtime(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _make_config(tmp_path)
+    config.save()  # the bundle upgrades the saved file once the id check passed
     events: list[str] = []
     monkeypatch.setenv("TEAM_BUNDLE_SERVICE_ROOT", str(tmp_path / "services"))
 
@@ -665,6 +671,7 @@ def test_run_supervised_bundle_skips_local_nats_when_disabled(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _make_config(tmp_path)
+    config.save()  # the bundle upgrades the saved file once the id check passed
     events: list[str] = []
 
     class FakeProcess:
@@ -727,6 +734,7 @@ def test_run_supervised_bundle_skips_local_nats_when_disabled(
 
 def test_run_supervised_bundle_starts_local_nats(tmp_path: Path, monkeypatch) -> None:
     config = _make_config(tmp_path)
+    config.save()  # the bundle upgrades the saved file once the id check passed
     config.transport.type = "nats"
     events: list[str] = []
     headless_popen_kwargs: dict[str, object] = {}
@@ -793,6 +801,7 @@ def test_run_supervised_bundle_uses_external_nats_when_bundled_nats_disabled(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _make_config(tmp_path)
+    config.save()  # the bundle upgrades the saved file once the id check passed
     config.transport.type = "nats"
     events: list[str] = []
 

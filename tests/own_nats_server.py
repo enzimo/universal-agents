@@ -7,6 +7,12 @@ saw the first test's server answer and ran against it, sharing its buckets, its 
 its lifetime (when that test ended, the other's requests waited out their deadlines). The
 server now picks a free port itself (``-p -1``) and the test reads it from that server's own
 log, once the server says it is ready, so a test only ever talks to its own server.
+
+The server applies the account's partition mappings at the contract's default count, as the
+bundled server does (``docker.nats_service.mappings_block``): hosts subscribe to agents'
+live control addresses with the partition token, and the installation authority checks the
+mapping before it serves. ``partitions`` chooses another count, ``None`` a server without
+mappings; a test that passes its own configuration file (``-c``) writes them there itself.
 """
 
 from __future__ import annotations
@@ -16,10 +22,12 @@ import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 import pytest
 
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
+from docker.nats_service import mappings_block
 from tests.owned_processes import stopped_at_exit
 
 _LISTENING = re.compile(r"Listening for client connections on 127\.0\.0\.1:(\d+)")
@@ -27,18 +35,24 @@ _READY = "Server is ready"
 
 
 @contextmanager
-def own_nats_server(executable: str, folder: Path, *arguments: str) -> Iterator[str]:
+def own_nats_server(executable: str, folder: Path, *arguments: str,
+                    partitions: Optional[int] = DEFAULT_PARTITION_COUNT) -> Iterator[str]:
     """Run nats-server with JetStream in ``folder`` until the block ends; yields its URL."""
 
-    with own_nats_server_process(executable, folder, *arguments) as (url, _process):
+    with own_nats_server_process(executable, folder, *arguments, partitions=partitions) as (url, _process):
         yield url
 
 
 @contextmanager
-def own_nats_server_process(executable: str, folder: Path,
-                            *arguments: str) -> Iterator[tuple[str, subprocess.Popen[bytes]]]:
+def own_nats_server_process(executable: str, folder: Path, *arguments: str,
+                            partitions: Optional[int] = DEFAULT_PARTITION_COUNT,
+                            ) -> Iterator[tuple[str, subprocess.Popen[bytes]]]:
     """``own_nats_server``, yielding the server's process too, for a test that pauses it (an outage)."""
 
+    if partitions is not None and "-c" not in arguments:
+        config = folder / "mappings.conf"
+        config.write_text(mappings_block(partitions))
+        arguments = (*arguments, "-c", str(config))
     log_path = folder / "nats.log"
     with log_path.open("w") as log:
         process = subprocess.Popen([executable, "-js", "-sd", str(folder / "store"), "-a", "127.0.0.1", "-p", "-1",

@@ -26,7 +26,7 @@ from nats.js.errors import KeyNotFoundError, NotFoundError
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.trust import kept_for
 from custom_transport.protocol1 import host_keys
-from custom_transport.protocol1.bootstrap import BootstrapBundle, write_bundle
+from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.bucket_reads import BucketReadTimedOut
 from custom_transport.protocol1.live import utc_now
 from installation_authority import process as authority_process
@@ -38,11 +38,15 @@ from installation_authority.service import (
     AuthorityDisconnected,
     CertificateRequest,
     InstallationAuthority,
+    PartitionCountMismatch,
     RevocationsUnverified,
     _denial,
     _renewal_refusal,
 )
 from runtime_settings.instance_layout import InstanceLayout
+from runtime_settings.transport import QueueSettings
+from custom_transport.protocol1.contract_files import transport
+from tests.queue_limits_support import TEST_QUEUE_LIMITS
 
 LISTED = ExpectedHost("worker-host-1", "worker.key1", "PUBLIC1", frozenset({"worker_host"}), frozenset({"team_one"}),
                       frozenset({"researcher"}), 4)
@@ -203,11 +207,49 @@ def test_receivers_and_writers_forget_a_certificate_at_the_same_time() -> None:
 # -- the authority without a server ----------------------------------------------------------------
 
 
-def authority_at(tmp_path: Path) -> InstallationAuthority:
+def authority_at(tmp_path: Path, *, partitions: int = 96) -> InstallationAuthority:
     layout = InstanceLayout.at(tmp_path / "instance")
     authority, _ = host_keys.ensure_authority_keys(layout, "install_one")
     keys, _ = host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
-    return InstallationAuthority(layout, authority, keys)
+    return InstallationAuthority(layout, authority, keys, partitions=partitions, queues=TEST_QUEUE_LIMITS)
+
+
+class _NoServer:
+    """A NATS connection the authority must not touch: the count check comes before anything else."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"the authority used its NATS connection ({name}) before refusing")
+
+
+def test_the_authority_refuses_to_start_when_the_bundles_partition_count_is_not_its_own(tmp_path: Path) -> None:
+    """Hosts compute agents' partitions with the bundle's count, the authority with its setting."""
+
+    authority = authority_at(tmp_path, partitions=96)
+    path = authority.layout.trust_bootstrap_path
+    write_bundle(path, BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),),
+                                       partitions=7))
+    before = path.read_bytes()
+
+    with pytest.raises(PartitionCountMismatch) as refused:
+        asyncio.run(authority.start(_NoServer(), teams=["team_one"]))
+
+    assert "holds partition count 7, but this authority's transport.queues.partitions is 96" in str(refused.value)
+    assert "restart the instance" in str(refused.value)
+    assert path.read_bytes() == before
+    assert not (authority.layout.host_trust_dir(AUTHORITY_RUNTIME) / ISSUED_FILENAME).exists()
+
+
+def test_the_authority_keeps_the_bundles_partition_count_when_it_writes_its_records(tmp_path: Path) -> None:
+    authority = authority_at(tmp_path, partitions=7)
+    path = authority.layout.trust_bootstrap_path
+    write_bundle(path, BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),),
+                                       partitions=7))
+    authority._own, authority._revocations = {"record": "certificate"}, {"record": "revocations"}
+
+    authority._publish_bundle()
+
+    assert read_bundle(path).partitions == 7
+    assert [record["record"] for record in read_bundle(path).records] == ["certificate", "revocations"]
 
 
 def test_a_stored_certificate_is_handed_back_only_for_the_same_keys_while_newest(tmp_path: Path) -> None:
@@ -346,7 +388,16 @@ def test_an_authority_whose_certificate_listing_fails_does_not_start(tmp_path: P
                                                                      fail_from: int) -> None:
     authority = authority_at(tmp_path)
     write_bundle(authority.layout.trust_bootstrap_path,
-                 BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),)))
+                 BootstrapBundle("install_one", ((authority.authority.key_id, authority.authority.public_key_text),),
+                                 partitions=authority.partitions))
+
+    async def nothing(*_args: Any, **_options: Any) -> None:
+        return None
+
+    # The partition mapping check and the teams' streams come before the listings and need a
+    # real server; their own tests cover them (test_partition_mapping_check, the live queue tests).
+    monkeypatch.setattr(authority_service, "check_partition_mapping", nothing)
+    monkeypatch.setattr(authority, "ensure_topology", nothing)
     asked = failing_listings(monkeypatch, fail_from=fail_from)
     nc = _Connection()
     with pytest.raises(BucketReadTimedOut):
@@ -423,14 +474,19 @@ class _Adapter:
 def _config(tmp_path: Path) -> Any:
     return SimpleNamespace(layout=InstanceLayout.at(tmp_path), instance_name="test",
                            manager=SimpleNamespace(team_id="team_one"),
-                           transport=SimpleNamespace(replicas=1, nats_servers=["nats://127.0.0.1:1"], nats_url=None,
+                           transport=SimpleNamespace(replicas=3, nats_servers=["nats://127.0.0.1:1"], nats_url=None,
                                                      subject_prefix="team", nats_user=None, nats_password=None,
-                                                     credentials_file=None))
+                                                     credentials_file=None,
+                                                     queues=QueueSettings(partitions=7, max_bytes={"pool": 5 << 20})))
 
 
-def _run_with(monkeypatch, tmp_path: Path, authority: Any) -> None:
+def _run_with(monkeypatch, tmp_path: Path, authority: Any, made: dict[str, Any] | None = None) -> None:
+    def make(*_args: Any, **kwargs: Any) -> Any:
+        (made if made is not None else {}).update(kwargs)
+        return authority
+
     monkeypatch.setattr(authority_process, "NatsTransportAdapter", _Adapter)
-    monkeypatch.setattr(authority_process, "InstallationAuthority", lambda *_args, **_kwargs: authority)
+    monkeypatch.setattr(authority_process, "InstallationAuthority", make)
     monkeypatch.setattr(authority_process, "load_authority_keys", lambda _layout: None)
     monkeypatch.setattr(authority_process, "load_host_keys", lambda _layout, _runtime: None)
     asyncio.run(authority_process.run_installation_authority(_config(tmp_path)))
@@ -442,11 +498,18 @@ def test_the_process_exits_with_a_reason_when_it_cannot_start_safely(tmp_path: P
             raise RevocationsUnverified("Restore the instance's trust folder.")
 
     caplog.set_level(logging.ERROR)
+    made: dict[str, Any] = {}
     with pytest.raises(SystemExit) as exited:
-        _run_with(monkeypatch, tmp_path, Refusing())
+        _run_with(monkeypatch, tmp_path, Refusing(), made)
     assert exited.value.code == 1
     assert "event=installation_authority_start_refused reason=RevocationsUnverified" in caplog.text
     assert "Restore the instance's trust folder." in caplog.text
+    assert made["partitions"] == 7  # the saved transport.queues.partitions
+    # The streams' limits are the saved transport.queues and transport.replicas.
+    queues = made["queues"]
+    assert (queues.max_bytes["pool"], queues.max_bytes["partition"], queues.max_messages_per_subject, queues.replicas) \
+        == (5 << 20, QueueSettings().max_bytes.partition, QueueSettings().max_messages_per_subject, 3)
+    assert set(queues.max_bytes) == set(transport()["queues"]["size_kinds"])
 
 
 def test_the_process_exits_when_its_upkeep_stops(tmp_path: Path, monkeypatch, caplog) -> None:
@@ -457,10 +520,32 @@ def test_the_process_exits_when_its_upkeep_stops(tmp_path: Path, monkeypatch, ca
         async def keep_current(self) -> None:
             raise AuthorityDisconnected("closed")
 
+        async def follow_placements(self, stop: asyncio.Event) -> None:
+            await stop.wait()
+
     with pytest.raises(SystemExit) as exited:
         _run_with(monkeypatch, tmp_path, Disconnecting())
     assert exited.value.code == 1
     assert "event=installation_authority_upkeep_stopped" in caplog.text
+
+
+def test_the_process_exits_when_it_stops_following_placements(tmp_path: Path, monkeypatch, caplog) -> None:
+    """It opens failed watches again itself, so ending before the stop is an error of its own."""
+
+    class LosingPlacements:
+        async def start(self, _nc: Any, *, teams: Any) -> None:
+            pass
+
+        async def keep_current(self) -> None:
+            await asyncio.Event().wait()
+
+        async def follow_placements(self, stop: asyncio.Event) -> None:
+            raise RuntimeError("the consumers could not be listed")
+
+    with pytest.raises(SystemExit) as exited:
+        _run_with(monkeypatch, tmp_path, LosingPlacements())
+    assert exited.value.code == 1
+    assert "event=installation_authority_placements_stopped error=the consumers could not be listed" in caplog.text
 
 
 @pytest.mark.parametrize("changed", ["key_id", "public_key", "expired", "absent"])

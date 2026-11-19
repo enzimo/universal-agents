@@ -6,6 +6,9 @@ import { createFinalization } from "./app_finalization.mjs";
 import { createModelSetup } from "./app_model_setup.mjs";
 import { createPageLifecycle, createRequestClient } from "./browser_lifecycle.mjs";
 
+// Protocol 1 carries the team id in message addresses, at most 24 characters (custom_messages.wire.ids).
+const TEAM_ID_MAX_LENGTH = 24;
+
 function mountPage() {
 "use strict";
 const lifecycle = createPageLifecycle(window);
@@ -1489,7 +1492,8 @@ function composedInstanceName() {
   }
 
 function composedTeamId() {
-    return "team_" + slugFromAssistantName();
+    // At most 24 characters, the cap protocol 1 gives team ids (onboarding_engine.team_id_answer).
+    return ("team_" + slugFromAssistantName()).slice(0, TEAM_ID_MAX_LENGTH).replace(/_+$/, "");
   }
 
 function validateTeamSkillReposBeforeNext() {

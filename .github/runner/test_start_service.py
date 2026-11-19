@@ -49,6 +49,23 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertTrue((self.root / "docker-used").exists())
 
+    def test_nats_starts_with_a_mounted_configuration_file(self):
+        config = self.root / "mappings.conf"
+        config.write_text("mappings {}\n")
+        with patch.object(
+            start_service, "docker", return_value=self.result(stdout="id")
+        ) as docker:
+            start_service.start("nats", str(config))
+        args = list(docker.call_args.args)
+        image = args.index("nats:2.15.1-alpine")
+        mount = f"{config.resolve()}:{start_service.NATS_CONFIG_IN_CONTAINER}:ro"
+        self.assertEqual(args[args.index("--volume") + 1], mount)
+        self.assertLess(args.index("--volume"), image)
+        self.assertEqual(
+            args[image + 1:],
+            ["-c", start_service.NATS_CONFIG_IN_CONTAINER, "--jetstream"],
+        )
+
     def test_port_race_retries_after_removing_only_owned_failed_container(self):
         replies = [
             self.result(1, stderr="address already in use"),

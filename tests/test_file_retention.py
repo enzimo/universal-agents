@@ -207,8 +207,8 @@ def test_a_settings_change_made_meanwhile_is_never_overwritten(
     path = config.layout.instance_config_path
     real_load = GatewayInstanceConfig.load.__func__
 
-    def load_then_someone_else_saves(cls, load_path):
-        loaded = real_load(cls, load_path)
+    def load_then_someone_else_saves(cls, load_path, **kwargs):
+        loaded = real_load(cls, load_path, **kwargs)
         path.write_text(path.read_text(encoding="utf-8") + "\n# changed by another settings writer\n", encoding="utf-8")
         return loaded
 

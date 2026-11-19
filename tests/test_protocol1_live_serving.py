@@ -14,7 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from nats.errors import TimeoutError as NatsTimeoutError
@@ -23,7 +23,7 @@ from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import Receiver, reply_audience, sign_frame, verify_frame
 from custom_messages.wire.kinds import CLOCK_SKEW_SECONDS
 from custom_messages.wire.models import Frame
-from custom_messages.wire.partitions import agent_record_key
+from custom_messages.wire.partitions import agent_partition, agent_record_key
 from custom_messages.wire.refusals import REFUSAL_AT_HEADER, REFUSAL_HEADER
 from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1 import live
@@ -99,6 +99,52 @@ async def serving(receiver_host: LiveHost, handler: Any, **options: Any) -> Any:
     await receiver_host.serve("svc.team", RECEIVER, handler, **options)
     (callback,) = receiver_host.nc.callbacks.values()
     return callback
+
+
+# -- an agent's live control arrives with its partition token -------------------------------------------
+
+AGENT_RECEIVER = Receiver("install_example", TEAM, "agent", "researcher-2", "worker-host-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("arrival", "handled"), [
+    ("mapped", True),
+    ("unmapped", False),          # a server that does not map: the token is missing
+    ("other_partition", False),   # a sender that published the mapped form with a partition it picked
+    ("extra_token", False),
+])
+async def test_an_agents_live_control_address_is_served_and_checked_with_its_partition(arrival, handled) -> None:
+    """README, "Partitions": the subscription holds the agent's partition at the trust store's count."""
+
+    count = fixtures.trust_store().partition_count
+    receiver_host = host("worker-host-1", "test-worker-key-1", 3)
+    seen: list[Any] = []
+
+    async def handler(verified):
+        seen.append(verified)
+        return {"outcome": "ok"}
+
+    await receiver_host.serve("ctl.agent.{agent}", AGENT_RECEIVER, handler, agent="researcher-2")
+    ((subject, callback),) = receiver_host.nc.callbacks.items()
+    partition = agent_partition(TEAM, "researcher-2", count)
+    assert subject == f"ua.v1.{TEAM}.*.ctl.agent.researcher-2.{partition}"
+
+    frame = host("lead-host-1", "test-lead-key-1", 3).sign(
+        "agent.status", {"level": "basic"}, {**AUDIENCE, "target": "agent", "id": "researcher-2"}, team=TEAM)
+    arrived_on = {"mapped": f"{frame['subject']}.{partition}", "unmapped": frame["subject"],
+                  "other_partition": f"{frame['subject']}.{(partition + 1) % count}",
+                  "extra_token": f"{frame['subject']}.{partition}.{partition}"}[arrival]
+    encoded, headers = receiver_host.encode(frame)
+    with patch.object(receiver_host, "_handle", AsyncMock()) as handle:
+        await callback(SimpleNamespace(data=encoded, headers=headers, subject=arrived_on, reply="_INBOX.lead-host-1.r1"))
+        await receiver_host.drain()
+    if handled:
+        assert receiver_host.nc.published == [] and handle.await_count == 1
+    else:
+        assert handle.await_count == 0
+        ((answered_on, _data, refusal),) = receiver_host.nc.published
+        assert answered_on == "_INBOX.lead-host-1.r1"
+        assert (refusal[REFUSAL_HEADER], refusal[REFUSAL_AT_HEADER]) == ("subject_mismatch", "/subject")
 
 
 # -- answering only the requester's inbox --------------------------------------------------------------

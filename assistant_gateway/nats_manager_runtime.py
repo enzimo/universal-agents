@@ -15,7 +15,12 @@ from custom_transport.base import (
     SubscriptionDelivery,
     TransportPublishOptions,
 )
-from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAdapter, NatsTransportConfig
+from custom_transport.nats_adapter import (
+    JetStreamAccountUsage,
+    JetStreamStreamList,
+    NatsTransportAdapter,
+    NatsTransportConfig,
+)
 from custom_transport.subjects import NatsSubjectMapper
 
 if TYPE_CHECKING:
@@ -231,6 +236,21 @@ class NatsGatewayManagerRuntime:
         if not self._connected or not self.settings.jetstream_enabled:
             return None
         return await self._adapter.jetstream_account_usage()
+
+    async def team_streams(self, team: str) -> JetStreamStreamList | None:
+        """The streams of ``team``'s protocol 1 subjects with their limits and sizes (the size warning).
+
+        Streams the server could not measure are named in the list's ``missing``. None while not
+        connected or without JetStream.
+        """
+
+        if not self._connected or not self.settings.jetstream_enabled:
+            return None
+        # Imported here: the protocol 1 subject root comes from the contract's generated code,
+        # which command-line runs that import this module never need (about half a second).
+        from custom_messages.wire.frame import SUBJECT_ROOT
+
+        return await self._adapter.jetstream_streams(subject=f"{SUBJECT_ROOT}{team}.>")
 
     @staticmethod
     def _delivery_handler(

@@ -27,6 +27,7 @@ from custom_agents.agent_host import AgentProcessHost, lead_host_profile
 from custom_agents.agent_requests import configure_process_host
 from custom_agents.live_controls import EVENT_HANDLERS, LIVE_CONTROL_HANDLERS
 from custom_agents.relayed_task_controls import RELAYED_HANDLERS
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
 from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
@@ -39,6 +40,7 @@ from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_servic
 # Through the tests package, as tests/conftest.py imports it: the recorder state lives in that
 # module object, and a path-based import would load a second copy with none.
 from tests.live_nats_support import require_stream_recorder
+from tests.queue_limits_support import TEST_QUEUE_LIMITS
 
 
 async def _connect(stack: AsyncExitStack, runtime: str):
@@ -83,8 +85,9 @@ async def protocol1_team(tmp_path: Path, team_id: str, agent_types: Iterable[str
     async with AsyncExitStack() as stack:
         hosts = {profile.runtime: message_hosts.expected_host(layout, profile)
                  for profile in (services_profile, lead_profile)}
-        installation = message_hosts.prepare_message_host_trust(layout, hosts)
-        authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME))
+        installation = message_hosts.prepare_message_host_trust(layout, hosts, partitions=DEFAULT_PARTITION_COUNT)
+        authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
+                                          partitions=DEFAULT_PARTITION_COUNT, queues=TEST_QUEUE_LIMITS)
         authority_nc = await _connect(stack, AUTHORITY_RUNTIME)
         await authority.start(authority_nc, teams=[team_id])
         services = MessageHost(layout, services_profile, await _connect(stack, TEAM_SERVICES_RUNTIME))

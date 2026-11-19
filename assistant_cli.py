@@ -74,6 +74,7 @@ from assistant_gateway.onboarding_engine import (
     launch_env_file_for,
     load_base_onboarding_template,
     resolve_onboarding_model_id,
+    team_id_answer,
 )
 from assistant_gateway.onboarding_web.settings_import import looks_like_instance_config
 from assistant_gateway.onboarding_reconciliation import (
@@ -2687,6 +2688,16 @@ def _prompt_text(prompt: str, *, default: Optional[str] = None) -> str:
     return default or ""
 
 
+def _prompt_team_id(*, default: str, assistant_name: str) -> str:
+    """Ask for the team id until protocol 1 can carry it (``onboarding_engine.team_id_answer``)."""
+
+    while True:
+        try:
+            return team_id_answer(_prompt_text("Team id", default=default), assistant_name)
+        except ValueError as exc:
+            print(exc)
+
+
 def _prompt_bool(prompt: str, *, default: bool) -> bool:
     label = "Y/n" if default else "y/N"
     raw = input(f"{prompt} [{label}]: ").strip().lower()
@@ -2777,17 +2788,22 @@ def _collect_onboarding_answers(
             template_provider=template.model_provider,
             template_model_id=template.model_id,
         )
+        assistant_name = _value_or_default(
+            args.assistant_name, GATEWAY_DEFAULTS.assistant_display_name.value
+        )
+        try:
+            team_id = team_id_answer(args.team_id or template.team_id, assistant_name)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         return {
             "instance_name": args.instance_name,
             "instance_root": instance_root,
-            "team_id": args.team_id or template.team_id,
+            "team_id": team_id,
             "timezone": _value_or_default(args.timezone, template.timezone),
             "user_display_name": _value_or_default(
                 args.display_name, GATEWAY_DEFAULTS.user_display_name.value
             ),
-            "assistant_name": _value_or_default(
-                args.assistant_name, GATEWAY_DEFAULTS.assistant_display_name.value
-            ),
+            "assistant_name": assistant_name,
             "assistant_purpose": args.assistant_purpose,
             "assistant_response_style": args.assistant_response_style,
             "assistant_autonomy": args.assistant_autonomy,
@@ -3032,7 +3048,7 @@ def _collect_onboarding_answers(
     instance_root = _prompt_text(
         "Instance root directory", default=str(instance_root_default)
     )
-    team_id = _prompt_text("Team id", default=args.team_id or template.team_id)
+    team_id = _prompt_team_id(default=args.team_id or template.team_id, assistant_name=assistant_name)
     default_delivery_channel = _prompt_text(
         "Default delivery channel",
         default=_value_or_default(

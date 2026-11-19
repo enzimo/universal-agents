@@ -9,7 +9,9 @@ installation authority vouches for them (``installation_authority``,
    since nothing the old key signed can be checked any more;
 2. creates any missing key: the authority's, and each host's it starts;
 3. writes the list of hosts the authority approves without asking anyone, with their
-   public keys (``expected-hosts.json``), and the bootstrap bundle's authority keys;
+   public keys (``expected-hosts.json``), and the bootstrap bundle's authority keys and the
+   installation's partition count (``transport.queues.partitions``), which every host's trust
+   store takes from the bundle;
 4. starts the installation authority once NATS and the team's message streams are ready,
    and waits until the bundle carries its certificate and a fresh revocations record, so
    every later host can join (a join that comes before the authority serves waits for it);
@@ -21,9 +23,9 @@ installation authority vouches for them (``installation_authority``,
 A process that is not ready in time, or whose wait ends any other way (Ctrl+C included),
 is stopped and waited for, so nothing a failed start began is left running.
 ``MessageServices`` does steps 3 to 5 at launch and again on a restart of everything (the
-configuration editor's restart): it writes the expected hosts from the saved configuration
-as it is then, so a raised limit takes effect, and the restarted authority and team
-services read the saved settings again.
+configuration editor's restart): it writes the expected hosts and the partition count from
+the saved configuration as it is then, so a raised limit takes effect, and the restarted
+authority and team services read the saved settings again.
 
 Keys are files only their owner can read; each process is given only its own folder
 (``runtime_settings.instance_layout``). A process the launcher stops listing loses
@@ -51,16 +53,23 @@ from custom_transport.protocol1.joining import HostProfile
 from installation_authority.expected_hosts import ExpectedHost, write_expected_hosts
 from installation_authority.service import AUTHORITY_RUNTIME
 from runtime_settings.instance_layout import InstanceLayout
+from runtime_settings.transport import TransportSettings
 from team_services.lock import LEASE
 from team_services.serving import forget_serving, serving_process
 
 LOGGER = logging.getLogger(__name__)
-# How long the authority may take to set up the topology and sign its records.
-AUTHORITY_READY_TIMEOUT_SECONDS = 60.0
-# How long the team services may take to serve: after an unclean stop, the dead instance's lease
-# on the team's lock and the clock tolerance (team_services.lock), plus as long as the authority
-# may take, for starting and joining.
-TEAM_SERVICES_READY_TIMEOUT_SECONDS = LEASE.total_seconds() + CLOCK_SKEW_SECONDS + AUTHORITY_READY_TIMEOUT_SECONDS
+# How long the authority may take to create one team's message streams when none exist yet,
+# measured on nats-server 2.15.1 (a stream per partition at the default 96 partitions, four
+# more, the buckets and two consumers; sync_interval always, store on a local disk): 1.8 s
+# with one copy of each stream on one server; on three clustered servers sharing one disk,
+# 3.7 s with one copy and 20.7 s with three (transport.replicas). Each allowance leaves room
+# for a disk about 15 times slower; servers on separate machines add the network's part. A
+# start that finds every stream reads them in 0.02 s.
+STREAM_SETUP_SECONDS_PER_TEAM = 30.0
+REPLICATED_STREAM_SETUP_SECONDS_PER_TEAM = 300.0
+# How long the authority may take, besides the streams, to check the server's partition
+# mapping and sign its records.
+AUTHORITY_START_SECONDS = 60.0
 # How often the launcher says what it still waits for.
 WAIT_REPORT_SECONDS = 10.0
 AUTHORITY_NAME = "installation authority"
@@ -91,8 +100,14 @@ def _installation_id(layout: InstanceLayout) -> str:
     return installation
 
 
-def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, ExpectedHost] | None = None) -> str:
-    """Keys, the expected hosts and the bundle's authority keys; returns the installation id."""
+def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, ExpectedHost] | None = None, *,
+                               partitions: int) -> str:
+    """Keys, the expected hosts, and the bundle's authority keys and partition count; returns the installation id.
+
+    ``partitions`` is the saved ``transport.queues.partitions``. The count is fixed when the
+    installation is created; a changed setting is written as it is and logged, and the
+    installation authority refuses to start when the team's streams were made with another.
+    """
 
     layout.trust_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     installation = _installation_id(layout)
@@ -108,12 +123,25 @@ def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, Expec
     keys = ((authority.key_id, authority.public_key_text),)
     try:
         existing: Optional[BootstrapBundle] = read_bundle(layout.trust_bootstrap_path)
-    except BootstrapError:
+    except BootstrapError as error:
         existing = None
-    if existing is None or existing.authority_keys != keys or existing.installation != installation:
+        if layout.trust_bootstrap_path.exists():
+            # A new bundle holds no records; the authority signs them again from its own folder.
+            LOGGER.warning("The bootstrap bundle cannot be read and is written again. event=bootstrap_bundle_rewritten "
+                           "reason=%s", error)
+    # The records of another installation's bundle are not kept: its key signed none of them.
+    kept = existing if existing is not None and existing.installation == installation else None
+    if kept is not None and kept.partitions != partitions:
+        # The bundle holds what the settings said at the last start attempt, which the
+        # authority may have refused; the streams' own record is what decides.
+        LOGGER.warning("The partition count in the saved settings differs from the one the last start wrote. The count "
+                       "is fixed when the installation is created: the installation authority refuses to start when "
+                       "the teams' message streams were made with another count. "
+                       "event=partition_count_changed setting=transport.queues.partitions previous=%s count=%s",
+                       kept.partitions, partitions)
+    if kept is None or kept.authority_keys != keys or kept.partitions != partitions:
         write_bundle(layout.trust_bootstrap_path,
-                     BootstrapBundle(installation, keys, existing.records if existing and existing.installation == installation
-                                     else ()))
+                     BootstrapBundle(installation, keys, kept.records if kept else (), partitions=partitions))
     return installation
 
 
@@ -214,8 +242,24 @@ def _wait_until_ready(process: subprocess.Popen[bytes], ready: Callable[[], bool
     return True
 
 
+def authority_ready_timeout(replicas: int) -> float:
+    """How long the authority may take to get ready: the mapping check, the streams of the instance's one team
+    (the launcher starts it for manager.team_id) with ``replicas`` copies each, and its records."""
+
+    return AUTHORITY_START_SECONDS + (STREAM_SETUP_SECONDS_PER_TEAM if replicas <= 1
+                                      else REPLICATED_STREAM_SETUP_SECONDS_PER_TEAM)
+
+
+def team_services_ready_timeout(replicas: int) -> float:
+    """How long the team services may take to serve: after an unclean stop, the dead instance's lease on the team's
+    lock and the clock tolerance (team_services.lock), plus as long as the authority may take, for starting and
+    joining."""
+
+    return LEASE.total_seconds() + CLOCK_SKEW_SECONDS + authority_ready_timeout(replicas)
+
+
 def start_installation_authority(layout: InstanceLayout, command: list[str], env: Mapping[str, str], *, cwd: Path,
-                                 timeout_seconds: float = AUTHORITY_READY_TIMEOUT_SECONDS,
+                                 timeout_seconds: float,
                                  stop_requested: Callable[[], bool] = _never) -> subprocess.Popen[bytes]:
     """Start the authority and wait until it signed its records; raise ``RuntimeError`` if it does not.
 
@@ -229,13 +273,14 @@ def start_installation_authority(layout: InstanceLayout, command: list[str], env
     process = subprocess.Popen(command, cwd=cwd, env=dict(env))
     if _wait_until_ready(process, lambda: _ready(layout, sequence_before), name=AUTHORITY_NAME,
                          timeout_seconds=timeout_seconds, stop_requested=stop_requested,
-                         waiting_for="it sets up the message topology and signs its certificate and revocations"):
+                         waiting_for="it checks the server's partition mapping, creates the team's message streams "
+                                     "and signs its certificate and revocations"):
         LOGGER.info("The installation authority is ready. event=installation_authority_started")
     return process
 
 
 def start_team_services(layout: InstanceLayout, command: list[str], env: Mapping[str, str], *, cwd: Path,
-                        timeout_seconds: float = TEAM_SERVICES_READY_TIMEOUT_SECONDS,
+                        timeout_seconds: float,
                         stop_requested: Callable[[], bool] = _never) -> subprocess.Popen[bytes]:
     """Start the team services and wait until they serve; raise ``RuntimeError`` if they do not.
 
@@ -265,8 +310,10 @@ class MessageServices:
     """The installation authority and the team services, which every other message host needs.
 
     ``start`` writes the trust folder with ``hosts()``, the hosts the launcher starts as
-    the saved configuration lists them now, then starts the authority and the team services
-    in that order, each once the one before is ready. A restart of everything stops the
+    the saved configuration lists them now, and the saved partition count from
+    ``transport()``, the saved transport settings, then starts the authority and the team
+    services in that order, each once the one before is ready; how long it waits grows with
+    ``transport.replicas``. A restart of everything stops the
     other processes, then ``stop`` stops the team services and the authority, and ``start``
     runs again with each environment's copies of saved settings recomputed
     (``environment``), before the other processes start again (plan 13B.2).
@@ -274,6 +321,7 @@ class MessageServices:
 
     layout: InstanceLayout
     hosts: Callable[[], Mapping[str, ExpectedHost]]
+    transport: Callable[[], TransportSettings]
     authority_command: list[str]
     authority_env: Mapping[str, str]
     team_services_command: list[str]
@@ -290,15 +338,19 @@ class MessageServices:
         ``ValueError`` when the trust folder or the saved configuration cannot be read.
         """
 
-        prepare_message_host_trust(self.layout, self.hosts())
+        transport = self.transport()
+        prepare_message_host_trust(self.layout, self.hosts(), partitions=transport.queues.partitions)
         self.authority = start_installation_authority(self.layout, self.authority_command,
                                                       environment(self.authority_env, AUTHORITY_NAME), cwd=self.cwd,
+                                                      timeout_seconds=authority_ready_timeout(transport.replicas),
                                                       stop_requested=stop_requested)
         if stop_requested():
             return False
         self.team_services = start_team_services(self.layout, self.team_services_command,
                                                  environment(self.team_services_env, TEAM_SERVICES_NAME),
-                                                 cwd=self.cwd, stop_requested=stop_requested)
+                                                 cwd=self.cwd,
+                                                 timeout_seconds=team_services_ready_timeout(transport.replicas),
+                                                 stop_requested=stop_requested)
         return not stop_requested()
 
     def processes(self) -> tuple[tuple[str, subprocess.Popen[bytes]], ...]:

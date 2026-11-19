@@ -153,6 +153,7 @@ from secure_tool_broker.sealbox_runtime import (
     resolve_sealbox_runtime_config,
     sealbox_server_env,
 )
+from storage.config import StorageSettings
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.sqlite_connection import prepare_sqlite_database
 from runtime_hosting.manifest_rendering import write_runtime_manifests
@@ -269,17 +270,87 @@ def _render_instance_config_migration_notice(
     )
 
 
+def protocol1_id_check_refusal(
+    config: GatewayInstanceConfig, find_store: Callable[[], StorageSettings | None]
+) -> str | None:
+    """The id check before anything changes (``instance_upgrades.protocol1_ids``): its refusal, or None.
+
+    ``config`` is the saved file read without upgrading it on disk
+    (``protocol1_ids.load_saved_for_check``); ``find_store`` gives the team's store and is
+    called only when the whole check runs. A catalog or store that cannot be read, or a
+    store that cannot be found, refuses the start as well.
+    """
+
+    from instance_upgrades.protocol1_ids import CHECK_FAILED_EVENT, Protocol1IdCheckFailed, check_ids_before_upgrade
+    from team_transfer.errors import TransferError
+    from team_transfer.runtime_guard import IMPORT_UNFINISHED_EVENT
+
+    try:
+        return check_ids_before_upgrade(config, find_store)
+    except TransferError as exc:
+        return f"event={IMPORT_UNFINISHED_EVENT} {exc}"
+    except (Protocol1IdCheckFailed, ValueError) as exc:
+        return (
+            "The check that every id fits protocol 1 could not finish, so nothing was changed "
+            f"(event={CHECK_FAILED_EVENT}): {exc}"
+        )
+
+
+def check_protocol1_ids(config_path: Path, explicit_env_path: str | None) -> str | None:
+    """The launcher's id check, first in ``main``: before the file's upgrade and any start; the refusal, or None.
+
+    The team's store is found only when the whole check runs, as the processes find it: with
+    the env file under the process environment (``build_process_env``'s order), since
+    ``POSTGRES_DSN`` may be in either. In the Docker bundle the check already ran
+    (``docker.run_bundle``), so its record exists and this returns at once.
+    """
+
+    from instance_upgrades.protocol1_ids import (
+        CHECK_FAILED_EVENT,
+        Protocol1IdCheckFailed,
+        check_due,
+        load_saved_for_check,
+    )
+    from team_transfer.errors import TransferError
+    from team_transfer.runtime_guard import IMPORT_UNFINISHED_EVENT, require_finished_import
+
+    try:
+        config = load_saved_for_check(config_path)
+        # A half-imported team is read by nothing, this check included (team_transfer.runtime_guard).
+        require_finished_import(config.layout)
+        if not check_due(config):
+            return None
+    except TransferError as exc:
+        return f"event={IMPORT_UNFINISHED_EVENT} {exc}"
+    except ValueError as exc:
+        return (
+            f"The check that every id fits protocol 1 could not read the settings in {config_path}, so nothing "
+            f"was changed (event={CHECK_FAILED_EVENT}): {exc}"
+        )
+
+    def find_store() -> StorageSettings | None:
+        try:
+            env_path = resolve_env_file_path(config, explicit_env_path, report_ignored_env_file=False)
+            return config.resolve_manager_storage_settings(env={**load_env_file_values(env_path), **os.environ})
+        except ValueError as exc:
+            raise Protocol1IdCheckFailed(f"The team's store could not be found from the settings in {config_path}: "
+                                         f"{exc}") from exc
+
+    return protocol1_id_check_refusal(config, find_store)
+
+
 def ensure_instance_config_ready_for_headless_launch(config_path: Path) -> str | None:
     status = inspect_instance_config_version(config_path)
     if not status.needs_migration:
         return None
     result = migrate_instance_config_file(status.path)
     LOGGER.warning(
-        "Headless launch migrated stale instance config %s from schema_version %s to %s; backup=%s",
+        "Headless launch migrated stale instance config %s from schema_version %s to %s; backup=%s; steps=%s",
         result.path,
         result.original_version,
         result.migrated_version,
         result.backup_path or "-",
+        " | ".join(result.applied_steps) or "-",
     )
     return _render_instance_config_migration_notice(
         result.path,
@@ -2944,18 +3015,24 @@ def main() -> int:
     if not config_path.exists():
         raise SystemExit(f"No such instance config: {config_path}")
 
+    # First, before the configuration file's upgrade or anything else changes.
+    refusal = check_protocol1_ids(config_path, args.env)
+    if refusal:
+        LOGGER.error("Headless launch refused. %s", refusal)
+        return 2
     startup_notice = ensure_instance_config_ready_for_headless_launch(config_path)
     # The saved file plus this deployment's details (for the Docker bundle, its
     # own NATS and PostgreSQL), applied in memory and never saved.
     # A half-imported team must never run (team_transfer.service). Checked
     # first, so the operator sees this cause rather than a missing folder.
+    from team_transfer.runtime_guard import IMPORT_UNFINISHED_EVENT
     from team_transfer.service import TransferError, require_finished_import
 
     try:
         config = GatewayInstanceConfig.load_for_process(config_path)
         require_finished_import(config.layout)
     except TransferError as exc:
-        LOGGER.error("Headless launch refused. event=team_import_unfinished %s", exc)
+        LOGGER.error("Headless launch refused. event=%s %s", IMPORT_UNFINISHED_EVENT, exc)
         return 2
     try:
         validate_runtime_layout(config)
@@ -3022,7 +3099,8 @@ def main() -> int:
     if local_nats_enabled_from_env(inherited_env, default=True):
         apply_local_nats_env(inherited_env)
         local_nats_process = start_local_nats(
-            env=inherited_env, logger=LOGGER, cwd=REPO_ROOT
+            env=inherited_env, logger=LOGGER, cwd=REPO_ROOT,
+            partitions=config.transport.queues.partitions,
         )
     else:
         # A configured choice, not a fault: the bundle launcher (docker/run_bundle.py)
@@ -3168,6 +3246,7 @@ def main() -> int:
     message_services = MessageServices(
         config.layout,
         lambda: message_hosts_to_approve(GatewayInstanceConfig.load_for_process(config_path), startup_agent_commands),
+        lambda: GatewayInstanceConfig.load_for_process(config_path).transport,
         build_installation_authority_command(config_path, repo_root=REPO_ROOT),
         environment_for(PROCESS_INSTALLATION_AUTHORITY, inherited_env, renamed=renamed_secrets),
         build_team_services_command(config_path, repo_root=REPO_ROOT),
