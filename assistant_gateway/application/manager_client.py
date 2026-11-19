@@ -398,6 +398,9 @@ class GatewayManagerClient:
         elif isinstance(content, UserNotification):
             task_id = content.source_task_id
         if isinstance(content, SystemStatusMessage):
+            # Every wait of the correlation gets it, and each wait passes its own
+            # unread copy on when it closes (reply_leftovers). No production
+            # sender reaches two waits today: control answers use a fresh correlation.
             return tuple(wait for (correlation, _), wait in self._response_queues.items() if correlation == correlation_id)
         wait = self._response_queues.get((correlation_id, task_id))
         if wait is None and task_id is not None:

@@ -35,8 +35,11 @@ when the wait closes. Running there means a cancelled or timed-out waiter is
 not held up by broker calls in its cleanup, and a second cancellation cannot
 cut a half-opened page short. It also means the waiter's caller handles the
 reply that ended the wait first. Interactive submission records that reply in
-the chat history before it next yields to the event loop, so the history
-keeps the order the team lead sent.
+the chat history before it next yields to the event loop, so the Web Chat
+history keeps the order the team lead sent. That holds for the history only:
+in other chats the chat app sends the live reply after it gets it back, so a
+leftover can reach the person first, as a message arriving just after the
+close already could.
 
 Order. Passes of one request run one after another: a pass started by a later
 close waits for the earlier one. A message that arrives after the close and
@@ -219,6 +222,8 @@ class ReplyLeftovers:
         # Running passes. Also the strong references asyncio needs: it keeps only weak ones.
         self._passes: dict[asyncio.Task[None], _Pass] = {}
         # Per request (correlation id): its latest pass, which runs after the earlier ones.
+        # Order is per request, not per task: scheduled tasks that share a
+        # correlation wait on each other's passes, within the per-pass bound.
         self._latest: dict[str, asyncio.Task[None]] = {}
         # Leftovers of waits that closed after stop(); the next stop() reports them.
         self._refused: list[_Pass] = []

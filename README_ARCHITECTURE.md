@@ -3256,7 +3256,10 @@ own result, expiry or restart recovery reaches the task
 (`GatewayResponseCoordinator.fail_lost_credential_request`).
 
 When the gateway stops, it stops passing leftovers on before it stops its
-page watches, so a page cannot open with nothing watching it. Every leftover
+page watches, so a leftover page cannot open with nothing watching it. A
+message that arrives on the response route until `GatewayManagerClient.close`
+is still handled as before, so a late page can still open in that window.
+Every leftover
 not passed on, whether its pass was running or had not started, is logged and
 its task is told the same way, while the connection to NATS is still open.
 `GatewayManagerClient.close` repeats this for waits that closed in between. A
@@ -3269,7 +3272,10 @@ line, and the run waited forever. Passing leftovers on outside the closing
 task means a cancelled or timed-out waiter never waits on broker calls. The
 caller records the reply that ended the wait before any leftover, because it
 does so before it next pauses (interactive submission, and Web Chat's answer
-to a question). The retries and the result to the task at give-up and
+to a question), so the Web Chat history keeps the team lead's order. That
+holds for the history only: in other chats the chat app sends the live reply
+after it gets it back, so a leftover can reach the person first, as a message
+arriving just after the close already could. The retries and the result to the task at give-up and
 shutdown follow the project review of PR #161: a leftover that failed once,
 or was cut off by a restart, must not leave its task waiting forever.
 

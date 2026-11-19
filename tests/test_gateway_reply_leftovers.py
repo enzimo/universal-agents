@@ -504,8 +504,12 @@ async def test_leftovers_get_the_handling_of_the_way_they_came_in(caplog, way_in
 
 
 @pytest.mark.asyncio
-async def test_a_leftover_agent_status_is_applied_without_noting_presence_again() -> None:
-    """The team lead answers discovery twice (it is asked again every second); the first answer ends the wait."""
+@pytest.mark.parametrize("way_in", ["operational", "response"])
+async def test_a_leftover_agent_status_is_applied_without_noting_presence_again(way_in) -> None:
+    """The team lead answers discovery twice (it is asked again every second); the first answer ends the wait.
+
+    Both ways in note presence on arrival (``_notify_agent_presence``); neither may note it again for the leftover.
+    """
 
     runtime = _FakeManagerRuntime()
     runtime.connected = True
@@ -535,9 +539,11 @@ async def test_a_leftover_agent_status_is_applied_without_noting_presence_again(
             msg_meta=MessageMeta(msg_correlation_id=request.msg_meta.msg_correlation_id),
         )
 
+    receive = getattr(client, f"handle_{way_in}")
+
     async def both_answers(_request: MessageEnvelope) -> None:
-        await client.handle_operational(answer(seen))
-        await client.handle_operational(answer(seen + timedelta(seconds=1)))
+        await receive(answer(seen))
+        await receive(answer(seen + timedelta(seconds=1)))
 
     runtime.operational_publish_hook = both_answers
 
@@ -547,13 +553,13 @@ async def test_a_leftover_agent_status_is_applied_without_noting_presence_again(
 
     # Each status was noted once, when it arrived.
     assert [(status.last_seen_at, source) for status, _at, source in presence] == [
-        (seen.isoformat(), "operational"),
-        ((seen + timedelta(seconds=1)).isoformat(), "operational"),
+        (seen.isoformat(), way_in),
+        ((seen + timedelta(seconds=1)).isoformat(), way_in),
     ]
     # The leftover answer was applied as a late status, as it would have been a moment later.
     assert client.manager_id == "manager_1"
     assert [(transition.manager_id, transition.source) for transition in available] == [
-        ("manager_1", "operational_unmatched")
+        ("manager_1", f"{way_in}_unmatched")
     ]
 
 
