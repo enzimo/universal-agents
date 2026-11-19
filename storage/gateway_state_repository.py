@@ -2731,12 +2731,17 @@ class _RelationalGatewayStateRepository:
         return [ToolSetupRecord(**dict(row)) for row in rows]
 
     def mark_tool_setup_result(self, setup_request_id: str, *, state: str) -> bool:
-        """Move an unsent result to ``state``; only the first caller gets True."""
+        """Move an unsent result to ``state`` and drop its kept copy; only the first caller gets True.
+
+        The copy (with the person's account name) is needed only until it is
+        sent; a crash before this update leaves the row unsent with its copy,
+        so it can still be sent again.
+        """
 
         bind = self._dialect.bind
         with self._connect() as conn:
             cursor = conn.execute(
-                f"UPDATE gateway_tool_setups SET result_state = {bind} "
+                f"UPDATE gateway_tool_setups SET result_state = {bind}, result_json = NULL "
                 f"WHERE setup_request_id = {bind} AND result_state = {bind}",
                 (state, setup_request_id, TOOL_SETUP_RESULT_UNSENT),
             )

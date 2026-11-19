@@ -28,12 +28,18 @@ asking first is a wasted round trip. Trusted code then does the whole routine:
    finished page or a granted request completes its piece; an expired page,
    or one the gateway could not watch after a restart, is offered again up to
    ``TOOL_SETUP_OFFER_LIMIT`` pages; a closed page, a denial, or a page that
-   cannot be offered again stops the run (``settle``). The run keeps the ids
-   of the page results it applied (``results_applied``), so a second copy of
-   a result is recognised (``result_applied``) even after its page was offered
-   again under a new id: the gateway sends a kept result again when a team
-   lead is back, and a copy can arrive twice (a crash between the send and its
-   record, or a dead lead's queue handed to its replacement).
+   cannot be offered again stops the run (``settle``); a result never changes
+   a piece that no longer waits. The run keeps the ids of the page results it
+   applied (``results_applied``) and of those whose follow-up steps finished
+   (``results_handled``: the history entry, the workflow step and the next
+   pages, or the answer when the task had ended). A copy of a handled result
+   is ignored, even after its page was offered again under a new id; a copy of
+   a result applied but not handled (the first handling failed partway, or the
+   agent stopped) runs the follow-up steps again, so the task still continues.
+   Copies arrive because the gateway sends a kept result again when a team
+   lead is back (a crash between the send and its record, or a dead lead's
+   queue handed to its replacement), and because the agent's inbox dispatches
+   a message again after a failure.
 5. **Outcome** (``outcome``): one compact line per tool (ready or not, and
    what happened) for TeamLead.
 
@@ -145,8 +151,10 @@ class ToolSetupRunV1(BaseModel):
     status: RunStatus = RUN_WAITING
     stop_reason: str = ""
     pieces: tuple[RunPieceV1, ...] = ()
-    # The setup_request_ids of the page results this run applied (record_page_result).
+    # The setup_request_ids of the page results this run applied (record_page_result)
+    # and of those whose follow-up steps finished (tool_setup_run_runtime).
     results_applied: tuple[str, ...] = ()
+    results_handled: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     version: int = Field(default=1, ge=1)
     created_at_utc: datetime = Field(default_factory=utc_now)
@@ -447,24 +455,31 @@ def piece_for_request(run: ToolSetupRunV1, request_id: str) -> RunPieceV1 | None
 
 
 def result_applied(run: ToolSetupRunV1, setup_request_id: str) -> bool:
-    """Whether the run already applied this page's result: its id is recorded, or its piece no longer waits.
+    """Whether the run already applied this page's result (its id is recorded)."""
 
-    The piece's status covers runs stored before the ids were recorded.
-    """
+    return setup_request_id in run.results_applied
 
-    if setup_request_id in run.results_applied:
-        return True
-    piece = piece_for_setup(run, setup_request_id)
-    return piece is not None and piece.status != WAITING
+
+def result_handled(run: ToolSetupRunV1, setup_request_id: str) -> bool:
+    """Whether this page result's follow-up steps finished, so a copy of it is ignored."""
+
+    return setup_request_id in run.results_handled
 
 
 def record_page_result(run: ToolSetupRunV1, result: ToolSetupResultV1) -> tuple[ToolSetupRunV1, bool]:
-    """Apply how a page ended, once; True when the piece should get a fresh page (module docstring)."""
+    """Apply how a page ended, once; True when the piece should get a fresh page (module docstring).
+
+    The id is recorded even when the piece no longer waits (it failed, or a
+    run saved by the previous version already applied this result), but such
+    a piece is never changed: a stale result does not undo a settled piece.
+    """
 
     piece = piece_for_setup(run, result.setup_request_id)
     if piece is None or result_applied(run, result.setup_request_id):
         return run, False
     run = run.model_copy(update={"results_applied": (*run.results_applied, result.setup_request_id)})
+    if piece.status != WAITING:
+        return run, False
     attempt = max(piece.attempt, result.attempt)
     if result.status == TOOL_SETUP_COMPLETED:
         changed = piece.model_copy(update={"status": DONE, "account_label": result.account_label, "attempt": attempt})
@@ -591,6 +606,7 @@ __all__ = [
     "record_access_decision",
     "record_page_result",
     "result_applied",
+    "result_handled",
     "run_id_for",
     "service_name",
     "settle",

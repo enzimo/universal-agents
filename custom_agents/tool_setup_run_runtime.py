@@ -22,10 +22,15 @@ code:
   Inbox's decisions update the run (``tool_setup_runs``): an expired page, or
   one nobody watched after a gateway restart, is offered again automatically,
   up to three pages; a closed page or a denial stops the run. A page's result
-  is applied once, under the run's lock, before anything else looks at it:
-  the gateway keeps a result it could not send and sends it when a team lead
-  is back, so a second copy can arrive, and it is ignored and logged
-  (``event=tool_setup_result_duplicate``), even after the task ended.
+  is applied once, under the run's lock, before anything else looks at it,
+  and marked handled only after its follow-up steps finished (the workflow
+  step, the history entry and the next pages, or the answer when the task had
+  ended; ``mark_page_result_handled``). The gateway keeps a result it could
+  not send and sends it when a team lead is back, so a second copy can
+  arrive: a copy of a handled result is ignored and logged
+  (``event=tool_setup_result_duplicate``), even after the task ended, and a
+  copy of one whose handling failed partway runs the follow-up steps again
+  (``event=tool_setup_result_handled_again``), so the task still continues.
 - **Resume** (``_resume``): once every piece is done, or the run stopped, the
   paused turn gets its interrupt answered and ``set_up_tools`` returns the
   compact per-tool result; after an agent restart (no live turn) the task
@@ -56,6 +61,7 @@ from custom_agents.task_human_interaction_blockers import (
 from custom_agents.tool_setup_runs import (
     ACCESS_APPROVED_CODE,
     FAILED,
+    PENDING,
     PIECE_ACCESS,
     RUN_STOPPED,
     RUN_WAITING,
@@ -74,6 +80,7 @@ from custom_agents.tool_setup_runs import (
     record_access_decision,
     record_page_result,
     result_applied,
+    result_handled,
     service_name,
     settle,
 )
@@ -366,8 +373,9 @@ async def _run_for(agent: Any, task_id: str, match: Any) -> ToolSetupRunV1 | Non
 class PageResultOutcome(StrEnum):
     """What applying a page's result to its run did (``apply_page_result``)."""
 
+    # Applied now, or applied before but its follow-up steps never finished: run them.
     APPLIED = "applied"
-    # The run already applied this result: a second copy.
+    # Its follow-up steps already finished: a second copy, ignored.
     REPEAT = "repeat"
     # No run of the task knows this page.
     NO_RUN = "no_run"
@@ -391,9 +399,9 @@ async def apply_page_result(agent: Any, result: ToolSetupResultV1) -> AppliedPag
     """Apply a page's result to the run that opened it, once, under the run's lock (module docstring).
 
     It runs before the caller checks whether the task ended, so a copy that
-    arrives after the task ended is recognised too, and a result whose task
-    ended is still recorded on its run, so a copy of that one is recognised as
-    well.
+    arrives after the task ended is recognised too. A result applied before
+    whose follow-up steps never finished (``results_handled``) is returned as
+    applied again, so the caller runs them now and the task continues.
     """
 
     run = await _run_for(agent, result.parent_task_id, lambda item: _knows_page(item, result.setup_request_id))
@@ -403,9 +411,9 @@ async def apply_page_result(agent: Any, result: ToolSetupResultV1) -> AppliedPag
         current = await _load(agent, run.run_id)
         if current is None:
             return AppliedPageResult(PageResultOutcome.NO_RUN)
-        if result_applied(current, result.setup_request_id):
+        if result_handled(current, result.setup_request_id):
             logger.info(
-                "A setup page's result arrived again after its run applied it; the copy is ignored. "
+                "A setup page's result arrived again after its run handled it; the copy is ignored. "
                 "event=tool_setup_result_duplicate run_id=%s task_id=%s setup_request_id=%s status=%s",
                 current.run_id,
                 result.parent_task_id,
@@ -413,15 +421,47 @@ async def apply_page_result(agent: Any, result: ToolSetupResultV1) -> AppliedPag
                 result.status,
             )
             return AppliedPageResult(PageResultOutcome.REPEAT, current)
+        if result_applied(current, result.setup_request_id):
+            logger.warning(
+                "A setup page's result arrived again before its handling finished; its follow-up steps run again. "
+                "event=tool_setup_result_handled_again run_id=%s task_id=%s setup_request_id=%s status=%s",
+                current.run_id,
+                result.parent_task_id,
+                result.setup_request_id,
+                result.status,
+            )
+            return AppliedPageResult(PageResultOutcome.APPLIED, current, _offered_again(current, result))
         changed, again = record_page_result(current, result)
         changed = await _save(agent, changed)
     return AppliedPageResult(PageResultOutcome.APPLIED, changed, again)
 
 
+def _offered_again(run: ToolSetupRunV1, result: ToolSetupResultV1) -> bool:
+    """For a result handled again: its piece still waits for its fresh page (only the history line says so)."""
+
+    piece = piece_for_setup(run, result.setup_request_id)
+    return piece is not None and piece.status == PENDING
+
+
+async def mark_page_result_handled(agent: Any, run_id: str, setup_request_id: str) -> None:
+    """Record that a page result's follow-up steps finished, so a later copy of it is ignored."""
+
+    async with _lock(agent, run_id):
+        run = await _load(agent, run_id)
+        if run is None or result_handled(run, setup_request_id):
+            return
+        await _save(agent, run.model_copy(update={"results_handled": (*run.results_handled, setup_request_id)}))
+
+
 async def continue_after_page_result(
     agent: Any, result: ToolSetupResultV1, applied: AppliedPageResult, header: Any, meta: Any
 ) -> None:
-    """After a result was applied to a running task's run: its workflow step, the history, then what comes next."""
+    """After a result was applied to a running task's run: its workflow step, the history, then what comes next.
+
+    The result is marked handled only after all of them, so a failure on the
+    way (or the agent stopping) leaves it to run again when the message is
+    dispatched again.
+    """
 
     run = applied.run
     if run is None:
@@ -446,6 +486,7 @@ async def continue_after_page_result(
         },
     )
     await advance(agent, run.run_id, header, meta)
+    await mark_page_result_handled(agent, run.run_id, result.setup_request_id)
 
 
 def complete_access_steps(agent: Any, run: ToolSetupRunV1) -> None:
@@ -599,6 +640,7 @@ __all__ = [
     "begin_run",
     "complete_access_steps",
     "continue_after_page_result",
+    "mark_page_result_handled",
     "on_access_decided",
     "outcome_for",
     "run_repository",

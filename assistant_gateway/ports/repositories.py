@@ -351,7 +351,7 @@ class ToolSetupRepository(Protocol):
         ...
 
     def mark_tool_setup_result(self, setup_request_id: str, *, state: str) -> bool:
-        """Move an unsent result to ``state`` (sent or unsendable); False when it was not unsent."""
+        """Move an unsent result to ``state`` (sent or unsendable) and drop its kept copy; False when it was not unsent."""
         ...
 
 

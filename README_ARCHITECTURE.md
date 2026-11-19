@@ -2826,7 +2826,9 @@ person which command to run or asking whether to start:
    The same conditional update keeps the task's result in the row
    (`result_json`, a `ToolSetupResultV1` without any address, and
    `result_state`: `unsent`, `sent` or `unsendable`), and the result is sent
-   from there (`GatewayToolSetups.resend_kept_results`). It is addressed when
+   from there (`GatewayToolSetups.resend_kept_results`); the update that
+   marks it sent or unsendable drops the kept copy, which holds the person's
+   account name. It is addressed when
    it is sent, to the team lead known at that moment, under a NATS message id
    that names that lead (`secure_result:<kind>:<result id>:<lead id>`): NATS
    drops a repeated id for 600 seconds, so a copy for a replacement lead must
@@ -2852,9 +2854,18 @@ person which command to run or asking whether to start:
    can still lose it, as it can lose any message the gateway sends it. The
    team lead applies a page's result to its run once, before it checks
    whether the task ended (`tool_setup_run_runtime.apply_page_result`, with
-   the applied ids in `ToolSetupRunV1.results_applied`), so a second copy is
-   ignored (`event=tool_setup_result_duplicate`) and never answers the person
-   twice; the gateway logs a publish NATS answered as a duplicate
+   the applied ids in `ToolSetupRunV1.results_applied`), and marks it handled
+   only after its follow-up steps finished: the workflow step, the history
+   entry and the next pages, or the answer when the task had ended
+   (`results_handled`). A copy of a handled result is ignored
+   (`event=tool_setup_result_duplicate`) and never answers the person twice;
+   a copy of a result whose handling failed partway, or was cut short by a
+   stop, runs the follow-up steps again
+   (`event=tool_setup_result_handled_again`), so the task still continues as
+   it did when every copy was handled in full. A result never changes a
+   piece that no longer waits, and a run saved by the previous version (no
+   ids) handles a replayed copy as that version did. The gateway logs a
+   publish NATS answered as a duplicate
    (`event=gateway_durable_publish_duplicate`). Removing a person deletes
    their setup rows with their chat sessions (`forget_person_records`):
    without the chat a kept result could never be sent, and the person's tasks

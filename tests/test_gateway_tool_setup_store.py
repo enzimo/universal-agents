@@ -119,7 +119,7 @@ def test_ending_a_page_keeps_its_one_result_unsent(settings) -> None:
     assert listed == record
 
 
-def test_an_unsent_result_is_marked_sent_or_unsendable_once(settings) -> None:
+def test_an_unsent_result_is_marked_sent_or_unsendable_once_and_its_copy_dropped(settings) -> None:
     repo = _open(settings)
     for page_id in ("page_1", "page_2", "page_3"):
         repo.record_tool_setup(_page(page_id))
@@ -134,8 +134,10 @@ def test_an_unsent_result_is_marked_sent_or_unsendable_once(settings) -> None:
     assert not repo.mark_tool_setup_result("page_4", state=TOOL_SETUP_RESULT_SENT), "a waiting page has nothing to send"
 
     assert [item.setup_request_id for item in repo.list_unsent_tool_setup_results()] == ["page_3"]
-    assert repo.get_tool_setup("page_1").result_state == TOOL_SETUP_RESULT_SENT
-    assert repo.get_tool_setup("page_2").result_state == TOOL_SETUP_RESULT_UNSENDABLE
+    sent, unsendable, unsent = (repo.get_tool_setup(page_id) for page_id in ("page_1", "page_2", "page_3"))
+    assert (sent.result_state, sent.result_json) == (TOOL_SETUP_RESULT_SENT, None), "the copy goes once it is sent"
+    assert (unsendable.result_state, unsendable.result_json) == (TOOL_SETUP_RESULT_UNSENDABLE, None)
+    assert unsent.result_json == _result("page_3"), "an unsent result keeps its copy"
 
 
 def test_a_table_from_before_kept_results_gains_their_columns_when_the_store_opens(settings) -> None:

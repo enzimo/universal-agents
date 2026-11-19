@@ -1308,7 +1308,8 @@ async def test_a_page_ending_without_a_team_lead_keeps_its_result_for_the_next_s
     assert (result.setup_request_id, result.reason_code) == ("tool_setup_req_old", "tool_setup_page_not_watched")
     assert (queue, message_id) == (lead, f"secure_result:tool_setup_result:tool_setup_req_old:{lead}")
     assert result.broker_session_id is None
-    assert restarted.state_store.tool_setup_repository.get_tool_setup("tool_setup_req_old").result_state == "sent"
+    sent = restarted.state_store.tool_setup_repository.get_tool_setup("tool_setup_req_old")
+    assert (sent.result_state, sent.result_json) == ("sent", None), "the kept copy goes once it is sent"
     assert (await restarted._credential_workflow.tool_setups.resend_kept_results()).sent == 0
     assert len(_setup_results(after_restart)) == 1, "sent once"
     await restarted._credential_workflow.close()

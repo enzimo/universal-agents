@@ -816,6 +816,34 @@ async def test_a_page_ending_while_the_team_lead_is_away_reaches_the_next_lead_a
     assert len(_setup_results(transport)) == 1, "a result is sent once"
 
 
+@pytest.mark.asyncio
+async def test_a_page_for_a_running_task_opens_while_its_request_says_manager_unavailable(handoff, caplog):
+    """The window before any kept result is resent: the request still reads manager_unavailable (finding F4).
+
+    The lead stopped while the chat's reply wait was open, a new lead is back,
+    no kept result rewrote the status, and the new lead sends a page for the
+    same task: the run state, not the status, decides that the task still runs.
+    """
+
+    gateway, envelope, _create, _transport = handoff
+    caplog.set_level(logging.INFO)
+    _thread_request(gateway)
+    gateway._credential_workflow.tool_setups.guide = _Steps()
+    gateway.manager_transitions.start()
+    gateway._maintenance_schedules.ensure_all = AsyncMock()  # type: ignore[method-assign]
+
+    async with gateway._manager_client.response_channel(CHAT_REQUEST):
+        await gateway._manager_client.mark_manager_unavailable(reason="the team lead stopped")
+    await _lead_announces(gateway, "manager_replacement")
+    request = gateway.state_store.get_request(CHAT_REQUEST)
+    assert (request.status, request.run_state) == ("manager_unavailable", "running")
+
+    later = _page(envelope, "tool_setup_req_after_outage", tool_id="http:registrar_one")
+    later.msg_header.from_agent_id = "manager_replacement"
+    assert await gateway._credential_handoffs.try_present(later) is True
+    assert _listed(gateway) == ["tool_setup_req_after_outage"]
+
+
 def _request(*, status: str, run_state: str | None) -> RequestRecord:
     return RequestRecord(
         correlation_id=CHAT_REQUEST, session_key="session_binding", request_kind="interactive",

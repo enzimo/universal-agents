@@ -530,28 +530,30 @@ async def test_a_copy_of_an_expired_pages_result_is_recognised_after_the_page_wa
 
 
 @pytest.mark.asyncio
-async def test_a_run_stored_before_applied_ids_were_kept_still_ignores_a_copy(tmp_path: Path, monkeypatch, caplog) -> None:
-    """A run saved by the previous version has no results_applied; its done piece still marks the copy (C10)."""
+async def test_a_result_replayed_into_a_run_stored_by_the_previous_version_is_handled_as_before(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """A run saved by the previous version records no result ids (C10, finding F2).
 
-    from unittest.mock import AsyncMock
+    A copy replayed into it after the upgrade (an inbox message the stopped
+    agent had not cleared) gets the previous version's handling: the done
+    piece stays done, the follow-up steps run again so the task still
+    continues, and only from then on is a further copy ignored.
+    """
 
-    from custom_agents import tool_setup_runtime
     from custom_agents.tool_setup_run_runtime import run_repository
     from storage.tool_setup_run_repository import RUN_TABLE
 
     lead = lead_agent(tmp_path, enabled=False)
-    answers = AsyncMock()
-    monkeypatch.setattr(tool_setup_runtime, "_publish_task_response", answers)
     broker_states(monkeypatch, {GITHUB: SIGNED_OUT, "cli:google": SIGNED_OUT | {"team_sign_in_app": "configured"}})
     _tool_call, raised = start(lead, [GITHUB, "cli:google"], purpose="check your GitHub and Gmail for Acme")
     await pause_turn(lead, raised.interrupt)
     github, _google = sent_pages(lead)
     await gateway_result(lead, github, "completed", account_label="exampleuser")
     run = the_run(lead)
-    workflow_events = len(workflow_service_for(lead).repository.events(run.workflow_id, limit=500))
-    # Store the run as the previous version wrote it: the same run without the applied ids.
+    # Store the run as the previous version wrote it: the same run without the result ids.
     stored = json.loads(run.model_dump_json())
-    del stored["results_applied"]
+    del stored["results_applied"], stored["results_handled"]
     repository = run_repository(lead)
     with repository._connect() as conn:
         conn.execute(
@@ -559,15 +561,174 @@ async def test_a_run_stored_before_applied_ids_were_kept_still_ignores_a_copy(tm
             (json.dumps(stored), run.run_id),
         )
         conn.commit()
-    assert the_run(lead).results_applied == (), "it loads, with no applied ids"
+    assert (the_run(lead).results_applied, the_run(lead).results_handled) == ((), ()), "it loads"
 
     with caplog.at_level("INFO"):
         await gateway_result(lead, github, "completed", account_label="exampleuser")
 
+    assert "event=tool_setup_result_duplicate" not in caplog.text, "the previous version's copy is handled as it was"
+    assert [piece.status for piece in the_run(lead).pieces if piece.tool_id == GITHUB] == ["done"]
+    assert _github_history(lead) == ["Setup page (sign_in) for cli:github: completed."] * 2
+    assert the_run(lead).results_handled == (github.setup_request_id,)
+
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
     assert f"event=tool_setup_result_duplicate run_id={run.run_id}" in caplog.text
+    assert len(_github_history(lead)) == 2
+
+
+# A result whose first handling failed partway (finding F1) --------------------------------
+
+
+def _github_history(lead) -> list[str]:
     entries = lead.task_manager.get_task_history_entries("task-lead", limit=None)
-    assert [entry.summary for entry in entries if entry.summary.startswith("Setup page (sign_in) for cli:github")] == [
-        "Setup page (sign_in) for cli:github: completed."
-    ]
-    assert len(workflow_service_for(lead).repository.events(run.workflow_id, limit=500)) == workflow_events
-    answers.assert_not_awaited()
+    return [entry.summary for entry in entries if entry.summary.startswith("Setup page (sign_in) for cli:github")]
+
+
+def _page_on_its_step(lead, setup_request_id: str) -> tuple[str, str] | None:
+    """The page's workflow step state and the page's own status on it."""
+
+    record = workflow_service_for(lead).repository.get(the_run(lead).workflow_id)
+    for step in record.steps:
+        for link in step.setups:
+            if link.setup_request_id == setup_request_id:
+                return str(getattr(step.state, "value", step.state)), str(link.status)
+    return None
+
+
+async def _github_page_after_google(tmp_path: Path, monkeypatch):
+    """Two tools, so a workflow tracks the pages; the Google page finished first."""
+
+    lead = lead_agent(tmp_path, enabled=False)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT, "cli:google": SIGNED_OUT | {"team_sign_in_app": "configured"}})
+    _tool_call, raised = start(lead, [GITHUB, "cli:google"], purpose="check your GitHub and Gmail for Acme")
+    await pause_turn(lead, raised.interrupt)
+    github, google = sent_pages(lead)
+    await gateway_result(lead, google, "completed", account_label="me@acme.example")
+    return lead, github
+
+
+def _failing_once(real, error: Exception):
+    calls = 0
+
+    def call(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise error
+        return real(*args, **kwargs)
+
+    return call
+
+
+def _async_failing_once(real, error: Exception):
+    calls = 0
+
+    async def call(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise error
+        return await real(*args, **kwargs)
+
+    return call
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_step", ["task_lookup", "workflow_step", "history", "next_pages"])
+async def test_a_result_whose_first_handling_failed_continues_the_task_when_dispatched_again(
+    tmp_path: Path, monkeypatch, caplog, failing_step: str
+) -> None:
+    """The run applied the result, then a follow-up step failed; the inbox dispatches it again and the task resumes."""
+
+    from custom_agents import tool_setup_run_runtime as run_runtime
+
+    lead, github = await _github_page_after_google(tmp_path, monkeypatch)
+    error = RuntimeError("the store is unavailable for a moment")
+    if failing_step == "task_lookup":
+        monkeypatch.setattr(lead.task_manager, "get_task_info", _failing_once(lead.task_manager.get_task_info, error))
+    elif failing_step == "workflow_step":
+        monkeypatch.setattr(run_runtime, "record_setup_result", _failing_once(run_runtime.record_setup_result, error))
+    elif failing_step == "history":
+        monkeypatch.setattr(run_runtime, "_history", _async_failing_once(run_runtime._history, error))
+    else:
+        monkeypatch.setattr(run_runtime, "advance", _async_failing_once(run_runtime.advance, error))
+
+    with pytest.raises(RuntimeError):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+    assert the_run(lead).results_applied[-1] == github.setup_request_id
+    assert github.setup_request_id not in the_run(lead).results_handled
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+
+    assert "event=tool_setup_result_handled_again" in caplog.text
+    assert "event=tool_setup_result_duplicate" not in caplog.text
+    assert "task-lead" in lead._pending_interrupt_responses, "the task resumes"
+    assert the_run(lead).status == "finished"
+    assert _page_on_its_step(lead, github.setup_request_id)[1] == "completed", "its workflow step records the page"
+    assert 1 <= len(_github_history(lead)) <= 2, "at most one repeated history entry"
+    assert github.setup_request_id in the_run(lead).results_handled
+
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+    assert "event=tool_setup_result_duplicate" in caplog.text, "once handled, a copy is ignored"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_for_an_ended_task_that_failed_is_sent_when_dispatched_again_and_only_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from custom_agents import tool_setup_runtime
+
+    lead, github = await _github_page_after_google(tmp_path, monkeypatch)
+    lead.task_manager.complete_task("task-lead", datetime.now(timezone.utc).isoformat())
+    answers = AsyncMock(side_effect=[TimeoutError("nats: timeout"), None, None])
+    monkeypatch.setattr(tool_setup_runtime, "_publish_task_response", answers)
+
+    with pytest.raises(TimeoutError):
+        await gateway_result(lead, github, "completed", account_label="exampleuser")
+    await gateway_result(lead, github, "completed", account_label="exampleuser")
+    await gateway_result(lead, github, "completed", account_label="exampleuser")
+
+    assert answers.await_count == 2, "the failed answer is sent again; a later copy does not answer a third time"
+
+
+@pytest.mark.asyncio
+async def test_a_late_copy_of_an_expired_pages_result_leaves_the_completed_step_alone(tmp_path: Path, monkeypatch) -> None:
+    lead, first = await _github_page_after_google(tmp_path, monkeypatch)
+    await gateway_result(lead, first, "expired", attempt=1)
+    second = sent_pages(lead)[-1]
+    assert second.setup_request_id != first.setup_request_id
+    await gateway_result(lead, second, "completed", account_label="exampleuser")
+    step_before, pages_before = _page_on_its_step(lead, second.setup_request_id), len(sent_pages(lead))
+
+    await gateway_result(lead, first, "expired", attempt=1)
+
+    assert _page_on_its_step(lead, second.setup_request_id) == step_before
+    assert len(sent_pages(lead)) == pages_before
+
+
+@pytest.mark.asyncio
+async def test_a_first_result_for_a_piece_whose_page_send_failed_is_not_a_duplicate(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The page request raised (NATS may still have stored it), so the piece failed; the page opened anyway (F2)."""
+
+    lead = lead_agent(tmp_path, enabled=False)
+    broker_states(monkeypatch, {GITHUB: SIGNED_OUT})
+    lead.team_comms.send_message.side_effect = TimeoutError("nats: timeout")
+    _tool_call, raised = start(lead, [GITHUB], purpose="list the repos")
+    await pause_turn(lead, raised.interrupt)
+    [page] = sent_pages(lead)
+    lead.team_comms.send_message.side_effect = None
+
+    with caplog.at_level("INFO"):
+        await gateway_result(lead, page, "completed", account_label="exampleuser")
+
+    assert "event=tool_setup_result_duplicate" not in caplog.text
+    assert [piece.status for piece in the_run(lead).pieces] == ["failed"], "a stale result never changes the piece"
+    assert _github_history(lead) == ["Setup page (sign_in) for cli:github: completed."]

@@ -132,9 +132,10 @@ class ToolSetupRecord:
     ``status`` is ``waiting`` until the page ends, then how it ended
     (``completed``, ``declined``, ``expired``, ``unavailable``). Finishing is a
     conditional update that also keeps the task's result (``result_json``, a
-    ``ToolSetupResultV1`` without any address), so exactly one result exists
-    even when the page's watcher and the person's own ``/link`` finish
-    together. ``result_state`` says whether that result was sent
+    ``ToolSetupResultV1`` without any address) until it is sent or found
+    unsendable, when the same update that records that drops it, so exactly
+    one result exists even when the page's watcher and the person's own
+    ``/link`` finish together. ``result_state`` says whether that result was sent
     (``TOOL_SETUP_RESULT_*``): a result is addressed only when it is sent, to
     the team lead known then, so one kept while no lead could be reached is
     sent when a lead is back. Both are None while the page waits and on rows
