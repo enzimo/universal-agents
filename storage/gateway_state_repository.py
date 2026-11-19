@@ -979,6 +979,11 @@ class _RelationalGatewayStateRepository:
 
         raise NotImplementedError
 
+    def _ensure_column(self, conn: Any, table_name: str, column_name: str, column_type: str) -> None:
+        """Add a column an existing table lacks when the store opens (each database adds it differently)."""
+
+        raise NotImplementedError
+
 
     def _connect(self) -> sqlite3.Connection | _BorrowedConnection:
         active = self._active_transaction.get()
