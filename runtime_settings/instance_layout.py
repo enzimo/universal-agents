@@ -151,6 +151,7 @@ UPGRADES_DIRNAME = "upgrades"
 ADAPTER_HOST_FILES_UPGRADE_FILENAME = "adapter-host-files.json"
 ADAPTER_HOST_FILES_UPGRADE_PROGRESS_FILENAME = "adapter-host-files.started"
 ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME = "adapter-host-files.lock"
+ADAPTER_HOST_FILES_WITHOUT_RECORDS_FILENAME = "adapter-host-files.without-records.txt"
 PROTOCOL1_IDS_CHECK_FILENAME = "protocol1-ids.json"
 # /upgrade: team exports the supervisor wrote, and the requests it reads
 # (team_transfer.export_requests).
@@ -660,10 +661,11 @@ class InstanceLayout:
         Up to 0.9.13 a file sent through a chat app the adapter host runs
         stayed in the adapter host's transfer folder; from 0.10 agents open
         files only in ``uploads_dir``. The step that moves those files
-        (``instance_upgrades.adapter_host_files``) writes this file,
-        with its finish time and counts, once every file was handled, and the
-        launcher runs the step only while it is missing. Under ``state/``, so
-        no agent tool or sandboxed code can reach it."""
+        (``instance_upgrades.adapter_host_files``) writes this file, with its
+        finish time, its counts and the id of the list its run wrote
+        (``adapter_host_files_without_records_path``), once every file was
+        handled, and the launcher runs the step only while it is missing.
+        Under ``state/``, so no agent tool or sandboxed code can reach it."""
 
         return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_FILENAME
 
@@ -688,6 +690,23 @@ class InstanceLayout:
         ``flock`` matters."""
 
         return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME
+
+    @property
+    def adapter_host_files_without_records_path(self) -> Path:
+        """The names of the files the upgrade step for adapter-host files left that no record names.
+
+        One name per line, sorted: only names of the gateway's own form
+        (``adapter_upload_`` and 12 lowercase hex digits), never one a person
+        may have chosen. Written by the run that writes the step's marker, just
+        before it, so an administrator can delete exactly those files under the
+        conditions the step's warning gives. A list is valid only beside the
+        marker of the run that wrote it: every later run that does not find the
+        marker removes it, and because that removal can fail, the marker holds
+        the list's id and the warning's delete command deletes nothing unless
+        the marker holds it. Under ``state/``, so no agent tool or sandboxed
+        code can reach it."""
+
+        return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_WITHOUT_RECORDS_FILENAME
 
     @property
     def protocol1_ids_check_path(self) -> Path:

@@ -2602,7 +2602,7 @@ def test_a_manager_that_checks_at_once_finds_the_streams_a_late_gateway_creates(
 
     settings = resolve_live_transport_settings()
     nats_url = settings.nats_servers[0]
-    team_id = new_id("team_streams").lower()
+    team_id = new_id("streams").lower()  # 20 characters: protocol 1 carries team ids of up to 24
     config_path = _prepare_launch(
         tmp_path,
         monkeypatch,
@@ -2674,7 +2674,7 @@ def test_stream_setup_creates_the_streams_participants_check_and_a_repeat_change
     from id_generation import new_id
     from live_nats_client import nats_transport_config_from_env, resolve_live_transport_settings
 
-    team_id = new_id("team_streams").lower()
+    team_id = new_id("streams").lower()  # 20 characters: protocol 1 carries team ids of up to 24
     mapper = NatsSubjectMapper(team_id=team_id)
     config_path, env = _stream_setup_case(tmp_path, team_id=team_id)
     settings = resolve_live_transport_settings()
@@ -2712,7 +2712,7 @@ def test_stream_setup_fails_clearly_for_a_stream_the_broker_will_not_change(tmp_
     from id_generation import new_id
     from live_nats_client import resolve_live_transport_settings
 
-    team_id = new_id("team_streams").lower()
+    team_id = new_id("streams").lower()  # 20 characters: protocol 1 carries team ids of up to 24
     memory_path, env = _stream_setup_case(tmp_path / "memory", team_id=team_id, storage="memory")
     file_path, _env = _stream_setup_case(tmp_path / "file", team_id=team_id, storage="file")
     try:

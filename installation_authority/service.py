@@ -34,8 +34,9 @@ Rules from the message contract's README ("Installation traffic", "Trust over ti
   sequence above every one before it and at least its issue time in milliseconds), renews
   its own certificate at two thirds of its life and signs with the new one from then on,
   and forgets old certificates once a day, deleting them from ``UA1_CERTS`` (revoked ones
-  stay). A step that fails is tried again a minute later. When its NATS connection has
-  closed for good it stops (``AuthorityDisconnected``), so its supervisor sees it.
+  stay). A step that fails is tried again a minute later, except the forgetting, which
+  notes the day it ran before it starts and so runs again the next day. When its NATS
+  connection has closed for good it stops (``AuthorityDisconnected``), so its supervisor sees it.
 - **Only its own records count.** Every process shares one NATS login in this phase, so
   any of them can write ``UA1_CERTS``. The authority uses a record it reads there (the
   revocations record to sign again, a certificate to hand back) only when it verifies
@@ -78,7 +79,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 import rfc8785
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from nats.js.errors import KeyNotFoundError, NoKeysError, NotFoundError
+from nats.js.errors import KeyNotFoundError
 from pydantic import ValidationError
 
 from custom_messages.wire.encoding import b64url, format_timestamp
@@ -98,6 +99,7 @@ from custom_messages.wire.trust import (
 )
 from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
+from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.contract_files import transport
 from custom_transport.protocol1.mapping_check import PartitionMappingError, check_partition_mapping
 from custom_transport.protocol1.host_keys import AuthorityKeys, HostKeys
@@ -371,10 +373,12 @@ class InstallationAuthority:
         return entry.value or None
 
     async def _bucket_keys(self, prefix: str) -> list[str]:
-        try:
-            return [key for key in await (await self._records()).keys() if key.startswith(prefix)]
-        except (NoKeysError, NotFoundError):  # the bucket holds no keys yet
-            return []
+        """Every key in UA1_CERTS that starts with ``prefix``, or an error (``bucket_reads.list_keys``).
+
+        The authority creates the bucket before it reads it, so a missing bucket is an error too.
+        """
+
+        return await list_keys(self._js, CERTIFICATES_BUCKET, prefix)
 
     def _own_record(self, data: bytes, record: str, key: str, now: datetime) -> dict[str, Any]:
         """``data`` as a ``record`` under ``key`` that this authority signed; raises ``FrameRefused`` otherwise.
@@ -520,26 +524,32 @@ class InstallationAuthority:
 
     async def upkeep(self, now: datetime) -> None:
         """Sign what is due at ``now``: revocations six hours old, its own certificate at two thirds of its life,
-        and the daily forgetting. A step that fails is logged and tried again at the next check.
+        and the daily forgetting. A step that fails is logged and tried again at the next check; the forgetting,
+        which notes the day it ran before it starts, the next day.
 
         Raises ``AuthorityDisconnected`` once the NATS client gave up reconnecting.
         """
 
         if self._nc is not None and self._nc.is_closed:
             raise AuthorityDisconnected("The installation authority's NATS connection closed and will not reconnect.")
-        steps: tuple[tuple[bool, Callable[[datetime], Any], str], ...] = (
-            (self._revocations_due(now), self._sign_revocations, "revocations_resign_failed"),
-            (self._own_certificate_due(now), self._renew_own_certificate, "authority_certificate_renewal_failed"),
-            (self._forget_due(now), self.forget, "authority_forget_failed"),
+        # When a failed step runs again: at the next check, or for the forgetting, which notes
+        # the day it ran before it starts, once its interval has passed.
+        next_check = f"in {int(UPKEEP_INTERVAL.total_seconds())} seconds"
+        steps: tuple[tuple[bool, Callable[[datetime], Any], str, str], ...] = (
+            (self._revocations_due(now), self._sign_revocations, "revocations_resign_failed", next_check),
+            (self._own_certificate_due(now), self._renew_own_certificate, "authority_certificate_renewal_failed",
+             next_check),
+            (self._forget_due(now), self.forget, "authority_forget_failed",
+             f"in {int(FORGET_INTERVAL.total_seconds() // 3600)} hours"),
         )
-        for due, step, event in steps:
+        for due, step, event, again in steps:
             if not due:
                 continue
             try:
                 await step(now)
             except Exception:
-                self.logger.exception("An authority upkeep step failed; it is tried again in %s seconds. event=%s "
-                                      "installation=%s", int(UPKEEP_INTERVAL.total_seconds()), event, self.installation)
+                self.logger.exception("An authority upkeep step failed; it is tried again %s. event=%s installation=%s",
+                                      again, event, self.installation)
 
     def _revocations_due(self, now: datetime) -> bool:
         if not self._revocations:
