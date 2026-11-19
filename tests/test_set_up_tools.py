@@ -30,7 +30,7 @@ from strands.models.model import Model as _StrandsModel
 
 from custom_agents import access_runtime
 from custom_agents.access_workflows import workflow_service_for
-from custom_agents.task_human_interaction_blockers import get_human_interaction_blocker
+from custom_agents.task_human_interaction_blockers import get_human_interaction_blocker, setup_answer_held
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND, TOOL_SETUP_RUN_RESPONSE_KIND
 from custom_messages.contracts.access_v2 import AccessRequestStatus, AccessReviewChoice
 from custom_messages.enums import ProgressState
@@ -114,7 +114,10 @@ async def test_repos_in_github_with_access_and_sign_in_missing(tmp_path: Path, m
     steering = lead._pending_interrupt_responses["task-lead"]
     [answer] = steering.interrupt_responses
     assert answer["response"]["kind"] == TOOL_SETUP_RUN_RESPONSE_KIND
-    assert get_human_interaction_blocker(lead.task_manager, "task-lead") is None
+    # The record stays, marked, until the paused turn really resumes: the
+    # answer waits for the task's lane (test_setup_run_resume_wait).
+    blocker = get_human_interaction_blocker(lead.task_manager, "task-lead")
+    assert blocker["run_id"] == run.run_id and setup_answer_held(blocker, lead.id)
     tool_call.response = answer["response"]
     result = call(lead, [GITHUB], tool_call, purpose="list the repos you can access in GitHub")
     assert result["status"] == "ready"

@@ -24,8 +24,20 @@ code:
   closed page or a denial stops the run.
 - **Resume** (``_resume``): once every piece is done, or the run stopped, the
   paused turn gets its interrupt answered and ``set_up_tools`` returns the
-  compact per-tool result; after an agent restart (no live turn) the task
-  resumes from a directive that states the same result.
+  compact per-tool result; with no live turn (after an agent restart) the
+  task resumes from a note that states the same result.
+
+  The task's record of the wait (its ``tool_setup_run`` blocker) is the only
+  saved record of it, so it stays until the wait really ends. A live turn's
+  answer waits in memory until the task's lane is free and the agent is not
+  paused (``execution_lanes_runtime``), so the record is first marked as
+  holding the answer (``mark_setup_answer_held``), and the resumed turn
+  removes it just before it runs (``task_steering_runtime``). Until
+  2026-11-19 the record was deleted when the run ended, and a task whose
+  answer waited for a busy lane was reported as stuck. A note is saved
+  before the record is removed; a restart between the two saves the same
+  note again, which is not added twice. Both decisions are made under the
+  run's lock, after reading the record again, so a task is resumed once.
 
 The run and the task blocker are stored, so both processes can restart
 during the wait. Nothing here grants access or reads a credential.
@@ -43,9 +55,12 @@ from typing import Any
 from custom_agents.access_workflow_setup_hooks import link_setup_request, record_setup_result
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_human_interaction_blockers import (
-    clear_human_interaction_blocker,
+    clear_setup_run_blocker,
     get_human_interaction_blocker,
+    is_setup_run_blocker,
+    mark_setup_answer_held,
     record_human_interaction_blocker,
+    setup_answer_held,
 )
 from custom_agents.tool_setup_runs import (
     ACCESS_APPROVED_CODE,
@@ -480,53 +495,115 @@ async def on_access_decided(agent: Any, request: AccessRequestV1, header: Any, m
 # -- resume --------------------------------------------------------------------------------
 
 
-async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any) -> None:
-    """Answer the paused turn, or resume the task from a directive after a restart."""
+# The note a task resumes from when no paused turn can take the run's answer.
+RUN_ENDED_NOTE = (
+    "The tool setup this task paused for ended while the task was paused. Continue the task using this "
+    "result; do the work if every tool is ready, otherwise tell the person plainly what is not set up: "
+)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _paused_turn_waits(agent: Any, run: ToolSetupRunV1) -> bool:
+    """The task's paused turn is still in memory and waits on this run's interrupt."""
+
+    session = getattr(agent, "_interrupted_turn_sessions", {}).get(run.task_id)
+    return session is not None and any(item.interrupt_id == run.interrupt_id for item in session.interrupts)
+
+
+async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any) -> bool:
+    """Answer the paused turn, or resume the task from a note (module docstring).
+
+    True when this call resumed the task. Runs under the run's lock and reads
+    the task's record again inside it, so callers that see the run ended at
+    the same time resume the task once.
+    """
 
     manager = agent.task_manager
-    run_ops = manager.operations_runtime.run
-    blocker = await run_ops(partial(get_human_interaction_blocker, manager), run.task_id)
-    # Only the task's own wait is answered, once: the blocker is cleared first.
-    if not blocker or blocker.get("kind") != TOOL_SETUP_RUN_KIND or blocker.get("run_id") != run.run_id:
-        logger.info("No task waits on this setup run. event=tool_setup_run_not_waited run_id=%s", run.run_id)
-        return
-    await run_ops(partial(clear_human_interaction_blocker, manager), run.task_id)
+    async with _lock(agent, run.run_id):
+        blocker = await manager.operations_runtime.run(partial(get_human_interaction_blocker, manager), run.task_id)
+        # Only the task's own wait is answered.
+        if not is_setup_run_blocker(blocker, run.run_id):
+            logger.info("No task waits on this setup run. event=tool_setup_run_not_waited run_id=%s", run.run_id)
+            return False
+        if _paused_turn_waits(agent, run):
+            if setup_answer_held(blocker):
+                return False  # answered already: the answer waits for the lane, or the lane is resuming it
+            return await _answer_paused_turn(agent, run)
+        result = await asyncio.to_thread(outcome_for, agent, run)
+        resumed = await _resume_from_note(
+            agent, run.task_id, run.run_id, RUN_ENDED_NOTE + json.dumps(result, sort_keys=True),
+            history="Tool setup ended; the task resumes.", event="tool_setup_run_resume",
+        )
+    if resumed:
+        logger.info(
+            "A setup run ended; the task resumes from a note. event=tool_setup_run_ended run_id=%s task_id=%s status=%s",
+            run.run_id,
+            run.task_id,
+            run.status,
+        )
+    return resumed
+
+
+async def _answer_paused_turn(agent: Any, run: ToolSetupRunV1) -> bool:
+    """Mark the record, then hand the answer to the paused turn; it runs when the task's lane is free.
+
+    The mark is saved before the answer exists in memory, so the answer is
+    never held without its record; the resumed turn removes the record
+    (``task_steering_runtime``). The turn reads the stored run.
+    """
+
+    manager = agent.task_manager
+    marked = await manager.operations_runtime.run(
+        partial(mark_setup_answer_held, manager), run.task_id, run.run_id, holder_id=str(agent.id), at=_now()
+    )
+    if not marked:
+        return False
+    # The live turn resumes with its interrupt answered, as the steering
+    # runtime does for a live session (``task_steering_runtime``).
+    agent._pending_interrupt_responses[run.task_id] = TaskSteering(
+        steering_id=f"tool_setup_resume_{run.run_id}",
+        steering_type=TaskSteeringType.INTERRUPT_RESPONSE,
+        target_task_id=run.task_id,
+        target_agent_id=agent.id,
+        interrupt_responses=[
+            {"interrupt_id": run.interrupt_id, "response": {"kind": TOOL_SETUP_RUN_RESPONSE_KIND, "run_id": run.run_id}}
+        ],
+        status=TaskSteeringStatus.PENDING,
+        idempotency_key=f"tool_setup_resume:{run.interrupt_id}",
+    )
     logger.info(
-        "A setup run ended; the task resumes. event=tool_setup_run_ended run_id=%s task_id=%s status=%s",
+        "A setup run ended; its answer waits for the task's lane. event=tool_setup_answer_held run_id=%s task_id=%s "
+        "status=%s",
         run.run_id,
         run.task_id,
         run.status,
     )
-    session = getattr(agent, "_interrupted_turn_sessions", {}).get(run.task_id)
-    if session is not None and any(item.interrupt_id == run.interrupt_id for item in session.interrupts):
-        # The live turn resumes with its interrupt answered, as the steering
-        # runtime does for a live session (``task_steering_runtime``); the
-        # tool reads the stored run.
-        steering = TaskSteering(
-            steering_id=f"tool_setup_resume_{run.run_id}",
-            steering_type=TaskSteeringType.INTERRUPT_RESPONSE,
-            target_task_id=run.task_id,
-            target_agent_id=agent.id,
-            interrupt_responses=[
-                {"interrupt_id": run.interrupt_id, "response": {"kind": TOOL_SETUP_RUN_RESPONSE_KIND, "run_id": run.run_id}}
-            ],
-            status=TaskSteeringStatus.PENDING,
-            idempotency_key=f"tool_setup_resume:{run.interrupt_id}",
-        )
-        agent._pending_interrupt_responses[run.task_id] = steering
-        schedule_pending_work(agent)
-        return
-    result = await asyncio.to_thread(outcome_for, agent, run)
-    directive = (
-        "The tool setup this task paused for ended while the task was paused. Continue the task using this "
-        "result; do the work if every tool is ready, otherwise tell the person plainly what is not set up: "
-        + json.dumps(result, sort_keys=True)
-    )
-    await run_ops(manager.append_runtime_resume_directive, run.task_id, directive)
-    await _history(agent, run.task_id, "Tool setup ended; the task resumes.", {"event": "tool_setup_run_resume", "run_id": run.run_id})
-    await run_ops(manager.update_main_task_state, run.task_id, ProgressState.ACCEPTED, datetime.now(timezone.utc).isoformat())
-    await run_ops(manager.enqueue_task, run.task_id, front=True)
     schedule_pending_work(agent)
+    return True
+
+
+async def _resume_from_note(agent: Any, task_id: str, run_id: str, note: str, *, history: str, event: str) -> bool:
+    """Queue the task at the front with a note its next turn reads; True when this call removed the record.
+
+    The caller holds the run's lock. The note is saved before the record is
+    removed: a restart between the two finds the record and saves the same
+    note again, which is not added twice (``append_runtime_resume_directive``).
+    """
+
+    manager = agent.task_manager
+    run_ops = manager.operations_runtime.run
+    await run_ops(manager.append_runtime_resume_directive, task_id, note)
+    if not await run_ops(partial(clear_setup_run_blocker, manager), task_id, run_id):
+        # The record was read under the lock; only the task ending removes it meanwhile.
+        return False
+    await _history(agent, task_id, history, {"event": event, "run_id": run_id})
+    await run_ops(manager.update_main_task_state, task_id, ProgressState.ACCEPTED, _now())
+    await run_ops(manager.enqueue_task, task_id, front=True)
+    schedule_pending_work(agent)
+    return True
 
 
 def outcome_for(agent: Any, run: ToolSetupRunV1) -> dict[str, Any]:

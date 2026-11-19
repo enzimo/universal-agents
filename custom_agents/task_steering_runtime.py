@@ -102,7 +102,7 @@ from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
-    clear_answered_access_blocker,
+    clear_answered_blocker,
     clear_human_interaction_blocker,
     record_human_interaction_blocker,
 )
@@ -1035,9 +1035,9 @@ async def _take_interrupt_response(
         f"{response_text}"
     )
     await agent.task_manager.operations_runtime.run(
-        partial(clear_answered_access_blocker, agent.task_manager),
+        partial(clear_answered_blocker, agent.task_manager),
         task_id,
-        _answered_access_ids(steering),
+        _structured_answers(steering),
     )
     await agent.task_manager.operations_runtime.run(
         agent.task_manager.append_runtime_resume_directive, task_id, directive
@@ -1127,18 +1127,21 @@ def _build_interrupt_response_blocks(
     return blocks
 
 
-def _answered_access_ids(
+def _structured_answers(
     steering: TaskSteering,
-) -> list[tuple[str, str]]:
-    """The (interrupt id, access request id) pairs a structured access outcome answers."""
+) -> list[tuple[str, Dict[str, Any]]]:
+    """The (interrupt id, structured answer) pairs an answer carries.
+
+    Trusted code answers access and setup-run waits with a dict
+    (``clear_answered_blocker`` matches it to the task's record); a text
+    answer from a person names no saved wait.
+    """
     answers = []
     for item in steering.interrupt_responses or []:
         response = item.get("response")
-        if isinstance(response, dict):
-            interrupt_id = item.get("interrupt_id") or item.get("interruptId")
-            request_id = response.get(ACCESS_REQUEST_ID_KEY)
-            if interrupt_id and request_id:
-                answers.append((str(interrupt_id), str(request_id)))
+        interrupt_id = item.get("interrupt_id") or item.get("interruptId")
+        if isinstance(response, dict) and interrupt_id:
+            answers.append((str(interrupt_id), dict(response)))
     return answers
 
 
@@ -1189,9 +1192,9 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
     # The access-request handler already checked the stored decision; every
     # tool call is still decided again when the SDK resumes.
     await agent.task_manager.operations_runtime.run(
-        partial(clear_answered_access_blocker, agent.task_manager),
+        partial(clear_answered_blocker, agent.task_manager),
         task_id,
-        _answered_access_ids(steering),
+        _structured_answers(steering),
     )
     # A resumed turn is a new turn: it gets its own stop for its commands.
     tool_stop = agent._set_active_execution_context(task_id)

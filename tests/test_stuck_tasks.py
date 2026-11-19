@@ -43,7 +43,8 @@ from custom_agents.task_steering_runtime import (
     INTERRUPT_RESUMED_EVENT,
     INTERRUPT_WAITS_ON_REQUESTER_KEY,
 )
-from custom_agents.tool_setup_runs import RUN_FINISHED, TOOL_SETUP_RUN_KIND, ToolSetupRunV1
+from custom_agents import tool_setup_run_runtime
+from custom_agents.tool_setup_runs import DONE, RUN_FINISHED, TOOL_SETUP_RUN_KIND, RunPieceV1, ToolSetupRunV1
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccessRequestStatus,
@@ -589,6 +590,45 @@ async def test_a_task_stranded_after_its_form_result_and_a_later_setup_pause_is_
     await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
     (notice,) = notices(lead)
     assert notice.title == STRANDED_TITLE
+
+
+@pytest.mark.asyncio
+async def test_a_finished_setup_run_whose_answer_waits_for_a_busy_lane_is_never_reported(lead, monkeypatch):
+    """Review FAIL-2: the run ends while the paused turn is live, and its lane stays busy past the threshold.
+
+    The answer waits in memory until the lane is free (``execution_lanes_runtime``);
+    the saved record of the wait must stay until the turn really resumes.
+    """
+    manager = lead.task_manager
+    started = datetime.now(timezone.utc) - timedelta(minutes=30)
+    held = record("root", state=ProgressState.ACCEPTED, at=started)
+    assert manager.add_task(held.task.model_copy(update={"task_state": []}), held.header, held.meta, owner_person_id="jordan")
+    manager.update_main_task_state("root", ProgressState.IN_PROGRESS, iso(started))
+    # set_up_tools paused the turn: its record, then WAITING (task_steering_runtime).
+    record_human_interaction_blocker(manager, "root", {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"})
+    manager.update_main_task_state("root", ProgressState.WAITING, iso(started + timedelta(minutes=1)))
+    ToolSetupRunRepository(manager.storage_settings).create(
+        ToolSetupRunV1(
+            run_id="run-1", team_id="team", person_id="jordan", task_id="root", agent_id="lead",
+            agent_type="TeamArchitect", tool_ids=("http:registrar",), interrupt_id="i1",
+            pieces=(RunPieceV1(piece_id="sign_in", tool_id="http:registrar", kind="sign_in", status=DONE),),
+        )
+    )
+    lead._interrupted_turn_sessions = {"root": SimpleNamespace(interrupts=[SimpleNamespace(interrupt_id="i1")])}
+    lead._pending_interrupt_responses = {}
+    woken = []
+    # The lane is busy (or the agent paused): the drain does not run the resume yet.
+    monkeypatch.setattr(tool_setup_run_runtime, "schedule_pending_work", woken.append)
+
+    await tool_setup_run_runtime.advance(lead, "run-1")  # the last page ended: the run finishes
+
+    assert "root" in lead._pending_interrupt_responses and woken, "the answer waits for its lane"
+    first = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=first)
+    await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    assert TASK_WAITING_ON_NOTHING not in waiting_reasons(lead)
+    assert not notices(lead) and not chats(lead)
+    assert "root" not in manager.task_state.task_queue, "the held answer resumes it, not the queue"
 
 
 @pytest.mark.asyncio
