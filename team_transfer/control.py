@@ -51,6 +51,7 @@ from runtime_settings.instance_layout import (
 )
 from team_transfer.container import TransferFileError, TransferReader, iter_files
 from team_transfer.format import TransferModel, section_files_prefix
+from team_transfer.team_ids import TeamIds
 from team_transfer.sections import (
     ExportSource,
     ImportContext,
@@ -288,7 +289,11 @@ def defined_agent_types(reader: TransferReader) -> list[tuple[str, str]]:
 
     from custom_agents.agent_catalog import load_agent_catalog
 
-    records = read_section_records(reader, ControlSection.name, ControlSection.schema_version)
+    # Agent types do not depend on the team id, so the export's own records are read.
+    records = read_section_records(
+        reader, ControlSection.name, ControlSection.schema_version,
+        team_ids=TeamIds.unchanged(reader.manifest.team_id),
+    )
     found: list[tuple[str, str]] = []
     with tempfile.TemporaryDirectory(prefix="ua-control-types-") as scratch:
         shadow = Path(scratch) / "control"

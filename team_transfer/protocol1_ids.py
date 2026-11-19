@@ -11,10 +11,13 @@ onboarding's Import when the export is opened, before its review is prepared
 (``service._import_context``), which covers the command-line import, the operator's review
 page and onboarding's own validation and import.
 
-What it checks, as the launcher does for the catalog: the export's team id
-(``TransferManifestV1.team_id``) and every agent type its ``control`` section defines
-(``control.defined_agent_types``), selected or not. The release's own agent types fit.
-Agent ids are not checked: no section carries the records that hold them.
+What it checks, as the launcher does for the catalog: the team id the import writes
+(``TransferReader.team_ids``: the export's own, or the new id the import gives the team,
+owner's decision 103 and ``team_transfer.team_ids``) and every agent type its ``control``
+section defines (``control.defined_agent_types``), selected or not. The release's own agent
+types fit. Agent ids are not checked: no section carries the records that hold them. A team
+id that does not fit is refused naming how to give the team a new one; an agent type keeps
+its name, so its refusal tells the owner to rename it on the instance the export came from.
 
 A later batch into an instance that exists is not checked: its team id is the instance's, and
 an agent type added there later gets no session on the message host, which the Status page
@@ -39,11 +42,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 def ids_over_cap(reader: TransferReader) -> list[IdOverCap]:
-    """The export's team id and agent types that protocol 1 cannot carry."""
+    """The team id the import writes and the export's agent types, where protocol 1 cannot carry them."""
 
     from team_transfer.control import defined_agent_types
 
-    return [*team_id_over_cap(reader.manifest.team_id), *agent_types_over_cap(defined_agent_types(reader))]
+    return [*team_id_over_cap(reader.team_ids.imported), *agent_types_over_cap(defined_agent_types(reader))]
 
 
 def require_protocol1_ids(reader: TransferReader) -> None:
@@ -53,9 +56,11 @@ def require_protocol1_ids(reader: TransferReader) -> None:
     if not found:
         return
     LOGGER.warning(
-        "A team export holds ids protocol 1 cannot carry, so it is not imported. event=%s team_id=%r ids=%r",
+        "A team export holds ids protocol 1 cannot carry, so it is not imported. event=%s team_id=%r "
+        "imported_team_id=%r ids=%r",
         IMPORT_REFUSED_EVENT,
         reader.manifest.team_id,
+        reader.team_ids.imported,
         [f"{item.rule_what}:{item.value}" for item in found],
     )
     raise TransferError(import_refusal_message(found))

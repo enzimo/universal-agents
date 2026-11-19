@@ -215,7 +215,9 @@ class ReviewSession:
 
             layout = InstanceLayout.at(files.review.target_root)
             previous = (
-                previous_records(ImportContext(files.reader, layout.root, layout, {}))
+                previous_records(
+                    ImportContext(files.reader, layout.root, layout, {}, team_ids=files.reader.team_ids)
+                )
                 if layout.instance_config_path.is_file()
                 else {}
             )

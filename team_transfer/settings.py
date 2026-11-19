@@ -45,6 +45,7 @@ from runtime_settings.transport import (
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
     SECTION_UPGRADES,
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -53,6 +54,7 @@ from team_transfer.sections import (
     SectionFiles,
     SectionRecords,
 )
+from team_transfer.team_ids import TeamIds
 
 if TYPE_CHECKING:
     from assistant_gateway.config import GatewayInstanceConfig
@@ -69,6 +71,14 @@ _DERIVED_SETTINGS: Final = frozenset(
         ("gateway", "team_id"),
     }
 )
+# Carried settings whose value the runtime builds from the team id: under a new team id (owner's
+# decision 103) a value that is the export's id, or starts with it and one of these separators, gets
+# the new id in its place. The transport routes gateway replies by the ``<team>_`` prefix, and an
+# operator's subject prefix names the team in external NATS permissions.
+_TEAM_NAMED_SETTINGS: Final[dict[tuple[str, ...], tuple[str, ...]]] = {
+    ("transport", "subject_prefix"): (".", "_"),
+    ("gateway", "response_queue_name"): ("_",),
+}
 # Fixed when an installation is created (runtime_settings.transport): the destination keeps
 # its own count, because another count puts queued work in other streams and a later batch
 # carrying one would stop the destination's start.
@@ -155,7 +165,7 @@ class SettingsSection:
             else GatewayInstanceConfig.create(
                 instance_name=manifest.instance_name,
                 instance_root=root,
-                team_id=manifest.team_id,
+                team_id=context.team_id,
                 timezone="UTC",
             ).to_yaml_dict()
         )
@@ -175,8 +185,9 @@ class SettingsSection:
         )
         context.scratch[_CONFIG_KEY] = config
         replaced = _replaced_by_destination(settings, destination, root)
+        named = _naming_the_old_team_id(settings, context.team_ids)
         return [
-            self._outcome(setting, refused, {**changed, **replaced})
+            self._outcome(setting, refused, {**named, **changed, **replaced})
             for setting in settings
         ]
 
@@ -274,6 +285,51 @@ def _destination_settings(context: ImportContext) -> dict[tuple[str, ...], Any]:
         # Secrets then come only from the environment (LaunchSettings refuses both).
         values[("launch", "env_file_path")] = None
     return values
+
+
+def _naming_the_old_team_id(settings: list[SettingV1], team_ids: TeamIds) -> dict[str, str]:
+    """Carried settings that still name the export's team id under a new one, with the note shown for each.
+
+    Only the settings the runtime builds from the team id are renamed (``_TEAM_NAMED_SETTINGS``);
+    any other value naming the old id may be a name the operator chose, so it is imported as it
+    is and the person importing checks it, never changed silently.
+    """
+
+    if not team_ids.renamed:
+        return {}
+    return {
+        setting.dotted: (
+            f"it names the export's team id {team_ids.exported!r}, and this instance's team id is "
+            f"{team_ids.imported!r}; the import keeps the value as it is, so check it"
+        )
+        for setting in settings
+        if _names(setting.value, team_ids.exported)
+    }
+
+
+def _names(value: Any, text: str) -> bool:
+    """Whether ``text`` appears in any string of a setting's value, keys included."""
+
+    if isinstance(value, str):
+        return text in value
+    if isinstance(value, dict):
+        return any(_names(key, text) or _names(item, text) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_names(item, text) for item in value)
+    return False
+
+
+def _renamed_team_settings(records: SectionRecords, team_ids: TeamIds) -> SectionRecords:
+    """The settings records under a new team id: the values built from the team id follow it."""
+
+    renamed = []
+    for record in records:
+        path = record.get("path")
+        separators = _TEAM_NAMED_SETTINGS.get(tuple(path)) if isinstance(path, list) else None
+        if separators is not None and "value" in record:
+            record = {**record, "value": team_ids.rename(record["value"], *separators)}
+        renamed.append(record)
+    return renamed
 
 
 def _valid_candidate(
@@ -728,3 +784,4 @@ def _upgraded_settings(records: SectionRecords) -> SectionRecords:
 
 for _source in (5, 6, 7, 8, 9, 10, 11):
     SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _upgraded_settings
+TEAM_ID_RENAMES[SettingsSection.name] = _renamed_team_settings

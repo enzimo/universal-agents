@@ -1357,11 +1357,30 @@ def team_id_answer(typed: Any, assistant_name: str) -> str:
 
     team_id = str(typed or "").strip()
     if not team_id:
-        return (f"team_{_slugify(assistant_name)}"[: TEAM_ID.cap]).rstrip("_")
+        return shortened_team_id(f"team_{_slugify(assistant_name)}")
     problem = TEAM_ID.problem(team_id)
     if problem is not None:
         raise ValueError(f"The team id {team_id!r} {problem}. Messages carry it in their addresses.")
     return team_id
+
+
+def shortened_team_id(value: str) -> str:
+    """``value`` made to fit protocol 1's team id rule, keeping as much of it as the rule allows.
+
+    Characters the rule does not allow (non-ASCII letters too) become ``_``, leading ``_`` and
+    ``-`` are dropped (the id must start with a letter or digit), the id is cut to the cap and
+    trailing ``_`` and ``-`` are dropped; ``team`` when nothing is left. The result always fits.
+    Used for the id onboarding derives from the assistant's name and for the new id onboarding's
+    Import suggests for a 0.9 team whose id does not fit (``team_transfer.team_ids``), so both
+    are cut the same way.
+    """
+
+    import re
+
+    from custom_messages.wire.ids import TEAM_ID
+
+    allowed = re.sub(r"[^A-Za-z0-9_-]", "_", str(value or "")).lstrip("_-")
+    return allowed[: TEAM_ID.cap].rstrip("_-") or "team"
 
 
 def _slugify(value: str) -> str:

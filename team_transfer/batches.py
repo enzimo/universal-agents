@@ -11,6 +11,7 @@ from typing import Any
 from team_transfer.errors import TransferError
 from team_transfer.sections import ExportSource, ImportContext
 from team_transfer.selection import keyed_records
+from team_transfer.team_ids import RECEIPT_TEAM_ID
 
 
 def previous_records(context: ImportContext) -> dict[str, set[str]]:
@@ -121,7 +122,7 @@ def receipt(context: ImportContext, imported: dict[str, list[str]]) -> dict[str,
         source = ExportSource(
             config,
             context.layout,
-            context.reader.manifest.team_id,
+            context.team_id,
             context.reader.manifest.instance_name,
         )
         records = (
@@ -132,6 +133,9 @@ def receipt(context: ImportContext, imported: dict[str, list[str]]) -> dict[str,
         initial_control = keyed_records("control", records)
     return {
         "source_mac": context.reader.manifest.mac,
+        # The id the team was imported under; later batches and the credentials keep it
+        # (team_transfer.team_ids.recorded_team_id).
+        RECEIPT_TEAM_ID: context.team_id,
         "initial_control": initial_control,
         "records": {
             section: sorted(

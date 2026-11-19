@@ -24,6 +24,13 @@ delete every step whose source version is older than what that release
 exports (a section that did not change keeps no step). Anything older, or
 newer, is refused before anything is written, with import/export instructions
 and the guide's release-specific paths (``readable_version_problem``).
+
+A new team id (owner's decision 103): right after the version step, the records
+are renamed for the team id the import writes (``team_transfer.team_ids``),
+through the rename each section registers in ``TEAM_ID_RENAMES`` beside its
+version steps. Every section registers one, ``holds_no_team_id`` when its
+records name no team, so a new section must decide; a section without one is
+refused under a new id rather than imported with the old one.
 """
 
 from __future__ import annotations
@@ -42,11 +49,13 @@ from team_transfer.container import (
     check_member_name,
 )
 from team_transfer.crypto import TransferKeys, canonical_json, decrypt, encrypt
+from team_transfer.errors import TransferError
 from team_transfer.format import (
     CREDENTIALS_DIR,
     SectionDocumentV1,
     section_files_prefix,
 )
+from team_transfer.team_ids import TeamIds
 
 if TYPE_CHECKING:
     from assistant_gateway.config import GatewayInstanceConfig
@@ -59,6 +68,19 @@ SectionUpgrade = Callable[[SectionRecords], SectionRecords]
 # from the previous release's versions; delete older ones. Empty while no
 # section has changed since the previous release.
 SECTION_UPGRADES: dict[tuple[str, int, int], SectionUpgrade] = {}
+
+TeamIdRename = Callable[[SectionRecords, TeamIds], SectionRecords]
+
+# section name -> how its records (at this version) name the team, applied only when the import
+# gives the team a new id. Each rename changes values through ``TeamIds`` alone (the one rename
+# rule in ``team_transfer.team_ids``) and returns new records, leaving its input as it was.
+TEAM_ID_RENAMES: dict[str, TeamIdRename] = {}
+
+
+def holds_no_team_id(records: SectionRecords, _team_ids: TeamIds) -> SectionRecords:
+    """The registered rename of a section whose records name no team: they stay as they are."""
+
+    return records
 
 
 class RecordOutcome(StrEnum):
@@ -149,6 +171,10 @@ class ImportContext:
     layout: "InstanceLayout"
     # This version's section versions, by name (from the section registry).
     versions: dict[str, int]
+    # The export's team id and the one the import writes (``team_transfer.team_ids``). Given
+    # explicitly by every caller, since ``reader`` may be a ``TransferReader`` or the broker's
+    # ``CredentialBundle``.
+    team_ids: TeamIds = field(kw_only=True)
     # What a section's plan leaves for its apply (for example the validated
     # configuration), keyed by the section's own names.
     scratch: dict[str, Any] = field(default_factory=dict)
@@ -161,6 +187,12 @@ class ImportContext:
     baseline_keys: dict[str, set[str]] = field(default_factory=dict)
     baseline_files: dict[str, bytes] = field(default_factory=dict, repr=False)
     destination: DestinationChoices = field(default_factory=DestinationChoices)
+
+    @property
+    def team_id(self) -> str:
+        """The team id the import writes: the new one when the team gets one, else the export's."""
+
+        return self.team_ids.imported
 
     def accepted(self, section: str) -> set[str]:
         """Keys of the records an earlier section imports."""
@@ -182,7 +214,7 @@ class ImportContext:
             return []
         if section not in self._records:
             self._records[section] = read_section_records(
-                self.reader, section, self.versions[section]
+                self.reader, section, self.versions[section], team_ids=self.team_ids
             )
         return self._records[section]
 
@@ -240,12 +272,14 @@ def encrypt_section(
 
 
 def read_section_records(
-    reader: TransferReader, section: str, version: int
+    reader: TransferReader, section: str, version: int, *, team_ids: TeamIds
 ) -> SectionRecords:
-    """The section's records at ``version``, converting the previous release's version.
+    """The section's records at ``version``, converting the previous release's version, under ``team_ids``.
 
     An encrypted section's plaintext is a ``SectionDocumentV1`` too; it is
     decrypted here and nowhere else, only when a section asks for it.
+    ``team_ids`` is required so no reader of records forgets the team's new id;
+    ``reader.team_ids`` for an open file.
     """
 
     entry = reader.manifest.section(section)
@@ -275,9 +309,29 @@ def read_section_records(
         raise TransferFileError(
             f"The section {section!r} record count does not match its manifest entry."
         )
-    return upgrade_records(
-        document, version, exported_by=reader.manifest.application_version
+    return renamed_records(
+        section,
+        upgrade_records(document, version, exported_by=reader.manifest.application_version),
+        team_ids,
     )
+
+
+def renamed_records(section: str, records: SectionRecords, team_ids: TeamIds) -> SectionRecords:
+    """``records`` (at this version) under the team id the import writes.
+
+    Unchanged when the team keeps its id. A section that registered no rename is refused,
+    never imported under the old id.
+    """
+
+    if not team_ids.renamed:
+        return records
+    rename = TEAM_ID_RENAMES.get(section)
+    if rename is None:
+        raise TransferError(
+            f"The section {section!r} cannot be imported under a new team id: this version does not know how its "
+            "records name the team."
+        )
+    return rename(records, team_ids)
 
 
 def upgrade_records(
@@ -341,13 +395,17 @@ __all__ = [
     "PlannedRecord",
     "RecordOutcome",
     "SECTION_UPGRADES",
+    "TEAM_ID_RENAMES",
     "SectionExport",
     "SectionFiles",
     "SectionRecords",
+    "TeamIdRename",
     "TransferSection",
     "encrypt_section",
     "encrypted_member",
+    "holds_no_team_id",
     "read_section_records",
+    "renamed_records",
     "readable_version_problem",
     "upgrade_records",
 ]

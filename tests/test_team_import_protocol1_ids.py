@@ -20,6 +20,7 @@ from team_transfer.crypto import new_key_derivation
 from team_transfer.errors import TransferError
 from team_transfer.service import export_source, export_team, import_team
 from team_transfer.settings import SettingsSection
+from team_transfer.team_ids import new_team_ids
 from tests.pinned_memory_support import new_instance
 from tests.test_onboarding_team_import import _onboarding
 from tests.test_team_transfer_control import GOOD_BUNDLE
@@ -50,9 +51,12 @@ def _export(tmp_path: Path, team_id: str, *, agent_type: str | None = None) -> P
     return out
 
 
-def _import(export: Path, target: Path, *, dry_run: bool = True) -> None:
+def _import(export: Path, target: Path, *, dry_run: bool = True, new_team_id: str | None = None,
+            sections: tuple = SECTIONS) -> None:
     with TransferReader.open(export, PASSPHRASE) as reader:
-        import_team(reader, target, dry_run=dry_run, sections=SECTIONS)
+        if new_team_id is not None:
+            reader = reader.with_team_ids(new_team_ids(reader.manifest.team_id, new_team_id))
+        import_team(reader, target, dry_run=dry_run, sections=sections)
 
 
 def test_a_team_id_over_24_characters_is_refused_before_the_import_writes_anything(tmp_path: Path, caplog) -> None:
@@ -64,12 +68,29 @@ def test_a_team_id_over_24_characters_is_refused_before_the_import_writes_anythi
     assert str(refused.value) == (
         "This export's team cannot be imported into this version: protocol 1 carries these ids in message addresses, "
         "and they do not fit (event=team_import_ids_over_caps). Nothing was written.\n"
-        f"The team id {TOO_LONG!r} is 25 characters long; protocol 1 allows at most 24. A team keeps its id when it "
-        "moves, and this version has no way yet to give a team a shorter one, so this export cannot be imported into "
-        "it.")
+        f"The team id {TOO_LONG!r} is 25 characters long; protocol 1 allows at most 24. Give the team a new team id "
+        "of at most 24 letters, digits, '-' and '_' as it is imported: onboarding's Import asks for one, and on the "
+        "command line assistant_cli team review (or team import --dry-run) takes it with --new-team-id.")
     assert "0.9.x" not in str(refused.value), "a fresh 0.10 import is not told to keep running 0.9.x"
     assert not target.exists() or not any(target.iterdir())
     assert "event=team_import_ids_over_caps" in caplog.text
+
+
+def test_a_team_id_over_24_characters_is_imported_under_a_new_id(tmp_path: Path) -> None:
+    target = tmp_path / "new"
+
+    _import(_export(tmp_path, TOO_LONG), target, dry_run=False, new_team_id=FITS, sections=(SettingsSection(),))
+
+    assert f"team_id: {FITS}" in (target / "instance_config.yaml").read_text(encoding="utf-8")
+
+
+def test_an_agent_type_over_24_characters_is_still_refused_when_the_team_gets_a_new_id(tmp_path: Path) -> None:
+    with pytest.raises(TransferError) as refused:
+        _import(_export(tmp_path, TOO_LONG, agent_type=LONG_TYPE), tmp_path / "new", new_team_id=FITS)
+
+    message = str(refused.value)
+    assert f"The agent type {LONG_TYPE!r} (defined in control/agent_bundles/long) is 28 characters long" in message
+    assert "team id" not in message.split("\n", 1)[1], "the new team id fits"
 
 
 def test_a_team_id_of_24_characters_is_imported(tmp_path: Path) -> None:

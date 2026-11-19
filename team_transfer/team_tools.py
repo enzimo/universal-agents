@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from team_transfer.container import TransferFileError
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -39,6 +40,7 @@ from team_transfer.sections import (
     SectionExport,
     SectionFiles,
     SectionRecords,
+    holds_no_team_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -216,5 +218,8 @@ def _write_new(path: Path, data: bytes, *, executable: bool) -> None:
     if executable:
         os.chmod(path, path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
+
+# Added tools' definitions and programs name no team.
+TEAM_ID_RENAMES[TeamToolsSection.name] = holds_no_team_id
 
 __all__ = ["TeamToolFileV1", "TeamToolsSection", "ToolProgramV1", "accepted_tool_definitions"]

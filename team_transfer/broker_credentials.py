@@ -42,6 +42,7 @@ from team_transfer.sections import (
     SectionRecords,
     encrypted_member,
 )
+from team_transfer.team_ids import TeamIds
 
 logger = logging.getLogger(__name__)
 
@@ -281,7 +282,9 @@ def import_credential_bundle(
     from team_transfer.settings import _require_storage_connection, storage_environment
 
     # previous_records reads only the manifest, which the bundle carries.
-    context = ImportContext(bundle, config.layout.root, config.layout, {})
+    context = ImportContext(
+        bundle, config.layout.root, config.layout, {}, team_ids=TeamIds.unchanged(manifest.team_id)
+    )
     context.scratch["settings.postgres_dsn"] = _require_storage_connection(
         config, config.layout
     )

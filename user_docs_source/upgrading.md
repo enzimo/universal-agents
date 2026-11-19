@@ -153,13 +153,27 @@ supported, because it may not read what a newer one saved.
   stops with a message naming each id and what to do
   (`event=protocol1_ids_over_caps`). Nothing has changed then, so you can start
   0.9 again:
-  - **A team id over 24 characters:** this instance cannot run 0.10 with that
-    team id. Keep running 0.9.x. A team transfer keeps the team id, so it does
-    not help here: onboarding's Import, and `assistant_cli team import` into a
-    fresh folder, refuse such an export when they open it, before they write
-    anything (`event=team_import_ids_over_caps`). They refuse an export with an
-    agent type over 24 characters the same way; rename it on 0.9 as below and
-    export again.
+  - **A team id over 24 characters, or with other characters:** an instance
+    keeps its team id, so this instance cannot run 0.10. Its team can move to
+    a fresh 0.10 instance under a new team id:
+    1. Start 0.9 again and update it to the latest 0.9.x release.
+    2. Export the team with
+       [`/upgrade`](team-transfer.md#export-from-chat-with-upgrade).
+    3. Set up a fresh 0.10 instance and choose
+       [Import in onboarding](team-transfer.md#import-during-onboarding). When
+       the export's team id does not fit, the page says why and asks for a new
+       team id, filled in with the old one cut to fit; you can change it.
+       Everything imported gets the new id, and the export file stays as it
+       is. On the command line, `assistant_cli team review` takes the new id
+       with `--new-team-id`, and `assistant_cli team import --review` then uses
+       the id the review recorded.
+
+    Without a new id, an import refuses such an export before it writes
+    anything (`event=team_import_ids_over_caps`). An export with an agent type
+    over 24 characters is refused the same way, also under a new team id:
+    rename the type on 0.9 as below and export again. If the instance uses an
+    external NATS server whose permissions name the old team id, update them
+    for the new one.
   - **An agent type over 24 characters:** on 0.9, rename it in the file the
     message names and everywhere the instance names it:
     `gateway.startup_agents` in `instance_config.yaml` and the team roster

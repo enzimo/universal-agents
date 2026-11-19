@@ -84,7 +84,7 @@ def archive_records(reader) -> dict[str, dict[str, dict[str, Any]]]:
             continue
         found[section.name] = keyed_records(
             section.name,
-            read_section_records(reader, section.name, section.schema_version),
+            read_section_records(reader, section.name, section.schema_version, team_ids=reader.team_ids),
         )
     return found
 

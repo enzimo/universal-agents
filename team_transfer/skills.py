@@ -38,6 +38,7 @@ from runtime_settings.instance_layout import SKILLS_DIRNAME
 from team_transfer.container import TransferFileError, iter_files
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
+    TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
     PlannedRecord,
@@ -45,6 +46,7 @@ from team_transfer.sections import (
     SectionExport,
     SectionFiles,
     SectionRecords,
+    holds_no_team_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -216,5 +218,8 @@ def _member(kind: SkillKind, name: str, relative: str) -> str:
     base = f"{SKILLS_DIRNAME}/{name}" if kind is SkillKind.OPERATOR else f"{_INSTALLED_PREFIX}/{name}"
     return f"{base}/{relative}" if relative else base
 
+
+# Skill folders and their install records name no team.
+TEAM_ID_RENAMES[SkillsSection.name] = holds_no_team_id
 
 __all__ = ["SkillFileV1", "SkillKind", "SkillUnitV1", "SkillsSection"]

@@ -6,7 +6,10 @@ verified file, plans every record against a fresh instance root and, unless
 it is a dry run, applies the plan section by section.
 
 A fresh instance is one without ``instance_config.yaml``: the import creates
-the instance. While it writes, a marker file
+the instance. The reader's ``team_ids`` say which team id the import writes:
+the export's own, or a new one a first import gives a team whose id does not
+fit (``team_transfer.team_ids``); later batches into the instance use the id
+its first import recorded in the receipt. While it writes, a marker file
 (``InstanceLayout.team_import_marker_path``) records that the import has not
 finished; ``require_finished_import`` refuses to start the runtime while it is
 there, because a half-imported team must never run. A failed first import is
@@ -40,6 +43,7 @@ from team_transfer.format import (
 from team_transfer.private_files import write_private_json
 from team_transfer.protocol1_ids import require_protocol1_ids
 from team_transfer.runtime_guard import import_writer, require_finished_import
+from team_transfer.team_ids import TeamIds
 from team_transfer.sections import (
     DestinationChoices,
     ExportSource,
@@ -219,6 +223,8 @@ def _export_section(
 class ImportPlan:
     manifest: TransferManifestV1
     target_root: Path
+    # The export's team id and the one the import writes (``team_transfer.team_ids``).
+    team_ids: TeamIds
     records: list[PlannedRecord] = field(default_factory=list)
     # Sections in the file this version does not know, and known sections the file lacks.
     unknown_sections: list[str] = field(default_factory=list)
@@ -261,7 +267,9 @@ def plan_import(
     context, previous = _import_context(reader, target_root, chosen, allow_existing)
     if destination is not None:
         context.destination = destination
-    plan = ImportPlan(manifest=reader.manifest, target_root=context.layout.root)
+    plan = ImportPlan(
+        manifest=reader.manifest, target_root=context.layout.root, team_ids=context.team_ids
+    )
     in_file = {entry.name for entry in reader.manifest.sections}
     plan.unknown_sections = sorted(in_file - set(context.versions))
     plan.missing_sections = [
@@ -312,11 +320,13 @@ def _import_context(reader, target_root, sections, allow_existing):
         target_root=layout.root,
         layout=layout,
         versions=_section_versions(sections),
+        team_ids=reader.team_ids,
     )
     if not allow_existing or not layout.instance_config_path.is_file():
         require_fresh_target(layout)
         # The import creates this version's team: ids it cannot carry are refused now, not by
-        # the launcher once everything is written (team_transfer.protocol1_ids).
+        # the launcher once everything is written (team_transfer.protocol1_ids). The team id
+        # checked is the one the import writes.
         require_protocol1_ids(reader)
         return context, {}
     from assistant_gateway.config import GatewayInstanceConfig
@@ -324,9 +334,10 @@ def _import_context(reader, target_root, sections, allow_existing):
 
     require_finished_import(layout)
     config = GatewayInstanceConfig.load_saved(layout.instance_config_path)
-    if config.gateway.team_id != reader.manifest.team_id:
+    if config.gateway.team_id != context.team_id:
         raise TransferError(
-            "The target instance and transfer file belong to different teams."
+            f"The target instance is team {config.gateway.team_id}, and this import is for "
+            f"{context.team_ids.describe()}: they are different teams."
         )
     context.existing = True
     context.scratch["settings.config"] = config
@@ -350,7 +361,9 @@ def _check_later_section(section, reader):
 
 
 def _selected_records(section, context, plan, choices, overrides, previous):
-    records = read_section_records(context.reader, section.name, section.schema_version)
+    records = read_section_records(
+        context.reader, section.name, section.schema_version, team_ids=context.team_ids
+    )
     if section.name == "schedules":
         from team_transfer.selection import keyed_records
 
@@ -502,6 +515,14 @@ def _apply_import(
     from team_transfer.settings import require_empty_postgres
 
     require_empty_postgres(context)
+    if context.team_ids.renamed:
+        logger.info(
+            "The team is imported under a new team id. event=team_transfer_new_team_id team_id=%s "
+            "imported_team_id=%s root=%s",
+            context.team_ids.exported,
+            context.team_ids.imported,
+            layout.root,
+        )
     write_private_json(layout.team_import_marker_path, _report(plan, finished=False))
     from team_transfer.settings import storage_environment
 
@@ -553,6 +574,8 @@ def _report(plan: ImportPlan, *, finished: bool) -> dict[str, Any]:
     return {
         "finished": finished,
         "written_at_utc": utc_now_iso(),
+        # The team id the import wrote; ``source.team_id`` is the export's, where the team came from.
+        "team_id": plan.team_ids.imported,
         "source": {
             "application_version": manifest.application_version,
             "exported_at_utc": manifest.exported_at_utc,
