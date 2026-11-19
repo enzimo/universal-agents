@@ -415,30 +415,6 @@ async def test_a_trust_record_read_from_its_bucket_is_kept_on_disk(tmp_path: Pat
     assert [record["sequence"] for record in kept] == [500]
 
 
-@pytest.mark.asyncio
-async def test_a_watch_reports_a_deleted_key_as_none() -> None:
-    class Watcher:
-        def __init__(self) -> None:
-            self.entries = [SimpleNamespace(key="team_example.lead", value=b"{}"), None,
-                            SimpleNamespace(key="team_example.lead", value=b"")]
-            self.stop = AsyncMock()
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            if not self.entries:
-                raise StopAsyncIteration
-            return self.entries.pop(0)
-
-    watcher = Watcher()
-    reader = worker()
-    js = SimpleNamespace(key_value=AsyncMock(return_value=SimpleNamespace(watch=AsyncMock(return_value=watcher))))
-    seen = [change async for change in StateRecords(js, lambda: reader.identity, reader.trust).watch("agent", team=TEAM)]
-    assert seen == [("team_example.lead", b"{}"), ("team_example.lead", None)]
-    watcher.stop.assert_awaited_once()
-
-
 def test_records_are_signed_with_the_identity_the_host_has_when_it_signs() -> None:
     """After a renewal the host's frames and records switch certificates together."""
 

@@ -26,6 +26,18 @@ def bucket_name(bucket: str, team: Optional[str] = None) -> str:
     return bucket
 
 
+def bucket_stream_name(name: str) -> str:
+    """The stream that holds bucket ``name`` (a filled name, as ``bucket_name`` returns)."""
+
+    return f"KV_{name}"
+
+
+def bucket_subject(name: str, keys: str = ">") -> str:
+    """The stream subject of ``keys`` (a key, or a pattern with ``*`` and ``>``) in bucket ``name``."""
+
+    return f"$KV.{name}.{keys}"
+
+
 def bucket_stream(transport: Mapping[str, Any], bucket: str, team: Optional[str] = None) -> dict[str, Any]:
     """The stream settings of ``bucket`` (a ``key_value`` name of the generated ``transport.json``).
 
@@ -38,8 +50,8 @@ def bucket_stream(transport: Mapping[str, Any], bucket: str, team: Optional[str]
     settings = transport["key_value_stream"]
     name = bucket_name(bucket, team)
     config: dict[str, Any] = {
-        "name": f"KV_{name}",
-        "subjects": [f"$KV.{name}.>"],
+        "name": bucket_stream_name(name),
+        "subjects": [bucket_subject(name)],
         "max_msgs_per_subject": settings["history"],
         "allow_rollup_hdrs": settings["allow_rollup_hdrs"],
         "deny_delete": settings["deny_delete"],
