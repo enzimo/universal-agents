@@ -326,6 +326,28 @@ def test_pinned_threads_come_first_and_the_rest_by_last_activity(settings) -> No
     assert keys == ["second", "first"], "a pinned thread is never cut by the limit"
 
 
+def test_threads_with_the_same_time_are_cut_the_same_way_by_both_reads(settings) -> None:
+    store = _Store(settings)
+    for key in ("charlie", "alpha", "bravo"):
+        store.thread(key)
+    # Equal times happen: the history cleanup stamps every restarted session with one time.
+    with store.repo._connect() as conn:
+        conn.execute("UPDATE gateway_sessions SET updated_at = '2026-11-19T10:00:00+00:00'")
+        conn.commit()
+    for include_last_message in (False, True):
+        keys = [
+            record.session_key
+            for record in store.repo.list_web_chat_threads(
+                owner_canonical_user_id=ALICE,
+                channel_name="website",
+                chat_id="web-chat",
+                limit=2,
+                include_last_message=include_last_message,
+            )
+        ]
+        assert keys == ["alpha", "bravo"]
+
+
 # What a thread waits on
 
 

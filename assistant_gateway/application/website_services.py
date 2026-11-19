@@ -6,7 +6,9 @@ import hmac
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypeIs, cast
+from typing import Literal, Protocol, cast
+
+from typing_extensions import TypeIs
 
 from assistant_gateway.application.objective_control_text import objective_control_text
 from assistant_gateway.application.gateway_application import (

@@ -1043,6 +1043,8 @@ class _RelationalGatewayStateRepository:
     """Shared record operations for gateway session and delivery state."""
 
     _dialect: SqlDialect
+    # Set by each database's subclass.
+    _logger: logging.Logger
 
     @staticmethod
     def _is_integrity_error(exc: Exception) -> bool:
@@ -1890,7 +1892,10 @@ class _RelationalGatewayStateRepository:
 
         Pinned threads come first so they never fall past the limit; the
         rest follow the later of the session's own update time and its last
-        transcript row (both ``utc_now_iso`` text, so they compare as text).
+        transcript row (both ``utc_now_iso`` text, so they compare as text),
+        then the session key, so the sessions route and the live read (two
+        differently shaped queries) always cut at the same threads and give
+        the same revision.
         Every lookup added for the thread list is a primary-key or index
         read, because live pages run this query every two seconds per open
         tab (``web_chat_thread_states``). The latest ordinary message is the
@@ -1984,7 +1989,8 @@ class _RelationalGatewayStateRepository:
               AND s.owner_canonical_user_id = {bind}
             ORDER BY
                 s.pinned DESC,
-                CASE WHEN q.updated_at_utc > s.updated_at THEN q.updated_at_utc ELSE s.updated_at END DESC
+                CASE WHEN q.updated_at_utc > s.updated_at THEN q.updated_at_utc ELSE s.updated_at END DESC,
+                s.session_key
             LIMIT {bind}
         """
         command = _COMMAND_PREFIX_PATTERN
