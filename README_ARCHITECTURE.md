@@ -4400,8 +4400,11 @@ storage before, so a full disk was first noticed when saving failed, and
 administrators must hear before a limit is reached. On every check the
 gateway reads the free space (`statvfs`, counted as `df` does) of the
 filesystem holding the instance folder and of each SQLite database's folder on
-another filesystem, and the NATS account's JetStream use and limit
-(`js.account_info()`, `NatsTransportAdapter.jetstream_account_usage`). An
+another filesystem, and the NATS account's JetStream use, limit and what its
+streams set aside (`NatsTransportAdapter.jetstream_account_usage`, which sends
+the raw `$JS.API.INFO` request through `custom_transport.jetstream_account`
+because nats-py's `account_info()` drops the set-aside figure; the
+installation authority reads the account through the same module). An
 unreadable disk produces a problem finding saying its free space is unknown;
 successful checks for other disks and NATS remain visible. At
 `gateway.storage_warnings.nearing_limit_percent` (80 by default) a place is

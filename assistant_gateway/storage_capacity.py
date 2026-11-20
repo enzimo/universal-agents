@@ -11,7 +11,7 @@ is reached (owner's decision of 2026-10-27). The Status page
   administrator is neither used nor free. An unreadable place is an explicit
   problem; other disks and the message server are still checked.
 - **Message storage.** The NATS account's JetStream use against the account's
-  limit (``js.account_info()``), when the account has one. The percentage
+  limit (``custom_transport.jetstream_account``), when the account has one. The percentage
   counts bytes stored, not the space streams set aside: every stream sets its
   whole byte limit aside when it is created, each team's protocol 1 work and
   dead-letter streams about 2.1 GiB at the default ``transport.queues.max_bytes``

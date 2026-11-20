@@ -22,6 +22,7 @@ from custom_messages.wire.queues import (
     agent_consumers,
     consumer_agent,
     queue_stream_config,
+    streams_set_aside,
     team_consumers,
     team_queue_streams,
 )
@@ -69,6 +70,14 @@ def test_a_team_has_one_partition_stream_per_partition_and_the_four_others() -> 
         "UA1_TEAM_WORK_team_a": ("team_services", "transport.queues.max_bytes.team_services"),
         "UA1_DLQ_team_a": ("dead_letter", "transport.queues.max_bytes.dead_letter")}
     assert len(team_queue_streams(TRANSPORT, "team_a", 96)) == 100
+
+
+def test_a_teams_streams_set_aside_their_size_kinds_limit_once_each() -> None:
+    """The one total the authority's refusals and the gateway's room warning use (C06 of its plan review)."""
+
+    assert streams_set_aside(team_queue_streams(TRANSPORT, "team_a", 7), LIMITS.max_bytes) == (
+        7 * 16 * MIB + 128 * MIB + 64 * MIB + 256 * MIB + 32 * MIB)
+    assert streams_set_aside((), LIMITS.max_bytes) == 0
 
 
 def test_a_partition_stream_has_the_contracts_settings_the_limits_and_its_count() -> None:

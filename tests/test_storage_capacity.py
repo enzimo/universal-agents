@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import os
 import shutil
 from collections.abc import Iterator
@@ -27,6 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from nats.js.errors import ServiceUnavailableError
 
 from assistant_gateway.config import GatewayInstanceConfig, StorageWarningSettings
 from assistant_gateway.status_page import StatusPage
@@ -74,6 +76,13 @@ class _Disk:
     def __call__(self) -> list[SpaceUse]:
         return [SpaceUse(key="disk:instance", label="The disk holding the instance folder",
                          used=int(self.percent * GB), capacity=100 * GB, location="/srv/instance")]
+
+
+def _usage(*, storage: int, max_storage: int | None = None, reserved_storage: int | None = 0) -> JetStreamAccountUsage:
+    """The account's stored messages on disk, nothing in memory."""
+
+    return JetStreamAccountUsage(storage=storage, memory=0, max_storage=max_storage, max_memory=None,
+                                 reserved_storage=reserved_storage, reserved_memory=0)
 
 
 def _capacity(tmp_path: Path, disk: _Disk, clock: _Clock, *, nearing: int = 80, nearly_full: int = 95) -> StorageCapacity:
@@ -238,8 +247,8 @@ def test_the_thresholds_follow_the_settings(tmp_path: Path) -> None:
 def test_stored_messages_are_measured_against_the_accounts_limit_or_noted_without_one(tmp_path: Path) -> None:
     capacity = _capacity(tmp_path, _Disk(10.0), _Clock())
 
-    [limited] = capacity.findings(JetStreamAccountUsage(storage=9 * GB, memory=0, max_storage=10 * GB, max_memory=None))
-    [unlimited] = capacity.findings(JetStreamAccountUsage(storage=12_000_000, memory=0, max_storage=None, max_memory=None))
+    [limited] = capacity.findings(_usage(storage=9 * GB, max_storage=10 * GB))
+    [unlimited] = capacity.findings(_usage(storage=12_000_000))
 
     assert limited.finding_id.startswith("storage_nearing_limit:message_storage:file:")
     assert limited.title == "The message server's storage is 90% full"
@@ -253,23 +262,43 @@ def test_stored_messages_are_measured_against_the_accounts_limit_or_noted_withou
     assert "three quarters of the disk space that was free when it started" in unlimited.summary
 
 
-def test_the_transport_reads_no_limit_and_zero_as_no_limit() -> None:
-    def adapter_with(limits: SimpleNamespace) -> NatsTransportAdapter:
-        adapter = NatsTransportAdapter(config=NatsTransportConfig(), mapper=NatsSubjectMapper(team_id="team"))
+def _adapter_answering(reply: dict) -> NatsTransportAdapter:
+    """An adapter whose connection answers the raw account information request with ``reply``."""
 
-        async def account_info():
-            return SimpleNamespace(storage=2048, memory=10, limits=limits)
+    adapter = NatsTransportAdapter(config=NatsTransportConfig(), mapper=NatsSubjectMapper(team_id="team"))
 
-        adapter._js = SimpleNamespace(account_info=account_info)
-        return adapter
+    async def request(subject: str, data: bytes, timeout: float) -> SimpleNamespace:
+        assert subject == "$JS.API.INFO"
+        return SimpleNamespace(data=json.dumps(reply).encode())
 
-    unlimited = asyncio.run(adapter_with(SimpleNamespace(max_storage=-1, max_memory=0)).jetstream_account_usage())
-    limited = asyncio.run(adapter_with(SimpleNamespace(max_storage=4096, max_memory=-1)).jetstream_account_usage())
+    adapter._nc = SimpleNamespace(request=request)
+    adapter._js = SimpleNamespace()
+    return adapter
+
+
+def test_the_transport_reads_no_limit_and_zero_as_no_limit_and_what_the_streams_set_aside() -> None:
+    def usage(**reply: object) -> JetStreamAccountUsage | None:
+        return asyncio.run(_adapter_answering({"storage": 2048, "memory": 10, **reply}).jetstream_account_usage())
+
+    unlimited = usage(limits={"max_storage": -1, "max_memory": 0}, reserved_storage=5 << 20, reserved_memory=0)
+    limited = usage(limits={"max_storage": 4096, "max_memory": -1}, reserved_storage=0, reserved_memory=1024)
+    unreported = usage(limits={"max_storage": -1, "max_memory": -1})
     absent = NatsTransportAdapter(config=NatsTransportConfig(), mapper=NatsSubjectMapper(team_id="team"))
 
-    assert unlimited == JetStreamAccountUsage(storage=2048, memory=10, max_storage=None, max_memory=None)
-    assert limited.max_storage == 4096 and limited.max_memory is None
+    assert unlimited == JetStreamAccountUsage(storage=2048, memory=10, max_storage=None, max_memory=None,
+                                              reserved_storage=5 << 20, reserved_memory=0)
+    assert limited is not None and limited.max_storage == 4096 and limited.max_memory is None
+    assert (limited.reserved_storage, limited.reserved_memory) == (0, 1024)
+    # nats-py's AccountInfo has no such figures; a server that leaves them out is unknown, not 0.
+    assert unreported is not None and (unreported.reserved_storage, unreported.reserved_memory) == (None, None)
     assert asyncio.run(absent.jetstream_account_usage()) is None  # not connected, or no JetStream
+
+
+def test_a_refused_account_information_request_raises_so_the_page_lists_the_server_as_unavailable() -> None:
+    adapter = _adapter_answering({"error": {"code": 503, "err_code": 10039, "description": "jetstream not enabled"}})
+
+    with pytest.raises(ServiceUnavailableError):
+        asyncio.run(adapter.jetstream_account_usage())
 
 
 # -- the Status page ----------------------------------------------------------------------------
@@ -412,7 +441,7 @@ async def test_an_unmeasured_disk_is_a_problem_and_keeps_other_disk_and_message_
     )
     report = await _page(
         _config(tmp_path), capacity, _Notices(), _Clock(),
-        messages=JetStreamAccountUsage(storage=9 * GB, memory=0, max_storage=10 * GB, max_memory=None),
+        messages=_usage(storage=9 * GB, max_storage=10 * GB),
     ).report()
     assert any(finding.finding_id == "storage_unmeasured:disk:unreadable" and finding.severity is StatusSeverity.PROBLEM
                for finding in report.findings)
@@ -490,10 +519,10 @@ def _own_server(tmp_path: Path, account_jetstream: str) -> Iterator[str]:
     [("enabled", None), ("{ max_file: 1GB, max_mem: -1 }", 1024 * 1024 * 1024)],
     ids=["no-limit", "account-limit"],
 )
-def test_the_account_reports_its_stored_messages_and_its_limit_when_it_has_one(
+def test_the_account_reports_its_stored_messages_what_its_streams_set_aside_and_its_limit_when_it_has_one(
     tmp_path: Path, account_jetstream: str, expected_limit: int | None
 ) -> None:
-    async def read(url: str) -> JetStreamAccountUsage | None:
+    async def read(url: str) -> tuple[JetStreamAccountUsage | None, JetStreamAccountUsage | None]:
         adapter = NatsTransportAdapter(
             config=NatsTransportConfig(servers=[url], user="team", password="team-pass", storage="file"),
             mapper=NatsSubjectMapper(team_id="team_storage"),
@@ -501,15 +530,22 @@ def test_the_account_reports_its_stored_messages_and_its_limit_when_it_has_one(
         await adapter.connect(reconcile_topology=True)
         try:
             await adapter._js.publish(adapter.mapper.agent_work_subject("lead"), b"x" * 4000)
-            return await adapter.jetstream_account_usage()
+            before = await adapter.jetstream_account_usage()
+            await adapter._js.add_stream(name="ROOM_PROBE", subjects=["room.probe"], max_bytes=5 << 20)
+            return before, await adapter.jetstream_account_usage()
         finally:
             await adapter.close()
 
     with _own_server(tmp_path, account_jetstream) as url:
-        usage = asyncio.run(read(url))
+        before, usage = asyncio.run(read(url))
 
     assert usage is not None and usage.storage >= 4000
     assert usage.max_storage == expected_limit
+    # NATS sets the new stream's whole byte limit aside before any message; nats-py's own
+    # account information leaves this figure out, the shared raw reader does not.
+    assert before is not None and before.reserved_storage is not None
+    assert usage.reserved_storage == before.reserved_storage + (5 << 20)
+    assert usage.reserved_memory == 0
     finding = (
         StorageCapacity(
             disks=list, databases=list, levels=StorageLevels(tmp_path / "levels.json"), nearing_limit_percent=80,

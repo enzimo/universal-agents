@@ -49,7 +49,6 @@ server sent it, naming no setting.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 from dataclasses import dataclass
@@ -70,9 +69,11 @@ from custom_messages.wire.queues import (
     consumer_agent,
     queue_stream_config,
     queue_streams_per_team,
+    streams_set_aside,
     team_consumers,
     team_queue_streams,
 )
+from custom_transport.jetstream_account import BUNDLED_STORAGE_SHARE, reported_bytes, request_account_info
 from installation_authority.refusals import AuthorityStartRefused
 
 _LOGGER = logging.getLogger(__name__)
@@ -107,16 +108,9 @@ _SERVER_ERRORS = (NatsError, TimeoutError)
 # What a refusal says the start left: nothing before the first change, the streams made after.
 _NOTHING_CHANGED = "Nothing was changed."
 _MADE_SO_FAR_STAY = "The streams made so far stay; once the cause is fixed, the next start finishes the team."
-# The account information request ($JS.API.INFO): what the account sets aside, its limits and tiers.
-ACCOUNT_INFO_SUBJECT = "$JS.API.INFO"
 CAP_SETTING = "transport.queues.max_messages_per_subject"
 COUNT_SETTING = "transport.queues.partitions"
 REPLICAS_SETTING = "transport.replicas"
-# A nats-server whose configuration sets no max_file_store, as the bundled server's does not,
-# gives JetStream three quarters of the disk's free space, measured each time it starts
-# (measured on 2.15.1: 0.750). So the disk needs a third more free space than the streams set
-# aside, at every start of NATS, not only the first.
-BUNDLED_STORAGE_SHARE = 3 / 4
 # Metadata keys the server writes itself (_nats.level and others); never sent back.
 _SERVER_METADATA_PREFIX = "_nats."
 # Consumer settings the contract sets, compared to decide whether a consumer needs an update.
@@ -227,8 +221,13 @@ class AccountRoom:
                     f"{tier}. Nothing was changed.")
         part = tiers[tier] if tier else reply
         limits = part.get("limits") or {}
+        # A server that leaves the figure out counts as one whose streams set aside nothing, as
+        # the authority always read it: its start checks are not changed here (PR 152 review,
+        # FA-1), and NATS's own refusal (10047) still names storage if the room was needed. The
+        # Status page reads the same missing figure as unknown and raises no room warning.
+        reserved = reported_bytes(part, "reserved_storage")
         return cls(replicas=replicas, tier=tier, storage_limit=int(limits.get("max_storage", -1)),
-                   reported=int(part.get("reserved_storage", 0)), streams=int(part.get("streams", 0)),
+                   reported=0 if reserved is None else reserved, streams=int(part.get("streams", 0)),
                    stream_limit=int(limits.get("max_streams", -1)),
                    consumer_limit=int(limits.get("max_consumers", -1)))
 
@@ -663,18 +662,16 @@ class QueueTopology:
         return max([*streams, int(self._transport["key_value_stream"].get("max_consumers", 0))])
 
     async def _account_info(self, *, after: str) -> dict[str, Any]:
-        """The account's information as the server sends it: nats-py's ``AccountInfo`` lacks ``reserved_storage``.
+        """The account's information as the server sends it (``custom_transport.jetstream_account``).
 
-        ``after`` says what the start left, for the refusal when the server does not answer.
+        nats-py's ``AccountInfo`` lacks ``reserved_storage``. ``after`` says what the start
+        left, for the refusal when the server refuses the request or does not answer.
         """
 
         try:
-            reply: dict[str, Any] = json.loads((await self._nc.request(ACCOUNT_INFO_SUBJECT, b"", timeout=5)).data)
-            if "error" in reply:
-                APIError.from_error(reply["error"])  # raises the error's kind
+            return await request_account_info(self._nc)
         except _SERVER_ERRORS as error:
             raise self._server_refusal("read the NATS account's JetStream information", error, after=after) from None
-        return reply
 
     def _totals(self, team: Optional[str], room: AccountRoom) -> str:
         """What a team's streams set aside at the current settings, and what the account sets aside and allows."""
@@ -688,7 +685,7 @@ class QueueTopology:
         if team is None:
             return _first_upper(account)
         streams = team_queue_streams(self._transport, team, self.partitions)
-        total = sum(self.limits.max_bytes[stream.kind] for stream in streams)
+        total = streams_set_aside(streams, self.limits.max_bytes)
         partition = self.limits.max_bytes["partition"]
         others = ", ".join(f"{stream.setting} {self.limits.max_bytes[stream.kind]:,}"
                            for stream in streams if stream.partition is None)
