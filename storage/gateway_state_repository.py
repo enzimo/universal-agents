@@ -96,7 +96,7 @@ from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
 from .turn_attachments import relocate_steering_attachment
-from .gateway_agent_trails import rebuild_thread_trail, record_request_agent
+from .gateway_agent_trails import rebuild_thread_trail, record_request_agent, would_record
 
 
 def utc_now_iso() -> str:
@@ -1205,7 +1205,8 @@ class _RelationalGatewayStateRepository:
                     created_at TEXT NOT NULL,
                     status TEXT NOT NULL,
                     run_state TEXT,
-                    agent_types_json TEXT
+                    agent_types_json TEXT,
+                    first_agent_at TEXT
                 )
                 """
             )
@@ -1217,6 +1218,8 @@ class _RelationalGatewayStateRepository:
             ensure_column(conn, "gateway_requests", "run_state", "TEXT", logger=self._logger)
             # The agent types that worked on the request, first recorded first (assistant_gateway.domain.agent_trail).
             ensure_column(conn, "gateway_requests", "agent_types_json", "TEXT", logger=self._logger)
+            # When its first agent was recorded: orders the trail, never rewritten (continuations rewrite created_at).
+            ensure_column(conn, "gateway_requests", "first_agent_at", "TEXT", logger=self._logger)
             # Agents name a request by its task (storage.gateway_agent_trails.record_request_agent). Created after
             # the column's ensure_column, so a store from before active_task_id opens too.
             conn.execute(
@@ -2934,20 +2937,24 @@ class _RelationalGatewayStateRepository:
             return cursor.rowcount > 0
 
     def record_request_agent(self, *, active_task_id: str, agent_type: str, lead: bool) -> Optional[str]:
-        """Record that ``agent_type`` worked on the running request of ``active_task_id`` (Web Chat's agent trail).
+        """Record that ``agent_type`` worked on the person's request of ``active_task_id`` (Web Chat's agent trail).
 
         The session key of the thread whose trail changed, or None when nothing changed: the type was already
-        recorded, or the id names no running interactive request of this gateway (storage.gateway_agent_trails).
-        Raises ``ValueError`` for an agent type the stored list could not be read back with, before writing.
+        recorded, or the id names no request of this gateway (storage.gateway_agent_trails). Raises
+        ``ValueError`` for an agent type the stored list could not be read back with, before writing. A plain read
+        decides first, so an id that changes nothing never takes the write lock (review F15).
         """
 
         agent = trail_agent(agent_type, lead)
+        with self._connect() as conn:
+            if not would_record(conn, self._dialect, active_task_id=active_task_id, agent=agent):
+                return None
         with self._connect() as conn:
             if not isinstance(conn, _BorrowedConnection):
                 conn.begin_write()  # reads then writes: take the write lock first
             session_key = record_request_agent(
                 conn, self._dialect, active_task_id=active_task_id, agent=agent,
-                logger=self._logger,
+                logger=self._logger, now=utc_now_iso(),
             )
             conn.commit()
         return session_key

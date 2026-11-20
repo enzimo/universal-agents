@@ -9,10 +9,15 @@ for the thread list:
   change from the team view (``assistant_gateway.team_view``) and hands each
   new (request, agent type) pair to one writer thread, which records it in the
   store (``RequestRepository.record_request_agent``). The store changes only a
-  running interactive request of this gateway whose task the id names, so an
-  id the gateway does not hold changes nothing; the thread and its owner come
-  from the gateway's own request record, never from the agent. The writer
-  keeps first-reported order; the store's locks keep each thread's copy right.
+  request this gateway admitted (running or finished, whatever continuations
+  made its kind) whose task the id names, so an id the gateway does not hold
+  changes nothing, and checks that with a plain read before it takes its write
+  lock; the thread and its owner come from the gateway's own request record,
+  never from the agent. The writer keeps first-reported order; the store's
+  locks keep each thread's copy right. Its queue holds at most
+  ``WRITE_QUEUE_LIMIT`` pairs, so a host that invents ids cannot grow it
+  without bound; a pair that does not fit is logged and forgotten, so the
+  agent's next record change can name it again (review F15).
   ``request_sent`` records the team lead when the gateway hands it the
   request: the lead always works first, and a lead turn shorter than the
   record's two-second write interval would otherwise be missed.
@@ -55,6 +60,10 @@ WRITE_RETRY_SECONDS = (0.5, 2.0, 5.0)
 NAME_MAX_CHARACTERS = 200
 # The most agents one thread lists as working now (``WebChatThreadWorkingV1.agents``).
 WORKING_AGENTS_MAX = 64
+# The most (request, agent type) pairs waiting for the writer (module docstring).
+WRITE_QUEUE_LIMIT = 4096
+# A full queue is logged at most this often.
+QUEUE_FULL_LOG_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -117,7 +126,9 @@ class GatewayRequestAgents:
         self._recent: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._recent_lock = threading.Lock()
         # (request task, agent type, lead) to record, in order; None stops the writer.
-        self._writes: queue.SimpleQueue[tuple[str, str, bool] | None] = queue.SimpleQueue()
+        self._writes: queue.Queue[tuple[str, str, bool] | None] = queue.Queue(maxsize=WRITE_QUEUE_LIMIT)
+        self._queue_full_logged_at: float | None = None
+        self._dropped = 0
         self._writer: threading.Thread | None = None
         self._names: Mapping[str, str] = {}
         self._names_read_at: float | None = None
@@ -147,7 +158,27 @@ class GatewayRequestAgents:
             self._recent[pair] = None
             while len(self._recent) > RECENT_PAIRS_LIMIT:
                 self._recent.popitem(last=False)
-        self._writes.put((request, agent_type, lead))
+        try:
+            self._writes.put_nowait((request, agent_type, lead))
+        except queue.Full:
+            self._queue_full(pair)
+
+    def _queue_full(self, pair: tuple[str, str]) -> None:
+        """A pair that does not fit is forgotten (a later record change names it again) and logged once a minute."""
+
+        with self._recent_lock:
+            self._recent.pop(pair, None)
+            self._dropped += 1
+            now = self._clock()
+            if self._queue_full_logged_at is not None and now - self._queue_full_logged_at < QUEUE_FULL_LOG_SECONDS:
+                return
+            self._queue_full_logged_at, dropped, self._dropped = now, self._dropped, 0
+        self._logger.warning(
+            "The agent trail's write queue is full; pairs are left out until it drains. "
+            "event=gateway_request_agent_queue_full dropped=%s limit=%s",
+            dropped,
+            WRITE_QUEUE_LIMIT,
+        )
 
     async def run(self, stop: asyncio.Event) -> None:
         """Keep the writer running until ``stop`` or cancellation, then let it finish what it was handed."""
@@ -171,7 +202,12 @@ class GatewayRequestAgents:
         writer = self._writer
         if writer is None:
             return
-        self._writes.put(None)
+        try:
+            self._writes.put(None, timeout=timeout)
+        except queue.Full:
+            self._logger.warning("The agent trail's writer did not drain before the gateway stopped; pairs still "
+                                 "waiting are left out. event=gateway_request_agent_writer_not_drained")
+            return
         writer.join(timeout)
         self._writer = None
 
@@ -217,7 +253,7 @@ class GatewayRequestAgents:
                 return
             break
         if session_key is None:
-            # Already recorded, or not a running request of this gateway (a finished one, or none at all).
+            # Already recorded, or no request of this gateway.
             self._logger.debug(
                 "A reported request changed no thread. event=gateway_request_agent_unchanged task_id=%s agent_type=%s",
                 request,

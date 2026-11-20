@@ -282,8 +282,9 @@ class RequestRepository(Protocol):
         """Mark a running request finished; False when it was not running."""
 
     def record_request_agent(self, *, active_task_id: str, agent_type: str, lead: bool) -> str | None:
-        """Record an agent type that worked on the running interactive request of this task, once, first
-        recorded first, and rebuild its thread's agent trail; the thread's session key when anything changed.
+        """Record an agent type that worked on the person's request of this task (any request the gateway
+        admitted, running or finished, whatever continuations made its kind), once, first recorded first, and
+        rebuild its thread's agent trail; the thread's session key when anything changed.
         Raises ``ValueError`` for an agent type a stored list could not hold, before writing anything."""
 
     def hold_guidance(self, record: HeldGuidanceRecord) -> None:

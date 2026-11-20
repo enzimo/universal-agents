@@ -310,3 +310,70 @@ def test_an_unreadable_stored_trail_is_logged_once_however_often_it_is_read(tmp_
             _states(team)
     assert caplog.text.count("event=web_chat_thread_trail_unreadable") == 1
     team.agents.close()
+
+
+def _continuation(team, request_kind: str, status: str) -> None:
+    """What the answer to the lead's question (clarification.py) or a setup-page result (secure_results.py) records:
+    the request's own row through the real request service, which rewrites its kind and creation time."""
+
+    from assistant_gateway.application.request_service import GatewayRequestService
+
+    service = GatewayRequestService(repository=team.store.request_repository,
+                                    unit_of_work_factory=team.store.request_unit_of_work)
+    service.record(correlation_id="corr_1", session_key=THREAD, request_kind=request_kind, request_text="answer",
+                   conversation_id=f"conv_{THREAD}", followup_to_task_id="task_1", status=status)
+
+
+def _second_request(team) -> None:
+    import time
+
+    time.sleep(0.002)  # the next request is admitted later
+    team.store.request_repository.record_request(
+        correlation_id="corr_2", session_key=THREAD, request_kind=REQUEST_KIND_INTERACTIVE, request_text="next",
+        conversation_id=f"conv_{THREAD}", followup_to_task_id="task_1", owner_canonical_user_id=OWNER,
+        active_task_id="task_2", run_state=RUN_STATE_RUNNING,
+    )
+
+
+@pytest.mark.parametrize(("request_kind", "status"), [
+    ("interactive_query_response", "responded"),
+    ("tool_setup_result", "waiting_for_credential_result"),
+])
+def test_a_request_keeps_its_agents_after_a_question_answer_or_setup_result(team, request_kind, status) -> None:
+    """Review F1: answering the lead's question or finishing a setup page rewrites the request's kind and creation
+    time; its agents stay recorded, a worker after it is still recorded, and the next request comes after it."""
+
+    team.agents.request_sent("task_1")
+    _settle(team.agents)
+    assert _shape(_row(team)) == ["P", "Team lead"]
+    _continuation(team, request_kind, status)
+    assert team.store.request_repository.get_request("corr_1").request_kind == request_kind  # rewritten
+    assert _shape(_row(team)) == ["P", "Team lead"] and _working(team) == []
+    team.live.report(team.agents, "worker_1", WEB, "task_1")
+    _settle(team.agents)
+    assert _working(team) == ["Web Research Agent"]
+    assert _shape(_row(team)) == ["P", "Team lead", "Web Research Agent"]
+    team.live.report(team.agents, "worker_1", WEB)
+    team.store.request_repository.finish_request("corr_1")
+    _second_request(team)
+    team.agents.request_sent("task_2")
+    _settle(team.agents)
+    assert _shape(_row(team)) == ["P", "Team lead", "Web Research Agent", "P", "Team lead"]
+
+
+def test_a_full_write_queue_leaves_pairs_out_logs_once_and_takes_them_again_later(monkeypatch, caplog) -> None:
+    """Review F15: a host that invents ids cannot grow the queue without bound."""
+
+    from assistant_gateway.application import request_agents_service
+
+    monkeypatch.setattr(request_agents_service, "WRITE_QUEUE_LIMIT", 2)
+    store = _FlakyStore([])
+    agents = _writer(store, [])  # not started: nothing drains the queue yet
+    with caplog.at_level(logging.WARNING):
+        for index in range(5):
+            agents.observe(AgentReport("worker_1", WEB, False, (f"task_{index}",)))
+    assert caplog.text.count("event=gateway_request_agent_queue_full dropped=1 limit=2") == 1
+    _settle(agents)
+    agents.observe(AgentReport("worker_1", WEB, False, ("task_4",)))  # a later change names it again
+    agents.close()
+    assert [item[0] for item in store.written] == ["task_0", "task_1", "task_4"]

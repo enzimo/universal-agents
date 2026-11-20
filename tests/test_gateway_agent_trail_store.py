@@ -93,15 +93,55 @@ def test_agents_are_recorded_once_per_request_in_first_recorded_order(settings) 
     assert trail.agents == (TrailAgent(LEAD, True), TrailAgent(WEB)) and not trail.has_older
 
 
-def test_ids_the_gateway_does_not_hold_as_running_interactive_requests_change_nothing(settings) -> None:
+def test_ids_the_gateway_does_not_hold_as_a_persons_request_change_nothing(settings) -> None:
     repo = _repo(settings)
     _thread(repo)
-    finished = _request(repo, 1)
-    repo.finish_request("corr_1")
     guidance = _request(repo, 2, running=False, kind=REQUEST_KIND_TASK_STEERING)
-    for task in (finished, guidance, "task_unknown", ""):
+    for task in (guidance, "task_unknown", ""):
         assert repo.record_request_agent(active_task_id=task, agent_type=WEB, lead=False) is None
     assert _listed(repo).agent_trail_json is None
+
+
+def test_an_agent_reported_after_its_request_finished_still_counts(settings) -> None:
+    """Review F4: a record arriving after the request finished (the two-second interval, or a write that waited
+    behind a failed one) is still the agent's turn on that request."""
+
+    repo = _repo(settings)
+    _thread(repo)
+    task = _request(repo, 1)
+    repo.record_request_agent(active_task_id=task, agent_type=LEAD, lead=True)
+    repo.finish_request("corr_1")
+    assert repo.record_request_agent(active_task_id=task, agent_type=WEB, lead=False) == THREAD
+    assert _shape(repo) == ["P", LEAD, WEB]
+
+
+def test_an_id_that_changes_nothing_never_takes_the_write_lock(settings, monkeypatch) -> None:
+    """Review F15: unknown ids and types already recorded are answered by a plain read."""
+
+    repo = _repo(settings)
+    _thread(repo)
+    task = _request(repo, 1)
+    repo.record_request_agent(active_task_id=task, agent_type=LEAD, lead=True)
+    writes: list[str] = []
+    connect = repo._open_connection
+
+    def counting():
+        conn = connect()
+        begin = conn.begin_write
+
+        def begin_write():
+            writes.append("begin")
+            return begin()
+
+        conn.begin_write = begin_write
+        return conn
+
+    monkeypatch.setattr(repo, "_open_connection", counting)
+    for task_id, agent_type in (("task_unknown", WEB), (task, LEAD)):
+        assert repo.record_request_agent(active_task_id=task_id, agent_type=agent_type, lead=agent_type == LEAD) is None
+    assert writes == []
+    assert repo.record_request_agent(active_task_id=task, agent_type=WEB, lead=False) == THREAD
+    assert writes == ["begin"]
 
 
 def test_the_list_names_the_running_requests_task_and_the_trail_survives_reopening(settings) -> None:
@@ -186,7 +226,8 @@ def test_a_cleanup_that_overlaps_a_recording_writes_a_copy_that_includes_it() ->
         cut = _created_at(repo, "corr_1")
 
         recording = connect_postgres(settings.postgres_dsn or "")
-        record_request_agent(recording, POSTGRES, active_task_id=running, agent=TrailAgent(WEB), logger=LOGGER)
+        record_request_agent(recording, POSTGRES, active_task_id=running, agent=TrailAgent(WEB), logger=LOGGER,
+                             now=_now())
         cleaned = threading.Event()
 
         def cleanup() -> None:
