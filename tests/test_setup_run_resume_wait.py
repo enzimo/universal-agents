@@ -689,6 +689,39 @@ async def test_each_scheduler_pass_runs_the_recovery_and_goes_on_after_a_failure
 
 
 @pytest.mark.asyncio
+async def test_a_draining_agents_scheduler_pass_still_runs_setup_run_recovery(monkeypatch, caplog) -> None:
+    """Review EVD-03: the real scheduler pass of an agent that drains for another message contract still runs the
+    setup-run recovery, so a run that ends while it drains resumes its own task (the drain test below shows what
+    that recovery then does)."""
+
+    from custom_agents import scheduled_runtime
+    from custom_agents.contract_drain_state import ContractDrain
+    from tests.test_schedule_tools import _LoopAgent
+
+    agent = _LoopAgent(can_start=False)
+    agent._contract_drain = ContractDrain(reason="another message contract", started_at=datetime.now(timezone.utc))
+    calls: list = []
+
+    async def recover(item):
+        calls.append(item)
+        return 0
+
+    async def nothing(_agent):
+        return None
+
+    monkeypatch.setattr(scheduled_runtime, "resume_ended_setup_runs", recover)
+    monkeypatch.setattr(scheduled_runtime, "resume_decided_access_waits", nothing)
+    monkeypatch.setattr(scheduled_runtime, "take_over_orphaned_work", nothing)
+    monkeypatch.setattr(scheduled_runtime, "report_stuck_tasks", nothing)
+
+    with caplog.at_level(logging.ERROR):
+        await scheduled_runtime._scheduler_pass(agent, {}, asyncio.sleep)
+
+    assert calls == [agent]
+    assert "event=setup_run_recovery_failed" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_a_pass_leaves_a_run_another_step_is_working_on(lead, woken, monkeypatch, caplog) -> None:
     """Review C07: a run in the middle of its own step is not a lost wake-up, so no warning names it."""
     pause_on_setup(lead)  # the page is done, but the run is not settled yet: still_waits is false

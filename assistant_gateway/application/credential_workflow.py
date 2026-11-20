@@ -201,8 +201,14 @@ class GatewayCredentialWorkflow:
             states=setup_states,
             team_id=settings.team_id,
             event_output=event_output,
-            # A gateway with a team view sends kept page results only to a lead the team's records named.
-            lead_from_records=(lambda: manager_client.lead_from_records) if kept_results_wait_for_records else None,
+            # A gateway with a team view sends kept page results only to a lead the team's records named. With no
+            # route at all the publisher runs and logs no_route, so the log tells a missing lead from a saved route
+            # that no read record names yet (critique C09).
+            lead_from_records=(
+                (lambda: manager_client.manager_id is None or manager_client.lead_from_records)
+                if kept_results_wait_for_records
+                else None
+            ),
             logger=self._logger,
         )
         # Tells a person how a page they opened with /link or /auth ended, in

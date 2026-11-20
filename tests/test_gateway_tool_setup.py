@@ -1322,6 +1322,41 @@ async def test_a_page_ending_without_a_team_lead_keeps_its_result_for_the_next_s
 
 
 @pytest.mark.asyncio
+async def test_a_gateway_without_a_team_view_sends_kept_results_at_its_full_start(tmp_path) -> None:
+    """Review EVD-02: a gateway without a team view (no message host) uses its saved route as it is, so its own
+    start, with its start services, still sends a kept result once to that route; the records rule for a gateway
+    with a team view (GatewayManagerClient.lead_from_records) does not apply to it."""
+
+    from unittest.mock import AsyncMock
+
+    from assistant_gateway.store import GatewayStateStore
+    from tests.test_gateway_phase1 import _build_test_config, _FakeGatewayManagerRuntime
+
+    config = _build_test_config(tmp_path)
+    config.manager.manager_agent_id = "lead_saved"
+    runtime = _FakeGatewayManagerRuntime()
+    gateway = UserGateway(
+        config, output_sink=None, state_store=GatewayStateStore(str(tmp_path / "gateway.db")), manager_runtime=runtime
+    )
+    assert gateway._team_view is None
+    _waiting_task(gateway, owner=gateway.config.user.canonical_user_id)
+    _kept_result_row(gateway, "tool_setup_req_kept")
+    gateway._maintenance_schedules.ensure_all = AsyncMock()  # type: ignore[method-assign]
+    await gateway.connect(start_services=True)
+    try:
+        assert "gateway_tool_setup_resend" in {task.get_name() for task in gateway._background_tasks}
+        await _until(lambda: _setup_results(runtime) != [])
+        await asyncio.sleep(0.1)
+        [(result, queue, message_id)] = _setup_results(runtime)
+        assert (result.setup_request_id, queue, message_id) == (
+            "tool_setup_req_kept", "lead_saved", "secure_result:tool_setup_result:tool_setup_req_kept:lead_saved"
+        )
+        assert _setups(gateway).get_tool_setup("tool_setup_req_kept").result_state == "sent"
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
 async def test_a_failed_publish_keeps_the_result_and_the_retry_sends_it(flaky_gateway, caplog) -> None:
     gateway, transport, _events = flaky_gateway
     setups = gateway._credential_workflow.tool_setups

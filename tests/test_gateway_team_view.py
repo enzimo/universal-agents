@@ -1424,3 +1424,28 @@ async def test_a_page_ended_at_start_goes_to_the_lead_the_read_records_name(tmp_
         assert recorded.seen == []
     finally:
         await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_with_no_team_lead_routed_a_kept_result_waits_as_no_route(tmp_path, monkeypatch, caplog) -> None:
+    """Critique C09: on a gateway with a team view, records that were read but name no lead leave no route at all.
+    A kept result then reaches the publisher and is logged as no_route, not as waiting for the records, and it goes
+    once the records name a lead."""
+
+    reader = Reader()
+    gateway, _ = _gateway(tmp_path, monkeypatch, reader, saved=None, start_limit=0.1)
+    _quick_checks(gateway)
+    _keep_setup_results(gateway, KEPT)
+    caplog.set_level(logging.INFO)
+    await gateway.connect(start_services=False)
+    try:
+        assert gateway._team_view.ready.is_set() and gateway._manager_client.manager_id is None
+        sending = await gateway._credential_workflow.tool_setups.resend_kept_results()
+        assert sending.reason == "no_route" and sending.sent == 0
+        assert "event=gateway_secure_result_not_sent reason=no_route" in caplog.text
+        assert "event=gateway_tool_setup_resend_waits_for_records" not in caplog.text
+
+        reader.publish(member("lead_1", lead=True))
+        await until(lambda: _sent_setup_results(gateway) == _sent_once_to("lead_1", KEPT))
+    finally:
+        await gateway.close()

@@ -424,9 +424,10 @@ class GatewayToolSetups:
         logger: logging.Logger | None = None,
     ) -> None:
         self._assistant = assistant_display_name
-        # With a team view: whether team records the lead follower read name the routed lead
-        # (GatewayManagerClient.lead_from_records). Kept results are sent only then, because a route saved by the
-        # previous run may name a lead that is gone. None without a team view: the saved route is used as it is.
+        # With a team view: False while a lead is routed that no team record the lead follower read names
+        # (GatewayManagerClient.lead_from_records); kept results wait then, because a route saved by the previous
+        # run may name a lead that is gone. With no route at all it is True, so the publisher logs no_route. None
+        # without a team view: the saved route is used as it is.
         self._lead_from_records = lead_from_records
         # People's last known tool setup states; a finished setup makes the tool ready.
         self._states = states

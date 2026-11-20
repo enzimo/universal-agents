@@ -64,8 +64,10 @@ class SendOutcome(StrEnum):
     NO_ROUTE = "no_route"
     # A lead is known but the publish failed (for example NATS is disconnected).
     PUBLISH_FAILED = "publish_failed"
-    # Kept setup page results only, on a gateway with a team view: no team record the lead follower read names
-    # the routed lead yet, so nothing is published (tool_setup.GatewayToolSetups). The publisher never returns it.
+    # Kept setup page results only, on a gateway with a team view: a lead is routed (a route saved by the previous
+    # run), but no team record the lead follower read names it yet, so nothing is published
+    # (tool_setup.GatewayToolSetups). With no route at all the result gets NO_ROUTE as before. The publisher never
+    # returns it.
     LEAD_NOT_FROM_RECORDS = "lead_not_from_records"
 
 

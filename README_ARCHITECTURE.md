@@ -3174,7 +3174,9 @@ person which command to run or asking whether to start:
    the previous run's lead may be gone. Such a pass stops with no retry
    (`event=gateway_tool_setup_resend_waits_for_records`,
    `reason=lead_not_from_records`), and the follower's transition or
-   confirmation sends the results once the records name the lead. A start
+   confirmation sends the results once the records name the lead. With no
+   lead routed at all, for example while the team lead restarts, the result
+   is kept as `no_route` (`event=gateway_secure_result_not_sent`). A start
    decision from read records notes that they name the lead without
    sending, so a page that ends at start sends its result at once. A
    gateway without a team view, which uses its saved route as it is, sends

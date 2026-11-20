@@ -82,7 +82,9 @@ class GatewayManagerClient:
 
     Which agent leads, and whether it is live, comes from the team's agent records: the
     team view's lead follower (``assistant_gateway.team_view.TeamLeadFollower``) is the
-    only caller of ``set_lead`` and ``mark_manager_unavailable`` while the gateway runs.
+    only caller of ``set_lead``, ``confirm_lead``, ``note_lead_from_records``,
+    ``forget_lead_from_records`` and ``mark_manager_unavailable`` while the gateway runs,
+    so ``lead_from_records`` reflects only records it read.
     Before message contract step 7c this client discovered the lead on the operational
     subject, ordered presence reports by their timestamps and polled the lead's liveness.
     """
