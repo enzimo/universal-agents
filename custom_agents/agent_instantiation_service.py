@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from custom_agents.schedule_repair_guidance import (
     AGENT_DEFINITION_CHANGED,
+    AGENT_TYPE_INELIGIBLE,
     SCHEDULE_LAUNCH_INTENT_CHANGED,
 )
 from custom_agents.schedule_definition_identity import (
@@ -75,8 +76,12 @@ WORKER_POOLS_DISABLED = "worker_pools_disabled"
 # edit made while it started ended it. Counting them made a routine restart, or
 # a schedule edited during its worker's start, hold back a healthy type and
 # open a start_failed review (review of PR #160, 2026-11-20).
+# AGENT_TYPE_INELIGIBLE: the operator switched automatic (scheduled) starts off,
+# or took the type off their eligible list, while a scheduled worker started;
+# a rule about scheduled starting, like WORKER_POOLS_DISABLED for pool starts.
 UNCOUNTED_START_ENDS = frozenset(
     {
+        AGENT_TYPE_INELIGIBLE,
         STOPPED_BY_RUNTIME,
         LAUNCHER_RECONCILIATION,
         LAUNCH_POLICY_REVOKED,
@@ -192,7 +197,7 @@ class AgentInstantiationService:
                 agent_type not in limits.eligible_agent_types
                 and not default_type_allowed(self.agent, agent_type, definition)
             ):
-                raise PermissionError("agent_type_ineligible_for_automatic_launch")
+                raise PermissionError(AGENT_TYPE_INELIGIBLE)
             if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
                 raise PermissionError("automatic_manager_launch_forbidden")
         return definition, limits

@@ -224,10 +224,12 @@ def _settle_worker_exit(
 ) -> None:
     """Record a worker thread's end on its start record; a failure is logged, never raised.
 
-    When the launcher stopped the worker and its thread outlived the 1 s
-    join, the launcher already wrote the record with the stop reason
-    (custom_agents.schedule_worker_controller), so the worker's own write
-    loses the fence. That is expected and logged as such, not as an error.
+    When the launcher stopped a worker that was not ready and its thread
+    outlived the 1 s join, the launcher already wrote the record with the
+    stop reason (custom_agents.schedule_worker_controller), so the worker's
+    own write loses the fence. That one case is expected and logged at info,
+    with the conflict's text; every other failure stays an error (a ready
+    worker whose end nothing recorded, a missing or foreign record).
     """
 
     from custom_agents.agent_instantiation_service import record_worker_exit
@@ -235,16 +237,17 @@ def _settle_worker_exit(
 
     try:
         record_worker_exit(agent, crash, stopped_because=handle.stop_reason)
-    except LaunchConflict:
-        if handle.stop_reason is None:
+    except LaunchConflict as conflict:
+        if handle.stop_reason is None or agent._worker_ready:
             _logger.exception("Could not record worker exit", extra={"launch_id": launch_id, "agent_id": agent.id})
             return
         _logger.info(
             "A stopped worker's start was already recorded by the launcher. "
-            "event=worker_exit_recorded_by_launcher launch_id=%s agent_id=%s reason=%s",
+            "event=worker_exit_recorded_by_launcher launch_id=%s agent_id=%s reason=%s error=%s",
             launch_id,
             agent.id,
             handle.stop_reason,
+            conflict,
         )
     except Exception:
         _logger.exception("Could not record worker exit", extra={"launch_id": launch_id, "agent_id": agent.id})

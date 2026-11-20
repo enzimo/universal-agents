@@ -239,18 +239,21 @@ class ScheduleWorkerController:
 
         Checked in this order, and the reason becomes its start record's:
 
-        - the type's own worker rules are refused (any source; a pool start is
-          not checked against them before it starts): the refusal's code, for
-          example ``schedule_worker_rule_exceeds_operator_limit:<field>``. It
-          lasts until the configuration is fixed, so it counts as a failed
-          start of the type;
-        - a schedule's own rules (its policy's overrides) are refused, for
-          example after the operator lowered a maximum: ``LAUNCH_POLICY_REVOKED``,
-          which does not count, since it is about that schedule;
-        - a scheduled start's type is refused now: its code (counts);
+        - the rules it started with are refused: the type's rules with a
+          scheduled start's own overrides on top, as the launcher checked
+          them (a pool start is not checked against them before it starts).
+          ``_rules_refusal`` decides whose rule it is: the type's own (its
+          code, for example ``schedule_worker_rule_exceeds_operator_limit:<field>``,
+          which lasts until the configuration is fixed and counts as a failed
+          start of the type) or only the schedule's (``LAUNCH_POLICY_REVOKED``,
+          which does not count);
+        - a scheduled start's type is refused now: its code. A denied type
+          counts; automatic starts switched off, or the type taken off the
+          eligible list, does not (``UNCOUNTED_START_ENDS``);
         - a scheduled start's policy or definition changed:
           ``LAUNCH_POLICY_REVOKED`` (does not count);
-        - the start took longer than its startup timeout: ``STARTUP_TIMED_OUT``.
+        - the start took longer than its startup timeout (a schedule's own
+          value when it sets one): ``STARTUP_TIMED_OUT``.
         """
 
         binding = (
@@ -261,16 +264,11 @@ class ScheduleWorkerController:
             else None
         )
         try:
-            rules = effective_worker_rules(self.agent, record.named_agent_type, {})
+            rules = effective_worker_rules(
+                self.agent, record.named_agent_type, binding.policy.rules if binding else {}
+            )
         except (ValueError, PermissionError) as exc:
-            return self._stop_refusal_reason(record, exc)
-        if binding is not None:
-            try:
-                rules = effective_worker_rules(
-                    self.agent, record.named_agent_type, binding.policy.rules
-                )
-            except (ValueError, PermissionError):
-                return LAUNCH_POLICY_REVOKED
+            return self._rules_refusal(record, binding, exc)
         if record.source == "schedule":
             refused = self._scheduled_start_refusal(record, binding, now, limits)
             if refused is not None:
@@ -278,6 +276,22 @@ class ScheduleWorkerController:
         if record.created_at_utc + timedelta(seconds=rules.startup_timeout_seconds) <= now:
             return STARTUP_TIMED_OUT
         return None
+
+    def _rules_refusal(self, record: Any, binding: Any, error: BaseException) -> str:
+        """Whose worker rules were refused: the type's own (counted code) or only a schedule's overrides.
+
+        A schedule's own rule above an operator maximum (one lowered while its
+        worker started) is about that schedule, so it does not count against
+        the type; the type's rules alone decide that.
+        """
+
+        if binding is None:
+            return self._stop_refusal_reason(record, error)
+        try:
+            effective_worker_rules(self.agent, record.named_agent_type, {})
+        except (ValueError, PermissionError) as type_error:
+            return self._stop_refusal_reason(record, type_error)
+        return LAUNCH_POLICY_REVOKED
 
     def _scheduled_start_refusal(
         self, record: Any, binding: Any, now: datetime, limits: Any
