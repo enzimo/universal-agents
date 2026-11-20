@@ -904,25 +904,31 @@ async def test_a_pass_skips_a_finished_task_that_still_has_a_record(lead, woken,
 # it already holds and takes over nothing. Setup-run recovery reads only the agent's own tasks and starts no
 # agent, like resume_decided_access_waits, so it needs no drain check of its own (plan decision D6).
 
-OWN_TASK, GONE_TASK = "task-own", "task-of-a-gone-lead"
+OWN_TASK, LATER_TASK, GONE_TASK = "task-own", "task-own-later", "task-of-a-gone-lead"
 DRAINING_LEAD, GONE_LEAD = "lead-draining", "lead-gone"
 
 
-def _saved_setup_wait(tmp_path: Path, owner: str, task_id: str, run_id: str) -> None:
-    """A TeamLead process saved a task paused on set_up_tools whose run then ended, and stopped (one shared store)."""
+def _saved_setup_waits(tmp_path: Path, owner: str, *waits: tuple[str, str, bool]) -> None:
+    """A TeamLead process saved tasks paused on set_up_tools, each ``(task id, run id, run ended)``, and stopped.
+
+    One TaskManager saves all of an owner's tasks, because each save replaces that owner's snapshot in the shared
+    store. A run that has not ended still waits for its page.
+    """
 
     manager = TaskManager(db_path=str(tmp_path / "instance.db"))
     manager.set_owner_identity(owner, owner, "team", "TeamArchitect")
-    assert manager.add_task(
-        Task(task_id=task_id, task_type=MessageMetaType.REQUEST), MessageHeader(from_agent_id="gateway"), MessageMeta(),
-        owner_person_id=None,
-    )
-    assert manager.get_next_task_to_process() == task_id
-    manager.update_main_task_state(task_id, ProgressState.IN_PROGRESS, _now())
-    manager.update_main_task_state(task_id, ProgressState.WAITING, _now())
     stopped = SimpleNamespace(id=owner, task_manager=manager, _interrupted_turn_sessions={})
-    pause_on_setup(stopped, run_id, task_id=task_id)
-    ended(stopped, run_id)
+    for task_id, run_id, run_ended in waits:
+        assert manager.add_task(
+            Task(task_id=task_id, task_type=MessageMetaType.REQUEST), MessageHeader(from_agent_id="gateway"),
+            MessageMeta(), owner_person_id=None,
+        )
+        assert manager.get_next_task_to_process() == task_id
+        manager.update_main_task_state(task_id, ProgressState.IN_PROGRESS, _now())
+        manager.update_main_task_state(task_id, ProgressState.WAITING, _now())
+        pause_on_setup(stopped, run_id, f"i-{run_id}", task_id=task_id, page=DONE if run_ended else "waiting")
+        if run_ended:
+            ended(stopped, run_id)
     manager._persist_runtime_state()
 
 
@@ -949,16 +955,27 @@ def _starting_lead(tmp_path: Path, *, draining: bool) -> SimpleNamespace:
     return agent
 
 
+def _left_to_the_gone_lead(agent: SimpleNamespace) -> None:
+    """The gone lead's task is neither taken over nor resumed: it stays saved under that lead, its run ended."""
+
+    manager = agent.task_manager
+    assert manager.get_task_info(GONE_TASK) is None
+    saved = {row.owner_agent_id for row in manager.runtime_state_store.peek_task_runtime_by_role("team", "TeamArchitect")}
+    assert GONE_LEAD in saved
+    assert run_repository(agent).get("run-gone").status == RUN_FINISHED
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("draining", [True, False], ids=["draining", "not_draining"])
-async def test_a_draining_agent_resumes_its_own_ended_setup_run_and_takes_over_no_other(
+async def test_a_draining_agent_resumes_its_own_ended_setup_runs_and_takes_over_no_other(
     tmp_path, monkeypatch, woken, results, draining
 ) -> None:
     from custom_agents import runtime_recovery
     from custom_agents.lease_loss_wind_down import may_start_next_task
 
-    _saved_setup_wait(tmp_path, DRAINING_LEAD, OWN_TASK, "run-own")
-    _saved_setup_wait(tmp_path, GONE_LEAD, GONE_TASK, "run-gone")
+    # The draining lead saved two tasks: one whose run ended while it was down, one whose run still waits.
+    _saved_setup_waits(tmp_path, DRAINING_LEAD, (OWN_TASK, "run-own", True), (LATER_TASK, "run-own-later", False))
+    _saved_setup_waits(tmp_path, GONE_LEAD, (GONE_TASK, "run-gone", True))
     # The other lead is gone: without the drain, the starting lead would take its saved work over.
     monkeypatch.setattr(runtime_recovery, "gone_owner_ids",
                         AsyncMock(side_effect=lambda _agent, ids, **_kw: [owner for owner in ids if owner == GONE_LEAD]))
@@ -975,27 +992,37 @@ async def test_a_draining_agent_resumes_its_own_ended_setup_run_and_takes_over_n
             assert manager.read_runtime_resume_directive(task_id).startswith(tool_setup_run_runtime.RUN_ENDED_NOTE)
         return
 
-    # Its own task resumes from a note, once, at the front of its queue, without waking the drain at start.
+    # At start: its own task whose run ended resumes from a note, once, at the front of its queue, without waking
+    # the drain; the task whose run still waits keeps waiting.
     assert list(manager.task_state.task_queue) == [OWN_TASK]
     assert get_human_interaction_blocker(manager, OWN_TASK) is None
     assert manager.get_task_info(OWN_TASK).state == ProgressState.ACCEPTED
     assert manager.read_runtime_resume_directive(OWN_TASK).startswith(tool_setup_run_runtime.RUN_ENDED_NOTE)
+    assert get_human_interaction_blocker(manager, LATER_TASK)["run_id"] == "run-own-later"
     assert woken == []
-    # The gone lead's task is neither taken over nor resumed: it stays saved under that lead, with its record.
-    assert manager.get_task_info(GONE_TASK) is None
-    saved = {row.owner_agent_id for row in manager.runtime_state_store.peek_task_runtime_by_role("team", "TeamArchitect")}
-    assert GONE_LEAD in saved
-    assert run_repository(agent).get("run-gone").status == RUN_FINISHED
+    _left_to_the_gone_lead(agent)
 
-    # A scheduler pass while draining finds nothing more to do.
-    assert await tool_setup_run_runtime.resume_ended_setup_runs(agent, now=PASS) == 0
-    assert list(manager.task_state.task_queue) == [OWN_TASK]
+    # Critique C07: the run the waiting task holds ends after the start, with no wake-up reaching the agent, while
+    # it drains. Only the scheduler pass resumes that task: once, from a note, and still not the gone lead's.
+    ended(agent, "run-own-later")
+    reads = count_reads(monkeypatch)
+    past_the_pacing = agent._setup_run_check_after + 1  # The start set the pass's pacing from the real clock.
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(agent, now=past_the_pacing) == 1
+    assert reads == [1], "the pass read the records"
+    assert list(manager.task_state.task_queue) == [LATER_TASK, OWN_TASK]
+    assert get_human_interaction_blocker(manager, LATER_TASK) is None
+    assert manager.read_runtime_resume_directive(LATER_TASK).startswith(tool_setup_run_runtime.RUN_ENDED_NOTE)
+    assert woken == [agent]
+    _left_to_the_gone_lead(agent)
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(agent, now=agent._setup_run_check_after + 1) == 0
+    assert reads == [1, 1] and list(manager.task_state.task_queue) == [LATER_TASK, OWN_TASK]
 
-    # Critique C04: even a drain that holds back unstarted tasks starts the resumed one, which ran before.
+    # Critique C04: even a drain that holds back unstarted tasks starts a resumed one, which ran before.
     assert await may_start_next_task(agent) is True
     assert manager.add_task(
         Task(task_id="task-never-started", task_type=MessageMetaType.REQUEST), MessageHeader(from_agent_id="gateway"),
         MessageMeta(), owner_person_id=None,
     )
-    manager.task_state.task_queue.remove(OWN_TASK)
+    for resumed in (LATER_TASK, OWN_TASK):
+        manager.task_state.task_queue.remove(resumed)
     assert await may_start_next_task(agent) is False
