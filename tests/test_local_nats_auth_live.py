@@ -21,7 +21,7 @@ import nats
 import pytest
 
 import docker.nats_service as nats_service
-from assistant_gateway.storage_capacity import SpaceUse, disk_space
+from assistant_gateway.storage_capacity import StoreDisk, store_disk
 from custom_transport.jetstream_account import BUNDLED_STORAGE_SHARE
 from custom_transport.protocol1.mapping_check import check_partition_mapping
 from tests.owned_processes import stopped_at_exit
@@ -106,14 +106,16 @@ def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatc
             # so an upgraded instance finds its queued work.
             assert varz["jetstream"]["config"]["store_dir"] == str(store / "jetstream")
             # With no max_file_store the server's room is three quarters of the free space on the store's
-            # disk, as the Status page measures it (assistant_gateway.storage_capacity.disk_space), and the
-            # page reads the room it runs with through bundled_running_room.
-            # Within 1%: other programs write to the disk between the server's start and this measurement.
-            disk = disk_space("disk:message_store", "The store's disk", store)
-            assert isinstance(disk, SpaceUse)
+            # disk and of what its streams store, as the Status page measures them
+            # (assistant_gateway.storage_capacity.store_disk), and the page reads the room it runs with
+            # through bundled_running_room. Within 1%: other programs write to the disk between the
+            # server's start and this measurement.
+            disk = store_disk(store)
+            assert isinstance(disk, StoreDisk)
             running = nats_service.bundled_running_room(monitor_port)
-            assert running == varz["jetstream"]["config"]["max_storage"]
-            assert running == pytest.approx(BUNDLED_STORAGE_SHARE * disk.free, rel=0.01)
+            assert running.room == varz["jetstream"]["config"]["max_storage"]
+            assert running.stored == varz["jetstream"]["stats"]["storage"]
+            assert running.room == pytest.approx(BUNDLED_STORAGE_SHARE * (disk.free + running.stored), rel=0.01)
 
         asyncio.run(probe())
         # A connection line as long as the largest credential the contract allows, plus the rest

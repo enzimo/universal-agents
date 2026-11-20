@@ -31,10 +31,13 @@ ACCOUNT_INFO_SUBJECT = "$JS.API.INFO"
 # nats-py's own default for JetStream API requests; the Status page waits up to 10 seconds in all.
 ACCOUNT_INFO_TIMEOUT_SECONDS = 5.0
 # A nats-server whose configuration sets no max_file_store, as the bundled server's does not,
-# gives JetStream three quarters of the disk's free space, measured each time it starts
-# (measured on 2.15.1: 0.750). So the disk needs a third more free space than the streams set
-# aside, at every start of NATS, not only the first. Here, not in the authority or the gateway,
-# because both use it and neither imports the other.
+# gives JetStream three quarters of the free space on its store's disk, measured each time it
+# starts, plus three quarters of what its streams already store, which it adds back once it has
+# recovered them (finalizeDynamicMaxStore; measured on 2.15.1 to the byte). So the free space
+# and the stored messages together need to be a third more than what the streams set aside, at
+# every start of NATS, not only the first. Here, not in the authority or the gateway, because
+# both use it and neither imports the other. The authority's start check leaves the stored part
+# out, so it never counts more room than there is.
 BUNDLED_STORAGE_SHARE = 3 / 4
 
 

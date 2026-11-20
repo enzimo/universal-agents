@@ -18,6 +18,7 @@ environment (``env_secrets.environment_for``, process ``nats``).
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import logging
 import os
@@ -25,10 +26,10 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import time
-from typing import Mapping, MutableMapping
-import urllib.request
+from typing import Mapping, MutableMapping, NamedTuple
 
 from custom_messages.wire.partitions import account_mappings, mapping_line
 from env_secrets import PROCESS_NATS, environment_for
@@ -37,11 +38,14 @@ from env_secrets import PROCESS_NATS, environment_for
 INTERNAL_NATS_HOST = "127.0.0.1"
 INTERNAL_NATS_PORT = 4222
 INTERNAL_NATS_MONITOR_PORT = 8222
-# How long each step of reading the bundled server's monitoring endpoint (bundled_running_room) may
-# wait: connecting, and each read of the reply. It is on the same machine, so an answer takes
-# milliseconds. This is the only bound on that wait: the Status page runs its storage check in a
-# worker thread with no time limit of its own.
+# How long reading the bundled server's monitoring endpoint (bundled_running_room) may take in all:
+# connecting, asking and the whole reply, under one deadline. It is on the same machine, so an
+# answer takes milliseconds. This is the only bound on that wait: the Status page runs its storage
+# check in a worker thread with no time limit of its own.
 MONITOR_TIMEOUT_SECONDS = 2.0
+# The longest reply read from that endpoint, headers included. The bundled server's /varz reply is
+# a few kilobytes; a longer one is not that server answering, and is refused unread.
+MONITOR_REPLY_LIMIT_BYTES = 1 << 20
 LOCAL_NATS_ENABLED_ENV = "TEAM_LOCAL_NATS_ENABLED"
 NATS_USER_ENV = "NATS_USER"
 NATS_PASSWORD_ENV = "NATS_PASSWORD"
@@ -49,9 +53,9 @@ NATS_URL_ENV = "NATS_URL"
 NATS_SERVERS_ENV = "NATS_SERVERS"
 # The bundled server's JetStream store folder (its ``-sd``), which ``start_local_nats``, and
 # nothing else, sets in the environment it is given, the one the runtime's processes get. The
-# bundled server sets no max_file_store, so it takes three quarters of the free space on that
-# folder's disk as its room at each start, and the Status page measures that disk
-# (``assistant_gateway.storage_capacity``). A hand-off to child processes, not a setting: both
+# bundled server sets no max_file_store, so at each start it takes three quarters of the free
+# space on that folder's disk, plus three quarters of what its streams already store there, as
+# its room, and the Status page measures that disk (``assistant_gateway.storage_capacity``). A hand-off to child processes, not a setting: both
 # launchers call ``start_local_nats`` (docker/launch_headless.py, and the bundle's
 # docker/run_bundle.py, which then hands the headless launcher TEAM_LOCAL_NATS_ENABLED=false),
 # so it is the one place that knows the server is the bundled one and where its store is. A
@@ -152,35 +156,103 @@ def bundled_nats_store_dir(env: Mapping[str, str], *, logger: logging.Logger | N
     return None
 
 
-def bundled_running_room(port: int | None = None, *, timeout: float = MONITOR_TIMEOUT_SECONDS) -> int:
-    """The bundled server's room as it runs: ``jetstream.config.max_storage`` from its ``/varz``.
+class RunningRoom(NamedTuple):
+    """The bundled server's room as it runs and what its streams store, from one ``/varz`` reply.
 
-    The server takes its room once, when it starts (three quarters of the free space on its
-    store's disk, since its configuration sets no max_file_store), and checks every new or
-    changed stream against it until it starts again, whatever the disk shows meanwhile. So this
-    figure, not the disk, tells whether it refuses new streams now (Status page,
-    ``assistant_gateway.storage_capacity``). It comes from the loopback monitoring port
-    ``start_local_nats`` always opens (``port`` for a test's own server), read directly, never
-    through an HTTP proxy the environment names. Raises ``OSError`` when the endpoint does not
-    answer or its reply is not valid HTTP, and ``ValueError`` when the reply is not JSON or has no
-    whole number of 0 or more there.
+    Both from the same reply, so whether the server already refuses new messages compares two
+    figures taken at the same moment (``assistant_gateway.storage_capacity``).
     """
 
-    url = f"http://{INTERNAL_NATS_HOST}:{INTERNAL_NATS_MONITOR_PORT if port is None else port}/varz"
-    try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout) as response:
-            body = response.read()
-    except http.client.HTTPException as exc:
-        # urllib passes these on unchanged: a reply cut off (a server stopping), or one that is not
-        # HTTP. The endpoint did not answer properly, so callers treat it as not answering.
-        raise OSError(f"the monitoring endpoint's reply is not valid HTTP: {type(exc).__name__}: {exc}") from exc
-    reply = json.loads(body)
+    room: int  # jetstream.config.max_storage: the room it took when it last started
+    stored: int  # jetstream.stats.storage: what its file streams store now, counted as NATS counts it
+
+
+def bundled_running_room(port: int | None = None, *, timeout: float = MONITOR_TIMEOUT_SECONDS) -> RunningRoom:
+    """The bundled server's room as it runs and what its streams store, from its ``/varz``.
+
+    The server takes its room once, when it starts (three quarters of the free space on its
+    store's disk plus three quarters of what its streams store, since its configuration sets no
+    max_file_store), and checks every new or changed stream against it until it starts again,
+    whatever the disk shows meanwhile; it refuses every new message once its streams store more
+    than that room. So these figures, not the disk, tell whether it refuses new streams or new
+    messages now (Status page, ``assistant_gateway.storage_capacity``). They come from the
+    loopback monitoring port ``start_local_nats`` always opens (``port`` for a test's own server),
+    read as ``_monitor_get`` reads it. Raises ``OSError`` when the endpoint does not answer in
+    time, answers other than 200 (a redirect included, which is not followed), answers at more than
+    ``MONITOR_REPLY_LIMIT_BYTES`` or with a reply that is not valid HTTP, and ``ValueError`` when the
+    reply is not JSON or lacks either figure as a whole number of 0 or more.
+    """
+
+    reply = json.loads(_monitor_get(INTERNAL_NATS_MONITOR_PORT if port is None else port, "/varz", timeout=timeout))
     jetstream = reply.get("jetstream") if isinstance(reply, dict) else None
-    config = jetstream.get("config") if isinstance(jetstream, dict) else None
-    room = config.get("max_storage") if isinstance(config, dict) else None
-    if type(room) is not int or room < 0:  # a JSON true is refused too
-        raise ValueError(f"the monitoring endpoint reports no jetstream.config.max_storage (got {room!r})")
-    return room
+    return RunningRoom(room=_varz_bytes(jetstream, "config", "max_storage"), stored=_varz_bytes(jetstream, "stats", "storage"))
+
+
+def _varz_bytes(jetstream: object, part: str, key: str) -> int:
+    """The byte figure ``jetstream.<part>.<key>`` of a ``/varz`` reply; ``ValueError`` when it is not a whole number of 0 or more."""
+
+    section = jetstream.get(part) if isinstance(jetstream, dict) else None
+    value = section.get(key) if isinstance(section, dict) else None
+    if type(value) is not int or value < 0:  # a JSON true is refused too
+        raise ValueError(f"the monitoring endpoint reports no jetstream.{part}.{key} (got {value!r})")
+    return value
+
+
+class _ReadReply:
+    """A reply already read in full, in the shape ``http.client.HTTPResponse`` reads from."""
+
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    def makefile(self, *_args: object, **_kwargs: object) -> io.BytesIO:
+        return io.BytesIO(self._raw)
+
+
+def _monitor_get(port: int, path: str, *, timeout: float) -> bytes:
+    """The body of a GET of ``path`` on the loopback monitoring port, read within ``timeout`` in all.
+
+    The whole reply is read first, under one monotonic deadline and at most
+    ``MONITOR_REPLY_LIMIT_BYTES``, and only then parsed by ``http.client``. Its own connection
+    reads would wait up to the socket timeout at every step, so a reply sent a few bytes at a
+    time could hold the storage check far longer than the timeout. Nothing is followed (a
+    redirect is a reply that is not 200), and no HTTP proxy the environment names is used.
+    """
+
+    deadline = time.monotonic() + timeout
+    raw = bytearray()
+    with socket.create_connection((INTERNAL_NATS_HOST, port), timeout=timeout) as connection:
+        connection.settimeout(_time_left(deadline))
+        connection.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: {INTERNAL_NATS_HOST}:{port}\r\nConnection: close\r\n\r\n".encode("ascii")
+        )
+        while True:
+            connection.settimeout(_time_left(deadline))
+            chunk = connection.recv(65536)
+            if not chunk:  # the endpoint closed the connection: the reply is complete
+                break
+            raw += chunk
+            if len(raw) > MONITOR_REPLY_LIMIT_BYTES:
+                raise OSError(f"the monitoring endpoint's reply is longer than {MONITOR_REPLY_LIMIT_BYTES} bytes")
+    response = http.client.HTTPResponse(_ReadReply(bytes(raw)), method="GET")  # type: ignore[arg-type]
+    try:
+        response.begin()
+        body = response.read()
+    except http.client.HTTPException as exc:
+        # A reply cut off (a server stopping), or one that is not HTTP: the endpoint did not answer
+        # properly, so callers treat it as not answering.
+        raise OSError(f"the monitoring endpoint's reply is not valid HTTP: {type(exc).__name__}: {exc}") from exc
+    if response.status != 200:
+        raise OSError(f"the monitoring endpoint answered {response.status} {response.reason}")
+    return body
+
+
+def _time_left(deadline: float) -> float:
+    """The seconds left before ``deadline``; ``TimeoutError`` when none are."""
+
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("the monitoring endpoint did not finish its reply in time")
+    return left
 
 
 def resolve_nats_service_root(env: Mapping[str, str] | None = None) -> Path:
