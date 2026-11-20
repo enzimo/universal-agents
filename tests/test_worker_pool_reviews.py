@@ -348,7 +348,8 @@ async def test_an_accepted_start_leaves_an_open_start_problem_open(world):
     Here the hourly limit opened it while a failed start was in view. The
     accepted worker may still crash; only one that becomes ready ends a problem
     of failed starts (and one opened otherwise ends after the quiet time, see
-    the next test). Counting acceptance as success closed it at once and told
+    test_a_start_problem_without_failed_starts_ends_after_the_quiet_time). Counting
+    acceptance as success closed it at once and told
     administrators it works again.
     """
 
@@ -425,3 +426,24 @@ async def test_a_problem_of_failed_starts_ends_with_the_first_ready_worker(world
     _report_start_history(_observation(waiting=0, start_recovered=True), recovered)
     await recovered.settle()
     assert worker_pool_repository(world.agent).list_open_incidents("team") == ()
+
+
+@pytest.mark.asyncio
+async def test_a_start_problem_without_failed_starts_ends_after_the_quiet_time(world):
+    """Critique C26: with a ready worker reported, it ends only once unseen for review_repeat_after_minutes."""
+
+    settings = _settings()
+    quiet = timedelta(minutes=settings.review_repeat_after_minutes)
+    opening = reviews.WorkerPoolIncidents(world.agent, settings)
+    opening.start_failed(_observation(), "agent_definition_unavailable")  # a refusal before any start record
+    await opening.settle()
+    assert [finding.subject_id for finding in world.told[-1]] == [f"{WORKER_TYPE}:{INCIDENT_START_FAILED}"]
+
+    for after, still_open in ((quiet - timedelta(minutes=1), True), (quiet + timedelta(minutes=1), False)):
+        later = reviews.WorkerPoolIncidents(world.agent, settings)
+        later.now = opening.now + after
+        _report_start_history(_observation(waiting=0, start_recovered=True), later)  # a ready worker, problem not seen
+        await later.settle()
+        open_now = worker_pool_repository(world.agent).list_open_incidents("team")
+        assert bool(open_now) is still_open
+        assert bool(world.told[-1]) is still_open  # the notice stands, then ends (the engine sends "working again")
