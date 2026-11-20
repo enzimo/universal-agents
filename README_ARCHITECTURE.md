@@ -803,7 +803,9 @@ Four repairs keep work from getting stuck in the first place:
   heartbeats every 20 seconds); a start record's end is not proof, since the
   lead ends earlier runs' records after the fact. A worker alive after the
   series ended leads a new series, whose replacement adopts the given-up work
-  too; an owner whose own series gave up never leads again. A refusal that leaves no start
+  too, and keeps leading it once its status row is pruned, since its own
+  attempts began after the give-up; an owner whose own series gave up never
+  leads again. A refusal that leaves no start
   record (the type was removed, a worker or start limit is reached) is paced
   with the same delays and then tried hourly, never given up, since a limit
   frees again. One rule
@@ -4288,8 +4290,11 @@ instance's run lock and has started no agent, so none can be in use, and the
 lead, the startup agents and the gateway, which start together, find room for
 their first consumers. It deletes only when the lock is proven: on a file
 system without locking an earlier run may still be alive, so it only reports
-(`event=nats_consumer_preflight_report_only`) and the lead's sweep, which
-judges owners by the liveness rule, removes them. The check takes the lock as
+(`event=nats_consumer_preflight_report_only`). The lead's sweep then removes
+those whose owner it can judge as gone by the liveness rule; the leftovers of
+starts an earlier run left active it cannot judge there (those records are not
+cleared without a proven lock), and they need the offline cleanup with the
+runtime stopped. The check takes the lock as
 an argument, so it cannot run before the lock is taken. Everything else it
 only reports. Neither outcome stops
 start-up, and agents report their own NATS errors. Making it a start-up gate

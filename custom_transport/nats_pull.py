@@ -232,6 +232,9 @@ class PullRunner:
         self._subscription = await self._js.pull_subscribe_bind(
             durable=self.durable_name, stream=self._stream_name
         )
+        # NATS counts a new consumer as idle from its creation, so a receiver
+        # that may not ask from the start (a full inbox) is quiet from now.
+        self._last_request_ended_at = time.monotonic()
         self._task = asyncio.create_task(self._run(), name=f"nats-pull:{self.name}")
         self._task.add_done_callback(self._loop_done)
 
@@ -411,7 +414,7 @@ class PullRunner:
             name,
             delay,
             consumer_gone,
-            expected,
+            str(expected).lower(),
             None if quiet is None else round(quiet, 1),
             exc,
         )

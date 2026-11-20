@@ -820,8 +820,10 @@ def run_nats_consumer_preflight(
     process, so none of them can be in use; hence ``--confirm-runtime-stopped``.
     Only a proven lock proves that: on a file system without locking
     (``proven=False``) an earlier run may still be alive, so the check then only
-    reports, logs that once, and leaves removal to the team lead's sweep, which
-    judges each owner by the liveness rule.
+    reports and logs that once. The team lead's sweep removes the leftovers whose
+    owner it can judge as gone by the liveness rule; those of starts an earlier
+    run left active stay (their records are not cleared without a proven lock)
+    until the offline cleanup runs with the runtime stopped.
     Doing it here, before the lead, the startup agents and the gateway start
     together, means a stream those leftovers filled to NATS's consumer limit
     cannot refuse a startup agent's first consumer (which would stop the whole
@@ -838,7 +840,8 @@ def run_nats_consumer_preflight(
     if not process_run.proven:
         LOGGER.warning(
             "The run lock could not prove that no earlier run is alive, so the consumer check only reports; "
-            "the team lead removes leftover consumers when it starts. "
+            "the team lead removes the leftover consumers whose owner it can judge as gone, and the rest need "
+            "scripts/reconcile_nats_consumers.py run with the runtime stopped. "
             "event=nats_consumer_preflight_report_only run_id=%s",
             process_run.run_id,
         )

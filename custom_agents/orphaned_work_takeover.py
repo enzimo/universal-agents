@@ -44,8 +44,11 @@ whose own series has not given up, leads a new series, and the given-up owners
 wait for that replacement, which adopts their work too. Saves and heartbeats are
 stored, so this holds across a lead restart. Without it, one given-up series
 stopped replacements for every later dead worker of the type and person until
-the records were pruned. A worker whose status row was already pruned and that
-saved nothing after the series ended is judged by its save alone.
+the records were pruned. An owner whose own series began after the give-up
+keeps leading it even once the lead prunes its status row (about ten minutes
+after it died, which removes its heartbeat): its attempt records are stored. A
+worker whose status row was pruned before it was first seen dead, and that
+saved nothing after the series ended, is judged by its save alone.
 
 - A refusal that leaves no start record (the type was removed or is denied, the
   team's worker limit or the hourly start limit is reached) is paced with the
@@ -291,9 +294,20 @@ def _plan_group(group: list[dict[str, Any]], now: datetime) -> tuple[dict[str, A
     later = [
         owner
         for owner in group
-        if id(owner) not in given_up and owner["alive_at"] is not None and owner["alive_at"] > gave_up_at
+        if id(owner) not in given_up and _alive_after(owner, gave_up_at)
     ]
     return (max(later, key=_highest_attempt) if later else None), series
+
+
+def _alive_after(owner: dict[str, Any], moment: datetime) -> bool:
+    """Proof of life after ``moment``, or a series of its own that began after it.
+
+    The second keeps an owner leading its own series after the lead prunes its
+    status row (about ten minutes after it died), which removes its heartbeat.
+    """
+    if owner["alive_at"] is not None and owner["alive_at"] > moment:
+        return True
+    return any((parse_utc(record.created_at_utc) or moment) > moment for record in owner["attempts"].values())
 
 
 def _highest_attempt(owner: dict[str, Any]) -> int:

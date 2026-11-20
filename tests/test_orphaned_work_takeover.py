@@ -455,7 +455,43 @@ async def test_a_worker_alive_after_a_give_up_is_replaced_though_its_last_save_w
     with caplog.at_level(logging.INFO):
         assert await take_over_orphaned_work(lead, now=died + timedelta(minutes=1), clock=clock + 100) == 1
     assert _attempt(lead, 1, busy).state == AgentLaunchState.STARTING
-    assert not [line for line in _lines(caplog, "orphaned_work_takeover_gave_up") if f"owner_agent_id={busy} " in line]
+    assert not [line for line in _lines(caplog, "orphaned_work_takeover_gave_up") if f"_gave_up owner_agent_id={busy} " in line]
+
+
+@pytest.mark.asyncio
+async def test_a_series_begun_after_a_give_up_keeps_leading_once_its_status_row_is_pruned(lead, caplog):
+    """Its heartbeat was its only proof of life, and the lead prunes the row ~10 minutes after it died."""
+
+    from custom_agents.agent_liveness import prune_departed_agent_rows
+
+    busy = "agent_busy_worker"
+    busy_record = launch_record(lead, AgentLaunchState.READY, agent_id=busy)
+    held_work(lead, owner=busy, task_id="work-0")
+    launch_record(lead, AgentLaunchState.FAILED)
+    held_work(lead)
+    _takeover_lead(lead)
+    base = datetime.now(timezone.utc) - timedelta(days=4)
+    _saved_at(lead, busy, base + timedelta(minutes=30))
+    clock = await _run_series_to_give_up(lead, DEAD, base, 0.0)
+    died = base + timedelta(days=3)
+    _heartbeat(lead, busy, died - timedelta(seconds=20))
+    AgentLaunchRepository(lead.task_manager.storage_settings).update(busy_record, state=AgentLaunchState.FAILED, now=died)
+    with caplog.at_level(logging.INFO):
+        # Its own five attempts, each crashing 5 s after its start; the lead's
+        # status-row pruning removes its heartbeat between the third and fourth.
+        for attempt, minute in enumerate([1, 3, 9, 25, 90], start=1):
+            if attempt == 4:
+                assert prune_departed_agent_rows(lead, now=died + timedelta(minutes=11)) == 1
+                assert AgentStateStore(storage_settings=lead.task_manager.storage_settings).get_by_id(busy) is None
+            now = died + timedelta(minutes=minute)
+            clock += 100.0
+            assert await take_over_orphaned_work(lead, now=now, clock=clock) == 1, attempt
+            _end(lead, attempt, owner=busy, now=now + timedelta(seconds=5))
+        assert await take_over_orphaned_work(lead, now=died + timedelta(hours=30), clock=clock + 100) == 0
+    # Its own series gave up, and it covers the first dead owner's work too.
+    gave_up = _lines(caplog, "orphaned_work_takeover_gave_up")
+    assert sorted(line.split("_gave_up owner_agent_id=")[1].split()[0] for line in gave_up) == sorted([busy, DEAD])
+    assert all(f"series_owner_agent_id={busy} attempts={MAX_TAKEOVER_ATTEMPTS}" in line for line in gave_up)
 
 
 @pytest.mark.asyncio

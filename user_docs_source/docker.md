@@ -428,8 +428,10 @@ above (`event=nats_consumer_reconciler_deleted`, with
 `reason=abandoned_lasting_agent_consumer`); the launcher holds the instance's
 run lock then and has started no agent, so none of them can be in use. On a
 file system where the lock cannot prove that, it only reports
-(`event=nats_consumer_preflight_report_only`) and the team lead removes the
-leftovers when it starts. What else it finds stays in its own lines, for
+(`event=nats_consumer_preflight_report_only`); the team lead then removes the
+leftovers whose owner it can judge as gone when it starts, and the rest need
+the reconciler above, run with the runtime stopped. What else it finds stays in
+its own lines, for
 example the warning
 `event=nats_consumer_capacity_high` when the team uses 90 percent or more of
 the account's consumer limit, and the agents start. When the report cannot run

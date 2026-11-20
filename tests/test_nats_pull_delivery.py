@@ -480,10 +480,11 @@ class ServiceUnavailableError(Exception):
 
 
 class _RecreatingJetStream:
-    """What recreating and binding the consumer asks of JetStream."""
+    """What creating, recreating and binding the consumer asks of JetStream."""
 
-    def __init__(self) -> None:
+    def __init__(self, *subscriptions) -> None:
         self.added: list[str] = []
+        self.subscriptions = list(subscriptions)
 
     async def consumer_info(self, stream_name, durable):
         from nats.js.errors import NotFoundError
@@ -494,13 +495,31 @@ class _RecreatingJetStream:
         self.added.append(config.durable_name)
 
     async def pull_subscribe_bind(self, durable, stream):
-        return _Subscription([])
+        return self.subscriptions.pop(0) if self.subscriptions else _Subscription([])
 
 
-def _mailbox_runner(*, inactive_threshold, ready=lambda: True, subscription=None):
+class _GoneUntilRecreated:
+    """Short empty requests until NATS removes the consumer; then every request fails."""
+
+    pending_msgs = 0
+
+    def __init__(self, *, gone: bool = False) -> None:
+        self.gone = gone
+
+    async def fetch(self, batch, timeout):
+        if self.gone:
+            raise ServiceUnavailableError("consumer gone")
+        await asyncio.sleep(0.01)
+        return []
+
+    async def unsubscribe(self):
+        return None
+
+
+def _mailbox_runner(*, inactive_threshold, ready=lambda: True, subscription=None, jetstream=None):
     runner = PullRunner(
         name="mailbox",
-        jetstream=_RecreatingJetStream(),
+        jetstream=jetstream or _RecreatingJetStream(),
         stream_name="S",
         consumer_config=SimpleNamespace(durable_name="d", inactive_threshold=inactive_threshold),
         policy=FetchPolicy.CONTINUOUS,
@@ -517,64 +536,88 @@ def _recreate_lines(caplog):
     return [r for r in caplog.records if "event=nats_pull_" in r.getMessage()]
 
 
+async def _until_logged(caplog, count: int, timeout: float = 5.0) -> None:
+    async with asyncio.timeout(timeout):
+        while len(_recreate_lines(caplog)) < count:
+            await asyncio.sleep(0.02)
+
+
+def _assert_expected(lines, threshold: float) -> None:
+    assert [r.levelno for r in lines] == [logging.INFO, logging.INFO]
+    assert "event=nats_pull_fetch_failed" in lines[0].getMessage() and "expected=true" in lines[0].getMessage()
+    assert "event=nats_pull_consumer_recreated" in lines[1].getMessage()
+    assert f"expected=true inactive_threshold_seconds={threshold}" in lines[1].getMessage()
+
+
 @pytest.mark.asyncio
 async def test_a_mailbox_that_asked_for_nothing_past_its_limit_is_recreated_as_expected(monkeypatch, caplog):
     import custom_transport.nats_pull as nats_pull
 
     monkeypatch.setattr(nats_pull, "_ERROR_BACKOFF_SECONDS", (0.0, 0.0, 0.0, 0.0))
-
-    class _Scripted:
-        """Short empty requests until NATS removes the consumer, then every request fails."""
-
-        pending_msgs = 0
-        gone = False
-
-        async def fetch(self, batch, timeout):
-            if self.gone:
-                raise ServiceUnavailableError("consumer gone")
-            await asyncio.sleep(0.01)
-            return []
-
-        async def unsubscribe(self):
-            return None
-
     room = {"free": True}
-    subscription = _Scripted()
-    runner = _mailbox_runner(inactive_threshold=0.2, ready=lambda: room["free"], subscription=subscription)
+    subscription = _GoneUntilRecreated()
+    # The limit is above the loop's 0.25 s check while it may not ask, so the
+    # quiet time must count from the last request, not from the last check.
+    runner = _mailbox_runner(inactive_threshold=0.6, ready=lambda: room["free"], subscription=subscription)
     with caplog.at_level(logging.INFO):
         task = asyncio.create_task(runner._run())
         await asyncio.sleep(0.05)
         room["free"] = False  # the deferred inbox is full: the mailbox stops asking ...
         subscription.gone = True  # ... and NATS removes the idle consumer
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(1.0)
         room["free"] = True
-        await asyncio.sleep(0.2)
+        await _until_logged(caplog, 2)
         task.cancel()  # the recreated consumer's request would wait its full fetch time
         await asyncio.gather(task, return_exceptions=True)
-    lines = _recreate_lines(caplog)
-    assert [r.levelno for r in lines] == [logging.INFO, logging.INFO]
-    assert "event=nats_pull_fetch_failed" in lines[0].getMessage() and "expected=True" in lines[0].getMessage()
-    assert "event=nats_pull_consumer_recreated" in lines[1].getMessage()
-    assert "expected=true inactive_threshold_seconds=0.2" in lines[1].getMessage()
+    _assert_expected(_recreate_lines(caplog), 0.6)
     assert runner._js.added == ["d"]
 
 
 @pytest.mark.asyncio
+async def test_a_mailbox_removed_before_its_first_request_is_recreated_as_expected(monkeypatch, caplog):
+    """NATS counts a new consumer as idle from its creation (removed 6.4 s after creation with a 6 s limit)."""
+
+    import custom_transport.nats_pull as nats_pull
+
+    monkeypatch.setattr(nats_pull, "_ERROR_BACKOFF_SECONDS", (0.0, 0.0, 0.0, 0.0))
+    room = {"free": False}  # a replacement whose inbox fills with adopted messages at once
+    jetstream = _RecreatingJetStream(_GoneUntilRecreated(gone=True))
+    runner = _mailbox_runner(inactive_threshold=0.6, ready=lambda: room["free"], jetstream=jetstream)
+    with caplog.at_level(logging.INFO):
+        await runner.start()
+        await asyncio.sleep(0.8)
+        room["free"] = True
+        await _until_logged(caplog, 2)
+        runner._stopping = True  # a stop we asked for is not reported
+        runner._task.cancel()
+        await asyncio.gather(runner._task, return_exceptions=True)
+    _assert_expected(_recreate_lines(caplog), 0.6)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("inactive_threshold", "quiet", "case"),
-    [(300.0, 5.0, "process-owned, vanished while asking"), (None, 1000.0, "lasting")],
+    ("inactive_threshold", "quiet", "error", "case"),
+    [
+        (300.0, 5.0, ServiceUnavailableError("gone"), "process-owned, vanished while asking"),
+        (None, 1000.0, ServiceUnavailableError("gone"), "lasting"),
+        (0.6, 1000.0, RuntimeError("connection reset"), "process-owned, long quiet, not a vanished consumer"),
+    ],
 )
-async def test_a_consumer_removed_by_something_else_is_still_a_warning(
-    monkeypatch, caplog, inactive_threshold, quiet, case
+async def test_a_failure_without_the_evidence_of_an_idle_expiry_is_still_a_warning(
+    monkeypatch, caplog, inactive_threshold, quiet, error, case
 ):
     import custom_transport.nats_pull as nats_pull
 
     monkeypatch.setattr(nats_pull, "_ERROR_BACKOFF_SECONDS", (0.0, 0.0, 0.0, 0.0))
     runner = _mailbox_runner(inactive_threshold=inactive_threshold, subscription=_Subscription([]))
     with caplog.at_level(logging.INFO):
-        await runner._recover_from_fetch_error(ServiceUnavailableError("gone"), 1, quiet)
+        await runner._recover_from_fetch_error(error, 1, quiet)
     lines = _recreate_lines(caplog)
-    assert [r.levelno for r in lines] == [logging.WARNING, logging.WARNING], case
-    assert "expected=False" in lines[0].getMessage()
-    assert "event=nats_pull_consumer_recreated" in lines[1].getMessage()
-    assert "expected=false" in lines[1].getMessage()
+    vanished = isinstance(error, ServiceUnavailableError)
+    assert [r.levelno for r in lines] == [logging.WARNING] * (2 if vanished else 1), case
+    assert "expected=false" in lines[0].getMessage()
+    if vanished:
+        assert "event=nats_pull_consumer_recreated" in lines[1].getMessage()
+        assert "expected=false" in lines[1].getMessage()
+    else:
+        assert runner._js.added == []  # nothing to recreate
