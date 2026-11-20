@@ -214,6 +214,8 @@ function inView(page) {
     await wide.page.keyboard.type(longTitle);
     await wide.page.keyboard.press("Enter");
     await wide.page.waitForTimeout(400);
+    // Back to the mouse: a click in the chat ends the keyboard focus the rename left.
+    await wide.page.click("#message-list", { position: { x: 20, y: 20 } });
     await wide.page.mouse.move(700, 600);
     await wide.page.hover(cutSelector);
     await wide.page.waitForSelector(".thread-preview-title");
@@ -227,8 +229,14 @@ function inView(page) {
     assert.equal(cardTitle.cut, false, "the card's title is not cut: " + JSON.stringify(cardTitle));
     assert.ok(cardTitle.height > cardTitle.lineHeight, "it wraps onto more lines: " + JSON.stringify(cardTitle));
     await wide.page.click(cutSelector);
-    // Focus leaves the row (a click in the chat), so only the hover can show the tooltip.
-    await wide.page.click("#message-list", { position: { x: 20, y: 20 } });
+    // Right after the click, with the mouse left in place, no tooltip covers the row (C18).
+    await wide.page.waitForTimeout(1500);
+    assert.equal(await wide.page.evaluate(() => {
+      const tooltip = document.querySelector("#thread-title-tooltip");
+      return Boolean(tooltip && !tooltip.hidden);
+    }), false, "no tooltip right after opening the chat");
+    // The pointer leaves the row and comes back.
+    await wide.page.mouse.move(700, 600);
     await wide.page.waitForTimeout(200);
     assert.equal(await wide.page.evaluate(() => {
       const tooltip = document.querySelector("#thread-title-tooltip");
@@ -242,7 +250,7 @@ function inView(page) {
     });
     assert.equal(openTooltip, cardTitle.text, "the open chat's row shows its full title on hover");
     assert.equal(await wide.page.locator(".thread-preview").count(), 0, "and no card");
-    checked.push(`full titles with the mouse: the card shows a ${longTitle.length}-character name whole (${cardTitle.height} px tall); the open chat's row shows it in the tooltip`);
+    checked.push(`full titles with the mouse: the card shows a ${longTitle.length}-character name whole (${cardTitle.height} px tall); the open chat's row shows it in the tooltip once the pointer comes back, not right after the click`);
     assert.deepEqual(wide.errors, []);
     await wide.context.close();
 

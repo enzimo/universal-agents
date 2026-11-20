@@ -1956,12 +1956,20 @@ function threadRow(thread) {
     lifecycle.listen(button, "blur", hideThreadTitleTooltip);
     // The open chat's row gets no hover card, and Web Chat has no chat
     // header, so a mouse resting on that row shows its full title (review F6).
+    // Not right after a click opened it, while the person reads: like the
+    // hover card, a row just pressed waits until the pointer leaves it (C18).
+    lifecycle.listen(button, "pointerdown", function (event) {
+      if (event.pointerType === "mouse") shellState.threadTitlePressedKey = thread.sessionKey;
+    });
     lifecycle.listen(button, "mouseenter", function () {
-      if (thread.id === sharedState.activeThreadId) {
+      if (thread.id === sharedState.activeThreadId && shellState.threadTitlePressedKey !== thread.sessionKey) {
         scheduleThreadTitleTooltip(title, fullThreadTitle(thread));
       }
     });
     lifecycle.listen(button, "mouseleave", function () {
+      if (shellState.threadTitlePressedKey === thread.sessionKey) {
+        shellState.threadTitlePressedKey = "";
+      }
       if (shellState.threadTitleTooltipOwner === title) {
         hideThreadTitleTooltip();
       }

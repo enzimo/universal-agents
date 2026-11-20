@@ -1950,7 +1950,9 @@ its history. Steps with linked requests cannot use this correction.
   needs user attention such as an error or recoverable runtime-pause choice.
 - Truncated thread titles show their full title in a custom frosted tooltip
   after one second of keyboard focus, or of mouse hover on the open chat's
-  row (it has no hover card, and Web Chat has no chat header); for other rows
+  row (it has no hover card, and Web Chat has no chat header), though not
+  right after a click opened it: like the hover card, it waits until the
+  pointer has left that row and come back; for other rows
   mouse users see it in the hover card, whose title wraps instead of being
   cut. Do not rely on native browser title tooltips for this.
 - The Web Chat sidebar header places the brand/UA lockup on the left and a
