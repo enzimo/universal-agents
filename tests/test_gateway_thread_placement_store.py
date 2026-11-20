@@ -554,7 +554,7 @@ def test_a_setup_page_opened_by_the_requests_own_task_is_a_setup_wait(settings) 
     record = store.one()
     assert (record.has_waiting_setup, record.running_request_status) == (True, WAITING_FOR_CREDENTIAL)
     assert store.listed(owner=BOB) == {}, "only the owner's threads are listed"
-    store.repo.finish_tool_setup("setup_1", status="finished")
+    store.repo.finish_tool_setup("setup_1", status="finished", result_json="{}")
     assert store.one().has_waiting_setup is False
 
 
