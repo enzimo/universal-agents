@@ -4963,11 +4963,18 @@ the desktop app never offers an older version.
   there would move a copy sent back unchanged under the copy's record. Such
   a record is told from a `scratch/sent` folder anywhere in its path (which
   holds whatever the instance root was then, and a moved root is the
-  likeliest cause of a moved folder), from the id prefix
-  (`SENT_FILE_ATTACHMENT_ID_PREFIX`, shared with the gateway's id port), or,
-  as a backstop, from a folder under this instance's `workspaces/` or
-  `state/`; it withholds the command like a turn, counts among the files no
-  run can move (`by_sent_copies`) and is never named. A record in another
+  likeliest cause of a moved folder) or from the id prefix
+  (`SENT_FILE_ATTACHMENT_ID_PREFIX`, shared with the gateway's id port); it
+  withholds the command like a turn, counts among the files no run can move
+  (`by_sent_copies`) and is never named. It shows only that the file is one
+  a person sent, so when nothing else names the files the error does not
+  say the folder moved. As a backstop, no folder under this instance's
+  `workspaces/` or `state/` is named or offered either, compared with the
+  root both resolved and as configured (a root reached through a link). A
+  record of receiving there withholds the command too but is counted apart
+  (`by_instance_folders`): a run with the transfer folder there would move
+  its file, so the error points at upgrading.md, which says how to finish
+  if the folder really was there, instead of saying it cannot move. A record in another
   folder whose name is not listed changes nothing: its file is not here and
   it names none of the listed files, so withholding the command for it
   would withhold it on every instance where an earlier `upload_dir`'s
@@ -4997,6 +5004,33 @@ the desktop app never offers an older version.
   record. Only the run that writes the marker reports, so the count is said
   once; a run that stops part way never counts, and the run that finishes
   it does.
+  When nothing is listed, `upload_dir` may name a folder holding none of
+  the files (empty, new or missing) while 0.9.13's records name the folder
+  they are in; nothing waits and nothing is listed, so the step used to
+  finish silently and the files never moved (DI-1 of the review of
+  PR #168). The run that writes the marker therefore runs the same gateway
+  scan for any name of the gateway's form and counts gateway records of
+  receiving and held guidance copies in another folder. It reads no
+  conversation turns, because with nothing to protect an agent-written turn
+  must not raise an upgrade error, and counts no copy sent to a person,
+  because an agent may send a file back under its generated name on any
+  instance. A normal instance has none: the default `upload_dir` was the
+  same in every 0.9 version, no 0.9 clean-up deletes a transfer file and
+  keeps its record (upload retention deletes only records under
+  `state/uploads`, a person's removal deletes records), and moved files get
+  `<id><suffix>` names. With any, it logs one error under the same event
+  with the folders it may show, the same steps for the folder that holds
+  the files (a folder moved to where `upload_dir` points would still match
+  nothing, because the step finds files by the path their records name),
+  and that nothing more is needed if those files are gone: the step looks
+  up no path, which would follow links in database-named paths and could
+  block on a dead mount, so a record whose folder was deleted under 0.9
+  counts too. The count goes to the marker's own field
+  (`recorded_elsewhere`), because `named_elsewhere` counts listed names. A
+  database error there keeps the count, since nothing is listed, and logs
+  `event=adapter_host_files_other_folders_unchecked`; the operator command
+  tells both failed checks apart from an uncounted folder
+  (`UpgradeResult.other_folders_unchecked`).
   Guidance
   the gateway still holds (`gateway_held_guidance`) is rewritten with its
   moved file, between the turns and the gateway record and under the same

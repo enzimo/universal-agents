@@ -129,7 +129,9 @@ supported, because it may not read what a newer one saved.
     person (kept in that person's `scratch/sent` folder, where their agents
     can read it and old files are deleted), and any record in this
     instance's `workspaces` or `state` folders, also stops the delete
-    command, but the error never shows or offers its folder. For the files
+    command, but the error never shows or offers its folder. When only
+    copies sent to people name the files, the error says they are files
+    people sent, not that the folder moved. For the files
     the gateway has a record of receiving, move or mount the folder
     back at the path the error names (a link does not work), set
     `upload_dir` to that path, delete
@@ -145,7 +147,14 @@ supported, because it may not read what a newer one saved.
     has no record of receiving (only a conversation record, held guidance or
     a copy sent to a person names them) cannot be moved at any path, and the
     error says so: keep them, and the people who sent them can send them
-    again. The error is logged once and its count stays in the marker
+    again. Files whose records of receiving name a folder inside this
+    instance's `state` or `workspaces` folder are counted apart: if the
+    transfer folder really was there under 0.9, stop the instance, move it
+    back to that path, set `upload_dir` to it, delete
+    `state/upgrades/adapter-host-files.json` and start; once the upgrade
+    has moved the files, set `upload_dir` back to a folder outside
+    `workspaces` (agents can read files in `workspaces`). The error is
+    logged once and its count stays in the marker
     (`named_elsewhere`); to see the error again, delete
     `state/upgrades/adapter-host-files.json` and restart.
   - **Files named in another folder that cannot be moved** stay in the
@@ -164,6 +173,22 @@ supported, because it may not read what a newer one saved.
     the upgrade, which only those records name, is listed too. The warning then says not to delete
     them if the folder was at another path under 0.9, before it gives the
     command.
+  - **`upload_dir` names a folder without the files.** When nothing is
+    left to list but gateway records or held guidance name files the
+    adapter host received in another folder (for example `upload_dir` was
+    changed to a new or empty folder while the files stayed where 0.9 kept
+    them), the upgrade logs one error with the same event
+    (`event=adapter_host_files_folder_moved`, with `recorded_elsewhere=`
+    and the folders it may show) and keeps the count in the marker
+    (`recorded_elsewhere`). Those files were not moved, so the team cannot
+    open them. With the folder that holds them at the path the error names
+    (move or mount it there if it is not; a link does not work), set
+    `upload_dir` to that path, delete
+    `state/upgrades/adapter-host-files.json` and restart. Moving the folder
+    to where `upload_dir` points does not work: the upgrade finds files by
+    the path their records name. If those files are gone, nothing more is
+    needed. Conversation records and copies sent to people do not count
+    here, so a normal instance gets no such error.
   - **The files could not be counted**: the warning
     `event=adapter_host_files_without_records_uncounted` gives the reason
     (a folder that cannot be listed, or one replaced during the upgrade).
@@ -172,6 +197,9 @@ supported, because it may not read what a newer one saved.
     not finish (`reason=other_folders_unchecked`), nothing is listed and
     no command is given: do not delete any of them; delete
     `state/upgrades/adapter-host-files.json` and restart to check again.
+    When nothing was left to list and that check did not finish, the
+    warning is `event=adapter_host_files_other_folders_unchecked`; delete
+    the marker and restart to check again.
   - **The transfer folder is not here.** It belongs to the gateway: 0.9
     wrote it on the gateway's machine, also when the adapter host ran
     elsewhere. It is missing when it was not copied or mounted with the

@@ -70,7 +70,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,6 +84,7 @@ from instance_upgrades.adapter_host_files import (
     DELETE_REFUSED,
     LIST_ID_FIELD,
     NAMED_ELSEWHERE_FIELD,
+    RECORDED_ELSEWHERE_FIELD,
     TRANSFER_FILE_PREFIX,
     NamedElsewhere,
     upgrade_adapter_host_files,
@@ -159,6 +160,7 @@ class _Instance:
 
         return SimpleNamespace(
             layout=self.layout,
+            instance_root=str(self.root),
             instance_root_path=self.root,
             interactive_apps=SimpleNamespace(adapter_host=AdapterHostSettings()),
             state_storage_settings=self.gateway_settings,
@@ -1224,7 +1226,7 @@ def test_records_naming_the_folder_at_another_path_withhold_the_list_and_the_com
     assert [r.levelno for r in caplog.records if "event=adapter_host_files_folder_moved" in r.getMessage()] == [logging.ERROR]
     assert error.endswith(
         f"event=adapter_host_files_folder_moved folder={moved} other_folders={old} files_without_records=2 unlisted=1 "
-        "named_elsewhere=1 by_gateway=1 by_sent_copies=0 by_held_guidance=0 by_turns=1"
+        "named_elsewhere=1 by_gateway=1 by_sent_copies=0 by_instance_folders=0 by_held_guidance=0 by_turns=1"
     )
     assert error.startswith(
         "1 of the 2 file(s) left in the adapter host's transfer folder that no record of this folder names are named "
@@ -1263,6 +1265,7 @@ def test_a_database_error_checking_other_folders_gives_no_list_and_no_command(
         result = upgrade_adapter_host_files(config)
 
     assert result.finished and result.elsewhere.names == 0 and result.counts.files_without_records is None
+    assert result.other_folders_unchecked == 2, "GEN-1 of PR #168's review: the operator command learns the count"
     marker = instance.layout.adapter_host_files_upgrade_path
     body = json.loads(marker.read_text())
     assert body[LIST_ID_FIELD] is None and body["files_without_records"] is None and body[NAMED_ELSEWHERE_FIELD] is None
@@ -1304,7 +1307,11 @@ def test_names_that_are_not_a_listed_name_in_another_folder_withhold_nothing(
     misses of the listed name (another length, uppercase, a suffix, a
     relative path) leave the usual warning and command. A path that
     normalizes into the transfer folder is a record of this folder: its file
-    moves, and the usual report covers the other file left.
+    moves, and the usual report covers the other file left. The near misses
+    are not listed names, so this rests on exact membership in the list,
+    not on the 12-hex rule in ``_elsewhere`` (EVA-2 of PR #168's review);
+    ``test_only_the_gateway_s_own_names_count_in_another_folder`` tests that
+    rule, where nothing is listed.
     """
 
     assert _LIVE.upper() != _LIVE
@@ -1375,7 +1382,7 @@ def test_a_match_only_a_turn_or_held_guidance_names_gives_no_steps_that_cannot_m
         printed = _run_operator_command(instance, monkeypatch, capsys)
 
     (error,) = _events(caplog, "adapter_host_files_folder_moved")
-    by = "by_sent_copies=0 by_held_guidance=0 by_turns=1" if source == "turn" else "by_sent_copies=0 by_held_guidance=1 by_turns=0"
+    by = "by_sent_copies=0 by_instance_folders=0 by_held_guidance=0 by_turns=1" if source == "turn" else "by_sent_copies=0 by_instance_folders=0 by_held_guidance=1 by_turns=0"
     shown = "-" if source == "turn" else str(old)
     assert error.endswith(
         f"folder={instance.transfer} other_folders={shown} files_without_records=1 unlisted=0 named_elsewhere=1 "
@@ -1428,7 +1435,7 @@ def test_a_match_through_a_gateway_record_on_a_later_page_gives_the_steps_for_th
     (error,) = _events(caplog, "adapter_host_files_folder_moved")
     assert error.endswith(
         f"other_folders={old} files_without_records=2 unlisted=0 named_elsewhere=2 by_gateway=1 by_sent_copies=0 "
-        "by_held_guidance=0 by_turns=1"
+        "by_instance_folders=0 by_held_guidance=0 by_turns=1"
     )
     assert "To move the 1 the gateway has a record of receiving: move or mount this folder back" in error
     assert (
@@ -1465,7 +1472,7 @@ def test_gateway_records_in_two_other_folders_give_steps_for_each_path(
     (error,) = _events(caplog, "adapter_host_files_folder_moved")
     assert error.endswith(
         f"other_folders={old_a},{old_b},{old_c} files_without_records=2 unlisted=0 named_elsewhere=2 by_gateway=2 "
-        "by_sent_copies=0 by_held_guidance=1 by_turns=0"
+        "by_sent_copies=0 by_instance_folders=0 by_held_guidance=1 by_turns=0"
     )
     assert (
         f"To move the 2 the gateway has a record of receiving: move or mount this folder back at one of the 2 paths "
@@ -1647,14 +1654,14 @@ _SENT_FOLDER = ("users", "usr_ann", "scratch", "sent", "outgoing_abc")
 
 
 @pytest.mark.parametrize(
-    ("attachment_id", "folder_of"),
+    ("attachment_id", "folder_of", "kind"),
     [
-        ("web_attachment_1", lambda instance: instance.layout.workspaces_dir.joinpath(*_SENT_FOLDER)),
-        ("att_copy", lambda instance: instance.root.parent.joinpath("old instance", "workspaces", *_SENT_FOLDER)),
-        ("web_attachment_2", lambda instance: instance.root / "old-outgoing"),
-        ("att_team", lambda instance: instance.layout.workspaces_dir / "team" / "files"),
-        ("att_state", lambda instance: instance.layout.state_dir / "kept"),
-        (None, lambda instance: instance.layout.workspaces_dir / "users" / "usr_ann" / "uploads"),
+        ("web_attachment_1", lambda instance: instance.layout.workspaces_dir.joinpath(*_SENT_FOLDER), "sent_copy"),
+        ("att_copy", lambda instance: instance.root.parent.joinpath("old instance", "workspaces", *_SENT_FOLDER), "sent_copy"),
+        ("web_attachment_2", lambda instance: instance.root / "old-outgoing", "sent_copy"),
+        ("att_team", lambda instance: instance.layout.workspaces_dir / "team" / "files", "instance_folder"),
+        ("att_state", lambda instance: instance.layout.state_dir / "kept", "instance_folder"),
+        (None, lambda instance: instance.layout.workspaces_dir / "users" / "usr_ann" / "uploads", "held_copy"),
     ],
     ids=["sent_copy", "sent_copy_under_an_old_root", "sent_file_id", "under_workspaces", "under_state", "held_copy_under_workspaces"],
 )
@@ -1665,18 +1672,23 @@ def test_a_record_in_a_folder_the_step_never_names_withholds_the_command_and_giv
     capsys: pytest.CaptureFixture[str],
     attachment_id: str | None,
     folder_of: Callable[[_Instance], Path],
+    kind: str,
 ) -> None:
     """SEC-1 of PR #168's review: a copy of a file sent to a person names a listed file; its folder is never offered.
 
     An agent chose the copy's name, so the copy can carry a leftover's
     generated name. It is recognized by a ``scratch/sent`` folder anywhere
-    in its path (also under an earlier instance root), by its
-    ``web_attachment_`` id, or as a backstop by a folder under this
-    instance's workspaces/ or state/ (a held guidance copy there too). The
-    record withholds the list and the command like any match, counts among
-    the files no run can move, and its folder is named nowhere: putting the
-    transfer folder there would hand every person's files to agents working
-    for one person.
+    in its path (also under an earlier instance root) or by its
+    ``web_attachment_`` id; as a backstop no folder under this instance's
+    workspaces/ or state/ is offered either (a held guidance copy there
+    too). The record withholds the list and the command like any match and
+    its folder is named nowhere: putting the transfer folder there would
+    hand every person's files to agents working for one person. C11 of the
+    fix round: the text stays true for each kind. A sent copy is no record
+    of receiving, so no run moves its file and it does not show the folder
+    moved (only that the file is one a person sent); a record of receiving
+    inside this instance's folders is counted apart and pointed at
+    upgrading.md, never told it cannot move.
     """
 
     leftover = _write(instance.transfer / _hex_name("cleaned up"), b"a person's file whose records were cleaned up")
@@ -1689,22 +1701,112 @@ def test_a_record_in_a_folder_the_step_never_names_withholds_the_command_and_giv
     with caplog.at_level(logging.DEBUG):
         printed = _run_operator_command(instance, monkeypatch, capsys)
 
-    by_sent_copies, by_held = (0, 1) if attachment_id is None else (1, 0)
+    by = {
+        "sent_copy": "by_sent_copies=1 by_instance_folders=0 by_held_guidance=0",
+        "instance_folder": "by_sent_copies=0 by_instance_folders=1 by_held_guidance=0",
+        "held_copy": "by_sent_copies=0 by_instance_folders=0 by_held_guidance=1",
+    }[kind]
     (error,) = _events(caplog, "adapter_host_files_folder_moved")
-    assert error.endswith(
-        f"other_folders=- files_without_records=1 unlisted=0 named_elsewhere=1 by_gateway=0 "
-        f"by_sent_copies={by_sent_copies} by_held_guidance={by_held} by_turns=0"
-    )
+    assert error.endswith(f"other_folders=- files_without_records=1 unlisted=0 named_elsewhere=1 by_gateway=0 {by} by_turns=0")
     assert "(not shown: the step shows no folder from a conversation record" in error
-    assert "The gateway has no record of receiving them, so the step cannot move them at any path: keep them" in error
     assert "move or mount" not in error and "set upload_dir" not in error, "no steps toward the copy's folder"
-    assert "The gateway has no record of receiving them, so they cannot be moved: keep them" in printed
     assert "move or mount" not in printed
+    if kind == "sent_copy":
+        assert "names have copies that the gateway sent to people (not shown:" in error
+        assert "), so they are files people sent. No list" in error
+        assert "most likely at another path" not in error and "most likely at another path" not in printed, "C11 (b)"
+        assert "and copies of 1 of them were sent to people, so they are files people sent." in printed
+    else:
+        assert "are named by records in another folder (not shown:" in error
+        assert "most likely at another path under 0.9.13" in error and "most likely at another path" in printed
+    if kind == "instance_folder":
+        assert (
+            "1 of them have gateway records of receiving only inside this instance's workspaces or state folder, which "
+            "the step never shows or offers: keep them; if the transfer folder really was there under 0.9.13, "
+            "upgrading.md says how to move them." in error
+        ), "C11 (a): such a file can move, by the steps upgrading.md gives"
+        assert "no record of receiving" not in error and "no record of receiving" not in printed
+        assert "which the upgrade does not offer: keep them; see upgrading.md" in printed
+    else:
+        assert "The gateway has no record of receiving them, so the step cannot move them at any path: keep them" in error
+        assert "The gateway has no record of receiving them, so they cannot be moved: keep them" in printed
     assert all(str(folder) not in record.getMessage() for record in caplog.records) and str(folder) not in printed
     body = json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())
     assert body[LIST_ID_FIELD] is None and body[NAMED_ELSEWHERE_FIELD] == 1
     _assert_no_list(instance.layout)
     assert leftover.is_file()
+
+
+def test_a_record_naming_this_instance_s_folders_through_the_configured_link_is_never_offered(
+    instance: _Instance, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """C10 of PR #168's fix round: the configured root is a link to the real root, and a record names its folders through it.
+
+    The layout resolves the root, so the backstop also compares the root as
+    configured, normalized without following a link. A record of receiving
+    under the link's ``workspaces/`` is counted apart and never shown, like
+    one under the resolved path.
+    """
+
+    alias = tmp_path / "alias root"
+    alias.symlink_to(instance.root, target_is_directory=True)
+    leftover = _write(instance.transfer / _hex_name("through the link"), b"a person's file")
+    through_link = alias / "workspaces" / "team" / "files"
+    _record_named(instance, "att_link", str(through_link / leftover.name))
+    config = instance.config()
+    config.instance_root = str(alias)
+    assert config.layout.root == instance.root, "the layout is the resolved root"
+
+    with caplog.at_level(logging.DEBUG):
+        result = upgrade_adapter_host_files(config)
+
+    assert result.elsewhere == NamedElsewhere(names=1, by_instance_folders=1)
+    (error,) = _events(caplog, "adapter_host_files_folder_moved")
+    assert " other_folders=- " in error and "move or mount" not in error
+    assert all(str(through_link) not in record.getMessage() for record in caplog.records)
+    _assert_no_list(instance.layout)
+
+
+def test_a_transfer_folder_that_was_inside_state_is_never_offered_and_upgrading_md_s_steps_move_its_files(
+    instance: _Instance, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C11 (a) of PR #168's fix round, the critic's probe: 0.9.13's upload_dir was state/adapter-uploads, now the default.
+
+    The photo's gateway record and turns name the old folder inside state/,
+    which the step never offers. The error must not say the gateway has no
+    record of receiving it; it points at upgrading.md, whose steps (put the
+    folder back there, set upload_dir to it, delete the marker, restart)
+    move the photo.
+    """
+
+    name = _hex_name("photo")
+    old = instance.layout.state_dir / "adapter-uploads"
+    assert instance.gateway().set_attachment_local_path("att_photo", str(old / name))
+    instance.repository().relocate_turn_attachment(
+        [(CONVERSATION, "task_1"), (CONVERSATION, "task_2")], "att_photo", local_path=str(old / name)
+    )
+    instance.photo_source.rename(instance.transfer / name)
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        first = instance.run()
+
+    assert first.elsewhere == NamedElsewhere(names=1, by_instance_folders=1, by_turns=1)
+    (error,) = _events(caplog, "adapter_host_files_folder_moved")
+    assert "most likely at another path under 0.9.13" in error and "upgrading.md says how to move them" in error
+    assert "no record of receiving" not in error and str(old) not in error
+    caplog.clear()
+
+    instance.transfer.rename(old)
+    config = instance.config()
+    config.interactive_apps.adapter_host = AdapterHostSettings(upload_dir=str(old))
+    instance.layout.adapter_host_files_upgrade_path.unlink()
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        second = upgrade_adapter_host_files(config)
+
+    assert second.finished and second.counts.moved == 1 and second.elsewhere.names == 0
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+    assert instance.photo_destination.read_bytes() == CONTENT["att_photo"]
+    assert not _events(caplog, "adapter_host_files_folder_moved")
 
 
 def test_a_copy_sent_back_unchanged_is_never_offered_and_the_steps_move_the_file_under_its_own_record(
@@ -1752,6 +1854,190 @@ def test_a_copy_sent_back_unchanged_is_never_offered_and_the_steps_move_the_file
     assert not _events(caplog, "adapter_host_files_folder_moved")
     _assert_reported(caplog, instance, [other.name])
     assert (old / other.name).is_file()
+
+
+# --- Records of receiving in another folder while nothing is listed here (DI-1 of PR #168's review) --------
+
+
+def test_upload_dir_naming_a_folder_without_the_files_reports_where_the_records_are_and_the_steps_move_them(
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DI-1, the reviewer's probe: 0.9.13's records name P1, which still holds the photo; the 0.10 upload_dir names a new folder.
+
+    Nothing is listed, so before this the run finished silently. Now it
+    logs one error with the folder the gateway record names and the steps,
+    keeps the count in the marker's own field (not ``named_elsewhere``,
+    which counts listed names), and the operator command says so. Following
+    the steps moves the photo.
+    """
+
+    name = _hex_name("photo")
+    _name_photo(instance, name)
+    p1 = instance.transfer
+    marker = instance.layout.adapter_host_files_upgrade_path
+    config = instance.config()
+    config.interactive_apps.adapter_host = AdapterHostSettings(upload_dir=str(instance.root / "brand-new-uploads"))
+    monkeypatch.setattr("assistant_cli.GatewayInstanceConfig.load_for_process", staticmethod(lambda _path: config))
+    import assistant_cli
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        assistant_cli._upgrade_adapter_host_files(argparse.Namespace(config="instance_config.yaml", files_gone=False))
+    printed = capsys.readouterr().out
+
+    body = json.loads(marker.read_text())
+    assert body["files_without_records"] == 0 and body[NAMED_ELSEWHERE_FIELD] == 0
+    assert body[RECORDED_ELSEWHERE_FIELD] == 1 and body[LIST_ID_FIELD] is None
+    (error,) = _events(caplog, "adapter_host_files_folder_moved")
+    assert [r.levelno for r in caplog.records if "event=adapter_host_files_folder_moved" in r.getMessage()] == [logging.ERROR]
+    assert error.startswith(
+        f"Gateway records or held guidance name 1 file(s) of chat apps the adapter host ran in another folder ({p1}), "
+        "and none of them is left in the transfer folder upload_dir names, so it was most likely at another path"
+    )
+    assert (
+        f"To move the 1 the gateway has a record of receiving: with the folder that holds them at {p1} (move or mount "
+        f"it there if it is not; a link does not work), set upload_dir to that path, delete the marker {marker} and "
+        "restart" in error
+    )
+    assert "If those files are gone, nothing more is needed." in error
+    assert error.endswith(
+        f"folder={instance.root / 'brand-new-uploads'} other_folders={p1} files_without_records=0 unlisted=0 "
+        "recorded_elsewhere=1 by_gateway=1 by_instance_folders=0 by_held_guidance=0"
+    )
+    assert name not in error
+    assert "Records of receiving name 1 file(s) of the adapter host's chat apps in another folder" in printed
+    assert "with the folder that holds them at the path the log's steps name" in printed
+    assert "If those files are gone, nothing more is needed." in printed and str(p1) not in printed
+    caplog.clear()
+
+    marker.unlink()
+    config.interactive_apps.adapter_host = AdapterHostSettings(upload_dir=str(p1))
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        second = upgrade_adapter_host_files(config)
+
+    assert second.finished and second.counts.moved == 1 and second.recorded_elsewhere.names == 0
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+    assert json.loads(marker.read_text())[RECORDED_ELSEWHERE_FIELD] == 0
+    assert not _events(caplog, "adapter_host_files_folder_moved")
+
+
+def test_a_normal_instance_gets_no_error_for_records_in_another_folder(instance: _Instance, caplog: pytest.LogCaptureFixture) -> None:
+    """DI-1: no false error. The photo, named as 0.9.13 named it, moves; its records then name state/uploads under its id.
+
+    Beside it, an agent sent a copy back under the photo's generated name
+    (a sent copy is never counted) and a conversation turn names a file of
+    the gateway's form in another folder (turns are not read for this:
+    agents write them).
+    """
+
+    name = _hex_name("photo")
+    _name_photo(instance, name)
+    _sent_copy(instance, "web_attachment_1", instance.layout.workspaces_dir.joinpath(*_SENT_FOLDER, name), CONTENT["att_photo"])
+    instance.repository().merge_turn_attachments(
+        conversation_id=CONVERSATION, task_id="task_1",
+        attachments=[_record("att_turn", str(instance.root / "agent-folder" / _hex_name("turn")), _SHA_X)],
+    )
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.finished and result.counts.moved == 1 and result.counts.files_without_records == 0
+    assert result.recorded_elsewhere == NamedElsewhere()
+    assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())[RECORDED_ELSEWHERE_FIELD] == 0
+    assert not _events(caplog, "adapter_host_files_folder_moved")
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ("held_copy", NamedElsewhere(names=1, by_held_guidance=1)),
+        ("instance_folder", NamedElsewhere(names=1, by_instance_folders=1)),
+        ("sent_copy", NamedElsewhere()),
+    ],
+)
+def test_with_nothing_listed_each_kind_of_record_counts_by_its_rule(
+    instance: _Instance, caplog: pytest.LogCaptureFixture, kind: str, expected: NamedElsewhere
+) -> None:
+    """DI-1 with SEC-1's rules: a held copy's folder is shown, a record of receiving in this instance's folders is counted and not shown, a sent copy is not counted."""
+
+    old = instance.root / "old-uploads"
+    name = _hex_name(kind)
+    if kind == "held_copy":
+        _hold(instance, "corr_named", _record("att_held", str(old / name), _SHA_X))
+        expected = replace(expected, folders=(old,))
+    elif kind == "instance_folder":
+        _record_named(instance, "att_team", str(instance.layout.workspaces_dir / "team" / "files" / name))
+    else:
+        _sent_copy(instance, "web_attachment_1", old / name, b"agent copy")
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.counts.files_without_records == 0 and result.recorded_elsewhere == expected
+    errors = _events(caplog, "adapter_host_files_folder_moved")
+    assert len(errors) == (0 if kind == "sent_copy" else 1)
+    if kind == "held_copy":
+        assert f" other_folders={old} " in errors[0]
+        assert "The gateway has no record of receiving them, so the step cannot move them at any path" in errors[0]
+    elif kind == "instance_folder":
+        assert " other_folders=- " in errors[0] and "workspaces/team" not in errors[0]
+        assert "upgrading.md says how to move them" in errors[0]
+
+
+@pytest.mark.parametrize(
+    ("file_name", "counted"),
+    [
+        (_LIVE, True),
+        (f"{_LIVE}0", False),
+        (_LIVE[:-1], False),
+        (TRANSFER_FILE_PREFIX + _LIVE.removeprefix(TRANSFER_FILE_PREFIX).upper(), False),
+        (f"{_LIVE}.pdf", False),
+    ],
+    ids=["12_hex", "13_hex", "11_hex", "uppercase", "suffix"],
+)
+def test_only_the_gateway_s_own_names_count_in_another_folder(
+    instance: _Instance, caplog: pytest.LogCaptureFixture, file_name: str, counted: bool
+) -> None:
+    """EVA-2 of PR #168's review: with nothing listed, the 12-hex rule in ``_elsewhere`` alone decides what counts.
+
+    The tests with listed names rest on exact membership in the list; here
+    any name of the gateway's form counts, so a near miss (another length,
+    uppercase, a suffix) counts only if the full match were dropped.
+    """
+
+    _record_named(instance, "att_named", str(instance.root / "old-uploads" / file_name))
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.counts.files_without_records == 0
+    assert result.recorded_elsewhere.names == int(counted)
+    assert len(_events(caplog, "adapter_host_files_folder_moved")) == int(counted)
+
+
+def test_a_database_error_checking_other_folders_with_nothing_listed_keeps_the_count_and_says_how_to_check_again(
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DI-1 with GEN-1 and FA-4: the files were counted (none), the check did not finish, and the operator line says that."""
+
+    def locked(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(_RelationalGatewayStateRepository, "list_attachment_paths_containing", locked)
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        printed = _run_operator_command(instance, monkeypatch, capsys)
+
+    body = json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())
+    assert body["files_without_records"] == 0 and body[RECORDED_ELSEWHERE_FIELD] is None
+    (unchecked,) = _events(caplog, "adapter_host_files_other_folders_unchecked")
+    assert unchecked.endswith(
+        f"folder={instance.transfer} reason=other_folders_unchecked: RuntimeError: database is locked"
+    )
+    assert f"To check again, delete the marker {instance.layout.adapter_host_files_upgrade_path} and restart" in unchecked
+    assert not _events(caplog, "adapter_host_files_without_records_uncounted")
+    assert "could not be counted" not in printed
+    assert "The check for records naming files of the adapter host's chat apps in another folder did not finish" in printed
+    assert "To check again, delete the marker and restart" in printed
 
 
 _EPOCH = "epoch_1"
@@ -2865,6 +3151,7 @@ def _fresh_config(tmp_path: Path, upload_dir: Path | None = None) -> SimpleNames
     adapter_host = AdapterHostSettings(upload_dir=str(upload_dir)) if upload_dir else AdapterHostSettings()
     return SimpleNamespace(
         layout=InstanceLayout.at(root),
+        instance_root=str(root),
         instance_root_path=root,
         interactive_apps=SimpleNamespace(adapter_host=adapter_host),
         state_storage_settings=settings,
@@ -3522,6 +3809,7 @@ def test_the_operator_command_says_when_the_leftover_files_could_not_be_counted(
         upgrade_module.UpgradeResult(finished=True, counts=upgrade_module.UpgradeCounts()),
         upgrade_module.UpgradeResult(finished=True, counts=upgrade_module.UpgradeCounts(files_without_records=0)),
         upgrade_module.UpgradeResult(finished=True, counts=upgrade_module.UpgradeCounts(files_without_records=2)),
+        upgrade_module.UpgradeResult(finished=True, counts=upgrade_module.UpgradeCounts(), other_folders_unchecked=2),
     ]
     monkeypatch.setattr(upgrade_module, "upgrade_adapter_host_files", lambda _config, *, files_gone: outcomes.pop(0))
     args = SimpleNamespace(config="instance_config.yaml", files_gone=False)
@@ -3535,6 +3823,14 @@ def test_the_operator_command_says_when_the_leftover_files_could_not_be_counted(
     printed = capsys.readouterr().out
     assert "2 file(s) are left in the transfer folder that no record names; the team cannot open them." in printed
     assert "never opens" not in printed, "0.10 reads the files of messages it had not handled (PR #150's review)"
+    assistant_cli._upgrade_adapter_host_files(args)
+    printed = capsys.readouterr().out
+    assert "could not be counted" not in printed, "GEN-1 and FA-4 of PR #168's review: they were counted"
+    assert (
+        "2 file(s) are left in the transfer folder that no record of it names. They were counted, but the check for "
+        "records naming them in another folder did not finish, so nothing is listed and no delete command is given: "
+        "do not delete any of them. To check again, delete the marker and restart; see the log." in printed
+    )
 
 
 def test_the_operator_command_gives_the_steps_only_for_files_a_gateway_record_names(
@@ -3581,6 +3877,37 @@ def test_the_operator_command_gives_the_steps_only_for_files_a_gateway_record_na
         "the files whose gateway records name that path, so do this for each path." in printed[3]
     ), "C08: one move back is not enough with two folders"
     assert "old-a" not in printed[3], "the log names the folders"
+
+
+def test_the_moved_folder_texts_split_records_of_receiving_in_this_instance_s_folders_from_the_rest(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C11 of PR #168's fix round: with every kind at once, each group gets its own true sentence, in the error and the operator line."""
+
+    import assistant_cli
+
+    elsewhere = NamedElsewhere(names=3, by_gateway=1, by_instance_folders=1, by_turns=1, gateway_folders=(Path("/old"),))
+    advice = upgrade_module._folder_moved_advice(Path("/m.json"), elsewhere)
+    assert advice.startswith(" To move the 1 the gateway has a record of receiving: move or mount this folder back at /old")
+    assert (
+        " 1 of them have gateway records of receiving only inside this instance's workspaces or state folder, which "
+        "the step never shows or offers: keep them;" in advice
+    )
+    assert advice.endswith(
+        " For the other 1 the gateway has no record of receiving them, so no run can move them: keep them, and the "
+        "people who sent them can send them again."
+    )
+    monkeypatch.setattr("assistant_cli.GatewayInstanceConfig.load_for_process", staticmethod(lambda _path: object()))
+    result = upgrade_module.UpgradeResult(
+        finished=True, counts=upgrade_module.UpgradeCounts(files_without_records=3), elsewhere=elsewhere
+    )
+    monkeypatch.setattr(upgrade_module, "upgrade_adapter_host_files", lambda _config, *, files_gone: result)
+    assistant_cli._upgrade_adapter_host_files(argparse.Namespace(config="instance_config.yaml", files_gone=False))
+    printed = capsys.readouterr().out
+    assert "most likely at another path under 0.9.13" in printed
+    assert "To move the 1 the gateway has a record of receiving: move or mount the folder back at the path" in printed
+    assert "1 of them have gateway records of receiving only inside this instance's workspaces or state folder" in printed
+    assert "For the other 1 the gateway has no record of receiving them, so they cannot be moved: keep them" in printed
 
 
 def test_the_fixture_matches_the_bytes_it_was_written_for() -> None:
