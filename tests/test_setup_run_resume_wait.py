@@ -896,3 +896,106 @@ async def test_a_pass_skips_a_finished_task_that_still_has_a_record(lead, woken,
 
     assert reads == [1]
     assert record_of(lead) is not None and not lead.task_manager.task_state.task_queue and not woken
+
+
+# A draining agent (contract drain) ---------------------------------------------------------------------------
+#
+# Brief A4 and the messaging project's rule: an agent whose process runs another message contract finishes what
+# it already holds and takes over nothing. Setup-run recovery reads only the agent's own tasks and starts no
+# agent, like resume_decided_access_waits, so it needs no drain check of its own (plan decision D6).
+
+OWN_TASK, GONE_TASK = "task-own", "task-of-a-gone-lead"
+DRAINING_LEAD, GONE_LEAD = "lead-draining", "lead-gone"
+
+
+def _saved_setup_wait(tmp_path: Path, owner: str, task_id: str, run_id: str) -> None:
+    """A TeamLead process saved a task paused on set_up_tools whose run then ended, and stopped (one shared store)."""
+
+    manager = TaskManager(db_path=str(tmp_path / "instance.db"))
+    manager.set_owner_identity(owner, owner, "team", "TeamArchitect")
+    assert manager.add_task(
+        Task(task_id=task_id, task_type=MessageMetaType.REQUEST), MessageHeader(from_agent_id="gateway"), MessageMeta(),
+        owner_person_id=None,
+    )
+    assert manager.get_next_task_to_process() == task_id
+    manager.update_main_task_state(task_id, ProgressState.IN_PROGRESS, _now())
+    manager.update_main_task_state(task_id, ProgressState.WAITING, _now())
+    stopped = SimpleNamespace(id=owner, task_manager=manager, _interrupted_turn_sessions={})
+    pause_on_setup(stopped, run_id, task_id=task_id)
+    ended(stopped, run_id)
+    manager._persist_runtime_state()
+
+
+def _starting_lead(tmp_path: Path, *, draining: bool) -> SimpleNamespace:
+    """The draining lead's process starts again with the same agent id (custody tests' starting agent)."""
+
+    from custom_agents.contract_drain_state import ContractDrain
+
+    manager = TaskManager(db_path=str(tmp_path / "instance.db"))
+    manager.set_owner_identity(DRAINING_LEAD, DRAINING_LEAD, "team", "TeamArchitect")
+    agent = SimpleNamespace(
+        id=DRAINING_LEAD, team_id="team", named_agent_type="TeamArchitect", same_role_runtime_takeover_enabled=True,
+        task_manager=manager, _logger=logging.getLogger("test.setup_run_resume_wait"),
+        deferred_inbox=SimpleNamespace(stored_team_id=AsyncMock(return_value=None),
+                                       restore_role=AsyncMock(return_value=False),
+                                       restore=AsyncMock(return_value=False)),
+        _recovery_retry_deadline_seconds=lambda: None, _interrupted_turn_sessions={}, _pending_interrupt_responses={},
+    )
+    if draining:
+        # The stricter drain of a pool worker, which holds back tasks it never started (critique C04); a lead's own
+        # drain holds back nothing.
+        agent._contract_drain = ContractDrain(reason="another message contract", started_at=datetime.now(timezone.utc),
+                                              holds_back_unstarted=True)
+    return agent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("draining", [True, False], ids=["draining", "not_draining"])
+async def test_a_draining_agent_resumes_its_own_ended_setup_run_and_takes_over_no_other(
+    tmp_path, monkeypatch, woken, results, draining
+) -> None:
+    from custom_agents import runtime_recovery
+    from custom_agents.lease_loss_wind_down import may_start_next_task
+
+    _saved_setup_wait(tmp_path, DRAINING_LEAD, OWN_TASK, "run-own")
+    _saved_setup_wait(tmp_path, GONE_LEAD, GONE_TASK, "run-gone")
+    # The other lead is gone: without the drain, the starting lead would take its saved work over.
+    monkeypatch.setattr(runtime_recovery, "gone_owner_ids",
+                        AsyncMock(side_effect=lambda _agent, ids, **_kw: [owner for owner in ids if owner == GONE_LEAD]))
+    monkeypatch.setattr(runtime_recovery, "tell_task_about_its_restarts", AsyncMock())
+    agent = _starting_lead(tmp_path, draining=draining)
+    manager = agent.task_manager
+
+    await runtime_recovery.recover_runtime_after_restart(agent)
+
+    if not draining:
+        # The control: the gone lead's task is taken over here too, and its ended setup run resumes it.
+        assert sorted(manager.task_state.task_queue) == sorted([OWN_TASK, GONE_TASK])
+        for task_id in (OWN_TASK, GONE_TASK):
+            assert manager.read_runtime_resume_directive(task_id).startswith(tool_setup_run_runtime.RUN_ENDED_NOTE)
+        return
+
+    # Its own task resumes from a note, once, at the front of its queue, without waking the drain at start.
+    assert list(manager.task_state.task_queue) == [OWN_TASK]
+    assert get_human_interaction_blocker(manager, OWN_TASK) is None
+    assert manager.get_task_info(OWN_TASK).state == ProgressState.ACCEPTED
+    assert manager.read_runtime_resume_directive(OWN_TASK).startswith(tool_setup_run_runtime.RUN_ENDED_NOTE)
+    assert woken == []
+    # The gone lead's task is neither taken over nor resumed: it stays saved under that lead, with its record.
+    assert manager.get_task_info(GONE_TASK) is None
+    saved = {row.owner_agent_id for row in manager.runtime_state_store.peek_task_runtime_by_role("team", "TeamArchitect")}
+    assert GONE_LEAD in saved
+    assert run_repository(agent).get("run-gone").status == RUN_FINISHED
+
+    # A scheduler pass while draining finds nothing more to do.
+    assert await tool_setup_run_runtime.resume_ended_setup_runs(agent, now=PASS) == 0
+    assert list(manager.task_state.task_queue) == [OWN_TASK]
+
+    # Critique C04: even a drain that holds back unstarted tasks starts the resumed one, which ran before.
+    assert await may_start_next_task(agent) is True
+    assert manager.add_task(
+        Task(task_id="task-never-started", task_type=MessageMetaType.REQUEST), MessageHeader(from_agent_id="gateway"),
+        MessageMeta(), owner_person_id=None,
+    )
+    manager.task_state.task_queue.remove(OWN_TASK)
+    assert await may_start_next_task(agent) is False

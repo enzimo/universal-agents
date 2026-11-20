@@ -788,7 +788,10 @@ Five repairs keep work from getting stuck in the first place:
   run's result (`tool_setup_run_runtime.resume_ended_setup_runs`). It leaves
   a run another step is working on, or saved in the last 30 seconds, to the
   next pass, so its warnings (`event=tool_setup_run_recovered`) name only
-  real lost wake-ups.
+  real lost wake-ups. An agent that drains for another message contract does
+  this too, as it resumes its decided access waits: these are tasks it
+  already holds, the recovery takes over nothing and starts no agent, and a
+  resumed task already ran, so even a draining pool worker starts it.
 - A task that ends with delegated work still running stops it
   (`custom_agents.orphaned_subtasks`), and a worker still reporting on work whose
   request ended is told to stop.
@@ -6342,7 +6345,9 @@ finish what they already admitted. The host's record says `draining` meanwhile; 
 agents' sessions are still renewed, so requests about the tasks they hold still reach them.
 Startup counts as held work until recovery finishes, so a drain cannot close controls
 before saved tasks become visible. A draining startup restores its own work and adopts
-no work from gone agents. Pool-worker wind-down waits for recovery too, so it returns
+no work from gone agents; it still resumes its own tasks whose setup run ended or whose
+access requests were decided meanwhile (`resume_ended_setup_runs`,
+`resume_decided_access_waits`). Pool-worker wind-down waits for recovery too, so it returns
 the complete set of saved tasks. Admission reads the leaf module `contract_drain_state`; drain
 execution can depend on turn and control handlers without creating an import cycle.
 Once no agent is starting or holds an unfinished task or a waiting request, the host closes their sessions

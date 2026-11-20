@@ -942,9 +942,11 @@ async def resume_ended_setup_runs(agent: Any, *, now: float | None = None, at_st
 
     Runs at agent start, after restart recovery, and on every scheduler pass,
     at most every ``SETUP_RUN_RECOVERY_SECONDS``. Only the agent's own tasks
-    are read; nothing here starts an agent. Each task is handled on its own,
-    so one failure is logged and the others go on. Returns how many it
-    resumed.
+    are read; nothing here takes work over or starts an agent, so an agent
+    that drains for another message contract runs it too, as it finishes what
+    it holds (``contract_drain``, like ``resume_decided_access_waits``). Each
+    task is handled on its own, so one failure is logged and the others go
+    on. Returns how many it resumed.
 
     A pass leaves a run alone while another step of this process works on
     it (its lock is held) or just saved it (``RECENT_RUN_SECONDS``), so its
