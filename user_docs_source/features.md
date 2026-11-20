@@ -563,8 +563,10 @@ Some of these are repaired automatically before you would be told: when the
 agent holding your request stops, the team lead starts another agent of the same
 kind that takes the work over; an agent waiting on your answer or on an access
 decision stays up until it gets one; an access decision made while the agent
-restarted still reaches the task; and when a request ends, any work it handed to
-other agents stops too.
+restarted still reaches the task; a finished tool setup continues its request
+even when the agent restarted before it carried on, and a request whose setup
+finished while its agent was busy with other work is not reported; and when a
+request ends, any work it handed to other agents stops too.
 
 When an agent leaves the team for good (it stops, or its process restarts after a
 crash), work that was sent to it by name and that it never started fails at once
@@ -794,6 +796,10 @@ same way.
   fresh page opens. A step outside Universal Agents keeps waiting without its
   card: its line in chat history keeps the instructions and link, and you
   mark it done on the workflow page.
+- If TeamLead is restarting when you finish a page (or the gateway cannot
+  reach it), the page's card still closes and the gateway keeps the result.
+  TeamLead gets it as soon as it is back, or when the gateway next starts, and
+  the task carries on; the other pages' cards stay until each page ends.
 
 When the request needs two or more things, one chat message says so first
 and links the workflow page that tracks them all, for example "I need 2

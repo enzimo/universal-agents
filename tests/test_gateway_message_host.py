@@ -35,7 +35,15 @@ from custom_transport.protocol1.trust_state import PersistentTrustStore
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
 from tests import message_contract_support as fixtures
-from tests.test_live_team_services import TEAM, broker, connect, host, installation, team_services  # noqa: F401 - broker is a fixture
+from tests.test_live_team_services import (  # noqa: F401 - broker is a fixture
+    TEAM,
+    broker,
+    connect,
+    host,
+    installation,
+    team_services_host,
+    until_team_services_serve,
+)
 
 REFERENCE = "p-AbCdEfGhIjKlMnOpQrStUv"
 LIST_BODY = {"request_id": "cmd-1", "bank": "usermem", "sort": "memory_id", "offset": 0, "limit": 10}
@@ -453,11 +461,12 @@ async def test_the_gateway_joins_in_the_background_and_sends_a_persons_command(
     stop = asyncio.Event()
     async with AsyncExitStack() as stack:
         await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM))
-        serving = await team_services(stack, broker, layout, stop)
+        services, serving = await team_services_host(stack, broker, layout, stop)
         gateway = GatewayMessageHost(layout, TEAM)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
         host_started = await gateway.ready(timeout=20)
         assert host_started.identity.certificate.roles == frozenset({"gateway"})
+        await until_team_services_serve(services, serving)
         # The team services check the command token and answer; memory is not served there yet.
         with pytest.raises(RequestRefused) as refused:
             await gateway.command("memory.list", LIST_BODY, person_ref=REFERENCE, timeout=10)

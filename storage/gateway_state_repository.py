@@ -43,6 +43,7 @@ from assistant_gateway.domain.request_state import (
     PendingQueryRecord,
     PendingQueryStatus,
     RequestRecord,
+    TOOL_SETUP_RESULT_UNSENT,
     ThreadRequestRunning,
     ToolSetupRecord,
 )
@@ -231,6 +232,14 @@ _TRANSCRIPT_MESSAGE_COLUMNS = """
     attachment_references_json, delivery_status, reply_to_message_id,
     created_at_utc
 """
+
+# Every gateway_tool_setups column; each is a ToolSetupRecord field of the same name.
+_TOOL_SETUP_COLUMN_NAMES = (
+    "setup_request_id", "parent_task_id", "person_id", "tool_id", "kind", "owner_kind",
+    "session_key", "correlation_id", "conversation_id", "status", "created_at", "finished_at",
+    "result_json", "result_state",
+)
+_TOOL_SETUP_COLUMNS = ", ".join(_TOOL_SETUP_COLUMN_NAMES)
 
 
 class GatewayStateRepository(
@@ -1079,7 +1088,7 @@ class _RelationalGatewayStateRepository:
     """Shared record operations for gateway session and delivery state."""
 
     _dialect: SqlDialect
-    # Set by each database's subclass.
+    # Set by each database's constructor; the shared schema setup passes it to the logged column step.
     _logger: logging.Logger
 
     @staticmethod
@@ -1251,14 +1260,29 @@ class _RelationalGatewayStateRepository:
                     conversation_id TEXT,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    finished_at TEXT
+                    finished_at TEXT,
+                    result_json TEXT,
+                    result_state TEXT
                 )
                 """
             )
+            # A finished page keeps its result until it is sent
+            # (ToolSetupRecord); tables from before this have neither column.
+            # Added before the indexes below, one of which reads result_state.
+            ensure_column(conn, "gateway_tool_setups", "result_json", "TEXT", logger=self._logger)
+            ensure_column(conn, "gateway_tool_setups", "result_state", "TEXT", logger=self._logger)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_gateway_tool_setups_status
                 ON gateway_tool_setups(status, person_id, tool_id)
+                """
+            )
+            # Only the results still waiting to be sent, which every resend reads.
+            conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_gateway_tool_setups_unsent
+                ON gateway_tool_setups(finished_at)
+                WHERE result_state = '{TOOL_SETUP_RESULT_UNSENT}'
                 """
             )
             conn.execute(
@@ -2994,57 +3018,36 @@ class _RelationalGatewayStateRepository:
             conn.commit()
 
     def record_tool_setup(self, record: ToolSetupRecord) -> None:
-        bind = self._dialect.bind
+        # Values by column name, so the record's field order never matters.
+        values = tuple(getattr(record, column) for column in _TOOL_SETUP_COLUMN_NAMES)
         with self._connect() as conn:
             conn.execute(
-                f"""
-                INSERT INTO gateway_tool_setups
-                (
-                    setup_request_id, parent_task_id, person_id, tool_id, kind, owner_kind,
-                    session_key, correlation_id, conversation_id, status, created_at, finished_at
-                )
-                VALUES ({", ".join([bind] * 12)})
-                """,
-                (
-                    record.setup_request_id,
-                    record.parent_task_id,
-                    record.person_id,
-                    record.tool_id,
-                    record.kind,
-                    record.owner_kind,
-                    record.session_key,
-                    record.correlation_id,
-                    record.conversation_id,
-                    record.status,
-                    record.created_at,
-                    record.finished_at,
-                ),
+                f"INSERT INTO gateway_tool_setups ({_TOOL_SETUP_COLUMNS}) "
+                f"VALUES ({', '.join([self._dialect.bind] * len(values))})",
+                values,
             )
             conn.commit()
 
     def get_tool_setup(self, setup_request_id: str) -> Optional[ToolSetupRecord]:
         with self._connect() as conn:
             row = conn.execute(
-                f"""
-                SELECT setup_request_id, parent_task_id, person_id, tool_id, kind, owner_kind,
-                       session_key, correlation_id, conversation_id, status, created_at, finished_at
-                FROM gateway_tool_setups
-                WHERE setup_request_id = {self._dialect.bind}
-                """,
+                f"SELECT {_TOOL_SETUP_COLUMNS} FROM gateway_tool_setups WHERE setup_request_id = {self._dialect.bind}",
                 (setup_request_id,),
             ).fetchone()
         return ToolSetupRecord(**dict(row)) if row is not None else None
 
-    def finish_tool_setup(self, setup_request_id: str, *, status: str) -> bool:
+    def finish_tool_setup(self, setup_request_id: str, *, status: str, result_json: str) -> bool:
+        """End a waiting page and keep its unsent result in the same conditional update (one result per page)."""
+
         bind = self._dialect.bind
         with self._connect() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE gateway_tool_setups
-                   SET status = {bind}, finished_at = {bind}
+                   SET status = {bind}, finished_at = {bind}, result_json = {bind}, result_state = {bind}
                  WHERE setup_request_id = {bind} AND status = {bind}
                 """,
-                (status, utc_now_iso(), setup_request_id, TOOL_SETUP_STATUS_WAITING),
+                (status, utc_now_iso(), result_json, TOOL_SETUP_RESULT_UNSENT, setup_request_id, TOOL_SETUP_STATUS_WAITING),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -3068,8 +3071,7 @@ class _RelationalGatewayStateRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT setup_request_id, parent_task_id, person_id, tool_id, kind, owner_kind,
-                       session_key, correlation_id, conversation_id, status, created_at, finished_at
+                SELECT {_TOOL_SETUP_COLUMNS}
                 FROM gateway_tool_setups
                 {"WHERE " + where if where else ""}
                 ORDER BY created_at ASC
@@ -3077,6 +3079,37 @@ class _RelationalGatewayStateRepository:
                 tuple(value for _column, value in chosen),
             ).fetchall()
         return [ToolSetupRecord(**dict(row)) for row in rows]
+
+    def list_unsent_tool_setup_results(self) -> list[ToolSetupRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {_TOOL_SETUP_COLUMNS}
+                FROM gateway_tool_setups
+                WHERE result_state = {self._dialect.bind}
+                ORDER BY finished_at ASC, setup_request_id ASC
+                """,
+                (TOOL_SETUP_RESULT_UNSENT,),
+            ).fetchall()
+        return [ToolSetupRecord(**dict(row)) for row in rows]
+
+    def mark_tool_setup_result(self, setup_request_id: str, *, state: str) -> bool:
+        """Move an unsent result to ``state`` and drop its kept copy; only the first caller gets True.
+
+        The copy (with the person's account name) is needed only until it is
+        sent; a crash before this update leaves the row unsent with its copy,
+        so it can still be sent again.
+        """
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE gateway_tool_setups SET result_state = {bind}, result_json = NULL "
+                f"WHERE setup_request_id = {bind} AND result_state = {bind}",
+                (state, setup_request_id, TOOL_SETUP_RESULT_UNSENT),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def list_requests_for_session(
         self, session_key: str, *, limit: int = 5
@@ -5066,6 +5099,8 @@ class _RelationalGatewayStateRepository:
         "gateway_requests",
         "gateway_held_guidance",
         "gateway_credential_collections",
+        # Their setup pages: a kept result could never be sent without the chat.
+        "gateway_tool_setups",
         "gateway_deliveries",
         "gateway_attachments",
         "gateway_questions",

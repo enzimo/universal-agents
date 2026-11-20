@@ -2086,6 +2086,67 @@ async def test_credential_form_closes_when_manager_delivery_fails(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_a_credential_form_ending_while_no_team_lead_is_known_never_ends_the_chat_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watcher keeps the result and retries; the person's running request is never marked finished."""
+
+    gateway, _events, request = _credential_form_gateway(tmp_path)
+    gateway.state_store.record_request(
+        correlation_id="corr_1", session_key="session_1", request_kind="interactive", request_text="Store my key",
+        conversation_id="conv_1", followup_to_task_id=None, status="waiting_for_credential",
+        owner_canonical_user_id=gateway.config.user.canonical_user_id, active_task_id="task_1", run_state="running",
+    )
+    lead = gateway._manager_client.manager_id
+    gateway._manager_client._manager_id = None
+    publish = AsyncMock()
+    gateway._manager_client.publish_durable = publish
+    monkeypatch.setattr(
+        gateway._secure_broker,
+        "get_collection_status",
+        AsyncMock(
+            return_value={
+                "session_id": "session_123",
+                "status": "credential_stored",
+                "result": {"status": "success", "content": {"status": "credential_stored", "message": "Stored."}},
+            }
+        ),
+    )
+    sleeps = 0
+    while_waiting: list[tuple[str, str | None]] = []
+
+    async def lead_back_on_the_retry(_seconds) -> None:
+        # The first wait is the watcher's poll; the second is the result's retry.
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 2:
+            record = gateway.state_store.get_request("corr_1")
+            while_waiting.append((record.status, record.run_state))
+            gateway._manager_client._manager_id = lead
+
+    monkeypatch.setattr(broker_session_watch_module.asyncio, "sleep", lead_back_on_the_retry)
+    await gateway._credential_workflow.poll_session(
+        status_url="http://127.0.0.1:18600/v1/credential-collection/sessions/session_123",
+        session_id="session_123",
+        request_content=request,
+        correlation_id="corr_1",
+        conversation_id="conv_1",
+        session_key="session_1",
+    )
+
+    assert while_waiting == [("waiting_for_credential", "running")], "no finished status while the result waits"
+    [call] = publish.await_args_list
+    envelope = call.args[0]
+    assert isinstance(envelope.msg_content, SecureCredentialCollectionResult)
+    assert call.kwargs["routing_key"] == lead
+    assert envelope.msg_header.idempotency_key == (
+        f"secure_result:secure_credential_collection_result:{request.credential_request_id}:{lead}"
+    )
+    after = gateway.state_store.get_request("corr_1")
+    assert (after.status, after.run_state) == ("waiting_for_credential_result", "running")
+
+
+@pytest.mark.asyncio
 async def test_credential_form_closes_before_stalled_manager_delivery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     gateway, events, request = _credential_form_gateway(tmp_path)
     entered = asyncio.Event()
@@ -6860,6 +6921,55 @@ async def test_gateway_available_transition_runs_hook_after_notice(
         "hook:resume",
     ]
     save_mock.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_kept_setup_results_are_sent_after_the_notice_and_hook_on_every_available_transition(
+    tmp_path: Path, monkeypatch, caplog
+):
+    """A lead's return and a change to another lead both send kept setup results, last; a failure is logged."""
+
+    from assistant_gateway.application.manager_client import GatewayManagerTransition
+
+    config = _build_test_config(tmp_path)
+    config.manager.manager_agent_id = None
+    config.delivery.default_target.channel_name = "telegram"
+    config.delivery.default_target.chat_id = "-100123"
+    monkeypatch.setattr(type(config), "save", lambda self: None)
+    events: list[str] = []
+    gateway = UserGateway(
+        config,
+        output_sink=None,
+        event_sink=lambda event: events.append("notice"),
+        state_store=GatewayStateStore(str(tmp_path / "state.db")),
+    )
+    gateway.manager_transitions.start()
+    gateway.manager_transitions.enable_notices()
+    gateway._maintenance_schedules.ensure_all = AsyncMock()  # type: ignore[method-assign]
+    gateway.manager_transitions.set_hooks(on_manager_available=lambda: events.append("hook"))
+    resend = AsyncMock(side_effect=lambda: events.append("resend"))
+    monkeypatch.setattr(gateway._credential_workflow.tool_setups, "resend_kept_results", resend)
+
+    def arrives(lead: str, *, back: bool) -> GatewayManagerTransition:
+        return GatewayManagerTransition(
+            manager_id=lead, available=True, source="presence", reason="test", became_available=back
+        )
+
+    await gateway.manager_transitions.handle_available(arrives("manager_back", back=True))
+    assert events == ["notice", "hook", "resend"]
+
+    events.clear()
+    await gateway.manager_transitions.handle_available(arrives("manager_next", back=False))
+    assert events == ["resend"], "a change to another lead sends them too"
+
+    resend.side_effect = RuntimeError("store unavailable")
+    with caplog.at_level("ERROR"):
+        await gateway.manager_transitions.handle_available(arrives("manager_after", back=False))
+    # Logged by the step that runs each part of a transition on its own (GatewayManagerTransitionApplication._step).
+    assert (
+        "event=gateway_manager_transition_step_failed step=resend_kept_results manager_id=manager_after "
+        "correlation_id=None error_type=RuntimeError"
+    ) in caplog.text
 
 
 @pytest.mark.asyncio

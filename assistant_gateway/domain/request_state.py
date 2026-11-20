@@ -123,19 +123,33 @@ class CredentialCollectionRecord:
 # result status (assistant_gateway.application.tool_setup).
 TOOL_SETUP_STATUS_WAITING = "waiting"
 
+# Where a finished setup page's result stands (``ToolSetupRecord.result_state``).
+# ``unsent``: kept until a team lead can be reached; ``sent``: accepted into the
+# queue of the team lead known when it was sent; ``unsendable``: it can never be
+# sent (its chat no longer exists, or the kept copy cannot be read), logged once.
+TOOL_SETUP_RESULT_UNSENT = "unsent"
+TOOL_SETUP_RESULT_SENT = "sent"
+TOOL_SETUP_RESULT_UNSENDABLE = "unsendable"
+
 
 @dataclass
 class ToolSetupRecord:
     """One setup page a task waits on (``assistant_gateway.application.tool_setup``).
 
-    ``status`` is ``waiting`` until the page's result is sent to the task,
-    then how it ended (``completed``, ``declined``, ``expired``,
-    ``unavailable``). Finishing is a conditional update, so exactly one result
-    reaches the task even when the page's watcher and the person's own
-    ``/link`` finish together. The row outlives a gateway restart, so a page
-    nobody watches any more is reported instead of leaving the task waiting.
-    ``correlation_id`` is the chat request the task answers. Page addresses
-    are never stored.
+    ``status`` is ``waiting`` until the page ends, then how it ended
+    (``completed``, ``declined``, ``expired``, ``unavailable``). Finishing is a
+    conditional update that also keeps the task's result (``result_json``, a
+    ``ToolSetupResultV1`` without any address) until it is sent or found
+    unsendable, when the same update that records that drops it, so exactly
+    one result exists even when the page's watcher and the person's own
+    ``/link`` finish together. ``result_state`` says whether that result was sent
+    (``TOOL_SETUP_RESULT_*``): a result is addressed only when it is sent, to
+    the team lead known then, so one kept while no lead could be reached is
+    sent when a lead is back. Both are None while the page waits and on rows
+    finished before results were kept. The row outlives a gateway restart, so
+    a page nobody watches any more is reported instead of leaving the task
+    waiting. ``correlation_id`` is the chat request the task answers. Page
+    addresses are never stored.
     """
 
     setup_request_id: str
@@ -150,6 +164,14 @@ class ToolSetupRecord:
     status: str
     created_at: str
     finished_at: str | None = None
+    result_json: str | None = None
+    result_state: str | None = None
+
+    @property
+    def result_unsent(self) -> bool:
+        """The page ended and its result still waits to be sent to the task."""
+
+        return self.result_state == TOOL_SETUP_RESULT_UNSENT
 
 
 class PendingQueryStatus(StrEnum):

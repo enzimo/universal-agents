@@ -569,3 +569,30 @@ async def recover_runtime_after_restart(agent: Any) -> None:
             await agent.task_manager.operations_runtime.run(
                 agent.task_manager.enqueue_task, task_id
             )
+
+    # Tasks kept waiting above for a set_up_tools run that has ended.
+    await _resume_ended_setup_runs(agent)
+
+
+async def _resume_ended_setup_runs(agent: Any) -> None:
+    """Resume tasks whose ``set_up_tools`` run ended while the agent was down (``tool_setup_run_runtime``).
+
+    A restart leaves no paused turn, so such a task resumes from a note with
+    the run's result; without this it would wait for good, its record
+    keeping it waiting above. Recovery only queues the task: startup wakes
+    the drain once it is ready. A failure is logged; the task keeps its
+    record (a failed resume puts it back), so the scheduler pass tries again.
+    It reads only the tasks restored above, so an agent that drains for
+    another message contract, which takes no gone agent's work over, resumes
+    only its own.
+    """
+    from custom_agents.tool_setup_run_runtime import resume_ended_setup_runs
+
+    try:
+        await resume_ended_setup_runs(agent, at_start=True)
+    except Exception:
+        agent._logger.exception(
+            "Could not resume tasks whose setup run ended during the restart. "
+            "event=setup_run_recovery_failed agent_id=%s",
+            agent.id,
+        )

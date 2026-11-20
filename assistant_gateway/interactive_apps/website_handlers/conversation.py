@@ -633,6 +633,10 @@ class WebsiteConversationHandlers:
             response_text=task_text,
             attachments=attachments,
         )
+        # Record the reply before this code next pauses (no await in between):
+        # messages still queued when the answer's reply wait closed are passed
+        # on only after that pause (reply_leftovers), so the history keeps the
+        # team lead's order.
         reply = self.application.transcripts.record_local_response(
             owner_canonical_user_id=owner,
             session_key=session_key,

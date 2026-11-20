@@ -5,10 +5,14 @@ Setup pages are opened only by trusted code for a ``set_up_tools`` run
 model never writes a setup request. The gateway sends one
 ``ToolSetupResultV1`` per page, and this module hands it to the run that
 waits for it, which records it, offers an expired page again, and resumes the
-task once everything is done. A result whose task is gone closes the
-requester's wait with a plain answer instead of reviving the task; a result
-no run waits for (a page from before the run was stored, or one the run
-already stopped waiting on) is logged and ignored.
+task once everything is done. The run applies a result once, first, and
+marks it handled once its follow-up steps (or the answer below) finished: a
+copy of a handled result (the gateway sends a kept result again when a team
+lead is back) is ignored before anything else, so it never answers the person
+twice, while a copy of one whose handling failed partway runs the rest again.
+A result whose task is gone closes the requester's wait with a plain answer
+instead of reviving the task; a result no run knows (a page from before the
+run was stored) is logged and ignored.
 
 ``tool_setup_context`` writes TeamLead's one pinned context line with the
 person's last known setup states, so a ready tool is used without setting it
@@ -60,8 +64,16 @@ async def handle_tool_setup_result(
 ) -> None:
     """Hand a page's result to the run that waits for it (module docstring)."""
 
-    from custom_agents.tool_setup_run_runtime import on_setup_result
+    from custom_agents.tool_setup_run_runtime import (
+        PageResultOutcome,
+        apply_page_result,
+        continue_after_page_result,
+        mark_page_result_handled,
+    )
 
+    applied = await apply_page_result(self, setup_result)
+    if applied.outcome is PageResultOutcome.REPEAT:
+        return
     run = self.task_manager.operations_runtime.run
     parent_task_id = setup_result.parent_task_id
     parent_task_info = await run(self.task_manager.get_task_info, parent_task_id)
@@ -88,8 +100,13 @@ async def handle_tool_setup_result(
             incoming_header=incoming_msg_header,
             incoming_meta=incoming_msg_meta,
         )
+        # After the answer: a failed answer is retried with the message, and
+        # a later copy does not answer again.
+        if applied.run is not None:
+            await mark_page_result_handled(self, applied.run.run_id, setup_result.setup_request_id)
         return
-    if await on_setup_result(self, setup_result, incoming_msg_header, incoming_msg_meta):
+    if applied.outcome is PageResultOutcome.APPLIED:
+        await continue_after_page_result(self, setup_result, applied, incoming_msg_header, incoming_msg_meta)
         return
     self._logger.warning(
         "[%s] No setup run waits for this page's result; it is ignored. event=tool_setup_result_unmatched "

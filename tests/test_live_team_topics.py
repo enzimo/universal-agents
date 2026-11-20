@@ -20,7 +20,13 @@ from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
 from team_services.topics import TopicOperations
 from tests.people_directory_support import access_store_at
-from tests.test_live_team_services import TEAM, broker, connect, installation  # noqa: F401 - shared fixture
+from tests.test_live_team_services import (  # noqa: F401 - shared fixture
+    TEAM,
+    broker,
+    connect,
+    installation,
+    until_team_services_serve,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 ADA = "p-AdaAdaAdaAdaAdaAdaAdaA"
@@ -49,6 +55,7 @@ async def test_signed_topic_commands_and_retries(broker: str, tmp_path: Path) ->
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
         stack.push_async_callback(gateway.close)
         await gateway.ready(timeout=20)
+        await until_team_services_serve(host, serving)
         client = MessageHostTeamServices(gateway, timeout_seconds=10)
         body = {"request_id": "cmd-tag", "conversation_id": "conv_ada", "tags": ["taxes"], "private": True}
         saved = await client.command("topics.tag_thread", body, person_ref=ADA, request_id="cmd-tag")
