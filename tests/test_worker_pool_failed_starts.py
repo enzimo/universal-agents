@@ -259,10 +259,92 @@ def test_a_start_still_starting_is_never_hung() -> None:
     assert (history.starts_in_progress, history.hung_starts) == (1, 0)
 
 
-def test_a_hung_start_older_than_the_window_is_still_counted() -> None:
+def test_a_hung_start_older_than_the_hour_is_no_longer_named() -> None:
+    """Review finding RC-4 (round 3): hung starts are named only within the hour; older ones show as workers_unknown."""
+
     old_hung = _unfinished(AgentLaunchState.UNKNOWN, unchanged_for=timedelta(hours=3))
     history = start_history([old_hung], TYPE, since=NOW - timedelta(hours=1), hung_before=NOW - HUNG_START_MARGIN)
-    assert (history.starts_in_progress, history.hung_starts) == (0, 1)
+    assert (history.starts_in_progress, history.hung_starts) == (0, 0)
+
+
+def _start_record(name: str, created: timedelta, state: AgentLaunchState, ended: timedelta, *,
+           ready: timedelta | None = None, reason=None):
+    """A start of TYPE made ``created`` before NOW and last changed ``ended`` before NOW."""
+
+    return make_launch(named_agent_type=TYPE, agent_id=f"agent_{name}", state=state, reason=reason,
+                       created_at_utc=NOW - created, updated_at_utc=NOW - ended,
+                       ready_at_utc=None if ready is None else NOW - ready)
+
+
+@pytest.mark.parametrize("minutes_after", [2, 30, 59])
+def test_workers_that_become_ready_after_a_newer_failed_start_reset_the_count(minutes_after) -> None:
+    """Review finding GEN-1 (round 3), probe probe_ready_after_newer_failure: A and B ready after C crashed.
+
+    Three starts made at T0; C, the newest, crashes at T0 + 5 s; A and B become
+    ready at T0 + 1 min and keep running. Checked 2, 30 and 59 minutes after
+    T0. At 6783cf83 the count stayed 1, so starts went one at a time.
+    """
+
+    t0 = NOW - timedelta(minutes=minutes_after)
+
+    def start(name, made, state, changed, *, ready=None, reason=None):
+        return make_launch(named_agent_type=TYPE, agent_id=f"agent_{name}", state=state, reason=reason,
+                           created_at_utc=made, updated_at_utc=changed, ready_at_utc=ready)
+
+    records = [
+        start("A", t0, AgentLaunchState.READY, NOW, ready=t0 + timedelta(minutes=1)),
+        start("B", t0 + timedelta(seconds=1), AgentLaunchState.READY, NOW, ready=t0 + timedelta(minutes=1)),
+        start("C", t0 + timedelta(seconds=2), AgentLaunchState.FAILED, t0 + timedelta(seconds=5), reason=CRASH),
+    ]
+    history = start_history(records, TYPE, since=NOW - timedelta(hours=1))
+    assert (history.failures_in_row, history.recovered) == (0, True)
+    observation = _observed(records, waiting=20, oldest_wait_seconds=600.0, running=2,
+                            limit=PoolLimit(scope=TYPE, effective=10, default=10, ceiling=10))
+    assert decide(observation, team_active=2, team_limit_value=50, settings=WorkerPoolsConfig()).starts > 1
+
+
+def test_a_failure_after_the_last_ready_worker_still_counts() -> None:
+    """An old worker still running does not clear two newer crashes."""
+
+    records = [
+        _start_record("old", timedelta(minutes=50), AgentLaunchState.READY, timedelta(0), ready=timedelta(minutes=49)),
+        _start_record("x", timedelta(minutes=20), AgentLaunchState.FAILED, timedelta(minutes=19), reason=CRASH),
+        _start_record("y", timedelta(minutes=10), AgentLaunchState.FAILED, timedelta(minutes=9), reason=CRASH),
+    ]
+    assert start_history(records, TYPE, since=NOW - timedelta(hours=1)).failures_in_row == 2
+
+
+@pytest.mark.parametrize("settled_at_restart", [False, True])
+def test_hung_starts_settled_after_a_newer_ready_worker_do_not_count(settled_at_restart) -> None:
+    """Critique C01: two starts hang, a newer one becomes ready, and the hung ones are settled later.
+
+    Settled when their threads end (the ready worker keeps running), or at a
+    restart (the ready worker retires at the same moment). Neither is a new
+    failure after the type's last success.
+    """
+
+    settled = timedelta(minutes=5)
+    newer = _start_record("newer", timedelta(minutes=32), AgentLaunchState.RETIRED if settled_at_restart else AgentLaunchState.READY,
+                   settled if settled_at_restart else timedelta(0), ready=timedelta(minutes=31))
+    hung = [
+        _start_record(name, timedelta(minutes=35), AgentLaunchState.FAILED, settled, reason=STARTUP_TIMED_OUT)
+        for name in ("h1", "h2")
+    ]
+    history = start_history([newer, *hung], TYPE, since=NOW - timedelta(hours=1))
+    assert (history.failures_in_row, history.recovered) == (0, True)
+
+
+def test_the_decision_names_hung_starts_it_starts_past() -> None:
+    """Review finding RC-5: the start reason says hung starts no longer hold; the at-size reason stays exact."""
+
+    observation = _observed(_three_failures_the_last_50_seconds_ago(), waiting=6, oldest_wait_seconds=600.0,
+                            unknown=1, hung_starts=1)
+    decision = decide(observation, team_active=1, team_limit_value=20, settings=WorkerPoolsConfig())
+    assert (decision.starts, decision.reason) == (
+        1, "tasks waited with no free worker; 1 hung start(s) no longer hold the next one"
+    )
+    full = _observed([], waiting=6, oldest_wait_seconds=600.0, unknown=1, running=3, hung_starts=1)
+    assert decide(full, team_active=4, team_limit_value=20, settings=WorkerPoolsConfig()).reason == "the pool is at its size"
 
 
 def test_the_hung_cutoff_follows_a_lease_longer_than_the_margin() -> None:
@@ -627,6 +709,8 @@ def _raised_codes(module) -> dict[str, int]:
         if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
             text = argument.value
         elif isinstance(argument, ast.Name):
+            if not argument.id.isupper():
+                continue  # a local value (a computed problem text), not a fixed code
             values = [getattr(space, argument.id) for space in namespaces if hasattr(space, argument.id)]
             assert values, f"cannot resolve {argument.id} raised in {module.__name__}:{node.lineno}"
             text = values[0]
@@ -1468,3 +1552,72 @@ def test_the_schedule_inspection_hides_an_older_releases_free_error_text(lead, m
     inspection = inspect_schedule_worker(lead, "job")
     assert inspection["launch"]["reason"] is None and inspection["launch_attempt"]["reason"] is None
     assert old_text not in str(inspection)
+
+
+# -- a schedule's blocked reason keeps only known codes (round 3) ------------------
+
+
+@pytest.mark.parametrize("module_name", ["custom_agents.schedule_readiness", "custom_agents.schedule_worker_controller"])
+def test_every_code_the_schedule_block_paths_raise_is_kept(module_name) -> None:
+    """Critique C02: a fixed code raised on a block path must be one block_reason keeps."""
+
+    import importlib
+
+    from custom_agents.schedule_worker_controller import _BLOCK_CODES
+
+    raised = _raised_codes(importlib.import_module(module_name))
+    assert raised, f"no codes found in {module_name}; the scan is broken"
+    kept = {code: line for code, line in raised.items() if code in _BLOCK_CODES or is_current_reason(code)}
+    assert kept == raised
+
+
+def test_a_readiness_refusal_with_free_text_does_not_reach_the_blocked_reason(lead, monkeypatch, caplog) -> None:
+    """Review finding RC-6: the readiness check stores only known codes; the text goes to the log."""
+
+    from custom_agents.schedule_repair_guidance import WORKER_RECONCILIATION_FAILED
+    from custom_agents.schedule_worker_controller import schedule_ready_for_admission
+    from custom_agents.schedule_worker_inspection import inspect_schedule_worker
+
+    _configured_schedule_start(lead, monkeypatch, rules={}, config={
+        "agent": {"schedule_workers": {"eligible_agent_types": ["Worker"]}},
+    })
+    secret = "cannot read /srv/team/private/agent.yaml"
+
+    def refuse(self, *_args, **_kwargs):
+        raise ValueError(secret)
+
+    monkeypatch.setattr(AgentInstantiationService, "validate_type", refuse)
+    schedule = lead._schedule_store.get_scheduled_message("job")
+    with caplog.at_level(logging.WARNING):
+        assert not schedule_ready_for_admission(lead, schedule)
+    binding = lead._schedule_store.worker_records.get_binding("job", team_id="team")
+    assert binding.blocked_reason == WORKER_RECONCILIATION_FAILED
+    monkeypatch.undo()
+    assert secret not in str(inspect_schedule_worker(lead, "job"))
+    assert "event=schedule_worker_block_reason_replaced" in caplog.text and secret in caplog.text
+
+
+def test_known_block_codes_are_kept() -> None:
+    from custom_agents.schedule_repair_guidance import AGENT_DEFINITION_CHANGED, WORKER_AUTHORIZATION_MODE_CHANGED
+    from custom_agents.schedule_worker_controller import block_reason
+
+    for code in (AGENT_DEFINITION_CHANGED, WORKER_AUTHORIZATION_MODE_CHANGED, "agent_type_disallowed",
+                 "schedule_worker_rule_exceeds_operator_limit:idle_ttl_seconds", f"{CRASHED_BEFORE_READY}: ValueError"):
+        assert block_reason(ValueError(code), schedule_id="job") == code
+
+
+@pytest.mark.asyncio
+async def test_a_reconcile_block_with_free_text_stores_only_a_code(lead, monkeypatch) -> None:
+    from custom_agents.schedule_repair_guidance import WORKER_RECONCILIATION_FAILED
+
+    _configured_schedule_start(lead, monkeypatch, rules={}, config={
+        "agent": {"schedule_workers": {"eligible_agent_types": ["Worker"]}},
+    })
+
+    async def cover(self, *_args, **_kwargs):
+        raise ValueError("team composition unreadable at /srv/team/private/team.yaml")
+
+    monkeypatch.setattr(ScheduleWorkerController, "_cover", cover)
+    await ScheduleWorkerController(lead).reconcile()
+    binding = lead._schedule_store.worker_records.get_binding("job", team_id="team")
+    assert binding.blocked_reason == WORKER_RECONCILIATION_FAILED

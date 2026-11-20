@@ -148,34 +148,27 @@ def start_history(
     skipped, and so are ends that say nothing about the type (restart cleanup,
     the runtime stopping, an edit during the start, a record without a reason
     or with an older release's free error text); a start that became ready
-    ends the count. Hung starts (``_unfinished_starts``) are read from all of
-    the type's records, not only the window.
+    ends the count.
 
     Starts whose record last changed before ``since`` are not read: for a
     failed start that is when it ended, not when it was made, so two starts
     that each hang for 30 minutes until their startup timeout still count as
     two in a row (review finding C17). The newest failure is the one that
-    ended last.
+    ended last. A worker of the type that became ready clears the failures
+    before it (``_ended_since_ready``).
     """
 
-    all_of_type = [record for record in launches if record.named_agent_type == agent_type]
-    of_type = sorted(
-        (record for record in all_of_type if since is None or record.updated_at_utc >= since),
-        key=lambda record: record.created_at_utc,
-        reverse=True,
-    )
-    # Starts in progress are read from the window, as failures are; hung ones
-    # from all records, so one that keeps hanging stays visible.
-    in_progress, _ = _unfinished_starts(of_type, hung_before)
-    _, hung = _unfinished_starts(all_of_type, hung_before)
-    ended: list[AgentLaunchV1] = []
-    recovered = False
-    for record in of_type:
-        if record.ready_at_utc is not None:
-            recovered = True
-            break
-        if record.state == AgentLaunchState.FAILED:
-            ended.append(record)
+    of_type = [
+        record
+        for record in launches
+        if record.named_agent_type == agent_type and (since is None or record.updated_at_utc >= since)
+    ]
+    # Starts in progress and hung ones are read from the window too: a start
+    # that became unknown over an hour ago is no longer named as hung (it
+    # still takes its slot, shown as workers_unknown; review finding RC-4).
+    in_progress, hung = _unfinished_starts(of_type, hung_before)
+    ready = [record for record in of_type if record.ready_at_utc is not None]
+    ended = _ended_since_ready(of_type, ready)
     failed = [record for record in ended if counts_as_failed_start(record.reason)]
     uncounted = [record for record in ended if not counts_as_failed_start(record.reason)]
     newest_failure = max(failed, key=lambda record: record.updated_at_utc, default=None)
@@ -184,13 +177,38 @@ def start_history(
         failures_in_row=len(failed),
         last_failure_at=newest_failure.updated_at_utc if newest_failure else None,
         last_failure_reason=newest_failure.reason if newest_failure else None,
-        recovered=recovered and not failed,
+        recovered=bool(ready) and not failed,
         uncounted_ends=len(uncounted),
         # An older release's free error text is never shown (shown_reason).
         last_uncounted_reason=shown_reason(newest_uncounted.reason) if newest_uncounted else None,
         starts_in_progress=in_progress,
         hung_starts=hung,
     )
+
+
+def _ended_since_ready(
+    records: list[AgentLaunchV1], ready: list[AgentLaunchV1]
+) -> list[AgentLaunchV1]:
+    """Starts that failed after the type's last success: the ones a ready worker has not cleared.
+
+    A failed start counts only when it ended after the latest readiness and
+    its start was made after the newest start that became ready. The first
+    keeps a newer start's crash from outliving older workers that became
+    ready after it (review finding GEN-1, round 3). The second keeps a start
+    that hung before a newer worker became ready, and was settled later
+    (after its thread ended, or at a restart), from counting as a new failure.
+    """
+
+    latest_ready_at = max((record.ready_at_utc for record in ready if record.ready_at_utc), default=None)
+    newest_ready_start = max((record.created_at_utc for record in ready), default=None)
+    return [
+        record
+        for record in records
+        if record.state == AgentLaunchState.FAILED
+        and record.ready_at_utc is None
+        and (latest_ready_at is None or record.updated_at_utc > latest_ready_at)
+        and (newest_ready_start is None or record.created_at_utc > newest_ready_start)
+    ]
 
 
 # A start the launcher stopped (its startup timeout passed, or its start was
@@ -406,11 +424,23 @@ def decide(
         starts = min(wanted, room, per_pass)
         return PoolDecision(
             starts,
-            "tasks waited with no free worker",
+            "tasks waited with no free worker" + _hung_note(observation),
             at_capacity=at_capacity,
             surplus=surplus,
         )
     return PoolDecision(0, "workers are free or starting", at_capacity=at_capacity, surplus=surplus)
+
+
+def _hung_note(observation: PoolObservation) -> str:
+    """Names hung starts in a decision that starts workers past them, or "" (review finding RC-5).
+
+    Only appended to the reason that starts workers: the at-size reasons are
+    compared by value elsewhere (custom_agents.delegation_wake).
+    """
+
+    if not observation.hung_starts:
+        return ""
+    return f"; {observation.hung_starts} hung start(s) no longer hold the next one"
 
 
 def _held_after_failed_starts(observation: PoolObservation) -> Optional[str]:

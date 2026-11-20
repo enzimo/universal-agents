@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from functools import partial
 from typing import Any
@@ -14,6 +15,7 @@ from custom_agents.agent_instantiation_service import (
     AgentInstantiationService,
     current_worker_limits,
     effective_worker_rules,
+    is_current_reason,
     launcher_refusal_reason,
     log_failed_start,
     refusal_code,
@@ -36,8 +38,10 @@ from custom_agents.schedule_repair_guidance import (
     WORKER_POLICY_EXPIRED,
     WORKER_READY_BUT_UNCLAIMED,
     WORKER_RECONCILIATION_FAILED,
+    SCHEDULE_BLOCK_REASONS,
 )
 from custom_agents.schedule_readiness import (
+    RESOURCE_CONSTRAINTS_UNSUPPORTED,
     effective_requirements,
     prepare_schedule_access,
 )
@@ -47,6 +51,39 @@ from custom_messages.contracts.schedule_worker_v1 import (
     utc_now,
 )
 from storage.agent_launch_repository import ACTIVE_LAUNCH_STATES, LaunchConflict
+
+
+logger = logging.getLogger(__name__)
+
+# The codes a schedule's blocked reason may hold: the scheduler's own block
+# reasons, plus the readiness check's fixed code for a requirement no adapter
+# enforces (caught inside that check today, but a code all the same).
+_BLOCK_CODES = SCHEDULE_BLOCK_REASONS | {RESOURCE_CONSTRAINTS_UNSUPPORTED}
+
+
+def block_reason(error: BaseException, *, schedule_id: str) -> str:
+    """The blocked reason a refused check stores: a known code, or ``WORKER_RECONCILIATION_FAILED``.
+
+    The reason reaches the schedule inspection and the owner's notice, so
+    free error text (a host path in a file error, a validation error's input)
+    is never stored; it is logged here instead. A known code is a block
+    reason (``SCHEDULE_BLOCK_REASONS``) or a start reason this release writes
+    (``is_current_reason``), as the launcher's results carry (review finding
+    RC-6, round 3).
+    """
+
+    text = str(error)
+    if text in _BLOCK_CODES or is_current_reason(text):
+        return text
+    logger.warning(
+        "A scheduled worker check failed with an error that is not a known code; the "
+        "schedule is blocked as worker_reconciliation_failed. "
+        "event=schedule_worker_block_reason_replaced schedule_id=%s error_type=%s error=%s",
+        schedule_id,
+        type(error).__name__,
+        error,
+    )
+    return WORKER_RECONCILIATION_FAILED
 
 
 def _date(value: str | None) -> datetime | None:
@@ -93,7 +130,7 @@ def schedule_ready_for_admission(agent: Any, schedule: Any) -> bool:
         return True
     except (ValueError, PermissionError) as exc:
         agent._schedule_store.worker_records.mark_blocked(
-            schedule.schedule_id, agent.team_id, str(exc)
+            schedule.schedule_id, agent.team_id, block_reason(exc, schedule_id=schedule.schedule_id)
         )
         return False
 
@@ -139,7 +176,7 @@ class ScheduleWorkerController:
                 ):
                     await self._cover(binding, row, now, limits)
             except (PermissionError, ValueError, LaunchConflict) as exc:
-                await self._block(binding, str(exc))
+                await self._block(binding, block_reason(exc, schedule_id=binding.schedule_id))
             except Exception:
                 self.agent._logger.exception(
                     "Schedule worker reconciliation failed",
