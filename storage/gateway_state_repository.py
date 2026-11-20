@@ -19,7 +19,7 @@ from assistant_gateway.domain.delivery import (
     DeliveryRecord,
     ScheduledTargetRecord,
 )
-from assistant_gateway.domain.agent_trail import TrailAgent
+from assistant_gateway.domain.agent_trail import trail_agent
 from assistant_gateway.domain.history import ConversationCut, GatewayHistoryDeleted, GatewayHistoryScope
 from assistant_gateway.domain.identity import (
     GatewayPersonRecordsDeleted,
@@ -2938,13 +2938,15 @@ class _RelationalGatewayStateRepository:
 
         The session key of the thread whose trail changed, or None when nothing changed: the type was already
         recorded, or the id names no running interactive request of this gateway (storage.gateway_agent_trails).
+        Raises ``ValueError`` for an agent type the stored list could not be read back with, before writing.
         """
 
+        agent = trail_agent(agent_type, lead)
         with self._connect() as conn:
             if not isinstance(conn, _BorrowedConnection):
                 conn.begin_write()  # reads then writes: take the write lock first
             session_key = record_request_agent(
-                conn, self._dialect, active_task_id=active_task_id, agent=TrailAgent(agent_type, lead),
+                conn, self._dialect, active_task_id=active_task_id, agent=agent,
                 logger=self._logger,
             )
             conn.commit()

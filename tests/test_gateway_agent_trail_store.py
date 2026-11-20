@@ -232,3 +232,19 @@ def _execute(settings: StorageSettings, query: str) -> None:
     with connect_postgres(settings.postgres_dsn or "") as conn:
         conn.execute(query)
         conn.commit()
+
+
+@pytest.mark.parametrize(("agent_type", "lead"), [("", False), ("   ", False), ("x" * 121, False), ("Researcher", "yes")])
+def test_an_agent_the_store_could_not_read_back_is_refused_before_anything_is_written(settings, agent_type, lead) -> None:
+    """C14: a refused type changes neither the request nor the thread's trail, and a valid one still records."""
+
+    repo = _repo(settings)
+    _thread(repo)
+    task = _request(repo, 1)
+    repo.record_request_agent(active_task_id=task, agent_type=LEAD, lead=True)
+    before = (repo.get_request("corr_1"), _listed(repo).agent_trail_json)
+    with pytest.raises(ValueError):
+        repo.record_request_agent(active_task_id=task, agent_type=agent_type, lead=lead)
+    assert (repo.get_request("corr_1"), _listed(repo).agent_trail_json) == before
+    assert repo.record_request_agent(active_task_id=task, agent_type=WEB, lead=False) == THREAD
+    assert _shape(repo) == ["P", LEAD, WEB]

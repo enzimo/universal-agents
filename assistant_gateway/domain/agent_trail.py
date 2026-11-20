@@ -91,6 +91,16 @@ def _agent(value: Any) -> TrailAgent:
     return TrailAgent(agent_type, lead)
 
 
+def trail_agent(agent_type: str, lead: bool) -> TrailAgent:
+    """An agent to record, checked with the rule stored lists are read with (plan review C14).
+
+    Raises ``AgentTrailUnreadable`` (a ``ValueError``) before anything is written, so the store never keeps a
+    list it would then refuse to read, which would lose the request's agents for good.
+    """
+
+    return _agent({"agent_type": agent_type, "lead": lead})
+
+
 def _agent_json(agent: TrailAgent) -> dict[str, Any]:
     return {"agent_type": agent.agent_type, "lead": agent.lead}
 
@@ -204,5 +214,6 @@ __all__ = [
     "encode_request_agents",
     "encode_thread_trail",
     "thread_trail",
+    "trail_agent",
     "with_agent",
 ]
