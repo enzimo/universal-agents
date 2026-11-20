@@ -6965,9 +6965,10 @@ async def test_kept_setup_results_are_sent_after_the_notice_and_hook_on_every_av
     resend.side_effect = RuntimeError("store unavailable")
     with caplog.at_level("ERROR"):
         await gateway.manager_transitions.handle_available(arrives("manager_after", back=False))
+    # Logged by the step that runs each part of a transition on its own (GatewayManagerTransitionApplication._step).
     assert (
         "event=gateway_manager_transition_step_failed step=resend_kept_results manager_id=manager_after "
-        "source=presence error_type=RuntimeError"
+        "correlation_id=None error_type=RuntimeError"
     ) in caplog.text
 
 

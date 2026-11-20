@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
+from assistant_gateway import team_view
 from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
 from assistant_gateway.application.ports import GatewaySecureBrokerRefusal
@@ -20,12 +21,11 @@ from assistant_gateway.application.request_service import request_task_ended
 from assistant_gateway.application.tool_setup import PageEnding
 from assistant_gateway.domain.request_state import RequestRecord
 from assistant_gateway.interactive_apps.website_handlers.workflows import WebsiteWorkflowHandlers
-from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1, ToolSetupResultV1
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.task_v1 import TaskSteering, TaskSteeringInterruptRecord
 from custom_messages.contracts.tool_setup_spec_v1 import ExternalSetupStepV1
-from custom_messages.enums import ControlType, MessageMetaType, TaskSteeringType
+from custom_messages.enums import TaskSteeringType
 from custom_messages.contracts.routing_v1 import (
     MessageHeader,
     MessageMeta,
@@ -732,24 +732,10 @@ def _thread_request(gateway: UserGateway) -> None:
 
 
 async def _lead_announces(gateway: UserGateway, lead_id: str) -> None:
-    """A team lead's presence status reaches the gateway (the way a lead comes back)."""
+    """The team's records name ``lead_id`` as the team lead, and the lead follower routes chats to it, as on
+    release/0.10 (``assistant_gateway.team_view.TeamLeadFollower``, the one caller of ``set_lead``)."""
 
-    status = AgentStatus(
-        self_id=lead_id,
-        team_id=gateway.config.manager.team_id,
-        named_agent_type=gateway.config.manager.named_agent_type,
-        is_paused=False,
-        is_executing=False,
-        has_execution_capacity=True,
-        is_busy=False,
-        is_exiting=False,
-        name="manager",
-        agent_role="manager",
-        last_seen_at=datetime.now(timezone.utc).isoformat(),
-        status_type=MessageMetaType.RESPONSE,
-        info_type=ControlType.STATUS_REQUEST_BASIC,
-    )
-    await gateway._manager_client.apply_manager_status(status, source="presence")
+    await gateway._manager_client.set_lead(lead_id, source=team_view.SOURCE)
 
 
 def _setup_results(transport) -> list[tuple[str, str, str | None]]:
@@ -778,8 +764,8 @@ async def test_a_page_ending_while_the_team_lead_is_away_reaches_the_next_lead_a
         _outside_step(envelope, "tool_setup_req_sibling", "http:registrar_two")
     )
 
-    # The team lead stops while the person's chat still waits for its reply: the
-    # liveness check clears the route, and the unavailable transition fails that wait.
+    # The team lead stops while the person's chat still waits for its reply: the lead
+    # follower clears the route, and the unavailable transition fails that wait.
     async with gateway._manager_client.response_channel(CHAT_REQUEST):
         await gateway._manager_client.mark_manager_unavailable(reason="the team lead stopped")
     request = gateway.state_store.get_request(CHAT_REQUEST)
