@@ -923,15 +923,11 @@ function archiveThread(threadId) {
       }
     };
     var named = quotedThreadTitle(archivedThread);
-    var refused = false;
-    requestClient.fetch(
+    threadChangeRequest(
       "/api/web-chat/sessions/" + encodeURIComponent(archivedThread.sessionKey) + "/archive",
       { method: "POST", credentials: "same-origin" }
-    ).then(function (response) {
-      // 4xx: the gateway looked at the delete and turned it down.
-      refused = response.status >= 400 && response.status < 500;
-      return parseApiResponse(response, TRY_AGAIN, current);
-    }).then(function () {
+    ).then(function () {
+      current();
       removeArchivedThread(threadId);
       shellState.threadListStatus.announce(THREAD_CHANGE_DONE[THREAD_MENU_ACTION.DELETE] + " " + named + ".");
     }).catch(function (error) {
@@ -939,10 +935,9 @@ function archiveThread(threadId) {
         return;
       }
       // Shown beside the list, in view, with Retry only when it can help (review F5).
-      shellState.threadListStatus.fail(
-        named + " was not deleted. " + (refused ? error.message : TRY_AGAIN),
-        { retry: refused ? null : function () { archiveThread(threadId); } },
-      );
+      shellState.threadListStatus.fail(threadChangeFailure(named, "deleted", error), {
+        retry: error.refused ? null : function () { archiveThread(threadId); },
+      });
     });
   }
 
@@ -2280,9 +2275,8 @@ function runThreadPlacement(thread, action, extra, authGeneration) {
       // The gateway's refusal says why, and repeating it cannot help; a
       // request that did not get through gets Retry for the same change.
       // Shown beside the list, in view and announced (review F5).
-      var refused = Boolean(error.refused);
-      shellState.threadListStatus.fail(named + " was not moved. " + (refused ? error.message : TRY_AGAIN), {
-        retry: refused ? null : function () { return changeThreadPlacement(threadForSession(sessionKey) || thread, action, extra); },
+      shellState.threadListStatus.fail(threadChangeFailure(named, "moved", error), {
+        retry: error.refused ? null : function () { return changeThreadPlacement(threadForSession(sessionKey) || thread, action, extra); },
       });
       return false;
     });
@@ -2299,26 +2293,34 @@ function sendThreadPlacement(thread, action, extra) {
     if (action === THREAD_MENU_ACTION.SNOOZE || action === THREAD_MENU_ACTION.DISMISS) {
       body.seen_sequence = Number(thread.lastSequence || 0);
     }
-    return requestClient.fetch("/api/web-chat/sessions/" + encodeURIComponent(thread.sessionKey), {
+    return threadChangeRequest("/api/web-chat/sessions/" + encodeURIComponent(thread.sessionKey), {
       method: "PATCH",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }).then(function (response) {
+    });
+  }
+
+// One thread change from the menu (a placement or a delete). On failure it
+// rejects with `refused` set when the gateway looked at the change and turned
+// it down (4xx), and `reason` holding what it said, which may be empty.
+function threadChangeRequest(url, init) {
+    return requestClient.fetch(url, init).then(function (response) {
       return response.text().then(function (text) {
         if (!response.ok) {
           authentication.handleUnauthorizedResponse(response);
-          var refusal = new Error(placementRefusal(text));
-          // 4xx: the gateway looked at the change and turned it down.
-          refusal.refused = response.status >= 400 && response.status < 500;
-          throw refusal;
+          var failure = new Error("Thread change failed.");
+          failure.refused = response.status >= 400 && response.status < 500;
+          failure.reason = refusalReason(text);
+          throw failure;
         }
       });
     });
   }
 
-// The gateway answers a refused change with its reason as plain text.
-function placementRefusal(text) {
+// The gateway answers a refused change with its reason as plain text (some
+// routes as JSON); "" when it gave none.
+function refusalReason(text) {
     var reason = String(text || "").trim();
     if (reason.charAt(0) === "{") {
       try {
@@ -2328,7 +2330,18 @@ function placementRefusal(text) {
         reason = "";
       }
     }
-    return reason || TRY_AGAIN;
+    return reason;
+  }
+
+// The status line's sentence for a failed change: the gateway's reason for a
+// refusal (or nothing more when it gave none, since repeating cannot help),
+// otherwise "Try again." beside the Retry button (review C14).
+function threadChangeFailure(named, verb, error) {
+    var sentence = named + " was not " + verb + ".";
+    if (error && error.refused) {
+      return error.reason ? sentence + " " + error.reason : sentence;
+    }
+    return sentence + " " + TRY_AGAIN;
   }
 
 // The unsaved "New Chat" row: selected, with no rename or archive, since

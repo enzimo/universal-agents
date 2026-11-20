@@ -91,7 +91,7 @@ function harness() {
   loadFunctions(sandbox, [
     "fetchSessions", "threadIsBusy", "applyThreadStates", "applyServerThreadRow", "applyEventToThreadRow",
     "restoreWokeThreadWhenRead", "changeThreadPlacement", "runThreadPlacement", "sendThreadPlacement",
-    "placementRefusal", "threadForSession", "quotedThreadTitle",
+    "threadChangeRequest", "refusalReason", "threadChangeFailure", "threadForSession", "quotedThreadTitle",
   ]);
   sandbox.fullThreadTitle = item => item.title;
   const thread = key => sandbox.sharedState.threads.find(item => item.sessionKey === key);
@@ -412,17 +412,20 @@ test("a change still queued when the sign-in ends is dropped, even for the same 
   assert.equal(errors.length, 0);
 });
 
-test("Delete reports in the status line: Retry only when it did not get through, and a confirmation (F5, F13)", async () => {
+test("Delete reports in the status line: the gateway's reason, Retry only when it did not get through, and a confirmation (F5, F13, C14)", async () => {
   const { sandbox, server, errors, announced, thread } = harness();
   server.sessions = [{ ...SNOOZED, list_state: null }];
   await sandbox.fetchSessions();
-  loadFunctions(sandbox, ["archiveThread", "parseApiResponse"]);
+  loadFunctions(sandbox, ["archiveThread"]);
   const removed = [];
   sandbox.removeArchivedThread = threadId => removed.push(threadId);
+  // As the archive route answers: plain text for a refusal, an empty body
+  // with no status text behind an HTTP/2 proxy, JSON on success.
   const answers = [
-    { ok: false, status: 503, json: async () => ({}) },
-    { ok: false, status: 404, json: async () => ({ message: "Thread not found." }) },
-    { ok: true, status: 200, json: async () => ({ status: "ok" }) },
+    { ok: false, status: 503, statusText: "", text: async () => "" },
+    { ok: false, status: 404, statusText: "Not Found", text: async () => "Thread not found." },
+    { ok: false, status: 404, statusText: "", text: async () => "" },
+    { ok: true, status: 200, text: async () => JSON.stringify({ status: "ok" }) },
   ];
   sandbox.requestClient.fetch = async () => answers.shift();
   sandbox.archiveThread(thread("gamma").id);
@@ -432,6 +435,10 @@ test("Delete reports in the status line: Retry only when it did not get through,
   errors[0].retry();
   await flush();
   assert.deepEqual([errors[1].message, errors[1].retry], ["\u201cRenew the certificate\u201d was not deleted. Thread not found.", null]);
+  sandbox.archiveThread(thread("gamma").id);
+  await flush();
+  assert.deepEqual([errors[2].message, errors[2].retry], ["\u201cRenew the certificate\u201d was not deleted.", null],
+    "a refusal without a reason does not say Try again");
   sandbox.archiveThread(thread("gamma").id);
   await flush();
   assert.deepEqual(removed, ["gamma"]);
