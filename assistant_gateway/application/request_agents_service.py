@@ -21,9 +21,15 @@ for the thread list:
   query already reads it), so the owner rule holds by construction: a page
   only ever looks at its own person's threads.
 
-A failed write is logged with the request's task and the agent type, and the
-pair is forgotten so the agent's next record tries again. Nothing here raises
-into the team view or the request path.
+A write that fails is tried again by the writer, in order, after
+``WRITE_RETRY_SECONDS`` (plan review C16): the team view tells observers only
+when a record changes, and the change after the one that named a request is
+usually the one that drops it, so waiting for the agent's next record would
+lose the pair. After the last try the failure is logged with the request's task
+and the agent type, and the pair is forgotten. A type the store refuses
+(``ValueError``) is final: logged once and kept remembered, so later changes of
+the same record do not log it again. Nothing here raises into the team view or
+the request path.
 """
 
 from __future__ import annotations
@@ -43,6 +49,12 @@ TEAM_LEAD_NAME = "Team lead"
 RECENT_PAIRS_LIMIT = 4096
 # How long the agent catalog's display names are kept before they are read again.
 NAMES_FRESH_SECONDS = 60.0
+# The waits before each further try of a write that failed (a busy store, a slow disk); about 7.5 s in all.
+WRITE_RETRY_SECONDS = (0.5, 2.0, 5.0)
+# The longest name a page shows (``WebChatWorkingAgentV1.name``); a longer catalog display name is cut.
+NAME_MAX_CHARACTERS = 200
+# The most agents one thread lists as working now (``WebChatThreadWorkingV1.agents``).
+WORKING_AGENTS_MAX = 64
 
 
 @dataclass(frozen=True)
@@ -70,7 +82,9 @@ def agent_name(agent_type: str, lead: bool, catalog: Mapping[str, str]) -> str:
 
     if lead:
         return TEAM_LEAD_NAME
-    return catalog.get(agent_type) or agent_type
+    name = " ".join(str(catalog.get(agent_type) or agent_type).split()) or agent_type
+    # Specialists may carry long display names; the page's contract holds NAME_MAX_CHARACTERS (plan review C15).
+    return name if len(name) <= NAME_MAX_CHARACTERS else name[: NAME_MAX_CHARACTERS - 1].rstrip() + "…"
 
 
 class _AgentRecorder(Protocol):
@@ -89,8 +103,12 @@ class GatewayRequestAgents:
         agent_names: Callable[[], Mapping[str, str]],
         logger: logging.Logger | None = None,
         clock: Callable[[], float] = time.monotonic,
+        retry_seconds: tuple[float, ...] = WRITE_RETRY_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._repository = repository
+        self._retry_seconds = retry_seconds
+        self._sleep = sleep
         self._live_reports = live_reports
         self._lead_agent_type = lead_agent_type
         self._agent_names = agent_names
@@ -165,21 +183,39 @@ class GatewayRequestAgents:
             self._write(*item)
 
     def _write(self, request: str, agent_type: str, lead: bool) -> None:
-        try:
-            session_key = self._repository.record_request_agent(
-                active_task_id=request, agent_type=agent_type, lead=lead
-            )
-        except Exception:
-            with self._recent_lock:
-                self._recent.pop((request, agent_type), None)  # the agent's next record tries again
-            self._logger.warning(
-                "Could not record which agent worked on a request; the next report tries again. "
-                "event=gateway_request_agent_record_failed task_id=%s agent_type=%s",
-                request,
-                agent_type,
-                exc_info=True,
-            )
-            return
+        """Record one pair, trying again after each wait in ``retry_seconds`` (module docstring)."""
+
+        for attempt, wait in enumerate((*self._retry_seconds, None), start=1):
+            try:
+                session_key = self._repository.record_request_agent(
+                    active_task_id=request, agent_type=agent_type, lead=lead
+                )
+            except ValueError as error:
+                # Final: the pair stays remembered, so the same record does not log this again.
+                self._logger.warning(
+                    "An agent type cannot be recorded for a request and is left out of its trail. "
+                    "event=gateway_request_agent_refused task_id=%s agent_type=%s error=%s",
+                    request,
+                    agent_type,
+                    error,
+                )
+                return
+            except Exception:
+                if wait is not None:
+                    self._sleep(wait)
+                    continue
+                with self._recent_lock:
+                    self._recent.pop((request, agent_type), None)  # a later change of the record may name it again
+                self._logger.warning(
+                    "Could not record which agent worked on a request after %s tries; its trail leaves it out. "
+                    "event=gateway_request_agent_record_failed task_id=%s agent_type=%s",
+                    attempt,
+                    request,
+                    agent_type,
+                    exc_info=True,
+                )
+                return
+            break
         if session_key is None:
             # Already recorded, or not a running request of this gateway (a finished one, or none at all).
             self._logger.debug(
@@ -207,9 +243,12 @@ class GatewayRequestAgents:
                         report.agent_type, WorkingAgent(report.agent_type, self.name(report.agent_type, report.lead),
                                                         report.lead)
                     )
-        # The team lead first, then the others by name, so the page's words do not shuffle.
+        # The team lead first, then the others by name, so the page's words do not shuffle; at most
+        # WORKING_AGENTS_MAX, the page contract's limit.
         return {
-            session: tuple(sorted(agents.values(), key=lambda agent: (not agent.lead, agent.name.casefold())))
+            session: tuple(sorted(agents.values(), key=lambda agent: (not agent.lead, agent.name.casefold())))[
+                :WORKING_AGENTS_MAX
+            ]
             for session, agents in found.items()
         }
 

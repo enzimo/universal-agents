@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -376,12 +378,32 @@ def web_chat_thread(
 
 
 
+# Unreadable stored trails already logged, as (session key, stored value): each is logged once, not at every
+# two-second read (plan review C15); a new value (the next rebuild) is logged again if it is unreadable too.
+_UNREADABLE_TRAILS_LOGGED: OrderedDict[tuple[str, str], None] = OrderedDict()
+_UNREADABLE_TRAILS_LOGGED_MAX = 1024
+_UNREADABLE_TRAILS_LOCK = threading.Lock()
+
+
+def _first_time_unreadable(session_key: str, stored: str) -> bool:
+    with _UNREADABLE_TRAILS_LOCK:
+        key = (session_key, stored)
+        if key in _UNREADABLE_TRAILS_LOGGED:
+            return False
+        _UNREADABLE_TRAILS_LOGGED[key] = None
+        while len(_UNREADABLE_TRAILS_LOGGED) > _UNREADABLE_TRAILS_LOGGED_MAX:
+            _UNREADABLE_TRAILS_LOGGED.popitem(last=False)
+        return True
+
+
 def thread_trail_of(record: WebChatThreadRecord) -> ThreadTrail:
-    """The thread's stored agent trail; an unreadable one is logged and the row shows none."""
+    """The thread's stored agent trail; an unreadable one is logged once and the row shows none."""
 
     try:
         return decode_thread_trail(record.agent_trail_json)
     except AgentTrailUnreadable as error:
+        if not _first_time_unreadable(record.session_key, record.agent_trail_json or ""):
+            return EMPTY_TRAIL
         LOGGER.warning(
             "A Web Chat thread's agent trail is unreadable; its row shows none until the next change rebuilds it. "
             "event=web_chat_thread_trail_unreadable session_key=%s error=%s",

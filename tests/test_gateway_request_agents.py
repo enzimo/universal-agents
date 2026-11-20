@@ -53,10 +53,16 @@ class _Team:
 
 @pytest.fixture
 def team(tmp_path: Path):
+    built = _team(tmp_path)
+    yield built
+    built.agents.close()
+
+
+def _team(tmp_path: Path, *, names: dict[str, str] = NAMES) -> SimpleNamespace:
     store = GatewayStateStore(str(tmp_path / "gateway.db"))
     live = _Team()
     agents = GatewayRequestAgents(repository=store.request_repository, live_reports=lambda: live.members.values(),
-                                  lead_agent_type=LEAD, agent_names=lambda: NAMES)
+                                  lead_agent_type=LEAD, agent_names=lambda: names)
     agents.start()
     unused = cast(Any, SimpleNamespace())
     application = WebsiteSessionApplication(
@@ -75,8 +81,7 @@ def team(tmp_path: Path):
         conversation_id=f"conv_{THREAD}", followup_to_task_id=None, owner_canonical_user_id=OWNER,
         active_task_id="task_1", run_state=RUN_STATE_RUNNING,
     )
-    yield SimpleNamespace(store=store, agents=agents, live=live, application=application)
-    agents.close()
+    return SimpleNamespace(store=store, agents=agents, live=live, application=application)
 
 
 def _settle(agents: GatewayRequestAgents) -> None:
@@ -146,31 +151,66 @@ def test_nobody_elses_page_and_no_unknown_id_sees_or_changes_the_work(team) -> N
     assert _shape(_row(team)) == ["P", "Team lead", "Web Research Agent"]
 
 
-def test_each_pair_is_written_once_and_a_failed_write_is_tried_again_on_the_next_report(caplog) -> None:
-    written: list[tuple[str, str, bool]] = []
-    failures = [OSError("database is locked")]
+class _FlakyStore:
+    """A store whose writes fail with ``failures`` first, then record."""
 
-    class Store:
-        def record_request_agent(self, *, active_task_id: str, agent_type: str, lead: bool) -> str | None:
-            if failures:
-                raise failures.pop()
-            written.append((active_task_id, agent_type, lead))
-            return THREAD
+    def __init__(self, failures: list[Exception]) -> None:
+        self.failures, self.written = failures, []
 
-    agents = GatewayRequestAgents(repository=Store(), live_reports=list, lead_agent_type=LEAD, agent_names=dict)
-    agents.start()
-    report = AgentReport("worker_1", WEB, False, ("task_1",))
+    def record_request_agent(self, *, active_task_id: str, agent_type: str, lead: bool) -> str | None:
+        if self.failures:
+            raise self.failures.pop(0)
+        self.written.append((active_task_id, agent_type, lead))
+        return THREAD
+
+
+def _writer(store, waits: list[float]) -> GatewayRequestAgents:
+    return GatewayRequestAgents(repository=store, live_reports=list, lead_agent_type=LEAD, agent_names=dict,
+                                retry_seconds=(0.5, 2.0, 5.0), sleep=waits.append)
+
+
+def test_a_failed_write_is_tried_again_by_the_writer_without_another_report(caplog) -> None:
+    """C16: the team view tells observers only when a record changes, so the writer itself tries again."""
+
+    store, waits = _FlakyStore([OSError("database is locked")]), []
+    agents = _writer(store, waits)
     with caplog.at_level(logging.WARNING):
-        agents.observe(report)
+        agents.observe(AgentReport("worker_1", WEB, False, ("task_1",)))
         _settle(agents)
-    assert written == [] and "event=gateway_request_agent_record_failed task_id=task_1 agent_type=WebResearchAgent" in caplog.text
-    for _ in range(3):  # the record refreshes; the pair is written once
-        agents.observe(report)
+    assert store.written == [("task_1", WEB, False)] and waits == [0.5]
+    assert "event=gateway_request_agent_record_failed" not in caplog.text
+    for _ in range(3):  # the record refreshes: the pair is written once
+        agents.observe(AgentReport("worker_1", WEB, False, ("task_1",)))
     agents.observe(AgentReport("worker_1", WEB, False, ("task_2",), exiting=True))
     agents.observe(AgentReport("worker_9", "", False, ("task_3",)))
     agents.request_sent("task_2")
+    _settle(agents)
     agents.close()
-    assert written == [("task_1", WEB, False), ("task_2", LEAD, True)]
+    assert store.written == [("task_1", WEB, False), ("task_2", LEAD, True)]
+
+
+def test_a_write_that_keeps_failing_is_logged_after_the_last_try_and_forgotten(caplog) -> None:
+    store, waits = _FlakyStore([OSError("database is locked")] * 4), []
+    agents = _writer(store, waits)
+    with caplog.at_level(logging.WARNING):
+        agents.observe(AgentReport("worker_1", WEB, False, ("task_1",)))
+        _settle(agents)
+    assert store.written == [] and waits == [0.5, 2.0, 5.0]
+    assert caplog.text.count("event=gateway_request_agent_record_failed task_id=task_1 agent_type=WebResearchAgent") == 1
+    agents.observe(AgentReport("worker_1", WEB, False, ("task_1",)))  # a later change names it again
+    agents.close()
+    assert store.written == [("task_1", WEB, False)]
+
+
+def test_a_refused_agent_type_is_logged_once_across_repeated_reports(caplog) -> None:
+    store, waits = _FlakyStore([ValueError("an agent type must be a non-empty string")]), []
+    agents = _writer(store, waits)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(4):
+            agents.observe(AgentReport("worker_1", "Bad", False, ("task_1",)))
+        _settle(agents)
+    agents.close()
+    assert caplog.text.count("event=gateway_request_agent_refused") == 1 and waits == [] and store.written == []
 
 
 @pytest.mark.asyncio
@@ -226,3 +266,47 @@ def test_the_list_revision_follows_the_trail_but_not_who_works(team) -> None:
     assert web_chat_threads_revision(team.application.list_web_chat_threads(owner_canonical_user_id=OWNER)) == before
     _settle(team.agents)
     assert web_chat_threads_revision(team.application.list_web_chat_threads(owner_canonical_user_id=OWNER)) != before
+
+
+def test_a_long_catalog_name_is_shortened_and_the_live_read_still_works(tmp_path: Path) -> None:
+    """C15: a specialist's 512-character display name must not make the person's live read fail."""
+
+    from assistant_gateway.application.request_agents_service import NAME_MAX_CHARACTERS
+    from assistant_gateway.application.website_application import WebChatWorkingAgentV1
+
+    assert WebChatWorkingAgentV1.model_fields["name"].metadata[-1].max_length == NAME_MAX_CHARACTERS
+    team = _team(tmp_path, names={WEB: "Web " * 128})
+    team.live.report(team.agents, "worker_1", WEB, "task_1")
+    [name] = _working(team)
+    assert len(name) == NAME_MAX_CHARACTERS and name.endswith("…")
+    team.agents.close()
+
+
+def test_live_records_that_cannot_be_read_still_give_the_list_and_the_states(tmp_path: Path, caplog) -> None:
+    team = _team(tmp_path)
+    team.agents.request_sent("task_1")
+    _settle(team.agents)
+
+    def broken() -> list[AgentReport]:
+        raise RuntimeError("team view unavailable")
+
+    team.agents._live_reports = broken
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert _shape(_row(team)) == ["P", "Team lead"] and _working(team) == []
+    assert caplog.text.count("event=web_chat_thread_agents_unreadable person_id=user_alpha") == 1
+    team.agents.close()
+
+
+def test_an_unreadable_stored_trail_is_logged_once_however_often_it_is_read(tmp_path: Path, caplog) -> None:
+    team = _team(tmp_path)
+    import sqlite3
+
+    with sqlite3.connect(str(tmp_path / "gateway.db")) as conn:
+        conn.execute("UPDATE gateway_sessions SET agent_trail_json = 'not a trail' WHERE session_key = ?", (THREAD,))
+    with caplog.at_level(logging.WARNING):
+        for _ in range(5):
+            assert _row(team)["trail"]["entries"] == []
+            _states(team)
+    assert caplog.text.count("event=web_chat_thread_trail_unreadable") == 1
+    team.agents.close()
