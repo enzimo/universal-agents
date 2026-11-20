@@ -505,8 +505,8 @@ def sign_in_may_remain_after_decline(session: BrokerAuthSession, exit_code: int 
     True when the process ended with 0 (it finished signing in in the moment
     before it was stopped) or, for GitHub, when gh's sign-in file changed since
     the sign-in started (gh wrote it, then was stopped before it exited). The
-    one decision both the Decline (``GitHubWebAuthFlow.cleanup``) and the
-    process monitor use, so the page and the log always agree. The leftover is
+    one decision both the Decline (``page_decline``, once it stopped the
+    process) and the process monitor use, so the page and the log always agree. The leftover is
     not removed: the file may also hold an earlier sign-in of the person's, or
     one another of their pages finished at the same moment.
     """
@@ -981,15 +981,8 @@ class GitHubWebAuthFlow:
         return session_status_payload(session)
 
     def cleanup(self, session: BrokerAuthSession) -> None:
-        process = session.process
-        if process is None:
-            return
-        _terminate_process(process)
-        # A Decline stopped gh: the page says so when gh may have signed in just before
-        # (the process monitor logs the same decision).
-        if session.state.get("status") == SIGN_IN_STATUS_DECLINED and process.poll() is not None:
-            if sign_in_may_remain_after_decline(session, process.returncode):
-                session.state[SIGN_IN_MAY_REMAIN_FIELD] = True
+        if session.process is not None:
+            _terminate_process(session.process)
 
 
 class GitHubWebAllAuthFlow(GitHubWebAuthFlow):

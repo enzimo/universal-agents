@@ -39,6 +39,7 @@ from secure_tool_broker.auth_pages import (
     render_broker_auth_page,
     render_close_page_button,
 )
+from secure_tool_broker.auth_flows import sign_in_may_remain_after_decline
 from secure_tool_broker.credential_state import credential_owner_context
 from secure_tool_broker.form_claims import (
     claim_auth_form_submission,
@@ -160,8 +161,9 @@ async def decline_auth_session(
     if flow is None:
         finish_form_submission(session)
     else:
-        # Stopping a sign-in process can wait a few seconds; the claim is released when it is done.
-        await run_claimed_form_thread(session, _cleanup_as_owner, session, flow)
+        # Stopping a sign-in process can wait a few seconds; the claim is released when it is done,
+        # and until then the status route still reports the page as pending (sign_in_pages).
+        await run_claimed_form_thread(session, _stop_declined_sign_in, session, flow)
     logger.info(
         "A person declined a sign-in page. event=broker_auth_session_declined provider=%s method=%s "
         "session_id_prefix=%s",
@@ -177,9 +179,20 @@ async def decline_auth_session(
     )
 
 
-def _cleanup_as_owner(session: Any, flow: Any) -> None:
+def _stop_declined_sign_in(session: Any, flow: Any) -> None:
+    """Stop the declined sign-in's process, then note whether its CLI may still hold a sign-in.
+
+    Runs while the Decline's claim is held, so the page, the status route and
+    the gateway's message all see the same answer (``sign_in_may_remain_after_decline``,
+    which the process monitor also uses for its log line).
+    """
+
     with credential_owner_context(session.owner_canonical_user_id):
         flow.cleanup(session)
+    process = session.process
+    if process is not None and process.poll() is not None:
+        if sign_in_may_remain_after_decline(session, process.returncode):
+            session.state[SIGN_IN_MAY_REMAIN_FIELD] = True
 
 
 __all__ = [

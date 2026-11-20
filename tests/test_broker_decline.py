@@ -43,12 +43,17 @@ FROM_CARD = {"Origin": "null"}
 # Stands in for ``gh auth login --web``: prints the device code and waits.
 # With TRAP_TERM it ends with exit code 0 when stopped, as if it had just
 # finished signing in. With WRITE_HOSTS it first writes its sign-in file, as gh
-# does once GitHub answered, and is then stopped before it exits (F9).
+# does once GitHub answered, and is then stopped before it exits (F9). With
+# IGNORE_TERM it ignores the stop signal, so Decline has to kill it.
 FAKE_GH = """#!/bin/sh
 echo "! First copy your one-time code: ABCD-1234"
 echo "Open this URL to continue in your web browser: https://github.com/login/device"
 if [ -n "$WRITE_HOSTS" ]; then
   printf 'github.com:\\n    oauth_token: gho_probe_value\\n' > "$GH_CONFIG_DIR/hosts.yml"
+fi
+if [ -n "$IGNORE_TERM" ]; then
+  trap '' TERM
+  while true; do sleep 0.1; done
 fi
 if [ -n "$TRAP_TERM" ]; then
   sleep 30 >/dev/null 2>&1 &
@@ -876,3 +881,35 @@ def test_a_sign_in_process_that_ignores_stop_is_killed_and_waited_for() -> None:
     auth_flows._terminate_process(process)
 
     assert process.poll() is not None  # gone before a declined sign-in reads what it left
+
+
+@pytest.mark.asyncio
+async def test_the_status_stays_pending_until_the_decline_has_decided(broker, monkeypatch) -> None:
+    """While Decline stops a slow gh, the status route must not report 'declined' without the flag (C12)."""
+
+    client, service = broker
+    monkeypatch.setenv("WRITE_HOSTS", "1")
+    monkeypatch.setenv("IGNORE_TERM", "1")
+    path = await _sign_in(client, "github", "web")
+    assert (await client.get(card_view_url(path))).status == 200
+    session = next(iter(service._auth_sessions.values()))
+    hosts = Path(session.state["gh_hosts_file"])
+    for _ in range(100):
+        if hosts.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert hosts.exists()
+
+    decline = asyncio.ensure_future(client.post(card_view_url(path), data=DECLINE, headers=FROM_CARD))
+    seen: list[tuple[str, bool]] = []
+    while not decline.done():
+        payload = await (await client.get(f"{path}/status", headers=FROM_CARD)).json()
+        seen.append((payload["status"], payload["sign_in_may_remain"]))
+        await asyncio.sleep(0.2)
+    page = await (await decline).text()
+    final = await (await client.get(f"{path}/status", headers=FROM_CARD)).json()
+
+    assert ("pending", False) in seen  # gh ignored the stop for about three seconds
+    assert ("declined", False) not in seen
+    assert (final["status"], final["sign_in_may_remain"]) == ("declined", True)
+    assert _outcome(page) == "finished"
