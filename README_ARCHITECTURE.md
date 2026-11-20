@@ -804,8 +804,9 @@ Four repairs keep work from getting stuck in the first place:
   lead ends earlier runs' records after the fact. A worker alive after the
   series ended leads a new series, whose replacement adopts the given-up work
   too, and keeps leading it once its status row is pruned, since its own
-  attempts began after the give-up; an owner whose own series gave up never
-  leads again. A refusal that leaves no start
+  attempts began after the give-up and the lead remembers the heartbeat it read
+  (until it restarts) for one whose first tries were refused; an owner whose
+  own series gave up never leads again. A refusal that leaves no start
   record (the type was removed, a worker or start limit is reached) is paced
   with the same delays and then tried hourly, never given up, since a limit
   frees again. One rule

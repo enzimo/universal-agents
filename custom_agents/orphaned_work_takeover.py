@@ -46,9 +46,12 @@ stored, so this holds across a lead restart. Without it, one given-up series
 stopped replacements for every later dead worker of the type and person until
 the records were pruned. An owner whose own series began after the give-up
 keeps leading it even once the lead prunes its status row (about ten minutes
-after it died, which removes its heartbeat): its attempt records are stored. A
-worker whose status row was pruned before it was first seen dead, and that
-saved nothing after the series ended, is judged by its save alone.
+after it died, which removes its heartbeat): its attempt records are stored. The
+lead also remembers the latest proof of life it read for each dead owner still
+holding work, so one whose first tries were refused (which leaves no record)
+keeps it after the prune too; like the refusal count, that memory is lost when
+the lead restarts. A worker whose status row was pruned before the lead read it,
+and that saved nothing after the series ended, is judged by its save alone.
 
 - A refusal that leaves no start record (the type was removed or is denied, the
   team's worker limit or the hourly start limit is reached) is paced with the
@@ -117,6 +120,9 @@ class _OwnerMemory:
     refusals: int = 0
     retry_at: float = 0.0
     logged: set[str] = field(default_factory=set)
+    # The latest proof of life read for it (a heartbeat lasts only until the
+    # lead prunes its status row, about ten minutes after it died).
+    alive_at: datetime | None = None
 
 
 def takeover_request_id(owner_agent_id: str, attempt: int) -> str:
@@ -412,10 +418,17 @@ async def _take_over_group(
     agent: Any, group: list[dict[str, Any]], memory: dict[str, _OwnerMemory], now: datetime, clock: float
 ) -> int:
     """One pass for the dead owners one replacement serves; returns how many starts it requested."""
+    remembered_by_owner = {
+        owner["owner_agent_id"]: memory.setdefault(owner["owner_agent_id"], _OwnerMemory()) for owner in group
+    }
+    for owner in group:
+        # A pruned status row takes the heartbeat with it; keep what was read.
+        remembered = remembered_by_owner[owner["owner_agent_id"]]
+        remembered.alive_at = owner["alive_at"] = _latest(remembered.alive_at, owner["alive_at"])
     runner, given_up = _plan_group(group, now)
     requested = 0
     for owner in group:
-        remembered = memory.setdefault(owner["owner_agent_id"], _OwnerMemory())
+        remembered = remembered_by_owner[owner["owner_agent_id"]]
         if runner is None and given_up is not None:
             _give_up(agent, owner, remembered, given_up, now)
         elif owner is runner:

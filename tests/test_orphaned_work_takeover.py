@@ -495,6 +495,41 @@ async def test_a_series_begun_after_a_give_up_keeps_leading_once_its_status_row_
 
 
 @pytest.mark.asyncio
+async def test_a_worker_refused_at_first_keeps_its_proof_of_life_after_its_status_row_is_pruned(lead, caplog):
+    """Refusals leave no attempt record, so only the remembered heartbeat proves it was alive after the give-up."""
+
+    from custom_agents.agent_liveness import prune_departed_agent_rows
+
+    busy = "agent_busy_worker"
+    busy_record = launch_record(lead, AgentLaunchState.READY, agent_id=busy)
+    held_work(lead, owner=busy, task_id="work-0")
+    launch_record(lead, AgentLaunchState.FAILED)
+    held_work(lead)
+    _takeover_lead(lead)
+    base = datetime.now(timezone.utc) - timedelta(days=4)
+    _saved_at(lead, busy, base + timedelta(minutes=30))
+    clock = await _run_series_to_give_up(lead, DEAD, base, 0.0) + 1000.0
+    died = base + timedelta(days=3)
+    _heartbeat(lead, busy, died - timedelta(seconds=20))
+    AgentLaunchRepository(lead.task_manager.storage_settings).update(busy_record, state=AgentLaunchState.FAILED, now=died)
+    # The type cannot be started for the first eleven minutes (likewise a worker or start limit).
+    definition = lead.definitions.pop("Worker")
+    started_at = []
+    with caplog.at_level(logging.INFO):
+        for minute in range(1, 181):  # a pass every minute for three hours
+            if minute == 11:
+                assert prune_departed_agent_rows(lead, now=died + timedelta(minutes=11)) == 1
+                lead.definitions["Worker"] = definition  # the refusal's cause is over
+            if await take_over_orphaned_work(lead, now=died + timedelta(minutes=minute), clock=clock + 60.0 * minute):
+                started_at.append(minute)
+                break
+    # Refused at minutes 1, 2 and 7; the next paced try, 15 minutes later, starts it.
+    assert started_at == [22]
+    assert _attempt(lead, 1, busy).state == AgentLaunchState.STARTING
+    assert not [line for line in _lines(caplog, "orphaned_work_takeover_gave_up") if f"_gave_up owner_agent_id={busy} " in line]
+
+
+@pytest.mark.asyncio
 async def test_after_a_give_up_the_later_owner_with_attempts_keeps_leading(lead, caplog):
     """Two owners alive after a give-up: the one whose series runs leads, not the one saved first."""
 
