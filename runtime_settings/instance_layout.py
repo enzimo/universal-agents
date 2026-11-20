@@ -662,9 +662,12 @@ class InstanceLayout:
         stayed in the adapter host's transfer folder; from 0.10 agents open
         files only in ``uploads_dir``. The step that moves those files
         (``instance_upgrades.adapter_host_files``) writes this file, with its
-        finish time, its counts and the id of the list its run wrote
-        (``adapter_host_files_without_records_path``), once every file was
-        handled, and the launcher runs the step only while it is missing.
+        finish time, its counts, the id of the list its run wrote
+        (``adapter_host_files_without_records_path``), how many listed files
+        records name in another folder (``named_elsewhere``) and, when no
+        listed file was named there, how many other files records of
+        receiving name there (``recorded_elsewhere``), once every file was handled, and the
+        launcher runs the step only while it is missing.
         Under ``state/``, so no agent tool or sandboxed code can reach it."""
 
         return self.state_dir / UPGRADES_DIRNAME / ADAPTER_HOST_FILES_UPGRADE_FILENAME
