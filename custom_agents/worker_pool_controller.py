@@ -196,7 +196,7 @@ def start_history(
 # A start the launcher stopped (its startup timeout passed, or its start was
 # revoked) or cannot check is "unknown". Unknown and never ready for longer
 # than this, it is hung: it no longer holds the next start of its type, and the
-# pool view and the start_failed texts name it. Longer than the default start
+# pool view and the start_failed and capacity texts name it. Longer than the default start
 # lease (120 s), so a stopped start whose thread already ended settles before it
 # is called hung; the saved lease is used when it is longer
 # (WorkerPoolController.observe). An unknown record is never renewed, so its
