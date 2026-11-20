@@ -5,12 +5,17 @@ Before a handler yields to broker work it claims the page: the claim fails when
 the page was already answered, is being answered, or expired. Decline goes
 through the same claim (secure_tool_broker.page_decline), so a page is either
 answered or declined, never both. The claim is held until the worker that does
-the broker work exits, even if the browser disconnects.
+the broker work exits, even if the browser disconnects, and a handler that
+records the worker's result afterwards (stored, deleted, signed in) records it
+before the claim is released (``run_claimed_form_thread(on_result=...)``):
+released first, a Decline could claim the page in between and be accepted
+after the credential was already stored.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Callable
@@ -20,6 +25,11 @@ from aiohttp import web
 from secure_tool_broker.account_links import STATUS_PENDING as ACCOUNT_LINK_PENDING, AccountLinkSession
 from secure_tool_broker.auth_flows import BrokerAuthSession
 from secure_tool_broker.redaction import redact_text
+from secure_tools.broker_pages import SIGN_IN_STATUS_ERROR
+
+LOGGER = logging.getLogger(__name__)
+# A credential form whose result could not be recorded ends as unavailable.
+_UNRECORDED_CREDENTIAL_STATUS = "credential_unavailable"
 
 
 class FormSubmissionClaim(StrEnum):
@@ -57,13 +67,49 @@ async def run_claimed_form_thread(
     session: Any,
     callback: Callable[..., Any],
     *args: Any,
+    on_result: Callable[[Any], None] | None = None,
+    log_ref: str = "",
     **kwargs: Any,
 ) -> Any:
-    """Keep the claim until the worker exits, even if the request is cancelled."""
+    """Keep the claim until the worker exits, even if the request is cancelled.
+
+    ``on_result(result)`` records what the worker did on the page (used,
+    status, result). It runs in the worker's done callback, then the claim is
+    released in that same callback, so no other request can claim the page
+    between the two; it also runs when the browser disconnected and the
+    handler never resumes. ``log_ref`` names the page in the log line of a
+    recording that failed (such as ``credential_collection abc123``).
+    """
 
     worker = asyncio.create_task(asyncio.to_thread(callback, *args, **kwargs))
-    worker.add_done_callback(lambda _worker: finish_form_submission(session))
+
+    def settle(done: asyncio.Task[Any]) -> None:
+        try:
+            if on_result is not None and not done.cancelled() and done.exception() is None:
+                _record(session, on_result, done.result(), log_ref)
+        finally:
+            finish_form_submission(session)
+
+    worker.add_done_callback(settle)
     return await asyncio.shield(worker)
+
+
+def _record(session: Any, on_result: Callable[[Any], None], result: Any, log_ref: str) -> None:
+    """Record a worker's result; a recording that fails still ends the page, so it is not answered twice."""
+
+    try:
+        on_result(result)
+    except Exception:
+        LOGGER.exception(
+            "A broker form's result could not be recorded; the page is ended as unavailable. "
+            "event=broker_form_result_record_failed page=%s",
+            log_ref or type(session).__name__,
+        )
+        session.used = True
+        if isinstance(session, BrokerAuthSession):
+            session.state["status"] = SIGN_IN_STATUS_ERROR
+        else:
+            session.status = _UNRECORDED_CREDENTIAL_STATUS
 
 
 def require_auth_form_available(session: BrokerAuthSession) -> None:

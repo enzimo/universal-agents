@@ -91,7 +91,13 @@ from secure_tool_broker.form_claims import (
     require_credential_collection_submission_available,
     run_claimed_form_thread,
 )
-from secure_tools.broker_pages import BROKER_PAGE_PREFIXES, SIGN_IN_FINAL_STATUSES, SIGN_IN_STATUS_DECLINED
+from secure_tools.broker_pages import (
+    BROKER_PAGE_PREFIXES,
+    SIGN_IN_FINAL_STATUSES,
+    SIGN_IN_STATUS_DECLINED,
+    SIGN_IN_STATUS_ERROR,
+    SIGN_IN_STATUS_SUCCESS,
+)
 from secure_tool_broker.onboarding_account_keys import onboarding_keys_handler
 from secure_tool_broker.bitwarden_cli import (
     bitwarden_server_url_from_env,
@@ -536,8 +542,15 @@ def _google_client_form(session: BrokerAuthSession) -> str:
     return render_broker_auth_page("Google sign-in app", body, decline=True)
 
 
-async def _submit_google_form(session: BrokerAuthSession, form: Any, *, team_id: str) -> ToolResult:
-    """Store the team's app, or the person's imported sign-in."""
+async def _submit_google_form(
+    session: BrokerAuthSession,
+    form: Any,
+    *,
+    team_id: str,
+    on_result: Callable[[ToolResult], None],
+    log_ref: str,
+) -> ToolResult:
+    """Store the team's app, or the person's imported sign-in; ``on_result`` records it before the claim ends."""
 
     credentials_json = str(form.get("credentials_json") or "")
     person = session.owner_canonical_user_id
@@ -549,14 +562,16 @@ async def _submit_google_form(session: BrokerAuthSession, form: Any, *, team_id:
                 "action=team_client_submit person_id=%s",
                 person,
             )
-            finish_form_submission(session)
-            return ToolResult(
+            refused = ToolResult(
                 status="error",
                 error="Only a team administrator or owner can set the team's Google sign-in app.",
                 content={"error_code": "google_team_client_admin_required"},
             )
+            on_result(refused)
+            finish_form_submission(session)
+            return refused
         return await run_claimed_form_thread(
-            session, store_team_client, team_id, credentials_json, stored_by=person
+            session, store_team_client, team_id, credentials_json, stored_by=person, on_result=on_result, log_ref=log_ref
         )
     return await run_claimed_form_thread(
         session,
@@ -565,7 +580,16 @@ async def _submit_google_form(session: BrokerAuthSession, form: Any, *, team_id:
         person_id=person,
         team_id=team_id,
         credentials_json=credentials_json,
+        on_result=on_result,
+        log_ref=log_ref,
     )
+
+
+def record_token_form_result(session: BrokerAuthSession, result: ToolResult) -> None:
+    """Record how a token form (GitHub, Google, Bitwarden) ended; the status route reports it to the gateway."""
+
+    session.used = True
+    session.state["status"] = SIGN_IN_STATUS_SUCCESS if result.status == "success" else SIGN_IN_STATUS_ERROR
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -1962,20 +1986,10 @@ class SecureToolBrokerService:
                         session.tool_context.canonical_user_id or ""
                     )
                 ),
+                on_result=lambda done: record_credential_form_result(session, done, stored_status="credential_deleted"),
+                log_ref=f"credential_deletion {session_id[:12]}",
             )
             content = dict(result.content or {})
-            session.result = {"status": result.status, "content": content}
-            if result.error:
-                session.result["error"] = redact_text(result.error)
-            session.status = str(
-                content.get("status")
-                or (
-                    "credential_deleted"
-                    if result.status == "success"
-                    else "credential_unavailable"
-                )
-            )
-            session.used = result.status == "success"
             self._logger.info(
                 "Credential deletion form submitted. event=credential_deletion_submitted credential_key=%s "
                 "status=%s session_id_prefix=%s",
@@ -2047,30 +2061,9 @@ class SecureToolBrokerService:
                     session.tool_context.canonical_user_id or ""
                 )
             ),
+            on_result=lambda done: record_credential_form_result(session, done, stored_status="credential_stored"),
+            log_ref=f"credential_collection {session_id[:12]}",
         )
-        content = dict(result.content or {})
-        if result.status == "success" and str(
-            session.request_payload.get("flow")
-            or session.request_payload.get("request_kind")
-            or ""
-        ).lower() in {
-            "manual_signup",
-            "signup_manual_fallback",
-            "manual_signup_fallback",
-        }:
-            content["status"] = "manual_signup_collected"
-        session.result = {"status": result.status, "content": content}
-        if result.error:
-            session.result["error"] = redact_text(result.error)
-        session.status = str(
-            content.get("status")
-            or (
-                "credential_stored"
-                if result.status == "success"
-                else "credential_unavailable"
-            )
-        )
-        session.used = result.status == "success"
         self._logger.info(
             "Credential collection form submitted. event=credential_collection_submitted credential_key=%s "
             "status=%s session_id_prefix=%s",
@@ -2709,6 +2702,11 @@ class SecureToolBrokerService:
             session,
             prune_expired=self._prune_auth_sessions,
         )
+        # Each worker's result is recorded before the claim is released (form_claims).
+        def record(done: ToolResult) -> None:
+            record_token_form_result(session, done)
+
+        log_ref = f"auth_{provider} {session_id[:12]}"
         user_timezone = str(form.get("user_timezone") or "").strip()
         if provider == "github":
             token = str(form.get("token") or "")
@@ -2720,9 +2718,13 @@ class SecureToolBrokerService:
                 login_github_with_token,
                 token,
                 hostname=hostname,
+                on_result=record,
+                log_ref=log_ref,
             )
         elif provider == "google":
-            result = await _submit_google_form(session, form, team_id=self._access_gate.team_id)
+            result = await _submit_google_form(
+                session, form, team_id=self._access_gate.team_id, on_result=record, log_ref=log_ref
+            )
         else:
             server_url = str(form.get("server_url") or "").strip()
             master_password = str(form.get("master_password") or "")
@@ -2778,6 +2780,8 @@ class SecureToolBrokerService:
                     client_id=client_id,
                     client_secret=client_secret,
                     server_url=server_url,
+                    on_result=record,
+                log_ref=log_ref,
                 )
                 if result.status == "success":
                     content = dict(result.content or {})
@@ -2800,6 +2804,8 @@ class SecureToolBrokerService:
                     client_id=client_id,
                     client_secret=client_secret,
                     server_url=server_url,
+                    on_result=record,
+                log_ref=log_ref,
                 )
             if result.status != "success":
                 content = dict(result.content or {})
@@ -2807,9 +2813,6 @@ class SecureToolBrokerService:
                 result = ToolResult(
                     status=result.status, content=content, error=result.error
                 )
-        session.used = True
-        # Read by the status route, which the gateway's /link watcher polls.
-        session.state["status"] = "success" if result.status == "success" else "error"
         display_name = auth_display_name(provider)
         if result.status != "success":
             details = self._auth_failure_details(result)
@@ -2891,6 +2894,31 @@ class SecureToolBrokerService:
             ),
             content_type="text/html",
         )
+
+
+# A collection request of these kinds that stored the credential reports "manual_signup_collected".
+_MANUAL_SIGNUP_FLOWS = frozenset({"manual_signup", "signup_manual_fallback", "manual_signup_fallback"})
+
+
+def record_credential_form_result(
+    session: CredentialCollectionSession, result: ToolResult, *, stored_status: str
+) -> None:
+    """Record what a credential collection or deletion did (``run_claimed_form_thread(on_result=...)``).
+
+    A success ends the form (``used``); a failure leaves it open to try again.
+    """
+
+    content = dict(result.content or {})
+    flow = str(session.request_payload.get("flow") or session.request_payload.get("request_kind") or "").lower()
+    if result.status == "success" and flow in _MANUAL_SIGNUP_FLOWS:
+        content["status"] = "manual_signup_collected"
+    session.result = {"status": result.status, "content": content}
+    if result.error:
+        session.result["error"] = redact_text(result.error)
+    session.status = str(
+        content.get("status") or (stored_status if result.status == "success" else "credential_unavailable")
+    )
+    session.used = result.status == "success"
 
 
 def credential_collection_ended_page(session: CredentialCollectionSession) -> str:

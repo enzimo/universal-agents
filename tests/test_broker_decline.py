@@ -10,6 +10,7 @@ a cross-site post without the private link is refused.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -421,3 +422,187 @@ def test_a_decline_while_the_sign_in_is_being_stored_keeps_the_page_declined(mon
 
     assert session.state["status"] == "declined"
     assert "event=broker_auth_signed_in_after_decline" in caplog.text
+
+
+# -- the result is recorded before the claim is released (review finding F4) -----------
+
+
+def _decline_right_after_release(monkeypatch: pytest.MonkeyPatch, decline) -> dict:
+    """Run ``decline(session)`` in the loop step right after a submission releases its claim.
+
+    That is where a Decline whose handler was waiting on ``request.post()``
+    resumes; before the fix the submission had not recorded its result yet.
+    """
+
+    from secure_tool_broker import form_claims
+
+    seen: dict = {}
+    release = form_claims.finish_form_submission
+
+    def release_then_decline(session) -> None:
+        release(session)
+        if seen:
+            return
+
+        def decline_now() -> None:
+            try:
+                decline(session)
+                seen["decline"] = "accepted"
+            except Exception as exc:  # noqa: BLE001 - the refusal is what the test looks for
+                seen["decline"] = f"refused {type(exc).__name__}"
+
+        seen["scheduled"] = True
+        asyncio.get_running_loop().call_soon(decline_now)
+
+    monkeypatch.setattr(form_claims, "finish_form_submission", release_then_decline)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_decline_just_after_a_stored_credential_is_refused(broker, monkeypatch) -> None:
+    from secure_tool_broker.page_decline import decline_credential_collection
+
+    client, service = broker
+    stored: list[dict] = []
+
+    def collect(_payload, fields, **_kwargs) -> ToolResult:
+        stored.append(dict(fields))
+        return ToolResult(status="success", content={"status": "credential_stored"})
+
+    monkeypatch.setattr("secure_tool_broker.service.collect_credential", collect)
+    created = await _collection(client)
+    seen = _decline_right_after_release(
+        monkeypatch,
+        lambda session: decline_credential_collection(
+            created["session_id"], session, prune_expired=lambda: None, logger=logging.getLogger("test")
+        ),
+    )
+
+    answer = await client.post(
+        card_view_url(_path(created["form_url"])), data={"field__username": "me", "field__password": "pw"}, headers=FROM_CARD
+    )
+    await asyncio.sleep(0)
+    status = await (await client.get(_path(created["status_url"]), headers=gateway_headers())).json()
+    reopened = await client.get(card_view_url(_path(created["form_url"])))
+
+    assert seen["decline"].startswith("refused")
+    assert stored == [{"username": "me", "password": "pw"}]
+    assert status["status"] == "credential_stored"
+    assert _outcome(await answer.text()) == "finished"
+    assert _outcome(await reopened.text()) == "finished"
+
+
+@pytest.mark.asyncio
+async def test_a_decline_just_after_a_token_sign_in_is_refused(broker, monkeypatch) -> None:
+    from secure_tool_broker.page_decline import decline_auth_session
+
+    client, service = broker
+    monkeypatch.setattr(
+        "secure_tool_broker.service.login_github_with_token", lambda *a, **k: ToolResult(status="success", content={})
+    )
+    path = await _sign_in(client, "github", "token")
+    session = next(iter(service._auth_sessions.values()))
+
+    def decline(held) -> None:
+        # With no flow, decline_auth_session never waits: it runs to its end in this step.
+        coroutine = decline_auth_session("sid", held, None, prune_expired=lambda: None, logger=logging.getLogger("test"))
+        try:
+            coroutine.send(None)
+        except StopIteration:
+            return
+
+    seen = _decline_right_after_release(monkeypatch, decline)
+
+    answer = await client.post(card_view_url(path), data={"token": "ghp_x"}, headers=FROM_CARD)
+    await asyncio.sleep(0)
+
+    assert seen["decline"].startswith("refused")
+    assert session.state["status"] == "success" and session.used
+    assert (await (await client.get(f"{path}/status")).json())["status"] == "success"
+    assert _outcome(await answer.text()) == "finished"
+
+
+def _bare_sign_in() -> BrokerAuthSession:
+    now = datetime.now(timezone.utc)
+    return BrokerAuthSession(
+        provider="github", method="token", created_at=now, expires_at=now + timedelta(minutes=5),
+        submission_in_progress=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_result_is_recorded_while_the_claim_is_still_held() -> None:
+    from secure_tool_broker.form_claims import run_claimed_form_thread
+
+    session = _bare_sign_in()
+    held_while_recording: list[bool] = []
+
+    def record(result: str) -> None:
+        held_while_recording.append(session.submission_in_progress)
+        session.state["status"] = result
+
+    assert await run_claimed_form_thread(session, lambda: "success", on_result=record) == "success"
+    await asyncio.sleep(0)
+
+    assert held_while_recording == [True]
+    assert session.state["status"] == "success" and not session.submission_in_progress
+
+
+@pytest.mark.asyncio
+async def test_the_result_is_recorded_when_the_browser_went_away() -> None:
+    from secure_tool_broker.form_claims import run_claimed_form_thread
+
+    session = _bare_sign_in()
+    worker_may_finish = threading.Event()
+    recorded = asyncio.Event()
+
+    def work() -> str:
+        worker_may_finish.wait(5)
+        return "success"
+
+    def record(result: str) -> None:
+        session.state["status"] = result
+        recorded.set()
+
+    handler = asyncio.ensure_future(run_claimed_form_thread(session, work, on_result=record))
+    await asyncio.sleep(0.05)
+    handler.cancel()  # the browser disconnected
+    worker_may_finish.set()
+    await asyncio.wait_for(recorded.wait(), 5)
+    await asyncio.sleep(0)
+
+    assert session.state["status"] == "success" and not session.submission_in_progress
+
+
+@pytest.mark.asyncio
+async def test_a_failed_worker_records_nothing_and_releases_the_claim() -> None:
+    from secure_tool_broker.form_claims import run_claimed_form_thread
+
+    session = _bare_sign_in()
+    calls: list[object] = []
+
+    def fail() -> None:
+        raise RuntimeError("store unavailable")
+
+    with pytest.raises(RuntimeError):
+        await run_claimed_form_thread(session, fail, on_result=calls.append)
+    await asyncio.sleep(0)
+
+    assert calls == [] and not session.submission_in_progress and not session.used
+
+
+@pytest.mark.asyncio
+async def test_a_result_that_cannot_be_recorded_still_ends_the_page(caplog) -> None:
+    from secure_tool_broker.form_claims import run_claimed_form_thread
+
+    session = _bare_sign_in()
+
+    def broken(_result: object) -> None:
+        raise KeyError("status")
+
+    caplog.set_level(logging.ERROR)
+    await run_claimed_form_thread(session, lambda: "success", on_result=broken, log_ref="auth_github abc123")
+    await asyncio.sleep(0)
+
+    assert session.used and session.state["status"] == "error" and not session.submission_in_progress
+    assert "event=broker_form_result_record_failed page=auth_github abc123" in caplog.text
