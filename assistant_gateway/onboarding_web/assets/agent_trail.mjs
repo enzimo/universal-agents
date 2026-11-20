@@ -196,6 +196,16 @@ export function trailView(thread, { busy = false, sentBeforeTrail = false } = {}
   };
 }
 
+// "Web Research Agent and Internal Improvement Agent working": who works, as the
+// row's second line shows it while someone works (lead ruling on review C22,
+// following the approved mockup), or "".
+export function workingLine(view) {
+  const names = view.workingNames.map((name, index) => (index > 0 && name === TEAM_LEAD_NAME ? "team lead" : name));
+  if (!names.length) return "";
+  const listed = names.length === 1 ? names[0] : names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+  return listed + " working";
+}
+
 // "Working: team lead, Web Research Agent" for the row's name, or "".
 export function workingLabel(view) {
   if (!view.workingNames.length) return "";

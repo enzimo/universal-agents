@@ -17,6 +17,7 @@ import {
   trailKey,
   trailView,
   workingLabel,
+  workingLine,
 } from "../assistant_gateway/onboarding_web/assets/agent_trail.mjs";
 import { fakeDocument } from "./fake_dom.mjs";
 
@@ -165,4 +166,15 @@ test("someone works whose triangle is not in the row: the lead pulses and the wo
     assert.equal(view.triangles.at(-1).who, "lead");
     assert.equal(workingLabel(view), "Working: Zeta");
   }
+});
+
+test("line 2's words name who works: one, two, or a list, the team lead first (lead ruling on C22)", () => {
+  const one = trailView(thread([P, LEAD, WEB], { work: working(WEB) }));
+  assert.equal(workingLine(one), "Web Research Agent working");
+  const two = trailView(thread([P, LEAD, WEB], { work: working(LEAD, WEB) }));
+  assert.equal(workingLine(two), "Team lead and Web Research Agent working");
+  const three = trailView(thread([P, LEAD, WEB, MEM], { work: working(WEB, MEM, LEAD) }));
+  assert.equal(workingLine(three), "Web Research Agent, Memory Review Agent and team lead working");
+  assert.equal(workingLine(trailView(thread([]), { busy: true })), "Team lead working");
+  assert.equal(workingLine(trailView(thread([P, LEAD]))), "");
 });

@@ -34,7 +34,7 @@ import {
 } from "./chat_thread_list.mjs";
 import { THREAD_MENU_ACTION, attachThreadMenuTriggers, createThreadMenu } from "./chat_thread_menu.mjs";
 import { createThreadPreview } from "./chat_thread_preview.mjs";
-import { renderTrail, trailKey, trailView, workingLabel } from "./agent_trail.mjs";
+import { renderTrail, trailKey, trailView, workingLabel, workingLine } from "./agent_trail.mjs";
 import { THREAD_CHANGE_DONE, TRY_AGAIN, createThreadListStatus } from "./chat_thread_status.mjs";
 
 function mountPage() {
@@ -1986,14 +1986,22 @@ function threadRow(thread) {
       titleLine.appendChild(ageWords);
     }
     button.appendChild(titleLine);
-    // Line 2: the agent trail, then what the thread waits on or its latest message.
-    var detail = threadDetail(thread, sharedState.assistantName);
+    // Line 2: the agent trail, then what the thread waits on, else who works
+    // now (lead ruling on review C22), else its latest message.
     var trail = threadTrailView(thread);
+    var detail = threadDetail(thread, sharedState.assistantName);
+    if ((!detail || detail.kind !== "waiting") && trail.workingNames.length) {
+      detail = { kind: "working", text: workingLine(trail), description: workingLabel(trail) };
+    }
     if (detail || trail.triangles.length) {
-      var detailLine = uiElement("span", "thread-line thread-detail" + (detail && detail.kind === "waiting" ? " is-waiting" : ""));
+      var detailLine = uiElement("span", "thread-line thread-detail" + (detail ? " is-" + detail.kind : ""));
       if (trail.triangles.length) detailLine.appendChild(renderTrail(document, trail));
       if (detail) {
-        detailLine.appendChild(uiElement("span", "thread-detail-text", detail.text));
+        var detailText = uiElement("span", "thread-detail-text", detail.text);
+        // The row's hidden mark already says who works (threadReplyMark), so the
+        // visible words are not read twice.
+        if (detail.kind === "working") detailText.setAttribute("aria-hidden", "true");
+        detailLine.appendChild(detailText);
         if (detail.description) detailLine.title = detail.description;
       }
       button.appendChild(detailLine);

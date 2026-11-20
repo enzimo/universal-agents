@@ -6366,7 +6366,7 @@ body.is-theme-customizing {
   display: inline-flex;
   align-items: center;
   height: 12px;
-  padding: 0 5px 0 1px;
+  padding-left: 1px;
 }
 
 .trail-tri {
@@ -6375,6 +6375,11 @@ body.is-theme-customizing {
   margin-right: -5px;
   overflow: visible;
   color: var(--tri-light);
+}
+
+/* The words start just after the last triangle (the line's 6 px gap). */
+.trail-tri:last-child {
+  margin-right: 0;
 }
 
 :root[data-color-mode="dark"] .trail-tri {
@@ -6399,6 +6404,17 @@ body.is-theme-customizing {
 
 .thread-detail.is-waiting {
   font-weight: 700;
+}
+
+/* Who works now, in the team lead's gold (the approved mockup), at 4.5:1 or
+   more on the light theme's pale backing; dark mode uses the gold itself. */
+.thread-detail.is-working .thread-detail-text {
+  color: #6b5000;
+  font-weight: 700;
+}
+
+:root[data-color-mode="dark"] .thread-detail.is-working .thread-detail-text {
+  color: #f6c84c;
 }
 
 .thread-row:hover .thread-button,

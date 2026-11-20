@@ -108,9 +108,11 @@ def _samples(now: datetime) -> list[_Sample]:
                 [("user", "Can you check which Portainer stacks are unhealthy?", 2),
                  ("assistant", "I need a Portainer API token to read your stacks. I've asked for one below.", 1)],
                 requests=[_agents("NetworkAgent")]),
+        # Six triangles beside the longest waiting label (review C21).
         _Sample(_record("website:web-chat:github", "Finish the GitHub sign-in", has_waiting_setup=True),
                 [("user", "Open a pull request for the docs fix.", 6),
-                 ("assistant", "GitHub needs you to sign in first; the setup page is below.", 4)]),
+                 ("assistant", "GitHub needs you to sign in first; the setup page is below.", 4)],
+                requests=[_agents("DocsWriterAgent"), _agents(), _agents("NetworkAgent")]),
         _Sample(_record("website:web-chat:weekly", "Weekly infrastructure report", pinned=True),
                 [("assistant", "## Weekly report\n\n- All 14 hosts healthy\n- Disk on nas-2 at 81%", 2880)],
                 requests=[_agents("SecurityAgent"), _agents("SecurityAgent", "LedgerAgent")]),

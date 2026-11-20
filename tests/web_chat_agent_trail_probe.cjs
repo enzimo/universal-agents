@@ -59,11 +59,37 @@ async function measureRow(page, selector) {
     document.head.appendChild(hide);
     return found;
   }, selector);
-  await page.waitForTimeout(50);
+  // Two frames: the rule is painted before the first capture (review C20).
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const measured = [];
   for (const triangle of triangles) {
-    const png = await page.screenshot({ clip: triangle.clip });
-    const pixels = await page.evaluate(async data => {
+    const pixels = await capture(page, triangle);
+    const backgrounds = pixels.map(luminance);
+    const own = luminance(triangle.color);
+    measured.push({ who: triangle.who, hollow: triangle.hollow, working: triangle.working,
+      worst: Math.min(...backgrounds.map(background => contrast(own, background))),
+      darkest: Math.min(...backgrounds), brightest: Math.max(...backgrounds) });
+  }
+  await page.evaluate(() => document.getElementById("probe-hide-trail").remove());
+  return measured;
+}
+
+// The pixels behind one triangle. A capture holding the triangle's own colour
+// means the hidden trail was still drawn: it is captured again after another
+// frame, never counted as a measurement (review C20).
+async function capture(page, triangle) {
+  const same = pixel => pixel.every((value, index) => Math.abs(value - triangle.color[index]) <= 2);
+  for (let attempt = 1; ; attempt += 1) {
+    const pixels = await readPixels(page, triangle.clip);
+    if (!pixels.some(same)) return pixels;
+    assert.ok(attempt < 5, `the trail stayed drawn while hidden: ${JSON.stringify(triangle)}`);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  }
+}
+
+async function readPixels(page, clip) {
+    const png = await page.screenshot({ clip });
+    return page.evaluate(async data => {
       const image = new Image();
       image.src = "data:image/png;base64," + data;
       await image.decode();
@@ -75,14 +101,6 @@ async function measureRow(page, selector) {
       for (let index = 0; index < bytes.length; index += 4) sample.push([bytes[index], bytes[index + 1], bytes[index + 2]]);
       return sample;
     }, png.toString("base64"));
-    const backgrounds = pixels.map(luminance);
-    const own = luminance(triangle.color);
-    measured.push({ who: triangle.who, hollow: triangle.hollow, working: triangle.working,
-      worst: Math.min(...backgrounds.map(background => contrast(own, background))),
-      darkest: Math.min(...backgrounds), brightest: Math.max(...backgrounds) });
-  }
-  await page.evaluate(() => document.getElementById("probe-hide-trail").remove());
-  return measured;
 }
 
 const round = value => Math.round(value * 1000) / 1000;
@@ -133,6 +151,23 @@ async function main() {
       const said = await page.evaluate(rows => rows.map(sel => document.querySelector(sel + " .sr-only").textContent),
         [ROW("vectors"), ROW("contracts")]);
       assert.deepEqual(said, ["Working: Web Research Agent, Internal Improvement Agent", "Working: team lead"]);
+      // Line 2 says who works in words while someone works (lead ruling on C22), cut with its full value as a
+      // title; a waiting row keeps its waiting reason, now beside six triangles without being cut (C21).
+      const lines = await page.evaluate(rows => rows.map(sel => {
+        const line = document.querySelector(sel + " .thread-detail");
+        const text = line.querySelector(".thread-detail-text");
+        return { kind: line.className, text: text.textContent, title: line.title, hidden: text.getAttribute("aria-hidden"),
+          triangles: line.querySelectorAll(".trail-tri").length, cut: text.scrollWidth > text.clientWidth };
+      }), [ROW("vectors"), ROW("contracts"), ROW("github")]);
+      assert.deepEqual(lines.map(line => [line.text, line.title, line.hidden]), [
+        ["Web Research Agent and Internal Improvement Agent working",
+          "Working: Web Research Agent, Internal Improvement Agent", "true"],
+        ["Team lead working", "Working: team lead", "true"],
+        ["Finish the setup page", "A setup page in this chat is waiting for you to finish it.", null],
+      ]);
+      assert.ok(lines[0].kind.includes("is-working") && lines[2].kind.includes("is-waiting"));
+      assert.equal(lines[2].triangles, 6);
+      assert.equal(lines[2].cut, false, "the longest waiting label fits beside a full trail");
       const pulsing = await page.evaluate(sel => [...document.querySelectorAll(sel + " .trail-tri.is-working")]
         .map(svg => svg.dataset.who), ROW("contracts"));
       assert.deepEqual(pulsing, ["lead"]);
@@ -162,7 +197,7 @@ async function main() {
       await context.close();
     }
     checked.push("contrast (worst pixel, 3:1 or more, backgrounds inside the fitted range): " + JSON.stringify(report));
-    checked.push("rows say who works; a busy row nobody reported on pulses the team lead");
+    checked.push("rows say who works, in words on line 2 and to screen readers; a busy row nobody reported on pulses the team lead; the longest waiting label fits beside six triangles");
     checked.push("motion off: steady glow; the second line does not clip it");
     checked.push("hover card footer: the trail and the agent types that worked");
 

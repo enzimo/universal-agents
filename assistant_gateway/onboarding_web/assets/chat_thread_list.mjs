@@ -47,7 +47,8 @@ export const THREAD_PLACEMENT_ACTION = Object.freeze({ CLEAR_WOKE: "clear_woke" 
 export const NEEDS_YOU_LABELS = Object.freeze({
   question: "Waiting for your answer",
   reply: "Waiting for your reply",
-  setup: "Needs you to finish setup",
+  // Fits beside six agent-trail triangles at the usual sidebar width (review C21).
+  setup: "Finish the setup page",
   credential: "Needs a sign-in or key",
 });
 

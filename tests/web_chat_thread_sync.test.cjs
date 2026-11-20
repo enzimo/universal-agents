@@ -770,15 +770,29 @@ test("a row draws its agent trail before the snippet and no busy dot (A4, A5)", 
     working: [{ agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }] });
   assert.ok(!row.className.includes("is-pending"), "the busy dot is gone");
   assert.deepEqual(line.children.map(child => child.className), ["thread-trail", "thread-detail-text"]);
-  assert.equal(line.children[1].textContent, "Ava: Here is the comparison.");
+  // While someone works, line 2 says who in words instead of the latest message (lead ruling on C22); the
+  // hidden mark already tells screen readers, so the words are not read twice.
+  assert.ok(line.className.includes("is-working"));
+  assert.equal(line.children[1].textContent, "Web Research Agent working");
+  assert.equal(line.children[1].getAttribute("aria-hidden"), "true");
+  assert.equal(line.title, "Working: Web Research Agent");
   assert.deepEqual(triangles.map(svg => svg.getAttribute("data-who")), ["person", "lead", "agent"]);
   assert.deepEqual(pulsing, ["agent"]);
   assert.equal(trailRow({ serverBusy: true, working: [{ agent_type: "WebResearchAgent", lead: false,
     name: "Web Research Agent" }] }).said, "Working: Web Research Agent");
-  // Nobody works and nothing is busy: the trail stays still and the row says nothing about work.
+  // Nobody works and nothing is busy: the trail stays still, line 2 shows the latest message again and the row
+  // says nothing about work.
   const still = trailRow({});
   assert.deepEqual(still.pulsing, []);
   assert.equal(still.said, undefined);
+  assert.ok(still.line.className.includes("is-message"));
+  assert.equal(still.line.children[1].textContent, "Ava: Here is the comparison.");
+  // A waiting reason wins over who works.
+  const waiting = trailRow({ needsYou: "setup", serverBusy: true,
+    working: [{ agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }] });
+  assert.ok(waiting.line.className.includes("is-waiting"));
+  assert.equal(waiting.line.children[1].textContent, "Finish the setup page");
+  assert.deepEqual(waiting.pulsing, ["agent"]);
 });
 
 test("a reply this page sent before any agent reported pulses the new team-lead triangle (A5, C10)", () => {
