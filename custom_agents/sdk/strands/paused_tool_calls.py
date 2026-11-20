@@ -21,8 +21,9 @@ one set of tool use ids:
 - ``AfterToolCallEvent`` removes it: the call finished, with a result, an
   error or a cancellation;
 - ``AfterInvocationEvent`` clears the set unless the call to the agent paused
-  (``result.stop_reason == "interrupt"``). After a pause the set holds exactly
-  the calls that paused, because every call that finished was removed.
+  (``call_paused``: its stop reason is ``INTERRUPT_STOP_REASON``). After a
+  pause the set holds exactly the calls that paused, because every call that
+  finished was removed.
 
 Only public Strands hooks and results are used. The rule relies on this
 Strands behaviour, which ``tests/test_resumed_tool_call_guidance.py`` pins on
@@ -51,10 +52,24 @@ call that reuses the id counts as new.
 
 from __future__ import annotations
 
+from typing import Any
+
 from strands.hooks import AfterInvocationEvent, AfterToolCallEvent, BeforeToolCallEvent, HookRegistry
 
 # AgentResult.stop_reason of a call to the agent that paused for an interrupt.
 INTERRUPT_STOP_REASON = "interrupt"
+
+
+def call_paused(result: Any) -> bool:
+    """Whether a call to the Strands agent ended paused for an interrupt (its ``AgentResult``).
+
+    A paused agent takes only interrupt answers as its next prompt: Strands
+    refuses text with a ``TypeError`` and stays paused. So the turn hands a
+    paused call to ``send_interrupt_request_for_result`` and does nothing else
+    with the agent (``custom_agents.sdk.strands.turn``).
+    """
+
+    return getattr(result, "stop_reason", None) == INTERRUPT_STOP_REASON
 
 
 class PausedToolCalls:
@@ -80,8 +95,8 @@ class PausedToolCalls:
         self._unfinished.discard(event.tool_use["toolUseId"])
 
     def _invocation_ended(self, event: AfterInvocationEvent) -> None:
-        if event.result is None or event.result.stop_reason != INTERRUPT_STOP_REASON:
+        if not call_paused(event.result):
             self._unfinished.clear()
 
 
-__all__ = ["INTERRUPT_STOP_REASON", "PausedToolCalls"]
+__all__ = ["INTERRUPT_STOP_REASON", "PausedToolCalls", "call_paused"]

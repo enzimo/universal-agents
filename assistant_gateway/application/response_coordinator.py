@@ -1,5 +1,9 @@
 """Application-owned terminal-response orchestration.
 
+A request's reply wait ends at the first message that answers it, for example
+the first setup page. Messages the team lead already sent behind it are
+passed on when the wait closes (``reply_leftovers``).
+
 Guidance for a running request is sent by ``thread_guidance``.
 """
 
@@ -24,6 +28,7 @@ from assistant_gateway.application.pending_questions import (
     GatewayPendingQuestions,
     QuestionDisplay,
 )
+from assistant_gateway.application.reply_leftovers import ArrivalRoute
 from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.application.response_models import GatewayResponse
 from assistant_gateway.domain.request_state import REQUEST_STATUS_WAITING_FOR_STEERING
@@ -307,6 +312,33 @@ class GatewayResponseCoordinator:
 
         if await self._credential_handoffs.try_present(envelope):
             return True
+        return await self.fail_credential_request_closed(envelope)
+
+    async def fail_lost_credential_request(self, envelope: MessageEnvelope) -> None:
+        """Tell the task about a setup, form or signup request that a leftover pass gave up on or shutdown cut off.
+
+        ``reply_leftovers`` calls this for each response-route leftover it did not
+        pass on. A setup page that already has a record is not refused: it opened,
+        and its own result, expiry or restart recovery reaches the task. Any other
+        kind of message is left alone.
+        """
+
+        content = envelope.msg_content
+        if (
+            isinstance(content, ToolSetupRequestV1)
+            and self._credential_workflow.tool_setups.page_status(content.setup_request_id) is not None
+        ):
+            self._logger.info(
+                "A setup page that was not fully passed on had already opened; its own result reaches the task. "
+                "event=gateway_lost_setup_page_already_open setup_request_id=%s task_id=%s",
+                content.setup_request_id,
+                content.parent_task_id,
+            )
+            return
+        await self.fail_credential_request_closed(envelope)
+
+    async def fail_credential_request_closed(self, envelope: MessageEnvelope) -> bool:
+        """Tell the task its setup, form or signup request cannot be shown; False for any other message."""
 
         content = envelope.msg_content
         if not isinstance(
@@ -439,6 +471,7 @@ class GatewayResponseCoordinator:
                     agent_signature="",
                 ),
             ),
+            route=ArrivalRoute.GATEWAY,
         )
 
     def _response(

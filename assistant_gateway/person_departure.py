@@ -4,7 +4,10 @@ Implements ``GatewayPersonRecords`` for ``person_lifecycle`` over the stores
 the gateway already owns or opens:
 
 - its own database (``GatewayStateStore.forget_person_records``): chat
-  sessions, Web Chat history, sign-ins and preferences, and the chat upload
+  sessions, Web Chat history, sign-ins and preferences, the setup pages their
+  tasks waited on with any results still kept for those tasks (without the
+  chat a kept result could never be sent, and the person's tasks end with
+  their removal; ``tool_setup.GatewayToolSetups``), and the chat upload
   files of the deleted attachment rows (deleted only inside the uploads
   folder, never through a link);
 - the access store: waiting access requests are withdrawn through

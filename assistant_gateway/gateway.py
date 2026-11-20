@@ -201,7 +201,7 @@ from assistant_gateway.http_secure_broker import HttpGatewaySecureBroker
 from assistant_gateway.onboarding_account_keys import OnboardingAccountKeyHandover
 from assistant_gateway.installed_procedures import GatewayInstalledProcedures
 from assistant_gateway.mcp_controls import GatewayMCPControls
-from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
+from assistant_gateway.nats_manager_runtime import HANDLING_RETRY_DELAY_SECONDS, NatsGatewayManagerRuntime
 from assistant_gateway.person_departure import build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
 from assistant_gateway.team_services_client import (
@@ -443,6 +443,7 @@ def _access_maintenance_tasks(
     credential_workflow: Any,
     status_page: Any,
     stop_event: asyncio.Event,
+    resend_kept_results_at_start: bool,
 ) -> list[asyncio.Task[Any]]:
     """Access work at start: onboarding key hand-over, form recovery and the Inbox loop.
 
@@ -450,6 +451,11 @@ def _access_maintenance_tasks(
     typed during onboarding (``assistant_gateway.onboarding_account_keys``); setup recovery
     tells tasks whose setup page was open when the gateway stopped that
     nobody watched it (``tool_setup.GatewayToolSetups.recover_unwatched``);
+    with ``resend_kept_results_at_start`` (a gateway without a team view, which uses
+    its saved route as it is), the setup results kept while no team lead could be
+    reached are sent to the one known now
+    (``tool_setup.GatewayToolSetups.resend_kept_results``); with a team view the lead
+    follower sends them once the team's records name the lead (``TeamLeadFollower``);
     credential recovery resumes saved broker session watches without storing
     submitted fields or page URLs;
     the Inbox loop (authorization on) sends announcements and decision
@@ -480,6 +486,8 @@ def _access_maintenance_tasks(
             status_page.run(stop_event, first_check_after=(handover_task,)), name="gateway_status_page_loop"
         ),
     ]
+    if resend_kept_results_at_start:
+        tasks.append(asyncio.create_task(tool_setups.resend_kept_results(), name="gateway_tool_setup_resend"))
     if config.authorization.enabled:
         tasks.append(asyncio.create_task(access_inbox.run(stop_event), name="gateway_access_inbox_loop"))
         tasks.append(
@@ -623,6 +631,11 @@ def _bind_manager_client(gateway: "UserGateway", view: GatewayTeamView | None) -
         on_unsolicited=gateway.inbound_messages.handle,
         on_manager_available=gateway.manager_transitions.handle_available,
         on_manager_unavailable=gateway.manager_transitions.handle_unavailable,
+        # The records confirm the routed lead (no transition): the setup results kept for it are sent.
+        on_lead_confirmed=gateway.manager_transitions.handle_lead_confirmed,
+        # A setup, form or signup request left on a closed reply wait and given up on is refused to its task
+        # (assistant_gateway.application.reply_leftovers).
+        on_leftover_lost=gateway._response_coordinator.fail_lost_credential_request,
     )
     if view is None:
         return None
@@ -645,6 +658,11 @@ async def _follow_team_lead_at_start(follower: TeamLeadFollower | None, manager_
                        "event=gateway_team_view_unavailable manager_id=%s", manager_client.manager_id)
         return
     await follower.start()
+    if not follower.view.ready.is_set() and follower.view.refusal is None:
+        # Kept setup results go only to a lead the records name: once they are read, the follower's
+        # transition or confirmation sends them (TeamLeadFollower). Chats may still go to the saved route.
+        logger.info("The setup results kept for the team lead wait until the team's records are read. "
+                    "event=gateway_tool_setup_resend_deferred manager_id=%s", manager_client.manager_id)
 
 
 def _team_commands(
@@ -901,6 +919,9 @@ class UserGateway:
                 manager_named_agent_type=config.manager.named_agent_type,
                 response_route=config.manager.response_queue_name,
                 initial_manager_id=config.manager.manager_agent_id,
+                # A leftover reply is retried as the response receiver retries a message.
+                leftover_attempts=int(config.transport.max_deliver or 1),
+                leftover_retry_seconds=HANDLING_RETRY_DELAY_SECONDS,
             ),
             id_generator=self._id_generator,
             logger=logger,
@@ -1149,6 +1170,8 @@ class UserGateway:
             request_service=self._request_service,
             clock=self._clock,
             event_output=self._event_output,
+            # With a team view the route is the lead follower's (TeamLeadFollower); without one, the saved route.
+            kept_results_wait_for_records=self._team_view is not None,
             logger=logger,
         )
         # An approved access proposal opens its account link forms for the
@@ -1235,6 +1258,8 @@ class UserGateway:
             targets=self._delivery_preferences,
             proactive_sessions=self.proactive_delivery,
             maintenance=self._maintenance_schedules,
+            # Sent on every team-lead-available transition (tool_setup.resend_kept_results).
+            kept_results=self._credential_workflow.tool_setups,
             manager=self._manager_client,
             responses=self._response_coordinator,
             event_output=self._event_output,
@@ -1535,6 +1560,8 @@ class UserGateway:
                     credential_workflow=self._credential_workflow,
                     status_page=self.application.status,
                     stop_event=self._stop_event,
+                    # With a team view the lead follower sends them once the records name the lead.
+                    resend_kept_results_at_start=self._team_lead is None,
                 )
             )
             if self._activity_notices.enabled:
@@ -1552,6 +1579,9 @@ class UserGateway:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks = []
+        # Before the page watches stop: a leftover passed on later could open a
+        # page that nothing watches (reply_leftovers).
+        await self._manager_client.stop_leftover_passes()
         await self._credential_workflow.close()
         self._credential_handoffs.clear()
         await self._activity_notices.close()

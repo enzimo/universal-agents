@@ -2,8 +2,9 @@
 
 An agent task can ask for a setup page (sign-in, account link, team sign-in
 app, outside step) after a permission approval ended the Web Chat HTTP
-response, after an earlier page of the same ``set_up_tools`` run, or from
-delegated work that never had one. The gateway then opens the page for the
+response, after an earlier page of the same ``set_up_tools`` run (including a
+page still queued on the live reply's wait when it closed, which
+``reply_leftovers`` passes on), or from delegated work that never had one. The gateway then opens the page for the
 Web Chat session owner (``tool_setup.GatewayToolSetups``) and keeps the
 page's own secret-free line in the transcript (its receipt, such as "Account
 link form opened for Portainer (your account)."; an outside step's line also
@@ -13,10 +14,13 @@ Chat's live events and the workflow page), never through delivery replay.
 
 A page's card stays listed until that page itself ends (its
 ``ToolSetupRecord`` is no longer waiting), its expiry passes, or its task
-ends (the chat request has a terminal status or a finished run state). The
-pages of one task share a chat request whose status each page's result
-changes, so that status never decides a card on its own (incident
-2026-11-14: finishing one page removed the other open pages' cards). A card
+ends (``request_service.request_task_ended``: a thread's request ends when its
+run finishes, another request at a terminal status). The same rule decides
+whether a new page for the task still opens. The pages of one task share a
+chat request whose status each page's result changes, and the
+team-lead-unavailable transition marks it ``manager_unavailable``, so that
+status never decides a thread's card on its own (incident 2026-11-14:
+finishing one page removed the other open pages' cards). A card
 with a bearer link stays in memory at most ``BEARER_CARD_MAX_LIFETIME``.
 Cards live only in gateway memory, so a gateway restart drops them: a broker
 page is reported unwatched and offered again with a new card
@@ -34,14 +38,14 @@ from assistant_gateway.application.credential_workflow import GatewayCredentialW
 from assistant_gateway.application.secure_results import REQUEST_STATUS_WAITING_FOR_CREDENTIAL
 from assistant_gateway.application.request_service import (
     GatewayRequestService,
-    TERMINAL_REQUEST_STATUSES,
+    request_task_ended,
 )
 from assistant_gateway.application.tool_setup import SETUP_STATUS_WAITING
 from assistant_gateway.application.transcript_service import GatewayTranscriptService
 from assistant_gateway.application.transient_presentation import PendingCredentialAction
 from assistant_gateway.ports.repositories import SessionRepository
 from assistant_gateway.domain.sessions import SessionRecord
-from assistant_gateway.domain.request_state import RUN_STATE_FINISHED, RequestRecord
+from assistant_gateway.domain.request_state import RequestRecord
 from custom_messages.contracts.credentials_v1 import TOOL_SETUP_EXTERNAL_STEP, ToolSetupRequestV1
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 
@@ -118,10 +122,11 @@ class ToolSetupHandoffs:
 
         set_up_tools opens a task's pages together, and they share one chat
         request whose status every page's result changes. So a card follows its
-        own page record, and the chat request matters only once it has ended
-        (a terminal status, or a finished run state for a thread's request).
+        own page record, and the chat request matters only once its task has
+        ended (``request_task_ended``, the rule page admission uses too).
         Before, finishing one page removed every other open page's card
-        (incident 2026-11-14).
+        (incident 2026-11-14), and a page ending while no team lead was known
+        removed them too, because ``manager_unavailable`` counted as the end.
         """
 
         if item.expires_at <= now:
@@ -129,7 +134,7 @@ class ToolSetupHandoffs:
         record = self._requests.get(item.correlation_id)
         if record is None:
             return CARD_CLOSED_REQUEST_MISSING, None
-        if record.status in TERMINAL_REQUEST_STATUSES or record.run_state == RUN_STATE_FINISHED:
+        if request_task_ended(record):
             return CARD_CLOSED_TASK_ENDED, None
         page_status = self._workflow.tool_setups.page_status(item.request_id)
         if page_status is None:
@@ -213,7 +218,7 @@ class ToolSetupHandoffs:
             # A terminal handoff's safe receipt is also its replay tombstone.
             # Never reopen the form or send a second failure for redelivery.
             return True
-        if record.status in TERMINAL_REQUEST_STATUSES:
+        if request_task_ended(record):
             return False
         if len(self._pending) >= 256:
             self._logger.error("event=gateway_credential_handoff_capacity_reached")

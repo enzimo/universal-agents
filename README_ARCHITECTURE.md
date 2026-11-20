@@ -724,13 +724,20 @@ A task waiting on nothing is not running (waiting, paused or ready), is not in
 its agent's queue, and has no reason to wait. Every legitimate reason is listed
 in one place, `custom_agents.task_wait_reasons`, each read from the record the
 runtime saves for it: from the agent's saved work (queue, delegated work, a
-question, a recoverable pause, a person's decision on an access request or a
-`set_up_tools` run, an outside result such as a credential form, an interrupt
-sent to the requester, a running action batch or held reply, an isolated
-recovery, a queue pause), and from team stores, read only when saved work
-explains nothing (a waiting access request, a running plan, a waiting setup run,
-a provider retry timer). A new kind of wait must save a record one of these
-rules can find. No saved record says when the last reason ended, and accepted
+question, a recoverable pause, a person's decision on an access request, a
+finished `set_up_tools` run whose answer the agent holds for the task's lane,
+an outside result such as a credential form, an interrupt sent to the
+requester, a running action batch or held reply, an isolated recovery, a queue
+pause), and from team stores, read only when saved work explains nothing (a
+waiting access request, a running plan, the setup run the task's record names
+while it still waits, a provider retry timer). A new kind of wait must save a
+record one of these rules can find. A setup-run record excuses a task only
+while its run waits or its answer is held for the lane, by the agent process
+that saved the work. The runtime keeps that mark only while a paused turn
+waits for the answer: a failed save of the mark is undone, a dropped turn
+or a resume from a note removes it, and agent start removes every mark,
+since no paused turn survives a restart. A record whose run ended or is
+missing is reported once nothing has resumed the task. No saved record says when the last reason ended, and accepted
 guidance adds history to such a task without moving it, so the wait counts from
 the first pass that sees it: the stuck-work engine takes a per-finding wait
 (`StuckFinding.notice_after`, here `no_progress_after_seconds`), and a pass that
@@ -743,7 +750,7 @@ about 16 hours (2026-11-14) with no condition noticing: its saved workflow had
 queued it to continue, and its turn's result then set it waiting, which removed
 the queue entry.
 
-Four repairs keep work from getting stuck in the first place:
+Five repairs keep work from getting stuck in the first place:
 
 - The team lead starts a replacement worker for a dead agent that still holds
   unfinished work (`custom_agents.orphaned_work_takeover`); the replacement's
@@ -773,6 +780,18 @@ Four repairs keep work from getting stuck in the first place:
   task waits on it accepts the notice, and each agent periodically resumes tasks
   whose requests were decided while the notice went to a previous agent
   (`access_request_runtime.resume_decided_access_waits`).
+- A finished tool setup follows its task the same way: at start, after restart
+  recovery, and on each scheduler pass (at most once a minute), each agent
+  resumes its own tasks whose `set_up_tools` run ended without resuming them
+  (a restart while the answer waited for the lane, a lost wake-up, a run that
+  is not stored, a result whose next step was lost), from a note with the
+  run's result (`tool_setup_run_runtime.resume_ended_setup_runs`). It leaves
+  a run another step is working on, or saved in the last 30 seconds, to the
+  next pass, so its warnings (`event=tool_setup_run_recovered`) name only
+  real lost wake-ups. An agent that drains for another message contract does
+  this too, as it resumes its decided access waits: these are tasks it
+  already holds, the recovery takes over nothing and starts no agent, and a
+  resumed task already ran, so even a draining pool worker starts it.
 - A task that ends with delegated work still running stops it
   (`custom_agents.orphaned_subtasks`), and a worker still reporting on work whose
   request ended is told to stop.
@@ -3074,6 +3093,17 @@ person which command to run or asking whether to start:
    denial, and resumes the turn: the live interrupt is answered, or after an
    agent restart the task resumes from a directive with the same compact
    result. The call returns per tool `ready` and `what_happened`.
+   The task's record of the wait (its `tool_setup_run` blocker) stays until
+   the turn really resumes. A live turn's answer waits in memory until the
+   task's lane is free and the agent is not paused, so the record is first
+   marked with the agent process that holds the answer, and the resumed turn
+   removes only that record just before it runs (matched by run and
+   interrupt id; `task_human_interaction_blockers.clear_answered_blocker`).
+   An answer the paused turn cannot take, because the turn is gone or the
+   answer cannot be converted, resumes the task from the directive instead.
+   Why: until 2026-11-19 the record was deleted when the run ended, so a
+   task whose answer waited behind a busy lane was reported as stuck, and a
+   restart in that window lost the run's result.
 5. The gateway (`assistant_gateway/application/tool_setup.py`) opens the
    matching page through the same broker calls as `/link` and `/auth`, and
    several pages of one task side by side (a sibling page of a task that
@@ -3101,6 +3131,99 @@ person which command to run or asking whether to start:
    a gateway restart, broker pages still waiting are reported as unwatched
    (and offered again); an outside step keeps waiting, because nothing
    watches it. Page addresses are never stored.
+   The same conditional update keeps the task's result in the row
+   (`result_json`, a `ToolSetupResultV1` without any address, and
+   `result_state`: `unsent`, `sent` or `unsendable`), and the result is sent
+   from there (`GatewayToolSetups.resend_kept_results`); the update that
+   marks it sent or unsendable drops the kept copy, which holds the person's
+   account name. It is addressed when
+   it is sent, to the team lead known at that moment, under a NATS message id
+   that names that lead (`secure_result:<kind>:<result id>:<lead id>`): NATS
+   drops a repeated id for 600 seconds, so a copy for a replacement lead must
+   not reuse the old lead's id. When no lead is known, or the publish fails
+   (NATS disconnected), the result stays kept and the chat request is never
+   given a finished status (`secure_results.SecureResultPublisher`). Kept
+   results are sent when a page ends; on every team-lead-available transition
+   (`manager_transitions.handle_available`, after the notice and the apps'
+   hook), which the lead follower reaches through
+   `GatewayManagerClient.set_lead`; when records the follower read name the
+   lead chats already go to (`GatewayManagerClient.confirm_lead`,
+   `manager_transitions.handle_lead_confirmed`, no transition), once per
+   stretch of read records, so a route saved by the previous run whose lead
+   is still live gets them without waiting for a lead change; and by a retry
+   with backoff (1 to 30
+   seconds) after a failed publish or an unexpected error while a lead is
+   known; the retry gives up after eight passes in a row in which a kept
+   result failed with an error (`event=gateway_tool_setup_resend_gave_up`)
+   and the next start or transition tries again, while a pass that cannot
+   even list the kept results (the database is down) is retried like a
+   failed publish. No retry starts once the gateway began to stop
+   (`event=gateway_tool_setup_retry_skipped_closed`); after the next start
+   the lead follower sends what is still kept. The start decision itself
+   sends nothing: the gateway starts its transitions after it, so the
+   follower's first regular check (within 5 seconds) confirms the lead it
+   set or kept at start and sends them. With a team view, kept results go
+   only to a lead that records the follower read named
+   (`GatewayManagerClient.lead_from_records`, set by `set_lead`,
+   `confirm_lead` and the start decision's `note_lead_from_records`,
+   cleared while the records are not read, on a refused join and when the
+   route is cleared). While the team's records are not read yet the follower
+   keeps the saved route, which chats may still reach
+   (`event=gateway_tool_setup_resend_deferred` at start), but no kept result
+   goes to it, not even when a page ends, including start-up page recovery:
+   the previous run's lead may be gone. Such a pass stops with no retry
+   (`event=gateway_tool_setup_resend_waits_for_records`,
+   `reason=lead_not_from_records`), and the follower's transition or
+   confirmation sends the results once the records name the lead. With no
+   lead routed at all, for example while the team lead restarts, the result
+   is kept as `no_route` (`event=gateway_secure_result_not_sent`). A start
+   decision from read records notes that they name the lead without
+   sending, so a page that ends at start sends its result at once. A
+   gateway without a team view, which uses its saved route as it is, sends
+   them at start instead. One pass at a time sends them, oldest first, and
+   reads them afresh, so a result is never sent from two places at once; a
+   missing lead or a failed publish stops the pass, while an error on one
+   result is logged (`event=gateway_tool_setup_resend_failed`) and the pass
+   goes on. A result that can never be sent (its chat no longer exists, or
+   the kept copy cannot be read) is marked `unsendable` and logged once
+   (`event=gateway_tool_setup_result_unsendable`). The stored result leaves out
+   the broker session id, which for an account link is the form's bearer. A
+   result is "sent" once it is accepted into the queue of the lead known
+   then, and nothing sends it again. Two cases can still lose it, as they
+   can lose any message the gateway sends then: a lead that stops before the
+   gateway sees it leave the team's records (at most about 35 seconds); and,
+   while a lead on another message contract drains, a result for a task it
+   still holds, which goes
+   to the new lead the chats go to: that lead does not hold the task, so it
+   tells the person to send a new message, while the draining lead's own
+   setup-run recovery continues the task (`resume_ended_setup_runs`). Moving
+   setup results to protocol 1 ends these cases. The
+   team lead applies a page's result to its run once, before it checks
+   whether the task ended (`tool_setup_run_runtime.apply_page_result`, with
+   the applied ids in `ToolSetupRunV1.results_applied`), and marks it handled
+   only after its follow-up steps finished: the workflow step, the history
+   entry and the next pages, or the answer when the task had ended
+   (`results_handled`). A copy of a handled result is ignored
+   (`event=tool_setup_result_duplicate`) and never answers the person twice;
+   a copy of a result whose handling failed partway, or was cut short by a
+   stop, runs the follow-up steps again
+   (`event=tool_setup_result_handled_again`), so the task still continues as
+   it did when every copy was handled in full. Setup-run recovery
+   (`resume_ended_setup_runs`) may advance such a run first, without waiting
+   for the copy; the copy then still records the page on its workflow step
+   and in the history, and its own `advance` finds nothing left to do. A result never changes a
+   piece that no longer waits, and a run saved by the previous version (no
+   ids) handles a replayed copy as that version did. The gateway logs a
+   publish NATS answered as a duplicate
+   (`event=gateway_durable_publish_duplicate`). Removing a person deletes
+   their setup rows with their chat sessions (`forget_person_records`):
+   without the chat a kept result could never be sent, and the person's tasks
+   end with their removal. The rows do not travel in a team transfer.
+   Rationale (review of the 2026-11-14 incident fixes): the row was marked
+   finished before the send and the result was not kept, so a page that ended
+   while the team lead restarted never reached its task, and the publisher
+   marked the still-running chat request `manager_unavailable`, which closed
+   the task's other cards and refused its later pages.
    The way that ends a page writes the one chat line that closes its card
    (`PageEnding.closing`, else the task's message). The line names the page by kind and the tool by the
    name its page showed: the sign-in name for sign-ins, the catalog's display
@@ -3110,14 +3233,25 @@ person which command to run or asking whether to start:
    source alone, which covers both the person's own `/link` and Mark Done,
    so Mark Done read as an account link with the raw tool id.
    A page that opens after the chat reply closed (usually every page of a run
-   but the first) is listed for Web Chat and the workflow page by
-   `credential_handoff.ToolSetupHandoffs`. A page shown in the live reply is
+   but the first, including one still queued on the reply's wait when it
+   closed, see "Messages left on a closing reply wait" below) is listed for
+   Web Chat and the workflow page by
+   `credential_handoff.ToolSetupHandoffs`. This holds after a reply wait that
+   timed out or was cancelled too: the request still runs, so its late page
+   opens in Web Chat. A chat that cannot show late pages refuses the page and
+   sends the task a `tool_setup_chat_not_waiting` result, so the run never
+   waits on a page that did not open. A page shown in the live reply is
    not listed again: its address goes only into that first no-store response,
    so after a refresh only its history line remains. A listed card stays
    until that page's own `ToolSetupRecord` ends
    (`GatewayToolSetups.page_status`), its expiry
-   passes, or the task ends (the chat request has a terminal status or a
-   finished run state). Cards live only in gateway memory, so a gateway
+   passes, or the task ends (`request_service.request_task_ended`: a thread's
+   request when its run state is finished, another request at a terminal
+   status; the same rule decides whether a new page for the task still
+   opens). A thread's status cannot say it: every page result changes it,
+   and the team-lead-unavailable transition still writes
+   `manager_unavailable` onto a request with an open reply wait while its
+   task resumes when a lead is back. Cards live only in gateway memory, so a gateway
    restart drops them: a broker page is offered again with a new card, while
    an outside step keeps only its history line and its Mark Done button on
    the workflow page. Each removal is logged once
@@ -3414,6 +3548,32 @@ only: its tool use id started in a call to the agent that paused and has not
 finished since. One consequence: a change approved in the Inbox while guidance
 waits is applied before the model reads that guidance. To stop such a change,
 decline it in the Inbox or stop the request.
+A call that paused gets no check after it: a paused Strands agent accepts only
+interrupt answers and refuses a text prompt with a `TypeError`, so the turn
+hands the pause on (`send_interrupt_request_for_result`), and guidance accepted
+while the call ran, also inside the pausing tool, waits for the resumed turn.
+Why: until 2026-11-19 a fresh turn read that guidance and called the paused
+agent with it, so the pause was never saved, the task failed, and the agent
+stayed paused for every later turn on its lane until a restart. The turn also
+marks the agent for replacement as soon as its call returns paused
+(`custom_agents.strands_parts.mark_paused`), so a turn that ends after such a
+call but before saving the pause (a stop recorded as the call paused, an
+error while saving) leaves no stuck agent: the next turn gets a new one,
+logged as `event=strands_agent_rotated_after_interrupt` with no interrupted
+task on the main lane and as `event=parallel_lane_strands_agent_built` on a
+parallel lane. An Objective work-session turn keeps its pause too, at the
+session's limit or with a required skill not yet activated
+(`event=objective_work_boundary_after_pause`). The session records the usage
+up to the pause. The work after the resume is not counted against the
+session budget: each resumed call gets the turn's per-call turn and token
+allowance again, and the step's tool-call cap is not checked after a resume;
+counting resumed work and checking its limits is a follow-up. A required
+skill that is still missing stops the resumed turn before its decision is
+carried out, as it stops a fresh turn
+(`LLMTurnExecutor.yield_for_missing_work_skills`,
+`event=objective_work_session_yield_after_resume`). A session past its limit
+lets the resumed turn finish; its saved status then refuses the next plan
+step, so the session ends with the runtime's degraded checkpoint.
 An explicitly addressed receiver answers `STALE` for a missing task. The gateway
 holds guidance for that request until the lead admits its task, and retries
 with the same idempotency key. Guidance never becomes another root request.
@@ -3481,6 +3641,77 @@ Before upgrading from a version without running-request state, operators must
 finish or stop active interactive work and answer or close pending questions.
 Older request rows are not inferred into the new running state, so leaving
 their tasks active would bypass the new busy-thread protection.
+
+Messages left on a closing reply wait are passed on, not dropped
+(`assistant_gateway/application/reply_leftovers.py`). A wait ends at the first
+message that answers it, but the team lead may already have sent more for the
+same request: `set_up_tools` sends all of a task's setup pages at once, and
+while the gateway opens the first through the broker, the others are queued
+on the same wait. Each wait records how its messages came in. Every way a wait
+ends (answer, timeout, cancellation, error) goes through
+`GatewayManagerClient.unregister_response_channel`, which empties what is left
+in the same step. A task of its own then passes each leftover on, oldest
+first, as if it had arrived after the close:
+
+- one from the response route takes the path of a message that nothing waits
+  for: a late setup page opens, forms fail closed, replies and notifications
+  are delivered, and late guidance answers settle their held copy;
+- one from the operational subject is dropped;
+- the gateway's own notice is not passed on.
+
+On either route an agent status message is ignored, as it is on arrival: the
+gateway learns who leads and who is live only from the team's records
+(`assistant_gateway.team_view`).
+
+A message that nothing waits for, and that arrives while its request's
+leftovers are being passed on, waits for them, so it cannot overtake them. The
+response route is handled one message at a time, so meanwhile every chat's
+replies wait too. That wait therefore gives up after
+`LEFTOVER_ORDER_WAIT_SECONDS` (20 seconds, the longest broker call a leftover
+makes plus delivery), logs `event=gateway_reply_leftover_order_wait_expired`,
+and lets the message go on out of order. Later messages for the request then
+do not wait for those leftovers again, because one has already gone ahead of
+them. Nor do they wait while a leftover is being tried again after a failure:
+the leftover has lost its place, as a message that fails on arrival does. So
+one pass holds the route at most once, for at most that bound.
+
+Each leftover is logged: `event=gateway_reply_leftover_passed_on` or
+`event=gateway_reply_leftover_not_passed_on` with a reason.
+
+A leftover whose handling fails is tried again the way the response receiver
+retries a message on arrival: up to the transport's `max_deliver` tries, 10
+seconds apart, with `event=gateway_reply_leftover_failed` for each failed
+try. The request's later leftovers wait meanwhile. After the last try the
+gateway logs `event=gateway_reply_leftover_gave_up` at error level, and the
+task is told rather than left waiting: a setup, form or signup request is
+refused to its task with a `tool_setup_chat_not_waiting` or failed-form
+result, unless its setup page already has a record, in which case that page's
+own result, expiry or restart recovery reaches the task
+(`GatewayResponseCoordinator.fail_lost_credential_request`).
+
+When the gateway stops, it stops passing leftovers on before it stops its
+page watches, so a leftover page cannot open with nothing watching it. A
+message that arrives on the response route until `GatewayManagerClient.close`
+is still handled as before, so a late page can still open in that window.
+Every leftover
+not passed on, whether its pass was running or had not started, is logged and
+its task is told the same way, while the connection to NATS is still open.
+`GatewayManagerClient.close` repeats this for waits that closed in between. A
+leftover was acknowledged to NATS when it was first queued, so one lost to a
+crash is not delivered again.
+
+Rationale (review of 2026-11-16): closing a wait discarded what it still
+held, so the second page of a setup run got no record, card, result or log
+line, and the run waited forever. Passing leftovers on outside the closing
+task means a cancelled or timed-out waiter never waits on broker calls. The
+caller records the reply that ended the wait before any leftover, because it
+does so before it next pauses (interactive submission, and Web Chat's answer
+to a question), so the Web Chat history keeps the team lead's order. That
+holds for the history only: in other chats the chat app sends the live reply
+after it gets it back, so a leftover can reach the person first, as a message
+arriving just after the close already could. The retries and the result to the task at give-up and
+shutdown follow the project review of PR #161: a leftover that failed once,
+or was cut off by a restart, must not leave its task waiting forever.
 
 Delivery receipts use the durable team-lead route, so they can wait for a
 replacement lead before the gateway sees it in the team's records. Repeated
@@ -6127,7 +6358,9 @@ finish what they already admitted. The host's record says `draining` meanwhile; 
 agents' sessions are still renewed, so requests about the tasks they hold still reach them.
 Startup counts as held work until recovery finishes, so a drain cannot close controls
 before saved tasks become visible. A draining startup restores its own work and adopts
-no work from gone agents. Pool-worker wind-down waits for recovery too, so it returns
+no work from gone agents; it still resumes its own tasks whose setup run ended or whose
+access requests were decided meanwhile (`resume_ended_setup_runs`,
+`resume_decided_access_waits`). Pool-worker wind-down waits for recovery too, so it returns
 the complete set of saved tasks. Admission reads the leaf module `contract_drain_state`; drain
 execution can depend on turn and control handlers without creating an import cycle.
 Once no agent is starting or holds an unfinished task or a waiting request, the host closes their sessions
@@ -6370,7 +6603,11 @@ the gateway acts on that view in four places.
   lead), and it is checked as soon as they are read. Afterwards it checks on every change
   and every 5 seconds, and a differing route goes through the usual transitions (the
   current lead unavailable, so replies waiting on a dead route are failed, then the new one
-  available). Among several lead records it keeps the current lead while it is live, and
+  available). Read records that name the lead chats already go to confirm it once per
+  stretch of read records (`confirm_lead`, no transition), so the setup results kept for
+  the team lead are sent even when the lead did not change; the start decision is never
+  confirmed, because the transitions start after it, so the first regular check confirms
+  it. Among several lead records it keeps the current lead while it is live, and
   otherwise takes the one whose record changed last (a crashed run's lead has not changed
   since the crash); it never flips between them (`event=gateway_multiple_leads`). A lead
   whose process runs another contract takes no new chats but finishes the tasks it holds,

@@ -372,6 +372,12 @@ class GatewayInteractiveSubmissionService:
         response = await self._submit_new_task(
             thread, task=task, correlation_id=correlation_id, parallel_thread=parallel_thread
         )
+        # Record the reply before this code next pauses (no await in between).
+        # Messages still queued when the reply's wait closed are passed on in a
+        # task that runs only after that pause (reply_leftovers), so the chat
+        # history keeps the order the team lead sent: the first setup page's
+        # line, then the next page's
+        # (tests/test_gateway_reply_leftovers.py::test_two_setup_pages_through_a_web_chat_send_keep_their_order).
         return self._append_response(
             session=thread.session,
             route=thread.route,

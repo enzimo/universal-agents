@@ -533,6 +533,7 @@ async def test_a_resumed_turn_stopped_after_its_model_call_ends_background_proce
         _logger=LOGGER,
         turn_executor=SimpleNamespace(
             _apply_agent_result_transformer=lambda _, result: result,
+            yield_for_missing_work_skills=AsyncMock(return_value=None),  # no work session
             decode_result=lambda **_: SimpleNamespace(decision=None, structured_output_details=None),
         ),
     )

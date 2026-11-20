@@ -628,6 +628,12 @@ class LeadRoute(Protocol):
 
     async def set_lead(self, lead_id: str, *, source: str) -> None: ...
 
+    async def confirm_lead(self, lead_id: str, *, source: str) -> None: ...
+
+    async def note_lead_from_records(self, lead_id: str) -> None: ...
+
+    async def forget_lead_from_records(self) -> None: ...
+
     async def mark_manager_unavailable(self, *, expected_manager_id: Optional[str] = None, reason: str,
                                        source: str = ..., kept_replies: frozenset[str] = ...) -> None: ...
 
@@ -672,6 +678,19 @@ class TeamLeadFollower:
       second notice (critique C01). Until then every unavailable transition except a refused
       join names them as ``kept_replies``, so a later lead that leaves fails only its own
       (review R1).
+    - **Kept setup results** (``tool_setup.GatewayToolSetups.resend_kept_results``) go to a
+      lead the records name. A lead set after the start sends them through its available
+      transition. When read records name the lead already routed to, it confirms that lead
+      once per stretch of read records (``LeadRoute.confirm_lead``, no transition), so a
+      route saved by the previous run whose lead is still live gets them without waiting for
+      a lead change; records that stop being read and come back confirm it again, and only
+      results still unsent go. The start decision is never confirmed: the gateway starts its
+      transitions after it (``UserGateway.connect``), so the first regular check confirms the
+      lead set or kept at start; a start decision from read records only notes that they name
+      the lead (``LeadRoute.note_lead_from_records``). While the records are not read or the
+      join is refused, no record names the routed lead (``LeadRoute.forget_lead_from_records``),
+      and the gateway sends no kept result to it, not even when a page ends: a route saved by
+      the previous run may name a lead that is gone (``GatewayManagerClient.lead_from_records``).
     """
 
     def __init__(self, view: GatewayTeamView, route: LeadRoute, waiting: WaitingReplies, *,
@@ -684,6 +703,9 @@ class TeamLeadFollower:
         # The lead on another contract whose people's waiting replies were kept, and those replies.
         self._kept: dict[str, frozenset[str]] = {}
         self._leads_logged: frozenset[str] = frozenset()
+        # The lead confirmed (or set after the start) during the current stretch of read records; cleared while
+        # the records are not read or a refused join holds, so the next read confirms again.
+        self._confirmed: Optional[str] = None
 
     @property
     def view(self) -> GatewayTeamView:
@@ -742,21 +764,50 @@ class TeamLeadFollower:
         current = self._route.manager_id
         refusal = self._view.refusal
         if refusal is not None:
+            await self._no_record_names_the_lead()
             if current is not None:
                 await self._route.mark_manager_unavailable(
                     expected_manager_id=current, source=SOURCE,
                     reason=f"the installation refused the gateway's join ({refusal.outcome}), so no lead can be seen")
             return
         if not self._view.ready.is_set():
+            await self._no_record_names_the_lead()
             return
         live = self._view.live()
         chosen = self._choose(current, live)
         if chosen == current:
+            await self._confirm(chosen, at_start=at_start)
             return
         if current is not None and (chosen is None or not at_start):
             await self._leave(current, live.get(current))
         if chosen is not None:
             await self._route.set_lead(chosen, source=SOURCE)
+        # After the start, set_lead's available transition sent the kept setup results; the start decision is
+        # never confirmed, because the transitions do not run yet (class docstring).
+        self._confirmed = None if at_start else chosen
+
+    async def _confirm(self, lead: Optional[str], *, at_start: bool) -> None:
+        """Records that were read name the routed lead: confirm it once per stretch of read records
+        (``LeadRoute.confirm_lead``), but never at start (class docstring)."""
+
+        if lead is None:
+            return
+        if at_start:
+            # The transitions do not run yet: only note that read records name the lead, so a page ending at start
+            # may send its result; the first regular check confirms the lead and sends the kept results.
+            await self._route.note_lead_from_records(lead)
+            return
+        if self._confirmed == lead:
+            return
+        await self._route.confirm_lead(lead, source=SOURCE)
+        self._confirmed = lead
+
+    async def _no_record_names_the_lead(self) -> None:
+        """The records are not read, or the join was refused: confirm the lead again once records name it, and
+        until then keep kept setup results from the route (``LeadRoute.forget_lead_from_records``)."""
+
+        self._confirmed = None
+        await self._route.forget_lead_from_records()
 
     async def _leave(self, current: str, record: Optional[TeamAgent]) -> None:
         """Mark the current lead unavailable: gone from the records, or live on another contract."""
