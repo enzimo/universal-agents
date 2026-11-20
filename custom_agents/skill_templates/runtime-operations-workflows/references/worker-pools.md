@@ -97,7 +97,7 @@ The runtime gives you a `worker_pool_review_...` task when:
 |---|---|
 | `capacity` | A pool (or the team, scope `*`) reached about 95% of its limit while tasks waited. For small pools that is the limit itself. |
 | `provider_limited` | Tasks of a type keep hitting the model provider's limits (rate limit, quota, overload), or a worker waits one out while tasks wait. No workers are added meanwhile. |
-| `start_failed` | Workers the runtime needed could not be started, or stopped before they were ready; the evidence names the last failure. |
+| `start_failed` | Two starts of a type in a row failed (crashed, timed out at startup, or were refused) while tasks waited, or the hourly start limit refused a start. The review names the failure; the evidence has `start_refused_because` and `pool.last_start_failure`. One failure alone only delays the next start. |
 
 Each review works for the team's maintenance owner (an administrator), so
 `notify_user` reaches them. Check `inspect_worker_pools`, then choose:
@@ -114,14 +114,19 @@ Each review works for the team's maintenance owner (an administrator), so
   finish their work and leave; nothing running is interrupted.
 
 Never choose A or B for `provider_limited`: more workers make more calls and
-more refusals. Neither a pool size nor a higher start-rate limit fixes
-`start_failed`: the runtime already waits longer before each next try
-(`next_start_waits_seconds`), and more starts only fail more often. Read
+more refusals. Neither a pool size nor a higher start-rate limit fixes a
+`start_failed` review that names a failure: the runtime already waits longer
+before each next try (`next_start_waits_seconds`) and tries one start at a
+time, and more starts only fail more often. Read `start_refused_because` and
 `last_start_failure`, check the agent type's definition and the operator's
 denied types, and tell an administrator the failure and what to change. A
-refusal by the hourly start limit after many failed starts is a symptom; report
-the failure behind it. Above an operator ceiling only an administrator
-can help (`agent.worker_pools` in the configuration); say so.
+refusal by the hourly start limit after failed starts is a symptom; report the
+failure behind it. When the review says the hourly limit was reached although
+no start failed, check why workers of the type start so often (a short idle
+time with a steady flow of tasks, or `last_start_end_not_counted`: starts the
+runtime stopped or an edit ended) before suggesting a higher
+`max_launches_per_type_per_hour`. Above an operator ceiling only an
+administrator can help (`agent.worker_pools` in the configuration); say so.
 
 When the review says the problem keeps coming back, tell administrators with
 `notify_user`: what happens, how often, the likely cause and your
@@ -136,6 +141,8 @@ Do not delegate the waiting tasks again; they are still queued.
 |---|---|
 | Tasks wait, `workers_running` 0, `decision` mentions a start problem | A worker cannot start; see the open `start_failed` problem and tell an administrator. |
 | `failed_starts_in_row` > 0 and `decision` says the next start waits | Workers of the type stop before they are ready. The runtime tries again after a growing wait; report `last_start_failure` to an administrator. |
+| `decision` says one more start is in progress | After failed starts the runtime tries one start at a time and waits for it to become ready or fail. |
+| `starts_ended_not_counted` > 0 | Starts the runtime stopped (a restart) or an edit ended. They are not failures of the type and hold nothing back, but they count toward the hourly start limit. |
 | Tasks wait, pool at its size, nobody free | Normal under load. Choose A, B or C. |
 | `workers_waiting_out_provider_limit` > 0 | The provider refuses calls; workers retry on their own after a growing wait. Choose C or D. |
 | `workers_unknown` > 0 | A start whose process cannot be checked holds a slot until it is proven gone; tell an administrator if it stays. |

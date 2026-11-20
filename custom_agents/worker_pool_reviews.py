@@ -8,7 +8,10 @@ three kinds of problem per worker type (``*`` for the whole team):
 - ``provider_limited``: ``provider_limit.review_events`` tasks of the type hit
   model provider limits within ``provider_limit.review_window_minutes``, or a
   worker of the type is waiting one out while tasks wait;
-- ``start_failed``: a worker the controller needed could not be started.
+- ``start_failed``: workers the controller needed could not be started: two
+  starts of the type in a row failed (crashed, timed out, or were refused)
+  while tasks waited, or the hourly start limit refused a start. The review
+  and the administrators' notice name the failure (``_start_failure_text``).
 
 Each becomes one open incident (``storage.worker_pool_repository``) while it
 lasts. TeamArchitect gets a review task when the incident opens and again
@@ -76,6 +79,58 @@ _TITLES = {
 
 def _scope_label(agent_type: str) -> str:
     return "The team" if agent_type == TEAM_SCOPE else f"The {agent_type} worker pool"
+
+
+# A stored reason is short by construction (custom_agents.agent_instantiation_service);
+# this bound keeps any one from crowding a review or a notice.
+_REASON_MAX_CHARS = 300
+
+
+def _shown(value: Any) -> str:
+    text = str(value or "").strip()
+    return text[:_REASON_MAX_CHARS] if text else "no reason recorded"
+
+
+def _start_failure_text(details: dict[str, Any], settings: WorkerPoolsConfig) -> tuple[str, str]:
+    """What a ``start_failed`` incident's evidence says: (what happened, what to do), as sentences.
+
+    Used by TeamArchitect's review and administrators' notice alike. The
+    failed starts decide first: one incident's evidence is rewritten every
+    pass and can hold both failed starts and the hourly limit's mark, and then
+    the failure is the cause and the limit only its symptom. Before
+    2026-11-20 the review said to check the start limits and the notice named
+    no failure, so in the 2026-11-19 incident people looked at the limit, not
+    at the crash behind it.
+    """
+
+    pool = details.get("pool") or {}
+    if pool.get("failed_starts_in_row") or not details.get("hourly_start_limit_reached"):
+        happened = (
+            "Workers of this type failed to start or stopped before they were ready. "
+            f"Latest failure: {_shown(details.get('start_refused_because'))}."
+        )
+        advice = (
+            "Neither a larger pool nor a higher start limit fixes this: the runtime "
+            "already waits longer before each next start, and more starts only fail "
+            "more often. Fix the failure: check the agent type's definition, the "
+            "operator's denied types and the runtime log (event=worker_start_failed)."
+        )
+        return happened, advice
+    happened = (
+        "The hourly start limit (agent.worker_pools.max_launches_per_type_per_hour, "
+        f"{settings.max_launches_per_type_per_hour}) refused new workers of this type "
+        "although no start failed."
+    )
+    if pool.get("starts_ended_not_counted"):
+        happened += (
+            f" {pool['starts_ended_not_counted']} start(s) ended for a reason that does "
+            f"not count as a failure; the latest: {_shown(pool.get('last_start_end_not_counted'))}."
+        )
+    advice = (
+        "Check why workers of this type are started so often (a short idle time with "
+        "a steady flow of tasks, or starts the runtime ended) before raising the limit."
+    )
+    return happened, advice
 
 
 def _provider_limit_evidence(
@@ -295,11 +350,15 @@ def _instructions(incident: WorkerPoolIncidentV1, *, recurring: bool, recurrence
             "limit is lower than the pool. Workers already wait and retry on their own.",
         ]
     elif incident.kind == INCIDENT_START_FAILED:
+        happened, advice = _start_failure_text(incident.details, settings)
         lines += [
             "",
-            "A worker could not be started; the evidence says why. A pool size does not fix "
-            "this. Check the agent type's definition and the operator's denied types and start "
-            "limits; tell administrators what they need to change.",
+            happened,
+            advice,
+            "The evidence has the details: details.start_refused_because and details.pool "
+            "(last_start_failure, failed_starts_in_row, next_start_waits_seconds, "
+            "last_start_end_not_counted). Tell administrators with notify_user what fails "
+            "and what to change; A to D do not help here.",
         ]
     else:
         lines += [
@@ -429,9 +488,8 @@ class RecurringPoolProblems:
             text = (
                 f"{scope} {_TITLES[incident.kind]}"
                 + (f" (it came back {recurrences} times within {self.settings.recurring_incident_window_hours:g} hours)" if recurring else "")
-                + ". TeamArchitect was given a review and may change pool sizes within the "
-                "operator ceilings (agent.worker_pools); check its report, the Status page and "
-                "the worker pool settings."
+                + ". "
+                + self._next_steps(incident)
             )
             found.append(
                 StuckFinding(
@@ -447,6 +505,18 @@ class RecurringPoolProblems:
                 )
             )
         return found
+
+    def _next_steps(self, incident: WorkerPoolIncidentV1) -> str:
+        """The notice's text after its title: the failure for start_failed, the pool sizes otherwise."""
+
+        if incident.kind == INCIDENT_START_FAILED:
+            happened, advice = _start_failure_text(incident.details, self.settings)
+            return f"{happened} {advice} TeamArchitect was given a review."
+        return (
+            "TeamArchitect was given a review and may change pool sizes within the "
+            "operator ceilings (agent.worker_pools); check its report, the Status page and "
+            "the worker pool settings."
+        )
 
     def recovery(self, incident: StuckWorkIncidentV1) -> Recovery:
         agent_type, _, kind = incident.subject_id.partition(":")

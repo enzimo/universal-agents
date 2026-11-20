@@ -22,8 +22,9 @@ and decides (``decide``):
 - a worker of the type is waiting out a provider limit: start none;
 - the type's latest starts failed (``start_history``): wait
   ``FAILED_START_RETRY_SECONDS`` after the last failure, twice as long for each
-  further failure in a row, up to ``FAILED_START_MAX_RETRY_SECONDS``, then try
-  one more;
+  further failure in a row, up to ``FAILED_START_MAX_RETRY_SECONDS``; then
+  start exactly one, and none while that one is still starting
+  (``_held_after_failed_starts``);
 - more workers than the pool size (TeamArchitect lowered it): idle ones leave
   now, busy ones stop asking for work and leave when they hold none.
 
@@ -31,19 +32,24 @@ Problems become incidents (``storage.worker_pool_repository``) that
 ``custom_agents.worker_pool_reviews`` turns into reviews for TeamArchitect and,
 when they keep coming back, notices for administrators: a pool or the team at
 ``capacity_warning_ratio`` of its limit while tasks wait (``capacity``), a type
-whose provider keeps refusing calls (``provider_limited``), and a worker that
-could not be started (``start_failed``).
+whose provider keeps refusing calls (``provider_limited``), and workers that
+could not be started (``start_failed``: ``START_FAILURES_BEFORE_REVIEW`` starts
+in a row failed while tasks wait, or the hourly start limit refused a start).
 
-A start counts as failed when the worker never became ready: the launcher
-refused it, or the worker crashed or stopped before it was ready (its start
-record ends ``failed`` with the reason, ``strands_team.instantiate_agent_type``).
-A start counts as successful only once its worker is ready. Until 2026-11-19 an
-accepted start counted as success at once, and the controller started a new
-worker every pass while each one crashed at start (the work stream had reached
-its NATS consumer limit). It made 60 starts in six minutes, and the hourly
-start limit then refused every start. TeamArchitect saw only that refusal, not
-the crash. The hourly-limit refusal is now logged when it begins and when it
-ends, not every pass, and its review names the last real failure.
+A start counts as failed when the worker never became ready for a reason that
+says something about its type: it crashed, its startup timed out, or the
+launcher refused it (its start record ends ``failed`` with the reason,
+``custom_agents.agent_instantiation_service``). Starts the runtime ended (a
+stop, restart cleanup), starts ended by an edit made while they started (a
+schedule's policy, the definition, a limit) and records an older release wrote
+without a reason do not count (``counts_as_failed_start``). A start counts as
+successful only once its worker is ready. Until 2026-11-19 an accepted start
+counted as success at once, and the controller started a new worker every pass
+while each one crashed at start (the work stream had reached its NATS consumer
+limit). It made 60 starts in six minutes, and the hourly start limit then
+refused every start. TeamArchitect saw only that refusal, not the crash. The
+hourly-limit refusal is now logged when it begins and when it ends (a worker
+started, or no tasks wait), and the review and the notice name the failure.
 
 Pool workers serve every person's tasks; their starts are recorded for the
 team's pool service identity (``pool_launch_owner``), and access stays decided
@@ -120,8 +126,13 @@ def start_history(
     workers crash at start fails for all of them. Starts still in progress are
     skipped, and so are ends that say nothing about the type (restart cleanup,
     the runtime stopping, an edit during the start, a record without a reason);
-    a start that became ready ends the count, and starts created before
-    ``since`` are not read.
+    a start that became ready ends the count.
+
+    Starts whose record last changed before ``since`` are not read: for a
+    failed start that is when it ended, not when it was made, so two starts
+    that each hang for 30 minutes until their startup timeout still count as
+    two in a row (review finding C17). The newest failure is the one that
+    ended last.
     """
 
     of_type = sorted(
@@ -129,7 +140,7 @@ def start_history(
             record
             for record in launches
             if record.named_agent_type == agent_type
-            and (since is None or record.created_at_utc >= since)
+            and (since is None or record.updated_at_utc >= since)
         ),
         key=lambda record: record.created_at_utc,
         reverse=True,
@@ -144,14 +155,15 @@ def start_history(
             ended.append(record)
     failed = [record for record in ended if counts_as_failed_start(record.reason)]
     uncounted = [record for record in ended if not counts_as_failed_start(record.reason)]
-    newest_failure = failed[0] if failed else None
+    newest_failure = max(failed, key=lambda record: record.updated_at_utc, default=None)
+    newest_uncounted = max(uncounted, key=lambda record: record.updated_at_utc, default=None)
     return StartHistory(
         failures_in_row=len(failed),
         last_failure_at=newest_failure.updated_at_utc if newest_failure else None,
         last_failure_reason=newest_failure.reason if newest_failure else None,
         recovered=recovered and not failed,
         uncounted_ends=len(uncounted),
-        last_uncounted_reason=uncounted[0].reason if uncounted else None,
+        last_uncounted_reason=newest_uncounted.reason if newest_uncounted else None,
         starts_in_progress=sum(
             1 for record in of_type if record.state in ACTIVE_LAUNCH_STATES and record.ready_at_utc is None
         ),

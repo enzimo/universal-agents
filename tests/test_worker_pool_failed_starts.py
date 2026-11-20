@@ -120,6 +120,19 @@ def test_failures_older_than_the_start_limit_window_no_longer_count() -> None:
     assert start_history(launches, TYPE, since=NOW - timedelta(minutes=10)) == StartHistory()
 
 
+def test_failed_starts_count_by_when_they_ended() -> None:
+    """Critique C17: two 30-minute startup timeouts are two failures in a row, though made over an hour apart."""
+
+    first = make_launch(named_agent_type=TYPE, state=AgentLaunchState.FAILED, reason=STARTUP_TIMED_OUT,
+                        created_at_utc=NOW - timedelta(minutes=95), updated_at_utc=NOW - timedelta(minutes=35))
+    second = make_launch(named_agent_type=TYPE, state=AgentLaunchState.FAILED, reason=CRASH,
+                         created_at_utc=NOW - timedelta(minutes=34), updated_at_utc=NOW - timedelta(minutes=50))
+    history = start_history([first, second], TYPE, since=NOW - timedelta(hours=1))
+    assert history.failures_in_row == 2
+    # The newest failure is the one that ended last, which is the older start here.
+    assert (history.last_failure_at, history.last_failure_reason) == (NOW - timedelta(minutes=35), STARTUP_TIMED_OUT)
+
+
 def test_a_type_never_started_has_no_history() -> None:
     assert start_history([], TYPE) == StartHistory()
 
@@ -272,6 +285,22 @@ def _three_failures_the_last_50_seconds_ago():
                     updated_at_utc=NOW - timedelta(seconds=90 - index * 20))
         for index in range(3)
     ]
+
+
+def test_the_wait_after_failed_starts_holds_the_next_start() -> None:
+    """Critique C18: three failures, the last 10 s ago: 30 s of the 40 s wait remain, and nothing starts."""
+
+    launches = [
+        make_launch(named_agent_type=TYPE, state=AgentLaunchState.FAILED, reason=CRASH,
+                    created_at_utc=NOW - timedelta(seconds=60 - index * 20),
+                    updated_at_utc=NOW - timedelta(seconds=50 - index * 20))
+        for index in range(3)
+    ]
+    observation = _observed(launches, waiting=6, oldest_wait_seconds=600.0)
+    assert observation.start_retry_in_seconds == 30.0
+    decision = decide(observation, team_active=0, team_limit_value=20, settings=WorkerPoolsConfig())
+    assert decision.starts == 0 and decision.reason.endswith("the next start waits 30 s")
+    assert _observed([]).start_retry_in_seconds == 0.0
 
 
 def test_no_more_starts_while_the_retry_after_failures_is_still_starting() -> None:

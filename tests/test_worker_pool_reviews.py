@@ -24,6 +24,9 @@ from storage.worker_pool_repository import (
 )
 
 WORKER_TYPE = "WebResearchAgent"
+# The real review admission, kept before the ``world`` fixture replaces it.
+REAL_OPEN_REVIEW = reviews.open_review
+CRASH = "crashed_before_ready: BadRequestError (NATS 10026: maximum consumers limit reached)"
 
 
 class _Runtime:
@@ -201,6 +204,126 @@ def test_review_instructions_steer_the_choice_by_problem():
         return reviews._instructions(incident, recurring=False, recurrences=1, settings=_settings(), **kwargs)
 
     assert "A and B make this worse" in text(INCIDENT_PROVIDER_LIMITED)
-    assert "A pool size does not fix this" in text(INCIDENT_START_FAILED)
+    assert "Neither a larger pool nor a higher start limit fixes this" in text(INCIDENT_START_FAILED)
     for kind in (INCIDENT_CAPACITY, INCIDENT_PROVIDER_LIMITED, INCIDENT_START_FAILED):
         assert "D. fewer workers" in text(kind)
+
+
+# -- what TeamArchitect and administrators read about a start_failed problem ---------
+
+FAILED_DETAILS = {
+    "pool": {"failed_starts_in_row": 2, "last_start_failure": CRASH},
+    "start_refused_because": CRASH,
+}
+UNCOUNTED = "launch_policy_revoked_before_readiness"
+LIMIT_DETAILS = {
+    "pool": {"failed_starts_in_row": 0, "starts_ended_not_counted": 4, "last_start_end_not_counted": UNCOUNTED},
+    "start_refused_because": "worker_launch_rate_limit",
+    "hourly_start_limit_reached": True,
+}
+
+
+async def _review_instructions(monkeypatch, details: dict) -> str:
+    """The text TeamArchitect's review task starts with, from the real open_review, before its evidence."""
+
+    from storage.worker_pool_repository import WorkerPoolIncidentV1
+
+    monkeypatch.setattr(
+        "custom_agents.task_context_runtime.sign_for_maintenance_owner", lambda _agent, meta, **_kw: meta
+    )
+    captured: dict = {}
+
+    async def admit(*, task_request, msg_header, msg_meta) -> None:
+        captured["task"] = task_request
+
+    agent = SimpleNamespace(id="lead", name="lead", team_id="team", _handle_task_request=admit)
+    now = datetime.now(timezone.utc)
+    incident = WorkerPoolIncidentV1(
+        incident_id="i", team_id="team", agent_type=WORKER_TYPE, kind=INCIDENT_START_FAILED,
+        opened_at_utc=now, last_seen_at_utc=now, details=details,
+    )
+    assert await REAL_OPEN_REVIEW(agent, incident, recurrences=1, recurring=False, settings=_settings())
+    instructions, _, evidence = captured["task"].problem_statement.partition("\n\nEvidence:\n")
+    assert evidence  # the evidence still follows
+    return instructions
+
+
+def _notice_text(world, details: dict) -> str:
+    worker_pool_repository(world.agent).record_incident(
+        team_id="team", agent_type=WORKER_TYPE, kind=INCIDENT_START_FAILED, details=details,
+    )
+    (finding,) = reviews.RecurringPoolProblems(world.agent, _settings()).findings(datetime.now(timezone.utc))
+    return finding.message.text
+
+
+@pytest.mark.asyncio
+async def test_the_review_names_the_failure_and_says_a_higher_limit_does_not_help(monkeypatch):
+    """Review finding EVD-2: the review said to check the start limits, the advice of the 2026-11-19 incident."""
+
+    instructions = await _review_instructions(monkeypatch, FAILED_DETAILS)
+    assert f"Latest failure: {CRASH}." in instructions
+    assert "Neither a larger pool nor a higher start limit fixes this" in instructions
+    assert "last_start_failure" in instructions
+    assert "and start limits" not in instructions
+
+
+def test_the_administrators_notice_names_the_failure_not_pool_sizes(world):
+    text = _notice_text(world, FAILED_DETAILS)
+    assert f"Latest failure: {CRASH}." in text
+    assert "Neither a larger pool nor a higher start limit fixes this" in text
+    assert "pool sizes" not in text
+
+
+@pytest.mark.asyncio
+async def test_the_hourly_limit_with_no_failed_start_points_at_how_often_workers_start(monkeypatch, world):
+    """Critique C03: then the limit, or why workers start so often, is what to look at."""
+
+    instructions = await _review_instructions(monkeypatch, LIMIT_DETAILS)
+    text = _notice_text(world, LIMIT_DETAILS)
+    for shown in (instructions, text):
+        assert "refused new workers of this type although no start failed" in shown
+        assert "max_launches_per_type_per_hour, 60" in shown
+        assert f"4 start(s) ended for a reason that does not count as a failure; the latest: {UNCOUNTED}." in shown
+        assert "started so often" in shown
+        assert "Neither a larger pool nor a higher start limit fixes this" not in shown
+
+
+@pytest.mark.asyncio
+async def test_failed_starts_decide_the_text_when_the_hourly_limit_also_refused(monkeypatch):
+    details = {**FAILED_DETAILS, "hourly_start_limit_reached": True,
+               "start_refused_because": f"worker_launch_rate_limit; the last 2 start(s) failed: {CRASH}"}
+    instructions = await _review_instructions(monkeypatch, details)
+    assert f"the last 2 start(s) failed: {CRASH}" in instructions
+    assert "although no start failed" not in instructions
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_start_leaves_an_open_start_problem_open(world):
+    """Review finding EVD-1 as an outcome (critique C19): an hourly-limit problem stays open after an accepted start.
+
+    The accepted worker may still crash; only one that becomes ready ends the
+    problem. Counting acceptance as success closed it at once and told
+    administrators it works again.
+    """
+
+    from custom_agents.worker_pool_controller import PoolDecision, WorkerPoolController
+    from custom_messages.contracts.schedule_worker_v1 import WORKER_LAUNCH_RATE_LIMIT, AgentLaunchResultV1
+
+    world.agent._pool_rate_limited_types = set()
+    results = [
+        AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT),
+        AgentLaunchResultV1(status="starting", agent_id="w", launch_id="l"),
+    ]
+    controller = WorkerPoolController(world.agent)
+    controller._launch = lambda _agent_type: results.pop(0)
+    for _ in range(2):
+        incidents = reviews.WorkerPoolIncidents(world.agent, _settings())
+        observation = _observation(failed_starts_in_row=1, last_start_failure=CRASH)
+        _report_start_history(observation, incidents)
+        await controller._start(observation, PoolDecision(1, "start"), incidents)
+        await incidents.settle()
+    assert results == []
+    assert [incident.kind for incident in worker_pool_repository(world.agent).list_open_incidents("team")] == [
+        INCIDENT_START_FAILED
+    ]
+    assert [item["kind"] for item in world.opened] == [INCIDENT_START_FAILED]

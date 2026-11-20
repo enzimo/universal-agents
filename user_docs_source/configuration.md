@@ -894,11 +894,16 @@ agent:
 ```
 
 A worker that fails to start, or stops before it is ready, counts as a failed
-start. While tasks wait, TeamArchitect gets a review naming the failure. The
-next start of that type waits 10 seconds, twice as long after each further
-failure in a row, up to 10 minutes. A worker of the type that becomes ready
-resets the wait. A type whose workers keep crashing is tried about 11 times in
-its first hour instead of reaching `max_launches_per_type_per_hour`.
+start of its type. Starts the runtime stopped itself, for example during a
+restart, and starts ended because someone changed a schedule or the agent
+definition at that moment, do not count. The next start of a type waits 10
+seconds after a failure, twice as long after each further failure in a row,
+up to 10 minutes, and only one start is tried at a time. A worker of the type
+that becomes ready resets the wait. A type whose workers keep crashing is
+tried about 11 times in its first hour instead of reaching
+`max_launches_per_type_per_hour`. When two starts in a row fail while tasks
+wait, TeamArchitect gets a review and administrators get an Inbox notice; both
+name the failure. A single failure only delays the next start.
 
 TeamArchitect sets pool sizes itself inside the ceilings, for a while or for
 good, when it reviews a pool at its limit, a model provider that keeps refusing
