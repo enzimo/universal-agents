@@ -60,7 +60,9 @@ def _record(session_key: str, title: str, **fields: object) -> WebChatThreadReco
     return WebChatThreadRecord(**values)  # type: ignore[arg-type]
 
 
-def _samples() -> list[_Sample]:
+def _samples(now: datetime) -> list[_Sample]:
+    # The Portainer form is still open for a quarter of an hour.
+    form_open_until = (now + timedelta(minutes=15)).isoformat()
     offsite = [
         ("user", "Can you find three venues within two hours of the office for 20 people in March?", 1500),
         ("assistant", "Five venues fit; three are within budget: **Lakeside Lodge**, The Old Mill and Pine Hollow.", 1490),
@@ -70,7 +72,8 @@ def _samples() -> list[_Sample]:
     ]
     return [
         _Sample(_record("website:web-chat:portainer", "Portainer stack health",
-                        running_request_status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL, has_waiting_credential_form=True),
+                        running_request_status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
+                        credential_form_expiries=(form_open_until,)),
                 [("user", "Can you check which Portainer stacks are unhealthy?", 2),
                  ("assistant", "I need a Portainer API token to read your stacks. I've asked for one below.", 1)]),
         _Sample(_record("website:web-chat:github", "Finish the GitHub sign-in", has_waiting_setup=True),
@@ -111,7 +114,7 @@ class PreviewThreads:
 
     def __init__(self, now: datetime) -> None:
         self._started = now
-        self._samples = {sample.record.session_key: sample for sample in _samples()}
+        self._samples = {sample.record.session_key: sample for sample in _samples(now)}
         for sample in self._samples.values():
             self._refresh(sample)
             if sample.record.hidden_as == ThreadHiddenAs.SNOOZED.value:

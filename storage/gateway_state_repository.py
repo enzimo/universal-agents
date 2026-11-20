@@ -2003,10 +2003,6 @@ class _RelationalGatewayStateRepository:
                     SELECT ts.session_key FROM gateway_tool_setups ts
                     WHERE ts.status = {bind} AND ts.person_id = {bind}
                 ) AS has_waiting_setup,
-                s.session_key IN (
-                    SELECT cc.session_key FROM gateway_credential_collections cc
-                    WHERE cc.person_id = {bind}
-                ) AS has_waiting_credential_form,
                 s.pinned,
                 s.hidden_as,
                 s.hidden_until,
@@ -2031,21 +2027,31 @@ class _RelationalGatewayStateRepository:
         params: list[Any] = [*ordinary, *ordinary, RUN_STATE_RUNNING, PendingQueryStatus.OPEN.value]
         # The setup pages' and credential forms' person, bound so each
         # subquery runs once per query.
-        params.extend([TOOL_SETUP_STATUS_WAITING, owner, owner, ThreadHiddenAs.SNOOZED.value, *_TEAM_POSTED_PARAMS])
+        params.extend([TOOL_SETUP_STATUS_WAITING, owner, ThreadHiddenAs.SNOOZED.value, *_TEAM_POSTED_PARAMS])
         if include_last_message:
             params.extend(ordinary)
         params.extend([channel_name, chat_id, owner, limit])
         with self._connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
+            # The person's credential forms, once per query (a few at most):
+            # a form counts only until it expires, which the application
+            # decides from the parsed time (``needs_you_reason``).
+            form_rows = conn.execute(
+                f"SELECT session_key, expires_at_utc FROM gateway_credential_collections WHERE person_id = {bind}",
+                (owner,),
+            ).fetchall()
+        form_expiries: dict[str, list[str]] = {}
+        for form in form_rows:
+            form_expiries.setdefault(str(form["session_key"]), []).append(str(form["expires_at_utc"]))
         records = []
         for row in rows:
             values = dict(row)
+            values["credential_form_expiries"] = tuple(form_expiries.get(str(values["session_key"]), ()))
             for flag in (
                 "has_messages",
                 "parallel_thread",
                 "has_open_question",
                 "has_waiting_setup",
-                "has_waiting_credential_form",
                 "pinned",
                 "team_posted_after_hiding",
             ):

@@ -204,8 +204,8 @@ def last_message(record: WebChatThreadRecord) -> WebChatThreadMessage | None:
     return WebChatThreadMessage(role=record.last_message_role, text=text, created_at=record.last_message_at)
 
 
-def needs_you_reason(record: WebChatThreadRecord) -> NeedsYouReason | None:
-    """What the thread waits on from the person, or ``None``."""
+def needs_you_reason(record: WebChatThreadRecord, *, now: datetime) -> NeedsYouReason | None:
+    """What the thread waits on from the person at ``now``, or ``None``."""
 
     if record.has_open_question:
         return NeedsYouReason.QUESTION
@@ -213,9 +213,34 @@ def needs_you_reason(record: WebChatThreadRecord) -> NeedsYouReason | None:
         return NeedsYouReason.REPLY
     if record.has_waiting_setup:
         return NeedsYouReason.SETUP
-    if record.has_waiting_credential_form or record.running_request_status == REQUEST_STATUS_WAITING_FOR_CREDENTIAL:
+    if _credential_form_open(record, now=now) or record.running_request_status == REQUEST_STATUS_WAITING_FOR_CREDENTIAL:
         return NeedsYouReason.CREDENTIAL
     return None
+
+
+def _credential_form_open(record: WebChatThreadRecord, *, now: datetime) -> bool:
+    """Whether a credential form in the thread still waits for the person.
+
+    A form's row stays until its result reaches the task, which can be after
+    the form was submitted or expired (the manager may be unreachable), so a
+    form counts only until its expiry time. An expiry nobody can read counts
+    as open, with a warning: the label stays as it was rather than hiding a
+    form that may still wait.
+    """
+
+    for value in record.credential_form_expiries:
+        expires = _stored_time(value)
+        if expires is None:
+            LOGGER.warning(
+                "A Web Chat credential form has an unreadable expiry time; the thread is shown as waiting. "
+                "event=web_chat_credential_form_expiry_unreadable session_key=%s expires_at_utc=%r",
+                record.session_key,
+                value,
+            )
+            return True
+        if expires > now:
+            return True
+    return False
 
 
 class ThreadPlacement(Protocol):
@@ -326,7 +351,7 @@ def web_chat_thread(
         last_message=last_message(record),
         last_activity_at=record.last_activity_at,
         last_sequence=record.last_sequence,
-        needs_you=needs_you_reason(record),
+        needs_you=needs_you_reason(record, now=now),
         pinned=record.pinned,
         list_state=list_state,
         snoozed_until=record.hidden_until if list_state is ThreadListState.SNOOZED else None,

@@ -204,6 +204,11 @@ async def test_opening_a_woke_thread_on_an_old_page_keeps_a_newer_snooze(tmp_pat
         assert datetime.fromisoformat(row["snoozed_until"]) == datetime.fromisoformat(week)
         assert "outcome=unchanged" in caplog.text and "action=clear_woke" in caplog.text
 
+        # A newer dismiss from the phone is kept the same way.
+        assert (await phone.place(key, "dismiss", seen_sequence=2)).status == 200
+        assert (await laptop.place(key, "clear_woke")).status == 200
+        assert (await phone.listed(key))["list_state"] == "dismissed"
+
         # The menu's Restore is still unconditional.
         assert (await laptop.place(key, "restore")).status == 200
         assert (await phone.listed(key))["list_state"] is None

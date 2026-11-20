@@ -190,12 +190,13 @@ class WebChatThreadRecord:
     last_activity_at: str | None = None
     last_sequence: int = 0
     # What the thread may be waiting on from the person: an open question,
-    # the status of its running request, and setup pages or credential forms
-    # still open for the person in it.
+    # the status of its running request, setup pages still open for the
+    # person in it, and when each credential form for the person in it
+    # expires (as the broker wrote it; the application compares it with now).
     has_open_question: bool = False
     running_request_status: str | None = None
     has_waiting_setup: bool = False
-    has_waiting_credential_form: bool = False
+    credential_form_expiries: tuple[str, ...] = ()
     # The person's placement of the thread: pinned, and snoozed or dismissed
     # (``ThreadHiddenAs``) with the snooze's wake time and the last message
     # sequence the person had seen when setting it aside.

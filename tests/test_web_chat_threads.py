@@ -284,20 +284,39 @@ def test_an_unreadable_wake_time_shows_the_thread_and_says_why(caplog: pytest.Lo
 
 
 def test_what_a_thread_waits_on_is_checked_in_order() -> None:
-    assert needs_you_reason(_record()) is None
+    assert needs_you_reason(_record(), now=NOW) is None
     everything = _record(
         has_open_question=True,
         running_request_status=REQUEST_STATUS_WAITING_FOR_STEERING,
         has_waiting_setup=True,
-        has_waiting_credential_form=True,
+        credential_form_expiries=(LATER,),
     )
-    assert needs_you_reason(everything) is NeedsYouReason.QUESTION
-    assert needs_you_reason(_record(running_request_status=REQUEST_STATUS_WAITING_FOR_STEERING)) is NeedsYouReason.REPLY
+    assert needs_you_reason(everything, now=NOW) is NeedsYouReason.QUESTION
+    assert needs_you_reason(_record(running_request_status=REQUEST_STATUS_WAITING_FOR_STEERING), now=NOW) is NeedsYouReason.REPLY
     own_task_setup = _record(running_request_status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL, has_waiting_setup=True)
-    assert needs_you_reason(own_task_setup) is NeedsYouReason.SETUP, "a setup page is labelled as one (C05)"
-    assert needs_you_reason(_record(running_request_status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL)) is NeedsYouReason.CREDENTIAL
-    assert needs_you_reason(_record(has_waiting_credential_form=True)) is NeedsYouReason.CREDENTIAL
-    assert needs_you_reason(_record(running_request_status="running")) is None
+    assert needs_you_reason(own_task_setup, now=NOW) is NeedsYouReason.SETUP, "a setup page is labelled as one (C05)"
+    assert needs_you_reason(_record(running_request_status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL), now=NOW) is NeedsYouReason.CREDENTIAL
+    assert needs_you_reason(_record(credential_form_expiries=(LATER,)), now=NOW) is NeedsYouReason.CREDENTIAL
+    assert needs_you_reason(_record(running_request_status="running"), now=NOW) is None
+
+
+def test_a_credential_form_counts_only_until_it_expires(caplog) -> None:
+    """F10: a form that ended while its result could not be delivered no longer keeps the thread in Needs you."""
+
+    earlier = (NOW - timedelta(minutes=1)).isoformat()
+    assert needs_you_reason(_record(credential_form_expiries=(earlier,)), now=NOW) is None
+    assert needs_you_reason(_record(credential_form_expiries=(NOW.isoformat(),)), now=NOW) is None
+    # One form expired and another still open in the same thread.
+    assert needs_you_reason(_record(credential_form_expiries=(earlier, LATER)), now=NOW) is NeedsYouReason.CREDENTIAL
+    # The broker's "Z" form is read as UTC.
+    zulu = (NOW + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert needs_you_reason(_record(credential_form_expiries=(zulu,)), now=NOW) is NeedsYouReason.CREDENTIAL
+    # A running request still waiting for a credential keeps the label.
+    expired_but_waiting = _record(credential_form_expiries=(earlier,), running_request_status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL)
+    assert needs_you_reason(expired_but_waiting, now=NOW) is NeedsYouReason.CREDENTIAL
+    with caplog.at_level(logging.WARNING):
+        assert needs_you_reason(_record(credential_form_expiries=("soon",)), now=NOW) is NeedsYouReason.CREDENTIAL
+    assert "event=web_chat_credential_form_expiry_unreadable" in caplog.text
 
 
 def test_the_latest_message_is_sent_as_stored_or_named_by_its_file() -> None:

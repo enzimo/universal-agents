@@ -297,6 +297,7 @@ TEAM_POSTS = [
     pytest.param("assistant", "assistant_message", TRANSCRIPT_SOURCE_GATEWAY_RESPONSE, id="final reply"),
     pytest.param("assistant", "task", TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE, id="reply after an answered question"),
     pytest.param("assistant", TASK_STEERING_MESSAGE_TYPE, TRANSCRIPT_SOURCE_DELIVERY_EVENT, id="team pause asking for a reply"),
+    pytest.param("assistant", TASK_STEERING_MESSAGE_TYPE, TRANSCRIPT_SOURCE_GATEWAY_RESPONSE, id="team pause inside the wait"),
     pytest.param("system", SYSTEM_NOTIFICATION_MESSAGE_TYPE, TRANSCRIPT_SOURCE_DELIVERY_EVENT, id="team notice"),
     pytest.param("system", "access_review", "access_review", id="access review"),
 ]
@@ -578,6 +579,42 @@ def test_setup_pages_and_forms_count_only_for_the_threads_person(settings) -> No
     assert store.one().has_waiting_setup is False
 
 
+def _credential_form(form_id: str, session_key: str, expires_at_utc: str, *, person: str = ALICE) -> CredentialCollectionRecord:
+    return CredentialCollectionRecord(
+        credential_request_id=form_id,
+        broker_session_id="broker_" + form_id,
+        person_id=person,
+        session_key=session_key,
+        correlation_id="request_" + form_id,
+        conversation_id=f"conv_{session_key}",
+        parent_task_id="task_1",
+        service_name="portainer",
+        credential_key="api_token",
+        display_name="Portainer",
+        flow="api_key",
+        source=None,
+        source_item_id=None,
+        source_item_name=None,
+        continue_task=True,
+        expires_at_utc=expires_at_utc,
+    )
+
+
+def test_each_threads_credential_forms_come_with_their_expiry(settings) -> None:
+    """F10: the list carries every form's expiry for the thread; another person's forms never show."""
+
+    store = _Store(settings)
+    store.thread()
+    store.thread("website:web-chat:beta")
+    store.repo.record_credential_collection(_credential_form("form_a", THREAD, "2030-01-01T00:00:00+00:00"))
+    store.repo.record_credential_collection(_credential_form("form_b", THREAD, "2020-01-01T00:00:00Z"))
+    store.repo.record_credential_collection(_credential_form("form_c", "website:web-chat:beta", "2030-01-01T00:00:00+00:00", person=BOB))
+    listed = store.listed()
+    assert sorted(listed[THREAD].credential_form_expiries) == ["2020-01-01T00:00:00Z", "2030-01-01T00:00:00+00:00"]
+    assert listed["website:web-chat:beta"].credential_form_expiries == ()
+    assert store.listed(include_last_message=False)[THREAD].credential_form_expiries == listed[THREAD].credential_form_expiries
+
+
 def test_an_open_credential_form_is_found_until_it_ends(settings) -> None:
     store = _Store(settings)
     store.thread()
@@ -601,9 +638,9 @@ def test_an_open_credential_form_is_found_until_it_ends(settings) -> None:
             expires_at_utc="2030-01-01T00:00:00+00:00",
         )
     )
-    assert store.one().has_waiting_credential_form is True
+    assert store.one().credential_form_expiries == ("2030-01-01T00:00:00+00:00",)
     store.repo.remove_credential_collection("form_1")
-    assert store.one().has_waiting_credential_form is False
+    assert store.one().credential_form_expiries == ()
 
 
 # Turn count for the hover preview

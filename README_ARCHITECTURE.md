@@ -407,8 +407,9 @@ saved on another device; the menu's Restore stays unconditional. Why: no
 background job or hook on the transcript path has to remember to clear anything, and live pages read the list every two
 seconds, so a wake shows within seconds. "Needs you" comes from what is
 already stored: an open question, the running request waiting for the
-person's reply or a credential, an open credential form or a waiting setup
-page. The list query reads only primary-key and index lookups per thread on
+person's reply or a credential, a credential form that has not expired yet
+(its row stays until the result reaches the task, which can be later when the
+manager is unreachable, so the expiry time decides) or a waiting setup page. The list query reads only primary-key and index lookups per thread on
 that two-second read; the latest message (for the row's second line) is read
 only for the sessions route. The thread list revision follows names, the
 Run concurrently setting, placement, snooze time and waiting reason, not

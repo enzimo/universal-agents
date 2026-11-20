@@ -851,10 +851,10 @@ class WebsiteConversationHandlers:
             "event_cursor": self.application.transcripts.snapshot_cursor(),
         }
         if response_message_type in {
-            "command_auth",
+            AUTH_COMMAND_MESSAGE_TYPE,
             ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
             TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
-            "command_user_sensitive",
+            SENSITIVE_USER_COMMAND_MESSAGE_TYPE,
         }:
             response_message = exchange[-1]
             payload["transient"] = {

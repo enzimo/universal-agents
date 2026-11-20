@@ -25,7 +25,9 @@ from assistant_gateway.application.transient_presentation import (
 from assistant_gateway.domain.message_types import (
     ACCESS_REVIEW_MESSAGE_TYPE,
     ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
+    AUTH_COMMAND_MESSAGE_TYPE,
     COMMAND_REPLY_MESSAGE_TYPES,
+    SENSITIVE_USER_COMMAND_MESSAGE_TYPE,
     TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
     LINK_RESULT_MESSAGE_TYPE,
     TOOL_SETUP_RESULT_MESSAGE_TYPE,
@@ -125,7 +127,7 @@ _CURSOR_VERSION = 1
 _SENSITIVE_RESPONSE_TEXT = {
     "secure_credential_collection": (SECURE_CREDENTIAL_COLLECTION_READY_TEXT),
     TOOL_SETUP_MESSAGE_TYPE: (TOOL_SETUP_READY_TEXT),
-    "command_auth": (
+    AUTH_COMMAND_MESSAGE_TYPE: (
         "Authentication workflow status was returned through trusted Web Chat controls."
     ),
     # A /link reply that opened a page keeps its card's own line instead
@@ -133,7 +135,7 @@ _SENSITIVE_RESPONSE_TEXT = {
     ACCOUNT_LINK_COMMAND_MESSAGE_TYPE: (
         "The /link reply was shown when it ran and is not kept in chat history."
     ),
-    "command_user_sensitive": (
+    SENSITIVE_USER_COMMAND_MESSAGE_TYPE: (
         "The requested Web Chat access operation was processed. One-time material is not "
         "stored in transcript history."
     ),
