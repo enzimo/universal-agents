@@ -24,7 +24,8 @@ and decides (``decide``):
   ``FAILED_START_RETRY_SECONDS`` after the last failure, twice as long for each
   further failure in a row, up to ``FAILED_START_MAX_RETRY_SECONDS``; then
   start exactly one, and none while that one is still starting
-  (``_held_after_failed_starts``);
+  (``_held_after_failed_starts``; a hung start, ``HUNG_START_MARGIN``, no
+  longer holds);
 - more workers than the pool size (TeamArchitect lowered it): idle ones leave
   now, busy ones stop asking for work and leave when they hold none.
 

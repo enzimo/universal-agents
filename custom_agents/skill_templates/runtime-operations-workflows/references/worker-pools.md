@@ -97,7 +97,7 @@ The runtime gives you a `worker_pool_review_...` task when:
 |---|---|
 | `capacity` | A pool (or the team, scope `*`) reached about 95% of its limit while tasks waited. For small pools that is the limit itself. |
 | `provider_limited` | Tasks of a type keep hitting the model provider's limits (rate limit, quota, overload), or a worker waits one out while tasks wait. No workers are added meanwhile. |
-| `start_failed` | Two starts of a type in a row failed (crashed, timed out at startup, or were refused) while tasks waited; or, at once, the hourly start limit refused a start, or the launcher refused one before it was recorded (for example the type's definition cannot be read; tried again every pass). The review names the failure; the evidence has `start_refused_because` and `pool.last_start_failure`. One failure alone only delays the next start. |
+| `start_failed` | Two starts of a type in a row failed (crashed, timed out at startup, or were refused) while tasks waited; or the launcher refused two starts in a row before they were recorded (for example the type's definition cannot be read; tried again every pass); or, at once, the hourly start limit refused a start. The review names the failure; the evidence has `start_refused_because` and `pool.last_start_failure`. One failure alone only delays the next start. |
 
 Each review works for the team's maintenance owner (an administrator), so
 `notify_user` reaches them. Check `inspect_worker_pools`, then choose:
@@ -147,8 +147,9 @@ Do not delegate the waiting tasks again; they are still queued.
 |---|---|
 | Tasks wait, `workers_running` 0, `decision` mentions a start problem | A worker cannot start; see the open `start_failed` problem and tell an administrator. |
 | `failed_starts_in_row` > 0 and `decision` says the next start waits | Workers of the type stop before they are ready. The runtime tries again after a growing wait; report `last_start_failure` to an administrator. |
-| `decision` says one more start is in progress | After failed starts the runtime tries one start at a time and waits for it to become ready or fail. |
-| `starts_ended_not_counted` > 0 | Starts the runtime stopped (a restart) or an edit ended. They are not failures of the type and hold nothing back, but they count toward the hourly start limit. |
+| `decision` says one more start is in progress | After failed starts the runtime tries one start at a time and waits for it to become ready or fail; a hung start (`starts_hung`) no longer holds the next one. |
+| `starts_hung` > 0 | Starts the runtime stopped, or cannot check, that have not ended for several minutes. They no longer hold the next start but still take a pool slot, so a larger pool does not help; tell an administrator to check the runtime log for those workers' threads. |
+| `starts_ended_not_counted` > 0 | Starts the runtime stopped (a restart), an edit ended, or a schedule's own startup timeout ended (`last_start_end_not_counted` `schedule_startup_timed_out`: the schedule's timeout is shorter than its type needs; tell the schedule's owner). They are not failures of the type and hold nothing back, but they count toward the hourly start limit. An older release's reason shows as no reason. |
 | Tasks wait, pool at its size, nobody free | Normal under load. Choose A, B or C. |
 | `workers_waiting_out_provider_limit` > 0 | The provider refuses calls; workers retry on their own after a growing wait. Choose C or D. |
 | `workers_unknown` > 0 | A start whose process cannot be checked holds a slot until it is proven gone; tell an administrator if it stays. |

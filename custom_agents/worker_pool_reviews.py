@@ -10,11 +10,12 @@ three kinds of problem per worker type (``*`` for the whole team):
   worker of the type is waiting one out while tasks wait;
 - ``start_failed``: workers the controller needed could not be started: two
   starts of the type in a row failed (crashed, timed out, or were refused)
-  while tasks waited; or at once, the hourly start limit refused a start, or
-  the launcher refused one before it was recorded (tried again every pass).
-  The review and the administrators' notice name the failure
-  (``_start_failure_text``). Only a problem of failed starts ends as soon as
-  a worker of the type is ready (``_opened_by_failed_starts``).
+  while tasks waited, or the launcher refused two in a row before they were
+  recorded (tried again every pass); or at once, the hourly start limit
+  refused a start. The review and the administrators' notice name the failure
+  (``_start_failure_text``), and hung starts (``_hung_starts_text``, also in
+  the capacity texts). Only a problem of failed starts ends as soon as a
+  worker of the type is ready (``_opened_by_failed_starts``).
 
 Each becomes one open incident (``storage.worker_pool_repository``) while it
 lasts. TeamArchitect gets a review task when the incident opens and again
@@ -128,15 +129,26 @@ def _start_failure_text(details: dict[str, Any], settings: WorkerPoolsConfig) ->
         happened, advice = _failed_start_text(details, pool)
     else:
         happened, advice = _hourly_limit_text(pool, settings)
-    if pool.get(POOL_HUNG_STARTS):
-        happened += (
-            f" {pool[POOL_HUNG_STARTS]} start(s) of this type stopped responding: the "
-            "runtime stopped them, or cannot check their process, and they have not ended "
-            "for several minutes. The runtime no longer waits for them, but each still "
-            "takes a pool slot until it ends or the runtime restarts; check the runtime "
-            "log for those workers' threads."
-        )
-    return happened, advice
+    return happened + _hung_starts_text(pool), advice
+
+
+def _hung_starts_text(pool: dict[str, Any]) -> str:
+    """A sentence about hung starts (``worker_pool_controller.HUNG_START_MARGIN``), or "" when there are none.
+
+    Used by the start_failed and capacity texts alike: starts that hang without
+    failing open no start_failed problem, and the pool then fills with them.
+    """
+
+    hung = pool.get(POOL_HUNG_STARTS)
+    if not hung:
+        return ""
+    return (
+        f" {hung} start(s) of this type stopped responding: the runtime stopped them, or "
+        "cannot check their process, and they have not ended for several minutes. The "
+        "runtime no longer waits for them, but each still takes a pool slot until it ends "
+        "or the runtime restarts, so a larger pool does not help while they hang; check "
+        "the runtime log for those workers' threads."
+    )
 
 
 def _failed_start_text(details: dict[str, Any], pool: dict[str, Any]) -> tuple[str, str]:
@@ -437,6 +449,9 @@ def _instructions(incident: WorkerPoolIncidentV1, *, recurring: bool, recurrence
             "Choose A for a burst of work, B if this keeps happening, C if waiting is fine, "
             "D if the model provider or cost calls for fewer workers.",
         ]
+        hung = _hung_starts_text(incident.details.get(EVIDENCE_POOL) or {})
+        if hung:
+            lines += ["", hung.strip()]
     if recurring:
         lines += [
             "",
@@ -583,10 +598,11 @@ class RecurringPoolProblems:
         if incident.kind == INCIDENT_START_FAILED:
             happened, advice = _start_failure_text(incident.details, self.settings)
             return f"{happened} {advice} TeamArchitect was given a review."
+        hung = _hung_starts_text(incident.details.get(EVIDENCE_POOL) or {})
         return (
             "TeamArchitect was given a review and may change pool sizes within the "
             "operator ceilings (agent.worker_pools); check its report, the Status page and "
-            "the worker pool settings."
+            f"the worker pool settings.{hung}"
         )
 
     def recovery(self, incident: StuckWorkIncidentV1) -> Recovery:

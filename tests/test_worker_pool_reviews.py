@@ -567,3 +567,82 @@ async def test_a_rate_limit_episode_ends_when_its_type_is_no_longer_registered(w
     ended = [m for m in messages if "event=worker_pool_start_rate_limit_ended" in m]
     assert len(began) == 2
     assert len(ended) == 1 and "because=no longer a worker type" in ended[0]
+
+
+class _Queues:
+    """The two queue reads observe() makes; one type's queue cannot be read this pass."""
+
+    def __init__(self, unreadable: str) -> None:
+        self.unreadable = unreadable
+
+    async def ensure_worker_queue(self, agent_type: str) -> None:
+        return None
+
+    async def worker_queue_state(self, agent_type: str):
+        if agent_type == self.unreadable:
+            return None
+        return SimpleNamespace(waiting=2, asking=0, unacknowledged=0)
+
+    async def oldest_worker_queue_message_at(self, agent_type: str):
+        return datetime.now(timezone.utc) - timedelta(seconds=30)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("lease_seconds", "hung", "in_progress"), [(120, 1, 0), (900, 0, 1)])
+async def test_observe_counts_hung_starts_and_keeps_unobserved_types_registered(
+    world, monkeypatch, lease_seconds, hung, in_progress
+):
+    """Critique C10: the real observe() feeds hung starts and the registered types to the controller."""
+
+    from custom_agents.agent_instantiation_service import PROCESS_HOST_ID
+    from custom_agents.worker_pool_controller import WorkerPoolController
+    from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState, utc_now
+    from runtime_settings.schedule_workers import ScheduleWorkersConfig
+    from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity
+    from tests.test_schedule_worker_transactions import make_launch
+
+    monkeypatch.setattr(
+        "custom_agents.agent_instantiation_service.current_worker_limits",
+        lambda _agent: ScheduleWorkersConfig(lease_seconds=lease_seconds),
+    )
+    world.agent._local_team_runtime = SimpleNamespace(
+        agent_types=lambda: (WORKER_TYPE, "Unreadable", "TeamArchitect"), local_workers=lambda _team: ()
+    )
+    world.agent._ensured_worker_queues = set()
+    queues = _Queues("Unreadable")
+    world.agent._ensure_nats_transport_adapter = lambda: queues
+    repository = AgentLaunchRepository(world.agent.task_manager.storage_settings)
+    record, _ = repository.reserve(
+        make_launch(team_id="team", named_agent_type=WORKER_TYPE, source="pool", host_id=PROCESS_HOST_ID),
+        LaunchCapacity.defaults(), join=False,
+    )
+    # Stopped for its startup timeout, its thread never ended: unknown since 6 minutes ago.
+    repository.update(repository.update(record, state=AgentLaunchState.STARTING),
+                      state=AgentLaunchState.UNKNOWN, reason="startup_timed_out",
+                      now=utc_now() - timedelta(minutes=6))
+    controller = WorkerPoolController(world.agent)
+    observations, _, _ = await controller.observe(_settings())
+    assert controller.registered_types == {WORKER_TYPE, "Unreadable"}
+    ((observation),) = observations
+    assert (observation.agent_type, observation.hung_starts, observation.starts_in_progress) == (
+        WORKER_TYPE, hung, in_progress
+    )
+    assert observation.as_dict()["starts_hung"] == hung
+
+
+def test_hung_starts_are_named_in_the_capacity_review_and_notice(world):
+    """Critique C11: starts that hang without failing fill the pool; a larger pool does not help."""
+
+    from storage.worker_pool_repository import WorkerPoolIncidentV1
+
+    details = {"pool": {"starts_hung": 4}, "controller": "the pool is at its size"}
+    now = datetime.now(timezone.utc)
+    incident = WorkerPoolIncidentV1(incident_id="i", team_id="team", agent_type=WORKER_TYPE, kind=INCIDENT_CAPACITY,
+                                    opened_at_utc=now, last_seen_at_utc=now, details=details)
+    instructions = reviews._instructions(incident, recurring=False, recurrences=1, settings=_settings())
+    notice = reviews.RecurringPoolProblems(world.agent, _settings())._next_steps(incident)
+    for shown in (instructions, notice):
+        assert "4 start(s) of this type stopped responding" in shown
+        assert "a larger pool does not help while they hang" in shown
+    plain = incident.model_copy(update={"details": {"pool": {"starts_hung": 0}}})
+    assert "stopped responding" not in reviews._instructions(plain, recurring=False, recurrences=1, settings=_settings())

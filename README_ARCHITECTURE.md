@@ -308,24 +308,30 @@ each. They run in parallel on as many workers as the team allows:
   A start counts as successful only once its worker is ready. A start that
   ends before then fails its start record with the reason: a crash (the error
   type and a NATS refusal's code and text), `startup_timed_out`, or a refusal
-  code (`agent_instantiation_service`; never free error text, since the reason
-  reaches TeamArchitect and administrators). Only failures that say something
-  about the type count (`counts_as_failed_start`): a start the runtime ended
-  (shutdown, restart cleanup), one ended by an edit made while it started (a
-  schedule's policy, the definition, a limit, automatic starts switched off)
-  and an older release's record without a reason do not. After a failure the
-  controller waits 10 seconds before the next start of the type, doubling with
-  each failure in a row up to 10 minutes (fixed values; a new setting would
-  change the team transfer's settings section), then makes exactly one start
-  and none while it is still starting. Two failures in a row while tasks wait
+  code from a fixed list (`KNOWN_START_CODES`; never free error text, since
+  the reason reaches TeamArchitect and administrators). Only failures that say
+  something about the type count (`counts_as_failed_start`): a start the
+  runtime ended (shutdown, restart cleanup), one ended by an edit made while it
+  started (a schedule's policy, the definition, a limit, automatic starts
+  switched off), one ended by a schedule's own startup timeout that is shorter
+  than its type's (`schedule_startup_timed_out`), and an older release's record
+  without a reason or with its free error text (never shown either) do not.
+  After a failure the controller waits 10 seconds before the next start of the
+  type, doubling with each failure in a row up to 10 minutes (fixed values; a
+  new setting would change the team transfer's settings section), then makes
+  exactly one start and none while it is still starting. A start the launcher
+  stopped, or cannot check, that has stayed unknown for over five minutes (or
+  the start lease, when longer) is hung: it no longer holds the next start,
+  but it keeps its pool slot, and the pool view (`starts_hung`) and the
+  start_failed and capacity texts name it. Two failures in a row while tasks wait
   open a `start_failed` review and an administrators' notice; both name the
   failure and say that a larger pool or a higher start limit does not help. A
   refusal by the hourly start limit opens it at once; with no failed start the
   text points at how often workers of the type are started instead. A
   launcher refusal made before a start is recorded (for example the type's
-  definition cannot be read) also opens it at once, and its text names the
-  refusal: nothing is counted for it, so the controller tries again every pass
-  without a wait. Only a problem of failed starts ends
+  definition cannot be read) opens it on the second refusal in a row (the
+  controller counts them in memory) and its text names the refusal; such a
+  start is tried again every pass without a wait. Only a problem of failed starts ends
   as soon as a worker of the type is ready; the other two end after
   `review_repeat_after_minutes` without being seen. Until
   2026-11-19 an accepted start counted as success at once. Workers that
