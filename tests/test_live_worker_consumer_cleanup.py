@@ -10,9 +10,13 @@ start a worker (``custom_agents.worker_consumer_cleanup``).
 Review of 2026-11-20 (FAIL-1, FAIL-3, EVD-3, CRIT-1): the first version swept
 after the first worker starts, kept leftovers whose start record had been
 pruned, never listed push-era consumers, and no test ran the sweep against
-real NATS or inside a real lead start. Without the start sweep this lead
-cannot start at all: NATS refuses its own mailbox (checked by the critic on a
-copy with the call removed).
+real NATS or inside a real lead start. On a server with a per-stream limit
+(NATS 2.15 and newer) the stream is filled until NATS refuses, and without the
+start sweep this lead cannot start at all: removing the call makes this test
+fail with error 10026 on the lead's own mailbox. NATS 2.10 (the oldest
+supported, and the one the CI live job runs) has no default limit; there the
+stream gets the full number of leftovers, and removing the call fails the test
+on the single sweep line instead.
 
 Real NATS server, real start-record and status stores, the real liveness rule,
 a real ``UniversalAgent`` lead with a team runtime started through
@@ -51,6 +55,8 @@ ASKING = "agent_hand_run"  # not configured, but a request is open
 CONFIGURED = "agent_configured"  # agent.agent_id in the saved configuration
 PUSH_ERA = "agent_push_era"  # a push-delivery release's started worker
 MAIL_OWNER = "agent_pruned_0"  # its mailbox holds a message when it is removed
+# More than NATS 2.15's default limit allows (1,000 consumers per stream).
+PRUNED_OWNERS = 600
 
 
 def _names(mapper: NatsSubjectMapper, owner: str, role: str) -> tuple[str, str]:
@@ -93,10 +99,10 @@ async def _push_era_leftover(adapter: NatsTransportAdapter, owner: str) -> None:
         await adapter._js.add_consumer(adapter.mapper.work_stream_name(), config=config)  # noqa: SLF001
 
 
-def _team_runtime() -> LocalAgentTeamRuntime:
+def _team_runtime(spawn_agent: MagicMock) -> LocalAgentTeamRuntime:
     return LocalAgentTeamRuntime(
         agent_types=lambda: ("TeamArchitect",),
-        spawn_agent=MagicMock(side_effect=AssertionError("this test starts no worker")),
+        spawn_agent=spawn_agent,
         shutdown_agents=lambda *args, **kwargs: None,
         resolve_definition=lambda agent_type: None,
         # Starts of the previous process are gone, except one whose run cannot be checked.
@@ -147,7 +153,10 @@ async def test_live_a_lead_starts_on_a_work_stream_full_of_leftovers(tmp_path, m
             agent_id=new_id("manager"), name="manager", team_id=team_id, named_agent_type="TeamArchitect",
             db_path=tmp_path / "lead.db", workspace_dir=workspace, is_lead=True,
         )
-    lead._local_team_runtime = _team_runtime()
+    # Checked at the end: the lead's loops log their own errors, so a raising
+    # stand-in could not fail the test.
+    spawn_agent = MagicMock()
+    lead._local_team_runtime = _team_runtime(spawn_agent)
     # The saved configuration names one agent id (the real helpers read it).
     monkeypatch.setattr(
         "custom_agents.worker_consumer_cleanup.current_launch_config",
@@ -185,15 +194,18 @@ async def test_live_a_lead_starts_on_a_work_stream_full_of_leftovers(tmp_path, m
         for index in range(3):
             record(f"agent_retired_{index}", AgentLaunchState.RETIRED)
             await _leftover(inspector, f"agent_retired_{index}")
-        # Start records pruned (no record, no status row): fill until NATS refuses.
+        # Start records pruned (no record, no status row): fill until NATS
+        # refuses, or to 600 owners (1,200 consumers) on a server without a limit.
         refused = None
-        for index in range(600):
+        for index in range(PRUNED_OWNERS):
             try:
                 await _leftover(inspector, f"agent_pruned_{index}")
             except Exception as exc:  # NATS 10026, the stream's consumer limit
                 refused = exc
                 break
-        assert refused is not None and "10026" in str(refused), refused
+        # NATS 2.15 refuses at its default per-stream limit (error 10026);
+        # NATS 2.10 has no default limit and accepts every leftover.
+        assert refused is None or "10026" in str(refused), refused
         before = await inspector.agent_consumers()
         assert len(before) > 3 * 256  # more than three listing pages
         await inspector._nc.publish(mapper.agent_work_subject(MAIL_OWNER), b"left in the mailbox")  # noqa: SLF001
@@ -238,6 +250,7 @@ async def test_live_a_lead_starts_on_a_work_stream_full_of_leftovers(tmp_path, m
         (message,) = await again.fetch(1, timeout=5)
         assert message.data == b"left in the mailbox"
         await message.ack()
+        spawn_agent.assert_not_called()
     finally:
         await _stop_agents(agent_tasks)
         await asker.close()
