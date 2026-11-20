@@ -1267,10 +1267,9 @@ room: see "Control messages share their stream's room" below. These settings are
   sender still stored all 8 of its own (11,319,729 bytes in the end).
 - **The room is needed at every start of NATS.** A server that does not set
   `max_file_store`, as the bundled one does not, gives JetStream three quarters of the
-  disk's free space plus three quarters of what its streams already store, measured each
-  time it starts (measured: 0.750, the stored bytes added back to the byte on 2.15.1). So
-  the free space and the stored messages together need to be a third more than the streams
-  set aside, at the first start and at every later one. A server that starts with less storage than its streams already set aside (or an
+  disk's free space, measured each time it starts (measured: 0.750). So the disk needs a
+  third more free space than the streams set aside, at the first start and at every later
+  one. A server that starts with less storage than its streams already set aside (or an
   account whose limit was lowered below it) keeps serving those streams and takes new
   messages, but refuses every new or changed stream with 10047, an unchanged update and a
   lowered limit included, so lowering a limit cannot help then: only more room can, which
