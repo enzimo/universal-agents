@@ -48,12 +48,13 @@ test("one turn and six turns draw every triangle, alternating up and down, none 
   assert.equal(six.triangles.length, TRAIL_LIMIT);
 });
 
-test("seven and twenty turns show six and the leftmost hollow and dotted", () => {
-  for (const turns of [7, 20]) {
-    const view = trailView(thread([LEAD, P, LEAD, WEB, P, LEAD], { older: turns > TRAIL_LIMIT }));
-    assert.deepEqual(shape(view), ["Lo", "P", "L", "W", "P", "L"], `${turns} turns`);
-    assert.equal(view.triangles.filter(t => t.hollow).length, 1);
-  }
+test("older history (7 or 20 turns): the server sends the last six with has_older; six show, the leftmost hollow", () => {
+  // The server cuts any longer history to the same six plus the flag (assistant_gateway.domain.agent_trail,
+  // tested for 7 and 20 turns in tests/test_agent_trail_domain.py), so one case covers both here (review F13).
+  const view = trailView(thread([LEAD, P, LEAD, WEB, P, LEAD], { older: true }));
+  assert.deepEqual(shape(view), ["Lo", "P", "L", "W", "P", "L"]);
+  assert.equal(view.triangles.filter(t => t.hollow).length, 1);
+  assert.equal(view.triangles.length, TRAIL_LIMIT);
 });
 
 test("working agents of the current request pulse, older requests' triangles stay still", () => {
@@ -177,4 +178,16 @@ test("line 2's words name who works: one, two, or a list, the team lead first (l
   assert.equal(workingLine(three), "Web Research Agent, Memory Review Agent and team lead working");
   assert.equal(workingLine(trailView(thread([]), { busy: true })), "Team lead working");
   assert.equal(workingLine(trailView(thread([P, LEAD]))), "");
+});
+
+test("an agent type named like an object member gets a colour and the row still draws (review F2)", () => {
+  for (const type of ["toString", "valueOf", "constructor", "__proto__", "hasOwnProperty"]) {
+    assert.match(agentColor(type), /^#[0-9a-f]{6}$/, type);
+    const view = trailView(thread([P, LEAD, { by: "agent", agent_type: type, lead: false, name: type }]));
+    const document = fakeDocument();
+    document.createElementNS = (namespace, tagName) => document.createElement(tagName);
+    assert.equal(renderTrail(document, view).children.length, 3, type);
+  }
+  assert.deepEqual(trailColors(undefined), trailColors(PERSON_COLOR));
+  assert.deepEqual(trailColors(() => "#ffffff"), trailColors(PERSON_COLOR));
 });

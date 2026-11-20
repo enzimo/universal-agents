@@ -628,7 +628,7 @@ function domHarness() {
   };
   loadFunctions(sandbox, [
     "focusedThreadListTarget", "restoreThreadListFocus", "visibleThreadRows", "sectionHeader", "threadRowElement",
-    "threadRowButton", "appendRenameControls",
+    "threadRowButton", "appendRenameControls", "threadTrailView", "threadIsBusy",
   ]);
   return { sandbox, document, list, newThreadButton, runTimers: () => timers.splice(0).forEach(fn => fn()) };
 }
@@ -733,7 +733,8 @@ test("a row tells screen readers about its menu, its reply mark and its age in w
   assert.equal(age.textContent, "5m");
   // A thread the team works in says who, instead of a busy dot (A5, A6).
   const busy = sandbox.threadRow({ ...thread, serverBusy: true });
-  assert.deepEqual(fakeDom.byClass(busy.children[1], "sr-only").map(node => node.textContent)[0], "Working: team lead");
+  assert.deepEqual(fakeDom.byClass(busy.children[1], "sr-only").map(node => node.textContent)[0],
+    "Working: team lead. New reply", "and its unread reply (review F5)");
 });
 
 const TRAIL = {
@@ -901,4 +902,33 @@ test("guidance and slash commands add no turn: the worker keeps pulsing (C18)", 
   const fresh = { ...idle };
   sandbox.startTerminalReplyWait(fresh, sandbox.sendStartsRequest(fresh, "Compare them again"));
   assert.equal(fresh.trailAtSend, agentTrail.trailKey(fresh));
+});
+
+test("screen readers hear who works and an unread reply together (review F5)", () => {
+  const worker = [{ agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }];
+  assert.equal(trailRow({ serverBusy: true, working: worker, hasUnreadReply: true, unreadReplyLevel: "attention" }).said,
+    "Working: Web Research Agent. Reply needs attention");
+  assert.equal(trailRow({ serverBusy: true, working: worker, hasUnreadReply: true, unreadReplyLevel: "normal" }).said,
+    "Working: Web Research Agent. New reply");
+});
+
+test("a busy row being renamed keeps its working triangles pulsing beside the field (review F7)", () => {
+  const { sandbox, document } = domHarness();
+  const row = document.createElement("div");
+  sandbox.sharedState.renameDraft = null;
+  sandbox.appendRenameControls(row, { id: "delta", sessionKey: "delta", title: "Compare databases", trail: TRAIL,
+    working: [{ agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }], serverBusy: true,
+    trailAtSend: null });
+  const form = fakeDom.byClass(row, "thread-rename-form")[0];
+  assert.deepEqual(form.children.map(child => child.className), ["thread-trail", "thread-rename-input"]);
+  const triangles = fakeDom.byTag(form, "svg");
+  assert.deepEqual(triangles.map(svg => [svg.getAttribute("data-who"), svg.getAttribute("class")]),
+    [["agent", "trail-tri is-working"]]);
+  // Nobody works: the field stands alone.
+  const idle = document.createElement("div");
+  sandbox.sharedState.renameDraft = null;
+  sandbox.appendRenameControls(idle, { id: "echo", sessionKey: "echo", title: "Idle", trail: TRAIL, working: [],
+    trailAtSend: null });
+  assert.deepEqual(fakeDom.byClass(idle, "thread-rename-form")[0].children.map(child => child.className),
+    ["thread-rename-input"]);
 });

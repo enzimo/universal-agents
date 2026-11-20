@@ -114,9 +114,14 @@ function fitted(hex, theme, target, { rest }) {
   return keeps ? hex : hslHex(hue, saturation, edge);
 }
 
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
 // A triangle's colours in both themes: resting (about 3.2:1) and working (at
-// least 4.5:1, its own colour when that already reaches it).
-export function trailColors(hex) {
+// least 4.5:1, its own colour when that already reaches it). Anything that is
+// not a #rrggbb colour is drawn in the person's grey, so one odd value can
+// never stop a row from being drawn (review F2).
+export function trailColors(color) {
+  const hex = HEX_COLOR.test(String(color)) ? String(color) : PERSON_COLOR;
   return {
     dark: { resting: fitted(hex, "dark", RESTING_CONTRAST, { rest: true }), working: fitted(hex, "dark", WORKING_CONTRAST, { rest: false }) },
     light: { resting: fitted(hex, "light", RESTING_CONTRAST, { rest: true }), working: fitted(hex, "light", WORKING_CONTRAST, { rest: false }) },

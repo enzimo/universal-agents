@@ -6749,6 +6749,14 @@ body.is-theme-customizing {
 }
 
 .thread-rename-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.thread-rename-input {
+  flex: 1 1 auto;
   min-width: 0;
 }
 

@@ -49,8 +49,12 @@ function hslHex(hue, saturation, lightness) {
   return "#" + rgb.map(value => Math.round((value + m) * 255).toString(16).padStart(2, "0")).join("");
 }
 
+// Only the table's own entries count: a type named like an object member
+// (`toString`, `constructor`) gets its hashed colour, never that member
+// (review F2: the agent trail draws stored types on every row).
 export function agentColor(namedAgentType) {
-  return AGENT_TYPE_COLORS[namedAgentType] || hslHex(hash(namedAgentType) % 360, 0.7, 0.62);
+  const type = String(namedAgentType);
+  return Object.hasOwn(AGENT_TYPE_COLORS, type) ? AGENT_TYPE_COLORS[type] : hslHex(hash(type) % 360, 0.7, 0.62);
 }
 
 function hexRgb(hex) {

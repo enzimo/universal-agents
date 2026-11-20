@@ -2098,13 +2098,11 @@ function threadActivityIndicator() {
 // dot in words, or "" when the row shows neither.
 function threadReplyMark(thread) {
     var working = workingLabel(threadTrailView(thread));
-    if (working) {
-      return working;
-    }
-    if (thread.hasUnreadReply && thread.unreadReplyLevel === "attention") {
-      return "Reply needs attention";
-    }
-    return thread.hasUnreadReply ? "New reply" : "";
+    var unread = !thread.hasUnreadReply ? ""
+      : thread.unreadReplyLevel === "attention" ? "Reply needs attention" : "New reply";
+    // Both, when someone works and a reply is unread: sighted people see the
+    // dot beside the pulsing triangles (review F5).
+    return [working, unread].filter(Boolean).join(". ");
   }
 
 // "active 5 minutes ago": the row's age as part of its name (review F12, F18).
@@ -2122,6 +2120,16 @@ function appendRenameControls(row, thread) {
     }
     var form = document.createElement("form");
     form.className = "thread-rename-form";
+    // While someone works the row keeps pulsing during a rename: the working
+    // triangles stand before the field (review F7).
+    var working = threadTrailView(thread).triangles.filter(function (triangle) {
+      return triangle.working;
+    }).map(function (triangle) {
+      return Object.assign({}, triangle, { hollow: false, down: false });
+    });
+    if (working.length) {
+      form.appendChild(renderTrail(document, { triangles: working }));
+    }
     var input = document.createElement("input");
     input.className = "thread-rename-input";
     input.type = "text";

@@ -3787,7 +3787,7 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
         "messageLevelFromPayload(lastMessage));" in script
     )
     # The unread dot is read in words inside the row's button (review F18).
-    assert 'return thread.hasUnreadReply ? "New reply" : "";' in script
+    assert ': thread.unreadReplyLevel === "attention" ? "Reply needs attention" : "New reply";' in script
     # Work shows in the agent trail (agent_trail.mjs), so the busy dot is gone:
     # the indicator shows only unread replies.
     assert "is-pending" not in styles and "is-pending" not in script
