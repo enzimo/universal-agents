@@ -481,9 +481,13 @@ that one: the server takes its room only when the whole instance (the
 container, or `ua start`) starts, and a team-wide restart keeps it running
 with the room it has. While the server refuses new messages, it takes them
 again as soon as its streams store less than its room, for example once agents
-take queued work. An external NATS
-server gets neither finding, because its storage is not on a disk the gateway
-can measure; give its account a limit, and Status shows the percentage.
+take queued work. Streams without a size limit, such as the attachment store,
+can store more than all the streams set aside. A start then takes new messages
+only if the disk's free space is more than a third of what they store, which
+the warning's amount to free may not reach, so both findings say that too.
+An external NATS server gets neither finding, because its storage is not on a
+disk the gateway can measure; give its account a limit, and Status shows the
+percentage.
 
 Each of the team's message streams also has a limit of its own. When one
 holds `transport.queues.warn_at_percent` of its limit (80 by default), Status

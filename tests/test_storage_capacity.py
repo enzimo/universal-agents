@@ -21,14 +21,16 @@ while it cannot be measured and ended when it no longer applies, memory
 storage keeping the check on the file streams, an unreported figure logged
 once, whether the running server has room for another team, and its wordings
 when streams without a byte limit store more than the room although less is
-set aside); the store's
+set aside, naming then the free space a start needs to take messages instead of
+saying that removing messages does not help); the store's
 free space counted in the block size NATS uses; the problem that the running
 server already refuses new streams (from its room as it runs, at the line,
 saying when messages stop, leading with messages refused now under its own
 title once its streams store more than its room, saying then that messages
 flow again once the streams store less and asking for the restart first when a
-start has room, not calling a start enough that would refuse every message,
-kept after space is freed
+start has room, not calling a start enough that would refuse every message
+and naming then, short or not, the free space of more than a third of what is
+stored that such a start needs, kept after space is freed
 until it runs with more room, asking for more space when the disk has only
 just enough, kept while its monitoring endpoint does not answer and that
 endpoint listed as unavailable, beside the warning and with a disk that cannot
@@ -874,6 +876,16 @@ FLOW_AGAIN = (
     "It takes new messages again as soon as its streams store less than its room, for example once agents take queued "
     "work, but only until they fill again; removing messages gives its next start no more room."
 )
+# While more is stored than set aside and a start would refuse every message, storing less is part of what lets that
+# start take messages, so the sentence does not say that removing messages gives it no more room.
+FLOW_AGAIN_STORED = (
+    "It takes new messages again as soon as its streams store less than its room, for example once agents take queued "
+    "work, but only until they fill again."
+)
+STORED_DECIDES = (
+    "Its next start takes new messages only if the free space is more than a third of what its streams store when it "
+    "starts."
+)
 FREE_FIRST = (
     "from other files on that disk first, so the message server does not start short again as their use grows (that "
     "also ends the room warning on this page), then restart the whole instance (the container, or ua start)."
@@ -904,23 +916,67 @@ def test_while_messages_are_refused_the_problem_says_they_flow_again_once_the_st
     assert now.action == f"{first} {FLOW_AGAIN} {NOW_ENDS}"
 
 
-def test_a_start_with_room_for_what_is_set_aside_but_not_for_what_is_stored_is_not_called_enough(
-    tmp_path: Path,
+THIRD_OF_STORED = (
+    "Free space on that disk, or give it more, until the free space is more than a third of what the stored messages "
+    "take, then restart the whole instance (the container, or ua start)."
+)
+
+
+@pytest.mark.parametrize(
+    ("free", "stored", "first"),
+    [
+        # Streams without a byte limit (the attachment store) store 5 GB although only 3 GB is set aside. 1.5 GB free
+        # and 5 GB stored are above the warning's line, yet a start now gives 4.875 GB of room, less than the 5 GB.
+        (1_500_000_000, 5 * GB,
+         "A start now would give it 4.9 GB of room, more than its streams set aside but less than their stored "
+         f"messages take (5 GB), so it would still refuse every new message. {THIRD_OF_STORED}"),
+        # Short too: 0.3 GB free and 3.5 GB stored give 2.85 GB. Freeing the room warning's 600 MB would end both
+        # findings with a start of 3.3 GB, still less than the 3.5 GB stored, so the problem names the free space.
+        (300_000_000, 3_500_000_000,
+         "A start now would give it 2.9 GB of room, less than its streams set aside and less than their stored "
+         "messages take (3.5 GB), so it would still refuse every new or changed stream and every new message. "
+         f"{THIRD_OF_STORED} That start also has more room than they set aside, because they store more than that."),
+    ],
+    ids=["above_the_line", "short"],
+)
+def test_a_start_that_would_refuse_every_message_with_more_stored_than_set_aside_names_the_free_space_it_needs(
+    tmp_path: Path, free: int, stored: int, first: str
 ) -> None:
-    # Streams without a byte limit (the attachment store) store 5 GB although only 3 GB is set aside. 1.5 GB free
-    # and 5 GB stored are above the warning's line, yet a start now gives 4.875 GB of room, less than the 5 GB.
-    stored = 5 * GB
-    capacity = _bundled(tmp_path, _StoreDisk(free=1_500_000_000), _Clock(), running=_RunningRoom(RESERVED, stored=stored))
+    capacity = _bundled(tmp_path, _StoreDisk(free=free), _Clock(), running=_RunningRoom(RESERVED, stored=stored))
 
     now, warning = _rooms(capacity, _usage(storage=stored, reserved_storage=RESERVED))
 
-    assert warning is None and now is not None and now.title == "The message server refuses new messages now"
-    assert now.action == (
-        "A start now would give it 4.9 GB of room, more than its streams set aside but less than their stored messages "
-        "take (5 GB), so it would still refuse every new message. Free space on that disk, or give it more, until the "
-        "free space is more than a third of what the stored messages take, then restart the whole instance (the "
-        f"container, or ua start). {FLOW_AGAIN} {NOW_ENDS}"
-    )
+    assert now is not None and now.title == "The message server refuses new messages now"
+    assert now.action == f"{first} {FLOW_AGAIN_STORED} {NOW_ENDS}"
+    assert "Free 600 MB" not in now.action
+    if free + stored > NEED:
+        assert warning is None
+    else:
+        # The warning's amount ends it, and the next step says what that start needs instead of removing not helping.
+        assert warning is not None and warning.action.startswith(
+            "Free 600 MB from other files on that disk before the message server next starts; that ends this warning. "
+            f"{STORED_DECIDES} The message server measures its room only when"
+        )
+        assert REMOVING not in warning.action
+
+
+@pytest.mark.parametrize(
+    ("stored", "reserved"), [(3_500_000_000, RESERVED), (5 * GB, RESERVED), (RESERVED + 3, RESERVED), (7 * GB, 1)]
+)
+def test_with_more_stored_than_set_aside_free_space_above_a_third_of_it_is_what_a_start_needs(
+    stored: int, reserved: int
+) -> None:
+    # What the findings say while a start would refuse every message with more stored than set aside: free space just
+    # above a third of what is stored lets a start take messages and gives room for what is set aside too; just below
+    # it, a start refuses every message. Within a byte or two of a third, NATS's own rounding decides.
+    def room(free: int) -> MessageRoom:
+        space = SpaceUse(key=MESSAGE_STORE_DISK_KEY, label="store disk", used=STORE_DISK - free, capacity=STORE_DISK)
+        return MessageRoom(disk=StoreDisk(space=space, free=free), reserved=reserved, stored=stored)
+
+    below, above = room(stored // 3 - 1), room(stored // 3 + 2)
+
+    assert below.stored_decides_start and below.refuses_messages_at_start
+    assert not above.refuses_messages_at_start and not above.short and not above.stored_decides_start
 
 
 def test_the_room_warning_says_messages_are_refused_when_the_streams_store_more_than_the_room_without_a_problem(
@@ -950,6 +1006,14 @@ def test_the_room_warning_says_messages_are_refused_when_the_streams_store_more_
         "only 250 MB more than it needs. The warning stays until they come to 4.4 GB,"
     ) in band.summary
     assert "enough room for the streams it has" not in band.summary
+    # Freeing each amount ends the warning, but a start then gives no more than the 3.3 GB stored (3.3 GB and
+    # 3.2625 GB), so the next step says what that start needs instead of that removing messages does not help.
+    assert short.action.startswith(
+        f"Free 500 MB from other files on that disk before the message server next starts; that ends this warning. "
+        f"{STORED_DECIDES} "
+    )
+    assert band.action.startswith(f"Free 100 MB from other files on that disk; that ends this warning. {STORED_DECIDES} ")
+    assert REMOVING not in short.action and REMOVING not in band.action
 
 
 def test_the_problem_starts_when_the_running_room_equals_what_is_set_aside(tmp_path: Path) -> None:

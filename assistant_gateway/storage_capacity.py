@@ -99,7 +99,12 @@ below it. That alone raises neither finding yet (a finding for stored messages
 against the room is a follow-up), but when one of them shows for another reason,
 its text says the server refuses, or would refuse at a start, every new message
 (``_running_state``, ``_band_outcome``, ``_start_refuses_messages``), instead of
-calling the room enough.
+calling the room enough. A start then takes new messages only once the free
+space is more than a third of what is stored, which also gives room for what is
+set aside; the warning's amount to free can fall short of that, so while a start
+would refuse every message both findings name that condition
+(``MessageRoom.stored_decides_start``), the problem instead of the amount and
+the warning beside it, in place of saying that removing messages does not help.
 
 Only the bundled server gets them. The launchers name it by handing the gateway
 its store folder (``docker.nats_service.bundled_nats_store_dir``, accepted only
@@ -197,12 +202,21 @@ _REMOVING_MESSAGES: Final = (
     "Removing messages from the message server does not help: it counts its stored messages back into its room "
     "when it starts."
 )
+# While a start would refuse every message with more stored than set aside (MessageRoom.stored_decides_start), the
+# room warning says what that start needs instead of _REMOVING_MESSAGES: storing less is then part of what lets it
+# take messages, and the warning's amount to free can fall short of that free space.
+_STORED_DECIDES_START: Final = (
+    "Its next start takes new messages only if the free space is more than a third of what its streams store when it "
+    "starts."
+)
 # While the running server refuses every message (_refuses_messages), its streams storing less than its room lets
-# messages through again at once (measured on 2.15.1), so the problem says both halves instead of _REMOVING_MESSAGES.
+# messages through again at once (measured on 2.15.1), so the problem says both halves instead of _REMOVING_MESSAGES:
+# this one, and _NO_MORE_ROOM, which it leaves out where the warning leaves out _REMOVING_MESSAGES (_flow_again).
 _MESSAGES_FLOW_AGAIN: Final = (
     "It takes new messages again as soon as its streams store less than its room, for example once agents take "
-    "queued work, but only until they fill again; removing messages gives its next start no more room."
+    "queued work, but only until they fill again"
 )
+_NO_MORE_ROOM: Final = "removing messages gives its next start no more room"
 
 
 @dataclass(frozen=True)
@@ -350,6 +364,21 @@ class MessageRoom:
         """Whether the server would refuse every new message as soon as it starts: it stores more than that room."""
 
         return self.stored > self.room
+
+    @property
+    def stored_decides_start(self) -> bool:
+        """Whether a start now would refuse every new message while the streams store more than they set aside.
+
+        Only streams without a byte limit can store that much. Then a start takes new messages
+        only once its room is more than what is stored, which is free space of more than a third
+        of the stored bytes (three quarters of both together is then more than the stored
+        bytes), and that room is also more than what is set aside. The room warning's amount to
+        free (``_to_free``) can fall short of it, so the findings say this condition instead of
+        leaving the warning's amount as the remedy. When less is stored than set aside, room for
+        what is set aside is enough for what is stored too, and the warning's amount covers both.
+        """
+
+        return self.refuses_messages_at_start and self.stored > self.reserved
 
     @property
     def release_at(self) -> int:
@@ -1008,12 +1037,14 @@ def message_room_finding(
     Its id stays the same while the level lasts. Below the line it says what fails and when
     messages stop (``_short_outcome``); in the release band above it, that there is room again by
     only a little. Both name one amount to free from files other than the message store, which
-    ends the warning, or say that the disk is too small for that (``_free_step``). ``running`` is
-    the room the server runs with now and what it stores, None when its monitoring endpoint did
-    not give them: the summary's last sentence says whether it already refuses
-    (``running_room_finding``), or that this page cannot tell (``_running_state``). The last step
-    says what adding a team needs, which is more than this warning's line: a new team's streams
-    set their whole limits aside on top.
+    ends the warning, or say that the disk is too small for that (``_free_step``). The next step
+    says that removing messages does not help, or, while a start would refuse every message with
+    more stored than set aside, the free space that start needs (``_STORED_DECIDES_START``), which
+    that amount can fall short of. ``running`` is the room the server runs with now and what it
+    stores, None when its monitoring endpoint did not give them: the summary's last sentence says
+    whether it already refuses (``running_room_finding``), or that this page cannot tell
+    (``_running_state``). The last step says what adding a team needs, which is more than this
+    warning's line: a new team's streams set their whole limits aside on top.
     """
 
     ends_at = _rounded_up(room.release_at)
@@ -1034,7 +1065,7 @@ def message_room_finding(
     team_need = room.need_with(team_set_aside)
     steps = [
         _free_step(room, offer_lower_limits=running is not None and not refusing),
-        _REMOVING_MESSAGES,
+        _STORED_DECIDES_START if room.stored_decides_start else _REMOVING_MESSAGES,
         f"The message server measures its room only when {_WHOLE_INSTANCE} starts; a team-wide restart keeps it "
         "running.",
         f"Each team's work and dead-letter streams set aside {readable_bytes(team_set_aside)} at this instance's "
@@ -1144,7 +1175,7 @@ def running_room_finding(
 
     When its streams already store more than that room it refuses every new message too, and the
     title and the summary's first sentence say so (``MESSAGES_REFUSED_TITLE``), and the action
-    says that it takes messages again once its streams store less (``_MESSAGES_FLOW_AGAIN``);
+    says that it takes messages again once its streams store less (``_flow_again``);
     otherwise the summary says its streams keep taking messages until they hold that room.
     Freeing space does not end it: the server took its room when it last started, so only a start
     of the whole instance with enough room (or streams removed) does. Its id stays the same while
@@ -1189,7 +1220,7 @@ def running_room_finding(
         summary=f"{summary} Freeing space alone does not end this: the server takes its room only when it starts."[:2000],
         action=" ".join([
             _restart_step(room, need, messages_refused=messages_refused),
-            *([_MESSAGES_FLOW_AGAIN] if messages_refused else []),
+            *([_flow_again(room)] if messages_refused else []),
             "A team-wide restart keeps the message server running with the room it has. This problem ends once it runs "
             "with more room than its streams set aside.",
         ])[:1000],
@@ -1197,6 +1228,20 @@ def running_room_finding(
         since=since,
         details="\n".join(details)[:2000],
     )
+
+
+def _flow_again(room: MessageRoom | None) -> str:
+    """The problem's sentence while the server refuses every message: it takes them again once its streams store less.
+
+    It ends by saying that removing messages gives its next start no more room (``_NO_MORE_ROOM``),
+    except while more is stored than set aside and a start would refuse every message
+    (``MessageRoom.stored_decides_start``): storing less is then part of what lets that start take
+    messages, as the first step's condition shows (``_start_refuses_messages``).
+    """
+
+    if room is not None and room.stored_decides_start:
+        return f"{_MESSAGES_FLOW_AGAIN}."
+    return f"{_MESSAGES_FLOW_AGAIN}; {_NO_MORE_ROOM}."
 
 
 def _restart_step(room: MessageRoom | None, need: int, *, messages_refused: bool) -> str:
@@ -1207,8 +1252,9 @@ def _restart_step(room: MessageRoom | None, need: int, *, messages_refused: bool
     does not start short again as other files grow; but while it refuses every message
     (``messages_refused``) and a start now has room, restart first, since that ends the stop
     (``_margin_step``). On a disk too small for that margin, restart now while there is enough
-    room, or give the disk more space first when there is not. A start that would have room for
-    what is set aside but not for what is stored is said as such (``_start_refuses_messages``).
+    room, or give the disk more space first when there is not. A start that would refuse every
+    message while more is stored than set aside, short or not, is said as such, with the free
+    space it needs instead of the room warning's amount (``_start_refuses_messages``).
     """
 
     restart = f"restart {_WHOLE_INSTANCE}"
@@ -1217,7 +1263,7 @@ def _restart_step(room: MessageRoom | None, need: int, *, messages_refused: bool
             "Make sure the free space on the disk holding its store and its stored messages together come to more "
             f"than {readable_bytes(need)}, then {restart}."
         )
-    if room.refuses_messages_at_start and not room.short:
+    if room.stored_decides_start:
         return _start_refuses_messages(room, restart)
     if room.free_and_stored >= room.release_at:
         return (
@@ -1243,8 +1289,8 @@ def _margin_step(room: MessageRoom, to_free: int, restart: str, *, messages_refu
     Freeing comes first, so the server does not start short again as other files grow, unless the
     server refuses every message (``messages_refused``) and a start now has room: the caller has
     ruled out a start that would refuse every message, so a restart now ends that stop and the
-    freeing can follow. While messages are refused, the problem's ``_MESSAGES_FLOW_AGAIN`` says
-    what removing messages does instead of ``_REMOVING_MESSAGES``.
+    freeing can follow. While messages are refused, the problem's ``_flow_again`` says what
+    removing messages does instead of ``_REMOVING_MESSAGES``.
     """
 
     amount = f"{readable_bytes(to_free)} from other files on that disk"
@@ -1259,18 +1305,33 @@ def _margin_step(room: MessageRoom, to_free: int, restart: str, *, messages_refu
 
 
 def _start_refuses_messages(room: MessageRoom, restart: str) -> str:
-    """The problem's first step when a start now would have room for what is set aside but not for what is stored.
+    """The problem's first step when a start now would refuse every message while more is stored than set aside.
 
-    Streams without a byte limit can store more than what is set aside. A start's room (three
-    quarters of the free space and the stored bytes) is more than what is stored once the free
-    space is more than a third of it, which freeing other files or a larger disk gives.
+    Streams without a byte limit can store more than what is set aside
+    (``MessageRoom.stored_decides_start``). A start's room (three quarters of the free space and
+    the stored bytes) is more than what is stored once the free space is more than a third of
+    it, which freeing other files or a larger disk gives; that room is then more than what is
+    set aside too, so a short start needs nothing more. The room warning's amount can fall short
+    of that free space, so this step names the condition, not that amount.
     """
 
+    if room.short:
+        start = (
+            f"A start now would give it {readable_bytes(room.room)} of room, less than its streams set aside and less "
+            f"than their stored messages take ({readable_bytes(room.stored)}), so it would still refuse every new or "
+            "changed stream and every new message."
+        )
+        both = " That start also has more room than they set aside, because they store more than that."
+    else:
+        start = (
+            f"A start now would give it {readable_bytes(room.room)} of room, more than its streams set aside but less "
+            f"than their stored messages take ({readable_bytes(room.stored)}), so it would still refuse every new "
+            "message."
+        )
+        both = ""
     return (
-        f"A start now would give it {readable_bytes(room.room)} of room, more than its streams set aside but less than "
-        f"their stored messages take ({readable_bytes(room.stored)}), so it would still refuse every new message. Free "
-        "space on that disk, or give it more, until the free space is more than a third of what the stored messages "
-        f"take, then {restart}."
+        f"{start} Free space on that disk, or give it more, until the free space is more than a third of what the "
+        f"stored messages take, then {restart}.{both}"
     )
 
 

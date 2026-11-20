@@ -4470,7 +4470,11 @@ store more than that room it refuses every new message too; the problem then
 says so first under its own title, on the same level, so administrators are
 not told twice. Streams without a byte limit (`ua_attachments` by default) can
 store more than the room while less is set aside; that alone raises neither
-finding yet, though a finding shown for another reason says so.
+finding yet, though a finding shown for another reason says so. A start then
+takes new messages only once the free space is more than a third of what is
+stored (`MessageRoom.stored_decides_start`); the warning's amount to free can
+fall short of that, so both findings name that free space instead of leaving the
+amount as the remedy.
 While the endpoint does not answer, the problem's level is kept and the check
 lists the endpoint as an unavailable source, so `notify_new_problems` keeps
 the problem instead of announcing it again. The check runs only where a
