@@ -28,7 +28,13 @@ from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_services.memory import MemoryOperations
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
 from tests.people_directory_support import access_store_at
-from tests.test_live_team_services import TEAM, broker, connect, installation  # noqa: F401 - broker is a fixture
+from tests.test_live_team_services import (  # noqa: F401 - broker is a fixture
+    TEAM,
+    broker,
+    connect,
+    installation,
+    until_team_services_serve,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 
@@ -56,6 +62,7 @@ async def started_team(stack: AsyncExitStack, url: str, tmp_path: Path, stop: as
     gateway.start(await connect(stack, url, GATEWAY_RUNTIME))
     stack.push_async_callback(gateway.close)
     await gateway.ready(timeout=20)
+    await until_team_services_serve(host, serving)
     return MessageHostTeamServices(gateway, timeout_seconds=10)
 
 

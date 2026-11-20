@@ -78,6 +78,28 @@ async def team_services_host(stack: AsyncExitStack, url: str, layout: InstanceLa
     return host, asyncio.create_task(serve_team(host, TEAM, stop))
 
 
+async def until_team_services_serve(services: MessageHost, serving: asyncio.Task[None], *,
+                                    timeout: float = 20.0) -> None:
+    """Wait until the team services answer their address, or fail when ``serving`` ended first.
+
+    They write their host record as "accepting" only after they took the team's lock, subscribed to
+    their address and flushed (``team_services.process._serve_holding_lock``). A gateway started beside
+    them can be ready before that, and a command it sends then gets "no responders". Since the bucket
+    listing fix (#153) the team services take about 50 ms longer to get there, so every test that sends
+    a command right after the gateway is ready waits here first.
+    """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while services._reported_state != "accepting":
+        if serving.done():
+            await serving  # raises what stopped it
+            raise AssertionError("the team services stopped before serving")
+        if loop.time() >= deadline:
+            raise AssertionError(f"the team services did not serve within {timeout} seconds")
+        await asyncio.sleep(0.02)
+
+
 async def host(stack: AsyncExitStack, url: str, layout: InstanceLayout, profile: HostProfile) -> MessageHost:
     started = MessageHost(layout, profile, await connect(stack, url, profile.runtime))
     await started.start()
