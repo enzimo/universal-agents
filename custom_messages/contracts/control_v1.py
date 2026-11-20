@@ -301,6 +301,16 @@ class AgentStatus(BaseModel):
             "workers started inside another process leave it empty and their start record decides."
         ),
     )
+    request_task_ids: List[str] = Field(
+        default_factory=list,
+        exclude=True,
+        description=(
+            "The root task ids of the people's requests the agent's model turns ran for now or since its previous "
+            "record. Only the gateway's team view fills it, from the agent's signed record "
+            "(assistant_gateway.team_view.record_status), and only gateway code reads it. Never serialized: one "
+            "person's request ids must not reach another person's status or a model."
+        ),
+    )
     info_type: ControlType = Field(
         default=ControlType.STATUS_REQUEST_BASIC
     )  # specify type of info that is requested (STATUS_REQUEST_BASIC, STATUS_REQUEST_FULL)
@@ -319,10 +329,12 @@ class AgentStatus(BaseModel):
             self.is_busy = self.is_executing
 
 
-# Fields agents exchange for liveness checks (custom_agents.agent_liveness) that
-# are never shown to a model or a person: process numbers and host names say
-# nothing useful there.
-AGENT_STATUS_RUNTIME_ONLY_FIELDS = frozenset({"process_identity"})
+# Fields that are never shown to a model or a person. Agents exchange
+# ``process_identity`` for liveness checks (custom_agents.agent_liveness):
+# process numbers and host names say nothing useful there. The gateway's team
+# view fills ``request_task_ids`` from agent records; its field definition also
+# keeps it out of every dump, since it names other people's requests.
+AGENT_STATUS_RUNTIME_ONLY_FIELDS = frozenset({"process_identity", "request_task_ids"})
 
 
 class AgentStatusMap(BaseModel):

@@ -39,6 +39,15 @@
     },
     "since": {
       "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "requests": {
+      "description": "The root task ids of the people's requests this agent's model turns ran for now or since its previous record, at most about 2 seconds earlier, each taken from the verified gateway-signed context of the turn's task. Ids only, never a person; readers map them only through their own request records. Absent when there are none.",
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/record_id"
+      },
+      "minItems": 1,
+      "maxItems": 16
     }
   },
   "required": [

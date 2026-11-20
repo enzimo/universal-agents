@@ -1,0 +1,31 @@
+{
+  "record": "agent",
+  "protocol": "1.0-pre",
+  "key": "team_example.55.lead",
+  "writer": {
+    "type": "host",
+    "installation": "install_example",
+    "runtime": "lead-host-1",
+    "membership_epoch": 3,
+    "key_id": "test-lead-key-1"
+  },
+  "sequence": 13,
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:33:00.000Z",
+  "body": {
+    "team": "team_example",
+    "agent": "lead",
+    "agent_type": "team_lead",
+    "display_name": "Team lead",
+    "session": "s-lead-1",
+    "state": "busy",
+    "accepting_work": true,
+    "since": "2026-10-22T04:29:00.000Z",
+    "requests": [
+      "task_example_request_1"
+    ]
+  },
+  "algorithm": "ed25519",
+  "body_digest": "Pc35ORbZLh3JBXdPc47swhv2qvqapImwzjH-YewQm0o",
+  "signature": "gMAPRWH9IKo-FBZ8o_YJzq0xA6kUsVtPiKLkNWm9jtdjK4wa9f2KdOnW0tcOMICKXliAnLnR3XLrsgm2PRBjDQ"
+}

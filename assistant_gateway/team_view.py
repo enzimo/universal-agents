@@ -311,6 +311,8 @@ def record_status(item: TeamAgent, team_id: str, *, details: Optional[MemberDeta
         is_team_lead=item.is_lead, is_paused=item.state == "paused", is_executing=item.state == "busy",
         is_busy=item.state == "busy", accepting_work=item.takes_work and not exiting,
         has_execution_capacity=capacity, is_exiting=exiting,
+        # The people's requests its turns ran for (never serialized; request_agents_service reads it).
+        request_task_ids=[] if exiting else list(item.requests),
         available_skills=list(details.skills) if details is not None else [],
         status_findings=list(details.findings) if details is not None else [],
         last_seen_at=(seen_at or datetime.now(timezone.utc)).isoformat(), status_type=MessageMetaType.RESPONSE,
