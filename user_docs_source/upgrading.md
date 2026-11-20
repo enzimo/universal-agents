@@ -116,7 +116,8 @@ supported, because it may not read what a newer one saved.
   - **The folder was at another path under 0.9** (moved, mounted elsewhere
     or reached through another link): its records name that path, so every
     file here looks like one no record names. The upgrade notices this when
-    a record names one of these files in another folder. It then lists
+    a conversation record, held guidance or a gateway attachment record
+    names one of these files in another folder. It then lists
     nothing, gives no delete command (a command from an earlier warning
     deletes nothing either) and logs one error instead
     (`event=adapter_host_files_folder_moved`): how many files records name
@@ -149,9 +150,12 @@ supported, because it may not read what a newer one saved.
     first, stop the instance, and remove only files sent before the upgrade
     (a file's modification time is when it was sent), because the 0.10
     adapter host passes new files through the same folder.
-  - **When the upgrade cannot tell that the folder moved.** If no record
-    names any of the files (their records were all deleted, for example),
-    the upgrade lists them as above. The warning then says not to delete
+  - **When the upgrade cannot tell that the folder moved.** If none of
+    those three kinds of record names any of the files in another folder
+    (their records were all deleted, for example), the upgrade lists them
+    as above. The adapter host's own upload records are not checked for
+    this, so a file sent in a message the gateway had not handled before
+    the upgrade, which only those records name, is listed too. The warning then says not to delete
     them if the folder was at another path under 0.9, before it gives the
     command.
   - **The files could not be counted**: the warning

@@ -4953,16 +4953,23 @@ the desktop app never offers an older version.
   a turn's folder may withhold the command but is never kept, logged or
   shown; the error names only folders from gateway records and held
   guidance copies, and never a file. A record in another folder whose name
-  is not listed changes nothing: its file is not here and the listed files
-  are named by no record anywhere, so withholding the command for it would
-  withhold it on every instance where an earlier `upload_dir`'s records
-  linger. When no record anywhere names a listed file (all of them cleaned
-  up, for example), the step cannot tell, so the warning keeps its sentence
-  before the command: if the folder was at another path under 0.9.13, do
-  not delete the files, and move the folder back as above. That sentence
-  comes before the command because the command deletes on one paste, and a
-  person who acts on it before reading the whole line must already have
-  read when not to. A folder that is not there counts 0. One gone or with
+  is not listed changes nothing: its file is not here and it names none of
+  the listed files, so withholding the command for it would withhold it on
+  every instance where an earlier `upload_dir`'s records linger. When no
+  conversation turn, held guidance copy or gateway record names a listed
+  file in another folder (all of them cleaned up, for example), the step
+  cannot tell, so the warning keeps its sentence before the command: if the
+  folder was at another path under 0.9.13, do not delete the files, and
+  move the folder back as above. That sentence comes before the command
+  because the command deletes on one paste, and a person who acts on it
+  before reading the whole line must already have read when not to. The
+  adapter host's own upload records (`gateway_adapter_uploads`) hold the
+  old path too, but this check does not read them: the step reads them only
+  for the files the gateway reads at its start, and only at the transfer
+  folder's path. So a file only they name (one sent in a message the
+  gateway had not handled before the upgrade) is still listed when the
+  folder moved, with only that sentence to protect it; reading them in this
+  check is a follow-up. A folder that is not there counts 0. One gone or with
   another device and inode than the step saw when it started (every look
   opens it by path, so a folder unmounted or replaced meanwhile would look
   empty), any other error listing it, a database error reading the adapter

@@ -211,7 +211,8 @@ counted (``unlisted=``).
 The run that writes the marker writes those names, sorted and one per line,
 to ``InstanceLayout.adapter_host_files_without_records_path`` just before the
 marker; the warning shows the first ten, then says to keep them when the
-folder was at another path under 0.9.13 and no record shows it (below), and
+folder was at another path under 0.9.13 and no record the step checks shows
+it (below), and
 only then gives a command that deletes exactly the listed files. A list is
 valid only beside the marker of the run that wrote it: every later run that
 does not find the marker removes it, under the step's lock and before it
@@ -269,12 +270,20 @@ write conversation turns, so a turn's folder may withhold the command but is
 never kept, logged or shown; only folders from gateway records and held
 guidance copies are named. A record in another folder whose name is not
 listed changes nothing: its file is not here, so it says nothing about this
-folder, and the listed files are named by no record anywhere. When the check
-cannot finish (a database error), nothing is listed either and
+folder or the listed files. When the check cannot finish (a database error),
+nothing is listed either and
 ``event=adapter_host_files_without_records_uncounted`` says how to check
 again. The detection opens no file, follows no link and drops no record. It
-finds nothing when no record anywhere names a listed file, for which the
-warning keeps its sentence before the command.
+finds nothing when no conversation turn, held guidance copy or gateway record
+names a listed file in another folder (their records were all deleted, for
+example), for which the warning keeps its sentence before the command. The
+adapter host's own upload records (``gateway_adapter_uploads``) hold the old
+path too, but this check does not read them: the step reads them only for the
+files the gateway reads at its start (``_files_the_gateway_reads``), and only
+at this folder's path. So a file only they name, one sent in a message the
+gateway had not handled before the upgrade, is still listed when the folder
+moved, with only that sentence to protect it; reading them here is a
+follow-up.
 
 Guidance the gateway still holds (``gateway_held_guidance``) is rewritten
 with its moved file: the gateway signs it again from that copy at each send,
@@ -885,8 +894,10 @@ def _report_files_without_records(
     record names a listed file in another folder, the step finds that and
     this warning is not given (``_report_folder_moved`` instead, with no list
     and no command, F7 of PR #154's review). The warning keeps its sentence
-    for the case no record shows (for example, the records of every listed
-    file were deleted since): it says to keep the files then and, because
+    for the case the checked records do not show (for example, the records
+    of every listed file were deleted since, or only the adapter host's
+    upload records name them, which that check does not read): it says to
+    keep the files then and, because
     the step reads only ``upload_dir`` (resolved through links), to set
     ``upload_dir`` to that path with the folder there (F1 of that review).
     """
@@ -934,9 +945,9 @@ def _listed_advice(transfer: Path, marker: Path, written: Optional[_WrittenList]
         names = "This warning names"
     # A folder at another path under 0.9.13 makes the list wrong. When a record names a listed file in another
     # folder the step withholds the list and the command (``_report_folder_moved``, F7 of PR #154's review); this
-    # sentence stays for the case no record shows, and it comes before the command (C10 of F6): the command deletes
-    # on one paste, and a person who acts on it before reading the whole line must already have been told when not
-    # to. With no match this text is exactly as before F7 (A5). Both the names and the not-moved warning's sources= come
+    # sentence stays for the case the checked records do not show, and it comes before the command (C10 of F6): the
+    # command deletes on one paste, and a person who acts on it before reading the whole line must already have been
+    # told when not to. With no match this text is exactly as before F7 (A5). Both the names and the not-moved warning's sources= come
     # from the same records, so no listed file is one a record keeps (C08 of F6): the administrator removes nothing
     # from the list. A remote adapter host keeps its registration epoch across a short restart until its message
     # arrives or a request fails (a heartbeat renews even an expired lease), so an upload it finished before the
