@@ -63,6 +63,21 @@ class TurnEnded(RuntimeError):
     """The bound task's model turn ended or was asked to stop (or none runs), so its work did not run to the end."""
 
 
+def _report_state(agent: Any) -> None:
+    """Tell the agent's host its state and the requests its turns run for (``UniversalAgent._report_record_state``,
+    ``custom_agents.agent_host``); called through the agent so this module imports no host code."""
+
+    report = getattr(agent, "_report_record_state", None)
+    if report is not None:
+        report()
+
+
+def _turn_request_id(agent: Any, task_id: str | None) -> str | None:
+    from custom_agents.working_requests import turn_request_id as decide
+
+    return decide(agent, task_id)
+
+
 def start_turn(agent: Any, task_id: str | None) -> ToolStop:
     """Start the model turn of the bound task's work; returns the turn's new ToolStop.
 
@@ -82,7 +97,11 @@ def start_turn(agent: Any, task_id: str | None) -> ToolStop:
         raise RuntimeError("A model turn needs an owning asyncio task.")
     work.turn_owner = owner
     work.tool_stop = ToolStop(agent_id=agent.id, task_id=task_id)
+    # Which person's request the turn serves, once per turn (custom_agents.working_requests); never raises.
+    work.request_task_id = _turn_request_id(agent, task_id)
     agent._running_turns[owner] = work
+    # The agent's record names the requests its turns run for, so a turn's start and end are state changes.
+    _report_state(agent)
     return work.tool_stop
 
 
@@ -95,6 +114,7 @@ def end_turn(agent: Any) -> None:
     if work is not None:
         # The turn's person model goes with it (custom_agents.person_model_runtime).
         restore_team_model(agent, work)
+        _report_state(agent)
 
 
 def running_turn_works(agent: Any) -> list[TaskWork]:

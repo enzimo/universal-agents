@@ -33,7 +33,7 @@ from assistant_gateway.application.workspace_browser import (
     GatewayWorkspaceAccess,
     WebsiteWorkspaceBrowser,
 )
-from assistant_gateway.runtime_ports import UuidGatewayIdGenerator
+from assistant_gateway.runtime_ports import SystemGatewayClock, UuidGatewayIdGenerator
 from assistant_gateway.attachments import gateway_staged_attachment_reader
 from assistant_gateway.interactive_apps.host_ports import (
     InteractiveAppRuntimeContext,
@@ -433,6 +433,7 @@ class WebsiteApplicationDouble(CoreApplicationDouble):
                 getattr(candidate, "sessions_awaiting_reply", ())
             ),
             proactive_session_key=self._config.heartbeat.session_key,
+            clock=SystemGatewayClock(),
         )
         transcript_service = GatewayTranscriptService(
             repository=state_store.transcript_repository,

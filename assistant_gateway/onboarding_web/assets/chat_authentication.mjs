@@ -233,6 +233,7 @@ function lockChat(message) {
     sharedState.threads = [];
     sharedState.activeThreadId = "";
     sharedState.editingThreadId = "";
+    operations.clearThreadListOverlays();
     sharedState.clientId = "";
     sharedState.clientIdKey = "";
     sharedState.storageKey = "";

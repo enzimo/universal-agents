@@ -1843,16 +1843,140 @@ its history. Steps with linked requests cannot use this correction.
   from an earlier sign-in or invalidated history revision. Cursor resets
   invalidate cached history and reload only the active thread; metadata-only
   refreshes must not advance the event cursor or rewind older-page navigation.
-- Thread history includes a New Chat button plus per-thread rename and archive
-  icon buttons. Archive hides a thread from the active list without implying
-  permanent transcript deletion. Keep the history label and its scrollable
-  thread list together as the sidebar's flexible region so rows stay
-  top-anchored immediately below the label rather than drifting toward the
-  account controls.
+- Web Chat fills the browser window's height, with about 6 px around and
+  between its panes (owner's request, 2026-11-19: more threads in view; it
+  was capped at 1100 px with 12-16 px gaps). The sidebar keeps 10 px padding
+  and 8 px between its parts, and the activity mesh stays above the account
+  area. Below 900 px the sidebar is `min(460px, 60vh)` tall so its list keeps
+  a few rows; a max-height alone left the list 0 px tall there.
+- The thread list sits below New Chat as the sidebar's flexible, scrolling
+  region, in sections (`chat_thread_list.mjs`): **Needs you** (a highlighted
+  box in attention gold, Ember in dark mode, for threads waiting on the
+  person), **Pinned**, **Recent**, then **Snoozed** and **Dismissed**. In the
+  light theme the status line and the list sit on a pale backing (about 82%
+  cover; owner's choice, 2026-11-20), while the rest of the sidebar stays
+  glassy, because the glass shows a mid-dark band of the mesh where the list's
+  text measured 1.0 to 2.5:1 (review F8). On it the Needs you box has a
+  nearly opaque pale fill and dark amber text (#8a4508), and the status
+  line's failure a pale fill. Measured in Chromium against what is drawn
+  behind the text (worst pixel, motion off), light: waiting reason 6.1,
+  Needs you header 5.9, status line 5.3, section headers 6.5, ages 6.8,
+  snippets 6.9, titles 7.0; dark mode, which has no backing, 6.3 or more.
+  The browser probe holds all of them to 4.5:1. Each
+  header is a button with the section's count and a chevron; it opens and
+  closes its rows in place and keeps focus. Snoozed and Dismissed start
+  collapsed; the person's choices are kept in this browser. Needs you,
+  Pinned, Snoozed and Dismissed show only when they hold a thread.
+- Each thread row has two lines: the title, a **Woke** pill when a snooze
+  ended and the person has not opened the thread yet, and the time since
+  anything was last posted in it, cards included (now, 5m, 3h, 2d, 3w, 1y;
+  the list is ordered by the same time, so it is not the snippet's time);
+  then the agent trail (below) and, after it, what the thread waits on
+  (gold/Ember, with the full sentence as its title), else who works on the
+  thread's request now, else the latest message as "You: ..." or
+  "<assistant name>: ...". The waiting reasons are short enough to fit
+  beside six triangles at the usual sidebar width: at 1280 by 880 the words
+  have 178 px there, and the longest reason, "Waiting for your answer",
+  measures 170 px in the probe's fonts, about 5% to spare for a slightly
+  wider system font ("Finish the setup page" replaced "Needs you to finish
+  setup", 180 px, review C21/C23). The snippet is plain text: no Markdown
+  markers, inline code as written, never a system card or a slash command.
+  Ages move on once a minute in place.
+- **Agent trail** (`agent_trail.mjs`; owner's request 2026-11-19, rule
+  2026-11-20): one small triangle per turn, oldest first, alternating up and
+  down and overlapping, before the second line's words. The person's turns
+  are grey (`#96a5af`), the team lead's gold (`#f6c84c`) and every other
+  agent type in the activity mesh's colour for it (`agentColor`). A turn is a
+  request that started work, then each agent type that worked on it, in the
+  order the gateway first learned of it (the team lead first). At most six
+  triangles, counting the ones working now; when the thread has older turns
+  the leftmost is drawn hollow with a dotted outline.
+  - The triangles of the agents working on the thread's current request
+    pulse their glow (1.4 s); the triangle's own colour never fades, so its
+    contrast holds through the pulse. Without motion (the system's reduced
+    motion or Interface Animation off) the glow stays steady, which is also
+    the working mark. A busy row (this page's reply wait or the server's
+    busy mark), or one the server says someone works on, always pulses
+    something: the current request's team-lead triangle, else a team-lead
+    triangle added at the end. Right after this page sends a new request
+    the row shows its turn and a pulsing team-lead triangle until the
+    server's trail catches up; guidance and slash commands add no turn.
+  - While someone works, the second line names them in words after the
+    trail, in the team lead's gold (`#6b5000` in the light theme, `#f6c84c`
+    in dark): "Web Research Agent working", "Team lead and Web Research
+    Agent working", cut with an ellipsis and the full "Working: ..." as the
+    line's title (owner-approved mockup, lead ruling on review C22). A
+    waiting reason wins over it. Measured worst pixel: 5.7:1 light, 4.5:1
+    or more dark.
+  - Colours keep at least 3:1 against every row background in both themes.
+    Each colour's lightness is moved within its own hue: resting triangles to
+    about 3.2:1 (a quieter look, like the mockup's half-strength triangles),
+    working ones to 4.5:1 or more. Dark colours are fitted to the brightest
+    dark row background (relative luminance 0.05; the raised row measures
+    0.03), light ones to the darkest light one (0.6; the pale backing over
+    the mesh measures 0.74 behind the trail). Measured in Chromium at the
+    worst pixel, normal, hovered, active and Needs you rows: 3.9:1 light,
+    4.0:1 dark (`tests/web_chat_agent_trail_probe.cjs`, which fails when a
+    background leaves the fitted range).
+  - The hover card's footer shows the same trail and the agent types that
+    worked in the thread, then the turn count ("Team lead, Web Research
+    Agent, Memory Review Agent · 12 turns").
+- A row's name for screen readers is its title, who works ("Working: team
+  lead, Web Research Agent") and the unread-reply dot in words ("New
+  reply", "Reply needs attention"; both when someone works and a reply is
+  unread, "Working: Web Research Agent. Reply needs attention", because
+  sighted people see the dot beside the pulsing triangles; the dot and the triangles themselves are
+  hidden from them, and so are the visible working words, which would say it
+  twice), Woke, the age in words ("active 5 minutes ago") and the second
+  line. Each row's button carries `aria-keyshortcuts="Shift+F10
+  ContextMenu"` and a hidden description saying the row has a menu, because
+  the menu is the only way to rename or delete; no `aria-haspopup`, since
+  Enter opens the chat.
+- Keyboard focus never falls to the page when the list is drawn again: it
+  stays on the same row or header; when a row moved into a collapsed section
+  or went away (Dismiss, Snooze, Delete) it goes to the row that took its
+  place, else the one before it, else its section's header, else New Chat;
+  a focused header whose section is no longer drawn hands focus to New Chat.
+  After a rename is saved or cancelled it is on the renamed row. The full
+  title tooltip shows only for keyboard focus (`:focus-visible`), so a mouse
+  Dismiss does not leave one over the next row.
+- Rename and Delete live in the row's menu, not on the row. The menu opens
+  with a right-click, a long press on touch screens, or the context-menu key
+  or Shift+F10 on a focused row (`chat_thread_menu.mjs`): Pin to top or
+  Unpin, Snooze (For 1 hour, Until this evening before 5 PM, Until tomorrow,
+  Until next week, each with its time; then Pick a time... and the note
+  **Comes back early if the team posts.**), Dismiss or Restore, Rename and
+  Delete (danger color). It is a compact frosted list placed where it opened
+  with Snooze's choices beside it; arrow keys, Home and End move through it,
+  Escape closes it and gives focus back to the row. Each Snooze choice is
+  described by the note, which arrow keys do not reach. Pick a time opens a
+  small labelled dialog with a date and time field, Snooze and Cancel; Tab
+  and Shift+Tab stay inside it (a hidden focusable guard at each end sends
+  focus to the other end, so Tab still moves between the field's own parts),
+  and switching to another app closes the menu but keeps the dialog and the
+  time chosen in it. Delete keeps
+  the archive behaviour: it hides the thread without deleting its messages.
+  While renaming, the row shows the name field with Save and Cancel icons;
+  Enter saves and Escape cancels.
+- What happened to a change from the menu shows in one line above the list,
+  outside the part that scrolls (`chat_thread_status.mjs`, review F5): a
+  polite live region present from page load. A failure names the chat in
+  quotes and says why, in the danger colour inside a thin rounded border,
+  with **Retry** only when the request did not get through (a refusal
+  cannot be fixed by repeating it) and **Close**; no timer clears it, and
+  signing out does. A change that worked is announced in visually hidden
+  text ("Dismissed “Check the backups”.") and takes no room. Failures are
+  never shown in the open chat: the person was working in the list.
+- A mouse resting on a row for about 400 ms shows a hover card beside it
+  (`chat_thread_preview.mjs`): the title and "active 1d ago" (when anything
+  was last posted, as the row's age), the last four turns with who and when,
+  each cut to two lines, and the turn count. Escape closes it, and it stays
+  closed until the pointer leaves that row (WCAG 1.4.13). Never on touch,
+  never for the chat already open, never under an open menu.
 - Opening or refreshing Web Chat must not create a conversation. Restore an
   existing selection when available; otherwise, once the server has answered
-  with no thread, show one selected, unsaved "New Chat" row (no rename or
-  archive; choosing it focuses the composer) and an empty composer (owner's
+  with no thread, show one selected, unsaved "New Chat" row (no menu;
+  choosing it focuses the composer) and an empty composer (owner's
   request, 2026-10-09). New Chat and the first submitted message explicitly
   create a conversation, which replaces that row.
   Opening Settings during sign-in waits for the saved-thread lookup before
@@ -1873,25 +1997,26 @@ its history. Steps with linked requests cannot use this correction.
   something has arrived in them, as "Updates" and "Memory review". They used
   to show as two empty "New Chat" rows on a newly set-up Web Chat, and the
   first message went into the memory-review thread.
-- Thread rows show a compact active-reply indicator between the truncated
-  thread title and rename/delete actions while the agent is still replying.
-- The active-reply pulse must remain clearly visible after its thread loses the
-  active-row backdrop. Keep the pulse at 78% opacity or higher and use scale
-  plus a stronger blue halo to convey motion on an unfocused row.
-- The initiating browser request owns that active-reply indicator until its
-  terminal success or failure. Durable transcript delivery only merges
-  presentation rows; an accepted user row must not clear the indicator while
-  the request is still waiting for the agent or create an unread-reply dot.
+- Work in a thread shows in its agent trail (above), not in a dot: the
+  busy dot was removed (owner's request, 2026-11-19). The initiating browser
+  request owns its reply wait until its terminal success or failure. Durable
+  transcript delivery only merges presentation rows; an accepted user row
+  must not end the wait while the request is still waiting for the agent or
+  create an unread-reply dot.
 - Any unfocused thread with a fresh unread reply uses a green border and halo.
-  If that thread is still running, keep the blue pulsing dot so unread content
+  If that thread is still running, its trail keeps pulsing, so unread content
   and active execution remain distinct signals. Use a gold border and halo
   instead when the unread reply needs user attention.
-- Completed replies in unfocused threads use that same indicator slot as a
-  solid dot: green for ordinary unread replies, gold/yellow when the reply
+- Unread replies in unfocused threads show a solid dot at the row's left,
+  in the indicator slot before the title: green for ordinary unread replies, gold/yellow when the reply
   needs user attention such as an error or recoverable runtime-pause choice.
 - Truncated thread titles show their full title in a custom frosted tooltip
-  after one second of hover or focus; do not rely on native browser title
-  tooltips for this.
+  after one second of keyboard focus, or of mouse hover on the open chat's
+  row (it has no hover card, and Web Chat has no chat header), though not
+  right after a click opened it: like the hover card, it waits until the
+  pointer has left that row and come back; for other rows
+  mouse users see it in the hover card, whose title wraps instead of being
+  cut. Do not rely on native browser title tooltips for this.
 - The Web Chat sidebar header places the brand/UA lockup on the left and a
   compact Settings cog on the far right. The cog uses the same frosted control
   treatment as other icon buttons, has an accessible name, and opens Settings;

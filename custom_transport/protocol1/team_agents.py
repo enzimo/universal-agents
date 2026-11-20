@@ -145,12 +145,23 @@ class TeamAgent:
     is_lead: bool
     # The contract digest the agent's host runs when it is not this reader's (module docstring).
     other_contract: Optional[str] = None
+    # The root task ids of the people's requests its model turns ran for now or since its previous record
+    # (the record's ``requests``, from verified gateway-signed contexts); ids only, read through the gateway's own
+    # request records (``assistant_gateway.application.request_agents_service``).
+    requests: tuple[str, ...] = ()
 
     @property
     def takes_work(self) -> bool:
         """Whether new work may go to the agent: it accepts work, and its host runs this reader's contract."""
 
         return self.accepting_work and self.state not in {"starting", "paused", "exiting", "stopped"} and self.other_contract is None
+
+
+def _request_ids(body: Any) -> tuple[str, ...]:
+    """The record's ``requests`` in its order, each once; none when the record has none."""
+
+    listed = _present(getattr(body, "requests", None))
+    return tuple(dict.fromkeys(str(item) for item in listed)) if listed else ()
 
 
 @dataclass(frozen=True)
@@ -744,7 +755,8 @@ class TeamAgents:
                          state=str(body.state), accepting_work=bool(body.accepting_work),
                          since=parse_timestamp(str(body.since)), host=signer.runtime, session=session,
                          is_lead=found.agent_role == "lead",
-                         other_contract=host.record.their_contract_sha256 if host.record.other_contract else None)
+                         other_contract=host.record.their_contract_sha256 if host.record.other_contract else None,
+                         requests=_request_ids(body))
 
     def _absence_reason(self, agent_id: str) -> str:
         agent = self._agents.get(agent_id)

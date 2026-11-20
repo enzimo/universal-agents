@@ -332,7 +332,10 @@ The runtime withholds the configured turn, token, and checkpoint-tool reserves
 from material work. If a work invocation reaches a safe boundary without a
 checkpoint, it performs a narrow checkpoint-only invocation. A deterministic
 degraded checkpoint is the fallback when that pass cannot persist a proper
-handoff; it is not evidence of useful progress.
+handoff; it is not evidence of useful progress. A call that pauses for a
+person's decision at the boundary keeps its pause and gets no checkpoint-only
+pass: a plan step paused past the limit, or resumed with a required skill
+still missing, ends the session with the runtime's degraded checkpoint.
 
 Treat a runtime-synthesized degraded checkpoint as a continuity aid that needs
 fresh validation, not as proof that the prior session completed its intended

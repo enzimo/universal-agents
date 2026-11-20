@@ -733,6 +733,7 @@ test("a conversation lookup from before Knowledge logout cannot replace the next
   try {
     for (const pending of ["list", "create", "json"]) {
       let authentication;
+      let overlaysCleared = 0;
       const f = fixture({ getSessionKey: () => authentication.ensureRuntimeControlsSession() });
       globalThis.window = {};
       globalThis.document = f.document;
@@ -763,6 +764,7 @@ test("a conversation lookup from before Knowledge logout cannot replace the next
         lifecycle: { clearInterval() {} }, requestClient: { fetch: f.browser.fetch }, operations: {
           parseApiResponse, stopLiveEvents() {}, clearOptimisticDeliveries() {},
           clearPendingAttachments() {}, setObjectivesStatus() {}, showSignIn() {},
+          clearThreadListOverlays() { overlaysCleared += 1; },
         },
       });
       parserContext.authentication = authentication;
@@ -781,6 +783,7 @@ test("a conversation lookup from before Knowledge logout cannot replace the next
       authentication.logoutChat();
       await answer(f.requests, "/api/web-chat/logout", jsonResponse({ status: "ok" }));
       assert.equal(shared.authSessionActive, false);
+      assert.equal(overlaysCleared, 1, "sign-out closes the thread menu and the hover card and forgets their text");
       // A successful later sign-in marks a fresh generation and supplies its CSRF token.
       shared.authSessionGeneration += 1;
       shared.authSessionActive = true;

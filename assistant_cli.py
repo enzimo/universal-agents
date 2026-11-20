@@ -16,7 +16,7 @@ import sys
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional, TextIO
+from typing import TYPE_CHECKING, Any, Callable, Optional, TextIO
 
 import yaml
 
@@ -115,6 +115,9 @@ from secure_tool_broker.service import (
 from secure_tool_broker.auth_pages import BROKER_APPEARANCE_ENV
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.objective_repository import create_objective_repository
+
+if TYPE_CHECKING:
+    from instance_upgrades.adapter_host_files import NamedElsewhere
 
 try:
     from dotenv import load_dotenv
@@ -2636,6 +2639,21 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
     again), and non-zero when a folder cannot be used
     (``FolderProblem``, with a message naming it) or on another unexpected
     error, which stops startup until a restart finishes it.
+
+    When records in another folder name files left in the transfer folder,
+    that folder was most likely at another path under 0.9.13: the step gives
+    no list and no delete command, and this says so with how to still move
+    the files a gateway record names (``_print_folder_moved``). When no
+    listed file is named there but records of receiving name other files
+    in another folder, this says so with the same steps, beside the line
+    for the listed files when there are any (DI-1 of PR #168's review, C12
+    of its fix round). When the check of the listed files did not finish,
+    this says the files were counted, that none may be deleted and how to
+    check again, rather than that they could not be counted (GEN-1 of that
+    review); when only the later count did not finish, it says how to check
+    again. A
+    ``--files-gone`` run reports them the same way; it never changes records
+    that name another folder.
     """
 
     from instance_upgrades.adapter_host_files import FolderProblem, upgrade_adapter_host_files
@@ -2665,13 +2683,98 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
                 f"{counts.no_record} file(s) have no gateway record saying which chat sent them, so they cannot be "
                 "moved and trying again does not help; the person can send them again."
             )
-        if counts.files_without_records is None:
+        unchecked = result.other_folders_unchecked
+        if counts.files_without_records is None and unchecked is not None:
+            print(
+                f"{unchecked} file(s) are left in the transfer folder that no record of it names. They were counted, "
+                "but the check for records naming them in another folder did not finish, so nothing is listed and "
+                "no delete command is given: do not delete any of them. To check again, delete the marker and "
+                "restart; see the log."
+            )
+        elif counts.files_without_records is None:
             print("The files left in the transfer folder could not be counted; see the log.")
+        elif result.elsewhere.names:
+            _print_folder_moved(result.elsewhere, left=counts.files_without_records)
         elif counts.files_without_records:
             print(
                 f"{counts.files_without_records} file(s) are left in the transfer folder that no record names; "
                 "the team cannot open them. See the log for which may be deleted, and when."
             )
+        if result.recorded_elsewhere.names:
+            _print_folder_moved(result.recorded_elsewhere)
+        elif counts.files_without_records is not None and unchecked is not None:
+            print(
+                "The check for records naming files of the adapter host's chat apps in another folder did not "
+                "finish, so it is not known whether some were left at another path and not moved. To check again, "
+                "delete the marker and restart; see the log."
+            )
+
+
+def _print_folder_moved(elsewhere: NamedElsewhere, *, left: int | None = None) -> None:
+    """The operator's line for files records name in another folder (``NamedElsewhere``); the log has the folder.
+
+    ``left`` is the count of files left in the transfer folder when listed
+    ones are named elsewhere; None when no listed file is named there and
+    gateway records or held guidance name other files in another folder
+    (DI-1 of PR #168's review). That line starts as the log's error does,
+    naming both kinds of record, because a held copy alone is no gateway
+    record of receiving (C14 of its fix round). Only
+    a file a gateway record of receiving it names can move, so the steps are
+    given for those alone (C05 of F7 of PR #154's review); a gateway record
+    of a copy sent to a person is not one (SEC-1 of PR #168's review), and
+    one inside the instance's workspaces or state folder is never offered
+    (C11 of its fix round). When only copies sent to people name them, the
+    line does not say the folder moved. No folder is printed: the log's
+    steps name it. A run moves only the files whose gateway records name
+    the path the folder is at, so with several such folders this says to
+    repeat the steps for each (C08).
+    """
+
+    nothing = "Nothing is listed and no delete command is given: do not delete any of them; the team cannot open them."
+    if left is None:
+        text = (
+            f"Gateway records or held guidance name {elsewhere.names} file(s) of the adapter host's chat apps in "
+            "another folder, and none of them is left in the transfer folder, so the transfer folder was most likely "
+            "at another path when 0.9 received them: they were not moved, and the team cannot open them."
+        )
+        put = "with the folder that holds them at"
+    elif elsewhere.received_elsewhere:
+        text = (
+            f"{left} file(s) are left in the transfer folder that no record of it names, and records in another "
+            f"folder name {elsewhere.names} of them, so the folder was most likely at another path under 0.9.13. "
+            f"{nothing}"
+        )
+        put = "move or mount the folder back at"
+    else:
+        text = (
+            f"{left} file(s) are left in the transfer folder that no record of it names, and copies of "
+            f"{elsewhere.names} of them were sent to people, so they are files people sent. {nothing}"
+        )
+        put = "move or mount the folder back at"
+    keep = "keep them; the people who sent them can send them again."
+    if elsewhere.by_gateway:
+        paths = len(elsewhere.gateway_folders)
+        where = f"one of the {paths} paths the log's steps name" if paths > 1 else "the path the log's steps name"
+        text += (
+            f" To move the {elsewhere.by_gateway} the gateway has a record of receiving: {put} {where} (a link does "
+            "not work), set upload_dir to that path, delete the marker and restart."
+        )
+        if paths > 1:
+            text += " That run moves only the files whose gateway records name that path, so do this for each path."
+    if elsewhere.by_instance_folders:
+        text += (
+            f" {elsewhere.by_instance_folders} of them have gateway records of receiving only inside this "
+            "instance's workspaces or state folder, which the upgrade does not offer: keep them; see upgrading.md "
+            "if the transfer folder really was there under 0.9.13."
+        )
+    without = elsewhere.without_gateway_record
+    if without and (elsewhere.by_gateway or elsewhere.by_instance_folders):
+        text += f" For the other {without} the gateway has no record of receiving them, so they cannot be moved: {keep}"
+    elif without:
+        text += f" The gateway has no record of receiving them, so they cannot be moved: {keep}"
+    if left is None:
+        text += " If those files are gone, nothing more is needed."
+    print(f"{text} See event=adapter_host_files_folder_moved in the log.")
 
 
 def _ensure_instance_config_ready(config_path: str | None) -> str:

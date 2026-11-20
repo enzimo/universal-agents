@@ -18,6 +18,7 @@ import pytest
 
 from assistant_gateway import team_view
 from assistant_gateway.application.manager_client import GatewayManagerClient, GatewayManagerClientSettings
+from assistant_gateway.application.reply_leftovers import ArrivalRoute
 from assistant_gateway.team_view import GatewayTeamView, TeamLeadFollower
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.wire.refusals import FrameRefused
@@ -555,13 +556,16 @@ class Following:
         self.writes: list[Optional[str]] = []
         self.available: list = []
         self.unavailable: list = []
+        # Confirmations of the routed lead (GatewayManagerClient.confirm_lead), which are not transitions.
+        self.confirmed: list = []
         self.client = GatewayManagerClient(
             settings=GatewayManagerClientSettings(instance_name="test", user_display_name="Test", team_id=TEAM,
                                                   manager_named_agent_type="TeamArchitect",
                                                   response_route="test_gateway_response", initial_manager_id=saved),
             id_generator=SimpleNamespace(),
             logger=logging.getLogger("test.gateway.lead_follower"), write_manager_route=self.writes.append,
-            on_manager_available=self.available.append, on_manager_unavailable=self.unavailable.append)
+            on_manager_available=self.available.append, on_manager_unavailable=self.unavailable.append,
+            on_lead_confirmed=self.confirmed.append)
         self.waiting = Waiting()
         self.follower = TeamLeadFollower(self.view, self.client, self.waiting, check_seconds=0.02)
         self.stop = asyncio.Event()
@@ -593,7 +597,8 @@ class Following:
             await service.handle_unavailable(transition)
 
         self.client.bind_inbound_handlers(on_unsolicited=AsyncMock(), on_manager_available=self.available.append,
-                                          on_manager_unavailable=unavailable)
+                                          on_manager_unavailable=unavailable, on_lead_confirmed=self.confirmed.append,
+                                          on_leftover_lost=AsyncMock())
         self.follower = TeamLeadFollower(self.view, self.client, service, check_seconds=0.02)
         return failed
 
@@ -721,9 +726,11 @@ async def test_a_lead_on_another_contract_keeps_the_waiting_replies_until_it_lea
         assert following.waiting.failed == []
 
         reply = SimpleNamespace(msg_content=None)
-        assert await following.client.queue_response("corr_answered", reply)
-        following.client.unregister_response_channel("corr_answered")  # the person got the lead's answer
+        assert await following.client.queue_response("corr_answered", reply, route=ArrivalRoute.RESPONSE)
+        # The person got the lead's answer: read, then the wait closes, as a real waiter does (a message still
+        # queued when a wait closes is passed on, reply_leftovers).
         assert answered.get_nowait() is reply
+        following.client.unregister_response_channel("corr_answered")
 
         reader.publish(reasons={"lead_1": "exiting"})
         await until(lambda: following.waiting.failed != [])
@@ -809,6 +816,65 @@ async def test_a_refused_join_clears_the_route_whenever_it_comes_until_the_host_
 
 
 @pytest.mark.asyncio
+async def test_read_records_confirm_the_routed_lead_once_per_stretch_and_never_at_start(monkeypatch) -> None:
+    """Lead ruling on C02, amended after critique C05: records that name the lead chats already go to confirm it
+    (``confirm_lead``, no transition) so kept setup results are sent; once per stretch of read records, never for
+    the start decision (the gateway starts its transitions after it), and not after a set_lead, whose own available
+    transition sends them."""
+
+    reader = Reader()
+    reader.publish(member("lead_1", lead=True))
+    async with Following(monkeypatch, reader, saved="lead_1") as following:
+        await following.follower.start(limit=1)
+        assert following.confirmed == [] and following.transitions() == []
+        # Review finding F1: the start decision from read records notes that they name the lead, without a send.
+        assert following.client.lead_from_records
+        following.follow()
+        await until(lambda: following.confirmed != [])
+        await asyncio.sleep(0.1)  # Several more checks, every 0.02 seconds.
+        assert [(item.manager_id, item.became_available) for item in following.confirmed] == [("lead_1", False)]
+        assert following.transitions() == []
+
+        # A refused join clears the route; joining again sets it, and that transition sends the kept results.
+        following.view.refuse("protocol_mismatch", "This gateway runs another message contract than the installation.")
+        await until(lambda: following.client.manager_id is None)
+        assert not following.client.lead_from_records
+        following.view.joining()
+        await until(lambda: following.client.manager_id == "lead_1")
+        await asyncio.sleep(0.1)
+        assert following.client.lead_from_records
+        assert len(following.confirmed) == 1
+        assert following.transitions() == [("unavailable", "lead_1", ()), ("available", "lead_1", True)]
+
+        # Records that stop being read and come back naming the same lead confirm it again.
+        reader.found = (member("lead_1", lead=True),)
+        reader.crash.set()
+        await until(lambda: reader.runs == 2 and following.view.ready.is_set())
+        await until(lambda: len(following.confirmed) == 2)
+        assert following.client.manager_id == "lead_1" and len(following.transitions()) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_saved_route_counts_as_named_by_the_records_only_once_they_are_read(monkeypatch) -> None:
+    """Review finding F1: records not read at start keep the saved route (chats may still reach it) but do not name
+    its lead, so kept setup results wait; records read later that name it confirm it."""
+
+    reader = Reader()
+    reader.catches_up = False
+    async with Following(monkeypatch, reader, saved="lead_1") as following:
+        await following.follower.start(limit=0.05)
+        following.follow()
+        await asyncio.sleep(0.1)
+        assert following.client.manager_id == "lead_1" and not following.client.lead_from_records
+        assert following.confirmed == []
+
+        reader.publish(member("lead_1", lead=True))
+        reader.ready.set()
+        await until(lambda: following.confirmed != [])
+        assert following.client.lead_from_records and following.transitions() == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("lead_stays", [False, True])
 async def test_a_lead_that_leaves_while_the_reader_starts_again_is_seen_gone(monkeypatch, lead_stays) -> None:
     """Critique C07: the restarted reader's view no longer has the lead and nothing names its departure; the check
@@ -859,6 +925,15 @@ class GatewayHost:
             await asyncio.wait_for(self.task, timeout=2)
 
 
+def _bound_handlers(gateway) -> SimpleNamespace:
+    """The manager client's handlers as UserGateway bound them, for recorders that wrap them."""
+
+    client = gateway._manager_client
+    return SimpleNamespace(on_unsolicited=client._on_unsolicited, on_manager_available=client._on_manager_available,
+                           on_manager_unavailable=client._on_manager_unavailable,
+                           on_lead_confirmed=client._on_lead_confirmed, on_leftover_lost=client._on_leftover_lost)
+
+
 def _gateway(tmp_path, monkeypatch, reader: Reader, *, saved: Optional[str] = "manager_1234",
              refusal: Optional[tuple[str, str]] = None, start_limit: float = 5.0):
     """A UserGateway whose runtime has a message host, as the gateway service's has
@@ -892,22 +967,30 @@ def _gateway(tmp_path, monkeypatch, reader: Reader, *, saved: Optional[str] = "m
                           state_store=GatewayStateStore(str(tmp_path / "state.db")), manager_runtime=HostedRuntime())
     seen: list[tuple] = []
     hooks: list[str] = []
+    confirmed: list[str] = []
+    # The recorders call the handlers the gateway itself bound (_bind_manager_client), so a wrong binding fails
+    # these tests (review finding F2).
+    bound = _bound_handlers(gateway)
 
     async def available(transition) -> None:
         seen.append(("available", transition.manager_id, transition.became_available))
-        await gateway.manager_transitions.handle_available(transition)
+        await bound.on_manager_available(transition)
 
     async def unavailable(transition) -> None:
         seen.append(("unavailable", transition.manager_id))
-        await gateway.manager_transitions.handle_unavailable(transition)
+        await bound.on_manager_unavailable(transition)
 
-    gateway._manager_client.bind_inbound_handlers(on_unsolicited=gateway.inbound_messages.handle,
-                                                  on_manager_available=available,
-                                                  on_manager_unavailable=unavailable)
+    async def lead_confirmed(transition) -> None:
+        confirmed.append(transition.manager_id)  # Not a transition: kept apart from ``seen``.
+        await bound.on_lead_confirmed(transition)
+
+    gateway._manager_client.bind_inbound_handlers(
+        on_unsolicited=bound.on_unsolicited, on_manager_available=available, on_manager_unavailable=unavailable,
+        on_lead_confirmed=lead_confirmed, on_leftover_lost=bound.on_leftover_lost)
     gateway.manager_transitions.set_hooks(on_manager_unavailable=lambda: hooks.append("pause"),
                                           on_manager_available=lambda: hooks.append("resume"))
     gateway._maintenance_schedules.ensure_all = AsyncMock()
-    return gateway, SimpleNamespace(seen=seen, hooks=hooks, delivered=delivered)
+    return gateway, SimpleNamespace(seen=seen, hooks=hooks, delivered=delivered, confirmed=confirmed)
 
 
 async def _publish_when_read(reader: Reader, *members: TeamAgent) -> None:
@@ -916,6 +999,24 @@ async def _publish_when_read(reader: Reader, *members: TeamAgent) -> None:
     await until(reader.ready.is_set)
     await asyncio.sleep(0.05)
     reader.publish(*members)
+
+
+def test_the_gateway_binds_each_manager_client_handler_to_its_owner(tmp_path, monkeypatch) -> None:
+    """Review finding F2: the recorders in these tests wrap the handlers the gateway bound; this pins what they are,
+    so a handler bound to the wrong owner (a confirmation running a whole available transition, for example)
+    fails here."""
+
+    gateway, _ = _gateway(tmp_path, monkeypatch, Reader())
+    client = gateway._manager_client
+    # _gateway put recorders in place; bind again as UserGateway does to read its own choice.
+    from assistant_gateway import gateway as gateway_module
+
+    gateway_module._bind_manager_client(gateway, gateway._team_view)
+    assert client._on_unsolicited == gateway.inbound_messages.handle
+    assert client._on_manager_available == gateway.manager_transitions.handle_available
+    assert client._on_manager_unavailable == gateway.manager_transitions.handle_unavailable
+    assert client._on_lead_confirmed == gateway.manager_transitions.handle_lead_confirmed
+    assert client._on_leftover_lost == gateway._response_coordinator.fail_lost_credential_request
 
 
 @pytest.mark.asyncio
@@ -1090,3 +1191,294 @@ async def test_a_refused_join_is_on_the_gateways_status_page(tmp_path, monkeypat
     finally:
         await gateway.close()
 
+
+
+# -- setup results kept for the team lead (#163 on release/0.10; lead ruling on C02, critiques C01 and C05) ----
+
+KEPT = "tool_setup_req_kept"
+
+
+def _keep_setup_results(gateway, *page_ids: str) -> None:
+    """Setup pages that ended while no team lead could be reached: their results are kept, unsent (#163)."""
+
+    from tests.test_gateway_account_links import _waiting_task
+    from tests.test_gateway_tool_setup import _kept_result_row
+
+    if gateway.state_store.get_session("session_link") is None:
+        _waiting_task(gateway, owner=gateway.config.user.canonical_user_id)
+    for page_id in page_ids:
+        _kept_result_row(gateway, page_id)
+
+
+def _sent_setup_results(gateway) -> list[tuple[str, str, str]]:
+    """Each setup result published: its page, the lead's queue and the NATS message id (which names the lead)."""
+
+    from custom_messages.contracts.credentials_v1 import ToolSetupResultV1
+
+    return [(envelope.msg_content.setup_request_id, routing_key, envelope.msg_header.idempotency_key)
+            for envelope, routing_key in gateway._manager_client._runtime.durable
+            if isinstance(envelope.msg_content, ToolSetupResultV1)]
+
+
+def _sent_once_to(lead: str, *page_ids: str) -> list[tuple[str, str, str]]:
+    return [(page_id, lead, f"secure_result:tool_setup_result:{page_id}:{lead}") for page_id in page_ids]
+
+
+def _quick_checks(gateway) -> None:
+    """The follower's regular check and the view's reader restart, shortened from 5 seconds for the test."""
+
+    gateway._team_lead._check_seconds = 0.05
+    gateway._team_view._restart_seconds = (0.01, 0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("saved", "seen"),
+    [("lead_from_last_run", [("available", "lead_1", False)]), ("lead_1", [])],
+    ids=["full_team_restart", "gateway_restart_lead_alive"],
+)
+async def test_kept_setup_results_go_once_to_the_lead_the_records_name_after_the_gateway_starts(
+    tmp_path, monkeypatch, saved, seen
+) -> None:
+    """Critiques C01 and C05, lead ruling on C02 (b), through UserGateway.connect with its start services.
+
+    A full team restart: results kept while the team was down, and the lead has a new id; the follower routes to
+    it at start, before the transitions run. A gateway restart: the saved lead is still live. Either way the first
+    regular check confirms the lead and the kept result goes to it once, under a message id naming it; nothing goes
+    to the previous run's id, and there is no start-up send of its own (no team view would need one).
+    """
+
+    reader = Reader()
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader, saved=saved)
+    _quick_checks(gateway)
+    _keep_setup_results(gateway, KEPT)
+    arriving = asyncio.create_task(_publish_when_read(reader, member("lead_1", lead=True)))
+    await gateway.connect(start_services=True)
+    try:
+        await arriving
+        assert gateway.config.manager.manager_agent_id == "lead_1"
+        assert "gateway_tool_setup_resend" not in {task.get_name() for task in gateway._background_tasks}
+        await until(lambda: _sent_setup_results(gateway) != [])
+        await asyncio.sleep(0.3)  # Several more regular checks.
+        assert _sent_setup_results(gateway) == _sent_once_to("lead_1", KEPT)
+        assert gateway.state_store.tool_setup_repository.get_tool_setup(KEPT).result_state == "sent"
+        assert recorded.seen == seen and recorded.confirmed == ["lead_1"]
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_kept_setup_results_wait_for_records_read_after_the_start_wait_then_go_to_the_saved_lead(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """Lead ruling on C02 (a): the saved lead is still live, but the team's records are read only after the start
+    wait. Nothing is sent while the records are unread (logged); once they name the saved lead, the kept result
+    goes to it once, with no unavailable or available transition."""
+
+    reader = Reader()
+    reader.catches_up = False
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader, saved="lead_1", start_limit=0.1)
+    _quick_checks(gateway)
+    _keep_setup_results(gateway, KEPT)
+    with caplog.at_level(logging.INFO, logger="assistant_gateway.gateway"):
+        await gateway.connect(start_services=False)
+    try:
+        assert "event=gateway_tool_setup_resend_deferred manager_id=lead_1" in caplog.text
+        await asyncio.sleep(0.2)
+        assert _sent_setup_results(gateway) == []
+
+        reader.publish(member("lead_1", lead=True))
+        reader.ready.set()
+        await until(lambda: _sent_setup_results(gateway) != [])
+        await asyncio.sleep(0.3)
+        assert _sent_setup_results(gateway) == _sent_once_to("lead_1", KEPT)
+        assert recorded.seen == [] and recorded.confirmed == ["lead_1"]
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_records_that_come_back_with_the_same_lead_send_only_what_is_still_kept(tmp_path, monkeypatch) -> None:
+    """Lead ruling on C02 (c): the records stop being read and come back naming the same lead. The lead is
+    confirmed again, and only a result kept meanwhile is sent; the one already sent is not sent again."""
+
+    reader = Reader()
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader, saved="lead_1")
+    _quick_checks(gateway)
+    _keep_setup_results(gateway, KEPT)
+    arriving = asyncio.create_task(_publish_when_read(reader, member("lead_1", lead=True)))
+    await gateway.connect(start_services=False)
+    try:
+        await arriving
+        await until(lambda: _sent_setup_results(gateway) == _sent_once_to("lead_1", KEPT))
+
+        _keep_setup_results(gateway, "tool_setup_req_kept_later")
+        reader.found = (member("lead_1", lead=True),)
+        reader.crash.set()
+        await until(lambda: len(recorded.confirmed) == 2)
+        await asyncio.sleep(0.3)
+        assert _sent_setup_results(gateway) == _sent_once_to("lead_1", KEPT, "tool_setup_req_kept_later")
+        assert recorded.seen == [] and recorded.confirmed == ["lead_1", "lead_1"]
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_a_lead_change_after_the_start_sends_a_kept_result_once_to_the_new_lead(tmp_path, monkeypatch) -> None:
+    """Critique C06, A3: the records replace lead_1 with lead_2 after the start. The real follower marks lead_1
+    unavailable and sets lead_2; that available transition sends the kept result once, under a message id naming
+    lead_2, and lead_2 is not confirmed on top of it. A third lead sends nothing more."""
+
+    reader = Reader()
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader, saved="lead_1")
+    _quick_checks(gateway)
+    _keep_setup_results(gateway, KEPT)
+    arriving = asyncio.create_task(_publish_when_read(reader, member("lead_1", lead=True)))
+    await gateway.connect(start_services=False)
+    try:
+        await arriving
+        await until(lambda: _sent_setup_results(gateway) == _sent_once_to("lead_1", KEPT))
+
+        _keep_setup_results(gateway, "tool_setup_req_kept_later")
+        reader.publish(member("lead_2", lead=True), reasons={"lead_1": "exiting"})
+        await until(lambda: gateway._manager_client.manager_id == "lead_2")
+        await asyncio.sleep(0.3)  # Several more regular checks.
+        assert _sent_setup_results(gateway) == (
+            _sent_once_to("lead_1", KEPT) + _sent_once_to("lead_2", "tool_setup_req_kept_later")
+        )
+        assert recorded.seen == [("unavailable", "lead_1"), ("available", "lead_2", True)]
+        assert recorded.confirmed == ["lead_1"]
+
+        reader.publish(member("lead_3", lead=True), reasons={"lead_2": "exiting"})
+        await until(lambda: gateway._manager_client.manager_id == "lead_3")
+        await asyncio.sleep(0.3)
+        assert len(_sent_setup_results(gateway)) == 2, "each kept result is sent once"
+        assert recorded.confirmed == ["lead_1"]
+    finally:
+        await gateway.close()
+
+
+OPEN_PAGE = "tool_setup_req_open"
+
+
+@pytest.mark.asyncio
+async def test_a_page_ended_before_the_records_are_read_keeps_its_result_for_the_lead_they_name(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """Review finding F1: a full team restart with a result kept while the team was down and a page still open when
+    the gateway stopped, and the team's records are not read within the start wait. Start recovery ends the page,
+    and neither result goes to the previous run's lead: both stay kept until the records name the new lead, which
+    gets each once."""
+
+    from tests.test_gateway_tool_setup import _waiting_record
+
+    reader = Reader()
+    reader.catches_up = False
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader, saved="lead_from_last_run", start_limit=0.1)
+    _quick_checks(gateway)
+    _keep_setup_results(gateway, KEPT)
+    _waiting_record(gateway, "cli:github", "sign_in", "person", setup_request_id=OPEN_PAGE)
+    setups = gateway.state_store.tool_setup_repository
+    caplog.set_level(logging.INFO)  # Start recovery runs in the background after connect returns.
+    await gateway.connect(start_services=True)
+    try:
+        await until(lambda: setups.get_tool_setup(OPEN_PAGE).status != "waiting")  # start recovery ended it
+        await asyncio.sleep(0.2)
+        assert _sent_setup_results(gateway) == []
+        assert [setups.get_tool_setup(page).result_state for page in (KEPT, OPEN_PAGE)] == ["unsent", "unsent"]
+        assert "event=gateway_tool_setup_resend_waits_for_records" in caplog.text
+        assert f"event=gateway_tool_setup_result_kept setup_request_id={OPEN_PAGE}" in caplog.text
+        assert "reason=lead_not_from_records" in caplog.text
+
+        reader.publish(member("lead_1", lead=True))
+        reader.ready.set()
+        await until(lambda: len(_sent_setup_results(gateway)) == 2)
+        await asyncio.sleep(0.3)
+        assert sorted(_sent_setup_results(gateway)) == sorted(_sent_once_to("lead_1", KEPT, OPEN_PAGE))
+        assert recorded.seen == [("unavailable", "lead_from_last_run"), ("available", "lead_1", True)]
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_a_page_ended_at_start_goes_to_the_lead_the_read_records_name(tmp_path, monkeypatch) -> None:
+    """Review finding F1: when the records are read in time and name the saved lead, the start decision notes it
+    without sending, so the page start recovery ends sends its result (and the one kept before) to that lead at
+    once; the follower's first regular check then sends nothing more."""
+
+    from tests.test_gateway_tool_setup import _waiting_record
+
+    reader = Reader()
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader, saved="lead_1")
+    _quick_checks(gateway)
+    _keep_setup_results(gateway, KEPT)
+    _waiting_record(gateway, "cli:github", "sign_in", "person", setup_request_id=OPEN_PAGE)
+    arriving = asyncio.create_task(_publish_when_read(reader, member("lead_1", lead=True)))
+    await gateway.connect(start_services=True)
+    try:
+        await arriving
+        await until(lambda: len(_sent_setup_results(gateway)) == 2)
+        await until(lambda: recorded.confirmed == ["lead_1"])
+        await asyncio.sleep(0.3)
+        assert sorted(_sent_setup_results(gateway)) == sorted(_sent_once_to("lead_1", KEPT, OPEN_PAGE))
+        assert recorded.seen == []
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_with_no_team_lead_routed_a_kept_result_waits_as_no_route(tmp_path, monkeypatch, caplog) -> None:
+    """Critique C09: on a gateway with a team view, records that were read but name no lead leave no route at all.
+    A kept result then reaches the publisher and is logged as no_route, not as waiting for the records, and it goes
+    once the records name a lead."""
+
+    reader = Reader()
+    gateway, _ = _gateway(tmp_path, monkeypatch, reader, saved=None, start_limit=0.1)
+    _quick_checks(gateway)
+    _keep_setup_results(gateway, KEPT)
+    caplog.set_level(logging.INFO)
+    await gateway.connect(start_services=False)
+    try:
+        assert gateway._team_view.ready.is_set() and gateway._manager_client.manager_id is None
+        sending = await gateway._credential_workflow.tool_setups.resend_kept_results()
+        assert sending.reason == "no_route" and sending.sent == 0
+        assert "event=gateway_secure_result_not_sent reason=no_route" in caplog.text
+        assert "event=gateway_tool_setup_resend_waits_for_records" not in caplog.text
+
+        reader.publish(member("lead_1", lead=True))
+        await until(lambda: _sent_setup_results(gateway) == _sent_once_to("lead_1", KEPT))
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_an_observer_that_fails_leaves_the_others_and_the_lead_follower_their_change(monkeypatch, caplog) -> None:
+    """Plan review C02: the agent trail's observer raising must not cost held guidance its wake-up, the other
+    members their notice, or the lead follower its ``changed``."""
+
+    reader = Reader()
+    woken: list[str] = []
+
+    def broken(status: AgentStatus) -> None:
+        raise RuntimeError("agent trail queue unavailable")
+
+    observe = team_view.change_observers({"agent_trail": broken, "held_guidance": lambda s: woken.append(s.self_id)})
+    async with Running(monkeypatch, reader, Host()) as running:
+        running.view._on_change = observe
+        await until(running.view.ready.is_set)
+        running.view.changed.clear()
+        with caplog.at_level(logging.WARNING):
+            reader.publish(member("lead_1", lead=True), member("worker_1"))
+        assert sorted(woken) == ["lead_1", "worker_1"]
+        assert running.view.changed.is_set()
+    assert caplog.text.count("event=gateway_team_observer_failed observer=agent_trail") == 2
+
+
+def test_a_members_report_carries_its_records_requests_and_a_departed_member_none() -> None:
+    from dataclasses import replace
+
+    working = replace(member("worker_1", state="busy"), requests=("task_1",))
+    status = team_view.record_status(working, TEAM)
+    assert team_view.agent_report(status).requests == ("task_1",)
+    left = team_view.record_status(working, TEAM, exiting=True)
+    assert team_view.agent_report(left).requests == () and team_view.agent_report(left).exiting

@@ -309,6 +309,28 @@ def test_build_process_env_prefers_env_file_then_process_env(tmp_path: Path) -> 
     )
 
 
+def test_build_process_env_drops_a_store_folder_from_team_env_and_keeps_the_inherited_one(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only the start of the bundled NATS server sets it; under the bundle it arrives inherited."""
+
+    from docker.nats_service import BUNDLED_NATS_STORE_DIR_ENV
+
+    config = _make_config(tmp_path)
+    env_file = tmp_path / "team.env"
+    env_file.write_text(f"{BUNDLED_NATS_STORE_DIR_ENV}=/srv/from-team-env\n", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="docker.launch_headless"):
+        alone = build_process_env(config, env_path=env_file, base_env={})
+        inherited = build_process_env(
+            config, env_path=env_file, base_env={BUNDLED_NATS_STORE_DIR_ENV: "/data/services/nats/data"}
+        )
+
+    assert BUNDLED_NATS_STORE_DIR_ENV not in alone
+    assert inherited[BUNDLED_NATS_STORE_DIR_ENV] == "/data/services/nats/data"
+    assert caplog.text.count(f"event=bundled_nats_marker_dropped source={env_file}") == 2
+
+
 def test_build_process_env_rejects_removed_public_url_env_vars(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     env_file = tmp_path / "team.env"
@@ -2430,6 +2452,44 @@ def test_launch_sets_up_the_message_streams_with_the_gateway_environment_just_be
     (_, stream_env), (_, services) = steps
     assert stream_env is services["gateway_env"], "the gateway's own settings and NATS credentials"
     assert stream_env["NATS_PASSWORD"] == "nats"
+
+
+@pytest.mark.parametrize("started_by", ["bundle", "this_launcher"])
+def test_the_gateway_gets_the_bundled_store_folder_and_keeps_it_across_an_in_app_restart(
+    tmp_path: Path, monkeypatch, started_by: str
+) -> None:
+    """Under the bundle the folder is inherited; otherwise this launcher's own NATS start sets it."""
+
+    import docker.launch_headless as lh
+    from docker.nats_service import BUNDLED_NATS_STORE_DIR_ENV, bundled_nats_store_dir, local_nats_url
+
+    store = tmp_path / "nats" / "data"
+    if started_by == "bundle":
+        env = {
+            "TEAM_LOCAL_NATS_ENABLED": "false",
+            "NATS_URL": local_nats_url(),
+            "NATS_SERVERS": local_nats_url(),
+            BUNDLED_NATS_STORE_DIR_ENV: str(store),
+        }
+    else:
+        env = {"TEAM_LOCAL_NATS_ENABLED": "true"}
+
+        def start_local_nats(*, env, **_kwargs):
+            env[BUNDLED_NATS_STORE_DIR_ENV] = str(store)  # what the real start sets once its server is ready
+            return SimpleNamespace(pid=4222, poll=lambda: None)
+
+        monkeypatch.setattr(lh, "start_local_nats", start_local_nats)
+    _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env=env)
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+    services: dict[str, object] = {}
+    monkeypatch.setattr(lh, "run_supervised", lambda **kwargs: services.update(kwargs) or 0)
+
+    assert lh.main() == 0
+    gateway_env = services["gateway_env"]
+    assert bundled_nats_store_dir(gateway_env) == store
+    # An in-app restart recomputes the saved settings' copies and leaves this hand-off alone.
+    restarted = services["settings_environment"].refresh(gateway_env, process="gateway")
+    assert bundled_nats_store_dir(restarted) == store
 
 
 def test_a_launch_that_uses_the_configured_nats_says_so_without_a_warning(

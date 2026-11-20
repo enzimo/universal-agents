@@ -43,6 +43,7 @@ from custom_transport.dead_letters import (
     DeadLetterRecord,
     StoppedReceiver,
 )
+from custom_transport.jetstream_account import reported_bytes, request_account_info
 from custom_transport.nats_pull import (
     CONSUMER_METADATA_SCHEMA,
     POOL_ACK_WAIT_SECONDS,
@@ -223,12 +224,18 @@ class JetStreamAccountUsage:
     ``storage``/``memory``: bytes used on disk and in memory. A limit is None
     when the account has none (the server reports -1, or 0); the server may
     still have its own, which the account information does not show.
+    ``reserved_storage``/``reserved_memory``: what the account's streams set
+    aside with their byte limits, which NATS checks a new or changed stream
+    against; None when the server did not report the figure, never 0 in its
+    place (``custom_transport.jetstream_account.reported_bytes``).
     """
 
     storage: int
     memory: int
     max_storage: int | None
     max_memory: int | None
+    reserved_storage: int | None
+    reserved_memory: int | None
 
 
 # The stream list request: every stream with its configuration and state, up to 256 a page.
@@ -679,19 +686,23 @@ class NatsTransportAdapter:
     async def jetstream_account_usage(self) -> Optional[JetStreamAccountUsage]:
         """This account's stored messages and its limits; None while JetStream is not in use here.
 
-        For administrators' Status page (``assistant_gateway.storage_capacity``).
-        A server that does not answer raises, so the page can say so.
+        For administrators' Status page (``assistant_gateway.storage_capacity``). One raw
+        account information request (``custom_transport.jetstream_account``), because
+        nats-py's ``account_info`` drops what the streams set aside. A server that does not
+        answer, or answers with an error, raises, so the page can say so.
         """
 
-        if self._js is None:
+        if self._js is None or self._nc is None:
             return None
-        info = await self._js.account_info()
-        limits = getattr(info, "limits", None)
+        info = await request_account_info(self._nc)
+        limits = info.get("limits") or {}
         return JetStreamAccountUsage(
-            storage=int(getattr(info, "storage", 0) or 0),
-            memory=int(getattr(info, "memory", 0) or 0),
-            max_storage=_positive_limit(getattr(limits, "max_storage", None)),
-            max_memory=_positive_limit(getattr(limits, "max_memory", None)),
+            storage=int(info.get("storage") or 0),
+            memory=int(info.get("memory") or 0),
+            max_storage=_positive_limit(limits.get("max_storage")),
+            max_memory=_positive_limit(limits.get("max_memory")),
+            reserved_storage=reported_bytes(info, "reserved_storage"),
+            reserved_memory=reported_bytes(info, "reserved_memory"),
         )
 
     async def jetstream_streams(self, *, subject: str) -> Optional[JetStreamStreamList]:

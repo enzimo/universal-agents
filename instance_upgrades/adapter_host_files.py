@@ -211,13 +211,14 @@ counted (``unlisted=``).
 The run that writes the marker writes those names, sorted and one per line,
 to ``InstanceLayout.adapter_host_files_without_records_path`` just before the
 marker; the warning shows the first ten, then says to keep them when the
-folder was at another path under 0.9.13 (the one case where the list is
-wrong by design), and only then gives a command that deletes exactly the
-listed files. A list is valid only beside the marker of the run that wrote
-it: every later run that does not find the marker removes it, under the
-step's lock and before it reads any record, and a run with nothing to list
-removes it too. Removing it can fail while the marker is still written, so
-the marker holds a random id for the list its run wrote
+folder was at another path under 0.9.13 and no record the step checks shows
+it (below), and
+only then gives a command that deletes exactly the listed files. A list is
+valid only beside the marker of the run that wrote it: every later run that
+does not find the marker removes it, under the step's lock and before it
+reads any record, and a run with nothing to list removes it too. Removing it
+can fail while the marker is still written, so the marker holds a random id
+for the list its run wrote
 (``without_records_list_id``, null without one), and the command deletes
 nothing, saying so, unless the marker holds its list's id (F1 of PR #154's
 review). A failure writing or removing the list is logged
@@ -239,6 +240,96 @@ the count unset: the count only reports, so it never stops startup, keeps the
 marker from being written or changes a record. Only the run that writes the
 marker reports, so the count is said once; a run that stops part way never
 counts, and the run that finishes it does.
+
+A transfer folder that was at another path under 0.9.13 (moved, mounted
+elsewhere or reached through another link) makes the list wrong: its records
+name that path and match nothing here, so every file people sent looks
+unrecorded (F7 of PR #154's review). The step finds this from the records
+themselves: before it writes the list, it collects the gateway's names
+(``_GATEWAY_NAME``, the same 12-hex rule) of record paths in another folder,
+from conversation turns and held guidance copies (noted by ``find``'s own
+scans) and from gateway records (``list_attachment_paths_containing``, one
+paged scan not limited to the transfer folder, run only when the list has a
+name). When any listed name is among them (``NamedElsewhere``), the whole list
+is unsafe: one match shows the folder moved, and every other listed file is
+equally suspect, its records perhaps cleaned up meanwhile. So the run writes
+no list and no list id, gives no command (an earlier warning's command
+refuses), never drops only the matched names (a partial list would look
+safe), and logs one error instead of the warning
+(``event=adapter_host_files_folder_moved``, with counts per kind of record).
+Error, not warning: it is said only once, because the run still writes its
+marker (the owner's choice of 2026-11-20: startup never waits on it and the
+step does not repeat it at every start), and people's files stay where the
+team cannot open them until an administrator acts. The marker keeps the count
+(``named_elsewhere``), the one trace once the log is gone. The error says
+what to do: the step moves a file only with its gateway record, so for the
+files a gateway record names, move or mount the folder back at the path those
+records name (one at a time when they name several), set ``upload_dir`` to it,
+delete the marker and restart; for the others, keep them. Agent processes
+write conversation turns, so a turn's folder may withhold the command but is
+never kept, logged or shown; only folders from gateway records and held
+guidance copies are named. Of those, the steps and the shown folders use only
+records of files people sent in, outside this instance's own folders
+(SEC-1 of PR #168's review). A gateway record of a copy the gateway sent to a
+person (in that person's ``scratch/sent`` folder, under a name the agent
+chose, with a ``web_attachment_`` id; ``_Step._sent_copy``) withholds the
+command like a turn and counts among the files no run can move
+(``by_sent_copies``); it shows only that the file is one a person sent, so
+when nothing else names the files the error does not say the folder moved
+(C11 of that review's fix round). A record of receiving under this
+instance's ``workspaces/`` or ``state/`` (``_Step._in_instance_folders``,
+the backstop, which compares the root both resolved and as configured, C10)
+withholds the command too and is counted apart (``by_instance_folders``):
+its file could move with the folder there, so the error points at
+upgrading.md instead of saying it cannot move. Neither folder is ever named
+or offered: moving the transfer folder there would put every person's
+leftover files where agents working for one person read them and scratch
+retention deletes them. A record in another folder whose name is not listed
+changes nothing for the list: its file is not here, so it says nothing about
+this folder or the listed files (its own file is reported apart, below).
+When the check cannot finish (a database error),
+nothing is listed either and
+``event=adapter_host_files_without_records_uncounted`` says how to check
+again. The detection opens no file, follows no link and drops no record. It
+finds nothing when no conversation turn, held guidance copy or gateway record
+names a listed file in another folder (their records were all deleted, for
+example), for which the warning keeps its sentence before the command. The
+adapter host's own upload records (``gateway_adapter_uploads``) hold the old
+path too, but this check does not read them: the step reads them only for the
+files the gateway reads at its start (``_files_the_gateway_reads``), and only
+at this folder's path. So a file only they name, one sent in a message the
+gateway had not handled before the upgrade, is still listed when the folder
+moved, with only that sentence to protect it; reading them here is a
+follow-up.
+
+``upload_dir`` may name a folder holding none of the files (empty, new,
+missing, or holding only files no record names) while 0.9's records name the
+folder they are in (DI-1 of PR #168's review, and C12 of its fix round: for
+example ``upload_dir`` was changed during 0.9, so the older files and their
+records stayed at the old folder): nothing waits there, so the step would
+move none of them and say nothing, or only list an unrelated file. So when
+no listed name is named in another folder (nothing is listed, or the listed
+names matched nothing), the run that writes the marker runs the gateway scan
+for any name of the gateway's form (``_Step._recorded_elsewhere``),
+counting gateway records of receiving and held guidance copies in another
+folder, never conversation turns (an agent-written turn must not raise an
+upgrade error) and never copies sent to people. No listed name is among
+those counted then, so its report and the usual warning are both true. Not
+counted either: records inside ``state/uploads``, whose files are already
+where agents open them (an operator may have kept the transfer folder there
+under 0.9; C13 of that fix round). A normal instance has none: the default
+``upload_dir`` was the same in every 0.9 version, no 0.9 clean-up deletes a
+transfer file and keeps its record, and moved files get ``<id><suffix>``
+names. With any, it logs one error under the same event, with the folders
+it may show and the same steps for the folder that holds the files, and
+adds that nothing more is needed if those files are gone: no path is looked
+up, so a record whose folder was deleted under 0.9 is counted too. The count
+goes to the marker's own field (``recorded_elsewhere``), because
+``named_elsewhere`` counts listed names. A database error there keeps the
+count and any list, since the listed names were already checked, and logs
+``event=adapter_host_files_other_folders_unchecked`` with how to check
+again; the operator command tells both failed checks apart from an
+uncounted folder (``UpgradeResult.other_folders_unchecked``, GEN-1).
 
 Guidance the gateway still holds (``gateway_held_guidance``) is rewritten
 with its moved file: the gateway signs it again from that copy at each send,
@@ -274,7 +365,7 @@ import re
 import shlex
 import stat
 from contextlib import contextmanager, suppress
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional
@@ -289,11 +380,12 @@ from assistant_gateway.contracts.adapter_host_v1 import (
     ChannelInboundMessageV1,
     decode_adapter_host_message_v1,
 )
-from assistant_gateway.domain.delivery import AttachmentRecord
+from assistant_gateway.domain.delivery import SENT_FILE_ATTACHMENT_ID_PREFIX, AttachmentRecord
 from assistant_gateway.inbound_attachments import safe_attachment_session_dir_name, sanitize_attachment_filename
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.task_v1 import TaskSteering
 from id_generation import RANDOM_ID_SUFFIX_LENGTH, new_id_suffix
+from runtime_settings.instance_layout import SCRATCH_DIRNAME, SCRATCH_SENT_DIRNAME, InstanceLayout
 from storage.adapter_host_repository import create_adapter_host_repository
 from storage.conversation_repository import ConversationRepository, create_conversation_repository
 from storage.gateway_state_repository import GatewayStateRepository, create_gateway_state_repository
@@ -349,6 +441,8 @@ _HELD_GUIDANCE_NOTE = (
 FILES_GONE_COMMAND = "assistant_cli upgrade adapter-host-files --config <instance_config.yaml> --files-gone"
 # Why a transfer folder that opened is not the one the run decided on (C06).
 REASON_FOLDER_CHANGED = "folder_changed"
+# Why counted files are left uncounted: the check for records naming them in another folder failed (C06 of F7).
+REASON_OTHER_FOLDERS_UNCHECKED = "other_folders_unchecked"
 
 # What 0.9.13's adapter host named each file it kept, directly in its transfer folder
 # (``new_id("adapter_upload")`` in ``assistant_gateway.adapter_host.service``).
@@ -367,6 +461,16 @@ _NAMED_IN_WARNING = 10
 # command checks the marker for it, so only the marker written with a list lets that list be used (F1 of
 # PR #154's review).
 LIST_ID_FIELD = "without_records_list_id"
+# The marker's field counting the listed names records place in another folder (``NamedElsewhere.names``; None
+# when the files were not counted). Above 0 it is the one trace on the instance that the step found the transfer
+# folder at another path once its error has left the log (C07 of F7 of PR #154's review); deleting the marker
+# and restarting runs the step and logs that error again.
+NAMED_ELSEWHERE_FIELD = "named_elsewhere"
+# The marker's field counting, when no listed name is named in another folder, the files of the gateway's form that
+# gateway records of receiving and held guidance copies outside state/uploads place there
+# (``UpgradeResult.recorded_elsewhere``; None when a listed name is named there, the files are not counted or the check
+# did not finish). Its own field, because ``named_elsewhere`` counts listed names (DI-1 of PR #168's review).
+RECORDED_ELSEWHERE_FIELD = "recorded_elsewhere"
 # What the delete command prints, with a nonzero status, when the marker is not the one written with its list
 # (C07 of F6): ``rm -f`` prints nothing when it deletes, so a silent refusal would look the same as a delete.
 DELETE_REFUSED = (
@@ -424,13 +528,121 @@ class UpgradeCounts:
 
 
 @dataclass(frozen=True)
+class NamedElsewhere:
+    """Which listed names records place in another folder: the transfer folder was most likely at another path under 0.9.13 (F7 of PR #154's review).
+
+    ``names`` counts the listed names any record names in another folder,
+    and each ``by_`` field those one kind of record names (a name may count
+    in several). ``by_gateway`` counts gateway records of files people sent
+    in, in a folder the step may name. ``by_sent_copies`` counts gateway
+    records of copies of files the gateway sent to people
+    (``_Step._sent_copy``), and ``by_instance_folders`` the names whose
+    only gateway records of receiving in another folder are inside this
+    instance's ``workspaces/`` or ``state/`` (``_Step._in_instance_folders``,
+    the backstop; never also in ``by_gateway``). Both withhold the list like
+    any match but never give a folder or a move-back step (SEC-1 and CRIT-1
+    of PR #168's review); they are counted apart because only the second
+    are records of receiving, whose files a run at that folder could move
+    (C11 of that fix round). ``folders`` holds the other folders from
+    gateway records of files sent in and held guidance copies only, sorted
+    and without a folder the step never names (``_Step._never_named``):
+    agent processes write conversation turns, so a turn's folder is never
+    kept or shown (A4). ``gateway_folders`` holds those from gateway records
+    of files sent in alone, sorted: a run moves a file only with its gateway
+    record, so these are the paths the move-back steps name, one per run
+    (C08).
+    """
+
+    names: int = 0
+    by_gateway: int = 0
+    by_sent_copies: int = 0
+    by_instance_folders: int = 0
+    by_held_guidance: int = 0
+    by_turns: int = 0
+    folders: tuple[Path, ...] = ()
+    gateway_folders: tuple[Path, ...] = ()
+
+    @property
+    def without_gateway_record(self) -> int:
+        """Names no gateway record of receiving places in another folder, so no run can move their files (C05).
+
+        Only turns, held guidance or copies of files sent to people name
+        them. The step moves a file only with its gateway record of receiving
+        (``REASON_NO_GATEWAY_RECORD``, ``event=adapter_host_files_held_only``),
+        so putting the folder back at another path moves only the
+        ``by_gateway`` files (and, at a folder the step never offers, the
+        ``by_instance_folders`` ones).
+        """
+
+        return self.names - self.by_gateway - self.by_instance_folders
+
+    @property
+    def received_elsewhere(self) -> bool:
+        """Whether a record written where a file was received names one: not only copies sent to people (C11).
+
+        Gateway records of receiving, turns and held guidance copies record
+        the path a file people sent was received at, so one in another
+        folder shows the transfer folder was there. A copy the gateway sent
+        to a person shows only that the file is one a person sent: its
+        folder is the person's, never the transfer folder's.
+        """
+
+        return bool(self.by_gateway or self.by_instance_folders or self.by_held_guidance or self.by_turns)
+
+
+def _summarize(
+    gateway: dict[str, set[Path]],
+    instance: set[str],
+    sent_copies: set[str],
+    held: dict[str, set[Path]],
+    turns: set[str],
+) -> NamedElsewhere:
+    """``NamedElsewhere`` from the names each kind of record places in another folder (``_Step._gateway_elsewhere``).
+
+    A name with a gateway record of receiving in a folder the step may name
+    counts in ``by_gateway`` only, so ``by_instance_folders`` and
+    ``without_gateway_record`` never count it again.
+    """
+
+    gateway_folders: set[Path] = set().union(*gateway.values())
+    instance_only = instance - gateway.keys()
+    return NamedElsewhere(
+        names=len(turns | held.keys() | gateway.keys() | instance_only | sent_copies),
+        by_gateway=len(gateway),
+        by_sent_copies=len(sent_copies),
+        by_instance_folders=len(instance_only),
+        by_held_guidance=len(held),
+        by_turns=len(turns),
+        folders=tuple(sorted(gateway_folders.union(*held.values()))),
+        gateway_folders=tuple(sorted(gateway_folders)),
+    )
+
+
+@dataclass(frozen=True)
 class UpgradeResult:
-    """``finished`` once the marker is written; ``folder_missing`` when records wait for a folder that holds none of their files."""
+    """``finished`` once the marker is written; ``folder_missing`` when records wait for a folder that holds none of their files.
+
+    ``elsewhere`` says which of the files left that no record names here
+    records name in another folder: when it names any, nothing was listed
+    and no delete command given (``_report_folder_moved``).
+    ``recorded_elsewhere`` says, when no listed name is named in another
+    folder, which files records of receiving name there
+    (``_report_recorded_elsewhere``). ``other_folders_unchecked`` is the
+    number of files left that no record names when a check for records in
+    another folder did not finish (None when both finished or did not run):
+    when the check of the listed names failed the counts leave that number
+    unset (C06 of F7 of PR #154's review), so the operator command finds it
+    only here; when the later count failed the counts keep it (GEN-1 and
+    FA-4 of PR #168's review).
+    """
 
     finished: bool
     counts: UpgradeCounts
     waiting: int = 0
     already_done: bool = False
+    elsewhere: NamedElsewhere = NamedElsewhere()
+    recorded_elsewhere: NamedElsewhere = NamedElsewhere()
+    other_folders_unchecked: Optional[int] = None
 
     @property
     def folder_missing(self) -> bool:
@@ -443,10 +655,15 @@ class _Leftovers:
 
     ``listed`` are the names of the gateway's form (``_GATEWAY_NAME``),
     sorted; ``unlisted`` counts the other names, which are never shown.
+    ``elsewhere`` says which listed names records place in another folder;
+    ``recorded_elsewhere``, set only when no listed name is named there and
+    that check finished, which files records of receiving place there (DI-1).
     """
 
     listed: tuple[str, ...] = ()
     unlisted: int = 0
+    elsewhere: NamedElsewhere = NamedElsewhere()
+    recorded_elsewhere: Optional[NamedElsewhere] = None
 
     @classmethod
     def of(cls, names: set[str]) -> _Leftovers:
@@ -456,6 +673,18 @@ class _Leftovers:
     @property
     def count(self) -> int:
         return len(self.listed) + self.unlisted
+
+    @property
+    def to_list(self) -> tuple[str, ...]:
+        """The names the list file may hold: all listed names, or none once records name one of them in another folder.
+
+        One such record means the folder moved, so every other listed file is
+        just as likely a live one, including those whose turns were cleaned
+        up: the matched names are never taken out to leave a list that looks
+        safe (the third correction of PR #154's review critic, DI-2).
+        """
+
+        return () if self.elsewhere.names else self.listed
 
 
 @dataclass(frozen=True)
@@ -613,6 +842,8 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
                 marker=marker,
                 progress=Path(layout.adapter_host_files_upgrade_progress_path),
                 files_gone=files_gone,
+                managed=_managed_folders(config),
+                opened=_opened_folders(config),
             )
             items = step.find()
             waiting, here = step.survey(items)
@@ -652,9 +883,64 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
         counts.turns_marked_unrecorded,
         "-" if counts.files_without_records is None else counts.files_without_records,
     )
-    if leftovers is not None and leftovers.count:
+    elsewhere = leftovers.elsewhere if leftovers is not None else NamedElsewhere()
+    recorded = leftovers.recorded_elsewhere if leftovers is not None else None
+    if leftovers is not None and elsewhere.names:
+        _report_folder_moved(transfer, marker, leftovers)
+    elif leftovers is not None and leftovers.count:
         _report_files_without_records(transfer, marker, written, leftovers)
-    return UpgradeResult(finished=True, counts=counts)
+    if leftovers is not None and recorded is not None and recorded.names:
+        _report_recorded_elsewhere(transfer, marker, leftovers, recorded)
+    return UpgradeResult(
+        finished=True,
+        counts=counts,
+        elsewhere=elsewhere,
+        recorded_elsewhere=recorded or NamedElsewhere(),
+        other_folders_unchecked=step.other_folders_unchecked,
+    )
+
+
+def _managed_folders(config: Any) -> tuple[Path, ...]:
+    """This instance's ``workspaces/`` and ``state/``, under the root as resolved and as configured (``_Step._in_instance_folders``).
+
+    A record that names an earlier root matches neither; the
+    ``scratch/sent`` rule does not depend on the root.
+    """
+
+    return _under_both_roots(config, lambda layout: (layout.workspaces_dir, layout.state_dir))
+
+
+def _opened_folders(config: Any) -> tuple[Path, ...]:
+    """``state/uploads``, where agents open files, under the root as resolved and as configured (``_Step._in_uploads``, C13).
+
+    The step adds the folder as it resolves it for the moves, the form a 0.9
+    record most likely names (0.9 recorded the transfer folder resolved,
+    ``resolved_upload_dir``).
+    """
+
+    return _under_both_roots(config, lambda layout: (layout.uploads_dir,))
+
+
+def _under_both_roots(config: Any, folders: Callable[[InstanceLayout], tuple[Path, ...]]) -> tuple[Path, ...]:
+    """``folders`` of this instance under its root as resolved and as configured, normalized and sorted.
+
+    The layout resolves the root through links, but a record may name these
+    folders through the configured path, when the root is reached through a
+    link (C10 of the fix round of PR #168's review). The configured form is
+    made absolute and normalized without following a link, like a record's
+    path (``_Step._elsewhere``), whose folder is never resolved: the step
+    follows no link a record names.
+    """
+
+    configured = InstanceLayout(Path(os.path.abspath(Path(config.instance_root).expanduser())))
+    layouts = (config.layout, configured)
+    return tuple(sorted({Path(os.path.normpath(folder)) for layout in layouts for folder in folders(layout)}))
+
+
+def _at_or_under(folder: Path, roots: tuple[Path, ...]) -> bool:
+    """Whether ``folder`` is one of ``roots`` or inside one, compared as paths (no file system call, no link followed)."""
+
+    return any(folder == root or root in folder.parents for root in roots)
 
 
 def _finish(
@@ -680,11 +966,30 @@ def _finish(
     to keep (F1 of PR #154's review). The review's probe showed that
     checking the list's sha256 or giving each run its own list name does
     not stop that: the stale list and its name are unchanged.
+
+    The list holds ``_Leftovers.to_list``: nothing when records name a
+    listed file in another folder (F7 of that review), so neither a list
+    nor an id is left for any command to use. The number of listed names
+    records place in another folder goes beside the id
+    (``NAMED_ELSEWHERE_FIELD``), so the instance keeps that finding after
+    the log is gone; when no listed name is named there, so does the number
+    of files records of receiving place there (``RECORDED_ELSEWHERE_FIELD``,
+    DI-1 of PR #168's review).
     """
 
-    listed = _settle_leftover_list(leftover_list, leftovers.listed if leftovers is not None else ())
+    listed = _settle_leftover_list(leftover_list, leftovers.to_list if leftovers is not None else ())
     written = _WrittenList(leftover_list, new_id_suffix()) if listed else None
-    body = {"finished_at_utc": _now(), **asdict(counts), LIST_ID_FIELD: written.list_id if written else None}
+    body = {
+        "finished_at_utc": _now(),
+        **asdict(counts),
+        LIST_ID_FIELD: written.list_id if written else None,
+        NAMED_ELSEWHERE_FIELD: leftovers.elsewhere.names if leftovers is not None else None,
+        RECORDED_ELSEWHERE_FIELD: (
+            leftovers.recorded_elsewhere.names
+            if leftovers is not None and leftovers.recorded_elsewhere is not None
+            else None
+        ),
+    }
     try:
         _write_state_file(marker, body)
     except FolderProblem:
@@ -766,11 +1071,19 @@ def _report_files_without_records(
     team runs (the operator's command, with or without ``--files-gone``)
     may name the 0.10 adapter host's copy of an upload whose message comes
     later, so the files may go only once the gateway has started on 0.10
-    since the marker was written, and while the instance is stopped. When the folder was at another path under 0.9.13,
-    its records name that path and match nothing here, so every file looks
-    unrecorded; the step reads only ``upload_dir`` (resolved through links),
-    so the warning says to set ``upload_dir`` to that path with the folder
-    there (F1 of that review).
+    since the marker was written, and while the instance is stopped.
+
+    When the folder was at another path under 0.9.13, its records name that
+    path and match nothing here, so every file looks unrecorded. When a
+    record names a listed file in another folder, the step finds that and
+    this warning is not given (``_report_folder_moved`` instead, with no list
+    and no command, F7 of PR #154's review). The warning keeps its sentence
+    for the case the checked records do not show (for example, the records
+    of every listed file were deleted since, or only the adapter host's
+    upload records name them, which that check does not read): it says to
+    keep the files then and, because
+    the step reads only ``upload_dir`` (resolved through links), to set
+    ``upload_dir`` to that path with the folder there (F1 of that review).
     """
 
     # The causes are those of the gateway's names; with none of those, they would not apply (C08 of F6).
@@ -814,9 +1127,11 @@ def _listed_advice(transfer: Path, marker: Path, written: Optional[_WrittenList]
         )
         what = "exactly the files named here"
         names = "This warning names"
-    # A folder at another path under 0.9.13 is the one case where the list is wrong by design, so it comes before
-    # the command (C10 of F6): the command deletes on one paste, and a person who acts on it before reading the
-    # whole line must already have been told when not to. Both the names and the not-moved warning's sources= come
+    # A folder at another path under 0.9.13 makes the list wrong. When a record names a listed file in another
+    # folder the step withholds the list and the command (``_report_folder_moved``, F7 of PR #154's review); this
+    # sentence stays for the case the checked records do not show, and it comes before the command (C10 of F6): the
+    # command deletes on one paste, and a person who acts on it before reading the whole line must already have been
+    # told when not to. With no match this text is exactly as before F7 (A5). Both the names and the not-moved warning's sources= come
     # from the same records, so no listed file is one a record keeps (C08 of F6): the administrator removes nothing
     # from the list. A remote adapter host keeps its registration epoch across a short restart until its message
     # arrives or a request fails (a heartbeat renews even an expired lease), so an upload it finished before the
@@ -848,6 +1163,191 @@ def _unlisted_note(leftovers: _Leftovers) -> str:
         f"({TRANSFER_FILE_PREFIX} and {RANDOM_ID_SUFFIX_LENGTH} lowercase hex digits), so something else put them "
         f"there and their names may be text someone chose; {scope}."
     )
+
+
+# Said in place of the folders when none may be shown (A4; SEC-1 of PR #168's review).
+_NOT_SHOWN = (
+    " (not shown: the step shows no folder from a conversation record, which agent processes write, from a copy of "
+    "a file sent to a person, or inside this instance's workspaces or state folders)"
+)
+
+
+def _report_folder_moved(transfer: Path, marker: Path, leftovers: _Leftovers) -> None:
+    """Say once, instead of the files-without-records warning, that records name listed files in another folder (F7 of PR #154's review).
+
+    The folder was then most likely at another path under 0.9.13, so the
+    files are people's: no list and no delete command are given. Error
+    rather than warning: the step reports it only once (the marker is
+    written, the owner's choice of 2026-11-20 over waiting for the folder)
+    and the team cannot open those files until an administrator acts.
+    Folders come only from gateway records of files sent in and held
+    guidance copies (A4), never from a folder the step never names
+    (``_Step._never_named``, SEC-1 of PR #168's review); no file is named.
+    When only copies sent to people name them, those show the files are
+    ones people sent, not that the folder moved, so the error says only
+    that (C11). The advice follows what can move (``_folder_moved_advice``).
+    """
+
+    elsewhere = leftovers.elsewhere
+    where = f" ({_shown_folders(elsewhere.folders)})" if elsewhere.folders else _NOT_SHOWN
+    if elsewhere.received_elsewhere:
+        found = (
+            f"are named by records in another folder{where}, so this folder was most likely at another path under "
+            "0.9.13 and they are files people sent"
+        )
+    else:
+        found = f"have copies that the gateway sent to people{where}, so they are files people sent"
+    logger.error(
+        "%s of the %s file(s) left in the adapter host's transfer folder that no record of this folder names %s. No "
+        "list and no delete command are given: do not delete any of them. They were not moved into state/uploads, so "
+        "the team cannot open them.%s%s See upgrading.md. "
+        "event=adapter_host_files_folder_moved folder=%s other_folders=%s files_without_records=%s unlisted=%s "
+        "named_elsewhere=%s by_gateway=%s by_sent_copies=%s by_instance_folders=%s by_held_guidance=%s by_turns=%s",
+        elsewhere.names,
+        leftovers.count,
+        found,
+        _folder_moved_advice(marker, elsewhere),
+        _unlisted_note(leftovers),
+        transfer,
+        _listed(str(folder) for folder in elsewhere.folders[:_NAMED_IN_WARNING]),
+        leftovers.count,
+        leftovers.unlisted,
+        elsewhere.names,
+        elsewhere.by_gateway,
+        elsewhere.by_sent_copies,
+        elsewhere.by_instance_folders,
+        elsewhere.by_held_guidance,
+        elsewhere.by_turns,
+    )
+
+
+def _report_recorded_elsewhere(transfer: Path, marker: Path, leftovers: _Leftovers, recorded: NamedElsewhere) -> None:
+    """Say once that records of receiving name files in another folder that no listed name is among (DI-1 of PR #168's review).
+
+    ``upload_dir`` then names a folder holding none of those files (empty,
+    new, missing, or holding only files no record names, C12 of its fix
+    round): the step moved nothing for them, and without this it would say
+    nothing about them. Only gateway records of receiving and held guidance
+    copies outside ``state/uploads`` count (``_Step._recorded_elsewhere``),
+    and the folders shown follow the same rules as the moved-folder error.
+    The same event, because it is the same finding with no file here to
+    protect; its count goes to the marker's own field
+    (``RECORDED_ELSEWHERE_FIELD``). Given beside the files-without-records
+    warning when files are listed: no listed name is among those counted,
+    so both are true. No path is looked up (A5), so the error also says that
+    nothing more is needed if those files are gone. The steps are the
+    moved-folder error's, for the folder that holds the files rather than
+    this one: a folder moved to where ``upload_dir`` points would still match
+    nothing, because the step finds files by the path their records name.
+    The transfer folder is said to have been elsewhere when 0.9 received
+    the files, not under 0.9.13: ``upload_dir`` may have been changed during
+    0.9.
+    """
+
+    where = f" ({_shown_folders(recorded.folders)})" if recorded.folders else _NOT_SHOWN
+    logger.error(
+        "Gateway records or held guidance name %s file(s) of chat apps the adapter host ran in another folder%s, "
+        "and none of them is left in the transfer folder upload_dir names, so the transfer folder was most likely "
+        "at another path when 0.9 received them: those files were not moved into state/uploads, so the team cannot "
+        "open them.%s If those files are gone, nothing more is needed. See upgrading.md. "
+        "event=adapter_host_files_folder_moved folder=%s other_folders=%s files_without_records=%s unlisted=%s "
+        "recorded_elsewhere=%s by_gateway=%s by_instance_folders=%s by_held_guidance=%s",
+        recorded.names,
+        where,
+        _folder_moved_advice(marker, recorded, here=False),
+        transfer,
+        _listed(str(folder) for folder in recorded.folders[:_NAMED_IN_WARNING]),
+        leftovers.count,
+        leftovers.unlisted,
+        recorded.names,
+        recorded.by_gateway,
+        recorded.by_instance_folders,
+        recorded.by_held_guidance,
+    )
+
+
+def _folder_moved_advice(marker: Path, elsewhere: NamedElsewhere, *, here: bool = True) -> str:
+    """How the files records name in another folder can still move: only those a gateway record of receiving names (C05 of F7 of PR #154's review).
+
+    The step moves a file only with its gateway record of receiving, so
+    putting the folder back at the other path moves the ``by_gateway``
+    files (``_move_back_steps``). Files whose only such records are inside
+    this instance's workspaces or state folders could move too, but the
+    step never offers those folders (SEC-1 of PR #168's review), so the
+    error says to keep them and points at upgrading.md, which says how to
+    finish when the transfer folder really was there (C11 of its fix
+    round). No run can move a file only a turn, held guidance or a copy of
+    a file sent to a person names. The error does not say how a later run
+    reports those files: a turn or held copy may name a folder other than
+    the one the folder goes back to, and then nothing reports them there
+    (GEN-2). With no record of receiving the error says so instead of giving
+    steps that cannot succeed. ``here`` is False for the error of files
+    recorded in another folder (``_report_recorded_elsewhere``), given when
+    no listed name is in another folder: the files are then in the folder
+    their records name, not in this one.
+    """
+
+    keep = "keep them, and the people who sent them can send them again"
+    advice = _move_back_steps(marker, elsewhere, here) if elsewhere.by_gateway else ""
+    if elsewhere.by_instance_folders:
+        advice += (
+            f" {elsewhere.by_instance_folders} of them have gateway records of receiving only inside this instance's "
+            "workspaces or state folder, which the step never shows or offers: keep them; if the transfer folder "
+            "really was there under 0.9.13, upgrading.md says how to move them."
+        )
+    without = elsewhere.without_gateway_record
+    if without and advice:
+        advice += f" For the other {without} the gateway has no record of receiving them, so no run can move them: {keep}."
+    elif without:
+        advice += f" The gateway has no record of receiving them, so the step cannot move them at any path: {keep}."
+    return advice
+
+
+def _move_back_steps(marker: Path, elsewhere: NamedElsewhere, here: bool) -> str:
+    """The steps that move the ``by_gateway`` files: the folder at the path their gateway records name, ``upload_dir`` set to it.
+
+    The steps stand on their own, because an administrator may meet this
+    first after ``--files-gone``, which they ran for another reason (C02). A
+    file the step refused at that other path keeps records naming it, so a
+    folder moved back from there is reported again for those files; the
+    error says so instead of promising that the move back always finishes
+    (C04). The steps name the gateway records' folder, not every folder the
+    error shows (a held copy may name another, where nothing can move), and
+    a run moves only the files whose gateway records name the path the
+    folder is at: with several such folders the steps name them all and say
+    to repeat them for each (C08).
+    """
+
+    paths = elsewhere.gateway_folders
+    if len(paths) > 1:
+        where = f"one of the {len(paths)} paths their gateway records name ({_shown_folders(paths)})"
+        source = "one of those paths"
+        repeat = (
+            " and reports again the files whose gateway records name another of those paths, so do this for each "
+            "of them"
+        )
+    else:
+        where, source, repeat = str(paths[0]), "that path", ""
+    if here:
+        put = f"move or mount this folder back at {where} (a link does not work)"
+        before = f"If this folder was just moved here from {source}"
+    else:
+        put = f"with the folder that holds them at {where} (move or mount it there if it is not; a link does not work)"
+        before = f"If the step already ran with upload_dir at {source}"
+    return (
+        f" To move the {elsewhere.by_gateway} the gateway has a record of receiving: {put}, set upload_dir to that "
+        f"path, delete the marker {marker} and restart; the step then runs again and moves the files whose gateway "
+        f"records name that path{repeat}. {before}, these are most likely files the step could not move there (an "
+        "adapter_host_file_not_moved warning of that run names each): fix them, then do the same."
+    )
+
+
+def _shown_folders(folders: tuple[Path, ...]) -> str:
+    """The first ``_NAMED_IN_WARNING`` of ``folders`` for the folder-moved error's text, then how many more."""
+
+    shown = ", ".join(str(folder) for folder in folders[:_NAMED_IN_WARNING])
+    more = len(folders) - _NAMED_IN_WARNING
+    return f"{shown} and {more} more" if more > 0 else shown
 
 
 def _delete_command(marker: Path, transfer: Path, written: _WrittenList) -> str:
@@ -891,9 +1391,15 @@ class _Step:
         marker: Path,
         progress: Path,
         files_gone: bool = False,
+        managed: tuple[Path, ...] = (),
+        opened: tuple[Path, ...] = (),
     ) -> None:
         self._transfer = transfer
         self._uploads = uploads
+        # Folders whose records the step never names (``_never_named``): this instance's workspaces/ and state/.
+        self._managed = managed
+        # state/uploads in every form a record may name it (``_in_uploads``, ``_opened_folders``).
+        self._opened = (uploads, *opened)
         self._gateway = gateway
         self._adapter_host = adapter_host
         self._conversations = conversations
@@ -908,6 +1414,12 @@ class _Step:
         self._unrecorded_turns: set[tuple[str, str]] = set()
         # Names in the transfer folder that a record ``find`` saw names, held-only ids included (F16).
         self._named: set[str] = set()
+        # Names of the gateway's form that ``find`` saw records place in another folder (``_elsewhere``): from
+        # turns the name only (A4), from held guidance copies with every folder, which ``_held_named`` filters.
+        self._turn_names_elsewhere: set[str] = set()
+        self._held_elsewhere: dict[str, set[Path]] = {}
+        # The files counted when the check for records in another folder did not finish (``files_without_records``).
+        self.other_folders_unchecked: Optional[int] = None
         self._not_moved: list[_NotMoved] = []
         self._absent: dict[Path, bool] = {}
         self._sync_unsupported: set[Path] = set()
@@ -975,19 +1487,31 @@ class _Step:
                 )
                 continue
             for attachment in attachments:
-                path = self._in_transfer(attachment.local_path())
+                raw = attachment.local_path()
+                path = self._in_transfer(raw)
                 if path is not None:
                     yield _HeldEntry(held.correlation_id, attachment, path)
+                elif (elsewhere := self._elsewhere(raw)) is not None:
+                    self._held_elsewhere.setdefault(elsewhere[1], set()).add(elsewhere[0])
 
     def _entries(self) -> Iterator[_Entry]:
+        """Files in the transfer folder conversation turns name; notes the names turns place in another folder.
+
+        Of a turn naming a file in another folder only the name is noted:
+        agent processes write turns, so their paths are never kept or shown (A4).
+        """
+
         after: Optional[tuple[str, str]] = None
         while True:
             turns = self._conversations.scan_turn_attachments(after=after, limit=_BATCH)
             for conversation_id, task_id, attachments in turns:
                 for attachment in attachments:
-                    path = self._in_transfer(attachment.local_path())
+                    raw = attachment.local_path()
+                    path = self._in_transfer(raw)
                     if path is not None:
                         yield _Entry(conversation_id, task_id, attachment, path)
+                    elif (elsewhere := self._elsewhere(raw)) is not None:
+                        self._turn_names_elsewhere.add(elsewhere[1])
             if len(turns) < _BATCH:
                 return
             after = (turns[-1][0], turns[-1][1])
@@ -1014,6 +1538,102 @@ class _Step:
         if self._transfer_in_uploads or self._uploads == path:
             return None
         return path
+
+    def _elsewhere(self, raw: Optional[str]) -> Optional[tuple[Path, str]]:
+        """``(folder, name)`` when ``raw`` names a transfer file of the gateway's form in another folder, else None.
+
+        Normalized like ``_in_transfer`` (no link followed, no file system
+        call), so a path that normalizes into the transfer folder is a record
+        of this folder, never of another. Only the gateway's own names count
+        (``_GATEWAY_NAME``, the form the list holds, matched in full), so a
+        name of another length or case, or with a suffix, withholds nothing;
+        nor does a relative path, which names no folder.
+        """
+
+        if not raw or not os.path.isabs(raw):
+            return None
+        path = Path(os.path.normpath(raw))
+        if path.parent == self._transfer or not _GATEWAY_NAME.fullmatch(path.name):
+            return None
+        return path.parent, path.name
+
+    def _never_named(self, folder: Path) -> bool:
+        """Whether a held guidance copy's ``folder`` must never be named: a sent copy's folder or one of this instance's.
+
+        The two rules below, SEC-1 and CRIT-1 of PR #168's review, applied
+        when the folders are shown (``_held_named``). Such a record still
+        withholds the list.
+        """
+
+        return self._sent_copy(folder) or self._in_instance_folders(folder)
+
+    @staticmethod
+    def _sent_copy(folder: Path, attachment_id: str = "") -> bool:
+        """Whether a record in ``folder`` (with ``attachment_id``, for a gateway record) is a copy the gateway sent to a person.
+
+        A file the gateway sends to a person is copied into that person's
+        ``scratch/sent/outgoing_<id>/`` under a name the agent chose
+        (``assistant_gateway.attachments``, the same in 0.9.13) and recorded
+        with a ``web_attachment_`` id, so such a record can carry a
+        leftover's generated name. Telling the administrator to put the
+        transfer folder there would put every person's leftover files where
+        agents working for that one person read them and scratch retention
+        deletes them, and a run there would move a copy sent back unchanged
+        under the copy's record. So a folder inside any ``scratch/sent`` is
+        never named, told from the path's own parts, which holds whatever the
+        instance root was then (the likeliest cause of a moved folder is the
+        whole root moving); nor is a record with that id prefix. Such a
+        record is no record of receiving: no run moves a file with it.
+        """
+
+        parts = folder.parts
+        if any(parts[index : index + 2] == (SCRATCH_DIRNAME, SCRATCH_SENT_DIRNAME) for index in range(len(parts) - 1)):
+            return True
+        return attachment_id.startswith(f"{SENT_FILE_ATTACHMENT_ID_PREFIX}_")
+
+    def _in_instance_folders(self, folder: Path) -> bool:
+        """Whether ``folder`` is at or under this instance's ``workspaces/`` or ``state/`` (``_managed_folders``): never named.
+
+        The backstop: agent-reachable folders and the step's own
+        destinations, never where a transfer folder belongs, so the step
+        never offers one. A gateway record there that is no sent copy is
+        still a record of receiving, and a run with the transfer folder
+        there would move its file, so its names are counted apart
+        (``NamedElsewhere.by_instance_folders``) and upgrading.md says how
+        to finish when the folder really was there (C11).
+        """
+
+        return _at_or_under(folder, self._managed)
+
+    def _in_uploads(self, folder: Path) -> bool:
+        """Whether ``folder`` is ``state/uploads`` or inside it (``_opened_folders``): its files are where agents open them.
+
+        Only the count of files recorded in another folder leaves such
+        records out (``_recorded_elsewhere``, C13 of PR #168's fix round):
+        an operator may have kept the transfer folder there under 0.9, as
+        ``_transfer_in_uploads`` allows now, and nothing needs moving. The
+        check of listed names keeps them: a listed name a record places
+        there still withholds the list.
+        """
+
+        return _at_or_under(folder, self._opened)
+
+    def _held_named(self, wanted: Optional[set[str]], *, outside_uploads: bool = False) -> dict[str, set[Path]]:
+        """Held guidance copies' names in another folder, for ``wanted`` names or, with None, any, with the folders the step may show.
+
+        A name counts when one of its held copies is in a folder kept: with
+        ``outside_uploads`` copies inside ``state/uploads`` are left out
+        (``_in_uploads``). Its folders leave out those the step never names
+        (``_never_named``, SEC-1 and CRIT-1 of PR #168's review); the name
+        still counts.
+        """
+
+        held: dict[str, set[Path]] = {}
+        for name, folders in self._held_elsewhere.items():
+            kept = {folder for folder in folders if not (outside_uploads and self._in_uploads(folder))}
+            if kept and (wanted is None or name in wanted):
+                held[name] = {folder for folder in kept if not self._never_named(folder)}
+        return held
 
     @property
     def _transfer_in_uploads(self) -> bool:
@@ -1046,7 +1666,46 @@ class _Step:
         None: the count only reports, so it never stops the start or keeps
         the marker from being written (rule 2 does not apply). Which of the
         names may be shown is ``_Leftovers.of``'s rule.
+
+        Then records in another folder are checked: first for the listed
+        names (``_named_elsewhere``), then, when none of them is named there
+        (nothing listed, or no match), for any file of the gateway's form
+        (``_recorded_elsewhere``; with files listed too since C12 of PR
+        #168's fix round, so an unrelated listed file does not hide files
+        recorded in another folder). After a match the second is not run:
+        the moved-folder error covers those files, and the second count would
+        count the matched names again. A database error in the first gives
+        None too: until that check finishes it is not known whether records
+        name the listed files at all, and no list and so no command may be
+        given (C03 of F7 of PR #154's review); its warning says the files
+        were counted and how to check again (C06). One in the second keeps
+        the count and any list, since the listed names were checked, and is
+        logged (``event=adapter_host_files_other_folders_unchecked``). Either
+        sets ``other_folders_unchecked`` to the count, for the operator
+        command (GEN-1 and FA-4 of PR #168's review).
         """
+
+        leftovers = self._count_leftovers()
+        if leftovers is None:
+            return None
+        if leftovers.listed:
+            try:
+                leftovers = replace(leftovers, elsewhere=self._named_elsewhere(leftovers.listed))
+            except Exception as exc:  # a database error: never a list without the check (C03)
+                self.other_folders_unchecked = leftovers.count
+                self._log_listed_unchecked(leftovers, f"{type(exc).__name__}: {exc}")
+                return None
+            if leftovers.elsewhere.names:
+                return leftovers
+        try:
+            return replace(leftovers, recorded_elsewhere=self._recorded_elsewhere())
+        except Exception as exc:  # a database error: the listed names were checked, so the count and list stand
+            self.other_folders_unchecked = leftovers.count
+            self._log_recorded_unchecked(f"{type(exc).__name__}: {exc}")
+            return leftovers
+
+    def _count_leftovers(self) -> Optional[_Leftovers]:
+        """The files left that no record names, before any check of other folders; None, logged, when not counted."""
 
         if self._transfer_in_uploads:
             return _Leftovers()
@@ -1059,6 +1718,92 @@ class _Step:
             self._log_uncounted(f"{type(exc).__name__}: {exc}")
             return None
         return _Leftovers.of(unnamed)
+
+    def _named_elsewhere(self, listed: tuple[str, ...]) -> NamedElsewhere:
+        """Which ``listed`` names records place in another folder (A1 of F7 of PR #154's review).
+
+        Three kinds of record: conversation turns and held guidance copies,
+        noted by ``find``'s own scans (``_entries``, ``_held_entries``), and
+        the gateway's attachment records (``_gateway_elsewhere``), kept only
+        for listed names, so what is held stays bounded by the list. Each
+        path is checked by ``_elsewhere``, so a record counts only when it
+        names a listed name exactly. A gateway record of a copy sent to a
+        person, or in this instance's folders, counts the name but gives no
+        folder.
+        """
+
+        wanted = set(listed)
+        gateway, instance, sent_copies = self._gateway_elsewhere(wanted)
+        return _summarize(gateway, instance, sent_copies, self._held_named(wanted), self._turn_names_elsewhere & wanted)
+
+    def _recorded_elsewhere(self) -> NamedElsewhere:
+        """With no listed name named in another folder: the files of the gateway's form that records of receiving place there (DI-1 of PR #168's review).
+
+        ``upload_dir`` may name a folder holding none of the files (empty,
+        new, missing, or holding only files no record names, C12 of its fix
+        round) while 0.9's records name the folder they are in: nothing waits
+        there, and without this check the step would never move them and say
+        nothing, or only list an unrelated file. No listed name is among
+        those counted (none is named in another folder), so this report and
+        the files-without-records warning are both true. Gateway records of
+        receiving and held guidance copies count, never conversation turns
+        (an agent-written turn must not raise an upgrade error) and never
+        copies sent to people (an agent may send a file back under its
+        generated name on any instance). Nor do records inside
+        ``state/uploads`` (``_in_uploads``, C13 of that fix round): their
+        files are already where agents open them. A normal instance has none: the
+        default ``upload_dir`` was the same in every 0.9 version, no 0.9
+        clean-up deletes a transfer file and keeps its record (upload
+        retention deletes only records under ``state/uploads``, a person's
+        removal deletes records), and the files the step moves get
+        ``<id><suffix>`` names, which the gateway's form does not match. A record whose file is
+        gone (a folder deleted by hand, an ``upload_dir`` changed under 0.9
+        whose old folder was deleted) still counts: no path is looked up
+        (A5), and the error says nothing more is needed then. Names are held
+        for this one scan, one per file the instance received this way.
+        """
+
+        gateway, instance, _sent_copies = self._gateway_elsewhere(None, outside_uploads=True)
+        return _summarize(gateway, instance, set(), self._held_named(None, outside_uploads=True), set())
+
+    def _gateway_elsewhere(
+        self, wanted: Optional[set[str]], *, outside_uploads: bool = False
+    ) -> tuple[dict[str, set[Path]], set[str], set[str]]:
+        """Gateway records naming a file of the gateway's form in another folder, for ``wanted`` names or, with None, any.
+
+        Read in pages with a query not limited to the transfer folder
+        (``list_attachment_paths_containing``) and checked by ``_elsewhere``;
+        with ``outside_uploads`` a record inside ``state/uploads`` is skipped
+        (``_in_uploads``). Returns the records of receiving by name with their
+        folders, the names of records of receiving inside this instance's
+        folders (``_in_instance_folders``), and the names of copies sent to
+        people (``_sent_copy``), whose folders are never kept.
+        """
+
+        gateway: dict[str, set[Path]] = {}
+        instance: set[str] = set()
+        sent_copies: set[str] = set()
+        after_id = ""
+        while True:
+            rows = self._gateway.list_attachment_paths_containing(
+                f"/{TRANSFER_FILE_PREFIX}", after_id=after_id, limit=_BATCH
+            )
+            for attachment_id, local_path in rows:
+                elsewhere = self._elsewhere(local_path)
+                if elsewhere is None or (wanted is not None and elsewhere[1] not in wanted):
+                    continue
+                folder, name = elsewhere
+                if outside_uploads and self._in_uploads(folder):
+                    continue
+                if self._sent_copy(folder, attachment_id):
+                    sent_copies.add(name)
+                elif self._in_instance_folders(folder):
+                    instance.add(name)
+                else:
+                    gateway.setdefault(name, set()).add(folder)
+            if len(rows) < _BATCH:
+                return gateway, instance, sent_copies
+            after_id = rows[-1][0]
 
     def _list_unnamed_files(self) -> Optional[set[str]]:
         """The folder's files no found record names; None, logged, when the folder cannot be listed or changed."""
@@ -1176,6 +1921,48 @@ class _Step:
             "event=adapter_host_files_without_records_uncounted folder=%s reason=%s",
             self._transfer,
             reason,
+        )
+
+    def _log_listed_unchecked(self, leftovers: _Leftovers, detail: str) -> None:
+        """The warning when the check for records naming the listed files in another folder failed (C06 of F7 of PR #154's review).
+
+        The files were counted, so the warning says so and why nothing is
+        listed, and how to run the check again: the marker is written, so the
+        step runs again only once it is deleted. The same event as the other
+        causes there, because the marker's count is unset in all of them.
+        """
+
+        logger.warning(
+            "%s file(s) are left in the adapter host's transfer folder that no record of this folder names, but "
+            "the check for records naming them in another folder did not finish, so it is not known whether this "
+            "folder was at another path under 0.9.13 and they are files people sent. No list and no delete "
+            "command are given: do not delete any of them. To check again, delete the marker %s and restart; the "
+            "step then runs again. Startup goes on. "
+            "event=adapter_host_files_without_records_uncounted folder=%s reason=%s: %s",
+            leftovers.count,
+            self._marker,
+            self._transfer,
+            REASON_OTHER_FOLDERS_UNCHECKED,
+            detail,
+        )
+
+    def _log_recorded_unchecked(self, detail: str) -> None:
+        """The warning when the count of files records of receiving place in another folder failed (DI-1 of PR #168's review).
+
+        The count and any list stand: no listed name was named in another
+        folder (C12 of that review's fix round), so its own event says only
+        that this check did not finish and how to run it again.
+        """
+
+        logger.warning(
+            "The check for records naming files of chat apps the adapter host ran in another folder did not finish, "
+            "so it is not known whether some of those files were left at another path and not moved. To check "
+            "again, delete the marker %s and restart; the step then runs again. Startup goes on. "
+            "event=adapter_host_files_other_folders_unchecked folder=%s reason=%s: %s",
+            self._marker,
+            self._transfer,
+            REASON_OTHER_FOLDERS_UNCHECKED,
+            detail,
         )
 
     def survey(self, items: list[_Item]) -> tuple[int, bool]:

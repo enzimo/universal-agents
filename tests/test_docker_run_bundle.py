@@ -17,8 +17,11 @@ import docker.run_bundle as run_bundle_module
 from assistant_gateway.config import GatewayInstanceConfig
 from storage.postgres_connection import BUNDLED_POSTGRES_ADDRESS_ENV
 from docker.nats_service import (
+    BUNDLED_NATS_STORE_DIR_ENV,
     INTERNAL_NATS_HOST,
     INTERNAL_NATS_PORT,
+    bundled_nats_store_dir,
+    local_nats_url,
 )
 from docker.run_bundle import (
     INTERNAL_POSTGRES_HOST,
@@ -135,6 +138,25 @@ def test_bundle_env_adds_only_its_own_details_to_the_container_environment(tmp_p
 
     assert "LLM_MODEL_ID" not in runtime_env
     assert runtime_env["OPERATOR_SETTING"] == "kept"
+
+
+@pytest.mark.parametrize("bundled_nats_enabled", [True, False])
+def test_bundle_env_drops_a_store_folder_the_container_supplied(
+    tmp_path: Path, bundled_nats_enabled: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only the bundle's own start of its server sets it (``start_local_nats``), after this."""
+
+    config = _make_config(tmp_path)
+    ambient = {"PATH": "/usr/bin", BUNDLED_NATS_STORE_DIR_ENV: "/srv/old-nats/data"}
+    effective_env = {"NATS_URL": "nats://nats.operator:4333", "NATS_SERVERS": "nats://nats.operator:4333"}
+
+    with caplog.at_level(logging.WARNING, logger="docker.run_bundle"):
+        runtime_env = build_bundle_runtime_env(
+            config, base_env=effective_env, ambient_env=ambient, bundled_nats_enabled=bundled_nats_enabled
+        )
+
+    assert BUNDLED_NATS_STORE_DIR_ENV not in runtime_env
+    assert "event=bundled_nats_marker_dropped" in caplog.text
 
 
 def test_build_launch_headless_command_forwards_external_skill_refresh_flags(
@@ -455,7 +477,12 @@ def test_start_local_nats_generates_and_reuses_credentials(tmp_path: Path, monke
     second_env: dict[str, str] = {}
     start_local_nats(env=second_env, logger=logging.getLogger("test"), cwd=Path.cwd(), partitions=96,
                      service_root=tmp_path)
-    assert second_env == {"NATS_USER": "ua-runtime", "NATS_PASSWORD": first_env["NATS_PASSWORD"]}
+    # The store folder too, for the Status page's room check (docker.nats_service).
+    assert second_env == {
+        "NATS_USER": "ua-runtime",
+        "NATS_PASSWORD": first_env["NATS_PASSWORD"],
+        BUNDLED_NATS_STORE_DIR_ENV: str(tmp_path / "data"),
+    }
 
     client_env: dict[str, str] = {}
     ensure_local_nats_credentials(client_env, service_root=tmp_path, create=False)
@@ -795,6 +822,68 @@ def test_run_supervised_bundle_starts_local_nats(tmp_path: Path, monkeypatch) ->
     assert "seed:postgres" in events
     assert "terminate:nats" in events
     assert headless_popen_kwargs["start_new_session"] is True
+
+
+def test_the_bundles_nats_start_hands_the_headless_launcher_its_store_folder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The launcher runs with its own NATS start turned off, so the folder must come from here."""
+
+    config = _make_config(tmp_path)
+    config.save()  # the bundle upgrades the saved file once the id check passed
+    headless_env: dict[str, str] = {}
+
+    class FakeProcess:
+        def __init__(self, name: str):
+            self.name = name
+            self.pid = 4222
+            self.terminated = False
+
+        def poll(self):
+            if self.terminated or self.name == "headless":
+                return 0
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    def fake_popen(command, **kwargs):
+        if command[0] == "nats-server":
+            return FakeProcess("nats")
+        headless_env.update(kwargs["env"])
+        return FakeProcess("headless")
+
+    # The real start_local_nats, without a real server.
+    monkeypatch.setattr("docker.nats_service.shutil.which", lambda name: "/usr/local/bin/nats-server")
+    monkeypatch.setattr(
+        "docker.nats_service.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout="nats-server: v2.15.3\n", stderr=""),
+    )
+    monkeypatch.setattr("docker.nats_service._wait_for_nats_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr("docker.run_bundle.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "docker.run_bundle._bundle_paths", lambda: types.SimpleNamespace(nats_root=tmp_path / "nats")
+    )
+    monkeypatch.setattr("docker.run_bundle.start_postgres", lambda: None)
+    monkeypatch.setattr("docker.run_bundle.seed_postgres_from_targets", lambda targets: None)
+    monkeypatch.setattr("docker.run_bundle.build_launch_headless_command", lambda *args, **kwargs: ["headless"])
+    monkeypatch.setattr("docker.run_bundle.terminate_process", lambda process, name: process.terminate())
+    monkeypatch.setattr("docker.run_bundle.time.sleep", lambda _seconds: None)
+
+    # The runtime environment main() builds when the bundle runs its own NATS.
+    runtime_env = {
+        "TEAM_LOCAL_NATS_ENABLED": "false",
+        "NATS_URL": local_nats_url(),
+        "NATS_SERVERS": local_nats_url(),
+        "NATS_USER": "team",
+        "NATS_PASSWORD": "nats",
+    }
+    assert run_supervised_bundle(config=config, runtime_env=runtime_env, env_path=None, gateway_args=[]) == 0
+
+    store = tmp_path / "nats" / "data"
+    assert headless_env["TEAM_LOCAL_NATS_ENABLED"] == "false"
+    assert headless_env[BUNDLED_NATS_STORE_DIR_ENV] == str(store)
+    assert bundled_nats_store_dir(headless_env) == store
 
 
 def test_run_supervised_bundle_uses_external_nats_when_bundled_nats_disabled(

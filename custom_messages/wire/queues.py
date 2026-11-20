@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -138,6 +138,19 @@ def team_queue_streams(transport: Mapping[str, Any], team: str, count: int) -> t
             name = _fill(template, team=team, partition=partition)
             streams.append(QueueStream(name, template, team, spec["size_kind"], count, partition))
     return tuple(streams)
+
+
+def streams_set_aside(streams: Iterable[QueueStream], max_bytes: Mapping[str, int]) -> int:
+    """What ``streams`` set aside when created with ``max_bytes`` (one byte limit per size kind), once each.
+
+    NATS sets a stream's whole byte limit aside when it creates the stream, and reports it
+    once per stream whatever its copies (``installation_authority.queues.AccountRoom``). The
+    authority's refusals and the gateway's room warning both count a team's streams with
+    this, from ``team_queue_streams``, so the two cannot drift apart when the contract adds a
+    stream or a size kind.
+    """
+
+    return sum(max_bytes[stream.kind] for stream in streams)
 
 
 def queue_stream_config(transport: Mapping[str, Any], stream: QueueStream, limits: QueueLimits) -> dict[str, Any]:

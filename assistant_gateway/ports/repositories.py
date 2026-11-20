@@ -35,6 +35,8 @@ from assistant_gateway.domain.sessions import (
     SessionListRecord,
     WebChatThreadRecord,
     SessionRecord,
+    ThreadHiddenAs,
+    ThreadPlacementRecord,
     SessionSearchRecord,
 )
 from assistant_gateway.domain.transcript import (
@@ -103,10 +105,11 @@ class SessionRepository(Protocol):
     def list_web_chat_threads(
         self,
         *,
-        owner_canonical_user_id: str | None,
+        owner_canonical_user_id: str,
         channel_name: str,
         chat_id: str,
         limit: int,
+        include_last_message: bool = False,
     ) -> list[WebChatThreadRecord]: ...
 
     def search_sessions(
@@ -193,6 +196,32 @@ class SessionRepository(Protocol):
         """Save the Run concurrently setting unless a request is open in the conversation."""
         ...
 
+    def set_session_pinned(self, session_key: str, *, pinned: bool) -> bool:
+        """Pin or unpin an active thread; pinning also brings it back from snooze or dismiss."""
+        ...
+
+    def set_session_hidden(
+        self,
+        session_key: str,
+        *,
+        hidden_as: ThreadHiddenAs,
+        hidden_until: str | None,
+        seen_sequence: int,
+    ) -> bool:
+        """Snooze or dismiss an active thread as of the last message the person saw."""
+        ...
+
+    def get_session_placement(self, session_key: str) -> ThreadPlacementRecord | None:
+        """Where an active thread sits now, with what the woke rule needs; ``None`` when not active."""
+        ...
+
+    def clear_session_hidden(self, session_key: str, *, only_if: ThreadPlacementRecord | None = None) -> bool:
+        """Bring an active thread back from snooze or dismiss and clear its Woke mark.
+
+        With ``only_if``, only while its stored placement still equals that read.
+        """
+        ...
+
     def set_active_session_for_channel(
         self,
         *,
@@ -251,6 +280,12 @@ class RequestRepository(Protocol):
 
     def finish_request(self, correlation_id: str) -> bool:
         """Mark a running request finished; False when it was not running."""
+
+    def record_request_agent(self, *, active_task_id: str, agent_type: str, lead: bool) -> str | None:
+        """Record an agent type that worked on the person's request of this task (any request the gateway
+        admitted, running or finished, whatever continuations made its kind), once, first recorded first, and
+        rebuild its thread's agent trail; the thread's session key when anything changed.
+        Raises ``ValueError`` for an agent type a stored list could not hold, before writing anything."""
 
     def hold_guidance(self, record: HeldGuidanceRecord) -> None:
         """Keep guidance until its running request confirms it."""
@@ -333,8 +368,8 @@ class ToolSetupRepository(Protocol):
 
     def get_tool_setup(self, setup_request_id: str) -> ToolSetupRecord | None: ...
 
-    def finish_tool_setup(self, setup_request_id: str, *, status: str) -> bool:
-        """Mark a waiting setup finished; False when it was already finished or is unknown."""
+    def finish_tool_setup(self, setup_request_id: str, *, status: str, result_json: str) -> bool:
+        """Mark a waiting setup finished and keep its unsent result; False when it was already finished or is unknown."""
         ...
 
     def list_tool_setups(
@@ -345,6 +380,14 @@ class ToolSetupRepository(Protocol):
         tool_id: str | None = None,
         parent_task_id: str | None = None,
     ) -> list[ToolSetupRecord]: ...
+
+    def list_unsent_tool_setup_results(self) -> list[ToolSetupRecord]:
+        """Finished setups whose result is still unsent, oldest ending first."""
+        ...
+
+    def mark_tool_setup_result(self, setup_request_id: str, *, state: str) -> bool:
+        """Move an unsent result to ``state`` (sent or unsendable) and drop its kept copy; False when it was not unsent."""
+        ...
 
 
 @runtime_checkable
@@ -465,6 +508,10 @@ class TranscriptRepository(Protocol):
         before_session_sequence: int | None,
         limit: int,
     ) -> list[GatewayTranscriptMessage]: ...
+
+    def count_transcript_turns(self, *, owner_canonical_user_id: str, session_key: str) -> int:
+        """Ordinary messages (no system cards, no slash commands) in one person's thread."""
+        ...
 
     def list_transcript_events(
         self,

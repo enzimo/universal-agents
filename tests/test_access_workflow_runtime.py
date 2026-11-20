@@ -29,7 +29,7 @@ from custom_agents.access_workflow_runtime import WorkflowCompletionRefused, def
 from custom_agents.access_workflows import workflow_service_for
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
-    clear_answered_access_blocker,
+    clear_answered_blocker,
     get_human_interaction_blocker,
 )
 from custom_messages.contracts.access_v2 import (
@@ -229,8 +229,8 @@ async def test_the_task_resumes_only_after_every_request_of_the_batch_is_decided
     steered.assert_awaited_once()
     steering = steered.await_args.kwargs["steering"]
     assert steering.idempotency_key == f"access_resume:{raised.interrupt.id}"
-    answered = [(item["interrupt_id"], item["response"]["access_request_id"]) for item in steering.interrupt_responses]
-    assert clear_answered_access_blocker(manager, "task-lead", answered)
+    answered = [(item["interrupt_id"], item["response"]) for item in steering.interrupt_responses]
+    assert clear_answered_blocker(manager, "task-lead", answered)
     assert get_human_interaction_blocker(manager, "task-lead") is None
 
 

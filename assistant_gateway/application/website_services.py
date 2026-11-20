@@ -5,8 +5,11 @@ from __future__ import annotations
 import hmac
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol, cast
+
+from typing_extensions import TypeIs
 
 from assistant_gateway.application.objective_control_text import objective_control_text
 from assistant_gateway.application.gateway_application import (
@@ -26,6 +29,7 @@ from assistant_gateway.application.operational_control import (
     GatewayStopControlRequest,
 )
 from assistant_gateway.application.ports import (
+    GatewayClock,
     GatewayEventOutput,
     GatewayPrivateResourceAuthorizer,
 )
@@ -50,12 +54,17 @@ from assistant_gateway.application.session_service import (
 )
 from assistant_gateway.application.transient_presentation import PendingCredentialAction
 from assistant_gateway.application.transcript_service import GatewayTranscriptService
-from assistant_gateway.domain.sessions import ParallelSettingOutcome
+from assistant_gateway.domain.sessions import ParallelSettingOutcome, ThreadHiddenAs
 from assistant_gateway.application.website_application import (
+    WEB_CHAT_THREAD_LIST_LIMIT,
     WebChatParallelSettingResult,
+    WebChatThreadAction,
+    WebChatThreadPlacementResult,
     ActivatedWebEnrollmentTokenV1,
     WEB_CHAT_CHAT_ID,
     WebChatThreadStatesV1,
+    WebChatThreadWorkingV1,
+    WebChatWorkingAgentV1,
     web_chat_threads_revision,
     GatewayAttachmentContent,
     GatewayGeneratedSiteSession,
@@ -100,12 +109,21 @@ from assistant_gateway.application.workspace_browser import (
     GatewayWorkspaceAccess,
     WebsiteWorkspaceBrowser,
 )
-from assistant_gateway.application.web_chat_threads import WebChatThread, web_chat_thread
+from assistant_gateway.application.request_agents_service import GatewayRequestAgents, agent_name
+from assistant_gateway.application.web_chat_threads import (
+    InvalidThreadPlacement,
+    ThreadListState,
+    WebChatThread,
+    snooze_wake_time,
+    thread_list_state,
+    web_chat_thread,
+)
 from assistant_gateway.domain.sessions import SessionListRecord, SessionRecord, WebChatThreadRecord
 from assistant_gateway.domain.transcript import (
     TRANSCRIPT_ROLE_USER,
     TRANSCRIPT_SOURCE_ACCESS_REVIEW,
     TRANSCRIPT_SOURCE_CLIENT_REQUEST,
+    TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE,
     GatewayTranscriptMessage,
 )
 from assistant_gateway.ports.repositories import DeliveryRepository, SessionRepository
@@ -121,6 +139,8 @@ from assistant_gateway.application.website_tasks import list_tasks, control_task
 from runtime_settings.appearance import DarkMetalAppearanceSettings, retired_dark_keys
 
 LOGGER = logging.getLogger(__name__)
+# A failure to read who works on a person's threads is logged at most this often per person (``_with_agents``).
+AGENTS_FAILURE_LOG_SECONDS = 60.0
 
 
 class GatewayBootstrapTokenSource(Protocol):
@@ -337,6 +357,16 @@ class WebsiteIdentityApplication:
         return self._identity.is_web_chat_user_active(canonical_user_id)
 
 
+# The largest value both stores keep in an INTEGER column (64-bit signed).
+_STORE_INTEGER_MAX = 2**63 - 1
+
+
+def _valid_seen_sequence(value: object) -> TypeIs[int]:
+    """Whether a page's last shown message sequence is a whole number the store can keep."""
+
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _STORE_INTEGER_MAX
+
+
 class WebsiteSessionApplication:
     """Own browser session visibility, mutation, and attachment access."""
 
@@ -352,6 +382,8 @@ class WebsiteSessionApplication:
         team_id: str,
         awaiting_reply_session_keys: Callable[[], frozenset[str]],
         proactive_session_key: str,
+        clock: GatewayClock,
+        request_agents: GatewayRequestAgents | None = None,
     ) -> None:
         self._sessions = sessions
         self._session_repository = session_repository
@@ -361,11 +393,19 @@ class WebsiteSessionApplication:
         self._manager_agent_id = manager_agent_id
         self._team_id = team_id
         # Sessions with a request whose agent reply the gateway still awaits
-        # (in memory, so every open page sees the same busy dot the sender does).
+        # (in memory, so every open page sees the same work the sender does).
         self._awaiting_reply_session_keys = awaiting_reply_session_keys
         # The configured key of the team's proactive session (heartbeat.
         # session_key): its threads are listed as "Updates" (web_chat_threads).
         self._proactive_session_key = proactive_session_key
+        # When snoozes wake (web_chat_threads.thread_list_state) and whether a
+        # snooze time is in the future.
+        self._clock = clock
+        # Web Chat's agent trail: who works on each listed thread now, and the names the page shows
+        # (request_agents_service). None where the gateway has no team view: rows then show their stored trail.
+        self._request_agents = request_agents
+        # When a failure to read who works was last logged, per person (``_with_agents``).
+        self._agents_failure_logged: dict[str, float] = {}
 
     def _owner_allows(
         self,
@@ -388,29 +428,88 @@ class WebsiteSessionApplication:
     def list_web_chat_threads(
         self,
         *,
-        owner_canonical_user_id: str | None,
-        limit: int = 50,
+        owner_canonical_user_id: str,
+        limit: int = WEB_CHAT_THREAD_LIST_LIMIT,
+        include_last_message: bool = False,
     ) -> list[WebChatThread]:
-        """The person's Web Chat threads as the sidebar lists them (web_chat_threads)."""
+        """The person's Web Chat threads as the sidebar lists them (web_chat_threads).
+
+        Only the sessions route asks for each thread's latest message; the
+        live read every two seconds needs what the revision covers.
+        """
 
         threads: list[WebChatThread] = []
+        now = self._clock.now_utc()
         for record in self._session_repository.list_web_chat_threads(
             owner_canonical_user_id=owner_canonical_user_id,
             channel_name=DELIVERY_CHANNEL_WEBSITE,
             chat_id=WEB_CHAT_CHAT_ID,
             limit=limit,
+            include_last_message=include_last_message,
         ):
             if not self._owner_allows(record, owner_canonical_user_id):
                 continue
-            thread = web_chat_thread(record, proactive_session_key=self._proactive_session_key)
+            thread = web_chat_thread(record, proactive_session_key=self._proactive_session_key, now=now)
             if thread is not None:
                 threads.append(thread)
-        return threads
+        return self._with_agents(threads, owner_canonical_user_id)
+
+    def _with_agents(self, threads: list[WebChatThread], owner_canonical_user_id: str) -> list[WebChatThread]:
+        """Each thread with who works on its running request now and its trail's agent names (agent trail).
+
+        Only this reader's own listed threads are matched (``GatewayRequestAgents.working``), so the owner rule
+        of the list holds for the agents too. The trail only decorates the list (plan review C15): if reading
+        who works fails, the threads keep their stored trails with type names and nobody working, and the
+        failure is logged at most once a minute per person, so the list and the live read never fail for it.
+        """
+
+        agents = self._request_agents
+        try:
+            working = (
+                agents.working({thread.session_key: thread.running_task_id for thread in threads}) if agents else {}
+            )
+            catalog_names = agents.names if agents else None
+        except Exception:
+            self._log_agents_failure(owner_canonical_user_id)
+            working, catalog_names = {}, None
+        shown = []
+        for thread in threads:
+            named = {(agent.agent_type, agent.lead) for agent in thread.trail.agents}
+            named |= {(entry.agent.agent_type, entry.agent.lead) for entry in thread.trail.entries if entry.agent}
+            names = self._trail_names(sorted(named), catalog_names, owner_canonical_user_id)
+            shown.append(replace(thread, working=working.get(thread.session_key, ()), agent_names=names))
+        return shown
+
+    def _trail_names(
+        self,
+        named: list[tuple[str, bool]],
+        catalog_names: Callable[[list[tuple[str, bool]]], dict[str, str]] | None,
+        owner_canonical_user_id: str,
+    ) -> dict[str, str]:
+        if catalog_names is not None:
+            try:
+                return catalog_names(named)
+            except Exception:
+                self._log_agents_failure(owner_canonical_user_id)
+        return {agent_type: agent_name(agent_type, lead, {}) for agent_type, lead in named}
+
+    def _log_agents_failure(self, owner_canonical_user_id: str) -> None:
+        now = time.monotonic()
+        last = self._agents_failure_logged.get(owner_canonical_user_id)
+        if last is not None and now - last < AGENTS_FAILURE_LOG_SECONDS:
+            return
+        self._agents_failure_logged[owner_canonical_user_id] = now
+        LOGGER.warning(
+            "Could not read who works on a person's Web Chat threads; the list shows the stored trails only. "
+            "event=web_chat_thread_agents_unreadable person_id=%s",
+            owner_canonical_user_id,
+            exc_info=True,
+        )
 
     def web_chat_thread_states(
         self,
         *,
-        owner_canonical_user_id: str | None,
+        owner_canonical_user_id: str,
     ) -> WebChatThreadStatesV1:
         threads = self.list_web_chat_threads(
             owner_canonical_user_id=owner_canonical_user_id,
@@ -425,6 +524,17 @@ class WebsiteSessionApplication:
             ),
             open_request_session_keys=tuple(
                 thread.session_key for thread in threads if thread.has_open_request
+            ),
+            working=tuple(
+                WebChatThreadWorkingV1(
+                    session_key=thread.session_key,
+                    agents=tuple(
+                        WebChatWorkingAgentV1(agent_type=agent.agent_type, name=agent.name, lead=agent.lead)
+                        for agent in thread.working
+                    ),
+                )
+                for thread in threads
+                if thread.working
             ),
         )
 
@@ -505,6 +615,114 @@ class WebsiteSessionApplication:
             parallel_thread,
         )
         return WebChatParallelSettingResult(outcome.value)
+
+    def set_web_chat_thread_placement(
+        self,
+        *,
+        session_key: str,
+        action: WebChatThreadAction,
+        owner_canonical_user_id: str | None,
+        snooze_until: str | None = None,
+        seen_sequence: int | None = None,
+    ) -> WebChatThreadPlacementResult:
+        """Pin, unpin, snooze, dismiss, restore or clear the Woke mark of one of the person's threads.
+
+        Checked like rename and archive: a Web Chat thread on the website
+        channel that the person may update; someone else's or a missing thread
+        reads as not found. Snooze and dismiss take ``seen_sequence``, the last
+        message the page showed, so a message the person never saw brings the
+        thread back (``set_session_hidden``). The state is stored on the
+        thread, so every device the person uses shows the same list.
+        """
+
+        session: SessionRecord | None = None
+        try:
+            session = self._session_repository.resolve_session_reference(session_key)
+            if (
+                session is None
+                or session.channel_name != DELIVERY_CHANNEL_WEBSITE
+                or session.chat_id != WEB_CHAT_CHAT_ID
+                or not self._owner_allows(session, owner_canonical_user_id, action=PRIVATE_ACTION_UPDATE)
+            ):
+                result = WebChatThreadPlacementResult.NOT_FOUND
+            else:
+                result = self._place_thread(session.session_key, action, snooze_until, seen_sequence)
+        except InvalidThreadPlacement as refused:
+            LOGGER.info(
+                "Web Chat thread placement refused. event=web_chat_thread_placement outcome=refused "
+                "session_key=%s action=%s reason=%r",
+                session.session_key if session is not None else session_key,
+                action.value,
+                str(refused),
+            )
+            raise
+        except Exception:
+            # The route answers 500; this line names the thread (as the page
+            # sent it when the lookup itself failed) and the change.
+            LOGGER.exception(
+                "Web Chat thread placement failed. event=web_chat_thread_placement outcome=error "
+                "session_key=%s action=%s",
+                session.session_key if session is not None else session_key,
+                action.value,
+            )
+            raise
+        LOGGER.info(
+            "Web Chat thread placement change. event=web_chat_thread_placement outcome=%s "
+            "session_key=%s action=%s",
+            result.value,
+            session.session_key if session is not None else session_key,
+            action.value,
+        )
+        return result
+
+    def _place_thread(
+        self,
+        session_key: str,
+        action: WebChatThreadAction,
+        snooze_until: str | None,
+        seen_sequence: int | None,
+    ) -> WebChatThreadPlacementResult:
+        repository = self._session_repository
+        if action is WebChatThreadAction.CLEAR_WOKE:
+            return self._clear_woke(session_key)
+        if action is WebChatThreadAction.PIN or action is WebChatThreadAction.UNPIN:
+            saved = repository.set_session_pinned(session_key, pinned=action is WebChatThreadAction.PIN)
+        elif action is WebChatThreadAction.RESTORE:
+            saved = repository.clear_session_hidden(session_key)
+        else:
+            seen = seen_sequence if _valid_seen_sequence(seen_sequence) else None
+            if seen is None:
+                raise InvalidThreadPlacement("Reload the chat and try again.")
+            if action is WebChatThreadAction.SNOOZE:
+                wake = snooze_wake_time(snooze_until, now=self._clock.now_utc())
+                saved = repository.set_session_hidden(
+                    session_key, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until=wake, seen_sequence=seen
+                )
+            else:
+                saved = repository.set_session_hidden(
+                    session_key, hidden_as=ThreadHiddenAs.DISMISSED, hidden_until=None, seen_sequence=seen
+                )
+        return WebChatThreadPlacementResult.SAVED if saved else WebChatThreadPlacementResult.NOT_FOUND
+
+    def _clear_woke(self, session_key: str) -> WebChatThreadPlacementResult:
+        """Clear a Woke mark only if the thread is woke by the gateway's own rule, as stored now.
+
+        The page asks when the person opens a thread its list showed as woke,
+        but its list may be older than a snooze or dismiss saved on another
+        device. The placement is read, judged by the list's own rule
+        (``thread_list_state``) and cleared only while it is unchanged, so
+        that newer choice is kept and the answer is ``UNCHANGED``.
+        """
+
+        repository = self._session_repository
+        placement = repository.get_session_placement(session_key)
+        if placement is None:
+            return WebChatThreadPlacementResult.NOT_FOUND
+        if thread_list_state(placement, now=self._clock.now_utc()) is not ThreadListState.WOKE:
+            return WebChatThreadPlacementResult.UNCHANGED
+        if repository.clear_session_hidden(session_key, only_if=placement):
+            return WebChatThreadPlacementResult.SAVED
+        return WebChatThreadPlacementResult.UNCHANGED
 
     def rename_web_chat_session(
         self,
@@ -750,6 +968,14 @@ class WebsiteTranscriptApplication:
             has_more=page.has_more,
         )
 
+    def count_turns(self, *, owner_canonical_user_id: str, session_key: str) -> int | None:
+        session = self._visible_session(session_key, owner_canonical_user_id)
+        if session is None:
+            return None
+        return self._transcript.count_turns(
+            owner_canonical_user_id=owner_canonical_user_id, session_key=session.session_key
+        )
+
     def list_events(
         self,
         *,
@@ -839,7 +1065,7 @@ class WebsiteTranscriptApplication:
             route=route,
             response=response,
             reply_to=user_message,
-            source_kind="gateway_local_response",
+            source_kind=TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE,
         )
         return self._message_view(reply) if reply is not None else None
 

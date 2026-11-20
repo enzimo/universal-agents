@@ -46,7 +46,11 @@ from assistant_gateway.application.transcript_service import (
     TranscriptRequestRecord,
     gateway_response_from_transcript,
 )
-from assistant_gateway.domain.transcript import GatewayTranscriptMessage
+from assistant_gateway.domain.transcript import (
+    TRANSCRIPT_SOURCE_GATEWAY_RESPONSE,
+    TRANSCRIPT_SOURCE_GUIDANCE_ANSWER,
+    GatewayTranscriptMessage,
+)
 from assistant_gateway.domain.sessions import SessionRecord
 from assistant_gateway.domain.request_state import (
     GUIDANCE_STATUS_HELD,
@@ -131,6 +135,7 @@ class GatewayInteractiveSubmissionService:
         refresh_delivery_preferences: Callable[[], None],
         transcript: GatewayTranscriptService,
         personal_setup: GatewayPersonalSetupGate,
+        request_sent: Callable[[str], None] = lambda task_id: None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
@@ -147,6 +152,8 @@ class GatewayInteractiveSubmissionService:
         self._refresh_delivery_preferences = refresh_delivery_preferences
         self._transcript = transcript
         self._personal_setup = personal_setup
+        # Told the request's task once the team lead has it (Web Chat's agent trail, request_agents_service).
+        self._request_sent = request_sent
         self._logger = logger or logging.getLogger(__name__)
 
     async def submit(
@@ -307,6 +314,8 @@ class GatewayInteractiveSubmissionService:
             route=thread.route,
             response=response,
             accepted=accepted,
+            # Marks the answer so it does not wake a snoozed thread (domain.sessions).
+            source_kind=TRANSCRIPT_SOURCE_GUIDANCE_ANSWER,
         )
 
     async def _submit_new_request(self, thread: _ThreadMessage) -> GatewayResponse:
@@ -372,6 +381,12 @@ class GatewayInteractiveSubmissionService:
         response = await self._submit_new_task(
             thread, task=task, correlation_id=correlation_id, parallel_thread=parallel_thread
         )
+        # Record the reply before this code next pauses (no await in between).
+        # Messages still queued when the reply's wait closed are passed on in a
+        # task that runs only after that pause (reply_leftovers), so the chat
+        # history keeps the order the team lead sent: the first setup page's
+        # line, then the next page's
+        # (tests/test_gateway_reply_leftovers.py::test_two_setup_pages_through_a_web_chat_send_keep_their_order).
         return self._append_response(
             session=thread.session,
             route=thread.route,
@@ -433,6 +448,7 @@ class GatewayInteractiveSubmissionService:
         route: GatewayRequestRoute,
         response: GatewayResponse,
         accepted: GatewayTranscriptMessage | None,
+        source_kind: str = TRANSCRIPT_SOURCE_GATEWAY_RESPONSE,
     ) -> GatewayResponse:
         if accepted is not None:
             self._transcript.append_gateway_response(
@@ -440,6 +456,7 @@ class GatewayInteractiveSubmissionService:
                 route=route,
                 response=response,
                 reply_to=accepted,
+                source_kind=source_kind,
             )
         return response
 
@@ -569,6 +586,8 @@ class GatewayInteractiveSubmissionService:
                 len(request.attachments),
             )
             await self._publish_request(envelope, routing_key=manager_id, correlation_id=correlation_id)
+            # The team lead has the request and works on it first; the agent trail shows that at once.
+            self._request_sent(task.task_id)
             self._logger.info(
                 "Gateway published interactive user request. "
                 "event=gateway_user_request_published correlation_id=%s "

@@ -24,6 +24,8 @@ from custom_agents.sdk.strands.turn_tool_stop import (
     invoke_with_tool_stop,
     stop_tool_calls,
 )
+from custom_agents.sdk.strands.paused_tool_calls import call_paused
+from custom_agents.strands_parts import mark_paused
 from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.sdk.strands.turn_ports import (
     TurnRuntimeSettings,
@@ -165,6 +167,53 @@ def _objective_work_invocation_usage(result: Any) -> tuple[dict[str, Any], list[
     )
 
 
+def _missing_skills_reason(missing_skills: list[str]) -> str:
+    return "Required work-session skills were not activated: " + ", ".join(missing_skills)
+
+
+async def _saved_work_checkpoint(
+    *, coordinator: Any, runtime: TaskOperationRuntime, session: Any
+) -> Any:
+    """The checkpoint the work session already points to, if it has one."""
+
+    if not session.checkpoint_id:
+        return None
+    checkpoints = await runtime.run(
+        coordinator.objective_work_repository.list_checkpoints,
+        session.objective_id,
+        owner_agent_id=session.owner_agent_id,
+        limit=1,
+    )
+    return next(
+        (item for item in checkpoints if item.checkpoint_id == session.checkpoint_id),
+        None,
+    )
+
+
+def _objective_work_yield_response(
+    *, msg_content: ContentType, active_task_id: Optional[str], checkpoint: Any, reason: str
+) -> Task:
+    """The task's response when its work session stops at a boundary (a fresh or a resumed turn)."""
+
+    return Task(
+        task_id=msg_content.task_id
+        if isinstance(msg_content, Task)
+        else active_task_id,
+        parent_task_id=msg_content.parent_task_id
+        if isinstance(msg_content, Task)
+        else None,
+        task_type=MessageMetaType.RESPONSE,
+        problem_statement=msg_content.problem_statement
+        if isinstance(msg_content, Task)
+        else None,
+        answer=(
+            "The bounded Objective work session yielded safely. "
+            f"Checkpoint {checkpoint.checkpoint_id} preserves the continuation state."
+        ),
+        errors=["objective_work_session_yield", reason],
+    )
+
+
 async def _finalize_objective_work_invocation(
     *,
     model: Agent,
@@ -180,7 +229,10 @@ async def _finalize_objective_work_invocation(
     active_task_id: Optional[str],
     tool_stop: ToolStop,
 ) -> Optional[Task]:
-    """Account one bounded invocation and produce a durable-yield response if needed."""
+    """Account one bounded invocation and produce a durable-yield response if needed.
+
+    A call that paused is accounted but never yields: its turn keeps the pause.
+    """
     usage, cycles = _objective_work_invocation_usage(result)
     session = await runtime.run(
         coordinator.account_invocation,
@@ -208,9 +260,7 @@ async def _finalize_objective_work_invocation(
     if not (missing_skills or limit_reached or session_boundary):
         return None
     if missing_skills:
-        reason = "Required work-session skills were not activated: " + ", ".join(
-            missing_skills
-        )
+        reason = _missing_skills_reason(missing_skills)
     elif limit_reached:
         reason = (
             f"Strands stopped at the configured {result.stop_reason} safe boundary."
@@ -219,22 +269,34 @@ async def _finalize_objective_work_invocation(
         reason = (
             session.yield_reason or "The configured work-session boundary was reached."
         )
+    if call_paused(result):
+        # The call paused for a person (an access decision, a setup step), so
+        # the turn's work is not finished and the turn saves its pause next
+        # (_complete_turn). The checkpoint-only call below would fail on the
+        # paused agent, which takes only interrupt answers, and a yield here
+        # would drop the pause. The usage up to the pause is recorded above;
+        # the work after the resume is not counted against the session budget:
+        # each resumed call gets this turn's per-call limits again, and the
+        # tool-call cap is not checked after a resume. The boundary applies
+        # after the resume: missing skills stop the resumed turn before its
+        # decision is carried out (LLMTurnExecutor.yield_for_missing_work_skills),
+        # and the saved session status refuses the next plan step
+        # (ObjectiveWorkSessionCoordinator.admits_plan_step).
+        logger.info(
+            "An Objective work session reached its boundary in a call that paused; the pause is kept and the "
+            "boundary applies after the resume. event=objective_work_boundary_after_pause session_id=%s "
+            "objective_id=%s status=%s reason=%s",
+            session.session_id,
+            session.objective_id,
+            getattr(session.status, "value", session.status),
+            reason,
+        )
+        return None
 
     checkpoint = None
     if session.checkpoint_id:
-        checkpoints = await runtime.run(
-            coordinator.objective_work_repository.list_checkpoints,
-            session.objective_id,
-            owner_agent_id=session.owner_agent_id,
-            limit=1,
-        )
-        checkpoint = next(
-            (
-                item
-                for item in checkpoints
-                if item.checkpoint_id == session.checkpoint_id
-            ),
-            None,
+        checkpoint = await _saved_work_checkpoint(
+            coordinator=coordinator, runtime=runtime, session=session
         )
     elif not missing_skills:
         checkpoint_started = time.monotonic()
@@ -300,21 +362,9 @@ async def _finalize_objective_work_invocation(
                 tool_calls=len(checkpoint_handler.tool_sequence),
                 stop_reason=getattr(checkpoint_result, "stop_reason", None),
             )
-            if session.checkpoint_id:
-                checkpoints = await runtime.run(
-                    coordinator.objective_work_repository.list_checkpoints,
-                    session.objective_id,
-                    owner_agent_id=session.owner_agent_id,
-                    limit=1,
-                )
-                checkpoint = next(
-                    (
-                        item
-                        for item in checkpoints
-                        if item.checkpoint_id == session.checkpoint_id
-                    ),
-                    None,
-                )
+            checkpoint = await _saved_work_checkpoint(
+                coordinator=coordinator, runtime=runtime, session=session
+            )
         except Exception as exc:
             logger.warning(
                 "Checkpoint-only Objective invocation failed; using deterministic degraded checkpoint. "
@@ -329,22 +379,8 @@ async def _finalize_objective_work_invocation(
         checkpoint = await runtime.run(
             coordinator.degraded_checkpoint, session, reason=reason
         )
-    return Task(
-        task_id=msg_content.task_id
-        if isinstance(msg_content, Task)
-        else active_task_id,
-        parent_task_id=msg_content.parent_task_id
-        if isinstance(msg_content, Task)
-        else None,
-        task_type=MessageMetaType.RESPONSE,
-        problem_statement=msg_content.problem_statement
-        if isinstance(msg_content, Task)
-        else None,
-        answer=(
-            "The bounded Objective work session yielded safely. "
-            f"Checkpoint {checkpoint.checkpoint_id} preserves the continuation state."
-        ),
-        errors=["objective_work_session_yield", reason],
+    return _objective_work_yield_response(
+        msg_content=msg_content, active_task_id=active_task_id, checkpoint=checkpoint, reason=reason
     )
 
 
@@ -363,9 +399,11 @@ def _remember_context_assembly(assembly: AssembledContext) -> None:
 def late_guidance_instruction(guidance: str) -> str:
     """What the model reads for guidance that arrived after a call to the agent, before its decision was carried out.
 
-    A fresh turn appends it to its prompt and calls the model again (below); a
-    resumed turn sends it as the next prompt of the same conversation
-    (``task_steering_runtime._run_resumed_turn``).
+    A fresh turn appends it to its prompt and calls the model again
+    (``LLMTurnExecutor._reinvoke_for_late_guidance``); a resumed turn sends it
+    as the next prompt of the same conversation
+    (``task_steering_runtime._call_until_guidance_read``). Neither reads
+    guidance after a call that paused.
     """
 
     return (
@@ -2065,16 +2103,19 @@ class LLMTurnExecutor:
         cancelled at shutdown lost them; a delegation repeated by a later turn
         is not deduplicated, so they must not outlive the decision either.
         """
-        if turn.start_notes is None:
+        await self._release_start_notes(turn.start_notes, turn.active_task_id)
+
+    async def _release_start_notes(self, notes: TurnStartNotes | None, task_id: Optional[str]) -> None:
+        if notes is None:
             return
         try:
-            await self.tasks.runtime.run(self.tasks.release_turn_start_notes, turn.start_notes)
+            await self.tasks.runtime.run(self.tasks.release_turn_start_notes, notes)
         except Exception:
             self.logger.exception(
                 "Could not remove the note a finished turn read; the next turn reads it again. "
                 "event=turn_start_state_release_failed agent_id=%s task_id=%s",
                 self.settings.id,
-                turn.active_task_id,
+                task_id,
             )
 
     async def _run_prepared_turn(self, turn: _TurnState) -> ContentType:
@@ -2591,40 +2632,75 @@ class LLMTurnExecutor:
                         strands_prompt_input=strands_prompt_input,
                         attempt=turn.strands_invocation_attempt,
                     )
+                    model = self._require_model()
                     turn.result = await invoke_with_tool_stop(
-                        self._require_model(),
+                        model,
                         strands_prompt_input,
                         tool_stop=self._require_tool_stop(turn),
                         invoke_kwargs=turn.invoke_kwargs,
                         callback_handler=turn.callback_handler,
                         logger=self.logger,
                     )
-                    late_guidance = (
-                        await self.effects.consume_pending_proactive_guidance_message(
-                            turn.active_task_id
-                        )
-                    )
-                    if late_guidance:
-                        self.logger.info(
-                            "[%s] Re-invoking task %s because mid-turn steering arrived after the model call.",
-                            self.settings.id,
-                            turn.active_task_id or "unknown",
-                        )
-                        turn.assembly = self._append_provider_prompt_suffix(
-                            turn.assembly,
-                            text=late_guidance_instruction(late_guidance),
-                            name="late_requester_steering",
-                            source="task_steering_runtime.consume_pending_proactive_guidance_message",
-                        )
-                        turn.full_prompt = turn.assembly.prompt
-                        self.effects.reset_llm_conversation()
-                        self.effects.refresh_skills_plugins()
-                        self._take_optional_strands_snapshot()
-                        turn.strands_invocation_attempt += 1
+                    if call_paused(turn.result):
+                        # A paused Strands agent takes only interrupt answers:
+                        # called again with text it raises TypeError and stays
+                        # paused. It is marked first, so no later turn reuses
+                        # it even if this one ends before saving the pause.
+                        # For a Task, _complete_turn hands the pause to
+                        # send_interrupt_request_for_result; guidance waits for
+                        # the resumed turn (its next new tool call, or
+                        # task_steering_runtime._call_until_guidance_read).
+                        self._keep_new_turns_off_paused_agent(turn, model)
+                        break
+                    if await self._reinvoke_for_late_guidance(turn):
                         continue
                     break
                 except Exception as invoke_error:
                     await self._recover_invocation(turn, invoke_error)
+
+    def _keep_new_turns_off_paused_agent(self, turn: _TurnState, model: Any) -> None:
+        """Mark the agent whose call just paused for replacement before the next turn (``strands_parts.mark_paused``)."""
+
+        if mark_paused(model):
+            return
+        self.logger.warning(
+            "A call paused on a Strands agent that the turn's work record does not hold, so it could not be "
+            "marked for replacement before the next turn. event=paused_strands_agent_unmarked agent_id=%s task_id=%s",
+            self.settings.id,
+            turn.active_task_id,
+        )
+
+    async def _reinvoke_for_late_guidance(self, turn: _TurnState) -> bool:
+        """Prepare another call when guidance arrived during a call that did not pause; return whether it did.
+
+        The turn decision is not always a tool call that ``RuntimeSteeringPlugin``
+        can cancel with the guidance (``task_steering_runtime`` module
+        docstring), so the turn reads waiting guidance before it carries out
+        its decision and calls the model again with a fresh conversation.
+        """
+
+        late_guidance = await self.effects.consume_pending_proactive_guidance_message(
+            turn.active_task_id
+        )
+        if not late_guidance:
+            return False
+        self.logger.info(
+            "[%s] Re-invoking task %s because mid-turn steering arrived after the model call.",
+            self.settings.id,
+            turn.active_task_id or "unknown",
+        )
+        turn.assembly = self._append_provider_prompt_suffix(
+            turn.assembly,
+            text=late_guidance_instruction(late_guidance),
+            name="late_requester_steering",
+            source="task_steering_runtime.consume_pending_proactive_guidance_message",
+        )
+        turn.full_prompt = turn.assembly.prompt
+        self.effects.reset_llm_conversation()
+        self.effects.refresh_skills_plugins()
+        self._take_optional_strands_snapshot()
+        turn.strands_invocation_attempt += 1
+        return True
 
     async def _recover_invocation(
         self, turn: _TurnState, invoke_error: Exception
@@ -2866,6 +2942,55 @@ class LLMTurnExecutor:
         )
         raise TaskWaitLimitReached(task_id=task_id, waits=waits, limit=limit)
 
+    async def yield_for_missing_work_skills(
+        self,
+        *,
+        msg_content: ContentType,
+        msg_meta: MessageMeta,
+        task_id: Optional[str],
+        start_notes: TurnStartNotes | None,
+    ) -> Optional[Task]:
+        """Stop a resumed work-session turn whose required skills are still missing; None to carry on.
+
+        A fresh turn whose call paused leaves this check to the resumed turn
+        (``_finalize_objective_work_invocation``), which calls it before its
+        decision is carried out (``task_steering_runtime._run_resumed_turn``).
+        Without it, a session whose last turn paused finished without its
+        required skills and without a checkpoint. Like a fresh turn with
+        missing skills, the session gets its saved checkpoint or the degraded
+        one (which asks for a person), the decision is dropped, and the task
+        answers with the same yield response. The session limit is not checked
+        here: the saved session status refuses the next plan step.
+        """
+
+        coordinator, session = await self._resolve_objective_work_context(msg_meta, task_id)
+        if session is None:
+            return None
+        missing_skills = await self.tasks.runtime.run(coordinator.missing_required_skills, session)
+        if not missing_skills:
+            return None
+        reason = _missing_skills_reason(missing_skills)
+        checkpoint = await _saved_work_checkpoint(
+            coordinator=coordinator, runtime=self.tasks.runtime, session=session
+        )
+        if checkpoint is None:
+            checkpoint = await self.tasks.runtime.run(coordinator.degraded_checkpoint, session, reason=reason)
+        self.logger.info(
+            "A resumed work-session turn stopped before its decision because required skills were not "
+            "activated. event=objective_work_session_yield_after_resume agent_id=%s task_id=%s session_id=%s "
+            "checkpoint_id=%s missing_skills=%s",
+            self.settings.id,
+            task_id,
+            session.session_id,
+            checkpoint.checkpoint_id,
+            missing_skills,
+        )
+        # The yield is the turn's saved result, as for a fresh turn's yield.
+        await self._release_start_notes(start_notes, task_id)
+        return _objective_work_yield_response(
+            msg_content=msg_content, active_task_id=task_id, checkpoint=checkpoint, reason=reason
+        )
+
     async def prepare_turn_decision(
         self, *, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta,
         task_id: Optional[str], decision: Any, strands_agent: Any, decision_tool_name: str = "",
@@ -3043,9 +3168,7 @@ class LLMTurnExecutor:
         turn.result = self._apply_agent_result_transformer(
             turn.msg_content, turn.result
         )
-        if getattr(turn.result, "stop_reason", None) == "interrupt" and isinstance(
-            turn.msg_content, Task
-        ):
+        if call_paused(turn.result) and isinstance(turn.msg_content, Task):
             # The task is mid-work: the resumed turn's decision releases what
             # this turn read (TurnStartNotes).
             turn.start_notes_handed_over = True

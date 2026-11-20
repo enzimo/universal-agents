@@ -2047,6 +2047,51 @@ h1 {
   color: var(--ocean-light);
 }
 
+/* Thread list in dark mode: the light theme's pale backing and fills
+   (review F8) are not needed over the dark glass, where the list's text
+   measures 6.3:1 or more as it is. */
+:root[data-color-mode="dark"] .chat-thread-history {
+  border-radius: 0;
+  background: none;
+  margin: 0;
+  padding: 0;
+}
+
+:root[data-color-mode="dark"] .thread-list-status.is-error {
+  background: transparent;
+}
+
+/* Thread list in dark mode: Deep Ocean levels with Ember for waiting. */
+:root[data-color-mode="dark"] .thread-row.is-active .thread-title,
+:root[data-color-mode="dark"] .thread-row:hover .thread-title {
+  color: var(--ocean-light);
+}
+
+:root[data-color-mode="dark"] .thread-detail.is-waiting,
+:root[data-color-mode="dark"] .thread-section.is-needs-you .thread-section-header {
+  color: var(--dark-ember);
+}
+
+:root[data-color-mode="dark"] .thread-section.is-needs-you {
+  border-color: rgba(240, 163, 90, 0.42);
+  background: rgba(240, 163, 90, 0.08);
+}
+
+:root[data-color-mode="dark"] .thread-section-header:hover,
+:root[data-color-mode="dark"] .thread-section-header:focus-visible {
+  background: var(--dark-raised);
+  color: var(--ocean-light);
+}
+
+:root[data-color-mode="dark"] .thread-section-header:focus-visible {
+  box-shadow: 0 0 0 2px var(--dark-focus);
+}
+
+:root[data-color-mode="dark"] .thread-woke-badge {
+  border-color: rgba(98, 213, 243, 0.48);
+  color: var(--dark-focus);
+}
+
 :root[data-color-mode="dark"] .settings-status,
 :root[data-color-mode="dark"] .runtime-test-status,
 :root[data-color-mode="dark"] .generated-token-message,
@@ -4425,12 +4470,20 @@ body.is-theme-customizing {
   margin-top: 22px;
 }
 
+/* Web Chat fills the window's height with about 6 px around and between its
+   panes (owner's request, 2026-11-19: more threads in view). The sign-in page
+   keeps the wider padding. */
+.chat-preview:has(> .chat-app:not([hidden])) {
+  padding: 6px;
+}
+
 .chat-app {
   width: min(1450px, 100%);
-  height: min(1100px, calc(100vh - 24px));
+  height: calc(100vh - 12px);
+  height: calc(100dvh - 12px);
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
-  gap: 14px;
+  gap: 6px;
 }
 
 .objectives-app {
@@ -5325,8 +5378,8 @@ body.is-theme-customizing {
 .chat-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px;
+  gap: 8px;
+  padding: 10px;
 }
 
 .chat-sidebar-header {
@@ -5446,28 +5499,151 @@ body.is-theme-customizing {
   width: 100%;
 }
 
+/* In the light theme the status line and the thread list sit on a pale
+   backing (owner's choice, 2026-11-20, review F8): the sidebar glass shows a
+   mid-dark band of the mesh where the list's small grey text measured 1.4 to
+   2.5:1 and even the titles' ink 3.8:1. The rest of the sidebar stays glassy;
+   dark mode has none (see the dark rules). The backing reaches 4 px beyond
+   the list (negative margin, same padding), so the list keeps the height it
+   has in dark mode and all five section headers still fit (review C19). */
 .chat-thread-history {
   min-height: 0;
   display: flex;
   flex: 1 1 0;
   flex-direction: column;
   gap: 8px;
-}
-
-.chat-thread-search {
-  color: var(--muted);
-  font-size: 0.82rem;
-  font-weight: 820;
-  text-transform: uppercase;
+  border-radius: 12px;
+  background: rgba(248, 253, 251, 0.82);
+  margin: -4px;
+  padding: 4px;
 }
 
 .thread-list {
   display: grid;
   flex: 1 1 auto;
   align-content: start;
-  gap: 8px;
+  gap: 4px;
   min-height: 0;
   overflow: auto;
+}
+
+/* The thread list's status line (chat_thread_status.mjs): a live region above
+   the scrolling list. Without a failure it holds at most a visually hidden
+   confirmation and takes no room (the negative margin cancels the column
+   gap); a failure shows in the danger colour with Retry and Close. */
+.thread-list-status {
+  position: relative;
+}
+
+.thread-list-status:not(.is-error) {
+  height: 0;
+  margin-bottom: -8px;
+}
+
+.thread-list-status.is-error {
+  /* A pale fill so the danger colour reads at 4.5:1 or more over the light
+     theme's glass (review C15); dark mode needs none. */
+  background: rgba(255, 246, 246, 0.95);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  border: 1px solid currentColor;
+  border-radius: 10px;
+  color: var(--danger);
+  font-size: 0.8rem;
+  font-weight: 650;
+  line-height: 1.3;
+  padding: 6px 8px;
+}
+
+.thread-list-status-text {
+  flex: 1 1 100%;
+}
+
+/* Thread list sections (chat_thread_list.mjs): Needs you, Pinned, Recent,
+   Snoozed, Dismissed. Each header is a button with the count that opens and
+   closes its rows. */
+.thread-section {
+  display: grid;
+  gap: 1px;
+}
+
+.thread-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 820;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.thread-section-header:hover,
+.thread-section-header:focus-visible {
+  color: var(--ocean);
+  outline: none;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.thread-section-header:focus-visible {
+  box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.34);
+}
+
+.thread-section-label {
+  flex: 1 1 auto;
+}
+
+.thread-section-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A chevron that points down when the section is open. */
+.thread-section-header::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 160ms ease;
+}
+
+.thread-section-header[aria-expanded="false"]::after {
+  transform: rotate(-45deg);
+}
+
+.thread-section-rows {
+  display: grid;
+  gap: 2px;
+}
+
+.thread-section-rows[hidden] {
+  display: none;
+}
+
+/* Needs you: a highlighted box in the attention gold the unread dot uses.
+   In the light theme its pale fill is nearly opaque and its text a darker
+   amber, so the waiting reason reads at 4.5:1 or more whatever the mesh
+   behind it (review F8: --amber over the glass measured 1.0-1.6:1). */
+.thread-section.is-needs-you {
+  border: 1px solid rgba(146, 64, 14, 0.45);
+  border-radius: 10px;
+  background: rgba(255, 251, 235, 0.94);
+  padding: 2px 4px 4px;
+}
+
+.thread-section.is-needs-you .thread-section-header,
+.thread-detail.is-waiting {
+  color: #8a4508;
 }
 
 .chat-debug-controls {
@@ -6056,11 +6232,27 @@ body.is-theme-customizing {
 
 .thread-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 18px 34px 34px;
+  grid-template-columns: 12px minmax(0, 1fr);
   align-items: center;
-  gap: 4px;
   border: 1px solid transparent;
   border-radius: 7px;
+  /* A long press opens the row's menu; no text selection or callout. */
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+.thread-row.is-renaming {
+  grid-template-columns: 12px minmax(0, 1fr) 30px 30px;
+  gap: 2px;
+}
+
+/* The unsaved New Chat row has no indicator: its button takes the row. */
+.thread-row.is-unsaved {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.thread-row.is-unsaved .thread-button {
+  padding-left: 12px;
 }
 
 .thread-row:hover,
@@ -6083,46 +6275,168 @@ body.is-theme-customizing {
     0 0 16px rgba(255, 214, 10, 0.32);
 }
 
+/* Two lines: the title, a Woke mark and the time since the last message,
+   then what the thread waits on or its latest message. */
 .thread-button {
-  min-height: 42px;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
   border: 0;
   border-radius: 7px;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  font-weight: 760;
-  overflow: hidden;
-  padding: 0 12px;
+  font: inherit;
+  padding: 4px 8px 5px 2px;
   text-align: left;
+}
+
+.thread-line {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.thread-title-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.thread-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.88rem;
+  font-weight: 780;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-age {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.thread-woke-badge {
+  flex: 0 0 auto;
+  border: 1px solid rgba(2, 132, 199, 0.42);
+  border-radius: 999px;
+  color: var(--ocean);
+  font-size: 0.66rem;
+  font-weight: 820;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+/* The line itself does not clip, so a working triangle's glow is never cut
+   off; its text cuts with an ellipsis (.thread-detail-text). The gap and the
+   triangles' overlap leave the longest waiting label about 5% to spare beside
+   six triangles, for fonts a little wider than the probe's (review C23). */
+.thread-detail {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: visible;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 560;
+}
+
+.thread-detail-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The agent trail (agent_trail.mjs): one small triangle per turn, alternating
+   up and down and overlapping like the approved mockup, before the snippet.
+   Each triangle carries its colours for both themes (--tri-light,
+   --tri-dark), already moved to at least 3:1 against the row: resting ones to
+   about 3.2:1, working ones to 4.5:1 or more with a glow. The leftmost is
+   hollow and dotted when older turns are hidden. */
+/* No taller than the triangles, so rows keep their height; the glow draws
+   past the box (the line does not clip). */
+.thread-trail {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 12px;
+  padding-left: 1px;
+}
+
+.trail-tri {
+  width: 15px;
+  height: 12px;
+  margin-right: -6px;
+  overflow: visible;
+  color: var(--tri-light);
+}
+
+/* The words start just after the last triangle (the line's 6 px gap). */
+.trail-tri:last-child {
+  margin-right: 0;
+}
+
+:root[data-color-mode="dark"] .trail-tri {
+  color: var(--tri-dark);
+}
+
+.trail-tri polygon {
+  fill: currentColor;
+}
+
+.trail-tri.is-hollow polygon {
+  fill: none;
+  stroke: currentColor;
+  stroke-dasharray: 2 1.6;
+  stroke-width: 1.5;
+}
+
+/* Working: a steady glow, which is also the mark without motion. */
+.trail-tri.is-working {
+  filter: drop-shadow(0 0 2px currentColor);
+}
+
+.thread-detail.is-waiting {
+  font-weight: 700;
+}
+
+/* Who works now, in the team lead's gold (the approved mockup), at 4.5:1 or
+   more on the light theme's pale backing; dark mode uses the gold itself. */
+.thread-detail.is-working .thread-detail-text {
+  color: #6b5000;
+  font-weight: 700;
+}
+
+:root[data-color-mode="dark"] .thread-detail.is-working .thread-detail-text {
+  color: #f6c84c;
+}
+
 .thread-row:hover .thread-button,
-.thread-row.is-active .thread-button {
+.thread-row.is-active .thread-button,
+.thread-row.is-active .thread-title {
   color: var(--ocean);
 }
 
 .thread-active-indicator {
-  width: 18px;
-  height: 34px;
+  width: 12px;
+  height: 100%;
+  min-height: 18px;
   display: grid;
   place-items: center;
   opacity: 0;
   pointer-events: none;
 }
 
-.thread-row.is-pending .thread-active-indicator {
-  opacity: 1;
-}
-
-.thread-row.is-pending:not(.is-active) .thread-active-indicator::before {
-  box-shadow:
-    0 0 0 4px rgba(2, 132, 199, 0.24),
-    0 0 14px rgba(2, 132, 199, 0.52);
-}
-
-.thread-row.has-unread:not(.is-pending) .thread-active-indicator {
+/* The dot shows only an unread reply; work shows in the agent trail. */
+.thread-row.has-unread .thread-active-indicator {
   opacity: 1;
 }
 
@@ -6133,10 +6447,9 @@ body.is-theme-customizing {
   border-radius: 999px;
   background: var(--ocean-mid);
   box-shadow: 0 0 0 4px rgba(2, 132, 199, 0.14);
-  animation: thread-reply-pulse 1.15s ease-in-out infinite;
 }
 
-.thread-row.has-unread:not(.is-pending) .thread-active-indicator::before {
+.thread-row.has-unread .thread-active-indicator::before {
   width: 7px;
   height: 7px;
   background: var(--green-bright);
@@ -6148,24 +6461,269 @@ body.is-theme-customizing {
   transform: none;
 }
 
-.thread-row.has-attention:not(.is-pending) .thread-active-indicator::before {
+.thread-row.has-attention .thread-active-indicator::before {
   background: var(--yellow-bright);
   box-shadow:
     0 0 0 3px rgba(255, 214, 10, 0.28),
     0 0 14px rgba(255, 214, 10, 0.52);
 }
 
-@keyframes thread-reply-pulse {
-  0%,
-  100% {
-    opacity: 0.78;
-    transform: scale(0.90);
-  }
+/* The hover preview (chat_thread_preview.mjs): the thread's last turns beside
+   its row, two lines each, with who wrote them and when. */
+.thread-preview {
+  position: fixed;
+  z-index: 35;
+  display: grid;
+  gap: 8px;
+  width: min(340px, calc(100vw - 16px));
+  border: 1px solid rgba(7, 89, 133, 0.26);
+  border-radius: 10px;
+  background: rgba(247, 255, 252, 0.88);
+  box-shadow: 0 18px 44px rgba(3, 28, 42, 0.24);
+  backdrop-filter: blur(22px) saturate(140%);
+  color: var(--ink);
+  padding: 10px 12px;
+  pointer-events: none;
+}
 
-  50% {
-    opacity: 1;
-    transform: scale(1.05);
-  }
+.thread-preview-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid rgba(28, 69, 60, 0.14);
+  padding-bottom: 6px;
+}
+
+/* The card shows the whole title, on as many lines as it needs (titles are
+   at most 200 characters): it is where mouse users read a cut title in full
+   (review F6). */
+.thread-preview-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.thread-preview-age,
+.thread-preview-count,
+.thread-preview-status {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.thread-preview-turn {
+  display: grid;
+  gap: 2px;
+}
+
+/* The card's footer: the thread's agent trail, then who worked in it and how
+   many turns it has. */
+.thread-preview-footer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.thread-preview-footer .thread-preview-count {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.thread-preview-who {
+  color: var(--ocean);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.thread-preview-who.is-user {
+  color: var(--ink);
+}
+
+.thread-preview-text {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+:root[data-color-mode="dark"] .thread-preview {
+  border-color: var(--dark-border);
+  background: rgba(11, 21, 27, 0.95);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+}
+
+:root[data-color-mode="dark"] .thread-preview-header {
+  border-color: rgba(98, 213, 243, 0.16);
+}
+
+:root[data-color-mode="dark"] .thread-preview-who {
+  color: var(--ocean-light);
+}
+
+:root[data-color-mode="dark"] .thread-preview-who.is-user {
+  color: var(--ink);
+}
+
+/* The thread menu (chat_thread_menu.mjs): a compact frosted list placed where
+   it was opened, with Snooze's choices in a submenu beside it. */
+.thread-menu,
+.thread-snooze-dialog {
+  position: fixed;
+  z-index: 40;
+  border: 1px solid rgba(7, 89, 133, 0.26);
+  border-radius: 10px;
+  background: rgba(247, 255, 252, 0.86);
+  box-shadow: 0 18px 44px rgba(3, 28, 42, 0.24);
+  backdrop-filter: blur(22px) saturate(140%);
+  color: var(--ink);
+}
+
+.thread-menu {
+  display: grid;
+  min-width: 180px;
+  max-width: min(280px, calc(100vw - 16px));
+  gap: 1px;
+  padding: 5px;
+}
+
+.thread-menu.is-submenu {
+  min-width: 220px;
+}
+
+.thread-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 30px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 650;
+  padding: 4px 10px;
+  text-align: left;
+}
+
+.thread-menu-item:hover,
+.thread-menu-item:focus-visible,
+.thread-menu-item:focus {
+  background: rgba(2, 132, 199, 0.14);
+  color: var(--ocean);
+  outline: none;
+}
+
+.thread-menu-item.has-submenu::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: rotate(-45deg);
+}
+
+.thread-menu-item.is-danger {
+  color: var(--danger);
+}
+
+.thread-menu-hint {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.thread-menu-separator {
+  height: 1px;
+  margin: 3px 6px;
+  background: rgba(28, 69, 60, 0.16);
+}
+
+.thread-menu-note {
+  margin: 4px 10px 3px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+/* The Pick a time dialog's focus guards: focusable but never seen; focus on
+   one moves to the other end of the dialog (chat_thread_menu.mjs). Being
+   absolutely placed, they take no grid gap. */
+.thread-snooze-guard {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.thread-snooze-dialog {
+  display: grid;
+  gap: 8px;
+  width: min(260px, calc(100vw - 16px));
+  padding: 12px;
+}
+
+.thread-snooze-label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.thread-snooze-input {
+  min-height: 34px;
+  border: 1px solid rgba(8, 98, 132, 0.34);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--ink);
+  font: inherit;
+  padding: 0 8px;
+}
+
+.thread-snooze-message {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.78rem;
+}
+
+.thread-snooze-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+:root[data-color-mode="dark"] .thread-menu,
+:root[data-color-mode="dark"] .thread-snooze-dialog {
+  border-color: var(--dark-border);
+  background: rgba(11, 21, 27, 0.94);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+  color: var(--ink);
+}
+
+:root[data-color-mode="dark"] .thread-menu-item:hover,
+:root[data-color-mode="dark"] .thread-menu-item:focus {
+  background: var(--dark-raised);
+  color: var(--ocean-light);
+}
+
+:root[data-color-mode="dark"] .thread-menu-separator {
+  background: rgba(98, 213, 243, 0.16);
+}
+
+:root[data-color-mode="dark"] .thread-snooze-input {
+  border-color: var(--dark-border);
+  background: var(--dark-control);
+  color: var(--ink);
+  color-scheme: dark;
 }
 
 .thread-title-tooltip {
@@ -6191,6 +6749,14 @@ body.is-theme-customizing {
 }
 
 .thread-rename-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.thread-rename-input {
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -6212,8 +6778,8 @@ body.is-theme-customizing {
 }
 
 .thread-action-button {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
   border: 1px solid transparent;
@@ -6256,13 +6822,6 @@ body.is-theme-customizing {
   stroke-width: 2;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .thread-active-indicator::before {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
-}
 
 .chat-main {
   display: grid;
@@ -8096,8 +8655,11 @@ body.is-theme-customizing {
     gap: 2px;
   }
 
+  /* The app grows with its content here, so the sidebar gets a real height:
+     a max-height alone left the thread list 0 px tall (plan review C10, C22).
+     About four two-line rows fit, and the list scrolls. */
   .chat-sidebar {
-    max-height: 280px;
+    height: min(460px, 60vh);
   }
 
   .message-form {
@@ -8936,6 +9498,25 @@ body.is-theme-customizing {
    --ua-motion-accent comes from appearance.js: the theme's gold tint, made
    light enough to read as a line, in dark mode, and the ocean accent in
    light mode. */
+
+/* The agent trail's working triangles pulse their glow (agent_trail.mjs);
+   their own colour never fades, so they keep their contrast through it. */
+@media (prefers-reduced-motion: no-preference) {
+  :root[data-ui-motion="on"] .trail-tri.is-working {
+    animation: trail-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes trail-pulse {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 1px currentColor);
+  }
+
+  50% {
+    filter: drop-shadow(0 0 5px currentColor);
+  }
+}
 
 /* Team activity mesh, between the chat list and the account row. */
 .chat-activity {

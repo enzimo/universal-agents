@@ -378,6 +378,84 @@ acknowledged, and handled by the execution lane of the task it concerns
 (`deferred_message_runtime.may_resume_a_turn`). The mailbox waits for each
 callback, so a turn there held back every other message.
 
+**Web Chat's thread list.** The sidebar lists a person's threads in sections
+(Needs you, Pinned, Recent, Snoozed, Dismissed; owner, 2026-11-19). Where a
+thread sits is stored on its gateway session, like `parallel_thread`:
+`gateway_sessions.pinned`, `hidden_as` (snoozed or dismissed), `hidden_until`
+(the snooze's wake time) and `hidden_at_sequence` (the last message the
+person's page showed when they set it aside; the store keeps the smaller of
+that and the thread's last sequence, so a message the person never saw brings
+it back). Waking and coming back are derived when the list is read
+(`assistant_gateway.application.web_chat_threads.thread_list_state`), never
+written by the code that posts messages: a snoozed thread wakes at its time
+or when the team posts after it was snoozed and stays marked woke until the
+person opens it; a dismissed thread comes back with any new message. Every
+message the team writes wakes it (owner's rule); only the person's own rows
+and the gateway's automatic answers to something the person did stay silent,
+each told by what produced it and marked when it is written: a slash
+command's reply (its own message types), a /link result, the answer to "?",
+and the answer to a message sent while a request runs (source kind
+`gateway_guidance_answer`, because the team's own pause that asks for a reply
+shares its message type). They are listed once in
+`assistant_gateway.domain.sessions` (`SNOOZE_SILENT_SOURCE_KINDS`,
+`SNOOZE_SILENT_MESSAGE_TYPES`); anything not listed wakes the thread, the
+safe side when a new kind of message appears. Opening a woke thread sends
+`clear_woke`, not `restore`: the gateway judges the stored placement by the
+list's own rule and clears it only while it is unchanged (compare-and-set),
+because the page's copy of the list can be older than a snooze or dismiss
+saved on another device; the menu's Restore stays unconditional. Why: no
+background job or hook on the transcript path has to remember to clear anything, and live pages read the list every two
+seconds, so a wake shows within seconds. "Needs you" comes from what is
+already stored: an open question, the running request waiting for the
+person's reply or a credential, a credential form that has not expired yet
+(its row stays until the result reaches the task, which can be later when the
+manager is unreachable, so the expiry time decides) or a waiting setup page. The list query reads only primary-key and index lookups per thread on
+that two-second read; the latest message (for the row's second line) is read
+only for the sessions route. The thread list revision follows names, the
+Run concurrently setting, placement, snooze time and waiting reason, not
+messages; pages update a row's time and snippet from the transcript events
+they already receive. Pin, snooze, dismiss and restore use the thread update
+route with `thread_action`, with the same checks as rename. This state is not
+carried by the team transfer, like `parallel_thread`.
+
+**The agent trail.** Each thread row starts its second line with up to six triangles, one
+per turn: a request the person sent, then each agent type that worked on it (owner,
+2026-11-19 and 2026-11-20). The gateway learns who worked from the agents' signed records
+("The requests an agent works for"): `assistant_gateway.application.request_agents_service`
+hears every member change from the team view (`on_change`, each observer guarded on its
+own, `team_view.change_observers`) and hands each new (request, agent type) pair to one
+writer thread, which records it with `RequestRepository.record_request_agent`; the store
+changes only a request the gateway admitted as a thread's request (a row with a run state,
+running or finished) whose `active_task_id` the id names, so an id the gateway does not hold
+changes nothing (a plain read checks that before the write lock is taken), and the thread
+and its owner come from the gateway's own request record, never from the agent. The
+request's kind does not decide: the answer to the lead's question and a setup-page or
+credential-form result are recorded on the request's own row and rewrite its kind and
+creation time, so the trail is ordered by `first_agent_at`, written once when the first
+agent (the team lead, at hand-over) is recorded (review F1). A record that arrives after
+the request finished still counts (review F4). The writer's queue is bounded
+(4,096 pairs; a pair that does not fit is logged and taken again at the record's next
+change). The team lead is recorded when the
+gateway hands it the request (`interactive_submission`), because a lead turn shorter than
+the record's write interval would otherwise be missed. The writer keeps first-reported
+order and tries a failed write again after 0.5, 2 and 5 seconds, since the team view tells
+observers only when a record changes; a type the store refuses is final. The agent types
+live with the request (`gateway_requests.agent_types_json`); the thread keeps a copy
+(`gateway_sessions.agent_trail_json`: the last six entries, whether older ones exist, and
+every agent type that worked in it) because the thread list is read every two seconds and
+may only use index lookups. The copy is a pure function of the requests
+(`assistant_gateway.domain.agent_trail`), rebuilt from them in the same transaction
+whenever a request's agents change and after history cleanup, under the store's write
+lock (BEGIN IMMEDIATE on SQLite) and with the session row locked `FOR UPDATE` on
+PostgreSQL before the requests are read, so two writers of one thread take turns and
+neither writes a copy made before the other's change (`storage.gateway_agent_trails`).
+Who works now is not stored: each list and live read matches the live records against
+the running request of each thread that page lists (`GatewayRequestAgents.working`), so a
+page only ever sees its own person's threads; a failure there leaves the stored trails and
+nobody working, logged once a minute per person. The list revision follows the trail, not
+who works, which every live read carries as `working`. Neither the requests nor this copy
+is carried by the team transfer.
+
 **Parallel threads.** Web Chat's **Run concurrently** switch is a setting of
 each thread (owner, 2026-10-29), stored on its gateway session
 (`gateway_sessions.parallel_thread`; internally such a thread is a parallel
@@ -724,13 +802,20 @@ A task waiting on nothing is not running (waiting, paused or ready), is not in
 its agent's queue, and has no reason to wait. Every legitimate reason is listed
 in one place, `custom_agents.task_wait_reasons`, each read from the record the
 runtime saves for it: from the agent's saved work (queue, delegated work, a
-question, a recoverable pause, a person's decision on an access request or a
-`set_up_tools` run, an outside result such as a credential form, an interrupt
-sent to the requester, a running action batch or held reply, an isolated
-recovery, a queue pause), and from team stores, read only when saved work
-explains nothing (a waiting access request, a running plan, a waiting setup run,
-a provider retry timer). A new kind of wait must save a record one of these
-rules can find. No saved record says when the last reason ended, and accepted
+question, a recoverable pause, a person's decision on an access request, a
+finished `set_up_tools` run whose answer the agent holds for the task's lane,
+an outside result such as a credential form, an interrupt sent to the
+requester, a running action batch or held reply, an isolated recovery, a queue
+pause), and from team stores, read only when saved work explains nothing (a
+waiting access request, a running plan, the setup run the task's record names
+while it still waits, a provider retry timer). A new kind of wait must save a
+record one of these rules can find. A setup-run record excuses a task only
+while its run waits or its answer is held for the lane, by the agent process
+that saved the work. The runtime keeps that mark only while a paused turn
+waits for the answer: a failed save of the mark is undone, a dropped turn
+or a resume from a note removes it, and agent start removes every mark,
+since no paused turn survives a restart. A record whose run ended or is
+missing is reported once nothing has resumed the task. No saved record says when the last reason ended, and accepted
 guidance adds history to such a task without moving it, so the wait counts from
 the first pass that sees it: the stuck-work engine takes a per-finding wait
 (`StuckFinding.notice_after`, here `no_progress_after_seconds`), and a pass that
@@ -743,7 +828,7 @@ about 16 hours (2026-11-14) with no condition noticing: its saved workflow had
 queued it to continue, and its turn's result then set it waiting, which removed
 the queue entry.
 
-Four repairs keep work from getting stuck in the first place:
+Five repairs keep work from getting stuck in the first place:
 
 - The team lead starts a replacement worker for a dead agent that still holds
   unfinished work (`custom_agents.orphaned_work_takeover`); the replacement's
@@ -773,6 +858,18 @@ Four repairs keep work from getting stuck in the first place:
   task waits on it accepts the notice, and each agent periodically resumes tasks
   whose requests were decided while the notice went to a previous agent
   (`access_request_runtime.resume_decided_access_waits`).
+- A finished tool setup follows its task the same way: at start, after restart
+  recovery, and on each scheduler pass (at most once a minute), each agent
+  resumes its own tasks whose `set_up_tools` run ended without resuming them
+  (a restart while the answer waited for the lane, a lost wake-up, a run that
+  is not stored, a result whose next step was lost), from a note with the
+  run's result (`tool_setup_run_runtime.resume_ended_setup_runs`). It leaves
+  a run another step is working on, or saved in the last 30 seconds, to the
+  next pass, so its warnings (`event=tool_setup_run_recovered`) name only
+  real lost wake-ups. An agent that drains for another message contract does
+  this too, as it resumes its decided access waits: these are tasks it
+  already holds, the recovery takes over nothing and starts no agent, and a
+  resumed task already ran, so even a draining pool worker starts it.
 - A task that ends with delegated work still running stops it
   (`custom_agents.orphaned_subtasks`), and a worker still reporting on work whose
   request ended is told to stop.
@@ -3074,6 +3171,17 @@ person which command to run or asking whether to start:
    denial, and resumes the turn: the live interrupt is answered, or after an
    agent restart the task resumes from a directive with the same compact
    result. The call returns per tool `ready` and `what_happened`.
+   The task's record of the wait (its `tool_setup_run` blocker) stays until
+   the turn really resumes. A live turn's answer waits in memory until the
+   task's lane is free and the agent is not paused, so the record is first
+   marked with the agent process that holds the answer, and the resumed turn
+   removes only that record just before it runs (matched by run and
+   interrupt id; `task_human_interaction_blockers.clear_answered_blocker`).
+   An answer the paused turn cannot take, because the turn is gone or the
+   answer cannot be converted, resumes the task from the directive instead.
+   Why: until 2026-11-19 the record was deleted when the run ended, so a
+   task whose answer waited behind a busy lane was reported as stuck, and a
+   restart in that window lost the run's result.
 5. The gateway (`assistant_gateway/application/tool_setup.py`) opens the
    matching page through the same broker calls as `/link` and `/auth`, and
    several pages of one task side by side (a sibling page of a task that
@@ -3101,6 +3209,99 @@ person which command to run or asking whether to start:
    a gateway restart, broker pages still waiting are reported as unwatched
    (and offered again); an outside step keeps waiting, because nothing
    watches it. Page addresses are never stored.
+   The same conditional update keeps the task's result in the row
+   (`result_json`, a `ToolSetupResultV1` without any address, and
+   `result_state`: `unsent`, `sent` or `unsendable`), and the result is sent
+   from there (`GatewayToolSetups.resend_kept_results`); the update that
+   marks it sent or unsendable drops the kept copy, which holds the person's
+   account name. It is addressed when
+   it is sent, to the team lead known at that moment, under a NATS message id
+   that names that lead (`secure_result:<kind>:<result id>:<lead id>`): NATS
+   drops a repeated id for 600 seconds, so a copy for a replacement lead must
+   not reuse the old lead's id. When no lead is known, or the publish fails
+   (NATS disconnected), the result stays kept and the chat request is never
+   given a finished status (`secure_results.SecureResultPublisher`). Kept
+   results are sent when a page ends; on every team-lead-available transition
+   (`manager_transitions.handle_available`, after the notice and the apps'
+   hook), which the lead follower reaches through
+   `GatewayManagerClient.set_lead`; when records the follower read name the
+   lead chats already go to (`GatewayManagerClient.confirm_lead`,
+   `manager_transitions.handle_lead_confirmed`, no transition), once per
+   stretch of read records, so a route saved by the previous run whose lead
+   is still live gets them without waiting for a lead change; and by a retry
+   with backoff (1 to 30
+   seconds) after a failed publish or an unexpected error while a lead is
+   known; the retry gives up after eight passes in a row in which a kept
+   result failed with an error (`event=gateway_tool_setup_resend_gave_up`)
+   and the next start or transition tries again, while a pass that cannot
+   even list the kept results (the database is down) is retried like a
+   failed publish. No retry starts once the gateway began to stop
+   (`event=gateway_tool_setup_retry_skipped_closed`); after the next start
+   the lead follower sends what is still kept. The start decision itself
+   sends nothing: the gateway starts its transitions after it, so the
+   follower's first regular check (within 5 seconds) confirms the lead it
+   set or kept at start and sends them. With a team view, kept results go
+   only to a lead that records the follower read named
+   (`GatewayManagerClient.lead_from_records`, set by `set_lead`,
+   `confirm_lead` and the start decision's `note_lead_from_records`,
+   cleared while the records are not read, on a refused join and when the
+   route is cleared). While the team's records are not read yet the follower
+   keeps the saved route, which chats may still reach
+   (`event=gateway_tool_setup_resend_deferred` at start), but no kept result
+   goes to it, not even when a page ends, including start-up page recovery:
+   the previous run's lead may be gone. Such a pass stops with no retry
+   (`event=gateway_tool_setup_resend_waits_for_records`,
+   `reason=lead_not_from_records`), and the follower's transition or
+   confirmation sends the results once the records name the lead. With no
+   lead routed at all, for example while the team lead restarts, the result
+   is kept as `no_route` (`event=gateway_secure_result_not_sent`). A start
+   decision from read records notes that they name the lead without
+   sending, so a page that ends at start sends its result at once. A
+   gateway without a team view, which uses its saved route as it is, sends
+   them at start instead. One pass at a time sends them, oldest first, and
+   reads them afresh, so a result is never sent from two places at once; a
+   missing lead or a failed publish stops the pass, while an error on one
+   result is logged (`event=gateway_tool_setup_resend_failed`) and the pass
+   goes on. A result that can never be sent (its chat no longer exists, or
+   the kept copy cannot be read) is marked `unsendable` and logged once
+   (`event=gateway_tool_setup_result_unsendable`). The stored result leaves out
+   the broker session id, which for an account link is the form's bearer. A
+   result is "sent" once it is accepted into the queue of the lead known
+   then, and nothing sends it again. Two cases can still lose it, as they
+   can lose any message the gateway sends then: a lead that stops before the
+   gateway sees it leave the team's records (at most about 35 seconds); and,
+   while a lead on another message contract drains, a result for a task it
+   still holds, which goes
+   to the new lead the chats go to: that lead does not hold the task, so it
+   tells the person to send a new message, while the draining lead's own
+   setup-run recovery continues the task (`resume_ended_setup_runs`). Moving
+   setup results to protocol 1 ends these cases. The
+   team lead applies a page's result to its run once, before it checks
+   whether the task ended (`tool_setup_run_runtime.apply_page_result`, with
+   the applied ids in `ToolSetupRunV1.results_applied`), and marks it handled
+   only after its follow-up steps finished: the workflow step, the history
+   entry and the next pages, or the answer when the task had ended
+   (`results_handled`). A copy of a handled result is ignored
+   (`event=tool_setup_result_duplicate`) and never answers the person twice;
+   a copy of a result whose handling failed partway, or was cut short by a
+   stop, runs the follow-up steps again
+   (`event=tool_setup_result_handled_again`), so the task still continues as
+   it did when every copy was handled in full. Setup-run recovery
+   (`resume_ended_setup_runs`) may advance such a run first, without waiting
+   for the copy; the copy then still records the page on its workflow step
+   and in the history, and its own `advance` finds nothing left to do. A result never changes a
+   piece that no longer waits, and a run saved by the previous version (no
+   ids) handles a replayed copy as that version did. The gateway logs a
+   publish NATS answered as a duplicate
+   (`event=gateway_durable_publish_duplicate`). Removing a person deletes
+   their setup rows with their chat sessions (`forget_person_records`):
+   without the chat a kept result could never be sent, and the person's tasks
+   end with their removal. The rows do not travel in a team transfer.
+   Rationale (review of the 2026-11-14 incident fixes): the row was marked
+   finished before the send and the result was not kept, so a page that ended
+   while the team lead restarted never reached its task, and the publisher
+   marked the still-running chat request `manager_unavailable`, which closed
+   the task's other cards and refused its later pages.
    The way that ends a page writes the one chat line that closes its card
    (`PageEnding.closing`, else the task's message). The line names the page by kind and the tool by the
    name its page showed: the sign-in name for sign-ins, the catalog's display
@@ -3110,14 +3311,25 @@ person which command to run or asking whether to start:
    source alone, which covers both the person's own `/link` and Mark Done,
    so Mark Done read as an account link with the raw tool id.
    A page that opens after the chat reply closed (usually every page of a run
-   but the first) is listed for Web Chat and the workflow page by
-   `credential_handoff.ToolSetupHandoffs`. A page shown in the live reply is
+   but the first, including one still queued on the reply's wait when it
+   closed, see "Messages left on a closing reply wait" below) is listed for
+   Web Chat and the workflow page by
+   `credential_handoff.ToolSetupHandoffs`. This holds after a reply wait that
+   timed out or was cancelled too: the request still runs, so its late page
+   opens in Web Chat. A chat that cannot show late pages refuses the page and
+   sends the task a `tool_setup_chat_not_waiting` result, so the run never
+   waits on a page that did not open. A page shown in the live reply is
    not listed again: its address goes only into that first no-store response,
    so after a refresh only its history line remains. A listed card stays
    until that page's own `ToolSetupRecord` ends
    (`GatewayToolSetups.page_status`), its expiry
-   passes, or the task ends (the chat request has a terminal status or a
-   finished run state). Cards live only in gateway memory, so a gateway
+   passes, or the task ends (`request_service.request_task_ended`: a thread's
+   request when its run state is finished, another request at a terminal
+   status; the same rule decides whether a new page for the task still
+   opens). A thread's status cannot say it: every page result changes it,
+   and the team-lead-unavailable transition still writes
+   `manager_unavailable` onto a request with an open reply wait while its
+   task resumes when a lead is back. Cards live only in gateway memory, so a gateway
    restart drops them: a broker page is offered again with a new card, while
    an outside step keeps only its history line and its Mark Done button on
    the workflow page. Each removal is logged once
@@ -3558,6 +3770,32 @@ only: its tool use id started in a call to the agent that paused and has not
 finished since. One consequence: a change approved in the Inbox while guidance
 waits is applied before the model reads that guidance. To stop such a change,
 decline it in the Inbox or stop the request.
+A call that paused gets no check after it: a paused Strands agent accepts only
+interrupt answers and refuses a text prompt with a `TypeError`, so the turn
+hands the pause on (`send_interrupt_request_for_result`), and guidance accepted
+while the call ran, also inside the pausing tool, waits for the resumed turn.
+Why: until 2026-11-19 a fresh turn read that guidance and called the paused
+agent with it, so the pause was never saved, the task failed, and the agent
+stayed paused for every later turn on its lane until a restart. The turn also
+marks the agent for replacement as soon as its call returns paused
+(`custom_agents.strands_parts.mark_paused`), so a turn that ends after such a
+call but before saving the pause (a stop recorded as the call paused, an
+error while saving) leaves no stuck agent: the next turn gets a new one,
+logged as `event=strands_agent_rotated_after_interrupt` with no interrupted
+task on the main lane and as `event=parallel_lane_strands_agent_built` on a
+parallel lane. An Objective work-session turn keeps its pause too, at the
+session's limit or with a required skill not yet activated
+(`event=objective_work_boundary_after_pause`). The session records the usage
+up to the pause. The work after the resume is not counted against the
+session budget: each resumed call gets the turn's per-call turn and token
+allowance again, and the step's tool-call cap is not checked after a resume;
+counting resumed work and checking its limits is a follow-up. A required
+skill that is still missing stops the resumed turn before its decision is
+carried out, as it stops a fresh turn
+(`LLMTurnExecutor.yield_for_missing_work_skills`,
+`event=objective_work_session_yield_after_resume`). A session past its limit
+lets the resumed turn finish; its saved status then refuses the next plan
+step, so the session ends with the runtime's degraded checkpoint.
 An explicitly addressed receiver answers `STALE` for a missing task. The gateway
 holds guidance for that request until the lead admits its task, and retries
 with the same idempotency key. Guidance never becomes another root request.
@@ -3625,6 +3863,77 @@ Before upgrading from a version without running-request state, operators must
 finish or stop active interactive work and answer or close pending questions.
 Older request rows are not inferred into the new running state, so leaving
 their tasks active would bypass the new busy-thread protection.
+
+Messages left on a closing reply wait are passed on, not dropped
+(`assistant_gateway/application/reply_leftovers.py`). A wait ends at the first
+message that answers it, but the team lead may already have sent more for the
+same request: `set_up_tools` sends all of a task's setup pages at once, and
+while the gateway opens the first through the broker, the others are queued
+on the same wait. Each wait records how its messages came in. Every way a wait
+ends (answer, timeout, cancellation, error) goes through
+`GatewayManagerClient.unregister_response_channel`, which empties what is left
+in the same step. A task of its own then passes each leftover on, oldest
+first, as if it had arrived after the close:
+
+- one from the response route takes the path of a message that nothing waits
+  for: a late setup page opens, forms fail closed, replies and notifications
+  are delivered, and late guidance answers settle their held copy;
+- one from the operational subject is dropped;
+- the gateway's own notice is not passed on.
+
+On either route an agent status message is ignored, as it is on arrival: the
+gateway learns who leads and who is live only from the team's records
+(`assistant_gateway.team_view`).
+
+A message that nothing waits for, and that arrives while its request's
+leftovers are being passed on, waits for them, so it cannot overtake them. The
+response route is handled one message at a time, so meanwhile every chat's
+replies wait too. That wait therefore gives up after
+`LEFTOVER_ORDER_WAIT_SECONDS` (20 seconds, the longest broker call a leftover
+makes plus delivery), logs `event=gateway_reply_leftover_order_wait_expired`,
+and lets the message go on out of order. Later messages for the request then
+do not wait for those leftovers again, because one has already gone ahead of
+them. Nor do they wait while a leftover is being tried again after a failure:
+the leftover has lost its place, as a message that fails on arrival does. So
+one pass holds the route at most once, for at most that bound.
+
+Each leftover is logged: `event=gateway_reply_leftover_passed_on` or
+`event=gateway_reply_leftover_not_passed_on` with a reason.
+
+A leftover whose handling fails is tried again the way the response receiver
+retries a message on arrival: up to the transport's `max_deliver` tries, 10
+seconds apart, with `event=gateway_reply_leftover_failed` for each failed
+try. The request's later leftovers wait meanwhile. After the last try the
+gateway logs `event=gateway_reply_leftover_gave_up` at error level, and the
+task is told rather than left waiting: a setup, form or signup request is
+refused to its task with a `tool_setup_chat_not_waiting` or failed-form
+result, unless its setup page already has a record, in which case that page's
+own result, expiry or restart recovery reaches the task
+(`GatewayResponseCoordinator.fail_lost_credential_request`).
+
+When the gateway stops, it stops passing leftovers on before it stops its
+page watches, so a leftover page cannot open with nothing watching it. A
+message that arrives on the response route until `GatewayManagerClient.close`
+is still handled as before, so a late page can still open in that window.
+Every leftover
+not passed on, whether its pass was running or had not started, is logged and
+its task is told the same way, while the connection to NATS is still open.
+`GatewayManagerClient.close` repeats this for waits that closed in between. A
+leftover was acknowledged to NATS when it was first queued, so one lost to a
+crash is not delivered again.
+
+Rationale (review of 2026-11-16): closing a wait discarded what it still
+held, so the second page of a setup run got no record, card, result or log
+line, and the run waited forever. Passing leftovers on outside the closing
+task means a cancelled or timed-out waiter never waits on broker calls. The
+caller records the reply that ended the wait before any leftover, because it
+does so before it next pauses (interactive submission, and Web Chat's answer
+to a question), so the Web Chat history keeps the team lead's order. That
+holds for the history only: in other chats the chat app sends the live reply
+after it gets it back, so a leftover can reach the person first, as a message
+arriving just after the close already could. The retries and the result to the task at give-up and
+shutdown follow the project review of PR #161: a leftover that failed once,
+or was cut off by a restart, must not leave its task waiting forever.
 
 Delivery receipts use the durable team-lead route, so they can wait for a
 replacement lead before the gateway sees it in the team's records. Repeated
@@ -4544,8 +4853,11 @@ storage before, so a full disk was first noticed when saving failed, and
 administrators must hear before a limit is reached. On every check the
 gateway reads the free space (`statvfs`, counted as `df` does) of the
 filesystem holding the instance folder and of each SQLite database's folder on
-another filesystem, and the NATS account's JetStream use and limit
-(`js.account_info()`, `NatsTransportAdapter.jetstream_account_usage`). An
+another filesystem, and the NATS account's JetStream use, limit and what its
+streams set aside (`NatsTransportAdapter.jetstream_account_usage`, which sends
+the raw `$JS.API.INFO` request through `custom_transport.jetstream_account`
+because nats-py's `account_info()` drops the set-aside figure; the
+installation authority reads the account through the same module). An
 unreadable disk produces a problem finding saying its free space is unknown;
 successful checks for other disks and NATS remain visible. At
 `gateway.storage_warnings.nearing_limit_percent` (80 by default) a place is
@@ -4565,7 +4877,8 @@ the findings' details. The bundled NATS server sets no JetStream limit
 (`docker/nats_service.py` passes no `max_file_store`), so the account reports
 none; the page then shows a note with the stored size instead of inventing a
 limit. Without `max_file_store` the server itself stops storing at three
-quarters of the disk space that was free when it started. The percentage
+quarters of the disk space that was free or held its messages when it started.
+The percentage
 counts bytes stored, not the space streams set aside, and the finding says
 so: every stream sets its whole byte limit aside when it is created, each
 team's protocol 1 work and dead-letter streams about 2.1 GiB at the default
@@ -4574,6 +4887,65 @@ server refuses a new or changed stream in an account allowed less (the
 authority checks before it creates any, `installation_authority/queues.py`). People's
 stored-data totals that the manager stopped measuring are a warning on the
 page too (`StorageUsageNotices.stale_finding`).
+
+The bundled server's room has two findings of its own, because the
+percentages miss it (FA-2 of pull request 152's review). The server takes
+three quarters of the free space (`f_bavail` times `f_bsize`, as NATS counts
+it) on the disk holding its store plus three quarters of what its streams
+already store as its room, once, each time it starts: it adds the stored bytes
+back once it has recovered its streams (measured on 2.15.1 to the byte). It
+refuses every new or changed stream (10047) while its streams set aside as
+much or more (equality included), and every new message (10023) once they
+store more than that room; until then the streams it has keep taking
+messages. Since each team's streams set aside about 2.1 GiB, the attachment
+object store (`ua_attachments`, created on first use), a new team and a start
+after a change to the stream settings can fail on a disk the percentage
+findings call healthy. The warning (`storage_message_room:<entered at>`)
+compares three quarters of the store disk's free space and the account's
+stored bytes together with the account's `reserved_storage` (`MessageRoom`):
+at or below it, the next start would leave the server short. The server moves
+every message between the free space and what it stores, so that sum hardly
+moves as the streams fill or drain: a work backlog does not raise the
+warning, removing messages does not end it, and the one amount it names to
+free is judged against the files other than the message store. It is
+announced like nearing the limit (`storage_capacity.tells_administrators`),
+and ends only once the free space and the stored bytes exceed what is needed
+by 3% of the disk: the percentage levels' margin applied to this comparison,
+expressed as a reading of 100 at the line so `StorageLevels.track_one` applies
+unchanged. The problem (`storage_message_room_now:<entered at>`) reads the room
+the server runs with and what its streams store from one reply of its loopback
+monitoring endpoint (`/varz` `jetstream.config.max_storage` and
+`jetstream.stats.storage`, `docker.nats_service.bundled_running_room`, read
+under one deadline, at most 1 MiB, following no redirect), because only a
+start of the whole instance changes that room: freeing space does not end the
+problem, and a team-wide restart keeps the server running. When the streams
+store more than that room it refuses every new message too; the problem then
+says so first under its own title, on the same level, so administrators are
+not told twice. Streams without a byte limit (`ua_attachments` by default) can
+store more than the room while less is set aside; that alone raises neither
+finding yet, though a finding shown for another reason says so. A start then
+takes new messages only once the free space is more than a third of what is
+stored (`MessageRoom.stored_decides_start`); the warning's amount to free can
+fall short of that, so both findings name that free space instead of leaving the
+amount as the remedy.
+While the endpoint does not answer, the problem's level is kept and the check
+lists the endpoint as an unavailable source, so `notify_new_problems` keeps
+the problem instead of announcing it again. The check runs only where a
+launcher started the bundled server: `start_local_nats` puts the store folder
+in `TEAM_BUNDLED_NATS_STORE_DIR` for the processes it starts, the bundle drops
+a value the container supplied and `build_process_env` one from `team.env`,
+and `bundled_nats_store_dir` accepts it only beside the bundled server's own
+address in both `NATS_URL` and `NATS_SERVERS` (otherwise it is ignored with a
+warning). This is a hand-off to child processes, not a setting: the launcher's
+start of the server is the one place that knows the server is the bundled one
+and where its store is. The check reads the account's file figures whatever
+`transport.storage` says: the protocol 1 streams are file streams in the
+message contract, and only `ua_attachments` follows that setting. An external
+server's store is on a disk the gateway cannot measure, so it gets neither
+finding; one with an account limit keeps the percentage finding, whose details
+show what the streams set aside. Neither finding has a
+setting: the line is NATS's rule, and a setting would need a change to the
+team transfer's settings section.
 
 Queue stream findings (`assistant_gateway/queue_capacity.py`) exist because a
 full work or dead-letter stream refuses new messages (`discard: new`):
@@ -4853,8 +5225,9 @@ the desktop app never offers an older version.
   after the credential import and before the gateway, the adapter host and
   the agents start (`docker.launch_headless.build_first_start_tasks`), while
   `InstanceLayout.adapter_host_files_upgrade_path`
-  (`state/upgrades/adapter-host-files.json`, the finish time, the counts and
-  the id of the list its run wrote)
+  (`state/upgrades/adapter-host-files.json`, the finish time, the counts,
+  the id of the list its run wrote and how many listed names records place
+  in another folder)
   is missing. Nothing else on the host writes the files or their records
   then. The operator's `--files-gone` run (`docker exec`, while the team
   runs) is safe beside the team for reasons a later change must keep: no
@@ -5054,24 +5427,133 @@ the desktop app never offers an older version.
   keeps the epoch, `AdapterHostApplicationService.heartbeat`), so an upload
   it finished just before the list may still resolve for a message after
   the gateway's start. The warning therefore says to let the team run a few
-  minutes after that start before stopping it to delete. If the folder was
-  at another path under 0.9.13, its records name that
-  path and every file here looks unrecorded, so the warning says not to
-  delete them then, before it gives the command: that is the one case where
-  the list is wrong by design, and the command deletes on one paste, so a
-  person who acts on it before reading the whole line must already have
-  read when not to. Putting the folder back is not enough, because the step
-  reads only `upload_dir` (resolved through links), so it says to move or
-  mount the folder back at that path and set `upload_dir` to it. A folder
-  that is not there counts 0. One gone or with another device and inode
-  than the step saw when it started (every look opens it by path, so a
-  folder unmounted or replaced meanwhile would look empty), any other error
-  listing it and a database error reading the adapter host's records log
-  `event=adapter_host_files_without_records_uncounted` and leave the count
-  unset (`null` in the marker), because the count only reports: it never
-  stops startup, keeps the marker from being written or changes a record.
-  Only the run that writes the marker reports, so the count is said once; a
-  run that stops part way never counts, and the run that finishes it does.
+  minutes after that start before stopping it to delete.
+  A folder that was at another path under 0.9.13 (moved, mounted elsewhere
+  or reached through another link) makes the list wrong: its records name
+  that path and match nothing here, so every file people sent looks
+  unrecorded (F7 of the review of PR #154). Before it writes the list, the
+  step therefore checks whether records name a listed file in another
+  folder (`NamedElsewhere`). It collects the gateway names (the same 12-hex
+  rule) of record paths outside the transfer folder from conversation turns
+  and held guidance copies, during the scans it already makes, and from
+  gateway records through
+  `GatewayStateRepository.list_attachment_paths_containing`: one paged scan
+  of two columns, not limited to the transfer folder's prefix as
+  `list_attachments_under` is, run only when there is a name to check. It
+  matches with `instr` in SQLite and `strpos` in PostgreSQL
+  (`SqlDialect.contains`), literally and with case on both, because
+  SQLite's `LIKE` ignores case and would return other rows than
+  PostgreSQL's. One match shows that the folder moved, and every other
+  listed file is equally suspect (its records may have been cleaned up
+  meanwhile), so the run treats the whole list as unsafe: it writes no list
+  and no list id (an earlier warning's command then refuses), gives no
+  command and logs one error instead of the warning
+  (`event=adapter_host_files_folder_moved`, with counts per kind of record).
+  Dropping only the matched names would leave a partial list that looks
+  safe. The run still writes its marker: the owner chose finishing once over
+  holding the marker back until the folder returns, so startup never waits
+  on it and the error is not repeated at every start. The error is
+  therefore said once, at error level, and the marker keeps its count
+  (`named_elsewhere`) as the trace once the log is gone. The error says how
+  to finish. The step moves a file only with its gateway record, so for the
+  files a gateway record names it says to move or mount the folder back at
+  the path those records name (a link does not work, because the step reads
+  only `upload_dir`, resolved through links), set `upload_dir` to it, delete
+  the marker and restart; with several such paths it names them and says to
+  do this for each, because each run moves only the files whose records name
+  the path the folder is at. A file the step refused at the other path
+  keeps records naming that path, so a folder moved back from there is
+  reported again for those files, and the error says so. Files only a
+  conversation turn or a held copy names cannot be moved at any path, and
+  the error says to keep them. Agent processes write conversation turns, so
+  a turn's folder may withhold the command but is never kept, logged or
+  shown; the error names only folders from gateway records and held
+  guidance copies, and never a file. The steps and the shown folders use
+  only records of files people sent in (`_Step._never_named`, SEC-1 of the
+  review of PR #168): the gateway also records the copies of files it sends
+  to people, staged in the person's `scratch/sent/outgoing_<id>/` under a
+  name the agent chose and recorded with a `web_attachment_` id, so such a
+  record can carry a leftover's generated name. Moving the transfer folder
+  there would put every person's leftover files where agents working for
+  that one person read them and scratch retention deletes them, and a run
+  there would move a copy sent back unchanged under the copy's record. Such
+  a record is told from a `scratch/sent` folder anywhere in its path (which
+  holds whatever the instance root was then, and a moved root is the
+  likeliest cause of a moved folder) or from the id prefix
+  (`SENT_FILE_ATTACHMENT_ID_PREFIX`, shared with the gateway's id port); it
+  withholds the command like a turn, counts among the files no run can move
+  (`by_sent_copies`) and is never named. It shows only that the file is one
+  a person sent, so when nothing else names the files the error does not
+  say the folder moved. As a backstop, no folder under this instance's
+  `workspaces/` or `state/` is named or offered either, compared with the
+  root both resolved and as configured (a root reached through a link). A
+  record of receiving there withholds the command too but is counted apart
+  (`by_instance_folders`): a run with the transfer folder there would move
+  its file, so the error points at upgrading.md, which says how to finish
+  if the folder really was there, instead of saying it cannot move. A record in another
+  folder whose name is not listed changes nothing: its file is not here and
+  it names none of the listed files, so withholding the command for it
+  would withhold it on every instance where an earlier `upload_dir`'s
+  records linger. When no
+  conversation turn, held guidance copy or gateway record names a listed
+  file in another folder (all of them cleaned up, for example), the step
+  cannot tell, so the warning keeps its sentence before the command: if the
+  folder was at another path under 0.9.13, do not delete the files, and
+  move the folder back as above. That sentence comes before the command
+  because the command deletes on one paste, and a person who acts on it
+  before reading the whole line must already have read when not to. The
+  adapter host's own upload records (`gateway_adapter_uploads`) hold the
+  old path too, but this check does not read them: the step reads them only
+  for the files the gateway reads at its start, and only at the transfer
+  folder's path. So a file only they name (one sent in a message the
+  gateway had not handled before the upgrade) is still listed when the
+  folder moved, with only that sentence to protect it; reading them in this
+  check is a follow-up. A folder that is not there counts 0. One gone or with
+  another device and inode than the step saw when it started (every look
+  opens it by path, so a folder unmounted or replaced meanwhile would look
+  empty), any other error listing it, a database error reading the adapter
+  host's records and one checking for records in another folder (its text
+  says the files were counted, gives no list and says how to check again)
+  log `event=adapter_host_files_without_records_uncounted` and leave the
+  count unset (`null` in the marker), because the count only reports: it
+  never stops startup, keeps the marker from being written or changes a
+  record. Only the run that writes the marker reports, so the count is said
+  once; a run that stops part way never counts, and the run that finishes
+  it does.
+  `upload_dir` may name a folder holding none of the files (empty, new,
+  missing, or holding only files no record names, for example after
+  `upload_dir` was changed during 0.9) while 0.9's records name the folder
+  they are in; nothing waits there, so the step used to finish without a
+  word about them, or with only a list of an unrelated file, and they never
+  moved (DI-1 of the review of PR #168, and C12 of its fix round). So when
+  no listed name is named in another folder (nothing is listed, or the
+  listed names matched nothing), the run that writes the marker runs the
+  same gateway scan for any name of the gateway's form and counts gateway
+  records of receiving and held guidance copies in another folder; no
+  listed name is among them then, so this report and the usual warning are
+  both true. It reads no conversation turns, because an agent-written turn
+  must not raise an upgrade error, counts no copy sent to a person,
+  because an agent may send a file back under its generated name on any
+  instance, and counts no record inside `state/uploads`, whose file is
+  already where agents open it (an operator may have kept the transfer
+  folder there under 0.9; C13 of that fix round). A normal instance has none: the default `upload_dir` was the
+  same in every 0.9 version, no 0.9 clean-up deletes a transfer file and
+  keeps its record (upload retention deletes only records under
+  `state/uploads`, a person's removal deletes records), and moved files get
+  `<id><suffix>` names. With any, it logs one error under the same event
+  with the folders it may show, the same steps for the folder that holds
+  the files (a folder moved to where `upload_dir` points would still match
+  nothing, because the step finds files by the path their records name),
+  and that nothing more is needed if those files are gone: the step looks
+  up no path, which would follow links in database-named paths and could
+  block on a dead mount, so a record whose folder was deleted under 0.9
+  counts too. The count goes to the marker's own field
+  (`recorded_elsewhere`), because `named_elsewhere` counts listed names. A
+  database error there keeps the count and any list, since the listed names
+  were already checked, and logs
+  `event=adapter_host_files_other_folders_unchecked`; the operator command
+  tells both failed checks apart from an uncounted folder
+  (`UpgradeResult.other_folders_unchecked`).
   Guidance
   the gateway still holds (`gateway_held_guidance`) is rewritten with its
   moved file, between the turns and the gateway record and under the same
@@ -5739,8 +6221,11 @@ renamed secrets included). The authority:
   stream whose fields the contract sets already
   match is not sent to NATS, so a restart with the same settings asks for no change: a
   server whose storage is now smaller than what its streams set aside (the bundled server
-  measures it from the disk's free space at every start) keeps serving the streams it has
-  but refuses every new or changed one. Per-team buckets use
+  measures it from the disk's free space and what its streams store at every start) keeps
+  serving the streams it has
+  but refuses every new or changed one. The Status page warns before the bundled server
+  would start that short and shows a problem once it runs that short (the storage findings
+  above). Per-team buckets use
   `custom_messages.wire.buckets.bucket_name` and every bucket's stream `bucket_stream`.
   The contract disables rollup, stream deletion and purge, so writing one key cannot
   erase the bucket. Repeated setup reconciles those settings without discarding records;
@@ -6236,6 +6721,29 @@ logged once with both digests (`event=team_agents_host_other_contract`), and
 `other_contract_hosts` lists such hosts for the Status page. A draining agent's own record
 says it takes no work too.
 
+**The requests an agent works for** (Web Chat's agent trail, 2026-11-20): an agent record
+may also carry `requests`, the root task ids of the people's requests the agent's model
+turns ran for now or since its previous record. Agents send no status messages any more,
+so the record is where the gateway can learn it live; `AgentStatus.request_task_ids` is a
+private attribute the gateway's team view sets from the record (`team_view.record_status`),
+never a field a message can set or a dump can carry. Each turn decides once, when it starts
+(`custom_agents.working_requests.turn_request_id`, kept on `TaskWork.request_task_id`):
+only a task whose signed context the gateway issued for a person, with no schedule, counts,
+and its `root_task_id` is the gateway's own request task, which delegated tasks carry
+unchanged. A schedule-run identity or a task without a signed context is answered without
+reading the store, and scheduled runs and system work report nothing. The signed
+`context_id` was not used because for a new request it is a digest of the request's task
+and files (`access_control.ownership.request_context_id`), which the gateway does not keep.
+Turn start and end report the agent's state (`turn_registry`, through the agent's own
+`_report_record_state`); a changed set rewrites the record within the 2-second rule but
+does not move `since`, which says when the state began. Ids reported since the last
+write are named once in the next record, so a turn shorter than the interval still
+reaches one. Only ids the contract takes go in (`RecordId`, at most 16): an id it refused
+would make the whole record unwritable and drop the agent from the team. The record names
+no person; any host of the installation can read these opaque task ids, as it can the
+task ids in work frames. This changed the contract digest, so every host of an
+installation must run this build (the pre-release rule); the ua-rust hosts follow later.
+
 **An agent process on another contract drains** (`custom_agents.agent_host`,
 `custom_agents.contract_drain`). When its host learns that the process runs another
 contract than the installation (from the team services' host record, which it follows from
@@ -6271,7 +6779,9 @@ finish what they already admitted. The host's record says `draining` meanwhile; 
 agents' sessions are still renewed, so requests about the tasks they hold still reach them.
 Startup counts as held work until recovery finishes, so a drain cannot close controls
 before saved tasks become visible. A draining startup restores its own work and adopts
-no work from gone agents. Pool-worker wind-down waits for recovery too, so it returns
+no work from gone agents; it still resumes its own tasks whose setup run ended or whose
+access requests were decided meanwhile (`resume_ended_setup_runs`,
+`resume_decided_access_waits`). Pool-worker wind-down waits for recovery too, so it returns
 the complete set of saved tasks. Admission reads the leaf module `contract_drain_state`; drain
 execution can depend on turn and control handlers without creating an import cycle.
 Once no agent is starting or holds an unfinished task or a waiting request, the host closes their sessions
@@ -6514,7 +7024,11 @@ the gateway acts on that view in four places.
   lead), and it is checked as soon as they are read. Afterwards it checks on every change
   and every 5 seconds, and a differing route goes through the usual transitions (the
   current lead unavailable, so replies waiting on a dead route are failed, then the new one
-  available). Among several lead records it keeps the current lead while it is live, and
+  available). Read records that name the lead chats already go to confirm it once per
+  stretch of read records (`confirm_lead`, no transition), so the setup results kept for
+  the team lead are sent even when the lead did not change; the start decision is never
+  confirmed, because the transitions start after it, so the first regular check confirms
+  it. Among several lead records it keeps the current lead while it is live, and
   otherwise takes the one whose record changed last (a crashed run's lead has not changed
   since the crash); it never flips between them (`event=gateway_multiple_leads`). A lead
   whose process runs another contract takes no new chats but finishes the tasks it holds,

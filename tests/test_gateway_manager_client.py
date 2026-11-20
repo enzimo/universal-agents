@@ -11,6 +11,7 @@ from assistant_gateway.application.manager_client import (
     GatewayManagerClient,
     GatewayManagerClientSettings,
 )
+from assistant_gateway.application.reply_leftovers import ArrivalRoute
 from assistant_gateway.team_view import GatewayTeamView, TeamLeadFollower
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand, SystemStatusMessage
 from custom_messages.contracts.task_v1 import Task
@@ -224,7 +225,7 @@ async def test_task_reply_waits_share_a_correlation_without_consuming_sibling_re
             assert len(unsolicited) == (1 if channel == "response" else 0)
             # A service-wide availability notice must release every wait,
             # even though only one correlation is exposed to the watcher.
-            await client.queue_response("corr_shared", _system_envelope("corr_shared"))
+            await client.queue_response("corr_shared", _system_envelope("corr_shared"), route=ArrivalRoute.GATEWAY)
             assert (await first.get()).msg_content.system_status == "ok"
             assert (await second.get()).msg_content.system_status == "ok"
         assert client.has_pending_response("corr_shared")
@@ -276,6 +277,40 @@ async def test_an_unavailable_lead_that_finishes_its_tasks_keeps_the_waiting_rep
     await client.mark_manager_unavailable(expected_manager_id="lead_1", reason="another contract",
                                           source="agent_records", kept_replies=frozenset({"corr_1"}))
     assert client.manager_id is None and [item.kept_replies for item in unavailable] == [frozenset({"corr_1"})]
+
+
+@pytest.mark.asyncio
+async def test_a_saved_route_is_named_by_the_records_only_when_the_follower_says_so() -> None:
+    """Review finding F1: kept setup results go only to a lead the team's records named (``lead_from_records``). A
+    route saved by the previous run is not one; set_lead, confirm_lead and the start note set it, before any handler
+    runs; an unavailable route and unread records clear it."""
+
+    seen_by_handlers: list[tuple[str, bool]] = []
+    client: GatewayManagerClient
+
+    def recorder(kind: str):
+        return lambda transition: seen_by_handlers.append((kind, client.lead_from_records))
+
+    client = GatewayManagerClient(
+        settings=_settings(manager_id="lead_saved"), id_generator=_FixedIds(),
+        logger=logging.getLogger("test.gateway.manager_client"), runtime=_FakeManagerRuntime(),
+        on_manager_available=recorder("available"), on_manager_unavailable=recorder("unavailable"),
+        on_lead_confirmed=recorder("confirmed"))
+    assert not client.lead_from_records
+
+    await client.note_lead_from_records("lead_other")  # Not the routed lead.
+    assert not client.lead_from_records
+    await client.note_lead_from_records("lead_saved")
+    assert client.lead_from_records and seen_by_handlers == []  # The start note sends nothing.
+
+    await client.forget_lead_from_records()  # Records unread: the route stays, unnamed.
+    assert not client.lead_from_records and client.manager_id == "lead_saved"
+    await client.confirm_lead("lead_saved", source="agent_records")
+    await client.mark_manager_unavailable(expected_manager_id="lead_saved", reason="it left", source="agent_records")
+    assert not client.lead_from_records
+    await client.set_lead("lead_new", source="agent_records")
+    assert client.lead_from_records
+    assert seen_by_handlers == [("confirmed", True), ("unavailable", False), ("available", True)]
 
 
 @pytest.mark.asyncio

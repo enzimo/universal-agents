@@ -27,6 +27,7 @@ function harness() {
     setThreadUnread() {}, clearSystemError() {}, saveThreads() {}, renderThreads() {},
     optimisticMessage: (clientRequestId, content, attachments) => ({ messageId: `optimistic:${clientRequestId}`, optimistic: true, clientRequestId, content, attachments }),
     pendingReplyCount: () => 0, startTerminalReplyWait() {}, finishTerminalReplyWait() {}, setThreadPending() {},
+    sendStartsRequest: () => true,
     renderMessages: options => renders.push(options),
     buildChatRequestBody: (content, thread, attachments, id) => ({ body: { content, thread, attachments, id } }),
     liveEvents: { start() {} }, attention: { receive: () => false },

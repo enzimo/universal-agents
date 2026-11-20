@@ -10,6 +10,10 @@ const FRAME = "iframe.broker-card-frame";
 const OPEN_LINK = ".broker-card-open";
 const MESSAGE_BOX = "#message-input";
 const DONE = "Done. This secure page is closed.";
+// The preview conversation that holds the broker cards. The thread list also has sample threads
+// (scripts/preview_web_chat_threads.py) and opens the first of them, so the probe picks this row
+// by its session key.
+const PREVIEW_THREAD_ROW = '.thread-row[data-session-key="website:web-chat:dev"] .thread-button';
 
 function checker() {
   const passed = [];
@@ -32,6 +36,11 @@ async function openChat(browser, base) {
     });
   });
   return page;
+}
+
+async function openPreviewConversation(page, base) {
+  await page.goto(`${base}/webchat`);
+  await page.locator(PREVIEW_THREAD_ROW).click();
 }
 
 const isActive = (page, selector) =>
@@ -87,7 +96,7 @@ async function cards(browser, {base, typed, follow_up: followUp}) {
   const {passed, check} = checker();
   const page = await openChat(browser, base);
   await inboxRoutes(page, followUp);
-  await page.goto(`${base}/webchat`);
+  await openPreviewConversation(page, base);
   await page.waitForFunction((frame) => document.querySelectorAll(frame).length === 4, FRAME, {timeout: 30000});
 
   const sandboxes = await page.$$eval(FRAME, (frames) => frames.map((frame) => frame.getAttribute("sandbox")));
@@ -254,7 +263,7 @@ async function cards(browser, {base, typed, follow_up: followUp}) {
   await page.waitForFunction((frame) => document.querySelectorAll(frame).length === 0, FRAME, {timeout: 15000});
   check(true, "a thread switch removed the remaining frames");
 
-  await page.locator(".thread-row:not(.is-active) .thread-button").first().click();
+  await page.locator(PREVIEW_THREAD_ROW).click();
   await page.waitForFunction((frame) => document.querySelectorAll(frame).length === 2, FRAME, {timeout: 15000});
   await page.locator("#settings-button").click();
   await page.locator("#settings-logout-button").click();
@@ -275,7 +284,7 @@ async function signIn(browser, {base}) {
       status: response.status(), origin: sent.origin || "", allowOrigin: answered["access-control-allow-origin"] || "",
     });
   });
-  await page.goto(`${base}/webchat`);
+  await openPreviewConversation(page, base);
   await page.waitForFunction((frame) => document.querySelectorAll(frame).length === 1, FRAME, {timeout: 30000});
   await page.frameLocator(`${CARD(0)} ${FRAME}`).locator("body").waitFor();
   await page.waitForFunction(() => (window.__cardMessages || []).some((message) => "height" in message), null, {timeout: 15000});

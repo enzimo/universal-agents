@@ -22,6 +22,7 @@ from assistant_gateway.storage_usage import StorageUsageNotices, build_storage_u
 from assistant_gateway.upload_retention import UploadRetention
 from assistant_gateway.history_cleanup import GatewayHistoryCleanup
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgePages
+from assistant_gateway.application.request_agents_service import GatewayRequestAgents
 from assistant_gateway.access_inbox import (
     GatewayAccessInbox,
     build_gateway_access_inbox,
@@ -201,7 +202,7 @@ from assistant_gateway.http_secure_broker import HttpGatewaySecureBroker
 from assistant_gateway.onboarding_account_keys import OnboardingAccountKeyHandover
 from assistant_gateway.installed_procedures import GatewayInstalledProcedures
 from assistant_gateway.mcp_controls import GatewayMCPControls
-from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
+from assistant_gateway.nats_manager_runtime import HANDLING_RETRY_DELAY_SECONDS, NatsGatewayManagerRuntime
 from assistant_gateway.person_departure import build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
 from assistant_gateway.team_services_client import (
@@ -443,6 +444,7 @@ def _access_maintenance_tasks(
     credential_workflow: Any,
     status_page: Any,
     stop_event: asyncio.Event,
+    resend_kept_results_at_start: bool,
 ) -> list[asyncio.Task[Any]]:
     """Access work at start: onboarding key hand-over, form recovery and the Inbox loop.
 
@@ -450,6 +452,11 @@ def _access_maintenance_tasks(
     typed during onboarding (``assistant_gateway.onboarding_account_keys``); setup recovery
     tells tasks whose setup page was open when the gateway stopped that
     nobody watched it (``tool_setup.GatewayToolSetups.recover_unwatched``);
+    with ``resend_kept_results_at_start`` (a gateway without a team view, which uses
+    its saved route as it is), the setup results kept while no team lead could be
+    reached are sent to the one known now
+    (``tool_setup.GatewayToolSetups.resend_kept_results``); with a team view the lead
+    follower sends them once the team's records name the lead (``TeamLeadFollower``);
     credential recovery resumes saved broker session watches without storing
     submitted fields or page URLs;
     the Inbox loop (authorization on) sends announcements and decision
@@ -480,6 +487,8 @@ def _access_maintenance_tasks(
             status_page.run(stop_event, first_check_after=(handover_task,)), name="gateway_status_page_loop"
         ),
     ]
+    if resend_kept_results_at_start:
+        tasks.append(asyncio.create_task(tool_setups.resend_kept_results(), name="gateway_tool_setup_resend"))
     if config.authorization.enabled:
         tasks.append(asyncio.create_task(access_inbox.run(stop_event), name="gateway_access_inbox_loop"))
         tasks.append(
@@ -571,40 +580,74 @@ async def _report_stale_blocks(access_inbox: GatewayAccessInbox, team_id: str) -
         logger.exception("Could not check blocks against the tool catalog. event=stale_block_check_failed team_id=%s", team_id)
 
 
-def _team_view(config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance) -> GatewayTeamView | None:
+def _team_view(
+    config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance,
+    agent_trail: Callable[[Any], None],
+) -> GatewayTeamView | None:
     """Who is live and who leads, from the team's records through the gateway's host (``assistant_gateway.team_view``).
 
     ``None`` without a host (command-line runs, or a gateway service on an instance the
     launcher never prepared): the saved route to the team lead is used as it is, and that is
     said once at start (``_follow_team_lead_at_start``). A change to the lead's record wakes
-    held guidance.
+    held guidance, and every member's change tells the agent trail which requests it works for
+    (``request_agents_service``); each observer is guarded on its own (``change_observers``).
     """
 
     message_host = getattr(runtime, "message_host", None)
     if message_host is None:
         return None
 
-    from assistant_gateway.team_view import GatewayTeamView
+    from assistant_gateway.team_view import GatewayTeamView, change_observers
 
-    view = GatewayTeamView(config.manager.team_id, on_change=guidance.lead_reported, logger=logger)
+    observers = {"held_guidance": guidance.lead_reported, "agent_trail": agent_trail}
+    view = GatewayTeamView(config.manager.team_id, on_change=change_observers(observers, logger), logger=logger)
     message_host.observe_team(view)
     return view
 
 
-def _team_view_and_presence(
-    config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance
-) -> tuple[GatewayTeamView | None, GatewayTeamPresence]:
-    """The team view (``_team_view``) and the Team page's projection of it; without a view the page lists no
-    members. Composed here so the host stays a composition root."""
+def _live_agent_reports(view: GatewayTeamView | None) -> list[Any]:
+    """The live members' records for the agent trail (``team_view.live_agent_reports``); none without a view."""
 
-    view = _team_view(config, runtime, guidance)
+    if view is None:
+        return []
+    from assistant_gateway.team_view import live_agent_reports
+
+    return live_agent_reports(view)
+
+
+def _agent_display_names(config: GatewayInstanceConfig) -> dict[str, str]:
+    """Each defined agent type's display name, from the agent catalog (``team_presence.configured_agent_classes``)."""
+
+    return {item["named_agent_type"]: item["display_name"] for item in configured_agent_classes(config)}
+
+
+def _team_view_and_presence(
+    config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance, requests: RequestRepository
+) -> tuple[GatewayTeamView | None, GatewayTeamPresence, GatewayRequestAgents]:
+    """The team view (``_team_view``), the Team page's projection of it, and Web Chat's agent trail
+    (``request_agents_service``), which hears every member change and reads the live records; without a view the
+    page lists no members and nobody is shown working. Composed here so the host stays a composition root."""
+
+    def agent_trail(status: Any) -> None:
+        from assistant_gateway.team_view import agent_report
+
+        request_agents.observe(agent_report(status))
+
+    view = _team_view(config, runtime, guidance, agent_trail)
+    request_agents = GatewayRequestAgents(
+        repository=requests,
+        live_reports=lambda: _live_agent_reports(view),
+        lead_agent_type=config.manager.named_agent_type,
+        agent_names=lambda: _agent_display_names(config),
+        logger=logger,
+    )
     presence = GatewayTeamPresence(
         members=view.statuses if view is not None else tuple,
         want_details=view.want_details if view is not None else lambda: None,
         list_agent_classes=lambda: configured_agent_classes(config),
         logger=logger,
     )
-    return view, presence
+    return view, presence, request_agents
 
 
 def _team_lead_tasks(follower: TeamLeadFollower | None, stop_event: asyncio.Event) -> list[asyncio.Task[None]]:
@@ -623,6 +666,11 @@ def _bind_manager_client(gateway: "UserGateway", view: GatewayTeamView | None) -
         on_unsolicited=gateway.inbound_messages.handle,
         on_manager_available=gateway.manager_transitions.handle_available,
         on_manager_unavailable=gateway.manager_transitions.handle_unavailable,
+        # The records confirm the routed lead (no transition): the setup results kept for it are sent.
+        on_lead_confirmed=gateway.manager_transitions.handle_lead_confirmed,
+        # A setup, form or signup request left on a closed reply wait and given up on is refused to its task
+        # (assistant_gateway.application.reply_leftovers).
+        on_leftover_lost=gateway._response_coordinator.fail_lost_credential_request,
     )
     if view is None:
         return None
@@ -645,6 +693,11 @@ async def _follow_team_lead_at_start(follower: TeamLeadFollower | None, manager_
                        "event=gateway_team_view_unavailable manager_id=%s", manager_client.manager_id)
         return
     await follower.start()
+    if not follower.view.ready.is_set() and follower.view.refusal is None:
+        # Kept setup results go only to a lead the records name: once they are read, the follower's
+        # transition or confirmation sends them (TeamLeadFollower). Chats may still go to the saved route.
+        logger.info("The setup results kept for the team lead wait until the team's records are read. "
+                    "event=gateway_tool_setup_resend_deferred manager_id=%s", manager_client.manager_id)
 
 
 def _team_commands(
@@ -901,6 +954,9 @@ class UserGateway:
                 manager_named_agent_type=config.manager.named_agent_type,
                 response_route=config.manager.response_queue_name,
                 initial_manager_id=config.manager.manager_agent_id,
+                # A leftover reply is retried as the response receiver retries a message.
+                leftover_attempts=int(config.transport.max_deliver or 1),
+                leftover_retry_seconds=HANDLING_RETRY_DELAY_SECONDS,
             ),
             id_generator=self._id_generator,
             logger=logger,
@@ -1068,9 +1124,10 @@ class UserGateway:
             logger=logger,
         )
         signed_in = SignedInPerson(sessions=self.session_repository, request_context=self._request_context_service)
-        # Who is live and who leads, from the team's records (None without a message host), and the Team page.
-        self._team_view, self.team_presence = _team_view_and_presence(
-            config, resolved_manager_runtime, self._thread_guidance
+        # Who is live and who leads, from the team's records (None without a message host), the Team page, and
+        # Web Chat's agent trail: who worked and works on each person's request (request_agents_service).
+        self._team_view, self.team_presence, self.request_agents = _team_view_and_presence(
+            config, resolved_manager_runtime, self._thread_guidance, self.request_repository
         )
         # Approving an MCP server stores grants through the Inbox's access
         # service (created below; looked up when a person approves).
@@ -1149,6 +1206,8 @@ class UserGateway:
             request_service=self._request_service,
             clock=self._clock,
             event_output=self._event_output,
+            # With a team view the route is the lead follower's (TeamLeadFollower); without one, the saved route.
+            kept_results_wait_for_records=self._team_view is not None,
             logger=logger,
         )
         # An approved access proposal opens its account link forms for the
@@ -1235,6 +1294,8 @@ class UserGateway:
             targets=self._delivery_preferences,
             proactive_sessions=self.proactive_delivery,
             maintenance=self._maintenance_schedules,
+            # Sent on every team-lead-available transition (tool_setup.resend_kept_results).
+            kept_results=self._credential_workflow.tool_setups,
             manager=self._manager_client,
             responses=self._response_coordinator,
             event_output=self._event_output,
@@ -1268,6 +1329,7 @@ class UserGateway:
             transcript=self._transcript_service,
             # A newly added person's first-time setup (assistant_gateway.personal_setup).
             personal_setup=self.access_inbox.personal_setup,
+            request_sent=self.request_agents.request_sent,
             logger=logger,
         )
         self.automated_submission = GatewayAutomatedSubmissionApplication(
@@ -1376,6 +1438,8 @@ class UserGateway:
                 self._manager_client.pending_response_correlation_ids()
             ),
             proactive_session_key=config.heartbeat.session_key,
+            clock=self._clock,
+            request_agents=self.request_agents,
         )
         website_operations = WebsiteOperationsApplication(
             team=self.team_presence,
@@ -1504,6 +1568,8 @@ class UserGateway:
                 name="gateway_held_guidance_loop",
             ),
             *_team_lead_tasks(self._team_lead, self._stop_event),
+            # Records which agents worked on each request; message routing's part of the agent trail.
+            asyncio.create_task(self.request_agents.run(self._stop_event), name="gateway_request_agents"),
         ]
 
         if start_services:
@@ -1535,6 +1601,8 @@ class UserGateway:
                     credential_workflow=self._credential_workflow,
                     status_page=self.application.status,
                     stop_event=self._stop_event,
+                    # With a team view the lead follower sends them once the records name the lead.
+                    resend_kept_results_at_start=self._team_lead is None,
                 )
             )
             if self._activity_notices.enabled:
@@ -1552,6 +1620,9 @@ class UserGateway:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks = []
+        # Before the page watches stop: a leftover passed on later could open a
+        # page that nothing watches (reply_leftovers).
+        await self._manager_client.stop_leftover_passes()
         await self._credential_workflow.close()
         self._credential_handoffs.clear()
         await self._activity_notices.close()

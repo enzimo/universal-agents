@@ -783,9 +783,11 @@ def test_capability_attachments_and_tool_groups_are_gone() -> None:
 @pytest.mark.parametrize(
     ("relative_path", "class_name", "method_budget", "statement_budget"),
     (
-        # Compose held-guidance retries and file retention in the host; their
-        # services own the behavior. The host's method limit stays six.
-        ("assistant_gateway/gateway.py", "UserGateway", 6, 127),
+        # Compose held-guidance retries and file retention in the host, and stop
+        # passing reply leftovers on before the page watches stop at shutdown
+        # (reply_leftovers); their services own the behavior. The host's method
+        # limit stays six.
+        ("assistant_gateway/gateway.py", "UserGateway", 6, 128),
         (
             "assistant_gateway/application/runtime_application.py",
             "GatewayRuntimeApplication",
@@ -863,6 +865,7 @@ NATS_CLIENT_CALLS = frozenset({
 # raw handle is added here in the same change, with its reason.
 NATS_CLIENT_MODULES = {
     "custom_transport/nats_adapter.py": "the transport adapter: publishing, delivery, object store",
+    "custom_transport/jetstream_account.py": "the raw account information request, for what the streams set aside",
     "custom_transport/nats_pull.py": "pull consumers for queued work",
     "custom_transport/nats_consumer_reconciler.py": "removes consumers the topology no longer names",
     "custom_transport/nats_topology.py": "creates and updates the streams",

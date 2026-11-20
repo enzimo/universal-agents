@@ -57,6 +57,8 @@ class TaskWork:
     - ``handling_finished``: the runner left its scope. Inherited timer
       callbacks may keep the record, but its SDK agent can have been reused
       by another task, so its transcript is no longer safe to archive.
+    - ``request_task_id``: the person's request the turn runs for, decided once
+      when it starts (``custom_agents.working_requests``), for the agent's record.
     """
 
     task_id: str | None
@@ -66,6 +68,7 @@ class TaskWork:
     person_model: Any = None
     context_assembly: Any = None
     handling_finished: bool = False
+    request_task_id: str | None = None
 
 
 _task_work: ContextVar[TaskWork | None] = turn_scoped(ContextVar("task_work", default=None), None)

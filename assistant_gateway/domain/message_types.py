@@ -24,13 +24,33 @@ TOOL_SETUP_RESULT_MESSAGE_TYPE = "tool_setup_result"
 # the countdown kept running after the form was submitted, until the agent's
 # final answer). The line holds no credential, only the credential key's name.
 SECURE_CREDENTIAL_RESULT_MESSAGE_TYPE = "secure_credential_result"
+# The gateway's reply to a person's slash command; /auth and the /user token
+# commands have their own types so their replies stay out of history.
+COMMAND_REPLY_MESSAGE_TYPE = "command"
+AUTH_COMMAND_MESSAGE_TYPE = "command_auth"
+SENSITIVE_USER_COMMAND_MESSAGE_TYPE = "command_user_sensitive"
 # The reply to a person's /link command; its form link is shown only to the
 # browser that ran the command.
 ACCOUNT_LINK_COMMAND_MESSAGE_TYPE = "command_account_link"
 # The reply to an owner's /upgrade; its export page link is shown only to the
 # browser that ran the command, and history keeps the card's receipt.
 TEAM_EXPORT_COMMAND_MESSAGE_TYPE = "command_upgrade"
+# Every type a slash command's reply is written with.
+COMMAND_REPLY_MESSAGE_TYPES = (
+    COMMAND_REPLY_MESSAGE_TYPE,
+    AUTH_COMMAND_MESSAGE_TYPE,
+    SENSITIVE_USER_COMMAND_MESSAGE_TYPE,
+    ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
+    TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
+)
 # How a form or sign-in page a person opened with /link (or /upgrade's export page) ended, posted by the
 # gateway in the chat where they ran /link (assistant_gateway.application.link_results).
 # In Web Chat it also removes the /link card with the same correlation id.
 LINK_RESULT_MESSAGE_TYPE = "link_result"
+# The gateway's answer to "?" in a chat (or /status): how the thread's running
+# work stands. It answers the person, so it never wakes a snoozed thread.
+TASK_PROGRESS_STATUS_MESSAGE_TYPE = "task_progress_status"
+# Steering for a running request: the gateway's or the team lead's answer to a
+# message the person sent while a request ran ("This message will be passed to
+# it.", accepted or refused), and the team's own pause asking for a reply.
+TASK_STEERING_MESSAGE_TYPE = "task_steering"

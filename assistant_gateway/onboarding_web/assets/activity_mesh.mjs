@@ -17,7 +17,8 @@
 const FADE_MS = 700;
 const FRAME_INTERVAL_MS = 50;
 const BUSY_STATUS = "busy";
-const TEAM_LEAD_COLOR = "#f6c84c";
+// The team lead's gold, also its agent trail colour (agent_trail.mjs).
+export const TEAM_LEAD_COLOR = "#f6c84c";
 // The calm mesh's color where glass_mesh.js is not loaded.
 const IDLE_RGB = [150, 165, 175];
 
@@ -48,8 +49,12 @@ function hslHex(hue, saturation, lightness) {
   return "#" + rgb.map(value => Math.round((value + m) * 255).toString(16).padStart(2, "0")).join("");
 }
 
+// Only the table's own entries count: a type named like an object member
+// (`toString`, `constructor`) gets its hashed colour, never that member
+// (review F2: the agent trail draws stored types on every row).
 export function agentColor(namedAgentType) {
-  return AGENT_TYPE_COLORS[namedAgentType] || hslHex(hash(namedAgentType) % 360, 0.7, 0.62);
+  const type = String(namedAgentType);
+  return Object.hasOwn(AGENT_TYPE_COLORS, type) ? AGENT_TYPE_COLORS[type] : hslHex(hash(type) % 360, 0.7, 0.62);
 }
 
 function hexRgb(hex) {

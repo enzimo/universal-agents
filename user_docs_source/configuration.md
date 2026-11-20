@@ -458,6 +458,37 @@ whole limit aside when it is created: each team's message streams about
 2.1 GiB at the default `transport.queues.max_bytes`, plus 64 MB for set-aside
 messages. Leave room for those.
 
+The bundled NATS server takes as its room, each time the whole instance
+starts, three quarters of the free space on the disk that holds its store plus
+three quarters of what its stored messages take. It refuses every new or
+changed stream while its streams set aside that much or more, and every new
+message once its stored messages take more than that room. Until then the
+streams it has keep taking messages, but the attachment store Web Chat creates
+the first time it copies an attachment, adding a team, and a start after a
+change to the message stream settings fail. So Status also warns, with one
+Inbox notice, when three quarters of that disk's free space and the stored
+messages together is no more than what the streams set aside: the server would
+refuse new streams after its next start. The warning names one amount to free
+from other files on that disk. Removing messages does not help, because the
+server counts its stored messages back into its room. It also says what each
+team's streams set aside and which setting changes it
+(`transport.queues.max_bytes`). It ends once the free space and the stored
+messages come to 3% of the disk's size more than the server needs, so it does
+not come and go as other files on the disk grow and shrink. If the server
+already runs with too little room, Status also shows a problem, with its own
+title once the server refuses new messages too. Freeing space does not end
+that one: the server takes its room only when the whole instance (the
+container, or `ua start`) starts, and a team-wide restart keeps it running
+with the room it has. While the server refuses new messages, it takes them
+again as soon as its streams store less than its room, for example once agents
+take queued work. Streams without a size limit, such as the attachment store,
+can store more than all the streams set aside. A start then takes new messages
+only if the disk's free space is more than a third of what they store, which
+the warning's amount to free may not reach, so both findings say that too.
+An external NATS server gets neither finding, because its storage is not on a
+disk the gateway can measure; give its account a limit, and Status shows the
+percentage.
+
 Each of the team's message streams also has a limit of its own. When one
 holds `transport.queues.warn_at_percent` of its limit (80 by default), Status
 shows a problem naming the team, what the stream holds and the setting to
@@ -1913,7 +1944,8 @@ No profile budget resets per model turn. `active_seconds` is the total
 wall-clock window for one session. `turns` counts model cycles across the
 session. `total_tokens` accumulates input plus output tokens across those
 cycles, including repeated prompt and tool-schema input. `tool_calls` counts
-all tool calls across the session. The checkpoint fields reserve subsets of
+the session's tool calls. One exception applies to all three counts: work
+after a paused call resumes is not counted yet (see below). The checkpoint fields reserve subsets of
 those totals, and the runtime withholds them from material work. If a safe boundary is reached
 without a checkpoint, it uses the reserve for a narrow checkpoint-only model
 invocation and falls back to a deterministic degraded checkpoint only if that
@@ -1921,6 +1953,21 @@ pass cannot persist the handoff. Input, output, total, and cache token usage are
 stored separately for tuning. Suggestion rules, the required skill list,
 default-profile selection, activity snapshot emission, and checkpoint retention
 are policy-wide rather than per-profile.
+
+A step can pause while it waits for a person, for example for an access
+decision or a setup step. Such a step keeps its pause even when the session
+reaches its limit or a required skill is not yet activated. The session
+records the usage up to the pause. The work after the person answers is not
+counted against the session budget yet: each resumed model call gets the
+step's per-call turn and token allowance again, and the step's tool-call
+limit is not checked after a resume. A step that pauses at the limit, once or
+several times, can therefore do more work than the budget allows; counting
+that work is planned. A required skill that is still missing stops the step
+when the person has answered, before its result is used, and the session ends
+with the runtime's degraded checkpoint. A session past its limit lets the
+step finish; when the step belongs to a plan, the session then does not start
+the next plan step and also ends with the degraded checkpoint, not the
+model's own checkpoint pass.
 
 The same policy file owns `custom_profiles`; these controls are deliberately
 separate from the main runtime config. The built-in envelope enables one-time

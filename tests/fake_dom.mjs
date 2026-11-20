@@ -81,6 +81,8 @@ export class FakeElement extends EventTarget {
 export function fakeDocument() {
   const document = {};
   document.createElement = tagName => new FakeElement(document, tagName);
+  // SVG elements (the agent trail's triangles) are plain elements here.
+  document.createElementNS = (_namespace, tagName) => new FakeElement(document, tagName);
   document.body = new FakeElement(document, "body");
   document.activeElement = document.body;
   return document;

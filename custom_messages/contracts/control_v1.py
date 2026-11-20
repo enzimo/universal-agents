@@ -16,6 +16,7 @@ from id_generation import new_id
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import PrivateAttr
 from typing import Any
 from typing import Dict
 from typing import List
@@ -308,6 +309,22 @@ class AgentStatus(BaseModel):
         ...,
         description="Indicates whether this is a request for status or a response to a request with own status.",
     )
+
+    # The root task ids of the people's requests the agent's model turns ran for now or since its previous
+    # record. Not a field: only the gateway's team view sets it, from the agent's signed record
+    # (assistant_gateway.team_view.record_status), and only gateway code reads it. So no message can set it, no
+    # dump or schema carries it, and one person's request ids never reach another person's status or a model.
+    _request_task_ids: tuple[str, ...] = PrivateAttr(default=())
+
+    @property
+    def request_task_ids(self) -> tuple[str, ...]:
+        return self._request_task_ids
+
+    def with_request_task_ids(self, request_task_ids: tuple[str, ...]) -> "AgentStatus":
+        """Set the ids read from the agent's signed record (the team view only); returns the status."""
+
+        self._request_task_ids = tuple(request_task_ids)
+        return self
 
     def get_id(self) -> str:
         return self.agent_status_id

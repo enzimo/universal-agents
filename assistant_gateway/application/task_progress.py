@@ -16,6 +16,7 @@ from assistant_gateway.application.request_context import (
     GatewayRequestRoute,
 )
 from assistant_gateway.application.response_models import GatewayResponse
+from assistant_gateway.domain.message_types import TASK_PROGRESS_STATUS_MESSAGE_TYPE
 from assistant_gateway.application.session_service import (
     GatewaySessionRoute,
     GatewaySessionService,
@@ -136,7 +137,7 @@ class GatewayTaskProgressService:
                     "Task status is temporarily unavailable because the team lead "
                     "is offline."
                 ),
-                message_type="task_progress_status",
+                message_type=TASK_PROGRESS_STATUS_MESSAGE_TYPE,
                 conversation_id=resolved_conversation_id,
             )
         correlation_id = self._id_generator.new_correlation_id()
@@ -193,7 +194,7 @@ class GatewayTaskProgressService:
                     correlation_id=correlation_id,
                     conversation_id=resolved_conversation_id,
                     task_id=response.root_task_id,
-                    message_type="task_progress_status",
+                    message_type=TASK_PROGRESS_STATUS_MESSAGE_TYPE,
                     text=self.render(response),
                     raw_envelope=response_envelope,
                 )
@@ -211,7 +212,7 @@ class GatewayTaskProgressService:
                         "Task status is temporarily unavailable. "
                         "The active task was not interrupted."
                     ),
-                    message_type="task_progress_status",
+                    message_type=TASK_PROGRESS_STATUS_MESSAGE_TYPE,
                     correlation_id=correlation_id,
                     conversation_id=resolved_conversation_id,
                 )

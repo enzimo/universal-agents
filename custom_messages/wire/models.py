@@ -866,6 +866,7 @@ class AgentState(WireModel):
     state: Literal['starting', 'idle', 'busy', 'paused', 'exiting', 'stopped']
     accepting_work: bool
     since: Timestamp
+    requests: Union[Annotated[list[RecordId], Field(min_length=1, max_length=16)], MISSING] = Field(default=MISSING)
 
 
 class AgentSessionState(WireModel):

@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# The id prefix of the gateway's attachment record for a file it sent to a person (``new_transcript_attachment_id``):
+# a copy staged in the person's ``scratch/sent`` folder under a name the agent chose. Files people send in get other
+# ids. The 0.9 upgrade step for adapter-host files never names such a record's folder (SEC-1 of PR #168's review).
+SENT_FILE_ATTACHMENT_ID_PREFIX = "web_attachment"
+
 
 @dataclass
 class DeliveryRecord:

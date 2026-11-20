@@ -28,7 +28,7 @@ from storage.schedule_repository import RowWrite
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
 from team_services.schedules import ScheduleOperations
 from tests.people_directory_support import access_store_at
-from tests.test_live_team_services import TEAM, broker, connect, installation  # noqa: F401
+from tests.test_live_team_services import TEAM, broker, connect, installation, until_team_services_serve  # noqa: F401
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 ADA = "p-AdaAdaAdaAdaAdaAdaAdaA"
@@ -68,6 +68,7 @@ async def test_signed_schedule_paging_and_controls(broker: str, tmp_path: Path) 
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
         stack.push_async_callback(gateway.close)
         await gateway.ready(timeout=20)
+        await until_team_services_serve(host, serving)
         rows = []
         offset = 0
         while True:

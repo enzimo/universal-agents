@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tests.browser_assets import module_source
 
+from datetime import datetime, timedelta, timezone
 from http.cookiejar import CookieJar
 from http.server import ThreadingHTTPServer
 import json
@@ -11,6 +12,7 @@ import threading
 
 import pytest
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 from assistant_gateway.application.website_application import (
@@ -1076,3 +1078,90 @@ def test_interface_motion_effects_never_clip_their_elements() -> None:
     motion = styles.split("/* ---------- Interface motion", maxsplit=1)[1]
     assert "overflow:" not in motion
     assert ".ua-arrive-mesh {" in motion and "border-radius: inherit;" in motion
+
+
+def test_dev_preview_lists_threads_in_every_section_and_places_them_like_the_gateway() -> None:
+    """A11: the preview serves the thread list's new fields, built by the gateway's own row code."""
+
+    server, thread, base_url = _serve_preview(DEFAULT_ASSET_ROOT)
+    opener = build_opener(HTTPCookieProcessor(CookieJar()))
+
+    def get(path: str) -> dict[str, object]:
+        with opener.open(f"{base_url}{path}", timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def patch(session_key: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+        request = Request(
+            f"{base_url}/api/web-chat/sessions/{quote(session_key, safe='')}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="PATCH",
+        )
+        try:
+            with opener.open(request, timeout=5) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            return error.code, json.loads(error.read().decode("utf-8"))
+
+    def rows() -> dict[str, dict[str, object]]:
+        return {row["session_key"]: row for row in get("/api/web-chat/sessions")["sessions"]}
+
+    try:
+        _json_post(f"{base_url}/api/web-chat/auth", {"token": "dev-token"}, opener=opener)
+        listed = get("/api/web-chat/sessions")
+        by_key = {row["session_key"]: row for row in listed["sessions"]}
+        needs_you = {row["needs_you"] for row in listed["sessions"] if row.get("needs_you")}
+        states = {row["list_state"] for row in listed["sessions"] if row.get("list_state")}
+        assert needs_you == {"credential", "setup"}
+        assert states == {"snoozed", "woke", "dismissed"}
+        assert any(row.get("pinned") for row in listed["sessions"])
+        weekly = by_key["website:web-chat:weekly"]
+        assert weekly["last_message"]["role"] == "assistant" and weekly["last_message"]["text"].startswith("## Weekly")
+        assert weekly["last_sequence"] == 1 and weekly["last_activity_at"]
+
+        # Pin, snooze, dismiss and restore change the samples and the revision on both reads.
+        before = listed["threads_revision"]
+        status, _ = patch("website:web-chat:offsite", {"thread_action": "pin"})
+        assert status == 200 and rows()["website:web-chat:offsite"]["pinned"] is True
+        after = get("/api/web-chat/sessions")["threads_revision"]
+        assert after != before
+        with opener.open(f"{base_url}/api/web-chat/events/stream?after=", timeout=5) as stream:
+            page = json.loads(stream.readline().decode("utf-8").removeprefix("data: "))
+        assert page["threads_revision"] == after
+        status, refusal = patch("website:web-chat:offsite", {"thread_action": "snooze", "snooze_until": "2020-01-01T00:00:00+00:00", "seen_sequence": 5})
+        assert status == 400 and "future" in refusal["message"]
+        status, _ = patch("website:web-chat:offsite", {"thread_action": "dismiss", "seen_sequence": 5})
+        assert status == 200 and rows()["website:web-chat:offsite"]["list_state"] == "dismissed"
+        patch("website:web-chat:offsite", {"thread_action": "restore"})
+        assert rows()["website:web-chat:offsite"]["list_state"] is None
+
+        # Opening the woke sample clears its mark like the gateway (clear_woke);
+        # a snooze saved since is kept, and an unknown action names every action.
+        tls = "website:web-chat:tls"
+        assert rows()[tls]["list_state"] == "woke"
+        status, _ = patch(tls, {"thread_action": "clear_woke"})
+        assert status == 200 and rows()[tls]["list_state"] is None
+        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        patch(tls, {"thread_action": "snooze", "snooze_until": tomorrow, "seen_sequence": 2})
+        status, _ = patch(tls, {"thread_action": "clear_woke"})
+        assert status == 200 and rows()[tls]["list_state"] == "snoozed"
+        status, refusal = patch(tls, {"thread_action": "archive"})
+        assert status == 400 and "clear_woke" in refusal["message"] and "restore" in refusal["message"]
+
+        # The hover preview's history page with the turn count, and Delete.
+        history = get("/api/web-chat/sessions/website%3Aweb-chat%3Aoffsite/messages?limit=12&turn_count=1")
+        assert history["turn_count"] == 4 and len(history["messages"]) == 5
+        with opener.open(Request(f"{base_url}/api/web-chat/sessions/website%3Aweb-chat%3Aprinter/archive", method="POST"), timeout=5):
+            pass
+        assert "website:web-chat:printer" not in rows()
+
+        # New Chat adds an empty, unnamed thread to the same list (the broker card probe switches to it and back).
+        created = _json_post(f"{base_url}/api/web-chat/sessions", {}, opener=opener)["session"]
+        new_key = created["session_key"]
+        assert created["title"] is None and rows()[new_key]["title"] is None
+        assert rows()[new_key]["last_message"] is None
+        assert get(f"/api/web-chat/sessions/{quote(new_key, safe='')}/messages?limit=50")["messages"] == []
+        assert _json_post(f"{base_url}/api/web-chat/sessions", {}, opener=opener)["session"]["session_key"] != new_key
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
