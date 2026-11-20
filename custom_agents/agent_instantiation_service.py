@@ -110,15 +110,14 @@ def counts_as_failed_start(reason: str | None) -> bool:
 def refusal_code(error: BaseException) -> str | None:
     """The error's text when it is one of the project's refusal codes, else None.
 
-    Only a ``ValueError``, a ``LaunchConflict`` or a ``PermissionError`` the
-    project raised (no ``errno``; an operating-system one names a path) can
-    carry a code. Any other text could hold anything, such as a host path or a
-    pydantic validation error's input values.
+    Only a ``ValueError``, a ``LaunchConflict`` or a ``PermissionError`` can
+    carry a code, and only when its whole text is one. Any other text could
+    hold anything, such as a host path or a pydantic validation error's input
+    values; an operating-system ``PermissionError`` reads
+    ``[Errno 13] Permission denied: '<path>'`` and is never a code.
     """
 
     if not isinstance(error, (ValueError, LaunchConflict, PermissionError)):
-        return None
-    if isinstance(error, PermissionError) and error.errno is not None:
         return None
     text = str(error)
     return text if _REFUSAL_CODE.fullmatch(text) else None
