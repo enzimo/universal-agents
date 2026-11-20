@@ -265,9 +265,11 @@ async def _sweep(agent: Any, sweep: str) -> SweepResult | None:
             sweep,
             RETRY_SECONDS,
         )
-        # A stream near its limit matters most when leftovers cannot be removed;
-        # this read also starts the hourly ones.
-        await _read_capacity(agent)
+        # A stream near its limit matters most when leftovers cannot be removed.
+        # Read once to start the hourly reads; retries every RETRY_SECONDS do not
+        # repeat the warning (sweep_worker_consumers_if_due keeps the hourly ones).
+        if getattr(agent, "_stream_capacity_check_at", None) is None:
+            await _read_capacity(agent)
         return None
     again = RESWEEP_SECONDS if result.kept_owners else None
     agent._worker_consumer_sweep_at = None if again is None else time.monotonic() + again

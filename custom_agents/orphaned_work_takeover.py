@@ -102,7 +102,7 @@ TAKEOVER_RETRY_DELAYS_SECONDS = (60.0, 300.0, 900.0, 3600.0)
 MAX_TAKEOVER_ATTEMPTS = len(TAKEOVER_RETRY_DELAYS_SECONDS) + 1
 _TERMINAL_STATE_VALUES = frozenset({"completed", "failed", "cancelled", "abandoned"})
 
-# The logged-once key of a dead owner nobody it works for is known for.
+# The logged-once key of a dead owner whose person is not known.
 SKIPPED_NO_PERSON = "skipped:no_person"
 
 # What one pass does for one dead owner.

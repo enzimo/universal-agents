@@ -954,6 +954,12 @@ async def test_a_sweep_that_keeps_failing_still_warns_near_the_limit(team, clock
     assert "event=nats_stream_consumer_capacity_high" in caplog.text and "stream_consumer_count=990" in caplog.text
     assert adapter.capacity_reads == 1
     assert team._stream_capacity_check_at == 1000.0 + CAPACITY_CHECK_SECONDS
+    # Its retries every RETRY_SECONDS do not read again: hourly, like every other state.
+    for _ in range(int(CAPACITY_CHECK_SECONDS // RETRY_SECONDS)):
+        clock[0] += RETRY_SECONDS
+        await sweep_worker_consumers_if_due(team)
+    assert adapter.capacity_reads == 2
+    assert caplog.text.count("event=nats_stream_consumer_capacity_high") == 2
 
 
 @pytest.mark.asyncio

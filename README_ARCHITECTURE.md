@@ -801,7 +801,7 @@ Four repairs keep work from getting stuck in the first place:
   (`agent.schedule_workers.retention_days` after the last attempt ended, 30
   days by default) and then begins a new series of five; an agent of the type
   that starts before then for another reason still adopts the work. A dead
-  owner nobody it works for is known for is logged once
+  owner whose person is not known is logged once
   (`event=orphaned_work_takeover_skipped`). Each attempt has its own start id
   (`takeover:<owner>:<attempt>`): with one fixed id, a replacement that
   crashed on a full work stream (2026-11-19) was found again on every pass,
