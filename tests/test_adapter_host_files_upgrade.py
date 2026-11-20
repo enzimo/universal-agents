@@ -3812,7 +3812,7 @@ def test_the_operator_command_says_when_the_leftover_files_could_not_be_counted(
         upgrade_module.UpgradeResult(finished=True, counts=upgrade_module.UpgradeCounts(), other_folders_unchecked=2),
     ]
     monkeypatch.setattr(upgrade_module, "upgrade_adapter_host_files", lambda _config, *, files_gone: outcomes.pop(0))
-    args = SimpleNamespace(config="instance_config.yaml", files_gone=False)
+    args = argparse.Namespace(config="instance_config.yaml", files_gone=False)
 
     assistant_cli._upgrade_adapter_host_files(args)
     assert "could not be counted; see the log" in capsys.readouterr().out
