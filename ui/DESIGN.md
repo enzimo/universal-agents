@@ -1906,8 +1906,10 @@ its history. Steps with linked requests cannot use this correction.
     worked in the thread, then the turn count ("Team lead, Web Research
     Agent, Memory Review Agent · 12 turns").
 - A row's name for screen readers is its title, who works ("Working: team
-  lead, Web Research Agent") or else the unread-reply dot in words ("New
-  reply", "Reply needs attention"; the dot and the triangles themselves are
+  lead, Web Research Agent") and the unread-reply dot in words ("New
+  reply", "Reply needs attention"; both when someone works and a reply is
+  unread, "Working: Web Research Agent. Reply needs attention", because
+  sighted people see the dot beside the pulsing triangles; the dot and the triangles themselves are
   hidden from them, and so are the visible working words, which would say it
   twice), Woke, the age in words ("active 5 minutes ago") and the second
   line. Each row's button carries `aria-keyshortcuts="Shift+F10
@@ -1989,8 +1991,8 @@ its history. Steps with linked requests cannot use this correction.
   If that thread is still running, its trail keeps pulsing, so unread content
   and active execution remain distinct signals. Use a gold border and halo
   instead when the unread reply needs user attention.
-- Completed replies in unfocused threads use that same indicator slot as a
-  solid dot: green for ordinary unread replies, gold/yellow when the reply
+- Unread replies in unfocused threads show a solid dot at the row's left,
+  in the indicator slot before the title: green for ordinary unread replies, gold/yellow when the reply
   needs user attention such as an error or recoverable runtime-pause choice.
 - Truncated thread titles show their full title in a custom frosted tooltip
   after one second of keyboard focus, or of mouse hover on the open chat's

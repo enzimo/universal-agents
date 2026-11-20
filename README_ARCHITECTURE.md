@@ -425,9 +425,17 @@ per turn: a request the person sent, then each agent type that worked on it (own
 hears every member change from the team view (`on_change`, each observer guarded on its
 own, `team_view.change_observers`) and hands each new (request, agent type) pair to one
 writer thread, which records it with `RequestRepository.record_request_agent`; the store
-changes only a running interactive request whose `active_task_id` the id names, so an id
-the gateway does not hold changes nothing, and the thread and its owner come from the
-gateway's own request record, never from the agent. The team lead is recorded when the
+changes only a request the gateway admitted as a thread's request (a row with a run state,
+running or finished) whose `active_task_id` the id names, so an id the gateway does not hold
+changes nothing (a plain read checks that before the write lock is taken), and the thread
+and its owner come from the gateway's own request record, never from the agent. The
+request's kind does not decide: the answer to the lead's question and a setup-page or
+credential-form result are recorded on the request's own row and rewrite its kind and
+creation time, so the trail is ordered by `first_agent_at`, written once when the first
+agent (the team lead, at hand-over) is recorded (review F1). A record that arrives after
+the request finished still counts (review F4). The writer's queue is bounded
+(4,096 pairs; a pair that does not fit is logged and taken again at the record's next
+change). The team lead is recorded when the
 gateway hands it the request (`interactive_submission`), because a lead turn shorter than
 the record's write interval would otherwise be missed. The writer keeps first-reported
 order and tries a failed write again after 0.5, 2 and 5 seconds, since the team view tells
