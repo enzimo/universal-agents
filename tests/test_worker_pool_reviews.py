@@ -772,6 +772,8 @@ async def test_a_queue_nats_refuses_to_create_is_reported_from_the_second_pass(w
         assert "no worker of this type can take tasks until its queue exists" in shown
         assert "check the NATS server" in shown
         assert "launcher refuses" not in shown
+        # Critique C09: the log line written for it, not the start events.
+        assert "event=worker_pool_queue_create_failed" in shown and "event=worker_start_failed" not in shown
 
     adapter.error = None  # the queue can be created again: the row ends
     await reconcile()
@@ -789,3 +791,64 @@ async def test_a_queue_that_times_out_is_logged_but_not_reported(world, monkeypa
             await reconcile()
     assert world.opened == [] and "Queueless" not in world.agent._worker_pool_snapshot["pools"]
     assert caplog.text.count("event=worker_pool_queue_create_failed") == 3
+
+
+@pytest.mark.asyncio
+async def test_a_launcher_refusal_after_an_older_failed_start_gets_the_refusals_advice(world):
+    """Critique C08: one NATS crash earlier in the hour, then the launcher refuses twice; the advice is the refusal's."""
+
+    from custom_agents.worker_pool_controller import PoolDecision, WorkerPoolController
+    from custom_messages.contracts.schedule_worker_v1 import AgentLaunchResultV1
+    from storage.worker_pool_repository import WorkerPoolIncidentV1
+
+    crash = _nats_crash()
+    controller = WorkerPoolController(world.agent)
+    controller._launch = lambda _agent_type: AgentLaunchResultV1(status="denied", reason="agent_definition_unavailable")
+    observation = _observation(failed_starts_in_row=1, last_start_failure=crash)
+    for _ in range(2):
+        incidents = reviews.WorkerPoolIncidents(world.agent, _settings())
+        _report_start_history(observation, incidents)
+        await controller._start(observation, PoolDecision(1, "start"), incidents)
+        await incidents.settle()
+    ((opened),) = world.opened
+    now = datetime.now(timezone.utc)
+    incident = WorkerPoolIncidentV1(incident_id="i", team_id="team", agent_type=WORKER_TYPE, kind=INCIDENT_START_FAILED,
+                                    opened_at_utc=now, last_seen_at_utc=now, details=opened["details"])
+    instructions = reviews._instructions(incident, recurring=False, recurrences=1, settings=_settings())
+    (finding,) = world.told[-1]
+    for shown in (instructions, finding.message.text):
+        assert "agent_definition_unavailable" in shown
+        assert "check the agent type's definition and the operator's denied types" in shown
+        assert "check the NATS server" not in shown
+
+
+@pytest.mark.asyncio
+async def test_a_queue_nats_answers_503_for_is_logged_but_not_reported(world, monkeypatch, caplog):
+    """Critique C10: 'JetStream system temporarily unavailable' carries a code but is temporary, like a timeout."""
+
+    from nats.js.errors import ServiceUnavailableError
+
+    _, reconcile = _queue_world(world, monkeypatch, ServiceUnavailableError(
+        code=503, err_code=10008, description="JetStream system temporarily unavailable"))
+    with caplog.at_level(logging.WARNING, logger="custom_agents.worker_pool_controller"):
+        for _ in range(3):
+            await reconcile()
+    assert world.opened == [] and "Queueless" not in world.agent._worker_pool_snapshot["pools"]
+    assert caplog.text.count("event=worker_pool_queue_create_failed") == 3
+
+
+@pytest.mark.asyncio
+async def test_the_inspect_tools_own_fresh_view_shows_a_queue_nats_refuses(world, monkeypatch):
+    """Critique C11: with no recent controller snapshot, inspect_worker_pools observes itself and still shows it."""
+
+    from custom_tools.providers.worker_pools import _snapshot
+    from nats.js.errors import BadRequestError
+
+    _queue_world(world, monkeypatch,
+                 BadRequestError(code=400, err_code=10026, description="maximum consumers limit reached"))
+    world.agent._worker_pool_snapshot = {}
+    view = await _snapshot(world.agent, _settings())
+    assert view["pools"]["Queueless"] == {
+        "agent_type": "Queueless",
+        "queue_unavailable": "worker_queue_unavailable: BadRequestError (NATS 10026: maximum consumers limit reached)",
+    }

@@ -39,6 +39,11 @@ in a row failed while tasks wait, or as many refusals in a row before a start
 was recorded, ``_note_refusal_before_record``; at once when the hourly start
 limit refused a start).
 
+A type whose shared queue NATS refuses to create (a refusal code, not a
+timeout or a 503 answer) is left out of the pass's observations; it is shown
+in the pool view (``pool_views``) and reported from the second pass in a row
+(``_report_unavailable_queues``).
+
 A start counts as failed when the worker never became ready for a reason that
 says something about its type: it crashed, its startup timed out, or the
 launcher refused it (its start record ends ``failed`` with the reason,
@@ -504,6 +509,19 @@ def _rate_limit_reason(observation: PoolObservation) -> str:
     return reason
 
 
+# A NATS answer with status 503 ("JetStream system temporarily unavailable",
+# code 10008, for example while a cluster elects a leader) is temporary like a
+# timeout although it carries a code, so a queue it refuses is not reported
+# (critique C10, round 3).
+_NATS_TEMPORARILY_UNAVAILABLE = 503
+
+
+def _lasting_queue_refusal(error: BaseException) -> bool:
+    """Whether NATS refused a queue for a lasting reason: a NATS refusal code, and not a 503 answer."""
+
+    return nats_refusal_in(error) is not None and getattr(error, "code", None) != _NATS_TEMPORARILY_UNAVAILABLE
+
+
 def pool_views(observations: Iterable[PoolObservation], queue_failures: dict[str, str]) -> dict[str, Any]:
     """The pool view's entries: each observed type, and each type whose queue NATS refused to create."""
 
@@ -582,13 +600,14 @@ class WorkerPoolController:
                 agent_type,
                 exc_info=True,
             )
-            # Only a refusal by NATS (an error code, such as 10026 at the work
-            # stream's consumer limit) is this type's lasting problem and is
+            # Only a lasting refusal by NATS (an error code, such as 10026 at the
+            # work stream's consumer limit) is this type's problem and is
             # reported (_report_unavailable_queues). An error without a code (a
-            # timeout, a lost connection) is a connection problem: logged here
-            # every pass, not reported, so a stall right after a restart, when
-            # every type's queue is created again, opens nothing for every type.
-            if nats_refusal_in(exc) is not None:
+            # timeout, a lost connection) or a 503 answer is a connection
+            # problem: logged here every pass, not reported, so a stall right
+            # after a restart, when every type's queue is created again, opens
+            # nothing for every type.
+            if _lasting_queue_refusal(exc):
                 self.queue_failures[agent_type] = queue_failure_reason(exc)
             return False
         ensured.add(agent_type)

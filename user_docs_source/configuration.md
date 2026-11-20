@@ -903,8 +903,9 @@ without a reason or with its error text do not count. The next start of a type
 waits 10 seconds after a failure, twice as long after each further failure in
 a row, up to 10 minutes, and only one start is tried at a time; a start that
 stopped responding for several minutes no longer holds the next one, but still
-takes a pool slot. A worker of the type
-that becomes ready resets the wait. A type whose workers keep crashing is
+takes a pool slot (it is named as hung for an hour, then counted only among the
+workers whose state cannot be checked). A worker of the type that becomes
+ready resets the wait. A type whose workers keep crashing is
 tried about 11 times in its first hour instead of reaching
 `max_launches_per_type_per_hour`. When two starts in a row fail while tasks
 wait, TeamArchitect gets a review and administrators get an Inbox notice; both
@@ -914,7 +915,10 @@ no start failed, they point at why workers of the type start so often, for
 example workers that stop soon after they become ready. A start the runtime
 refuses before it begins, for example because the agent definition cannot be
 read, opens them on the second refusal in a row, and is tried again on every
-pass until the cause is fixed.
+pass until the cause is fixed. So does a worker type whose queue the NATS
+server refuses to create, for example because the work stream has reached its
+consumer limit; a timeout or a temporarily unavailable NATS server is only
+logged. The review and the notice say where to look for each kind of failure.
 
 TeamArchitect sets pool sizes itself inside the ceilings, for a while or for
 good, when it reviews a pool at its limit or a model provider that keeps

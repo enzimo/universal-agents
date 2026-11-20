@@ -11,10 +11,12 @@ three kinds of problem per worker type (``*`` for the whole team):
 - ``start_failed``: workers the controller needed could not be started: two
   starts of the type in a row failed (crashed, timed out, or were refused)
   while tasks waited, or the launcher refused two in a row before they were
-  recorded (tried again every pass); or at once, the hourly start limit
-  refused a start. The review and the administrators' notice name the failure
-  (``_start_failure_text``), and hung starts (``_hung_starts_text``, also in
-  the capacity texts). Only a problem of failed starts ends as soon as a
+  recorded (tried again every pass), or NATS refused on two passes in a row
+  to create the type's shared queue (``queue_unavailable``); or at once, the
+  hourly start limit refused a start. The review and the administrators'
+  notice name the failure and advise by its kind (``_start_failure_text``,
+  ``_FIX_BY_KIND``), and hung starts (``_hung_starts_text``, also in the
+  capacity texts). Only a problem of failed starts ends as soon as a
   worker of the type is ready (``_opened_by_failed_starts``).
 
 Each becomes one open incident (``storage.worker_pool_repository``) while it
@@ -182,18 +184,26 @@ _FIX_BY_KIND = {
 def _failed_start_text(details: dict[str, Any], pool: dict[str, Any]) -> tuple[str, str]:
     """Failed starts in a row, a launcher refusal made before any start record, or a queue that cannot be created.
 
-    The advice follows the actual failure: the last failed start when there
-    are failed starts (the refused-because text may be the hourly limit's),
-    otherwise the refusal itself.
+    The advice follows the failure the text names: the refused-because
+    reason, except when the hourly start limit refused the start (its text is
+    then the limit's), where the last failed start decides. Before the
+    critique C08 fix, an older failed start still in view decided it, so a
+    later launcher refusal got that failure's advice.
     """
 
     reason = _shown(details.get(EVIDENCE_REFUSED_BECAUSE))
+    log_pointers = _LOG_POINTERS
     if pool.get(POOL_QUEUE_UNAVAILABLE):
         happened = (
             "The shared queue of this type on the NATS work stream cannot be created, so no "
             f"worker of this type can take tasks: {reason}."
         )
         why = "no worker of this type can take tasks until its queue exists"
+        # No start is tried, so the start events are never written for it.
+        log_pointers = (
+            "The runtime log has the full error on every pass: "
+            "event=worker_pool_queue_create_failed for this type."
+        )
     elif pool.get(POOL_FAILED_STARTS):
         happened = (
             "Workers of this type failed to start or stopped before they were ready. "
@@ -205,10 +215,14 @@ def _failed_start_text(details: dict[str, Any], pool: dict[str, Any]) -> tuple[s
         # nothing to wait on, it is tried again every pass.
         happened = f"The launcher refuses to start workers of this type: {reason}."
         why = "the launcher refuses every start of this type until the cause is fixed"
-    kind = start_reason_kind(pool.get(POOL_LAST_START_FAILURE) or details.get(EVIDENCE_REFUSED_BECAUSE))
+    basis = (
+        pool.get(POOL_LAST_START_FAILURE)
+        if details.get(EVIDENCE_HOURLY_LIMIT)
+        else details.get(EVIDENCE_REFUSED_BECAUSE)
+    )
     advice = (
         f"Neither a larger pool nor a higher start limit fixes this: {why}. Fix the "
-        f"failure: {_FIX_BY_KIND[kind]} " + _LOG_POINTERS
+        f"failure: {_FIX_BY_KIND[start_reason_kind(basis)]} " + log_pointers
     )
     return happened, advice
 

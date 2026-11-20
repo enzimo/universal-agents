@@ -26,7 +26,7 @@ _EXPLANATION = {
     "oldest_wait_seconds": "How long the oldest waiting task has waited.",
     "workers_running": "Workers of the type that are up (busy or free).",
     "workers_starting": "Workers the controller started that are not ready yet.",
-    "workers_unknown": "Starts whose process cannot be checked; they hold a slot until proven gone.",
+    "workers_unknown": "Starts whose process cannot be checked, hung starts among them; they hold a slot until proven gone. A hung start is also named in starts_hung for its first hour.",
     "workers_draining": "Workers asked to leave (the pool is above its size); they finish their work first.",
     "workers_waiting_out_provider_limit": "Workers whose model provider refused calls; they retry later and take no new work, and no workers are added meanwhile.",
     "pool_size": "effective: in force now; source: temporary, lasting (both set by you) or default (configuration); ceiling: the operator's maximum.",
@@ -36,7 +36,7 @@ _EXPLANATION = {
     "starts_ended_not_counted": "Starts since the last ready worker that ended for a reason that is not a failure of the type (the runtime stopped them, an edit ended them, or a schedule's own startup timeout ended them: schedule_startup_timed_out, which the schedule's owner should hear about). They still count toward the hourly start limit.",
     "last_start_end_not_counted": "Why the newest of those starts ended.",
     "queue_unavailable": "The type's shared queue on the NATS work stream cannot be created (the reason has the NATS code; 10026 means the stream has reached its consumer limit). No worker of the type can take tasks until it exists; from the second pass in a row it is a start_failed problem.",
-    "starts_hung": "Starts the runtime stopped, or cannot check, that have not ended for several minutes. The runtime no longer waits for them before the next start, but each still takes a pool slot until it ends or the runtime restarts.",
+    "starts_hung": "Starts the runtime stopped, or cannot check, that have not ended for several minutes. The runtime no longer waits for them before the next start, but each still takes a pool slot until it ends or the runtime restarts. Named here for an hour; after that only in workers_unknown.",
     "decision": "What the controller did on its last pass and why.",
     "open_problems": "Worker pool problems still open (capacity, provider_limited, start_failed); each gives you a review.",
 }

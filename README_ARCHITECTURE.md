@@ -322,8 +322,11 @@ each. They run in parallel on as many workers as the team allows:
   exactly one start and none while it is still starting. A start the launcher
   stopped, or cannot check, that has stayed unknown for over five minutes (or
   the start lease, when longer) is hung: it no longer holds the next start,
-  but it keeps its pool slot, and the pool view (`starts_hung`) and the
-  start_failed and capacity texts name it. Two failures in a row while tasks wait
+  but it keeps its pool slot, and for an hour the pool view (`starts_hung`) and
+  the start_failed and capacity texts name it; after that it shows only as
+  `workers_unknown`. A worker of the type that becomes ready clears the failed
+  starts before it: those that ended before it was ready, and those whose
+  start was made before its own. Two failures in a row while tasks wait
   open a `start_failed` review and an administrators' notice; both name the
   failure and say that a larger pool or a higher start limit does not help. A
   refusal by the hourly start limit opens it at once; with no failed start the
@@ -331,7 +334,15 @@ each. They run in parallel on as many workers as the team allows:
   launcher refusal made before a start is recorded (for example the type's
   definition cannot be read) opens it on the second refusal in a row (the
   controller counts them in memory) and its text names the refusal; such a
-  start is tried again every pass without a wait. Only a problem of failed starts ends
+  start is tried again every pass without a wait. A type whose shared queue
+  NATS refuses to create (for example 10026 at the work stream's consumer
+  limit) is shown in the pool view (`queue_unavailable`) and reported the same
+  way from the second pass; a timeout or a 503 "temporarily unavailable"
+  answer is only logged (`event=worker_pool_queue_create_failed`). The texts'
+  advice follows the kind of failure: the NATS server and stream limits for a
+  NATS refusal, the runtime log for a crash, what is slow at startup for a
+  timeout, the definition and denied types for a refusal code. A schedule's
+  blocked reason likewise keeps only known codes (`block_reason`). Only a problem of failed starts ends
   as soon as a worker of the type is ready; the other two end after
   `review_repeat_after_minutes` without being seen. Until
   2026-11-19 an accepted start counted as success at once. Workers that

@@ -97,7 +97,7 @@ The runtime gives you a `worker_pool_review_...` task when:
 |---|---|
 | `capacity` | A pool (or the team, scope `*`) reached about 95% of its limit while tasks waited. For small pools that is the limit itself. |
 | `provider_limited` | Tasks of a type keep hitting the model provider's limits (rate limit, quota, overload), or a worker waits one out while tasks wait. No workers are added meanwhile. |
-| `start_failed` | Two starts of a type in a row failed (crashed, timed out at startup, or were refused) while tasks waited; or the launcher refused two starts in a row before they were recorded (for example the type's definition cannot be read; tried again every pass); or, at once, the hourly start limit refused a start. The review names the failure; the evidence has `start_refused_because` and `pool.last_start_failure`. One failure alone only delays the next start. |
+| `start_failed` | Two starts of a type in a row failed (crashed, timed out at startup, or were refused) while tasks waited; or the launcher refused two starts in a row before they were recorded (for example the type's definition cannot be read; tried again every pass), or NATS refused on two passes in a row to create the type's shared queue (`queue_unavailable`, for example NATS 10026 at the stream's consumer limit); or, at once, the hourly start limit refused a start. The review names the failure; the evidence has `start_refused_because` and `pool.last_start_failure`. One failure alone only delays the next start. |
 
 Each review works for the team's maintenance owner (an administrator), so
 `notify_user` reaches them. Check `inspect_worker_pools`, then choose:
@@ -120,8 +120,12 @@ more refusals. Neither a pool size nor a higher start-rate limit fixes a
 try (`next_start_waits_seconds`) and tries one start at a time, and more
 starts only fail more often; when the launcher refuses every start, nothing
 starts until the cause is fixed. Read `start_refused_because` and
-`last_start_failure`, check the agent type's definition and the operator's
-denied types, and tell an administrator the failure and what to change. A
+`last_start_failure`, and follow the review's advice for the kind of failure:
+the NATS server and the work stream's limits for a NATS refusal (10026: the
+stream has reached its consumer limit), the runtime log for a crash, what is
+slow at startup for a timeout, and the agent type's definition and the
+operator's denied types for a refusal code. Tell an administrator the failure
+and what to change. A
 refusal by the hourly start limit after failed starts is a symptom; report the
 failure behind it. When the review says the hourly limit was reached and no
 start failed since a worker of the type was last ready, check why workers of
@@ -148,10 +152,11 @@ Do not delegate the waiting tasks again; they are still queued.
 | Tasks wait, `workers_running` 0, `decision` mentions a start problem | A worker cannot start; see the open `start_failed` problem and tell an administrator. |
 | `failed_starts_in_row` > 0 and `decision` says the next start waits | Workers of the type stop before they are ready. The runtime tries again after a growing wait; report `last_start_failure` to an administrator. |
 | `decision` says one more start is in progress | After failed starts the runtime tries one start at a time and waits for it to become ready or fail; a hung start (`starts_hung`) no longer holds the next one. |
-| `starts_hung` > 0 | Starts the runtime stopped, or cannot check, that have not ended for several minutes. They no longer hold the next start but still take a pool slot, so a larger pool does not help; tell an administrator to check the runtime log for those workers' threads. |
+| `starts_hung` > 0 | Starts the runtime stopped, or cannot check, that have not ended for several minutes. They no longer hold the next start but still take a pool slot, so a larger pool does not help; tell an administrator to check the runtime log for those workers' threads. After an hour such a start shows only as `workers_unknown`. |
+| `queue_unavailable` on a type | NATS refuses to create the type's shared queue (the reason has the NATS code; 10026: the work stream has reached its consumer limit). No worker of the type can take tasks; tell an administrator. The runtime log line is `event=worker_pool_queue_create_failed`. |
 | `starts_ended_not_counted` > 0 | Starts the runtime stopped (a restart), an edit ended, or a schedule's own startup timeout ended (`last_start_end_not_counted` `schedule_startup_timed_out`: the schedule's timeout is shorter than its type needs; tell the schedule's owner). They are not failures of the type and hold nothing back, but they count toward the hourly start limit. An older release's reason shows as no reason. |
 | Tasks wait, pool at its size, nobody free | Normal under load. Choose A, B or C. |
 | `workers_waiting_out_provider_limit` > 0 | The provider refuses calls; workers retry on their own after a growing wait. Choose C or D. |
-| `workers_unknown` > 0 | A start whose process cannot be checked holds a slot until it is proven gone; tell an administrator if it stays. |
+| `workers_unknown` > 0 | A start whose process cannot be checked, or a hung start older than an hour, holds a slot until it is proven gone; tell an administrator if it stays. |
 | A delegated task moved between workers several times | Its workers keep dying or losing their lease; look at the task history and the stuck-work notices, and report a repeating cause. |
 | A delegated task runs for hours | Check its worker with `inspect_delegated_work`; stop it with `cancel_delegated_task` if it is no longer needed. The runtime also tells the person about work without progress. |
