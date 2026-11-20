@@ -1099,21 +1099,8 @@ class AgentProcessHost:
             now = self.host.clock()
             # Above every earlier sequence for the key, also if the agent's id were ever used again.
             hosted.record_sequence = max(hosted.record_sequence + 1, int(now.timestamp() * 1000))
-            body: dict[str, Any] = {"team": self.team, "agent": str(hosted.agent.id), "agent_type": hosted.agent_type,
-                                    "session": hosted.session, "state": hosted.state,
-                                    "accepting_work": hosted.accepting_work,
-                                    "since": format_timestamp(hosted.since or now)}
-            if hosted.display_name:
-                body["display_name"] = hosted.display_name
-            if requests:
-                body["requests"] = list(requests)
-            if left_out:
-                self.logger.warning("An agent's record leaves out request ids the contract cannot carry or past its "
-                                    "limit. event=agent_record_requests_left_out runtime=%s agent=%s left_out=%s "
-                                    "limit=%s", self.profile.runtime, hosted.agent.id, len(left_out),
-                                    AGENT_RECORD_REQUESTS_MAX)
-                for item in left_out:  # they must not keep the next record from being written
-                    hosted.requests_seen.pop(item, None)
+            body = self._record_body(hosted, requests, now)
+            self._leave_out(hosted, left_out)
             key = self._record_key(str(hosted.agent.id))
             try:
                 document = self.host.records.signed("agent", key, body, sequence=hosted.record_sequence, issued_at=now,
@@ -1132,6 +1119,31 @@ class AgentProcessHost:
                 hosted.requests_seen.pop(item, None)
         if (hosted.state, hosted.accepting_work, hosted.session, self._record_requests(hosted)[0]) != current:
             self._record_soon(hosted)  # it changed while this one was written
+
+    def _record_body(self, hosted: _HostedAgent, requests: tuple[str, ...], now: datetime) -> dict[str, Any]:
+        """The agent record's body as the agent's state is now (contract: state/agent.schema.json)."""
+
+        body: dict[str, Any] = {"team": self.team, "agent": str(hosted.agent.id), "agent_type": hosted.agent_type,
+                                "session": hosted.session, "state": hosted.state,
+                                "accepting_work": hosted.accepting_work,
+                                "since": format_timestamp(hosted.since or now)}
+        if hosted.display_name:
+            body["display_name"] = hosted.display_name
+        if requests:
+            body["requests"] = list(requests)
+        return body
+
+    def _leave_out(self, hosted: _HostedAgent, left_out: tuple[str, ...]) -> None:
+        """Log request ids the record cannot carry and forget them, so they never keep a record from being written."""
+
+        if not left_out:
+            return
+        self.logger.warning("An agent's record leaves out request ids the contract cannot carry or past its "
+                            "limit. event=agent_record_requests_left_out runtime=%s agent=%s left_out=%s "
+                            "limit=%s", self.profile.runtime, hosted.agent.id, len(left_out),
+                            AGENT_RECORD_REQUESTS_MAX)
+        for item in left_out:
+            hosted.requests_seen.pop(item, None)
 
     def _record_failed(self, hosted: _HostedAgent) -> None:
         assert self.loop is not None

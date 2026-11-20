@@ -6335,11 +6335,13 @@ body.is-theme-customizing {
 }
 
 /* The line itself does not clip, so a working triangle's glow is never cut
-   off; its text cuts with an ellipsis (.thread-detail-text). */
+   off; its text cuts with an ellipsis (.thread-detail-text). The gap and the
+   triangles' overlap leave the longest waiting label about 5% to spare beside
+   six triangles, for fonts a little wider than the probe's (review C23). */
 .thread-detail {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   overflow: visible;
   color: var(--muted);
   font-size: 0.78rem;
@@ -6372,7 +6374,7 @@ body.is-theme-customizing {
 .trail-tri {
   width: 15px;
   height: 12px;
-  margin-right: -5px;
+  margin-right: -6px;
   overflow: visible;
   color: var(--tri-light);
 }

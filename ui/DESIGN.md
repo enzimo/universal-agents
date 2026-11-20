@@ -1855,16 +1855,62 @@ its history. Steps with linked requests cannot use this correction.
   ended and the person has not opened the thread yet, and the time since
   anything was last posted in it, cards included (now, 5m, 3h, 2d, 3w, 1y;
   the list is ordered by the same time, so it is not the snippet's time);
-  then what the thread waits on
-  (gold/Ember, at most about 28 characters so part 2's agent trail fits
-  before it, with the full sentence as its title) or the latest message as
-  "You: ..." or "<assistant name>: ...". The snippet is plain text: no
-  Markdown markers, inline code as written, never a system card or a slash
-  command. Ages move on once a minute in place.
-- A row's name for screen readers is its title, the reply dot in words
-  ("New reply", "Reply needs attention", "Replying"; the dot itself is
-  hidden from them), Woke, the age in words ("active 5 minutes ago") and the
-  second line. Each row's button carries `aria-keyshortcuts="Shift+F10
+  then the agent trail (below) and, after it, what the thread waits on
+  (gold/Ember, with the full sentence as its title), else who works on the
+  thread's request now, else the latest message as "You: ..." or
+  "<assistant name>: ...". The waiting reasons are short enough to fit
+  beside six triangles at the usual sidebar width: at 1280 by 880 the words
+  have 178 px there, and the longest reason, "Waiting for your answer",
+  measures 170 px in the probe's fonts, about 5% to spare for a slightly
+  wider system font ("Finish the setup page" replaced "Needs you to finish
+  setup", 180 px, review C21/C23). The snippet is plain text: no Markdown
+  markers, inline code as written, never a system card or a slash command.
+  Ages move on once a minute in place.
+- **Agent trail** (`agent_trail.mjs`; owner's request 2026-11-19, rule
+  2026-11-20): one small triangle per turn, oldest first, alternating up and
+  down and overlapping, before the second line's words. The person's turns
+  are grey (`#96a5af`), the team lead's gold (`#f6c84c`) and every other
+  agent type in the activity mesh's colour for it (`agentColor`). A turn is a
+  request that started work, then each agent type that worked on it, in the
+  order the gateway first learned of it (the team lead first). At most six
+  triangles, counting the ones working now; when the thread has older turns
+  the leftmost is drawn hollow with a dotted outline.
+  - The triangles of the agents working on the thread's current request
+    pulse their glow (1.4 s); the triangle's own colour never fades, so its
+    contrast holds through the pulse. Without motion (the system's reduced
+    motion or Interface Animation off) the glow stays steady, which is also
+    the working mark. A busy row (this page's reply wait or the server's
+    busy mark), or one the server says someone works on, always pulses
+    something: the current request's team-lead triangle, else a team-lead
+    triangle added at the end. Right after this page sends a new request
+    the row shows its turn and a pulsing team-lead triangle until the
+    server's trail catches up; guidance and slash commands add no turn.
+  - While someone works, the second line names them in words after the
+    trail, in the team lead's gold (`#6b5000` in the light theme, `#f6c84c`
+    in dark): "Web Research Agent working", "Team lead and Web Research
+    Agent working", cut with an ellipsis and the full "Working: ..." as the
+    line's title (owner-approved mockup, lead ruling on review C22). A
+    waiting reason wins over it. Measured worst pixel: 5.7:1 light, 4.5:1
+    or more dark.
+  - Colours keep at least 3:1 against every row background in both themes.
+    Each colour's lightness is moved within its own hue: resting triangles to
+    about 3.2:1 (a quieter look, like the mockup's half-strength triangles),
+    working ones to 4.5:1 or more. Dark colours are fitted to the brightest
+    dark row background (relative luminance 0.05; the raised row measures
+    0.03), light ones to the darkest light one (0.6; the pale backing over
+    the mesh measures 0.74 behind the trail). Measured in Chromium at the
+    worst pixel, normal, hovered, active and Needs you rows: 3.9:1 light,
+    4.0:1 dark (`tests/web_chat_agent_trail_probe.cjs`, which fails when a
+    background leaves the fitted range).
+  - The hover card's footer shows the same trail and the agent types that
+    worked in the thread, then the turn count ("Team lead, Web Research
+    Agent, Memory Review Agent · 12 turns").
+- A row's name for screen readers is its title, who works ("Working: team
+  lead, Web Research Agent") or else the unread-reply dot in words ("New
+  reply", "Reply needs attention"; the dot and the triangles themselves are
+  hidden from them, and so are the visible working words, which would say it
+  twice), Woke, the age in words ("active 5 minutes ago") and the second
+  line. Each row's button carries `aria-keyshortcuts="Shift+F10
   ContextMenu"` and a hidden description saying the row has a menu, because
   the menu is the only way to rename or delete; no `aria-haspopup`, since
   Enter opens the chat.
@@ -1933,17 +1979,14 @@ its history. Steps with linked requests cannot use this correction.
   something has arrived in them, as "Updates" and "Memory review". They used
   to show as two empty "New Chat" rows on a newly set-up Web Chat, and the
   first message went into the memory-review thread.
-- Thread rows show a compact active-reply indicator at the left of the row
-  while the agent is still replying.
-- The active-reply pulse must remain clearly visible after its thread loses the
-  active-row backdrop. Keep the pulse at 78% opacity or higher and use scale
-  plus a stronger blue halo to convey motion on an unfocused row.
-- The initiating browser request owns that active-reply indicator until its
-  terminal success or failure. Durable transcript delivery only merges
-  presentation rows; an accepted user row must not clear the indicator while
-  the request is still waiting for the agent or create an unread-reply dot.
+- Work in a thread shows in its agent trail (above), not in a dot: the
+  busy dot was removed (owner's request, 2026-11-19). The initiating browser
+  request owns its reply wait until its terminal success or failure. Durable
+  transcript delivery only merges presentation rows; an accepted user row
+  must not end the wait while the request is still waiting for the agent or
+  create an unread-reply dot.
 - Any unfocused thread with a fresh unread reply uses a green border and halo.
-  If that thread is still running, keep the blue pulsing dot so unread content
+  If that thread is still running, its trail keeps pulsing, so unread content
   and active execution remain distinct signals. Use a gold border and halo
   instead when the unread reply needs user attention.
 - Completed replies in unfocused threads use that same indicator slot as a

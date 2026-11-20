@@ -187,17 +187,19 @@ def decode_thread_trail(text: str | None) -> ThreadTrail:
         raise AgentTrailUnreadable("a thread trail has at most six entries and a true or false has_older")
     if not isinstance(raw_agents, list):
         raise AgentTrailUnreadable("a thread trail's agents must be a list")
-    entries = []
-    for item in raw_entries:
-        if not isinstance(item, dict) or item.get("by") not in (_BY_PERSON, _BY_AGENT):
-            raise AgentTrailUnreadable("each entry is the person's or an agent's")
-        if item["by"] == _BY_PERSON:
-            if set(item) != {"by"}:
-                raise AgentTrailUnreadable("a person's entry carries nothing else")
-            entries.append(PERSON)
-        else:
-            entries.append(TrailEntry(_agent({key: item[key] for key in item if key != "by"})))
-    return ThreadTrail(tuple(entries), has_older, tuple(_agent(item) for item in raw_agents))
+    return ThreadTrail(tuple(_entry(item) for item in raw_entries), has_older, tuple(_agent(item) for item in raw_agents))
+
+
+def _entry(item: Any) -> TrailEntry:
+    """One stored entry: the person's (nothing else in it) or an agent's."""
+
+    if not isinstance(item, dict) or item.get("by") not in (_BY_PERSON, _BY_AGENT):
+        raise AgentTrailUnreadable("each entry is the person's or an agent's")
+    if item["by"] == _BY_AGENT:
+        return TrailEntry(_agent({key: item[key] for key in item if key != "by"}))
+    if set(item) != {"by"}:
+        raise AgentTrailUnreadable("a person's entry carries nothing else")
+    return PERSON
 
 
 __all__ = [
