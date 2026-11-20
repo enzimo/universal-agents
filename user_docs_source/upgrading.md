@@ -124,8 +124,13 @@ supported, because it may not read what a newer one saved.
     in another folder, the folders it may show (from gateway records and
     held guidance, never from conversation records, which agents write) and
     what to do. Do not delete any of the files. They were not moved, so the
-    team cannot open them. The upgrade moves a file only with its gateway
-    record. For the files a gateway record names, move or mount the folder
+    team cannot open them. The upgrade moves a file only with the gateway's
+    record of receiving it. A gateway record of a copy of a file sent to a
+    person (kept in that person's `scratch/sent` folder, where their agents
+    can read it and old files are deleted), and any record in this
+    instance's `workspaces` or `state` folders, also stops the delete
+    command, but the error never shows or offers its folder. For the files
+    the gateway has a record of receiving, move or mount the folder
     back at the path the error names (a link does not work), set
     `upload_dir` to that path, delete
     `state/upgrades/adapter-host-files.json` and restart; that start moves
@@ -136,10 +141,11 @@ supported, because it may not read what a newer one saved.
     name the path the folder is at, and reports the others again. A file
     the upgrade refused at the other path keeps records naming that path,
     so after the move back the error names that path for it: fix the file
-    (see "A file it refuses" above), then do the same. Files only a
-    conversation record or held guidance names cannot be moved at any path,
-    and the error says so: keep them, and the people who sent them can send
-    them again. The error is logged once and its count stays in the marker
+    (see "A file it refuses" above), then do the same. Files the gateway
+    has no record of receiving (only a conversation record, held guidance or
+    a copy sent to a person names them) cannot be moved at any path, and the
+    error says so: keep them, and the people who sent them can send them
+    again. The error is logged once and its count stays in the marker
     (`named_elsewhere`); to see the error again, delete
     `state/upgrades/adapter-host-files.json` and restart.
   - **Files named in another folder that cannot be moved** stay in the

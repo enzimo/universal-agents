@@ -2689,8 +2689,10 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
 def _print_folder_moved(left: int, elsewhere: NamedElsewhere) -> None:
     """The operator's line for files records name in another folder (``NamedElsewhere``); the log has the folder.
 
-    Only a file a gateway record names can move, so the steps are given for
-    those alone (C05 of F7 of PR #154's review). No folder is printed: the
+    Only a file a gateway record of receiving it names can move, so the
+    steps are given for those alone (C05 of F7 of PR #154's review); a
+    gateway record of a copy sent to a person is not one (SEC-1 of PR #168's
+    review). No folder is printed: the
     log's steps name it. A run moves only the files whose gateway records
     name the path the folder is at, so with several such folders this says
     to repeat the steps for each (C08).
@@ -2706,15 +2708,18 @@ def _print_folder_moved(left: int, elsewhere: NamedElsewhere) -> None:
         paths = len(elsewhere.gateway_folders)
         where = f"one of the {paths} paths the log's steps name" if paths > 1 else "the path the log's steps name"
         text += (
-            f" To move the {elsewhere.by_gateway} a gateway record names: move or mount the folder back at {where} "
-            "(a link does not work), set upload_dir to that path, delete the marker and restart."
+            f" To move the {elsewhere.by_gateway} the gateway has a record of receiving: move or mount the folder "
+            f"back at {where} (a link does not work), set upload_dir to that path, delete the marker and restart."
         )
         if paths > 1:
             text += " That run moves only the files whose gateway records name that path, so do this for each path."
         if elsewhere.without_gateway_record:
-            text += f" The other {elsewhere.without_gateway_record} have no gateway record, so they cannot be moved: {keep}"
+            text += (
+                f" For the other {elsewhere.without_gateway_record} the gateway has no record of receiving them, so "
+                f"they cannot be moved: {keep}"
+            )
     else:
-        text += f" No gateway record names them, so they cannot be moved: {keep}"
+        text += f" The gateway has no record of receiving them, so they cannot be moved: {keep}"
     print(f"{text} See event=adapter_host_files_folder_moved in the log.")
 
 

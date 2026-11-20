@@ -4952,10 +4952,26 @@ the desktop app never offers an older version.
   the error says to keep them. Agent processes write conversation turns, so
   a turn's folder may withhold the command but is never kept, logged or
   shown; the error names only folders from gateway records and held
-  guidance copies, and never a file. A record in another folder whose name
-  is not listed changes nothing: its file is not here and it names none of
-  the listed files, so withholding the command for it would withhold it on
-  every instance where an earlier `upload_dir`'s records linger. When no
+  guidance copies, and never a file. The steps and the shown folders use
+  only records of files people sent in (`_Step._never_named`, SEC-1 of the
+  review of PR #168): the gateway also records the copies of files it sends
+  to people, staged in the person's `scratch/sent/outgoing_<id>/` under a
+  name the agent chose and recorded with a `web_attachment_` id, so such a
+  record can carry a leftover's generated name. Moving the transfer folder
+  there would put every person's leftover files where agents working for
+  that one person read them and scratch retention deletes them, and a run
+  there would move a copy sent back unchanged under the copy's record. Such
+  a record is told from a `scratch/sent` folder anywhere in its path (which
+  holds whatever the instance root was then, and a moved root is the
+  likeliest cause of a moved folder), from the id prefix
+  (`SENT_FILE_ATTACHMENT_ID_PREFIX`, shared with the gateway's id port), or,
+  as a backstop, from a folder under this instance's `workspaces/` or
+  `state/`; it withholds the command like a turn, counts among the files no
+  run can move (`by_sent_copies`) and is never named. A record in another
+  folder whose name is not listed changes nothing: its file is not here and
+  it names none of the listed files, so withholding the command for it
+  would withhold it on every instance where an earlier `upload_dir`'s
+  records linger. When no
   conversation turn, held guidance copy or gateway record names a listed
   file in another folder (all of them cleaned up, for example), the step
   cannot tell, so the warning keeps its sentence before the command: if the

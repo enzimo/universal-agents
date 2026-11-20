@@ -18,6 +18,7 @@ from access_control.people import (
     status_change_refusal,
 )
 from assistant_gateway.application.gateway_application import GatewayDeliveryEvent
+from assistant_gateway.domain.delivery import SENT_FILE_ATTACHMENT_ID_PREFIX
 from id_generation import new_id
 
 OutputSink = Callable[[str], Awaitable[None] | None]
@@ -55,7 +56,7 @@ class UuidGatewayIdGenerator:
         return new_id("web_msg")
 
     def new_transcript_attachment_id(self) -> str:
-        return new_id("web_attachment")
+        return new_id(SENT_FILE_ATTACHMENT_ID_PREFIX)
 
 
 class MembershipRoleIdentityAuthorizer:
