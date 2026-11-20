@@ -6335,9 +6335,61 @@ body.is-theme-customizing {
 }
 
 .thread-detail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 560;
+}
+
+.thread-detail-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The agent trail (agent_trail.mjs): one small triangle per turn, alternating
+   up and down and overlapping like the approved mockup, before the snippet.
+   Each triangle carries its colours for both themes (--tri-light,
+   --tri-dark), already moved to at least 3:1 against the row: resting ones to
+   about 3.2:1, working ones to 4.5:1 or more with a glow. The leftmost is
+   hollow and dotted when older turns are hidden. */
+.thread-trail {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 5px 0 1px;
+}
+
+.trail-tri {
+  width: 15px;
+  height: 12px;
+  margin-right: -5px;
+  overflow: visible;
+  color: var(--tri-light);
+}
+
+:root[data-color-mode="dark"] .trail-tri {
+  color: var(--tri-dark);
+}
+
+.trail-tri polygon {
+  fill: currentColor;
+}
+
+.trail-tri.is-hollow polygon {
+  fill: none;
+  stroke: currentColor;
+  stroke-dasharray: 2 1.6;
+  stroke-width: 1.5;
+}
+
+/* Working: a steady glow, which is also the mark without motion. */
+.trail-tri.is-working {
+  filter: drop-shadow(0 0 2px currentColor);
 }
 
 .thread-detail.is-waiting {
@@ -6360,17 +6412,8 @@ body.is-theme-customizing {
   pointer-events: none;
 }
 
-.thread-row.is-pending .thread-active-indicator {
-  opacity: 1;
-}
-
-.thread-row.is-pending:not(.is-active) .thread-active-indicator::before {
-  box-shadow:
-    0 0 0 4px rgba(2, 132, 199, 0.24),
-    0 0 14px rgba(2, 132, 199, 0.52);
-}
-
-.thread-row.has-unread:not(.is-pending) .thread-active-indicator {
+/* The dot shows only an unread reply; work shows in the agent trail. */
+.thread-row.has-unread .thread-active-indicator {
   opacity: 1;
 }
 
@@ -6381,10 +6424,9 @@ body.is-theme-customizing {
   border-radius: 999px;
   background: var(--ocean-mid);
   box-shadow: 0 0 0 4px rgba(2, 132, 199, 0.14);
-  animation: thread-reply-pulse 1.15s ease-in-out infinite;
 }
 
-.thread-row.has-unread:not(.is-pending) .thread-active-indicator::before {
+.thread-row.has-unread .thread-active-indicator::before {
   width: 7px;
   height: 7px;
   background: var(--green-bright);
@@ -6396,24 +6438,11 @@ body.is-theme-customizing {
   transform: none;
 }
 
-.thread-row.has-attention:not(.is-pending) .thread-active-indicator::before {
+.thread-row.has-attention .thread-active-indicator::before {
   background: var(--yellow-bright);
   box-shadow:
     0 0 0 3px rgba(255, 214, 10, 0.28),
     0 0 14px rgba(255, 214, 10, 0.52);
-}
-
-@keyframes thread-reply-pulse {
-  0%,
-  100% {
-    opacity: 0.78;
-    transform: scale(0.90);
-  }
-
-  50% {
-    opacity: 1;
-    transform: scale(1.05);
-  }
 }
 
 /* The hover preview (chat_thread_preview.mjs): the thread's last turns beside
@@ -6466,6 +6495,19 @@ body.is-theme-customizing {
 .thread-preview-turn {
   display: grid;
   gap: 2px;
+}
+
+/* The card's footer: the thread's agent trail, then who worked in it and how
+   many turns it has. */
+.thread-preview-footer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.thread-preview-footer .thread-preview-count {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .thread-preview-who {
@@ -6749,13 +6791,6 @@ body.is-theme-customizing {
   stroke-width: 2;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .thread-active-indicator::before {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
-}
 
 .chat-main {
   display: grid;
@@ -9365,6 +9400,25 @@ body.is-theme-customizing {
    --ua-motion-accent comes from appearance.js: the theme's gold tint, made
    light enough to read as a line, in dark mode, and the ocean accent in
    light mode. */
+
+/* The agent trail's working triangles pulse their glow (agent_trail.mjs);
+   their own colour never fades, so they keep their contrast through it. */
+@media (prefers-reduced-motion: no-preference) {
+  :root[data-ui-motion="on"] .trail-tri.is-working {
+    animation: trail-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes trail-pulse {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 1px currentColor);
+  }
+
+  50% {
+    filter: drop-shadow(0 0 5px currentColor);
+  }
+}
 
 /* Team activity mesh, between the chat list and the account row. */
 .chat-activity {

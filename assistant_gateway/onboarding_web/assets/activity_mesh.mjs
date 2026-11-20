@@ -17,7 +17,8 @@
 const FADE_MS = 700;
 const FRAME_INTERVAL_MS = 50;
 const BUSY_STATUS = "busy";
-const TEAM_LEAD_COLOR = "#f6c84c";
+// The team lead's gold, also its agent trail colour (agent_trail.mjs).
+export const TEAM_LEAD_COLOR = "#f6c84c";
 // The calm mesh's color where glass_mesh.js is not loaded.
 const IDLE_RGB = [150, 165, 175];
 

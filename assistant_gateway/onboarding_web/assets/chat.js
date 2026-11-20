@@ -34,6 +34,7 @@ import {
 } from "./chat_thread_list.mjs";
 import { THREAD_MENU_ACTION, attachThreadMenuTriggers, createThreadMenu } from "./chat_thread_menu.mjs";
 import { createThreadPreview } from "./chat_thread_preview.mjs";
+import { renderTrail, trailKey, trailView, workingLabel } from "./agent_trail.mjs";
 import { THREAD_CHANGE_DONE, TRY_AGAIN, createThreadListStatus } from "./chat_thread_status.mjs";
 
 function mountPage() {
@@ -270,6 +271,8 @@ shellState.threadPreview = createThreadPreview({
     var thread = threadForSession(sessionKey);
     return Boolean(thread) && thread.id !== sharedState.activeThreadId && !shellState.threadMenu.isOpen();
   },
+  // The footer's trail pulses like the row's (threadTrailView).
+  trailFor: thread => threadTrailView(thread),
 });
 // Right-click, long press, the context-menu key or Shift+F10 on a row open its
 // menu; tracked once for the whole list so a redraw cannot orphan a press.
@@ -900,6 +903,13 @@ function threadFromSeed(seed) {
       lastMessage: seed.lastMessage || null,
       lastActivityAt: Number(seed.lastActivityAt || 0),
       lastSequence: Number(seed.lastSequence || 0),
+      // The agent trail (agent_trail.mjs): the server's trail and who works on
+      // the thread's request now (every list and live read), and the trail as
+      // it was when this page sent its message, so the row can show the new
+      // turn until the server's trail changes (plan review C10).
+      trail: seed.trail || null,
+      working: [],
+      trailAtSend: null,
       // A clear_woke for its Woke mark was sent and the list has not caught up.
       restoreRequested: false,
       // Whether this page has the server's row for the thread in this sign-in.
@@ -984,9 +994,24 @@ function setThreadPending(thread, isPending) {
   }
 
 // pendingReply is this page's own wait for a reply it sent; serverBusy is the
-// server's view, so pages on other devices show the same busy dot.
+// server's view, so pages on other devices see the same work. A busy row
+// always pulses at least one triangle of its agent trail.
 function threadIsBusy(thread) {
     return Boolean(thread && (thread.pendingReply || thread.serverBusy));
+  }
+
+// The row's agent trail: its triangles, which pulse, and who works in words.
+function threadTrailView(thread) {
+    var sentBeforeTrail = Boolean(thread.pendingReply && thread.trailAtSend !== null
+      && thread.trailAtSend === trailKey(thread));
+    return trailView(thread, { busy: threadIsBusy(thread), sentBeforeTrail: sentBeforeTrail });
+  }
+
+// Who works on each listed thread now, as one comparable string per thread.
+function workingKey(working) {
+    return JSON.stringify((Array.isArray(working) ? working : []).map(function (agent) {
+      return [agent.agent_type, Boolean(agent.lead), agent.name];
+    }));
   }
 
 // Live thread-list state rides on every event page because renames, archives,
@@ -997,9 +1022,18 @@ function applyThreadStates(payload) {
     }
     var busySessions = new Set(Array.isArray(payload.busy_session_keys) ? payload.busy_session_keys : []);
     var openSessions = new Set(Array.isArray(payload.open_request_session_keys) ? payload.open_request_session_keys : []);
+    var workingSessions = new Map((Array.isArray(payload.working) ? payload.working : []).map(function (item) {
+      return [item.session_key, Array.isArray(item.agents) ? item.agents : []];
+    }));
     var busyChanged = false;
     var openChanged = false;
     sharedState.threads.forEach(function (thread) {
+      // Who works now changes the row's pulsing triangles without a reload.
+      var working = workingSessions.get(thread.sessionKey) || [];
+      if (workingKey(thread.working) !== workingKey(working)) {
+        thread.working = working;
+        busyChanged = true;
+      }
       var isBusy = busySessions.has(thread.sessionKey);
       if (Boolean(thread.serverBusy) !== isBusy) {
         thread.serverBusy = isBusy;
@@ -1106,6 +1140,9 @@ function startTerminalReplyWait(thread) {
     if (!thread) {
       return;
     }
+    if (pendingReplyCount(thread) === 0) {
+      thread.trailAtSend = trailKey(thread);
+    }
     thread.pendingReplyCount = pendingReplyCount(thread) + 1;
     setThreadPending(thread, true);
   }
@@ -1115,6 +1152,9 @@ function finishTerminalReplyWait(thread) {
       return;
     }
     thread.pendingReplyCount = Math.max(0, pendingReplyCount(thread) - 1);
+    if (thread.pendingReplyCount === 0) {
+      thread.trailAtSend = null;
+    }
     setThreadPending(thread, thread.pendingReplyCount > 0);
   }
 
@@ -1886,10 +1926,11 @@ function renderThreads() {
   }
 
 // One two-line row: the title, a Woke mark and the time since anything was
-// last posted, then what the thread waits on or its latest message. Rename
-// and Delete live in the row's menu; while renaming, the row shows the name
-// field with Save and Cancel. Its name for screen readers says the same in
-// words, with the reply marks the dot shows, and that the row has a menu
+// last posted, then the agent trail (agent_trail.mjs) and what the thread
+// waits on or its latest message. Rename and Delete live in the row's menu;
+// while renaming, the row shows the name field with Save and Cancel. Its name
+// for screen readers says the same in words: who works now ("Working: team
+// lead") or the reply marks the dot shows, and that the row has a menu
 // (review F9, F12, F18).
 function threadRow(thread) {
     var renaming = thread.id === sharedState.editingThreadId;
@@ -1897,7 +1938,6 @@ function threadRow(thread) {
     row.className = "thread-row"
       + (thread.id === sharedState.activeThreadId ? " is-active" : "")
       + (renaming ? " is-renaming" : "")
-      + (threadIsBusy(thread) ? " is-pending" : "")
       + (thread.hasUnreadReply ? " has-unread" : "")
       + (thread.hasUnreadReply && thread.unreadReplyLevel === "attention" ? " has-attention" : "")
       + (thread.listState === LIST_STATE.WOKE ? " is-woke" : "");
@@ -1937,10 +1977,16 @@ function threadRow(thread) {
       titleLine.appendChild(ageWords);
     }
     button.appendChild(titleLine);
+    // Line 2: the agent trail, then what the thread waits on or its latest message.
     var detail = threadDetail(thread, sharedState.assistantName);
-    if (detail) {
-      var detailLine = uiElement("span", "thread-line thread-detail" + (detail.kind === "waiting" ? " is-waiting" : ""), detail.text);
-      if (detail.description) detailLine.title = detail.description;
+    var trail = threadTrailView(thread);
+    if (detail || trail.triangles.length) {
+      var detailLine = uiElement("span", "thread-line thread-detail" + (detail && detail.kind === "waiting" ? " is-waiting" : ""));
+      if (trail.triangles.length) detailLine.appendChild(renderTrail(document, trail));
+      if (detail) {
+        detailLine.appendChild(uiElement("span", "thread-detail-text", detail.text));
+        if (detail.description) detailLine.title = detail.description;
+      }
       button.appendChild(detailLine);
     }
     // The full title shows on keyboard focus; mouse users get the hover
@@ -2031,10 +2077,12 @@ function threadActivityIndicator() {
     return indicator;
   }
 
-// The reply dot in words, or "" when the row shows none.
+// Who works on the thread in words ("Working: team lead"), else the reply
+// dot in words, or "" when the row shows neither.
 function threadReplyMark(thread) {
-    if (threadIsBusy(thread)) {
-      return "Replying";
+    var working = workingLabel(threadTrailView(thread));
+    if (working) {
+      return working;
     }
     if (thread.hasUnreadReply && thread.unreadReplyLevel === "attention") {
       return "Reply needs attention";
@@ -2258,6 +2306,8 @@ function applyServerThreadRow(thread, session) {
     thread.listState = String(session.list_state || "");
     thread.needsYou = String(session.needs_you || "");
     thread.snoozedUntil = String(session.snoozed_until || "");
+    thread.trail = session.trail || null;
+    thread.working = Array.isArray(session.working) ? session.working : [];
     if (thread.listState !== LIST_STATE.WOKE) {
       thread.restoreRequested = false;
     }

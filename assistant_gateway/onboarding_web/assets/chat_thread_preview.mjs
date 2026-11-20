@@ -1,7 +1,9 @@
 // The thread list's hover preview: about 400 ms after a mouse rests on a row,
 // a small card shows the thread's title in full, when anything was last
 // posted, its last four turns (two lines each, with who wrote them and when)
-// and how many turns it has. Escape closes it.
+// and a footer: the thread's agent trail, the agent types that worked in it
+// and how many turns it has ("Team lead, Web Research Agent · 12 turns").
+// Escape closes it.
 //
 // It reads the existing history route with a small page and asks for the turn
 // count (`turn_count=1`), and it caches each thread's card until the thread's
@@ -10,6 +12,7 @@
 // Touch screens never get it: a long press there opens the menu instead.
 
 import { ATTACHMENT_SNIPPET, formatThreadAge, isOrdinaryMessage, plainSnippet } from "./chat_thread_list.mjs";
+import { renderTrail, trailAgentNames, trailView } from "./agent_trail.mjs";
 
 export const PREVIEW_DELAY_MS = 400;
 export const PREVIEW_TURNS = 4;
@@ -35,7 +38,9 @@ function attachmentName(message) {
 
 // `canPreview(sessionKey)` says whether a card may show now: never for the
 // chat that is open beside it, and not while the thread menu is open.
-export function createThreadPreview({ document, window, lifecycle, requestClient, list, threadFor, assistantName, canPreview = () => true, now = () => Date.now() }) {
+// `trailFor(thread)` is the row's trail view (chat.js knows whether the row is
+// busy), so the footer's triangles match the row's.
+export function createThreadPreview({ document, window, lifecycle, requestClient, list, threadFor, assistantName, canPreview = () => true, now = () => Date.now(), trailFor = thread => trailView(thread) }) {
   const cache = new Map(); // sessionKey -> { sequence, turns, turnCount }
   let hovered = "";
   // A row just pressed is not previewed again until the pointer leaves it:
@@ -148,10 +153,21 @@ export function createThreadPreview({ document, window, lifecycle, requestClient
         item.appendChild(element("span", "thread-preview-text", turn.text));
         card.appendChild(item);
       });
-      card.appendChild(element("p", "thread-preview-count", content.turnCount + (content.turnCount === 1 ? " turn" : " turns")));
+      card.appendChild(previewFooter(thread, content.turnCount));
     }
     document.body.appendChild(card);
     place();
+  }
+
+  // The footer: the thread's trail, who worked in it and how many turns it has.
+  function previewFooter(thread, turnCount) {
+    const footer = element("div", "thread-preview-footer");
+    const view = trailFor(thread);
+    if (view.triangles.length) footer.appendChild(renderTrail(document, view));
+    const names = trailAgentNames(thread);
+    const turns = turnCount + (turnCount === 1 ? " turn" : " turns");
+    footer.appendChild(element("p", "thread-preview-count", names ? names + " · " + turns : turns));
+    return footer;
   }
 
   function place() {
