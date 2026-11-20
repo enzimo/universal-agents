@@ -46,6 +46,7 @@ from assistant_gateway.runtime_config import load_runtime_config_file  # noqa: E
 from custom_transport.nats_consumer_reconciler import (  # noqa: E402
     ConsumerReconciliationResult,
     NatsConsumerReconciler,
+    configured_agent_ids,
 )
 from custom_transport.subjects import NatsSubjectMapper  # noqa: E402
 from default_values import TRANSPORT_DEFAULTS  # noqa: E402
@@ -154,10 +155,7 @@ async def reconcile_nats_consumers(
         or [config.get("transport.nats_url", TRANSPORT_DEFAULTS.nats_url.value)]
     )
     team_id = resolve_reconciliation_team_id(config)
-    configured_stable_id = str(config.get("agent.agent_id") or "").strip()
-    protected_ids = list(stable_agent_ids)
-    if configured_stable_id:
-        protected_ids.append(configured_stable_id)
+    protected_ids = [*stable_agent_ids, *configured_agent_ids(config)]
 
     try:
         import nats

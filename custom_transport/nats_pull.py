@@ -47,9 +47,11 @@ from typing import Any, Awaitable, Callable, Optional
 from custom_transport.base import FetchPolicy
 from custom_transport.dead_letters import REASON_HANDLER_FAILED
 
-# The metadata schema of consumers this release creates. Consumers of the
-# push-delivery release carried "consumer-lifecycle-v1".
+# The metadata schema of consumers this release creates.
 CONSUMER_METADATA_SCHEMA = "consumer-lifecycle-v2"
+# The schema of consumers the push-delivery releases created (until 2026-10-05):
+# push consumers with the same ownership metadata, names and subjects.
+PUSH_CONSUMER_METADATA_SCHEMA = "consumer-lifecycle-v1"
 
 # Worker queues are acknowledged at admission, seconds after a worker takes a
 # task, so a worker that dies before admitting it returns the task to the queue

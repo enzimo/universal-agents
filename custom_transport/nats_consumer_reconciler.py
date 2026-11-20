@@ -9,12 +9,36 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from custom_transport.base import AGENT_CONSUMER_ROLES, AGENT_CONTROL_ROLE, AGENT_DIRECT_ROLE
-from custom_transport.nats_consumer_state import consumer_listening_state
-from custom_transport.nats_pull import CONSUMER_METADATA_SCHEMA
+from custom_transport.nats_consumer_state import consumer_has_open_request, consumer_listening_state
+from custom_transport.nats_pull import CONSUMER_METADATA_SCHEMA, PUSH_CONSUMER_METADATA_SCHEMA
 from custom_transport.subjects import NatsSubjectMapper
 
 
 GENERATED_AGENT_ID_PATTERN = r"agent_id_[0-9a-f]{12}"
+
+# The schemas an agent's own mailbox and control consumers may carry. From
+# 2026-09-13, when a started worker's id began to be set by ``spawn_agent``,
+# until pull delivery on 2026-10-05, every started worker got lasting push
+# consumers with the push schema and the same ownership metadata, names and
+# filter subjects as today's. An old consumer is replaced only when one with
+# its name is created again, which never happens for a gone worker, so teams
+# that ran those releases can still hold them (checked in the history before
+# the repository restart of 2026-10-15).
+AGENT_CONSUMER_SCHEMAS = frozenset({CONSUMER_METADATA_SCHEMA, PUSH_CONSUMER_METADATA_SCHEMA})
+# The one setting that gives an agent a lasting id (``strands_main``; the
+# supervisor never passes ``--agent-id``).
+CONFIGURED_AGENT_ID_SETTING = "agent.agent_id"
+
+
+def configured_agent_ids(config: Any) -> frozenset[str]:
+    """Agent ids set in a runtime configuration (anything with ``get(path)``).
+
+    Their mailbox and control consumers are lasting routes that must survive
+    every process, so the team lead's cleanup and the offline script keep them.
+    """
+
+    configured = str(config.get(CONFIGURED_AGENT_ID_SETTING) or "").strip()
+    return frozenset({configured}) if configured else frozenset()
 
 
 @dataclass(frozen=True)
@@ -28,6 +52,10 @@ class AgentConsumer:
     consumer_scope: str
     num_pending: int | None
     num_ack_pending: int | None
+    # ``ua.schema``: this release's, or the push-delivery releases'.
+    schema: str
+    # A receiver has a request open right now (``consumer_has_open_request``).
+    asking: bool
 
 
 @dataclass(frozen=True)
@@ -331,10 +359,12 @@ class NatsConsumerReconciler:
     async def agent_consumers(self) -> tuple[AgentConsumer, ...]:
         """Every agent's mailbox and control consumer of this team on the work stream.
 
-        Lasting and process-owned ones alike, read from the consumers'
-        ownership metadata and checked against the names and subjects the agent
-        would use, so nothing else on the stream is ever listed. Whether an
-        owner is gone is not decided here (``custom_agents.worker_consumer_cleanup``).
+        Lasting and process-owned ones alike, of this release and of the
+        push-delivery releases (``AGENT_CONSUMER_SCHEMAS``), read from the
+        consumers' ownership metadata and checked against the names and subjects
+        the agent would use, so nothing else on the stream is ever listed.
+        Whether an owner is gone is not decided here
+        (``custom_agents.worker_consumer_cleanup``).
         """
 
         stream_name = self._mapper.work_stream_name()
@@ -342,9 +372,10 @@ class NatsConsumerReconciler:
         for info in await self._list_consumers(stream_name):
             config = getattr(info, "config", None)
             metadata = dict(getattr(config, "metadata", None) or {})
+            schema = str(metadata.get("ua.schema") or "")
             if (
                 metadata.get("ua.managed") != "true"
-                or metadata.get("ua.schema") != CONSUMER_METADATA_SCHEMA
+                or schema not in AGENT_CONSUMER_SCHEMAS
                 or metadata.get("ua.team_id") != self._mapper.team_id
             ):
                 continue
@@ -368,6 +399,8 @@ class NatsConsumerReconciler:
                     consumer_scope=str(metadata.get("ua.consumer_scope") or ""),
                     num_pending=self._optional_int(getattr(info, "num_pending", None)),
                     num_ack_pending=self._optional_int(getattr(info, "num_ack_pending", None)),
+                    schema=schema,
+                    asking=consumer_has_open_request(info),
                 )
             )
         return tuple(found)
@@ -394,12 +427,13 @@ class NatsConsumerReconciler:
             self._logger.info(
                 "Deleted a gone agent's NATS consumer. "
                 "event=nats_agent_consumer_deleted stream_name=%s consumer_name=%s "
-                "consumer_role=%s consumer_scope=%s owner_agent_id=%s num_pending=%s "
+                "consumer_role=%s consumer_scope=%s schema=%s owner_agent_id=%s num_pending=%s "
                 "num_ack_pending=%s reason=%s",
                 consumer.stream_name,
                 consumer.consumer_name,
                 consumer.consumer_role,
                 consumer.consumer_scope,
+                consumer.schema,
                 consumer.owner_agent_id,
                 consumer.num_pending,
                 consumer.num_ack_pending,
