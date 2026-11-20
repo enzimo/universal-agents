@@ -1136,12 +1136,21 @@ function saveParallelSetting(thread, value) {
     });
   }
 
-function startTerminalReplyWait(thread) {
+// Whether a message sent now starts a new request, which adds a turn to the
+// agent trail: not a slash command, and not guidance for a request already
+// open, from this page or another (plan review C18).
+function sendStartsRequest(thread, content) {
+    return String(content || "").trim().charAt(0) !== "/" && !threadRequestOpen(thread);
+  }
+
+// `startsRequest`: the message starts a new request, so the row shows its
+// turn until the server's trail changes (agent_trail.mjs sentBeforeTrail).
+function startTerminalReplyWait(thread, startsRequest) {
     if (!thread) {
       return;
     }
     if (pendingReplyCount(thread) === 0) {
-      thread.trailAtSend = trailKey(thread);
+      thread.trailAtSend = startsRequest ? trailKey(thread) : null;
     }
     thread.pendingReplyCount = pendingReplyCount(thread) + 1;
     setThreadPending(thread, true);
@@ -3144,8 +3153,9 @@ function sendMessage(content, options) {
     shellState.deliveryTracker.watch(clientRequestId);
     var wasWaitingForReply = Boolean(thread.pendingReply || pendingReplyCount(thread) > 0);
     var startsTerminalReplyWait = !wasWaitingForReply;
+    var startsRequest = sendStartsRequest(thread, content);
     if (startsTerminalReplyWait) {
-      startTerminalReplyWait(thread);
+      startTerminalReplyWait(thread, startsRequest);
     } else {
       setThreadPending(thread, true);
     }

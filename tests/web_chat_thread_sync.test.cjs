@@ -862,3 +862,29 @@ test("a change that did not get through offers Retry for the same change; a refu
   assert.equal(errors[1].message, "\u201cRenew the certificate\u201d was not moved. Thread not found.");
   assert.equal(errors[1].retry, null, "repeating a refusal cannot help");
 });
+
+test("guidance and slash commands add no turn: the worker keeps pulsing (C18)", () => {
+  const sandbox = {};
+  loadFunctions(sandbox, ["sendStartsRequest", "threadRequestOpen", "threadIsBusy", "pendingReplyCount",
+    "startTerminalReplyWait", "setThreadPending"]);
+  sandbox.renderParallelSwitch = () => {};
+  const idle = { trail: TRAIL, working: [], pendingReplyCount: 0 };
+  assert.equal(sandbox.sendStartsRequest(idle, "Compare them again"), true);
+  assert.equal(sandbox.sendStartsRequest(idle, "  /status"), false, "a slash command");
+  assert.equal(sandbox.sendStartsRequest({ ...idle, serverRequestOpen: true }, "Also check prices"), false,
+    "guidance for a request another page started");
+  assert.equal(sandbox.sendStartsRequest({ ...idle, serverBusy: true }, "Also check prices"), false);
+  // Guidance from a page that was not waiting: the wait starts, but no turn is added.
+  const guided = { ...idle, serverRequestOpen: true,
+    working: [{ agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }] };
+  sandbox.startTerminalReplyWait(guided, sandbox.sendStartsRequest(guided, "Also check prices"));
+  assert.equal(guided.trailAtSend, null);
+  const row = trailRow(guided);
+  assert.deepEqual(row.triangles.map(svg => svg.getAttribute("data-who")), ["person", "lead", "agent"]);
+  assert.deepEqual(row.pulsing, ["agent"]);
+  assert.equal(row.said, "Working: Web Research Agent");
+  // A new request records the trail it started from.
+  const fresh = { ...idle };
+  sandbox.startTerminalReplyWait(fresh, sandbox.sendStartsRequest(fresh, "Compare them again"));
+  assert.equal(fresh.trailAtSend, agentTrail.trailKey(fresh));
+});

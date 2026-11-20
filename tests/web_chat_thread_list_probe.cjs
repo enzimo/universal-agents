@@ -189,7 +189,8 @@ function inView(page) {
     }));
     assert.ok(card.turns > 0 && card.turns <= 4, JSON.stringify(card));
     assert.ok(card.lines.every(lines => lines <= 2), JSON.stringify(card));
-    assert.equal(card.count, "4 turns");
+    // The footer names who worked in the thread before the count (agent trail, A7).
+    assert.equal(card.count, "Team lead, Web Research Agent, Memory Review Agent, Ledger Keeper · 4 turns");
     await wide.page.screenshot({ path: path.join(shots, "thread-hover.png") });
     // F7: Escape closes the card while the mouse stays on the row, and it does not come back.
     await wide.page.keyboard.press("Escape");

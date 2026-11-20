@@ -1060,8 +1060,8 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             "messages": messages[start:],
             "next_cursor": self._preview_event_cursor(),
             "has_more": False,
-            "threads_revision": self._preview_threads().revision(datetime.now(timezone.utc)),
-            "busy_session_keys": [],
+            # The thread states the gateway sends: revision, busy marks and who works now (agent trail).
+            **self._preview_threads().live_states(datetime.now(timezone.utc)),
             "team_activity": {"members": self._preview_members()},
             "transient_actions": [],
         }

@@ -105,18 +105,31 @@ function hslHex(hue, saturation, lightness) {
   return "#" + rgb.map(value => Math.round((value + m) * 255).toString(16).padStart(2, "0")).join("");
 }
 
-test("every hue the mesh can give and every fixed colour keeps 3:1 resting and 4.5:1 working in both themes (C04)", () => {
+// Each theme's row backgrounds, darkest to brightest: dark rows from black to
+// the fitted worst case, light rows from the fitted worst case to white (C17).
+const BACKGROUND_RANGES = { dark: [0, TRAIL_BACKGROUNDS.dark], light: [TRAIL_BACKGROUNDS.light, 1] };
+
+test("each theme is fitted to its worst background: the brightest dark one, the darkest light one (C17)", () => {
+  assert.ok(TRAIL_BACKGROUNDS.dark <= 0.05, "the raised dark row measures about 0.03");
+  assert.ok(TRAIL_BACKGROUNDS.light <= 0.7, "the light backing measures about 0.70 to 0.74 behind the trail");
+});
+
+test("every hue the mesh can give and every fixed colour keeps 3:1 resting and 4.5:1 working across both themes' backgrounds (C04, C17)", () => {
   const colors = [PERSON_COLOR, TEAM_LEAD_COLOR, ...Object.values(AGENT_TYPE_COLORS)];
   for (let hue = 0; hue < 360; hue += 1) colors.push(hslHex(hue, 0.7, 0.62));
   for (const color of colors) {
     const fitted = trailColors(color);
     for (const theme of ["dark", "light"]) {
-      const background = TRAIL_BACKGROUNDS[theme];
-      const resting = contrastRatio(relativeLuminance(fitted[theme].resting), background);
-      const lit = contrastRatio(relativeLuminance(fitted[theme].working), background);
-      assert.ok(resting >= RESTING_CONTRAST - 0.05 && resting >= 3, `${color} ${theme} resting ${resting}`);
-      assert.ok(lit >= WORKING_CONTRAST, `${color} ${theme} working ${lit}`);
-      assert.ok(lit - resting >= 1, `${color} ${theme}: working stands out from resting without motion`);
+      for (const background of BACKGROUND_RANGES[theme]) {
+        const resting = contrastRatio(relativeLuminance(fitted[theme].resting), background);
+        const lit = contrastRatio(relativeLuminance(fitted[theme].working), background);
+        assert.ok(resting >= 3, `${color} ${theme} on ${background}: resting ${resting}`);
+        assert.ok(lit >= WORKING_CONTRAST, `${color} ${theme} on ${background}: working ${lit}`);
+        assert.ok(lit - resting >= 1, `${color} ${theme}: working stands out from resting without motion`);
+      }
+      const worst = theme === "dark" ? TRAIL_BACKGROUNDS.dark : TRAIL_BACKGROUNDS.light;
+      const resting = contrastRatio(relativeLuminance(fitted[theme].resting), worst);
+      assert.ok(resting <= RESTING_CONTRAST + 0.15, `${color} ${theme}: resting stays quiet (${resting})`);
     }
   }
 });
@@ -141,4 +154,15 @@ test("the hover card names every agent type that worked in the thread", () => {
   const agents = [{ agent_type: "TeamArchitect", lead: true, name: "Team lead" }, { agent_type: "WebResearchAgent", name: "Web Research Agent" }];
   assert.equal(trailAgentNames(thread([P], { agents })), "Team lead, Web Research Agent");
   assert.equal(trailAgentNames(thread([])), "");
+});
+
+test("someone works whose triangle is not in the row: the lead pulses and the words name who works (C19)", () => {
+  const many = ["A", "B", "C", "D", "E", "F"].map(name => ({ by: "agent", agent_type: name + "Agent", lead: false, name }));
+  const zeta = { agent_type: "ZetaAgent", lead: false, name: "Zeta" };
+  for (const busy of [false, true]) {
+    const view = trailView(thread(many, { older: true, work: [zeta] }), { busy });
+    assert.equal(view.triangles.filter(t => t.working).length, 1, `busy ${busy}`);
+    assert.equal(view.triangles.at(-1).who, "lead");
+    assert.equal(workingLabel(view), "Working: Zeta");
+  }
 });

@@ -16,9 +16,10 @@
 // - Working triangles are the agent entries of the thread's current request
 //   (after the last person entry in the row, or the whole row when it holds
 //   none: every request starts with one) whose type works now.
-// - A row that is busy (this page's own reply wait or the server's busy mark)
-//   always pulses something: the team lead's triangle of the current request,
-//   else a team-lead triangle added at the end. Right after this page sends,
+// - A row that is busy (this page's own reply wait or the server's busy mark),
+//   or that the server says someone works on, always pulses something: the
+//   team lead's triangle of the current request, else a team-lead triangle
+//   added at the end. The words keep the server's names of who works. Right after this page sends,
 //   while the trail has not changed since, the new person's turn and a pulsing
 //   team-lead triangle are added (`sentBeforeTrail`), so the pulse never sits
 //   on the request that already finished.
@@ -36,13 +37,15 @@ export const BY_AGENT = "agent";
 export const TEAM_LEAD_NAME = "Team lead";
 // The person's triangles: a neutral grey, moved into the band like the others.
 export const PERSON_COLOR = "#96a5af";
-// The brightest row background in dark mode (the raised row, #173440, and
-// the Needs you box over the dark glass measure about 0.03) and the brightest
-// in light mode (white glass over the pale backing), as relative luminance.
-// Dark triangles are measured against the brightest dark background and
-// light ones against white: the worst cases (ui/DESIGN.md, the browser probe
-// checks every row state).
-export const TRAIL_BACKGROUNDS = Object.freeze({ dark: 0.05, light: 1.0 });
+// Each theme's worst row background, as relative luminance (plan review C17).
+// A triangle is lighter than a dark row, so its contrast is lowest on the
+// brightest dark background: the raised row (#173440) and the Needs you box
+// over the dark glass measure about 0.03 to 0.04. It is darker than a light
+// row, so its contrast is lowest on the darkest light background: the pale
+// backing over the mesh measures about 0.70 to 0.74 behind the trail. Each
+// value keeps a margin past what was measured, and the browser probe fails
+// when a measured background falls outside it (tests/web_chat_agent_trail_probe.cjs).
+export const TRAIL_BACKGROUNDS = Object.freeze({ dark: 0.05, light: 0.6 });
 export const RESTING_CONTRAST = 3.2;
 export const WORKING_CONTRAST = 4.5;
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -164,7 +167,9 @@ export function trailView(thread, { busy = false, sentBeforeTrail = false } = {}
     entry.working = entry.lead ? leadWorks : types.has(entry.agent_type);
   });
   if (sentBeforeTrail) entries[entries.length - 1].working = true;
-  if (busy && !entries.some(entry => entry.working)) {
+  // A busy row, or one the server says someone works on whose triangle is not
+  // in the row, always pulses something (plan review C19).
+  if ((busy || working.length > 0) && !entries.some(entry => entry.working)) {
     const lead = entries.findLastIndex((entry, index) => index >= current && entry.by === BY_AGENT && entry.lead);
     if (lead >= 0) {
       entries[lead].working = true;

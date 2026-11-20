@@ -6334,10 +6334,13 @@ body.is-theme-customizing {
   padding: 2px 6px;
 }
 
+/* The line itself does not clip, so a working triangle's glow is never cut
+   off; its text cuts with an ellipsis (.thread-detail-text). */
 .thread-detail {
   display: flex;
   align-items: center;
   gap: 6px;
+  overflow: visible;
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 560;
@@ -6356,11 +6359,13 @@ body.is-theme-customizing {
    --tri-dark), already moved to at least 3:1 against the row: resting ones to
    about 3.2:1, working ones to 4.5:1 or more with a glow. The leftmost is
    hollow and dotted when older turns are hidden. */
+/* No taller than the triangles, so rows keep their height; the glow draws
+   past the box (the line does not clip). */
 .thread-trail {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  height: 16px;
+  height: 12px;
   padding: 0 5px 0 1px;
 }
 
