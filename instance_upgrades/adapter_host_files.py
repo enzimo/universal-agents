@@ -349,6 +349,8 @@ _HELD_GUIDANCE_NOTE = (
 FILES_GONE_COMMAND = "assistant_cli upgrade adapter-host-files --config <instance_config.yaml> --files-gone"
 # Why a transfer folder that opened is not the one the run decided on (C06).
 REASON_FOLDER_CHANGED = "folder_changed"
+# Why counted files are left uncounted: the check for records naming them in another folder failed (C06 of F7).
+REASON_OTHER_FOLDERS_UNCHECKED = "other_folders_unchecked"
 
 # What 0.9.13's adapter host named each file it kept, directly in its transfer folder
 # (``new_id("adapter_upload")`` in ``assistant_gateway.adapter_host.service``).
@@ -367,6 +369,11 @@ _NAMED_IN_WARNING = 10
 # command checks the marker for it, so only the marker written with a list lets that list be used (F1 of
 # PR #154's review).
 LIST_ID_FIELD = "without_records_list_id"
+# The marker's field counting the listed names records place in another folder (``NamedElsewhere.names``; None
+# when the files were not counted). Above 0 it is the one trace on the instance that the step found the transfer
+# folder at another path once its error has left the log (C07 of F7 of PR #154's review); deleting the marker
+# and restarting runs the step and logs that error again.
+NAMED_ELSEWHERE_FIELD = "named_elsewhere"
 # What the delete command prints, with a nonzero status, when the marker is not the one written with its list
 # (C07 of F6): ``rm -f`` prints nothing when it deletes, so a silent refusal would look the same as a delete.
 DELETE_REFUSED = (
@@ -424,27 +431,7 @@ class UpgradeCounts:
 
 
 @dataclass(frozen=True)
-class UpgradeResult:
-    """``finished`` once the marker is written; ``folder_missing`` when records wait for a folder that holds none of their files.
-
-    ``named_elsewhere`` counts the files left that no record names here but
-    records name in another folder (``_NamedElsewhere``): nothing was listed
-    and no delete command given.
-    """
-
-    finished: bool
-    counts: UpgradeCounts
-    waiting: int = 0
-    already_done: bool = False
-    named_elsewhere: int = 0
-
-    @property
-    def folder_missing(self) -> bool:
-        return not self.finished and self.waiting > 0
-
-
-@dataclass(frozen=True)
-class _NamedElsewhere:
+class NamedElsewhere:
     """Which listed names records place in another folder: the transfer folder was most likely at another path under 0.9.13 (F7 of PR #154's review).
 
     ``names`` counts the listed names any record names in another folder,
@@ -460,6 +447,38 @@ class _NamedElsewhere:
     by_turns: int = 0
     folders: tuple[Path, ...] = ()
 
+    @property
+    def without_gateway_record(self) -> int:
+        """Names no gateway record places in another folder: only turns or held guidance do, so no run can move their files (C05).
+
+        The step moves a file only with its gateway record
+        (``REASON_NO_GATEWAY_RECORD``, ``event=adapter_host_files_held_only``),
+        so putting the folder back at the other path moves only the
+        ``by_gateway`` files.
+        """
+
+        return self.names - self.by_gateway
+
+
+@dataclass(frozen=True)
+class UpgradeResult:
+    """``finished`` once the marker is written; ``folder_missing`` when records wait for a folder that holds none of their files.
+
+    ``elsewhere`` says which of the files left that no record names here
+    records name in another folder: when it names any, nothing was listed
+    and no delete command given (``_report_folder_moved``).
+    """
+
+    finished: bool
+    counts: UpgradeCounts
+    waiting: int = 0
+    already_done: bool = False
+    elsewhere: NamedElsewhere = NamedElsewhere()
+
+    @property
+    def folder_missing(self) -> bool:
+        return not self.finished and self.waiting > 0
+
 
 @dataclass(frozen=True)
 class _Leftovers:
@@ -472,7 +491,7 @@ class _Leftovers:
 
     listed: tuple[str, ...] = ()
     unlisted: int = 0
-    elsewhere: _NamedElsewhere = field(default_factory=_NamedElsewhere)
+    elsewhere: NamedElsewhere = NamedElsewhere()
 
     @classmethod
     def of(cls, names: set[str]) -> _Leftovers:
@@ -690,12 +709,12 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
         counts.turns_marked_unrecorded,
         "-" if counts.files_without_records is None else counts.files_without_records,
     )
-    named_elsewhere = leftovers.elsewhere.names if leftovers is not None else 0
-    if leftovers is not None and named_elsewhere:
+    elsewhere = leftovers.elsewhere if leftovers is not None else NamedElsewhere()
+    if leftovers is not None and elsewhere.names:
         _report_folder_moved(transfer, marker, leftovers)
     elif leftovers is not None and leftovers.count:
         _report_files_without_records(transfer, marker, written, leftovers)
-    return UpgradeResult(finished=True, counts=counts, named_elsewhere=named_elsewhere)
+    return UpgradeResult(finished=True, counts=counts, elsewhere=elsewhere)
 
 
 def _finish(
@@ -724,12 +743,20 @@ def _finish(
 
     The list holds ``_Leftovers.to_list``: nothing when records name a
     listed file in another folder (F7 of that review), so neither a list
-    nor an id is left for any command to use.
+    nor an id is left for any command to use. The number of listed names
+    records place in another folder goes beside the id
+    (``NAMED_ELSEWHERE_FIELD``), so the instance keeps that finding after
+    the log is gone.
     """
 
     listed = _settle_leftover_list(leftover_list, leftovers.to_list if leftovers is not None else ())
     written = _WrittenList(leftover_list, new_id_suffix()) if listed else None
-    body = {"finished_at_utc": _now(), **asdict(counts), LIST_ID_FIELD: written.list_id if written else None}
+    body = {
+        "finished_at_utc": _now(),
+        **asdict(counts),
+        LIST_ID_FIELD: written.list_id if written else None,
+        NAMED_ELSEWHERE_FIELD: leftovers.elsewhere.names if leftovers is not None else None,
+    }
     try:
         _write_state_file(marker, body)
     except FolderProblem:
@@ -899,17 +926,12 @@ def _report_folder_moved(transfer: Path, marker: Path, leftovers: _Leftovers) ->
     """Say once, instead of the files-without-records warning, that records name listed files in another folder (F7 of PR #154's review).
 
     The folder was then most likely at another path under 0.9.13, so the
-    files are people's: no list and no delete command are given, and the
-    error says how to still move them. Error rather than warning: the step
-    reports it only once (the marker is written, the owner's choice of
-    2026-11-20 over waiting for the folder) and the team cannot open those
-    files until an administrator acts. The steps stand on their own,
-    because an administrator may meet this first after ``--files-gone``,
-    which they ran for another reason. A file the step refused at that
-    other path keeps records naming it, so a folder moved back from there
-    is reported again for those files; the error says so instead of
-    promising that the move back always finishes (C04). Folders come only
-    from gateway records and held guidance copies (A4); no file is named.
+    files are people's: no list and no delete command are given. Error
+    rather than warning: the step reports it only once (the marker is
+    written, the owner's choice of 2026-11-20 over waiting for the folder)
+    and the team cannot open those files until an administrator acts.
+    Folders come only from gateway records and held guidance copies (A4); no
+    file is named. The advice follows what can move (``_folder_moved_advice``).
     """
 
     elsewhere = leftovers.elsewhere
@@ -926,17 +948,13 @@ def _report_folder_moved(transfer: Path, marker: Path, leftovers: _Leftovers) ->
         "%s of the %s file(s) left in the adapter host's transfer folder that no record of this folder names are "
         "named by records in another folder%s, so this folder was most likely at another path under 0.9.13 and "
         "they are files people sent. No list and no delete command are given: do not delete any of them. They "
-        "were not moved into state/uploads, so the team cannot open them. To move them: move or mount this folder "
-        "back at the path their records name (a link does not work), set upload_dir to that path, delete the "
-        "marker %s and restart; the step then runs again and moves the files whose records name that path. If "
-        "this folder was just moved here from that path, these are most likely files the step could not move "
-        "there (an adapter_host_file_not_moved warning of that run names each): fix them, then do the same.%s See "
-        "upgrading.md. event=adapter_host_files_folder_moved folder=%s other_folders=%s files_without_records=%s "
-        "unlisted=%s named_elsewhere=%s by_gateway=%s by_held_guidance=%s by_turns=%s",
+        "were not moved into state/uploads, so the team cannot open them.%s%s See upgrading.md. "
+        "event=adapter_host_files_folder_moved folder=%s other_folders=%s files_without_records=%s unlisted=%s "
+        "named_elsewhere=%s by_gateway=%s by_held_guidance=%s by_turns=%s",
         elsewhere.names,
         leftovers.count,
         where,
-        marker,
+        _folder_moved_advice(marker, elsewhere),
         _unlisted_note(leftovers),
         transfer,
         _listed(shown),
@@ -947,6 +965,40 @@ def _report_folder_moved(transfer: Path, marker: Path, leftovers: _Leftovers) ->
         elsewhere.by_held_guidance,
         elsewhere.by_turns,
     )
+
+
+def _folder_moved_advice(marker: Path, elsewhere: NamedElsewhere) -> str:
+    """How the folder-moved error's files can still move: only those a gateway record names (C05 of F7 of PR #154's review).
+
+    The step moves a file only with its gateway record, so putting the
+    folder back at the other path moves the ``by_gateway`` files and no
+    others; a file only a turn or held guidance names is reported there as
+    not moved (``no_gateway_record``) or held only, and no run can move it.
+    With no gateway record the error says so instead of giving steps that
+    cannot succeed. The steps stand on their own, because an administrator
+    may meet this first after ``--files-gone``, which they ran for another
+    reason (C02). A file the step refused at that other path keeps records
+    naming it, so a folder moved back from there is reported again for those
+    files; the error says so instead of promising that the move back always
+    finishes (C04).
+    """
+
+    keep = "keep them, and the people who sent them can send them again"
+    if not elsewhere.by_gateway:
+        return f" No gateway record names them, so the step cannot move them at any path: {keep}."
+    advice = (
+        f" To move the {elsewhere.by_gateway} a gateway record names: move or mount this folder back at the path "
+        f"their records name (a link does not work), set upload_dir to that path, delete the marker {marker} and "
+        "restart; the step then runs again and moves the files a gateway record names at that path. If this "
+        "folder was just moved here from that path, these are most likely files the step could not move there "
+        "(an adapter_host_file_not_moved warning of that run names each): fix them, then do the same."
+    )
+    if elsewhere.without_gateway_record:
+        advice += (
+            f" The other {elsewhere.without_gateway_record} have no gateway record, so no run can move them (that "
+            f"run reports each as adapter_host_file_not_moved or adapter_host_files_held_only): {keep}."
+        )
+    return advice
 
 
 def _delete_command(marker: Path, transfer: Path, written: _WrittenList) -> str:
@@ -1177,8 +1229,13 @@ class _Step:
         host's records are logged
         (``event=adapter_host_files_without_records_uncounted``) and give
         None: the count only reports, so it never stops the start or keeps
-        the marker from being written (rule 2 does not apply). Which of the
-        names may be shown is ``_Leftovers.of``'s rule.
+        the marker from being written (rule 2 does not apply). So does a
+        database error checking for records that name the listed files in
+        another folder (``_named_elsewhere``): until that check finishes it
+        is not known whether records name them at all, and no list and so no
+        command may be given (C03 of F7 of PR #154's review); its warning
+        says the files were counted and how to check again (C06). Which of
+        the names may be shown is ``_Leftovers.of``'s rule.
         """
 
         if self._transfer_in_uploads:
@@ -1188,16 +1245,19 @@ class _Step:
             return None if unnamed is None else _Leftovers()
         try:
             unnamed -= self._files_the_gateway_reads()
-            leftovers = _Leftovers.of(unnamed)
-            if leftovers.listed:
-                leftovers = replace(leftovers, elsewhere=self._named_elsewhere(leftovers.listed))
         except Exception as exc:  # a database error: the count only reports (A2), so it is left unset, logged
-            # Also when the check for records in another folder fails: no list and so no command (C03).
             self._log_uncounted(f"{type(exc).__name__}: {exc}")
             return None
-        return leftovers
+        leftovers = _Leftovers.of(unnamed)
+        if not leftovers.listed:
+            return leftovers
+        try:
+            return replace(leftovers, elsewhere=self._named_elsewhere(leftovers.listed))
+        except Exception as exc:  # a database error: never a list without the check (C03)
+            self._log_other_folders_unchecked(leftovers.count, f"{type(exc).__name__}: {exc}")
+            return None
 
-    def _named_elsewhere(self, listed: tuple[str, ...]) -> _NamedElsewhere:
+    def _named_elsewhere(self, listed: tuple[str, ...]) -> NamedElsewhere:
         """Which ``listed`` names records place in another folder (A1 of F7 of PR #154's review).
 
         Three kinds of record: conversation turns and held guidance copies,
@@ -1228,7 +1288,7 @@ class _Step:
         folders: set[Path] = set()
         for found in (*gateway.values(), *held.values()):
             folders |= found
-        return _NamedElsewhere(
+        return NamedElsewhere(
             names=len(turns | held.keys() | gateway.keys()),
             by_gateway=len(gateway),
             by_held_guidance=len(held),
@@ -1352,6 +1412,28 @@ class _Step:
             "event=adapter_host_files_without_records_uncounted folder=%s reason=%s",
             self._transfer,
             reason,
+        )
+
+    def _log_other_folders_unchecked(self, count: int, detail: str) -> None:
+        """The uncounted warning when only the check for records in another folder failed (C06 of F7 of PR #154's review).
+
+        The files were counted, so the warning says so and why nothing is
+        listed, and how to run the check again: the marker is written, so
+        the step runs again only once it is deleted. The same event as the
+        other causes, because the marker's count is unset in both.
+        """
+
+        logger.warning(
+            "%s file(s) are left in the adapter host's transfer folder that no record of this folder names, but the "
+            "check for records naming them in another folder did not finish, so it is not known whether this folder "
+            "was at another path under 0.9.13 and they are files people sent. No list and no delete command are "
+            "given: do not delete any of them. To check again, delete the marker %s and restart; the step then runs "
+            "again. Startup goes on. event=adapter_host_files_without_records_uncounted folder=%s reason=%s: %s",
+            count,
+            self._marker,
+            self._transfer,
+            REASON_OTHER_FOLDERS_UNCHECKED,
+            detail,
         )
 
     def survey(self, items: list[_Item]) -> tuple[int, bool]:

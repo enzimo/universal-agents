@@ -82,7 +82,9 @@ import instance_upgrades.adapter_host_files as upgrade_module
 from instance_upgrades.adapter_host_files import (
     DELETE_REFUSED,
     LIST_ID_FIELD,
+    NAMED_ELSEWHERE_FIELD,
     TRANSFER_FILE_PREFIX,
+    NamedElsewhere,
     upgrade_adapter_host_files,
 )
 from assistant_gateway.adapter_host.domain import AdapterInboxRecord, AdapterUploadRecord
@@ -1202,12 +1204,14 @@ def test_records_naming_the_folder_at_another_path_withhold_the_list_and_the_com
         result = upgrade_adapter_host_files(config)
     monkeypatch.undo()
 
-    assert result.finished and result.named_elsewhere == 1 and result.counts.files_without_records == 2
+    assert result.finished and result.counts.files_without_records == 2
+    assert result.elsewhere == NamedElsewhere(names=1, by_gateway=1, by_held_guidance=0, by_turns=1, folders=(old,))
     assert name not in opened and (moved / name).read_bytes() == CONTENT["att_photo"]
     assert instance.gateway().get_attachment("att_photo").local_path == str(old / name)
     assert instance.turn_paths("task_1")["att_photo"] == instance.turn_paths("task_2")["att_photo"] == str(old / name)
     body = json.loads(marker.read_text())
     assert body[LIST_ID_FIELD] is None and body["files_without_records"] == 2
+    assert body[NAMED_ELSEWHERE_FIELD] == 1, "C07: the finding stays on the instance after the log is gone"
     _assert_no_list(instance.layout)
     (summary,) = _events(caplog, "adapter_host_files_upgraded")
     assert summary.endswith("moved=0 already_moved=0 missing=0 refused=0 no_record=0 gateway_rows_removed=0 "
@@ -1226,10 +1230,11 @@ def test_records_naming_the_folder_at_another_path_withhold_the_list_and_the_com
     assert "No list and no delete command are given: do not delete any of them." in error
     assert "They were not moved into state/uploads, so the team cannot open them." in error, "C02"
     assert (
-        "move or mount this folder back at the path their records name (a link does not work), set upload_dir to "
-        f"that path, delete the marker {marker} and restart" in error
+        "To move the 1 a gateway record names: move or mount this folder back at the path their records name (a link "
+        f"does not work), set upload_dir to that path, delete the marker {marker} and restart" in error
     ), "C02: the way to still move them"
     assert "fix them, then do the same" in error, "C04: no promise that moving it back always finishes"
+    assert "no gateway record" not in error.lower(), "C05: a gateway record names the one match"
     assert name not in error and "xargs" not in error and "rm -f" not in error
     _assert_earlier_command_refused(instance, command, moved / name, tmp_path)
 
@@ -1239,7 +1244,10 @@ def test_records_naming_the_folder_at_another_path_withhold_the_list_and_the_com
 def test_a_database_error_checking_other_folders_gives_no_list_and_no_command(
     instance: _Instance, monkeypatch, caplog, tmp_path
 ) -> None:
-    """C03: a failing check for records in another folder must never leave the delete command. Uncounted, not stopped."""
+    """C03: a failing check for records in another folder must never leave the delete command. Uncounted, not stopped.
+
+    C06: its warning says the files were counted and how to run the check again.
+    """
 
     config, moved, name = _folder_moved_since_0_9_13(instance)
     command = _earlier_command(instance, moved, name)
@@ -1251,11 +1259,17 @@ def test_a_database_error_checking_other_folders_gives_no_list_and_no_command(
     with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
         result = upgrade_adapter_host_files(config)
 
-    assert result.finished and result.named_elsewhere == 0 and result.counts.files_without_records is None
-    body = json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())
-    assert body[LIST_ID_FIELD] is None and body["files_without_records"] is None
+    assert result.finished and result.elsewhere.names == 0 and result.counts.files_without_records is None
+    marker = instance.layout.adapter_host_files_upgrade_path
+    body = json.loads(marker.read_text())
+    assert body[LIST_ID_FIELD] is None and body["files_without_records"] is None and body[NAMED_ELSEWHERE_FIELD] is None
     (uncounted,) = _events(caplog, "adapter_host_files_without_records_uncounted")
-    assert uncounted.endswith(f"folder={moved} reason=RuntimeError: database is locked")
+    assert uncounted.endswith(f"folder={moved} reason=other_folders_unchecked: RuntimeError: database is locked")
+    assert uncounted.startswith(
+        "2 file(s) are left in the adapter host's transfer folder that no record of this folder names, but the check "
+        "for records naming them in another folder did not finish"
+    ), "C06: they were counted; the check failed"
+    assert "do not delete any of them" in uncounted and f"To check again, delete the marker {marker} and restart" in uncounted
     assert not _events(caplog, "adapter_host_files_without_records")
     assert not _events(caplog, "adapter_host_files_folder_moved")
     _assert_no_list(instance.layout)
@@ -1303,12 +1317,204 @@ def test_names_that_are_not_a_listed_name_in_another_folder_withhold_nothing(
     with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
         result = instance.run()
 
-    assert result.finished and result.named_elsewhere == 0
+    assert result.finished and result.elsewhere.names == 0
     assert not _events(caplog, "adapter_host_files_folder_moved")
     left = [STRAY_NAME] if in_this_folder else [_LIVE, STRAY_NAME]
     _assert_reported(caplog, instance, left)
     _assert_listed(instance.layout, left)
     assert live.exists() != in_this_folder, "a record of this folder moves its file"
+
+
+_SHA_X = hashlib.sha256(b"x").hexdigest()  # what ``_record_named`` records
+
+
+def _run_operator_command(instance: _Instance, monkeypatch: pytest.MonkeyPatch, capsys, **args: Any) -> str:
+    """Run ``upgrade adapter-host-files`` on ``instance`` as the operator does; returns what it printed."""
+
+    import assistant_cli
+
+    monkeypatch.setattr(assistant_cli.GatewayInstanceConfig, "load_for_process", staticmethod(lambda _path: instance.config()))
+    assistant_cli._upgrade_adapter_host_files(SimpleNamespace(config="instance_config.yaml", files_gone=False, **args))
+    return capsys.readouterr().out
+
+
+@pytest.mark.parametrize("source", ["turn", "held_guidance"])
+def test_a_match_only_a_turn_or_held_guidance_names_gives_no_steps_that_cannot_move_it(
+    instance: _Instance, monkeypatch, caplog, capsys, source
+) -> None:
+    """A1, A4, C05: no gateway record names the listed file in another folder, so no run can move it there either.
+
+    The error and the operator's line give no move-back steps, only that
+    the file must be kept. A turn's folder is shown nowhere, in the log or
+    the operator's output (agent processes write turns); a held guidance
+    copy's is named.
+    """
+
+    live = _write(instance.transfer / _LIVE, b"x")
+    old = instance.root / "old-uploads"
+    record = _record("att_named", str(old / _LIVE), _SHA_X)
+    if source == "turn":
+        instance.repository().merge_turn_attachments(conversation_id=CONVERSATION, task_id="task_1", attachments=[record])
+    else:
+        _hold(instance, "corr_named", record)
+
+    with caplog.at_level(logging.DEBUG):
+        printed = _run_operator_command(instance, monkeypatch, capsys)
+
+    (error,) = _events(caplog, "adapter_host_files_folder_moved")
+    by = "by_held_guidance=0 by_turns=1" if source == "turn" else "by_held_guidance=1 by_turns=0"
+    shown = "-" if source == "turn" else str(old)
+    assert error.endswith(
+        f"folder={instance.transfer} other_folders={shown} files_without_records=1 unlisted=0 named_elsewhere=1 "
+        f"by_gateway=0 {by}"
+    )
+    assert (
+        "No gateway record names them, so the step cannot move them at any path: keep them, and the people who sent "
+        "them can send them again." in error
+    )
+    assert "move or mount" not in error and "delete the marker" not in error, "C05: no steps that cannot succeed"
+    assert "1 file(s) are left in the transfer folder that no record of it names, and records in another folder name 1" in printed
+    assert "No gateway record names them, so they cannot be moved: keep them" in printed and "move or mount" not in printed
+    assert "which may be deleted" not in printed
+    if source == "turn":
+        assert all(old.name not in record.getMessage() for record in caplog.records) and old.name not in printed, "A4"
+    body = json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())
+    assert body[LIST_ID_FIELD] is None and body[NAMED_ELSEWHERE_FIELD] == 1
+    _assert_no_list(instance.layout)
+    assert live.read_bytes() == b"x"
+
+
+def test_a_match_through_a_gateway_record_on_a_later_page_gives_the_steps_for_that_file(
+    instance: _Instance, monkeypatch, caplog
+) -> None:
+    """A1, C05: gateway records outside the folder are read in pages, and only the file one names gets the move-back steps.
+
+    With one record per page, a record of another folder naming no listed
+    file is read first. A second listed file only a turn names is counted
+    apart: it is kept, and its turn's folder is not shown.
+    """
+
+    monkeypatch.setattr(upgrade_module, "_BATCH", 1)
+    by_gateway = _write(instance.transfer / _hex_name("by gateway"), b"x")
+    by_turn = _write(instance.transfer / _hex_name("by turn"), b"x")
+    old = instance.root / "old-uploads"
+    _record_named(instance, "att_a1", str(old / _hex_name("not here")))
+    _record_named(instance, "att_zz", str(old / by_gateway.name))
+    instance.repository().merge_turn_attachments(
+        conversation_id=CONVERSATION, task_id="task_1",
+        attachments=[_record("att_turn", str(instance.root / "agent-folder" / by_turn.name), _SHA_X)],
+    )
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.elsewhere == NamedElsewhere(names=2, by_gateway=1, by_held_guidance=0, by_turns=1, folders=(old,))
+    (error,) = _events(caplog, "adapter_host_files_folder_moved")
+    assert error.endswith(
+        f"other_folders={old} files_without_records=2 unlisted=0 named_elsewhere=2 by_gateway=1 by_held_guidance=0 by_turns=1"
+    )
+    assert "To move the 1 a gateway record names: move or mount this folder back" in error
+    assert (
+        "The other 1 have no gateway record, so no run can move them (that run reports each as "
+        "adapter_host_file_not_moved or adapter_host_files_held_only): keep them" in error
+    )
+    assert "agent-folder" not in error and not _events(caplog, "adapter_host_files_without_records")
+    assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())[LIST_ID_FIELD] is None
+    _assert_no_list(instance.layout)
+
+
+def test_a_record_in_another_folder_whose_name_is_not_listed_changes_nothing(instance: _Instance, caplog) -> None:
+    """A7: its file is not here (still in its own folder, deleted or moved earlier), so it says nothing about this folder.
+
+    The listed file is named by no record anywhere, so the list and the
+    command stay as they are.
+    """
+
+    _write(instance.transfer / STRAY_NAME, STRAY)
+    _record_named(instance, "att_named", str(instance.root / "old-uploads" / _hex_name("somewhere else")))
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.elsewhere.names == 0 and not _events(caplog, "adapter_host_files_folder_moved")
+    _assert_reported(caplog, instance, [STRAY_NAME])
+    _assert_listed(instance.layout, [STRAY_NAME])
+    assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())[NAMED_ELSEWHERE_FIELD] == 0
+
+
+@pytest.mark.parametrize("refused_at_p2", [False, True], ids=["moved_at_p2", "refused_at_p2"])
+def test_records_of_both_paths_move_what_each_path_can_and_the_error_s_steps_finish_it(
+    instance: _Instance, caplog, refused_at_p2
+) -> None:
+    """C01, C04 and A3's finish path: records name the folder at P1 and, for a newer file, at P2, where it is now.
+
+    At P2 the newer file moves, which the summary line counts, or is
+    refused (another sha256), and the photo its records place at P1 gives
+    the error. The error's steps (the folder back at P1, upload_dir there,
+    the marker deleted, a restart) move the photo. A file refused at P2
+    keeps records naming P2, so that run names P2 for it instead of
+    finishing quietly.
+    """
+
+    config, moved, name = _folder_moved_since_0_9_13(instance)
+    newer = _write(moved / _hex_name("sent at P2"), b"not what was recorded" if refused_at_p2 else b"x")
+    _record_named(instance, "att_p2", str(newer))
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        first = upgrade_adapter_host_files(config)
+
+    assert (first.counts.moved, first.counts.refused) == ((0, 1) if refused_at_p2 else (1, 0))
+    (summary,) = _events(caplog, "adapter_host_files_upgraded")
+    assert f"moved={first.counts.moved} already_moved=0 missing=0 refused={first.counts.refused} " in summary, "C01"
+    (error,) = _events(caplog, "adapter_host_files_folder_moved")
+    assert f"other_folders={instance.transfer} " in error and first.elsewhere.names == 1
+    caplog.clear()
+
+    moved.rename(instance.transfer)
+    instance.layout.adapter_host_files_upgrade_path.unlink()
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        second = instance.run()
+
+    assert second.finished and second.counts.moved == 1
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.photo_destination)
+    assert instance.photo_destination.read_bytes() == CONTENT["att_photo"] and not (instance.transfer / name).exists()
+    if refused_at_p2:
+        (error,) = _events(caplog, "adapter_host_files_folder_moved")
+        assert f"other_folders={moved} " in error and "by_gateway=1" in error
+        assert (instance.transfer / newer.name).is_file() and second.elsewhere.names == 1
+    else:
+        assert not _events(caplog, "adapter_host_files_folder_moved") and second.elsewhere.names == 0
+        assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())[NAMED_ELSEWHERE_FIELD] == 0
+
+
+def test_files_gone_as_the_first_run_to_find_the_match_reports_it_the_same_way(instance: _Instance, caplog) -> None:
+    """C02: a P2-era record whose file is gone makes the normal run wait, so ``--files-gone`` is the first to see the match.
+
+    It drops only that record; the records naming P1 stay as they are, and
+    its error carries the steps, since the administrator ran it for
+    another reason.
+    """
+
+    config, moved, name = _folder_moved_since_0_9_13(instance)
+    _record_named(instance, "att_p2", str(moved / _hex_name("gone at P2")))
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        waiting = upgrade_adapter_host_files(config)
+    assert not waiting.finished and waiting.waiting == 1 and not _events(caplog, "adapter_host_files_folder_moved")
+    caplog.clear()
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = upgrade_adapter_host_files(config, files_gone=True)
+
+    assert result.finished and result.counts.gateway_rows_removed == 1 and result.elsewhere.names == 1
+    (error,) = _events(caplog, "adapter_host_files_folder_moved")
+    assert f"other_folders={instance.transfer} " in error
+    assert "To move the 1 a gateway record names: move or mount this folder back at the path their records name" in error
+    assert instance.gateway().get_attachment("att_photo").local_path == str(instance.transfer / name)
+    assert instance.turn_paths("task_1")["att_photo"] == str(instance.transfer / name)
+    assert (moved / name).read_bytes() == CONTENT["att_photo"]
+    body = json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())
+    assert body[LIST_ID_FIELD] is None and body[NAMED_ELSEWHERE_FIELD] == 1
+    _assert_no_list(instance.layout)
 
 
 _EPOCH = "epoch_1"
@@ -3092,6 +3298,35 @@ def test_the_operator_command_says_when_the_leftover_files_could_not_be_counted(
     printed = capsys.readouterr().out
     assert "2 file(s) are left in the transfer folder that no record names; the team cannot open them." in printed
     assert "never opens" not in printed, "0.10 reads the files of messages it had not handled (PR #150's review)"
+
+
+def test_the_operator_command_gives_the_steps_only_for_files_a_gateway_record_names(monkeypatch, capsys) -> None:
+    """C05: after a run that found records in another folder, the line replaces the delete advice and splits like the error."""
+
+    import assistant_cli
+
+    monkeypatch.setattr(assistant_cli.GatewayInstanceConfig, "load_for_process", staticmethod(lambda _path: object()))
+    counts = upgrade_module.UpgradeCounts(files_without_records=3)
+    outcomes = [
+        upgrade_module.UpgradeResult(finished=True, counts=counts, elsewhere=NamedElsewhere(names=1, by_gateway=1)),
+        upgrade_module.UpgradeResult(finished=True, counts=counts, elsewhere=NamedElsewhere(names=2, by_gateway=1, by_turns=1)),
+        upgrade_module.UpgradeResult(finished=True, counts=counts, elsewhere=NamedElsewhere(names=1, by_held_guidance=1)),
+    ]
+    monkeypatch.setattr(upgrade_module, "upgrade_adapter_host_files", lambda _config, *, files_gone: outcomes.pop(0))
+    args = SimpleNamespace(config="instance_config.yaml", files_gone=False)
+    printed = []
+    for _ in range(3):
+        assistant_cli._upgrade_adapter_host_files(args)
+        printed.append(capsys.readouterr().out)
+
+    for text in printed:
+        assert "3 file(s) are left in the transfer folder that no record of it names, and records in another folder" in text
+        assert "do not delete any of them" in text and "See event=adapter_host_files_folder_moved in the log." in text
+        assert "which may be deleted" not in text
+    steps = "To move the 1 a gateway record names: move or mount the folder back at the path the log names"
+    assert steps in printed[0] and "no gateway record" not in printed[0]
+    assert steps in printed[1] and "The other 1 have no gateway record, so they cannot be moved: keep them" in printed[1]
+    assert "No gateway record names them, so they cannot be moved: keep them" in printed[2] and "move or mount" not in printed[2]
 
 
 def test_the_fixture_matches_the_bytes_it_was_written_for() -> None:

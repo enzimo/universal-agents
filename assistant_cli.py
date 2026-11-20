@@ -16,7 +16,7 @@ import sys
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional, TextIO
+from typing import TYPE_CHECKING, Any, Callable, Optional, TextIO
 
 import yaml
 
@@ -115,6 +115,9 @@ from secure_tool_broker.service import (
 from secure_tool_broker.auth_pages import BROKER_APPEARANCE_ENV
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.objective_repository import create_objective_repository
+
+if TYPE_CHECKING:
+    from instance_upgrades.adapter_host_files import NamedElsewhere
 
 try:
     from dotenv import load_dotenv
@@ -2636,6 +2639,13 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
     again), and non-zero when a folder cannot be used
     (``FolderProblem``, with a message naming it) or on another unexpected
     error, which stops startup until a restart finishes it.
+
+    When records in another folder name files left in the transfer folder,
+    that folder was most likely at another path under 0.9.13: the step gives
+    no list and no delete command, and this says so with how to still move
+    the files a gateway record names (``_print_folder_moved``). A
+    ``--files-gone`` run reports it the same way; it never changes records
+    that name another folder.
     """
 
     from instance_upgrades.adapter_host_files import FolderProblem, upgrade_adapter_host_files
@@ -2667,11 +2677,39 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
             )
         if counts.files_without_records is None:
             print("The files left in the transfer folder could not be counted; see the log.")
+        elif result.elsewhere.names:
+            _print_folder_moved(counts.files_without_records, result.elsewhere)
         elif counts.files_without_records:
             print(
                 f"{counts.files_without_records} file(s) are left in the transfer folder that no record names; "
                 "the team cannot open them. See the log for which may be deleted, and when."
             )
+
+
+def _print_folder_moved(left: int, elsewhere: NamedElsewhere) -> None:
+    """The operator's line for files records name in another folder (``NamedElsewhere``); the log has the folder.
+
+    Only a file a gateway record names can move, so the steps are given for
+    those alone (C05 of F7 of PR #154's review). No folder is printed: the
+    log names it when it may be shown.
+    """
+
+    text = (
+        f"{left} file(s) are left in the transfer folder that no record of it names, and records in another folder "
+        f"name {elsewhere.names} of them, so the folder was most likely at another path under 0.9.13. Nothing is "
+        "listed and no delete command is given: do not delete any of them; the team cannot open them."
+    )
+    keep = "keep them; the people who sent them can send them again."
+    if elsewhere.by_gateway:
+        text += (
+            f" To move the {elsewhere.by_gateway} a gateway record names: move or mount the folder back at the path "
+            "the log names (a link does not work), set upload_dir to that path, delete the marker and restart."
+        )
+        if elsewhere.without_gateway_record:
+            text += f" The other {elsewhere.without_gateway_record} have no gateway record, so they cannot be moved: {keep}"
+    else:
+        text += f" No gateway record names them, so they cannot be moved: {keep}"
+    print(f"{text} See event=adapter_host_files_folder_moved in the log.")
 
 
 def _ensure_instance_config_ready(config_path: str | None) -> str:
