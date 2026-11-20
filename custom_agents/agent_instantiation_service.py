@@ -634,15 +634,40 @@ def _nats_refusal(error: BaseException) -> tuple[int, str] | None:
     return None
 
 
+def nats_refusal_in(error: BaseException) -> tuple[int, str] | None:
+    """The first NATS refusal (code, description) on the error or under it, else None."""
+
+    for current in _error_chain(error):
+        refusal = _nats_refusal(current)
+        if refusal is not None:
+            return refusal
+    return None
+
+
+# How a reason marks a NATS refusal: "<error type> (NATS <code>: <description>)".
+# Written by describe_error and read back by start_reason_kind.
+NATS_REFUSAL_MARK = " (NATS "
+
+
+def describe_error(error: BaseException) -> str:
+    """An error as people may see it: its type, plus a NATS refusal's code and description on it or under it."""
+
+    refusal = nats_refusal_in(error)
+    if refusal is None:
+        return type(error).__name__
+    return f"{type(error).__name__}{NATS_REFUSAL_MARK}{refusal[0]}: {refusal[1]})"
+
+
 def start_failure_reason(error: BaseException | None) -> str:
     """The start record's reason for a worker that ended before it was ready.
 
     A project refusal keeps its code (``refusal_code``), as refusals before
     the start already do. Otherwise only the error's type is kept, plus the
     code and description of a NATS JetStream refusal (server text such as
-    "maximum consumers limit reached"). Other error text can carry anything,
-    and this reason reaches TeamArchitect's review and administrators'
-    notices; the full error is in the log (``event=agent_thread_crash``).
+    "maximum consumers limit reached"; ``describe_error``). Other error text
+    can carry anything, and this reason reaches TeamArchitect's review and
+    administrators' notices; the full error is in the log
+    (``event=agent_thread_crash``).
 
     The errors under the one that ended the thread are read too, newest
     first, so a cleanup error raised over the real refusal still names it.
@@ -650,15 +675,54 @@ def start_failure_reason(error: BaseException | None) -> str:
 
     if error is None:
         return EXITED_BEFORE_READY
-    crashed = f"{CRASHED_BEFORE_READY}: {type(error).__name__}"
     for current in _error_chain(error):
         code = refusal_code(current)
         if code is not None:
             return code
-        refusal = _nats_refusal(current)
-        if refusal is not None:
-            return f"{crashed} (NATS {refusal[0]}: {refusal[1]})"
-    return crashed
+        if _nats_refusal(current) is not None:
+            break
+    return f"{CRASHED_BEFORE_READY}: {describe_error(error)}"
+
+
+# A worker type's shared queue on the NATS work stream could not be created
+# (custom_agents.worker_pool_controller); not a start record's reason, the
+# evidence of a start_failed problem.
+WORKER_QUEUE_UNAVAILABLE = "worker_queue_unavailable"
+
+
+def queue_failure_reason(error: BaseException) -> str:
+    """Why a worker type's queue could not be created, as people may see it."""
+
+    return f"{WORKER_QUEUE_UNAVAILABLE}: {describe_error(error)}"
+
+
+# The kinds of start failure, for the advice the start_failed texts give
+# (custom_agents.worker_pool_reviews): where to look differs for each.
+REASON_KIND_NATS = "nats_refusal"
+REASON_KIND_CRASH = "crash"
+REASON_KIND_STARTUP_TIMEOUT = "startup_timeout"
+REASON_KIND_REFUSAL = "refusal"
+
+
+def start_reason_kind(reason: str | None) -> str:
+    """Which kind of failure a reason written here describes.
+
+    Read back from the forms the writers above produce: a NATS refusal (a
+    crash or a queue failure with ``NATS_REFUSAL_MARK``, or any queue
+    failure), a crash or an exit before ready, a startup timeout, or else a
+    refusal code.
+    """
+
+    text = reason or ""
+    if text.startswith(f"{WORKER_QUEUE_UNAVAILABLE}: ") or (
+        text.startswith(f"{CRASHED_BEFORE_READY}: ") and NATS_REFUSAL_MARK in text
+    ):
+        return REASON_KIND_NATS
+    if text.startswith(f"{CRASHED_BEFORE_READY}: ") or text == EXITED_BEFORE_READY:
+        return REASON_KIND_CRASH
+    if text == STARTUP_TIMED_OUT:
+        return REASON_KIND_STARTUP_TIMEOUT
+    return REASON_KIND_REFUSAL
 
 
 def update_runtime_launch(

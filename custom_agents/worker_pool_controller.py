@@ -72,6 +72,8 @@ from typing import Any, Iterable, Optional
 from custom_agents.agent_instantiation_service import (
     LAUNCHER_REJECTED_START,
     counts_as_failed_start,
+    nats_refusal_in,
+    queue_failure_reason,
     shown_reason,
 )
 from custom_agents.worker_pool_limits import PoolLimit, team_limit, type_limit, worker_pool_repository
@@ -94,6 +96,7 @@ from storage.worker_pool_repository import (
     POOL_HUNG_STARTS,
     POOL_LAST_START_FAILURE,
     POOL_LAST_UNCOUNTED_END,
+    POOL_QUEUE_UNAVAILABLE,
     POOL_UNCOUNTED_ENDS,
     TEAM_SCOPE,
 )
@@ -501,6 +504,15 @@ def _rate_limit_reason(observation: PoolObservation) -> str:
     return reason
 
 
+def pool_views(observations: Iterable[PoolObservation], queue_failures: dict[str, str]) -> dict[str, Any]:
+    """The pool view's entries: each observed type, and each type whose queue NATS refused to create."""
+
+    views: dict[str, Any] = {observation.agent_type: observation.as_dict() for observation in observations}
+    for agent_type, reason in queue_failures.items():
+        views[agent_type] = {"agent_type": agent_type, POOL_QUEUE_UNAVAILABLE: reason}
+    return views
+
+
 @dataclass
 class _Workers:
     running: set[str] = field(default_factory=set)
@@ -537,8 +549,10 @@ def _workers_by_type(launches: Any, local: Any) -> dict[str, _Workers]:
 class WorkerPoolController:
     def __init__(self, agent: Any) -> None:
         self.agent = agent
-        # The worker types of the current pass (set by observe).
+        # The worker types of the current pass (set by observe), and those among
+        # them whose shared queue NATS refused to create (``_ensure_queue``).
         self.registered_types: set[str] = set()
+        self.queue_failures: dict[str, str] = {}
         self.runtime = agent.task_manager.operations_runtime
         self.team_id = str(agent.team_id)
 
@@ -560,7 +574,7 @@ class WorkerPoolController:
             return True
         try:
             await self._adapter().ensure_worker_queue(agent_type)
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "Could not create a worker type's queue; retrying next pass. "
                 "event=worker_pool_queue_create_failed team_id=%s agent_type=%s",
@@ -568,6 +582,14 @@ class WorkerPoolController:
                 agent_type,
                 exc_info=True,
             )
+            # Only a refusal by NATS (an error code, such as 10026 at the work
+            # stream's consumer limit) is this type's lasting problem and is
+            # reported (_report_unavailable_queues). An error without a code (a
+            # timeout, a lost connection) is a connection problem: logged here
+            # every pass, not reported, so a stall right after a restart, when
+            # every type's queue is created again, opens nothing for every type.
+            if nats_refusal_in(exc) is not None:
+                self.queue_failures[agent_type] = queue_failure_reason(exc)
             return False
         ensured.add(agent_type)
         return True
@@ -659,7 +681,7 @@ class WorkerPoolController:
         self.agent._worker_pool_snapshot = {
             "observed_at": datetime.now(timezone.utc).isoformat(),
             "team": {"workers_active": team_active, "limit": team.as_dict()},
-            "pools": {observation.agent_type: observation.as_dict() for observation in observations},
+            "pools": pool_views(observations, self.queue_failures),
         }
         for observation in observations:
             decision = decide(
@@ -675,6 +697,7 @@ class WorkerPoolController:
             if decision.surplus:
                 await self._drain(observation.agent_type, decision.surplus)
             await incidents.observe_type(observation, decision)
+        self._report_unavailable_queues(incidents)
         self._forget_unregistered()
         await incidents.observe_team(observations, team_active=team_active, team=team)
         await incidents.observe_provider_limits(observations)
@@ -778,6 +801,22 @@ class WorkerPoolController:
         counts[observation.agent_type] = counts.get(observation.agent_type, 0) + 1
         if counts[observation.agent_type] >= START_FAILURES_BEFORE_REVIEW:
             incidents.start_failed(observation, reason)
+
+    def _report_unavailable_queues(self, incidents: Any) -> None:
+        """Report registered types whose queue NATS refused to create, from the second pass in a row.
+
+        Such a type is left out of the pass's observations, so no start is
+        tried and nothing else would tell anyone (review finding GEN-3, round
+        3). The row count is the one refusals before a start record use
+        (``_note_refusal_before_record``); it resets once the type is observed
+        again or is no longer registered.
+        """
+
+        counts: dict[str, int] = self.agent._pool_refusals_in_row
+        for agent_type, reason in sorted(self.queue_failures.items()):
+            counts[agent_type] = counts.get(agent_type, 0) + 1
+            if counts[agent_type] >= START_FAILURES_BEFORE_REVIEW:
+                incidents.queue_unavailable(agent_type, reason)
 
     def _forget_unregistered(self) -> None:
         """End the refusal episode, and drop the refusal count, of types no longer registered.

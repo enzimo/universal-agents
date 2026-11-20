@@ -165,3 +165,21 @@ async def test_inspect_worker_pools_explains_the_controller_view(lead):
     assert list(result["pools"]) == ["WebResearchAgent"]
     assert result["settings"]["max_workers_per_type_ceiling"] == 8
     assert "tasks_waiting" in result["explanation"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_worker_pools_shows_a_type_whose_queue_cannot_be_created(lead):
+    """Review finding GEN-3 (round 3): such a type has no tasks or workers counted, but is shown."""
+
+    reason = "worker_queue_unavailable: BadRequestError (NATS 10026: maximum consumers limit reached)"
+    lead._worker_pool_snapshot = {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "team": {"workers_active": 0},
+        "pools": {
+            "Queueless": {"agent_type": "Queueless", "queue_unavailable": reason},
+            "IdleAgent": {"tasks_waiting": 0, "workers_running": 0},
+        },
+    }
+    result = json.loads(await tools.inspect_worker_pools())
+    assert result["pools"] == {"Queueless": {"agent_type": "Queueless", "queue_unavailable": reason}}
+    assert "queue_unavailable" in result["explanation"]

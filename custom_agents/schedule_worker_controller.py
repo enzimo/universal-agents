@@ -61,21 +61,29 @@ logger = logging.getLogger(__name__)
 _BLOCK_CODES = SCHEDULE_BLOCK_REASONS | {RESOURCE_CONSTRAINTS_UNSUPPORTED}
 
 
-def block_reason(error: BaseException, *, schedule_id: str) -> str:
+def _is_block_code(text: str) -> bool:
+    return text in _BLOCK_CODES or is_current_reason(text)
+
+
+def block_reason(error: BaseException, *, schedule_id: str, current: str | None = None) -> str:
     """The blocked reason a refused check stores: a known code, or ``WORKER_RECONCILIATION_FAILED``.
 
     The reason reaches the schedule inspection and the owner's notice, so
     free error text (a host path in a file error, a validation error's input)
-    is never stored; it is logged here instead. A known code is a block
-    reason (``SCHEDULE_BLOCK_REASONS``) or a start reason this release writes
+    is not stored; it is logged instead. A known code is a block reason
+    (``SCHEDULE_BLOCK_REASONS``) or a start reason this release writes
     (``is_current_reason``), as the launcher's results carry (review finding
-    RC-6, round 3).
+    RC-6, round 3). The warning is written when the stored reason changes;
+    while ``current`` already says ``WORKER_RECONCILIATION_FAILED`` (the same
+    fault on every pass), it is a debug line. A reason an older release
+    stored is read through ``shown_block_reason``.
     """
 
     text = str(error)
-    if text in _BLOCK_CODES or is_current_reason(text):
+    if _is_block_code(text):
         return text
-    logger.warning(
+    logger.log(
+        logging.DEBUG if current == WORKER_RECONCILIATION_FAILED else logging.WARNING,
         "A scheduled worker check failed with an error that is not a known code; the "
         "schedule is blocked as worker_reconciliation_failed. "
         "event=schedule_worker_block_reason_replaced schedule_id=%s error_type=%s error=%s",
@@ -83,6 +91,19 @@ def block_reason(error: BaseException, *, schedule_id: str) -> str:
         type(error).__name__,
         error,
     )
+    return WORKER_RECONCILIATION_FAILED
+
+
+def shown_block_reason(text: str | None) -> str | None:
+    """A stored blocked reason as people and agents may see it: ``block_reason``'s rule applied on reading.
+
+    The previous release stored ``str(exc)`` on both block paths; such a
+    reason shows as ``WORKER_RECONCILIATION_FAILED`` until the schedule's
+    next check stores a known one (critique C06, round 3).
+    """
+
+    if not text or _is_block_code(text):
+        return text
     return WORKER_RECONCILIATION_FAILED
 
 
@@ -130,7 +151,13 @@ def schedule_ready_for_admission(agent: Any, schedule: Any) -> bool:
         return True
     except (ValueError, PermissionError) as exc:
         agent._schedule_store.worker_records.mark_blocked(
-            schedule.schedule_id, agent.team_id, block_reason(exc, schedule_id=schedule.schedule_id)
+            schedule.schedule_id,
+            agent.team_id,
+            block_reason(
+                exc,
+                schedule_id=schedule.schedule_id,
+                current=binding.blocked_reason if binding is not None else None,
+            ),
         )
         return False
 
@@ -176,7 +203,10 @@ class ScheduleWorkerController:
                 ):
                     await self._cover(binding, row, now, limits)
             except (PermissionError, ValueError, LaunchConflict) as exc:
-                await self._block(binding, block_reason(exc, schedule_id=binding.schedule_id))
+                await self._block(
+                    binding,
+                    block_reason(exc, schedule_id=binding.schedule_id, current=binding.blocked_reason),
+                )
             except Exception:
                 self.agent._logger.exception(
                     "Schedule worker reconciliation failed",

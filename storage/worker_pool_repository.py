@@ -52,6 +52,9 @@ POOL_LAST_START_FAILURE = "last_start_failure"
 POOL_UNCOUNTED_ENDS = "starts_ended_not_counted"
 POOL_LAST_UNCOUNTED_END = "last_start_end_not_counted"
 POOL_HUNG_STARTS = "starts_hung"
+# A registered type whose shared queue cannot be created: the pool view's entry
+# for it, with the reason (custom_agents.worker_pool_controller.pool_views).
+POOL_QUEUE_UNAVAILABLE = "queue_unavailable"
 # The newest changes kept on a limit row, for inspection.
 _LIMIT_HISTORY = 10
 

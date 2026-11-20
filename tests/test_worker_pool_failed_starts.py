@@ -1621,3 +1621,61 @@ async def test_a_reconcile_block_with_free_text_stores_only_a_code(lead, monkeyp
     await ScheduleWorkerController(lead).reconcile()
     binding = lead._schedule_store.worker_records.get_binding("job", team_id="team")
     assert binding.blocked_reason == WORKER_RECONCILIATION_FAILED
+
+
+
+def test_the_kind_of_each_written_reason_is_read_back() -> None:
+    """Critique C05: the kinds come from the writers' own forms, built here from real errors."""
+
+    from custom_agents.agent_instantiation_service import (
+        REASON_KIND_CRASH,
+        REASON_KIND_NATS,
+        REASON_KIND_REFUSAL,
+        REASON_KIND_STARTUP_TIMEOUT,
+        queue_failure_reason,
+        start_reason_kind,
+    )
+
+    refusal = BadRequestError(code=400, err_code=10026, description="maximum consumers limit reached")
+    assert start_reason_kind(start_failure_reason(refusal)) == REASON_KIND_NATS
+    assert start_reason_kind(queue_failure_reason(refusal)) == REASON_KIND_NATS
+    assert start_reason_kind(start_failure_reason(RuntimeError("boom"))) == REASON_KIND_CRASH
+    assert start_reason_kind(start_failure_reason(None)) == REASON_KIND_CRASH
+    assert start_reason_kind(STARTUP_TIMED_OUT) == REASON_KIND_STARTUP_TIMEOUT
+    assert start_reason_kind(start_failure_reason(PermissionError("agent_type_disallowed"))) == REASON_KIND_REFUSAL
+    assert start_reason_kind(launcher_refusal_reason(ValueError("free text"))) == REASON_KIND_REFUSAL
+
+
+def test_the_schedule_inspection_hides_an_older_releases_block_text(lead, monkeypatch) -> None:
+    """Critique C06: a block text the previous release stored reads as worker_reconciliation_failed."""
+
+    from custom_agents.schedule_repair_guidance import WORKER_RECONCILIATION_FAILED
+    from custom_agents.schedule_worker_inspection import inspect_schedule_worker
+
+    _configured_schedule_start(lead, monkeypatch, rules={}, config={
+        "agent": {"schedule_workers": {"eligible_agent_types": ["Worker"]}},
+    })
+    old_text = "team composition unreadable at /srv/team/private/team.yaml"
+    lead._schedule_store.worker_records.mark_blocked("job", "team", old_text)
+    inspection = inspect_schedule_worker(lead, "job")
+    assert inspection["block_reason"] == WORKER_RECONCILIATION_FAILED
+    assert old_text not in str(inspection)
+
+
+@pytest.mark.asyncio
+async def test_a_lasting_free_text_fault_warns_once_not_every_pass(lead, monkeypatch, caplog) -> None:
+    """Critique C07: the replaced-reason warning is written when the stored reason changes."""
+
+    _configured_schedule_start(lead, monkeypatch, rules={}, config={
+        "agent": {"schedule_workers": {"eligible_agent_types": ["Worker"]}},
+    })
+
+    async def cover(self, *_args, **_kwargs):
+        raise ValueError("team composition unreadable at /srv/team/private/team.yaml")
+
+    monkeypatch.setattr(ScheduleWorkerController, "_cover", cover)
+    with caplog.at_level(logging.DEBUG, logger="custom_agents.schedule_worker_controller"):
+        for _ in range(4):
+            await ScheduleWorkerController(lead).reconcile()
+    replaced = [r for r in caplog.records if "event=schedule_worker_block_reason_replaced" in r.getMessage()]
+    assert [r.levelno for r in replaced] == [logging.WARNING] + [logging.DEBUG] * 3

@@ -48,6 +48,13 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Optional
 
+from custom_agents.agent_instantiation_service import (
+    REASON_KIND_CRASH,
+    REASON_KIND_NATS,
+    REASON_KIND_REFUSAL,
+    REASON_KIND_STARTUP_TIMEOUT,
+    start_reason_kind,
+)
 from custom_agents.stuck_work import Recovery, StuckFinding, StuckMessage, report_stuck_work
 from custom_agents.worker_pool_limits import worker_pool_repository
 from custom_messages.contracts.routing_v1 import (
@@ -69,7 +76,9 @@ from storage.worker_pool_repository import (
     INCIDENT_START_FAILED,
     POOL_FAILED_STARTS,
     POOL_HUNG_STARTS,
+    POOL_LAST_START_FAILURE,
     POOL_LAST_UNCOUNTED_END,
+    POOL_QUEUE_UNAVAILABLE,
     POOL_UNCOUNTED_ENDS,
     TEAM_SCOPE,
     IncidentKind,
@@ -151,11 +160,41 @@ def _hung_starts_text(pool: dict[str, Any]) -> str:
     )
 
 
+# Where to look for each kind of start failure (start_reason_kind). Before
+# 2026-11-20 every failure got the definition and denied-types advice, which
+# fits none of the 2026-11-19 incident's NATS refusals (review finding GEN-2,
+# round 3).
+_FIX_BY_KIND = {
+    REASON_KIND_NATS: (
+        "check the NATS server and the work stream's limits; NATS 10026 means the work "
+        "stream has reached its consumer limit."
+    ),
+    REASON_KIND_CRASH: "read the worker's error in the runtime log (event=agent_thread_crash for this type).",
+    REASON_KIND_STARTUP_TIMEOUT: (
+        "find what is slow while the worker starts (the tools, connections or recovery it "
+        "loads, in the runtime log for its start), or whether the type's startup timeout "
+        "is too short."
+    ),
+    REASON_KIND_REFUSAL: "check the agent type's definition and the operator's denied types.",
+}
+
+
 def _failed_start_text(details: dict[str, Any], pool: dict[str, Any]) -> tuple[str, str]:
-    """Failed starts in a row, or a launcher refusal made before any start record existed."""
+    """Failed starts in a row, a launcher refusal made before any start record, or a queue that cannot be created.
+
+    The advice follows the actual failure: the last failed start when there
+    are failed starts (the refused-because text may be the hourly limit's),
+    otherwise the refusal itself.
+    """
 
     reason = _shown(details.get(EVIDENCE_REFUSED_BECAUSE))
-    if pool.get(POOL_FAILED_STARTS):
+    if pool.get(POOL_QUEUE_UNAVAILABLE):
+        happened = (
+            "The shared queue of this type on the NATS work stream cannot be created, so no "
+            f"worker of this type can take tasks: {reason}."
+        )
+        why = "no worker of this type can take tasks until its queue exists"
+    elif pool.get(POOL_FAILED_STARTS):
         happened = (
             "Workers of this type failed to start or stopped before they were ready. "
             f"Latest failure: {reason}."
@@ -166,10 +205,10 @@ def _failed_start_text(details: dict[str, Any], pool: dict[str, Any]) -> tuple[s
         # nothing to wait on, it is tried again every pass.
         happened = f"The launcher refuses to start workers of this type: {reason}."
         why = "the launcher refuses every start of this type until the cause is fixed"
+    kind = start_reason_kind(pool.get(POOL_LAST_START_FAILURE) or details.get(EVIDENCE_REFUSED_BECAUSE))
     advice = (
         f"Neither a larger pool nor a higher start limit fixes this: {why}. Fix the "
-        "failure: check the agent type's definition and the operator's denied types. "
-        + _LOG_POINTERS
+        f"failure: {_FIX_BY_KIND[kind]} " + _LOG_POINTERS
     )
     return happened, advice
 
@@ -259,6 +298,23 @@ class WorkerPoolIncidents:
 
     def start_succeeded(self, agent_type: str) -> None:
         self._started_types.add(agent_type)
+
+    def queue_unavailable(self, agent_type: str, reason: str) -> None:
+        """A registered type whose shared queue cannot be created: a start_failed problem with the reason.
+
+        There is no observation for such a type (its queue state cannot be
+        read), so the evidence carries only the reason and the mark the texts
+        read (``POOL_QUEUE_UNAVAILABLE``).
+        """
+
+        self._see(
+            agent_type,
+            INCIDENT_START_FAILED,
+            {
+                EVIDENCE_POOL: {"agent_type": agent_type, POOL_QUEUE_UNAVAILABLE: reason},
+                EVIDENCE_REFUSED_BECAUSE: reason,
+            },
+        )
 
     def start_failed(self, observation: Any, reason: str, *, hourly_start_limit: bool = False) -> None:
         evidence: dict[str, Any] = {EVIDENCE_POOL: observation.as_dict(), EVIDENCE_REFUSED_BECAUSE: reason}
@@ -439,9 +495,9 @@ def _instructions(incident: WorkerPoolIncidentV1, *, recurring: bool, recurrence
             happened,
             advice,
             "The evidence has the details: details.start_refused_because and details.pool "
-            "(last_start_failure, failed_starts_in_row, next_start_waits_seconds, "
-            "last_start_end_not_counted). Tell administrators with notify_user what fails "
-            "and what to change; A to D do not help here.",
+            "(for failed starts, last_start_failure and next_start_waits_seconds). Tell "
+            "administrators with notify_user what fails and what to change; A to D do not "
+            "help here.",
         ]
     else:
         lines += [

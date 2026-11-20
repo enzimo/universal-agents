@@ -11,6 +11,7 @@ from custom_agents.agent_instantiation_service import (
     shown_reason,
 )
 from custom_agents.memory_review_runtime import is_memory_review_schedule_name
+from custom_agents.schedule_worker_controller import shown_block_reason
 from custom_agents.schedule_definition_identity import definition_changes
 from custom_agents.schedule_repair_guidance import (
     AGENT_DEFINITION_CHANGED,
@@ -136,7 +137,7 @@ def _repair_plan(
     agent: Any, binding: Any, definition: dict[str, Any], reason: str | None
 ) -> tuple[str, dict[str, Any] | None]:
     """Instructions for the current blocker plus a ready re-save when it applies."""
-    blocker = binding.blocked_reason or reason
+    blocker = shown_block_reason(binding.blocked_reason) or reason
     if definition.get("status") == "changed":
         blocker = AGENT_DEFINITION_CHANGED
     if blocker not in RESAVE_REPAIR_REASONS:
@@ -362,7 +363,7 @@ def inspect_schedule_worker(agent: Any, schedule_id: str = "") -> dict[str, Any]
         "observed_requirements": [
             item.model_dump(mode="json") for item in binding.observed_capabilities
         ],
-        "block_reason": binding.blocked_reason,
+        "block_reason": shown_block_reason(binding.blocked_reason),
         "next_action_at_utc": next_action_at.isoformat() if next_action_at else None,
         "launch_attempt": _shown_start_reason(attempt),
         "launch": _shown_start_reason(launch.model_dump(mode="json")) if launch else None,

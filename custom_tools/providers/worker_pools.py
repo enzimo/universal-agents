@@ -35,6 +35,7 @@ _EXPLANATION = {
     "next_start_waits_seconds": "How long the controller still waits before the next start of the type; the wait doubles with each failed start in a row, and after it one start is tried at a time.",
     "starts_ended_not_counted": "Starts since the last ready worker that ended for a reason that is not a failure of the type (the runtime stopped them, an edit ended them, or a schedule's own startup timeout ended them: schedule_startup_timed_out, which the schedule's owner should hear about). They still count toward the hourly start limit.",
     "last_start_end_not_counted": "Why the newest of those starts ended.",
+    "queue_unavailable": "The type's shared queue on the NATS work stream cannot be created (the reason has the NATS code; 10026 means the stream has reached its consumer limit). No worker of the type can take tasks until it exists; from the second pass in a row it is a start_failed problem.",
     "starts_hung": "Starts the runtime stopped, or cannot check, that have not ended for several minutes. The runtime no longer waits for them before the next start, but each still takes a pool slot until it ends or the runtime restarts.",
     "decision": "What the controller did on its last pass and why.",
     "open_problems": "Worker pool problems still open (capacity, provider_limited, start_failed); each gives you a review.",
@@ -55,7 +56,7 @@ def _error(message: str, **extra: Any) -> str:
 async def _snapshot(agent: Any, settings: Any) -> dict[str, Any]:
     """The controller's latest view, or a fresh one when it is missing or old."""
 
-    from custom_agents.worker_pool_controller import WorkerPoolController
+    from custom_agents.worker_pool_controller import WorkerPoolController, pool_views
 
     snapshot = dict(getattr(agent, "_worker_pool_snapshot", None) or {})
     observed = snapshot.get("observed_at")
@@ -65,11 +66,12 @@ async def _snapshot(agent: Any, settings: Any) -> dict[str, Any]:
         fresh = age < timedelta(seconds=60)
     if fresh or getattr(agent, "_local_team_runtime", None) is None:
         return snapshot
-    observations, team_active, team = await WorkerPoolController(agent).observe(settings)
+    controller = WorkerPoolController(agent)
+    observations, team_active, team = await controller.observe(settings)
     return {
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "team": {"workers_active": team_active, "limit": team.as_dict()},
-        "pools": {observation.agent_type: observation.as_dict() for observation in observations},
+        "pools": pool_views(observations, controller.queue_failures),
     }
 
 
@@ -139,6 +141,7 @@ async def inspect_worker_pools(agent_type: str = "") -> str:
     """
 
     from custom_agents.worker_pool_settings import current_worker_pool_settings
+    from storage.worker_pool_repository import POOL_QUEUE_UNAVAILABLE
 
     agent = _agent()
     try:
@@ -153,7 +156,10 @@ async def inspect_worker_pools(agent_type: str = "") -> str:
         pools = {
             name: pool
             for name, pool in pools.items()
-            if pool.get("tasks_waiting") or pool.get("workers_running") or pool.get("workers_starting")
+            if pool.get("tasks_waiting")
+            or pool.get("workers_running")
+            or pool.get("workers_starting")
+            or pool.get(POOL_QUEUE_UNAVAILABLE)
         }
     history = await _pool_history(agent, settings)
     return json.dumps(

@@ -646,3 +646,146 @@ def test_hung_starts_are_named_in_the_capacity_review_and_notice(world):
         assert "a larger pool does not help while they hang" in shown
     plain = incident.model_copy(update={"details": {"pool": {"starts_hung": 0}}})
     assert "stopped responding" not in reviews._instructions(plain, recurring=False, recurrences=1, settings=_settings())
+
+
+# -- round 3: advice by the kind of failure, and a queue that cannot be created ----
+
+
+def _nats_crash(wrapped: bool = False) -> str:
+    from custom_agents.agent_instantiation_service import start_failure_reason
+    from nats.js.errors import BadRequestError
+
+    refusal = BadRequestError(code=400, err_code=10026, description="maximum consumers limit reached")
+    if not wrapped:
+        return start_failure_reason(refusal)
+    try:
+        try:
+            raise refusal
+        except BadRequestError:
+            raise RuntimeError("cleanup failed")
+    except RuntimeError as error:
+        return start_failure_reason(error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_a_nats_refusal_points_at_the_nats_server_not_the_definition(monkeypatch, world, wrapped):
+    """Review finding GEN-2 (round 3): the 2026-11-19 failure gets NATS advice, built from the real error."""
+
+    reason = _nats_crash(wrapped)
+    details = {"pool": {"failed_starts_in_row": 2, "last_start_failure": reason}, "start_refused_because": reason}
+    for shown in (await _review_instructions(monkeypatch, details), _notice_text(world, details)):
+        assert "NATS 10026" in shown and "check the NATS server and the work stream's limits" in shown
+        assert "10026 means the work stream has reached its consumer limit" in shown
+        assert "agent type's definition" not in shown
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "advice"),
+    [
+        (None, "read the worker's error in the runtime log (event=agent_thread_crash for this type)"),
+        ("startup_timed_out", "find what is slow while the worker starts"),
+        ("agent_definition_unavailable", "check the agent type's definition and the operator's denied types"),
+    ],
+)
+async def test_the_advice_follows_the_kind_of_failure(monkeypatch, world, reason, advice):
+    from custom_agents.agent_instantiation_service import start_failure_reason
+
+    reason = reason or start_failure_reason(RuntimeError("worker crashed"))
+    failed = 0 if reason == "agent_definition_unavailable" else 2
+    details = {"pool": {"failed_starts_in_row": failed, "last_start_failure": reason if failed else None},
+               "start_refused_because": reason}
+    for shown in (await _review_instructions(monkeypatch, details), _notice_text(world, details)):
+        assert advice in shown
+
+
+@pytest.mark.asyncio
+async def test_an_hourly_limit_after_nats_crashes_gets_the_advice_of_the_crash(monkeypatch):
+    crash = _nats_crash()
+    details = {"pool": {"failed_starts_in_row": 2, "last_start_failure": crash}, "hourly_start_limit_reached": True,
+               "start_refused_because": f"worker_launch_rate_limit; the last 2 start(s) failed: {crash}"}
+    assert "check the NATS server" in await _review_instructions(monkeypatch, details)
+
+
+class _QueueAdapter:
+    """observe()'s queue reads; one type's queue creation fails with ``error`` until ``error`` is None."""
+
+    def __init__(self, failing: str, error) -> None:
+        self.failing, self.error = failing, error
+
+    async def ensure_worker_queue(self, agent_type: str) -> None:
+        if agent_type == self.failing and self.error is not None:
+            raise self.error
+
+    async def worker_queue_state(self, agent_type: str):
+        return SimpleNamespace(waiting=0, asking=0, unacknowledged=0)
+
+    async def oldest_worker_queue_message_at(self, agent_type: str):
+        return None
+
+
+def _queue_world(world, monkeypatch, error):
+    from custom_agents.worker_pool_controller import WorkerPoolController
+    from runtime_settings.schedule_workers import ScheduleWorkersConfig
+
+    settings = _settings()
+    monkeypatch.setattr("custom_agents.worker_pool_settings.current_worker_pool_settings", lambda _agent: settings)
+    monkeypatch.setattr("custom_agents.agent_instantiation_service.current_worker_limits",
+                        lambda _agent: ScheduleWorkersConfig())
+    world.agent._local_team_runtime = SimpleNamespace(agent_types=lambda: (WORKER_TYPE, "Queueless"),
+                                                      local_workers=lambda _team: ())
+    world.agent._ensured_worker_queues = set()
+    world.agent._worker_pool_snapshot = {}
+    adapter = _QueueAdapter("Queueless", error)
+    world.agent._ensure_nats_transport_adapter = lambda: adapter
+    return adapter, lambda: WorkerPoolController(world.agent).reconcile()
+
+
+@pytest.mark.asyncio
+async def test_a_queue_nats_refuses_to_create_is_reported_from_the_second_pass(world, monkeypatch):
+    """Review finding GEN-3 (round 3): the type's queue at the consumer limit reaches TeamArchitect and administrators."""
+
+    from nats.js.errors import BadRequestError
+
+    adapter, reconcile = _queue_world(
+        world, monkeypatch, BadRequestError(code=400, err_code=10026, description="maximum consumers limit reached")
+    )
+    await reconcile()
+    view = world.agent._worker_pool_snapshot["pools"]["Queueless"]
+    assert view == {"agent_type": "Queueless", "queue_unavailable":
+                    "worker_queue_unavailable: BadRequestError (NATS 10026: maximum consumers limit reached)"}
+    assert world.opened == []  # one pass: nothing opens
+
+    await reconcile()
+    ((opened),) = world.opened
+    assert (opened["kind"], opened["scope"]) == (INCIDENT_START_FAILED, "Queueless")
+    now = datetime.now(timezone.utc)
+    from storage.worker_pool_repository import WorkerPoolIncidentV1
+
+    incident = WorkerPoolIncidentV1(incident_id="i", team_id="team", agent_type="Queueless", kind=INCIDENT_START_FAILED,
+                                    opened_at_utc=now, last_seen_at_utc=now, details=opened["details"])
+    instructions = reviews._instructions(incident, recurring=False, recurrences=1, settings=_settings())
+    (finding,) = [f for f in world.told[-1] if f.subject_id == f"Queueless:{INCIDENT_START_FAILED}"]
+    for shown in (instructions, finding.message.text):
+        assert "cannot be created" in shown and "NATS 10026" in shown
+        assert "no worker of this type can take tasks until its queue exists" in shown
+        assert "check the NATS server" in shown
+        assert "launcher refuses" not in shown
+
+    adapter.error = None  # the queue can be created again: the row ends
+    await reconcile()
+    assert "Queueless" not in world.agent._pool_refusals_in_row
+    assert "queue_unavailable" not in world.agent._worker_pool_snapshot["pools"]["Queueless"]
+
+
+@pytest.mark.asyncio
+async def test_a_queue_that_times_out_is_logged_but_not_reported(world, monkeypatch, caplog):
+    """Critique C04: an error without a NATS code is a connection problem; a stall after a restart opens nothing."""
+
+    _, reconcile = _queue_world(world, monkeypatch, TimeoutError("nats: timeout"))
+    with caplog.at_level(logging.WARNING, logger="custom_agents.worker_pool_controller"):
+        for _ in range(3):
+            await reconcile()
+    assert world.opened == [] and "Queueless" not in world.agent._worker_pool_snapshot["pools"]
+    assert caplog.text.count("event=worker_pool_queue_create_failed") == 3
