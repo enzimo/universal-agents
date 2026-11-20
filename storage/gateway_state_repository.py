@@ -1004,6 +1004,8 @@ class _RelationalGatewayStateRepository:
     """Shared record operations for gateway session and delivery state."""
 
     _dialect: SqlDialect
+    # Set by each database's constructor; the shared schema setup passes it to the logged column step.
+    _logger: logging.Logger
 
     @staticmethod
     def _is_integrity_error(exc: Exception) -> bool:
