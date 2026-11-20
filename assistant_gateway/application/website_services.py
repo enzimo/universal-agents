@@ -560,35 +560,37 @@ class WebsiteSessionApplication:
         thread, so every device the person uses shows the same list.
         """
 
-        session = self._session_repository.resolve_session_reference(session_key)
-        if (
-            session is None
-            or session.channel_name != DELIVERY_CHANNEL_WEBSITE
-            or session.chat_id != WEB_CHAT_CHAT_ID
-            or not self._owner_allows(session, owner_canonical_user_id, action=PRIVATE_ACTION_UPDATE)
-        ):
-            result = WebChatThreadPlacementResult.NOT_FOUND
-        else:
-            try:
+        session: SessionRecord | None = None
+        try:
+            session = self._session_repository.resolve_session_reference(session_key)
+            if (
+                session is None
+                or session.channel_name != DELIVERY_CHANNEL_WEBSITE
+                or session.chat_id != WEB_CHAT_CHAT_ID
+                or not self._owner_allows(session, owner_canonical_user_id, action=PRIVATE_ACTION_UPDATE)
+            ):
+                result = WebChatThreadPlacementResult.NOT_FOUND
+            else:
                 result = self._place_thread(session.session_key, action, snooze_until, seen_sequence)
-            except InvalidThreadPlacement as refused:
-                LOGGER.info(
-                    "Web Chat thread placement refused. event=web_chat_thread_placement outcome=refused "
-                    "session_key=%s action=%s reason=%r",
-                    session.session_key,
-                    action.value,
-                    str(refused),
-                )
-                raise
-            except Exception:
-                # The route answers 500; this line names the thread and the change.
-                LOGGER.exception(
-                    "Web Chat thread placement failed. event=web_chat_thread_placement outcome=error "
-                    "session_key=%s action=%s",
-                    session.session_key,
-                    action.value,
-                )
-                raise
+        except InvalidThreadPlacement as refused:
+            LOGGER.info(
+                "Web Chat thread placement refused. event=web_chat_thread_placement outcome=refused "
+                "session_key=%s action=%s reason=%r",
+                session.session_key if session is not None else session_key,
+                action.value,
+                str(refused),
+            )
+            raise
+        except Exception:
+            # The route answers 500; this line names the thread (as the page
+            # sent it when the lookup itself failed) and the change.
+            LOGGER.exception(
+                "Web Chat thread placement failed. event=web_chat_thread_placement outcome=error "
+                "session_key=%s action=%s",
+                session.session_key if session is not None else session_key,
+                action.value,
+            )
+            raise
         LOGGER.info(
             "Web Chat thread placement change. event=web_chat_thread_placement outcome=%s "
             "session_key=%s action=%s",

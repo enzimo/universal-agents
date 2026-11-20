@@ -36,6 +36,8 @@ from assistant_gateway.domain.transcript import (
     TRANSCRIPT_SOURCE_DELIVERY_EVENT,
     TRANSCRIPT_SOURCE_GATEWAY_COMMAND,
     TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE,
+    TRANSCRIPT_SOURCE_GATEWAY_RESPONSE,
+    TRANSCRIPT_SOURCE_GUIDANCE_ANSWER,
     TranscriptAppendRequest,
     TranscriptAttachmentReference,
 )
@@ -278,20 +280,23 @@ def test_only_the_team_posting_after_a_snooze_counts(settings) -> None:
     assert store.one().team_posted_after_hiding is True
 
 
-# The gateway's own answers to the person (owner's rule, F11): a slash
-# command's reply, a local reply, how the person's /link ended, the answer to
-# "?" and the answer to a message sent while a request ran.
+# The gateway's own answers to the person (owner's rule, F11), told by what
+# produced them: a slash command's reply (whatever source kind it was written
+# with), how the person's /link ended, the answer to "?" and the answer to a
+# message sent while a request ran.
 GATEWAY_ANSWERS = [
     pytest.param("system", "command", TRANSCRIPT_SOURCE_GATEWAY_COMMAND, id="command reply"),
     pytest.param("system", "command_auth", TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE, id="local command reply"),
     pytest.param("system", LINK_RESULT_MESSAGE_TYPE, TRANSCRIPT_SOURCE_DELIVERY_EVENT, id="link result"),
-    pytest.param("system", TASK_PROGRESS_STATUS_MESSAGE_TYPE, "gateway_response", id="answer to ?"),
-    pytest.param("assistant", TASK_STEERING_MESSAGE_TYPE, "gateway_response", id="message passed on"),
+    pytest.param("system", TASK_PROGRESS_STATUS_MESSAGE_TYPE, TRANSCRIPT_SOURCE_GATEWAY_RESPONSE, id="answer to ?"),
+    pytest.param("assistant", TASK_STEERING_MESSAGE_TYPE, TRANSCRIPT_SOURCE_GUIDANCE_ANSWER, id="message passed on"),
 ]
-# What the team posts; the final reply is written like the "?" answer, so the
-# rule cannot leave out the source kind gateway_response as a whole.
+# Every message the team writes wakes it, including those that share a type or
+# a source kind with a gateway answer.
 TEAM_POSTS = [
-    pytest.param("assistant", "assistant_message", "gateway_response", id="final reply"),
+    pytest.param("assistant", "assistant_message", TRANSCRIPT_SOURCE_GATEWAY_RESPONSE, id="final reply"),
+    pytest.param("assistant", "task", TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE, id="reply after an answered question"),
+    pytest.param("assistant", TASK_STEERING_MESSAGE_TYPE, TRANSCRIPT_SOURCE_DELIVERY_EVENT, id="team pause asking for a reply"),
     pytest.param("system", SYSTEM_NOTIFICATION_MESSAGE_TYPE, TRANSCRIPT_SOURCE_DELIVERY_EVENT, id="team notice"),
     pytest.param("system", "access_review", "access_review", id="access review"),
 ]

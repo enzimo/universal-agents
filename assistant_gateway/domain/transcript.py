@@ -22,11 +22,18 @@ TRANSCRIPT_SOURCE_CLIENT_REQUEST = "client_request"
 # the Web Chat card finds the request again after a reload.
 TRANSCRIPT_SOURCE_ACCESS_REVIEW = "access_review"
 TRANSCRIPT_SOURCE_DELIVERY_EVENT = "delivery_event"
+# A reply the gateway records for a request it carried (the default).
+TRANSCRIPT_SOURCE_GATEWAY_RESPONSE = "gateway_response"
 # The gateway's own replies to the person's slash commands and local requests
 # (``GatewayTranscriptService.append_local_exchange`` and
 # ``WebsiteSessionApplication.record_local_response``).
 TRANSCRIPT_SOURCE_GATEWAY_COMMAND = "gateway_command"
 TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE = "gateway_local_response"
+# The gateway's (or the team lead's) answer to a message the person sent while
+# a request ran: "will be passed to it", accepted or refused. Marked when it is
+# written, because the team's own pause asking for a reply has the same
+# message type (``task_steering``) and must still wake a snoozed thread.
+TRANSCRIPT_SOURCE_GUIDANCE_ANSWER = "gateway_guidance_answer"
 
 
 @dataclass(frozen=True)

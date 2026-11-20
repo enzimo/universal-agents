@@ -6,14 +6,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from assistant_gateway.domain.message_types import (
+    COMMAND_REPLY_MESSAGE_TYPES,
     LINK_RESULT_MESSAGE_TYPE,
     TASK_PROGRESS_STATUS_MESSAGE_TYPE,
-    TASK_STEERING_MESSAGE_TYPE,
 )
-from assistant_gateway.domain.transcript import (
-    TRANSCRIPT_SOURCE_GATEWAY_COMMAND,
-    TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE,
-)
+from assistant_gateway.domain.transcript import TRANSCRIPT_SOURCE_GUIDANCE_ANSWER
 
 
 class ParallelSettingOutcome(StrEnum):
@@ -45,25 +42,24 @@ class ThreadHiddenAs(StrEnum):
     DISMISSED = "dismissed"
 
 
-# What does not count as "the team posting" for a snoozed thread: the
-# person's own rows (role ``user``) and the gateway's answers to them (owner's
-# rule: a snoozed thread comes back early only when the team posts; the
-# person's own messages and slash commands never wake it). Answers are told
-# apart by how they were written, since their role is ``system`` or
-# ``assistant`` like the team's posts:
-# - replies to a slash command or a local request (their source kinds);
+# What does not count as "the team posting" for a snoozed thread (owner's
+# rule: it comes back early when the team posts; every message the team writes
+# wakes it). Only the person's own rows (role ``user``) and the gateway's
+# automatic answers to something the person did stay silent, each told by
+# what produced it, marked when it was written:
+# - a slash command's reply (its own message types);
 # - how a /link the person ran ended (``link_result``);
-# - the answer to "?" (``task_progress_status``);
-# - the answer to a message sent while a request ran (``task_steering``: the
-#   gateway's "will be passed to it" and the team lead's accepted or refused
-#   reply). The team's own pause that asks the person for a reply is also
-#   ``task_steering``; it shows in Needs you while it waits, and the team's
-#   next post wakes the thread.
-SNOOZE_SILENT_SOURCE_KINDS = (TRANSCRIPT_SOURCE_GATEWAY_COMMAND, TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE)
+# - the answer to "?" (``task_progress_status``, only ever that answer);
+# - the answer to a message sent while a request ran (source kind
+#   ``gateway_guidance_answer``; the team's own pause that asks for a reply
+#   has the same message type and wakes it).
+# Anything not listed wakes it: a thread that comes back once too often costs
+# a glance, one that stays hidden hides the team's message.
+SNOOZE_SILENT_SOURCE_KINDS = (TRANSCRIPT_SOURCE_GUIDANCE_ANSWER,)
 SNOOZE_SILENT_MESSAGE_TYPES = (
+    *COMMAND_REPLY_MESSAGE_TYPES,
     LINK_RESULT_MESSAGE_TYPE,
     TASK_PROGRESS_STATUS_MESSAGE_TYPE,
-    TASK_STEERING_MESSAGE_TYPE,
 )
 
 

@@ -46,7 +46,11 @@ from assistant_gateway.application.transcript_service import (
     TranscriptRequestRecord,
     gateway_response_from_transcript,
 )
-from assistant_gateway.domain.transcript import GatewayTranscriptMessage
+from assistant_gateway.domain.transcript import (
+    TRANSCRIPT_SOURCE_GATEWAY_RESPONSE,
+    TRANSCRIPT_SOURCE_GUIDANCE_ANSWER,
+    GatewayTranscriptMessage,
+)
 from assistant_gateway.domain.sessions import SessionRecord
 from assistant_gateway.domain.request_state import (
     GUIDANCE_STATUS_HELD,
@@ -307,6 +311,8 @@ class GatewayInteractiveSubmissionService:
             route=thread.route,
             response=response,
             accepted=accepted,
+            # Marks the answer so it does not wake a snoozed thread (domain.sessions).
+            source_kind=TRANSCRIPT_SOURCE_GUIDANCE_ANSWER,
         )
 
     async def _submit_new_request(self, thread: _ThreadMessage) -> GatewayResponse:
@@ -433,6 +439,7 @@ class GatewayInteractiveSubmissionService:
         route: GatewayRequestRoute,
         response: GatewayResponse,
         accepted: GatewayTranscriptMessage | None,
+        source_kind: str = TRANSCRIPT_SOURCE_GATEWAY_RESPONSE,
     ) -> GatewayResponse:
         if accepted is not None:
             self._transcript.append_gateway_response(
@@ -440,6 +447,7 @@ class GatewayInteractiveSubmissionService:
                 route=route,
                 response=response,
                 reply_to=accepted,
+                source_kind=source_kind,
             )
         return response
 

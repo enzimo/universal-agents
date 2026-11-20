@@ -16,9 +16,16 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from assistant_gateway.domain.request_state import REQUEST_KIND_INTERACTIVE, RUN_STATE_RUNNING
+from assistant_gateway.domain.transcript import TRANSCRIPT_SOURCE_GUIDANCE_ANSWER
 from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
+from custom_messages.contracts.envelope_v1 import MessageEnvelope
+from custom_messages.contracts.routing_v1 import MessageHeader
+from custom_messages.contracts.task_v1 import TaskSteering, TaskSteeringInterruptRecord
+from custom_messages.enums import RequesterType, TaskSteeringType
 from tests.test_gateway_parallel_threads import WEB_CHAT_TOKEN, _AnsweringTransport, _send
+from tests.test_gateway_question_queue import REPORT_QUESTION, _Chat, _finished, _question
 from tests.test_gateway_task_steering import _config as steering_config
 from tests.test_gateway_website_app import InternalWebsiteInteractiveApp
 
@@ -52,6 +59,7 @@ def _gateway(tmp_path: Path, monkeypatch, clock: _Clock) -> UserGateway:
         clock=clock,
     )
     transport.gateway = gateway
+    gateway.test_transport = transport  # type: ignore[attr-defined]
     return gateway
 
 
@@ -218,6 +226,151 @@ async def test_the_persons_own_slash_command_does_not_wake_a_snooze(tmp_path: Pa
         row = await browser.listed(key)
         assert row["last_sequence"] == 4, "the command and its reply were recorded"
         assert row["list_state"] == "snoozed"
+
+
+def _last_rows(gateway: UserGateway, session_key: str) -> list:
+    return gateway.transcript_repository.list_transcript_messages(
+        owner_canonical_user_id=gateway.config.user.canonical_user_id,
+        session_key=session_key,
+        before_session_sequence=None,
+        limit=10,
+    )
+
+
+async def _snoozed_with_running_request(client: TestClient, browser: _Browser, gateway: UserGateway, clock: _Clock) -> dict:
+    """A snoozed thread whose second request still runs (its HTTP wait has ended)."""
+
+    thread = await _thread_with_reply(client, browser)
+    gateway.request_repository.record_request(
+        correlation_id="corr_running",
+        session_key=thread["session_key"],
+        request_kind=REQUEST_KIND_INTERACTIVE,
+        request_text="Clean up the backups",
+        conversation_id=thread["conversation_id"],
+        followup_to_task_id=None,
+        active_task_id="task_root",
+        run_state=RUN_STATE_RUNNING,
+    )
+    response = await browser.place(
+        thread["session_key"], "snooze", snooze_until=(clock.now + timedelta(days=1)).isoformat(), seen_sequence=2
+    )
+    assert response.status == 200
+    return thread
+
+
+def _team_pause(gateway: UserGateway, task_id: str) -> MessageEnvelope:
+    first = gateway.test_transport.durable[0]  # type: ignore[attr-defined]
+    return MessageEnvelope(
+        msg_content=TaskSteering(
+            steering_type=TaskSteeringType.INTERRUPT_REQUEST,
+            target_task_id=task_id,
+            status_reason="Delete the old backups too? Reply to continue.",
+            interrupts=[TaskSteeringInterruptRecord(interrupt_id="ask_1", reason={"kind": "question"})],
+        ),
+        msg_header=MessageHeader(from_agent_id="manager_agent_1", to_routing_path="team_steering_gateway", agent_signature=""),
+        msg_meta=first.msg_meta.model_copy(
+            update={"msg_correlation_id": "corr_running", "requester_type": RequesterType.USER_REQUESTER, "is_response_requested": False}
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_id", ["task_root", "task_other"])
+async def test_a_team_pause_after_the_requests_wait_wakes_a_snooze(tmp_path: Path, monkeypatch, task_id: str) -> None:
+    """C08: a pause the team posts outside the request's wait, for its task or another, never stays hidden."""
+
+    clock = _Clock()
+    gateway = _gateway(tmp_path, monkeypatch, clock)
+    app = InternalWebsiteInteractiveApp(gateway.config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        browser = await _Browser.sign_in(client)
+        key = (await _snoozed_with_running_request(client, browser, gateway, clock))["session_key"]
+        await gateway.inbound_messages.handle(_team_pause(gateway, task_id))
+        assert _last_rows(gateway, key)[-1].message_type == "task_steering"
+        row = await browser.listed(key)
+        assert row["list_state"] == "woke" or row["needs_you"], row
+
+
+@pytest.mark.asyncio
+async def test_a_message_sent_while_a_request_runs_keeps_the_snooze(tmp_path: Path, monkeypatch) -> None:
+    """F11: the acknowledgement of the person's own message is not the team posting."""
+
+    clock = _Clock()
+    gateway = _gateway(tmp_path, monkeypatch, clock)
+    app = InternalWebsiteInteractiveApp(gateway.config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        browser = await _Browser.sign_in(client)
+        thread = await _snoozed_with_running_request(client, browser, gateway, clock)
+        response = await _send(client, thread, "Keep last week's backups", request_id="guidance")
+        assert response.status == 200, await response.text()
+        answer = _last_rows(gateway, thread["session_key"])[-1]
+        assert (answer.message_type, answer.source_kind) == ("task_steering", TRANSCRIPT_SOURCE_GUIDANCE_ANSWER)
+        assert (await browser.listed(thread["session_key"]))["list_state"] == "snoozed"
+
+
+@pytest.mark.asyncio
+async def test_the_teams_reply_after_an_answered_question_wakes_a_snooze(tmp_path: Path, monkeypatch) -> None:
+    """C07: the team's next post after the person answers is written as a local response and still wakes."""
+
+    chat = _Chat(tmp_path, channel="web")
+    config = chat.config
+    config.network.public_origin = "http://127.0.0.1"
+    config.interactive_apps.internal_website.enabled = True
+    config.interactive_apps.internal_website.web_chat_enabled = True
+    config.interactive_apps.internal_website.web_chat_token_env_var = "WEB_CHAT_AUTH_TOKEN"
+    monkeypatch.setenv("WEB_CHAT_AUTH_TOKEN", WEB_CHAT_TOKEN)
+    app = InternalWebsiteInteractiveApp(config, gateway=chat.gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        browser = await _Browser.sign_in(client)
+        key = (await browser.new_thread())["session_key"]
+        chat.session = chat.store.get_session(key)
+        chat.record_request("corr_report", "Summarize the sales report")
+        await chat.lead_sends("corr_report", _question("task_report", REPORT_QUESTION))
+
+        async def snooze_then_finish(envelope) -> None:
+            # The person answered; on another device they snooze the thread until the team is done.
+            row = await browser.listed(key)
+            response = await browser.place(
+                key,
+                "snooze",
+                snooze_until=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                seen_sequence=row["last_sequence"],
+            )
+            assert response.status == 200, await response.text()
+            assert (await browser.listed(key))["list_state"] == "snoozed"
+            await chat.lead_sends(envelope.msg_meta.msg_correlation_id, _finished("task_report", "Here is the summary."))
+
+        chat.lead.on_answer = snooze_then_finish
+        response = await client.post(
+            "/api/web-chat/chat",
+            headers=browser.headers,
+            json={"message": "The shared reports folder", "session_key": key, "client_request_id": "answer_1"},
+        )
+        assert response.status == 200, await response.text()
+        last = _last_rows(chat.gateway, key)[-1]
+        assert (last.role, last.content) == ("assistant", "Here is the summary.")
+        assert (await browser.listed(key))["list_state"] == "woke"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_thread_lookup_is_logged_with_the_thread_and_the_change(tmp_path: Path, monkeypatch, caplog) -> None:
+    """C09: the first read of a placement request is inside the logged failure path too."""
+
+    clock = _Clock()
+    gateway = _gateway(tmp_path, monkeypatch, clock)
+    app = InternalWebsiteInteractiveApp(gateway.config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        browser = await _Browser.sign_in(client)
+        key = (await browser.new_thread())["session_key"]
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(gateway.session_repository, "resolve_session_reference", broken)
+        caplog.set_level("ERROR")
+        assert (await browser.place(key, "dismiss", seen_sequence=0)).status == 500
+    (record,) = [item for item in caplog.records if "event=web_chat_thread_placement outcome=error" in item.getMessage()]
+    assert f"session_key={key}" in record.getMessage() and "action=dismiss" in record.getMessage()
 
 
 @pytest.mark.asyncio

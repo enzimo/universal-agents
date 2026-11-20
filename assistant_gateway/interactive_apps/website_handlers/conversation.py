@@ -11,7 +11,13 @@ from assistant_gateway.application.command_help import (
 from assistant_gateway.application.transient_presentation import GatewayTransientAction
 from assistant_gateway.application.commands.account_link import ACCOUNT_LINK_COMMAND
 from secure_tools.chat_commands import UPGRADE_COMMAND
-from assistant_gateway.domain.message_types import ACCOUNT_LINK_COMMAND_MESSAGE_TYPE, TEAM_EXPORT_COMMAND_MESSAGE_TYPE
+from assistant_gateway.domain.message_types import (
+    ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
+    AUTH_COMMAND_MESSAGE_TYPE,
+    COMMAND_REPLY_MESSAGE_TYPE,
+    SENSITIVE_USER_COMMAND_MESSAGE_TYPE,
+    TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
+)
 from assistant_gateway.application.gateway_application import (
     GatewayApplicationResponse,
     GatewaySession,
@@ -688,7 +694,7 @@ class WebsiteConversationHandlers:
                 client_request_id=client_request_id,
                 user_text=text,
                 response_text="The /reply command is available only in the local CLI.",
-                response_message_type="command",
+                response_message_type=COMMAND_REPLY_MESSAGE_TYPE,
             )
         if command_name not in _WEB_CHAT_ALLOWED_COMMANDS:
             return self._local_exchange_response(
@@ -698,7 +704,7 @@ class WebsiteConversationHandlers:
                 client_request_id=client_request_id,
                 user_text=text,
                 response_text=_WEB_CHAT_COMMAND_NOT_AVAILABLE,
-                response_message_type="command",
+                response_message_type=COMMAND_REPLY_MESSAGE_TYPE,
             )
         acceptance = self.application.transcripts.record_local_user_message(
             owner_canonical_user_id=owner,
@@ -880,7 +886,7 @@ class WebsiteConversationHandlers:
     def _command_message_type(command: str) -> str:
         tokens = str(command or "").strip().lower().split()
         if tokens and tokens[0] == "/auth":
-            return "command_auth"
+            return AUTH_COMMAND_MESSAGE_TYPE
         if tokens and tokens[0] == ACCOUNT_LINK_COMMAND:
             # The reply holds a one-time form link; keep it out of history.
             return ACCOUNT_LINK_COMMAND_MESSAGE_TYPE
@@ -892,8 +898,8 @@ class WebsiteConversationHandlers:
             and tokens[0] == "/user"
             and any(token in {"token", "invite", "code"} for token in tokens[1:])
         ):
-            return "command_user_sensitive"
-        return "command"
+            return SENSITIVE_USER_COMMAND_MESSAGE_TYPE
+        return COMMAND_REPLY_MESSAGE_TYPE
 
     @staticmethod
     def _safe_command_transcript_text(command: str) -> str:

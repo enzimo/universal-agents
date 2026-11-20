@@ -25,6 +25,7 @@ from assistant_gateway.application.transient_presentation import (
 from assistant_gateway.domain.message_types import (
     ACCESS_REVIEW_MESSAGE_TYPE,
     ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
+    COMMAND_REPLY_MESSAGE_TYPES,
     TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
     LINK_RESULT_MESSAGE_TYPE,
     TOOL_SETUP_RESULT_MESSAGE_TYPE,
@@ -45,6 +46,7 @@ from assistant_gateway.domain.transcript import (
     TRANSCRIPT_SOURCE_ACCESS_REVIEW,
     TRANSCRIPT_SOURCE_CLIENT_REQUEST,
     TRANSCRIPT_SOURCE_GATEWAY_COMMAND,
+    TRANSCRIPT_SOURCE_GATEWAY_RESPONSE,
     TRANSCRIPT_SOURCE_DELIVERY_EVENT,
     GatewayTranscriptMessage,
     TranscriptAppendRequest,
@@ -371,7 +373,7 @@ class GatewayTranscriptService:
         route: GatewayRequestRoute,
         response: GatewayResponse | GatewayApplicationResponse,
         reply_to: GatewayTranscriptMessage,
-        source_kind: str = "gateway_response",
+        source_kind: str = TRANSCRIPT_SOURCE_GATEWAY_RESPONSE,
     ) -> GatewayTranscriptMessage | None:
         if not self.is_web_chat_route(session, route):
             return None
@@ -744,14 +746,10 @@ class GatewayTranscriptService:
             "secure_credential_collection",
             TOOL_SETUP_MESSAGE_TYPE,
             TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE,
-            "command",
-            "command_auth",
-            ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
-            TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
+            *COMMAND_REPLY_MESSAGE_TYPES,
             LINK_RESULT_MESSAGE_TYPE,
             TOOL_SETUP_RESULT_MESSAGE_TYPE,
             SECURE_CREDENTIAL_RESULT_MESSAGE_TYPE,
-            "command_user_sensitive",
         }:
             return TRANSCRIPT_ROLE_SYSTEM
         return TRANSCRIPT_ROLE_ASSISTANT
