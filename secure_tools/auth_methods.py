@@ -35,6 +35,10 @@ X_SIGN_IN_PROVIDER = "x"
 TEAM_CLIENT_PROVIDERS = frozenset({"google", X_SIGN_IN_PROVIDER})
 
 
+# The command that shows who is signed in to what (gateway messages and broker pages).
+SIGN_IN_STATUS_COMMAND = "/auth status"
+
+
 def team_client_command(provider: str) -> str:
     """The administrators' command that stores a provider's team sign-in app."""
 

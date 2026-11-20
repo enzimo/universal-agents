@@ -42,10 +42,14 @@ DECLINE = {DECLINE_FIELD: "yes"}
 FROM_CARD = {"Origin": "null"}
 # Stands in for ``gh auth login --web``: prints the device code and waits.
 # With TRAP_TERM it ends with exit code 0 when stopped, as if it had just
-# finished signing in.
+# finished signing in. With WRITE_HOSTS it first writes its sign-in file, as gh
+# does once GitHub answered, and is then stopped before it exits (F9).
 FAKE_GH = """#!/bin/sh
 echo "! First copy your one-time code: ABCD-1234"
 echo "Open this URL to continue in your web browser: https://github.com/login/device"
+if [ -n "$WRITE_HOSTS" ]; then
+  printf 'github.com:\\n    oauth_token: gho_probe_value\\n' > "$GH_CONFIG_DIR/hosts.yml"
+fi
 if [ -n "$TRAP_TERM" ]; then
   sleep 30 >/dev/null 2>&1 &
   pid=$!
@@ -255,18 +259,22 @@ async def test_declining_a_running_github_sign_in_stays_declined(broker, monkeyp
     assert session.process is not None and session.process.poll() is None
 
     declined = await client.post(card_view_url(path), data=DECLINE, headers=FROM_CARD)
-    assert _outcome(await declined.text()) == "declined"
+    # gh that ended with 0 as it was stopped may keep its own sign-in: the page and card say so (F9).
+    page = await declined.text()
+    assert _outcome(page) == ("finished" if finishes_on_stop else "declined")
+    assert ("Nothing was saved" in page) is not finishes_on_stop
     session.thread.join(timeout=10)
     assert not session.thread.is_alive()
 
     payload = await (await client.get(f"{path}/status", headers=FROM_CARD)).json()
     assert payload["status"] == "declined"
+    assert payload["sign_in_may_remain"] is finishes_on_stop
     assert payload["failure_reason"] is None
     assert finalized == []
     assert "event=broker_auth_process_failed" not in caplog.text
-    # gh that ended with 0 as it was stopped may keep its own sign-in: the log says so.
     expected_event = "broker_auth_signed_in_after_decline" if finishes_on_stop else "broker_auth_process_ended_after_decline"
-    assert f"event={expected_event}" in caplog.text
+    other_event = "broker_auth_process_ended_after_decline" if finishes_on_stop else "broker_auth_signed_in_after_decline"
+    assert f"event={expected_event}" in caplog.text and f"event={other_event}" not in caplog.text
 
 
 def test_declining_a_running_google_sign_in_stays_declined(tmp_path: Path, caplog) -> None:
@@ -816,3 +824,55 @@ async def test_a_decline_still_arriving_when_a_token_sign_in_finishes_shows_the_
     assert _outcome(await answer.text()) == "finished"
     assert late.status == 200 and _outcome(await late.text()) == "finished"
     assert next(iter(service._auth_sessions.values())).state["status"] == "success"
+
+
+# -- a declined gh sign-in that may have left gh signed in (review finding F9) -----------
+
+
+@pytest.mark.asyncio
+async def test_a_decline_after_gh_wrote_its_sign_in_says_a_sign_in_may_remain(broker, monkeypatch, caplog) -> None:
+    """gh wrote hosts.yml and was stopped before it exited (exit -15): nothing claims nothing was saved."""
+
+    client, service = broker
+    caplog.set_level(logging.INFO)
+    monkeypatch.setenv("WRITE_HOSTS", "1")
+    path = await _sign_in(client, "github", "web")
+    assert (await client.get(card_view_url(path))).status == 200
+    session = next(iter(service._auth_sessions.values()))
+    hosts = Path(session.state["gh_hosts_file"])
+    for _ in range(100):  # gh writes its file right after printing the code
+        if hosts.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert hosts.exists() and session.process.poll() is None
+
+    declined = await client.post(card_view_url(path), data=DECLINE, headers=FROM_CARD)
+    session.thread.join(timeout=10)
+    page = await declined.text()
+    reopened = await (await client.get(card_view_url(path))).text()
+    payload = await (await client.get(f"{path}/status", headers=FROM_CARD)).json()
+
+    assert session.process.returncode != 0  # stopped, not finished
+    for shown in (page, reopened):
+        assert "may have finished signing in just before you declined" in shown and "/auth status" in shown
+        assert "Nothing was saved" not in shown
+        assert _outcome(shown) == "finished"  # the card reads "Done.", which claims nothing about saving
+    # The task and the gateway are still told the page was declined, with the flag.
+    assert payload["status"] == "declined" and payload["sign_in_may_remain"] is True
+    assert "event=broker_auth_signed_in_after_decline" in caplog.text
+    assert "event=broker_auth_process_ended_after_decline" not in caplog.text
+    assert "gho_probe_value" not in caplog.text and "gho_probe_value" not in page
+    # The leftover is not removed (it may hold an earlier sign-in of the person's).
+    assert hosts.exists()
+
+
+def test_a_sign_in_process_that_ignores_stop_is_killed_and_waited_for() -> None:
+    process = subprocess.Popen(
+        ["sh", "-c", "trap '' TERM; echo ready; while true; do sleep 0.1; done"],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert process.stdout is not None and process.stdout.readline().strip() == "ready"
+
+    auth_flows._terminate_process(process)
+
+    assert process.poll() is not None  # gone before a declined sign-in reads what it left

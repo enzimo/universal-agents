@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
 import os
@@ -25,7 +26,7 @@ from secure_tool_broker.auth_pages import (
     render_session_countdown,
 )
 from secure_tool_broker.credential_state import credential_owner_environment
-from secure_tools.broker_pages import SIGN_IN_STATUS_DECLINED
+from secure_tools.broker_pages import SIGN_IN_MAY_REMAIN_FIELD, SIGN_IN_STATUS_DECLINED
 from secure_tool_broker.credential_state_store import (
     credential_state_backend_mode,
     read_credential_state,
@@ -466,6 +467,8 @@ def _finalize_google_web_auth(session: BrokerAuthSession, logger: logging.Logger
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
+    """Stop a sign-in process and wait until it is gone (a declined sign-in then reads what it left)."""
+
     if process.poll() is not None:
         return
     process.terminate()
@@ -473,6 +476,47 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=3)
     except subprocess.TimeoutExpired:
         process.kill()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            LOGGER.error("A sign-in process did not end after it was killed. event=broker_auth_process_unkillable pid=%s", process.pid)
+
+
+# gh keeps its sign-in in hosts.yml in the person's own GH_CONFIG_DIR
+# (credential_state.credential_owner_environment). Its fingerprint before a
+# browser sign-in starts tells whether gh wrote a sign-in before Decline stopped
+# it; the file itself is never read into the session.
+_GH_HOSTS_FILE = "gh_hosts_file"
+_GH_HOSTS_BEFORE = "gh_hosts_before"
+
+
+def _file_fingerprint(path: str) -> str:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return "absent"
+    except OSError as exc:
+        return f"unreadable:{type(exc).__name__}"
+
+
+def sign_in_may_remain_after_decline(session: BrokerAuthSession, exit_code: int | None) -> bool:
+    """Whether a declined sign-in's CLI may still hold a sign-in, once its process has ended.
+
+    True when the process ended with 0 (it finished signing in in the moment
+    before it was stopped) or, for GitHub, when gh's sign-in file changed since
+    the sign-in started (gh wrote it, then was stopped before it exited). The
+    one decision both the Decline (``GitHubWebAuthFlow.cleanup``) and the
+    process monitor use, so the page and the log always agree. The leftover is
+    not removed: the file may also hold an earlier sign-in of the person's, or
+    one another of their pages finished at the same moment.
+    """
+
+    if exit_code == 0:
+        return True
+    hosts_file = str(session.state.get(_GH_HOSTS_FILE) or "")
+    if not hosts_file:
+        return False
+    return _file_fingerprint(hosts_file) != session.state.get(_GH_HOSTS_BEFORE)
 
 
 def _explain_auth_process_exit(session: BrokerAuthSession) -> tuple[str, str]:
@@ -552,16 +596,18 @@ def _auth_failure_details_html(session: BrokerAuthSession) -> str:
 
 
 def _log_ended_after_decline(session: BrokerAuthSession, logger: logging.Logger, *, exit_code: int) -> None:
-    """A declined sign-in's process ended; exit code 0 means its CLI may still hold a sign-in."""
+    """A declined sign-in's process ended: say whether its CLI may still hold a sign-in (``sign_in_may_remain_after_decline``)."""
 
-    if exit_code == 0:
+    if sign_in_may_remain_after_decline(session, exit_code):
+        session.state[SIGN_IN_MAY_REMAIN_FIELD] = True
         logger.warning(
-            "A declined sign-in's process finished signing in just before it was stopped; the page stays declined, "
-            "but a sign-in may remain. Check with /auth status. event=broker_auth_signed_in_after_decline "
-            "provider=%s method=%s person_id=%s",
+            "A declined sign-in's process finished signing in, or wrote its sign-in, just before it was stopped; "
+            "the page stays declined and says a sign-in may remain. Check with /auth status. "
+            "event=broker_auth_signed_in_after_decline provider=%s method=%s person_id=%s exit_code=%s",
             session.provider,
             session.method,
             session.owner_canonical_user_id,
+            exit_code,
         )
         return
     logger.info(
@@ -750,9 +796,12 @@ class GitHubWebAuthFlow:
 
         env = credential_owner_environment(session.owner_canonical_user_id)
         env.setdefault("BROWSER", "echo")
+        hosts_file = str(Path(env["GH_CONFIG_DIR"]) / "hosts.yml") if env.get("GH_CONFIG_DIR") else ""
         session.state.update(
             {
                 "status": "pending",
+                _GH_HOSTS_FILE: hosts_file,
+                _GH_HOSTS_BEFORE: _file_fingerprint(hosts_file) if hosts_file else "",
                 "hostname": hostname,
                 "git_protocol": git_protocol,
                 "scope_profile": self.scope_profile,
@@ -932,8 +981,15 @@ class GitHubWebAuthFlow:
         return session_status_payload(session)
 
     def cleanup(self, session: BrokerAuthSession) -> None:
-        if session.process is not None:
-            _terminate_process(session.process)
+        process = session.process
+        if process is None:
+            return
+        _terminate_process(process)
+        # A Decline stopped gh: the page says so when gh may have signed in just before
+        # (the process monitor logs the same decision).
+        if session.state.get("status") == SIGN_IN_STATUS_DECLINED and process.poll() is not None:
+            if sign_in_may_remain_after_decline(session, process.returncode):
+                session.state[SIGN_IN_MAY_REMAIN_FIELD] = True
 
 
 class GitHubWebAllAuthFlow(GitHubWebAuthFlow):

@@ -83,6 +83,7 @@ from assistant_gateway.application.account_links import (
     account_link_status_is_final,
 )
 from assistant_gateway.application.broker_session_watch import (
+    SIGN_IN_MAY_REMAIN_NOTE,
     WATCH_EXPIRED,
     WATCH_FINISHED,
     BrokerSessionOutcome,
@@ -292,6 +293,8 @@ def sign_in_page_ending(outcome: BrokerSessionOutcome, *, what: str) -> PageEndi
         return PageEnding(TOOL_SETUP_UNAVAILABLE, _unconfirmed(what), reason_code=REASON_PAGE_UNCONFIRMED)
     if status == SIGN_IN_STATUS_DECLINED:
         # The person chose Decline on the page; no further page for this tool opens in the task.
+        if outcome.sign_in_may_remain:
+            return PageEnding(TOOL_SETUP_DECLINED, f"{_capitalized(what)} was declined. {SIGN_IN_MAY_REMAIN_NOTE}")
         return PageEnding(TOOL_SETUP_DECLINED, f"{_capitalized(what)} was closed without finishing.")
     if status == SIGN_IN_STATUS_ERROR:
         why = _sentence(str(outcome.payload.get("message") or ""))[:300]

@@ -34,6 +34,7 @@ from aiohttp import web
 from custom_messages.contracts.credentials_v1 import CREDENTIAL_DECLINED
 from secure_tool_broker.auth_pages import (
     CARD_OUTCOME_DECLINED,
+    CARD_OUTCOME_FINISHED,
     auth_display_name,
     render_broker_auth_page,
     render_close_page_button,
@@ -45,7 +46,8 @@ from secure_tool_broker.form_claims import (
     finish_form_submission,
     run_claimed_form_thread,
 )
-from secure_tools.broker_pages import SIGN_IN_FINAL_STATUSES, SIGN_IN_STATUS_DECLINED
+from secure_tools.auth_methods import SIGN_IN_STATUS_COMMAND
+from secure_tools.broker_pages import SIGN_IN_FINAL_STATUSES, SIGN_IN_MAY_REMAIN_FIELD, SIGN_IN_STATUS_DECLINED
 
 # Why a Decline was not applied to a sign-in page (event=broker_auth_decline_ignored reason=...).
 REFUSED_PAGE_WITHOUT_DECLINE = "page_without_decline"
@@ -53,19 +55,32 @@ REFUSED_PAGE_ALREADY_ENDED = "page_already_ended"
 REFUSED_SIGN_IN_ALREADY_FINISHED = "sign_in_already_finished"
 
 
-def declined_page(eyebrow: str) -> str:
+def declined_page(eyebrow: str, *, sign_in_may_remain: bool = False) -> str:
     """The page a person declined: closed, nothing saved; a card tells the chat it was declined.
 
     The words hold whether a task waits on the page or the person opened it with a command.
+    With ``sign_in_may_remain`` (a sign-in's CLI finished signing in just before
+    Decline stopped it, ``auth_flows.sign_in_may_remain_after_decline``) the page
+    does not say nothing was saved, and the card reads "Done." (finished), which
+    claims nothing about saving, instead of "Declined. Nothing was saved."
     """
 
+    if sign_in_may_remain:
+        saved = (
+            f"<p>{html.escape(eyebrow)} may have finished signing in just before you declined, so a sign-in may "
+            f"remain. Check with {html.escape(SIGN_IN_STATUS_COMMAND)}. The page is closed. If an agent asked for it, "
+            "it is told you declined.</p>"
+        )
+        outcome = CARD_OUTCOME_FINISHED
+    else:
+        saved = "<p>Nothing was saved, and the page is closed. If an agent asked for it, it is told.</p>"
+        outcome = CARD_OUTCOME_DECLINED
     body = (
         f'<section class="content-panel"><p class="eyebrow">{html.escape(eyebrow)}</p>'
-        "<h1>You declined this page.</h1>"
-        "<p>Nothing was saved, and the page is closed. If an agent asked for it, it is told.</p>"
+        f"<h1>You declined this page.</h1>{saved}"
         f"{render_close_page_button()}</section>"
     )
-    return render_broker_auth_page("Declined", body, card_outcome=CARD_OUTCOME_DECLINED)
+    return render_broker_auth_page("Declined", body, card_outcome=outcome)
 
 
 def decline_credential_collection(
@@ -154,7 +169,12 @@ async def decline_auth_session(
         session.method,
         session_id[:12],
     )
-    return web.Response(text=declined_page(auth_display_name(session.provider)), content_type="text/html")
+    return web.Response(
+        text=declined_page(
+            auth_display_name(session.provider), sign_in_may_remain=bool(session.state.get(SIGN_IN_MAY_REMAIN_FIELD))
+        ),
+        content_type="text/html",
+    )
 
 
 def _cleanup_as_owner(session: Any, flow: Any) -> None:

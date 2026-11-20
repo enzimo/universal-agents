@@ -43,6 +43,10 @@ SIGN_IN_STATUS_SUCCESS = "success"
 SIGN_IN_STATUS_ERROR = "error"
 SIGN_IN_STATUS_DECLINED = "declined"
 SIGN_IN_FINAL_STATUSES = frozenset({SIGN_IN_STATUS_SUCCESS, SIGN_IN_STATUS_ERROR, SIGN_IN_STATUS_DECLINED})
+# A declined sign-in's status route sets this true when the CLI may still hold a
+# sign-in it finished just before Decline stopped it (GitHub's gh writes its own
+# sign-in file); the page, the card and the gateway's message then say so.
+SIGN_IN_MAY_REMAIN_FIELD = "sign_in_may_remain"
 
 # A host name or IPv4 address as it may appear in a Content-Security-Policy source.
 _HOST_NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
@@ -107,6 +111,7 @@ __all__ = [
     "CARD_VIEW_PARAM",
     "CARD_VIEW_VALUE",
     "SIGN_IN_FINAL_STATUSES",
+    "SIGN_IN_MAY_REMAIN_FIELD",
     "SIGN_IN_STATUS_DECLINED",
     "SIGN_IN_STATUS_ERROR",
     "SIGN_IN_STATUS_SUCCESS",

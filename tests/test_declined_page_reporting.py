@@ -108,3 +108,29 @@ def test_a_declined_link_sign_in_says_the_page_was_closed() -> None:
         restart_command="/link cli:github",
     )
     assert text == "You closed the GitHub sign-in page without finishing. Run /link cli:github to try again."
+
+
+# A declined sign-in whose CLI may have signed in just before Decline stopped it (review finding F9).
+_MAY_REMAIN = {"status": SIGN_IN_STATUS_DECLINED, "sign_in_may_remain": True}
+
+
+def test_a_declined_sign_in_that_may_remain_says_so_to_the_task() -> None:
+    ending = sign_in_page_ending(BrokerSessionOutcome(WATCH_FINISHED, _MAY_REMAIN), what="the GitHub sign-in")
+
+    assert ending.status == TOOL_SETUP_DECLINED
+    assert ending.message == (
+        "The GitHub sign-in was declined. The sign-in may have finished just before it was declined, "
+        "so it may remain; check with /auth status."
+    )
+
+
+def test_a_declined_link_sign_in_that_may_remain_says_so_to_the_person() -> None:
+    text = sign_in_result_text(
+        BrokerSessionOutcome(WATCH_FINISHED, _MAY_REMAIN), display_name="GitHub", restart_command="/link cli:github"
+    )
+
+    assert text == (
+        "You declined the GitHub sign-in page. The sign-in may have finished just before it was declined, "
+        "so it may remain; check with /auth status."
+    )
+    assert "without finishing" not in text

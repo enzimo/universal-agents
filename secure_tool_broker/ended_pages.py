@@ -32,7 +32,7 @@ from secure_tool_broker.auth_pages import (
 )
 from secure_tool_broker.page_decline import declined_page
 from secure_tools.auth_methods import GOOGLE_TEAM_CLIENT_METHOD, page_command, sign_in_command
-from secure_tools.broker_pages import SIGN_IN_STATUS_DECLINED, SIGN_IN_STATUS_SUCCESS
+from secure_tools.broker_pages import SIGN_IN_MAY_REMAIN_FIELD, SIGN_IN_STATUS_DECLINED, SIGN_IN_STATUS_SUCCESS
 
 # What a Bitwarden "Save for Restart Unlock" submission (result action
 # executors.BITWARDEN_RESTART_UNLOCK_ACTION) saved, kept in the session's state with the
@@ -118,7 +118,9 @@ def ended_sign_in_page(session: BrokerAuthSession, flow: BrokerAuthFlow | None) 
 
     state: dict[str, Any] = session.state
     if state.get("status") == SIGN_IN_STATUS_DECLINED:
-        return declined_page(auth_display_name(session.provider))
+        return declined_page(
+            auth_display_name(session.provider), sign_in_may_remain=bool(state.get(SIGN_IN_MAY_REMAIN_FIELD))
+        )
     if flow is not None:
         # /auth model and /upgrade draw their own closed page; browser sign-ins their ending.
         return flow.render(session)

@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Final, Literal
 
+from secure_tools.auth_methods import SIGN_IN_STATUS_COMMAND
+from secure_tools.broker_pages import SIGN_IN_MAY_REMAIN_FIELD
 from assistant_gateway.application.ports import (
     GatewayClock,
     GatewaySecureBrokerRefusal,
@@ -55,6 +57,18 @@ class BrokerSessionOutcome:
 
     ending: WatchEnding
     payload: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def sign_in_may_remain(self) -> bool:
+        """A declined sign-in whose CLI may have finished signing in just before Decline stopped it."""
+
+        return self.payload.get(SIGN_IN_MAY_REMAIN_FIELD) is True
+
+
+# Said after a declined sign-in that may have left a sign-in behind (sign_in_may_remain).
+SIGN_IN_MAY_REMAIN_NOTE = (
+    f"The sign-in may have finished just before it was declined, so it may remain; check with {SIGN_IN_STATUS_COMMAND}."
+)
 
 
 def watch_deadline(expires_at_utc: str) -> datetime:
@@ -149,6 +163,7 @@ class BrokerSessionWatches:
 
 
 __all__ = [
+    "SIGN_IN_MAY_REMAIN_NOTE",
     "WATCH_EXPIRED",
     "WATCH_FINISHED",
     "WATCH_GRACE",
