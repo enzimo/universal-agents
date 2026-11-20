@@ -212,13 +212,22 @@ supported, because it may not read what a newer one saved.
   whole size limit aside on its storage at once: about 2.1 GiB per team at the
   default `transport.queues.max_bytes`
   ([Storage notices](configuration.md#storage-notices)). The included NATS
-  server gives its streams three quarters of the disk's free space, measured
-  at each start, so keep about 3 GiB free on the instance's disk for each
-  team, at this start and every later one. When the room is not there, the
+  server gives its streams three quarters of the disk's free space plus three
+  quarters of what its stored messages take, measured at each start, so keep
+  about 3 GiB free on the instance's disk for each team (messages it already
+  stores count toward that), at this start and every later one. When the room is not there, the
   start stops before anything is served and names the stream, the limit it
   asked for and the `transport.queues.max_bytes` entry. Do what the message
   says (free disk space, or lower that limit), then start again; streams
-  already made stay and the next start finishes the rest.
+  already made stay and the next start finishes the rest. Later, the
+  [Status page](features.md#status-page) warns administrators, with one Inbox
+  notice, once the free space and the stored messages fall below what the next
+  start needs, and says how much to free from other files. If the server
+  already started with too little room, Status shows a problem: the streams it
+  has keep taking messages until they hold its room, but new ones, such as the
+  attachment store Web Chat creates the first time it copies an attachment,
+  are refused until you free space and restart the whole instance (the
+  container, or `ua start`). A team-wide restart is not enough.
 - **From 0.9 with an external NATS server:** prepare the server first. 0.10
   needs NATS Server 2.15.1 or later with two server settings
   ([Surviving a power loss](configuration.md#surviving-a-power-loss)), and more

@@ -32,7 +32,11 @@ Sources, each producing ``StatusFindingV1`` items:
   instance and its databases are on, and the message server's stored
   messages against the account's limit. Nearing the limit is a warning that
   administrators are told about anyway, nearly full a problem; a message
-  server that sets no limit is a note;
+  server that sets no limit is a note. For the bundled message server, its
+  room against what its streams set aside: a warning that administrators are
+  told about when its next start would leave it refusing new streams, and a
+  problem when it refuses them already, read from its monitoring endpoint,
+  which the storage check lists as unavailable when it does not answer;
 - the team's protocol 1 work and dead-letter streams that are filling up
   (``assistant_gateway.queue_capacity``), each against its own limit: a problem
   at ``transport.queues.warn_at_percent``. A stream list that fails marks the
@@ -59,10 +63,12 @@ previous check's problems are kept in ``InstanceLayout.status_problems_path``
 (``PreviousProblems``), so a restart neither repeats a notice nor forgets one
 is due; while a source cannot be asked, the problems it found before are kept
 too, so they are not announced again once it answers. Storage
-nearing its limit counts as a problem for the notice, although the page shows
-it as a warning: administrators must hear before it fills, not when saving
-fails. Its finding id names the level and when it was entered, never the
-percentage, so it is announced once per level entered. A
+nearing its limit, and the bundled message server's room warning, count as
+problems for the notice, although the page shows them as warnings:
+administrators must hear while there is still time to act, not when saving
+or a new stream fails. Their finding ids name the level and when it was
+entered, never the percentage or the free space, so each is announced once per
+level entered. A
 notice records what administrators were told and is not withdrawn when its
 problems go away; the page shows the current state. So the loop's first check
 waits for the gateway's start-up work that changes what it would find
@@ -278,7 +284,8 @@ class StatusPage:
     async def notify_new_problems(self) -> None:
         """One Inbox notice to administrators when a check finds a problem the previous check did not.
 
-        Administrators must hear about the problems and about storage nearing its limit
+        Administrators must hear about the problems, about storage nearing its limit and
+        about the bundled message server's room warning
         (``storage_capacity.tells_administrators``). The notice lists every current one,
         and its id is the digest of their ids, so the store keeps no notice twice: not
         after a restart between storing a notice and saving this check's problems, nor
@@ -485,7 +492,8 @@ class StatusPage:
             unavailable.append(MESSAGE_SERVER_SOURCE)
             messages = None
         try:
-            return await asyncio.to_thread(self.storage.findings, messages)
+            # The check adds the sources it could not ask itself (the bundled server's monitoring endpoint).
+            return await asyncio.to_thread(self.storage.findings, messages, unavailable=unavailable)
         except Exception:  # noqa: BLE001 - listed as unavailable; the rest of the page still shows
             LOGGER.exception("The storage checks failed. event=status_storage_check_failed")
             unavailable.append(STORAGE_SOURCE)

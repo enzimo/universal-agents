@@ -17,6 +17,8 @@ environment (``env_secrets.environment_for``, process ``nats``).
 
 from __future__ import annotations
 
+import http.client
+import io
 import json
 import logging
 import os
@@ -24,9 +26,10 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import time
-from typing import Mapping, MutableMapping
+from typing import Mapping, MutableMapping, NamedTuple
 
 from custom_messages.wire.partitions import account_mappings, mapping_line
 from env_secrets import PROCESS_NATS, environment_for
@@ -35,9 +38,33 @@ from env_secrets import PROCESS_NATS, environment_for
 INTERNAL_NATS_HOST = "127.0.0.1"
 INTERNAL_NATS_PORT = 4222
 INTERNAL_NATS_MONITOR_PORT = 8222
+# How long reading the bundled server's monitoring endpoint (bundled_running_room) may take in all:
+# connecting, asking and the whole reply, under one deadline. It is on the same machine, so an
+# answer takes milliseconds. This is the only bound on that wait: the Status page runs its storage
+# check in a worker thread with no time limit of its own.
+MONITOR_TIMEOUT_SECONDS = 2.0
+# The longest reply read from that endpoint, headers included. The bundled server's /varz reply is
+# a few kilobytes; a longer one is not that server answering, and is refused unread.
+MONITOR_REPLY_LIMIT_BYTES = 1 << 20
 LOCAL_NATS_ENABLED_ENV = "TEAM_LOCAL_NATS_ENABLED"
 NATS_USER_ENV = "NATS_USER"
 NATS_PASSWORD_ENV = "NATS_PASSWORD"
+NATS_URL_ENV = "NATS_URL"
+NATS_SERVERS_ENV = "NATS_SERVERS"
+# The bundled server's JetStream store folder (its ``-sd``), which ``start_local_nats``, and
+# nothing else, sets in the environment it is given, the one the runtime's processes get. The
+# bundled server sets no max_file_store, so at each start it takes three quarters of the free
+# space on that folder's disk, plus three quarters of what its streams already store there, as
+# its room, and the Status page measures that disk (``assistant_gateway.storage_capacity``). A hand-off to child processes, not a setting: both
+# launchers call ``start_local_nats`` (docker/launch_headless.py, and the bundle's
+# docker/run_bundle.py, which then hands the headless launcher TEAM_LOCAL_NATS_ENABLED=false),
+# so it is the one place that knows the server is the bundled one and where its store is. A
+# value from team.env, or from the bundle container's own environment, is dropped
+# (``drop_supplied_bundled_store_dir``). A headless launcher started directly cannot tell a
+# value its container set from one the bundle handed it, so ``bundled_nats_store_dir`` accepts
+# one only beside the bundled server's address; its own start of the server replaces any value.
+# The ``_DIR`` ending keeps it clear of the secret-name check.
+BUNDLED_NATS_STORE_DIR_ENV = "TEAM_BUNDLED_NATS_STORE_DIR"
 GENERATED_NATS_USER = "ua-runtime"
 _AUTH_DIR_NAME = "auth"
 # The JetStream store directory under the service root, passed to nats-server as ``-sd``.
@@ -71,9 +98,161 @@ def local_nats_enabled_from_env(env: Mapping[str, str] | None = None, *, default
 
 
 def apply_local_nats_env(env: dict[str, str]) -> None:
-    env["NATS_URL"] = local_nats_url()
-    env["NATS_SERVERS"] = local_nats_url()
+    env[NATS_URL_ENV] = local_nats_url()
+    env[NATS_SERVERS_ENV] = local_nats_url()
     env["NATS_JETSTREAM_ENABLED"] = "true"
+
+
+def drop_supplied_bundled_store_dir(values: MutableMapping[str, str], *, source: str, logger: logging.Logger) -> None:
+    """Remove a bundled store folder that ``source`` (team.env, the container's environment) supplied.
+
+    Only ``start_local_nats`` sets ``BUNDLED_NATS_STORE_DIR_ENV``. One from anywhere else could
+    point the Status page at a folder no server of this instance uses, so it is dropped and
+    named; the bundled server, when this start runs it, sets its own afterwards.
+    """
+
+    supplied = values.pop(BUNDLED_NATS_STORE_DIR_ENV, None)
+    if supplied is not None:
+        logger.warning(
+            "Ignoring %s from %s: only the start of the bundled NATS server sets it. "
+            "event=bundled_nats_marker_dropped source=%s",
+            BUNDLED_NATS_STORE_DIR_ENV,
+            source,
+            source,
+        )
+
+
+def bundled_nats_store_dir(env: Mapping[str, str], *, logger: logging.Logger | None = None) -> Path | None:
+    """The bundled NATS server's store folder when this process uses that server; None otherwise.
+
+    The folder counts only beside the bundled server's own address in both NATS_URL and
+    NATS_SERVERS, which both launchers set when they start that server. A folder beside any
+    other address, or one that is not an absolute path, is ignored with a warning, so the
+    Status page never measures a folder the server it uses does not keep its store in. The
+    addresses are not logged: an operator's address can carry a password. Absent, it gives
+    None without a log line; the caller says once that the room is not checked.
+    """
+
+    raw = str(env.get(BUNDLED_NATS_STORE_DIR_ENV) or "").strip()
+    if not raw:
+        return None
+    folder = Path(raw)
+    local = local_nats_url()
+    url = str(env.get(NATS_URL_ENV) or "").strip()
+    servers = [item.strip() for item in str(env.get(NATS_SERVERS_ENV) or "").split(",") if item.strip()]
+    bundled_address = url == local and servers == [local]
+    if bundled_address and folder.is_absolute():
+        return folder
+    (logger or logging.getLogger(__name__)).warning(
+        "Ignoring %s: this process does not use the bundled NATS server at %s, or the folder is not an "
+        "absolute path, so the Status page does not check the message server's room. "
+        "event=bundled_nats_marker_ignored folder=%s bundled_address=%s absolute=%s",
+        BUNDLED_NATS_STORE_DIR_ENV,
+        local,
+        raw,
+        bundled_address,
+        folder.is_absolute(),
+    )
+    return None
+
+
+class RunningRoom(NamedTuple):
+    """The bundled server's room as it runs and what its streams store, from one ``/varz`` reply.
+
+    Both from the same reply, so whether the server already refuses new messages compares two
+    figures taken at the same moment (``assistant_gateway.storage_capacity``).
+    """
+
+    room: int  # jetstream.config.max_storage: the room it took when it last started
+    stored: int  # jetstream.stats.storage: what its file streams store now, counted as NATS counts it
+
+
+def bundled_running_room(port: int | None = None, *, timeout: float = MONITOR_TIMEOUT_SECONDS) -> RunningRoom:
+    """The bundled server's room as it runs and what its streams store, from its ``/varz``.
+
+    The server takes its room once, when it starts (three quarters of the free space on its
+    store's disk plus three quarters of what its streams store, since its configuration sets no
+    max_file_store), and checks every new or changed stream against it until it starts again,
+    whatever the disk shows meanwhile; it refuses every new message once its streams store more
+    than that room. So these figures, not the disk, tell whether it refuses new streams or new
+    messages now (Status page, ``assistant_gateway.storage_capacity``). They come from the
+    loopback monitoring port ``start_local_nats`` always opens (``port`` for a test's own server),
+    read as ``_monitor_get`` reads it. Raises ``OSError`` when the endpoint does not answer in
+    time, answers other than 200 (a redirect included, which is not followed), answers at more than
+    ``MONITOR_REPLY_LIMIT_BYTES`` or with a reply that is not valid HTTP, and ``ValueError`` when the
+    reply is not JSON or lacks either figure as a whole number of 0 or more.
+    """
+
+    reply = json.loads(_monitor_get(INTERNAL_NATS_MONITOR_PORT if port is None else port, "/varz", timeout=timeout))
+    jetstream = reply.get("jetstream") if isinstance(reply, dict) else None
+    return RunningRoom(room=_varz_bytes(jetstream, "config", "max_storage"), stored=_varz_bytes(jetstream, "stats", "storage"))
+
+
+def _varz_bytes(jetstream: object, part: str, key: str) -> int:
+    """The byte figure ``jetstream.<part>.<key>`` of a ``/varz`` reply; ``ValueError`` when it is not a whole number of 0 or more."""
+
+    section = jetstream.get(part) if isinstance(jetstream, dict) else None
+    value = section.get(key) if isinstance(section, dict) else None
+    if type(value) is not int or value < 0:  # a JSON true is refused too
+        raise ValueError(f"the monitoring endpoint reports no jetstream.{part}.{key} (got {value!r})")
+    return value
+
+
+class _ReadReply:
+    """A reply already read in full, in the shape ``http.client.HTTPResponse`` reads from."""
+
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    def makefile(self, *_args: object, **_kwargs: object) -> io.BytesIO:
+        return io.BytesIO(self._raw)
+
+
+def _monitor_get(port: int, path: str, *, timeout: float) -> bytes:
+    """The body of a GET of ``path`` on the loopback monitoring port, read within ``timeout`` in all.
+
+    The whole reply is read first, under one monotonic deadline and at most
+    ``MONITOR_REPLY_LIMIT_BYTES``, and only then parsed by ``http.client``. Its own connection
+    reads would wait up to the socket timeout at every step, so a reply sent a few bytes at a
+    time could hold the storage check far longer than the timeout. Nothing is followed (a
+    redirect is a reply that is not 200), and no HTTP proxy the environment names is used.
+    """
+
+    deadline = time.monotonic() + timeout
+    raw = bytearray()
+    with socket.create_connection((INTERNAL_NATS_HOST, port), timeout=timeout) as connection:
+        connection.settimeout(_time_left(deadline))
+        connection.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: {INTERNAL_NATS_HOST}:{port}\r\nConnection: close\r\n\r\n".encode("ascii")
+        )
+        while True:
+            connection.settimeout(_time_left(deadline))
+            chunk = connection.recv(65536)
+            if not chunk:  # the endpoint closed the connection: the reply is complete
+                break
+            raw += chunk
+            if len(raw) > MONITOR_REPLY_LIMIT_BYTES:
+                raise OSError(f"the monitoring endpoint's reply is longer than {MONITOR_REPLY_LIMIT_BYTES} bytes")
+    response = http.client.HTTPResponse(_ReadReply(bytes(raw)), method="GET")  # type: ignore[arg-type]
+    try:
+        response.begin()
+        body = response.read()
+    except http.client.HTTPException as exc:
+        # A reply cut off (a server stopping), or one that is not HTTP: the endpoint did not answer
+        # properly, so callers treat it as not answering.
+        raise OSError(f"the monitoring endpoint's reply is not valid HTTP: {type(exc).__name__}: {exc}") from exc
+    if response.status != 200:
+        raise OSError(f"the monitoring endpoint answered {response.status} {response.reason}")
+    return body
+
+
+def _time_left(deadline: float) -> float:
+    """The seconds left before ``deadline``; ``TimeoutError`` when none are."""
+
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("the monitoring endpoint did not finish its reply in time")
+    return left
 
 
 def resolve_nats_service_root(env: Mapping[str, str] | None = None) -> Path:
@@ -389,8 +568,9 @@ def start_local_nats(
 ) -> subprocess.Popen[bytes]:
     """Start the local server with required authentication and the partition mappings.
 
-    ``env`` gains NATS_USER/NATS_PASSWORD when they were unset, so callers must
-    pass the same mapping they later give to runtime processes. ``partitions`` is the
+    ``env`` gains NATS_USER/NATS_PASSWORD when they were unset, and the store folder
+    (``BUNDLED_NATS_STORE_DIR_ENV``) once the server is ready, so callers must pass the
+    same mapping they later give to runtime processes. ``partitions`` is the
     saved ``transport.queues.partitions``; the installation authority checks the server
     maps at its own count before it serves.
 
@@ -482,4 +662,5 @@ def start_local_nats(
             )
             stop_local_nats(process, logger=logger)
         raise
+    env[BUNDLED_NATS_STORE_DIR_ENV] = str(data_dir.absolute())
     return process

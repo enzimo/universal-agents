@@ -40,6 +40,7 @@ from nats.js.errors import APIError
 
 from custom_messages.wire.partitions import agent_partition
 from custom_messages.wire.queues import QueueLimits, queue_stream_config, team_consumers, team_queue_streams
+from custom_transport.jetstream_account import reported_bytes, request_account_info
 from custom_transport.protocol1.bootstrap import read_bundle
 from custom_transport.protocol1 import host_keys
 from custom_transport.protocol1.contract_files import transport
@@ -84,7 +85,7 @@ def topology(nc: Any, limits: QueueLimits, partitions: int = 96) -> QueueTopolog
 
 
 async def account(nc: Any) -> dict:
-    return json.loads((await nc.request("$JS.API.INFO", b"", timeout=5)).data)
+    return await request_account_info(nc)
 
 
 def run(folder: Path, scenario: Any, **config: Any) -> None:
@@ -277,6 +278,8 @@ def test_an_account_with_limits_per_replica_tier_is_checked_against_its_tier(tmp
             await topology(nc, queue_limits()).ensure([TEAM])  # 100 streams and 7 buckets
             info = await account(nc)
             assert info["limits"]["max_storage"] == 0 and info["tiers"]["R1"]["streams"] == 107
+            # The top-level figure is the tiers' total, so the Status page reads it on either kind of account.
+            assert reported_bytes(info, "reserved_storage") == info["tiers"]["R1"]["reserved_storage"] == 100 * MIB
             with pytest.raises(StreamAccountRefused) as refused:
                 await topology(nc, queue_limits()).ensure([TEAM, "team_more"])
             assert str(refused.value).startswith(

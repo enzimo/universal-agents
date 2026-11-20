@@ -195,16 +195,16 @@ def test_the_queue_and_storage_levels_share_one_record(tmp_path) -> None:
     config = _config(tmp_path)
     config.transport.queues.warn_at_percent = 60
     disk = {"used": 85}
-    storage = build_storage_capacity(config)
+    storage = build_storage_capacity(config, env={})
     storage._disks = lambda: [SpaceUse(key="disk:instance", label="The disk", used=disk["used"], capacity=100)]
     storage._databases = list
     queues = build_queue_capacity(config, storage=storage)
 
     assert queues.team == TEAM and queues.warn_at_percent == 60
-    assert len(storage.findings(None)) == 1
+    assert len(storage.findings(None, unavailable=[])) == 1
     assert _ids(queues.findings([usage(f"UA1_PART_{TEAM}~95", 61.0)]))  # the instance's 96 partitions
     disk["used"] = 96  # the disk's record changes after the queue's: it must keep the queue's level
-    assert len(storage.findings(None)) == 1
+    assert len(storage.findings(None, unavailable=[])) == 1
 
     saved = json.loads(config.layout.storage_levels_path.read_text(encoding="utf-8"))["levels"]
     assert sorted(saved) == ["disk:instance", f"queue:UA1_PART_{TEAM}~95"]

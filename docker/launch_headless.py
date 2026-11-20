@@ -167,6 +167,7 @@ from runtime_settings.code_sandbox_contract import (
 from docker.nats_service import (
     LOCAL_NATS_ENABLED_ENV,
     apply_local_nats_env,
+    drop_supplied_bundled_store_dir,
     local_nats_enabled_from_env,
     start_local_nats,
 )
@@ -815,6 +816,9 @@ def build_process_env(
     base_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     env_file_values = load_env_file_values(env_path)
+    # team.env never carries the bundled server's store folder; the inherited environment
+    # may, from the bundle launcher's start of that server (docker.nats_service).
+    drop_supplied_bundled_store_dir(env_file_values, source=str(env_path), logger=LOGGER)
     ambient_env = os.environ if base_env is None else base_env
     runtime_env = dict(env_file_values)
     runtime_env.update(dict(ambient_env))

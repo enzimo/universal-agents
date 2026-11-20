@@ -865,6 +865,7 @@ NATS_CLIENT_CALLS = frozenset({
 # raw handle is added here in the same change, with its reason.
 NATS_CLIENT_MODULES = {
     "custom_transport/nats_adapter.py": "the transport adapter: publishing, delivery, object store",
+    "custom_transport/jetstream_account.py": "the raw account information request, for what the streams set aside",
     "custom_transport/nats_pull.py": "pull consumers for queued work",
     "custom_transport/nats_consumer_reconciler.py": "removes consumers the topology no longer names",
     "custom_transport/nats_topology.py": "creates and updates the streams",

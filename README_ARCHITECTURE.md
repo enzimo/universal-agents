@@ -4631,8 +4631,11 @@ storage before, so a full disk was first noticed when saving failed, and
 administrators must hear before a limit is reached. On every check the
 gateway reads the free space (`statvfs`, counted as `df` does) of the
 filesystem holding the instance folder and of each SQLite database's folder on
-another filesystem, and the NATS account's JetStream use and limit
-(`js.account_info()`, `NatsTransportAdapter.jetstream_account_usage`). An
+another filesystem, and the NATS account's JetStream use, limit and what its
+streams set aside (`NatsTransportAdapter.jetstream_account_usage`, which sends
+the raw `$JS.API.INFO` request through `custom_transport.jetstream_account`
+because nats-py's `account_info()` drops the set-aside figure; the
+installation authority reads the account through the same module). An
 unreadable disk produces a problem finding saying its free space is unknown;
 successful checks for other disks and NATS remain visible. At
 `gateway.storage_warnings.nearing_limit_percent` (80 by default) a place is
@@ -4652,7 +4655,8 @@ the findings' details. The bundled NATS server sets no JetStream limit
 (`docker/nats_service.py` passes no `max_file_store`), so the account reports
 none; the page then shows a note with the stored size instead of inventing a
 limit. Without `max_file_store` the server itself stops storing at three
-quarters of the disk space that was free when it started. The percentage
+quarters of the disk space that was free or held its messages when it started.
+The percentage
 counts bytes stored, not the space streams set aside, and the finding says
 so: every stream sets its whole byte limit aside when it is created, each
 team's protocol 1 work and dead-letter streams about 2.1 GiB at the default
@@ -4661,6 +4665,65 @@ server refuses a new or changed stream in an account allowed less (the
 authority checks before it creates any, `installation_authority/queues.py`). People's
 stored-data totals that the manager stopped measuring are a warning on the
 page too (`StorageUsageNotices.stale_finding`).
+
+The bundled server's room has two findings of its own, because the
+percentages miss it (FA-2 of pull request 152's review). The server takes
+three quarters of the free space (`f_bavail` times `f_bsize`, as NATS counts
+it) on the disk holding its store plus three quarters of what its streams
+already store as its room, once, each time it starts: it adds the stored bytes
+back once it has recovered its streams (measured on 2.15.1 to the byte). It
+refuses every new or changed stream (10047) while its streams set aside as
+much or more (equality included), and every new message (10023) once they
+store more than that room; until then the streams it has keep taking
+messages. Since each team's streams set aside about 2.1 GiB, the attachment
+object store (`ua_attachments`, created on first use), a new team and a start
+after a change to the stream settings can fail on a disk the percentage
+findings call healthy. The warning (`storage_message_room:<entered at>`)
+compares three quarters of the store disk's free space and the account's
+stored bytes together with the account's `reserved_storage` (`MessageRoom`):
+at or below it, the next start would leave the server short. The server moves
+every message between the free space and what it stores, so that sum hardly
+moves as the streams fill or drain: a work backlog does not raise the
+warning, removing messages does not end it, and the one amount it names to
+free is judged against the files other than the message store. It is
+announced like nearing the limit (`storage_capacity.tells_administrators`),
+and ends only once the free space and the stored bytes exceed what is needed
+by 3% of the disk: the percentage levels' margin applied to this comparison,
+expressed as a reading of 100 at the line so `StorageLevels.track_one` applies
+unchanged. The problem (`storage_message_room_now:<entered at>`) reads the room
+the server runs with and what its streams store from one reply of its loopback
+monitoring endpoint (`/varz` `jetstream.config.max_storage` and
+`jetstream.stats.storage`, `docker.nats_service.bundled_running_room`, read
+under one deadline, at most 1 MiB, following no redirect), because only a
+start of the whole instance changes that room: freeing space does not end the
+problem, and a team-wide restart keeps the server running. When the streams
+store more than that room it refuses every new message too; the problem then
+says so first under its own title, on the same level, so administrators are
+not told twice. Streams without a byte limit (`ua_attachments` by default) can
+store more than the room while less is set aside; that alone raises neither
+finding yet, though a finding shown for another reason says so. A start then
+takes new messages only once the free space is more than a third of what is
+stored (`MessageRoom.stored_decides_start`); the warning's amount to free can
+fall short of that, so both findings name that free space instead of leaving the
+amount as the remedy.
+While the endpoint does not answer, the problem's level is kept and the check
+lists the endpoint as an unavailable source, so `notify_new_problems` keeps
+the problem instead of announcing it again. The check runs only where a
+launcher started the bundled server: `start_local_nats` puts the store folder
+in `TEAM_BUNDLED_NATS_STORE_DIR` for the processes it starts, the bundle drops
+a value the container supplied and `build_process_env` one from `team.env`,
+and `bundled_nats_store_dir` accepts it only beside the bundled server's own
+address in both `NATS_URL` and `NATS_SERVERS` (otherwise it is ignored with a
+warning). This is a hand-off to child processes, not a setting: the launcher's
+start of the server is the one place that knows the server is the bundled one
+and where its store is. The check reads the account's file figures whatever
+`transport.storage` says: the protocol 1 streams are file streams in the
+message contract, and only `ua_attachments` follows that setting. An external
+server's store is on a disk the gateway cannot measure, so it gets neither
+finding; one with an account limit keeps the percentage finding, whose details
+show what the streams set aside. Neither finding has a
+setting: the line is NATS's rule, and a setting would need a change to the
+team transfer's settings section.
 
 Queue stream findings (`assistant_gateway/queue_capacity.py`) exist because a
 full work or dead-letter stream refuses new messages (`discard: new`):
@@ -5826,8 +5889,11 @@ renamed secrets included). The authority:
   stream whose fields the contract sets already
   match is not sent to NATS, so a restart with the same settings asks for no change: a
   server whose storage is now smaller than what its streams set aside (the bundled server
-  measures it from the disk's free space at every start) keeps serving the streams it has
-  but refuses every new or changed one. Per-team buckets use
+  measures it from the disk's free space and what its streams store at every start) keeps
+  serving the streams it has
+  but refuses every new or changed one. The Status page warns before the bundled server
+  would start that short and shows a problem once it runs that short (the storage findings
+  above). Per-team buckets use
   `custom_messages.wire.buckets.bucket_name` and every bucket's stream `bucket_stream`.
   The contract disables rollup, stream deletion and purge, so writing one key cannot
   erase the bucket. Repeated setup reconciles those settings without discarding records;
