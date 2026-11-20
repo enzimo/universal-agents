@@ -424,6 +424,10 @@ class GatewayStateRepository(
 
     def list_attachments_under(self, folder: str, *, after_id: str = "", limit: int) -> list[AttachmentRecord]: ...
 
+    def list_attachment_paths_containing(
+        self, text: str, *, after_id: str = "", limit: int
+    ) -> list[tuple[str, str]]: ...
+
     def set_attachment_local_path(self, attachment_id: str, local_path: str) -> bool: ...
 
     def relocate_held_guidance_attachment(
@@ -3008,6 +3012,34 @@ class _RelationalGatewayStateRepository:
                 (len(prefix), prefix, after_id, int(limit)),
             ).fetchall()
         return [AttachmentRecord(**dict(row)) for row in rows]
+
+    def list_attachment_paths_containing(
+        self, text: str, *, after_id: str = "", limit: int
+    ) -> list[tuple[str, str]]:
+        """Up to ``limit`` (attachment id, file path) pairs whose path holds ``text``, by id after ``after_id``.
+
+        Matched literally and with case in both databases
+        (``SqlDialect.contains``), in any folder, unlike
+        ``list_attachments_under``. For the upgrade step that moves files out
+        of the adapter host's transfer folder
+        (``instance_upgrades.adapter_host_files``): it looks for records that
+        name a transfer file under another folder, which show the folder was
+        at another path under 0.9.13. Reads only the two columns.
+        """
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT attachment_id, local_path
+                FROM gateway_attachments
+                WHERE {self._dialect.contains("local_path")} AND attachment_id > {bind}
+                ORDER BY attachment_id
+                LIMIT {bind}
+                """,
+                (text, after_id, int(limit)),
+            ).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
 
     def set_attachment_local_path(self, attachment_id: str, local_path: str) -> bool:
         """Record where an attachment's file now is; False when there is no such record."""

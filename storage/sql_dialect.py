@@ -16,12 +16,26 @@ class SqlDialect:
     # blob; PostgreSQL's octet_length reads a stored value's size without
     # decompressing it.
     text_bytes_template: str
+    # Where a bound text first occurs in a column's text (1-based, 0 when it
+    # does not), with ``{0}`` for the column and ``{1}`` for the bind marker.
+    # Both functions match the text literally and with case, unlike LIKE,
+    # which needs its wildcards escaped and ignores ASCII case in SQLite only.
+    position_template: str
 
     def text_bytes(self, column: str) -> str:
         """The byte size of ``column``'s text, 0 when it is NULL."""
 
         return f"COALESCE({self.text_bytes_template.format(column)}, 0)"
 
+    def contains(self, column: str) -> str:
+        """A condition true when ``column``'s text holds the bound text, matched literally; false when NULL."""
 
-SQLITE = SqlDialect(bind="?", name="SQLite", text_bytes_template="LENGTH(CAST({} AS BLOB))")
-POSTGRES = SqlDialect(bind="%s", name="Postgres", text_bytes_template="octet_length({})")
+        return f"{self.position_template.format(column, self.bind)} > 0"
+
+
+SQLITE = SqlDialect(
+    bind="?", name="SQLite", text_bytes_template="LENGTH(CAST({} AS BLOB))", position_template="instr({0}, {1})"
+)
+POSTGRES = SqlDialect(
+    bind="%s", name="Postgres", text_bytes_template="octet_length({})", position_template="strpos({0}, {1})"
+)

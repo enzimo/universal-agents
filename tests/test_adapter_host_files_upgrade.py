@@ -79,7 +79,12 @@ from uuid import uuid4
 import pytest
 
 import instance_upgrades.adapter_host_files as upgrade_module
-from instance_upgrades.adapter_host_files import DELETE_REFUSED, LIST_ID_FIELD, upgrade_adapter_host_files
+from instance_upgrades.adapter_host_files import (
+    DELETE_REFUSED,
+    LIST_ID_FIELD,
+    TRANSFER_FILE_PREFIX,
+    upgrade_adapter_host_files,
+)
 from assistant_gateway.adapter_host.domain import AdapterInboxRecord, AdapterUploadRecord
 from assistant_gateway.adapter_host.service import AdapterHostApplicationService
 from assistant_gateway.contracts.adapter_host_v1 import (
@@ -1093,6 +1098,219 @@ def test_a_run_that_waits_or_stops_removes_an_earlier_list(instance: _Instance, 
     assert removed.endswith(f"list={earlier}") and "is not valid, so it was removed" in removed
 
 
+# --- Records that name the transfer folder at another path (F7 of PR #154's review) ----------------------
+
+
+def _name_photo(instance: _Instance, name: str) -> None:
+    """Give the photo a name of the gateway's form, in its file, its gateway record and both turns, as 0.9.13 wrote it."""
+
+    path = str(instance.transfer / name)
+    assert instance.gateway().set_attachment_local_path("att_photo", path)
+    turns = [(CONVERSATION, "task_1"), (CONVERSATION, "task_2")]
+    instance.repository().relocate_turn_attachment(turns, "att_photo", local_path=path)
+    instance.photo_source.rename(instance.transfer / name)
+
+
+def _folder_moved_since_0_9_13(instance: _Instance) -> tuple[Any, Path, str]:
+    """The reviewer's probe (DI-2 of PR #154's review): 0.9.13's records name the folder at P1, which is now at P2.
+
+    The photo's gateway record and both turns name ``P1/<gateway name>``;
+    the folder was renamed to P2 and ``upload_dir`` set to P2. Returns that
+    config, P2 and the photo's name. The records of the lost file and the
+    orphan name P1 too; the orphan's file, a name of another form, is in P2.
+    """
+
+    name = _hex_name("photo")
+    _name_photo(instance, name)
+    moved = instance.root / "moved-uploads"
+    instance.transfer.rename(moved)
+    config = instance.config()
+    config.interactive_apps.adapter_host = AdapterHostSettings(upload_dir=str(moved))
+    return config, moved, name
+
+
+def _earlier_command(instance: _Instance, transfer: Path, name: str) -> str:
+    """The delete command an earlier run's warning gave for a list naming ``name`` (the marker since deleted)."""
+
+    leftover_list = instance.layout.adapter_host_files_without_records_path
+    _write(leftover_list, f"{name}\n".encode())
+    written = upgrade_module._WrittenList(leftover_list, "a1b2c3d4e5f6")
+    return upgrade_module._delete_command(instance.layout.adapter_host_files_upgrade_path, transfer, written)
+
+
+def _assert_earlier_command_refused(instance: _Instance, command: str, file: Path, cwd: Path) -> None:
+    """A list the run could not remove is back with a live file in it, and the earlier command still deletes nothing."""
+
+    _write(instance.layout.adapter_host_files_without_records_path, f"{file.name}\n".encode())
+    refused = _paste(command, cwd)
+    assert refused.returncode != 0 and refused.stderr == f"{DELETE_REFUSED}\n" and not refused.stdout
+    assert file.is_file(), "the live file stays"
+
+
+def test_the_gateway_query_finds_text_literally_in_any_folder(instance: _Instance) -> None:
+    """A1: ``list_attachment_paths_containing`` reads records outside the transfer folder, matched literally and with case.
+
+    ``%``, ``_`` and ``!`` are wildcards or escapes in ``LIKE``; here they
+    match only themselves, on both databases, and pages follow the id.
+    """
+
+    other = {
+        "att_q1": "/old/100%_!/adapter_upload_1",
+        "att_q2": "/old/1000_!/adapter_upload_2",
+        "att_q3": "/old/100X_!x/adapter_upload_3",
+        "att_q4": "/old/ADAPTER_UPLOAD_4",
+    }
+    for attachment_id, path in other.items():
+        _record_named(instance, attachment_id, path)
+    gateway = instance.gateway()
+
+    assert gateway.list_attachment_paths_containing("100%_!", limit=10) == [("att_q1", other["att_q1"])]
+    pages: list[list[tuple[str, str]]] = []
+    after = ""
+    while not pages or len(pages[-1]) == 2:
+        pages.append(gateway.list_attachment_paths_containing("/adapter_upload_", after_id=after, limit=2))
+        after = pages[-1][-1][0] if pages[-1] else after
+
+    assert [row for page in pages for row in page] == [
+        ("att_lost", str(instance.transfer / "adapter_upload_lost")),
+        ("att_photo", str(instance.photo_source)),
+        ("att_q1", other["att_q1"]),
+        ("att_q2", other["att_q2"]),
+        ("att_q3", other["att_q3"]),
+    ], "every folder, by id; the uppercase name and the web chat file are not matched"
+
+
+def test_records_naming_the_folder_at_another_path_withhold_the_list_and_the_command(
+    instance: _Instance, monkeypatch, caplog, tmp_path
+) -> None:
+    """A1, A2, A5: the reviewer's probe. The listed photo is a live file whose records name P1, so nothing is listed.
+
+    The run finishes once (the owner's choice for A3): the marker holds no
+    list id, so an earlier warning's command refuses even beside a list; the
+    summary line is logged as usual and one error replaces the
+    files-without-records warning, naming P1 (from the gateway record) and
+    how to still move the files. No listed file is opened, no record changes.
+    """
+
+    config, moved, name = _folder_moved_since_0_9_13(instance)
+    old = instance.transfer
+    marker = instance.layout.adapter_host_files_upgrade_path
+    command = _earlier_command(instance, moved, name)
+    opened = _opened_names(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = upgrade_adapter_host_files(config)
+    monkeypatch.undo()
+
+    assert result.finished and result.named_elsewhere == 1 and result.counts.files_without_records == 2
+    assert name not in opened and (moved / name).read_bytes() == CONTENT["att_photo"]
+    assert instance.gateway().get_attachment("att_photo").local_path == str(old / name)
+    assert instance.turn_paths("task_1")["att_photo"] == instance.turn_paths("task_2")["att_photo"] == str(old / name)
+    body = json.loads(marker.read_text())
+    assert body[LIST_ID_FIELD] is None and body["files_without_records"] == 2
+    _assert_no_list(instance.layout)
+    (summary,) = _events(caplog, "adapter_host_files_upgraded")
+    assert summary.endswith("moved=0 already_moved=0 missing=0 refused=0 no_record=0 gateway_rows_removed=0 "
+                            "turns_marked_unrecorded=0 files_without_records=2")
+    assert not _events(caplog, "adapter_host_files_without_records")
+    (error,) = _events(caplog, "adapter_host_files_folder_moved")
+    assert [r.levelno for r in caplog.records if "event=adapter_host_files_folder_moved" in r.getMessage()] == [logging.ERROR]
+    assert error.endswith(
+        f"event=adapter_host_files_folder_moved folder={moved} other_folders={old} files_without_records=2 unlisted=1 "
+        "named_elsewhere=1 by_gateway=1 by_held_guidance=0 by_turns=1"
+    )
+    assert error.startswith(
+        "1 of the 2 file(s) left in the adapter host's transfer folder that no record of this folder names are named "
+        f"by records in another folder ({old}), so this folder was most likely at another path under 0.9.13"
+    )
+    assert "No list and no delete command are given: do not delete any of them." in error
+    assert "They were not moved into state/uploads, so the team cannot open them." in error, "C02"
+    assert (
+        "move or mount this folder back at the path their records name (a link does not work), set upload_dir to "
+        f"that path, delete the marker {marker} and restart" in error
+    ), "C02: the way to still move them"
+    assert "fix them, then do the same" in error, "C04: no promise that moving it back always finishes"
+    assert name not in error and "xargs" not in error and "rm -f" not in error
+    _assert_earlier_command_refused(instance, command, moved / name, tmp_path)
+
+    assert upgrade_adapter_host_files(config).already_done, "reported once"
+
+
+def test_a_database_error_checking_other_folders_gives_no_list_and_no_command(
+    instance: _Instance, monkeypatch, caplog, tmp_path
+) -> None:
+    """C03: a failing check for records in another folder must never leave the delete command. Uncounted, not stopped."""
+
+    config, moved, name = _folder_moved_since_0_9_13(instance)
+    command = _earlier_command(instance, moved, name)
+
+    def locked(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(_RelationalGatewayStateRepository, "list_attachment_paths_containing", locked)
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = upgrade_adapter_host_files(config)
+
+    assert result.finished and result.named_elsewhere == 0 and result.counts.files_without_records is None
+    body = json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())
+    assert body[LIST_ID_FIELD] is None and body["files_without_records"] is None
+    (uncounted,) = _events(caplog, "adapter_host_files_without_records_uncounted")
+    assert uncounted.endswith(f"folder={moved} reason=RuntimeError: database is locked")
+    assert not _events(caplog, "adapter_host_files_without_records")
+    assert not _events(caplog, "adapter_host_files_folder_moved")
+    _assert_no_list(instance.layout)
+    _assert_earlier_command_refused(instance, command, moved / name, tmp_path)
+
+
+_LIVE = _hex_name("live")
+
+
+@pytest.mark.parametrize(
+    ("path_of", "in_this_folder"),
+    [
+        (lambda transfer, other: str(other / f"{_LIVE}0"), False),
+        (lambda transfer, other: str(other / _LIVE[:-1]), False),
+        (lambda transfer, other: str(other / (TRANSFER_FILE_PREFIX + _LIVE.removeprefix(TRANSFER_FILE_PREFIX).upper())), False),
+        (lambda transfer, other: str(other / f"{_LIVE}.pdf"), False),
+        (lambda transfer, other: f"{other.name}/{_LIVE}", False),
+        (lambda transfer, other: f"{transfer}/../{transfer.name}/{_LIVE}", True),
+        (lambda transfer, other: f"{transfer}//{_LIVE}", True),
+    ],
+    ids=["13_hex", "11_hex", "uppercase", "suffix", "relative", "dot_dot_into_this_folder", "double_slash_into_this_folder"],
+)
+def test_names_that_are_not_a_listed_name_in_another_folder_withhold_nothing(
+    instance: _Instance, caplog, path_of, in_this_folder
+) -> None:
+    """C03: only a listed name exactly, in an absolute path of another folder, counts; each kind of record is tried.
+
+    A gateway record, a turn and a held guidance copy name the path. Near
+    misses of the listed name (another length, uppercase, a suffix, a
+    relative path) leave the usual warning and command. A path that
+    normalizes into the transfer folder is a record of this folder: its file
+    moves, and the usual report covers the other file left.
+    """
+
+    assert _LIVE.upper() != _LIVE
+    live = _write(instance.transfer / _LIVE, b"x")
+    _write(instance.transfer / STRAY_NAME, STRAY)
+    path = path_of(instance.transfer, instance.root / "old-uploads")
+    _record_named(instance, "att_named", path)
+    instance.repository().merge_turn_attachments(
+        conversation_id=CONVERSATION, task_id="task_1", attachments=[_record("att_named", path, hashlib.sha256(b"x").hexdigest())]
+    )
+    _hold(instance, "corr_named", _record("att_named", path, hashlib.sha256(b"x").hexdigest()))
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = instance.run()
+
+    assert result.finished and result.named_elsewhere == 0
+    assert not _events(caplog, "adapter_host_files_folder_moved")
+    left = [STRAY_NAME] if in_this_folder else [_LIVE, STRAY_NAME]
+    _assert_reported(caplog, instance, left)
+    _assert_listed(instance.layout, left)
+    assert live.exists() != in_this_folder, "a record of this folder moves its file"
+
+
 _EPOCH = "epoch_1"
 _RECEIVED = datetime(2026, 11, 1, tzinfo=timezone.utc)
 
@@ -1199,8 +1417,10 @@ async def test_the_file_left_out_is_the_one_the_real_gateway_reads_and_removes_a
     (read_at_start,) = hosted.transfer_copies()
     stray = _write(hosted.transfer_dir / STRAY_NAME, STRAY)
     repository = hosted.service._repository
+    # The chat's own gateway records, which the check for records in another folder reads (F7 of PR #154's review).
+    gateway = create_gateway_state_repository(resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "state.db")}}))
     step = upgrade_module._Step(
-        transfer=hosted.transfer_dir, uploads=hosted.chat.config.layout.uploads_dir.resolve(), gateway=None,
+        transfer=hosted.transfer_dir, uploads=hosted.chat.config.layout.uploads_dir.resolve(), gateway=gateway,
         adapter_host=lambda: repository, conversations=None, marker=tmp_path / "marker", progress=tmp_path / "progress",
     )
 

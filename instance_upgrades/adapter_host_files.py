@@ -274,7 +274,7 @@ import re
 import shlex
 import stat
 from contextlib import contextmanager, suppress
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional
@@ -425,16 +425,40 @@ class UpgradeCounts:
 
 @dataclass(frozen=True)
 class UpgradeResult:
-    """``finished`` once the marker is written; ``folder_missing`` when records wait for a folder that holds none of their files."""
+    """``finished`` once the marker is written; ``folder_missing`` when records wait for a folder that holds none of their files.
+
+    ``named_elsewhere`` counts the files left that no record names here but
+    records name in another folder (``_NamedElsewhere``): nothing was listed
+    and no delete command given.
+    """
 
     finished: bool
     counts: UpgradeCounts
     waiting: int = 0
     already_done: bool = False
+    named_elsewhere: int = 0
 
     @property
     def folder_missing(self) -> bool:
         return not self.finished and self.waiting > 0
+
+
+@dataclass(frozen=True)
+class _NamedElsewhere:
+    """Which listed names records place in another folder: the transfer folder was most likely at another path under 0.9.13 (F7 of PR #154's review).
+
+    ``names`` counts the listed names any record names in another folder,
+    and each ``by_`` field those one kind of record names (a name may count
+    in several). ``folders`` holds the other folders from gateway records and
+    held guidance copies only, sorted: agent processes write conversation
+    turns, so a turn's folder is never kept or shown (A4).
+    """
+
+    names: int = 0
+    by_gateway: int = 0
+    by_held_guidance: int = 0
+    by_turns: int = 0
+    folders: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -443,10 +467,12 @@ class _Leftovers:
 
     ``listed`` are the names of the gateway's form (``_GATEWAY_NAME``),
     sorted; ``unlisted`` counts the other names, which are never shown.
+    ``elsewhere`` says which listed names records place in another folder.
     """
 
     listed: tuple[str, ...] = ()
     unlisted: int = 0
+    elsewhere: _NamedElsewhere = field(default_factory=_NamedElsewhere)
 
     @classmethod
     def of(cls, names: set[str]) -> _Leftovers:
@@ -456,6 +482,18 @@ class _Leftovers:
     @property
     def count(self) -> int:
         return len(self.listed) + self.unlisted
+
+    @property
+    def to_list(self) -> tuple[str, ...]:
+        """The names the list file may hold: all listed names, or none once records name one of them in another folder.
+
+        One such record means the folder moved, so every other listed file is
+        just as likely a live one, including those whose turns were cleaned
+        up: the matched names are never taken out to leave a list that looks
+        safe (the third correction of PR #154's review critic, DI-2).
+        """
+
+        return () if self.elsewhere.names else self.listed
 
 
 @dataclass(frozen=True)
@@ -652,9 +690,12 @@ def upgrade_adapter_host_files(config: Any, *, files_gone: bool = False) -> Upgr
         counts.turns_marked_unrecorded,
         "-" if counts.files_without_records is None else counts.files_without_records,
     )
-    if leftovers is not None and leftovers.count:
+    named_elsewhere = leftovers.elsewhere.names if leftovers is not None else 0
+    if leftovers is not None and named_elsewhere:
+        _report_folder_moved(transfer, marker, leftovers)
+    elif leftovers is not None and leftovers.count:
         _report_files_without_records(transfer, marker, written, leftovers)
-    return UpgradeResult(finished=True, counts=counts)
+    return UpgradeResult(finished=True, counts=counts, named_elsewhere=named_elsewhere)
 
 
 def _finish(
@@ -680,9 +721,13 @@ def _finish(
     to keep (F1 of PR #154's review). The review's probe showed that
     checking the list's sha256 or giving each run its own list name does
     not stop that: the stale list and its name are unchanged.
+
+    The list holds ``_Leftovers.to_list``: nothing when records name a
+    listed file in another folder (F7 of that review), so neither a list
+    nor an id is left for any command to use.
     """
 
-    listed = _settle_leftover_list(leftover_list, leftovers.listed if leftovers is not None else ())
+    listed = _settle_leftover_list(leftover_list, leftovers.to_list if leftovers is not None else ())
     written = _WrittenList(leftover_list, new_id_suffix()) if listed else None
     body = {"finished_at_utc": _now(), **asdict(counts), LIST_ID_FIELD: written.list_id if written else None}
     try:
@@ -850,6 +895,60 @@ def _unlisted_note(leftovers: _Leftovers) -> str:
     )
 
 
+def _report_folder_moved(transfer: Path, marker: Path, leftovers: _Leftovers) -> None:
+    """Say once, instead of the files-without-records warning, that records name listed files in another folder (F7 of PR #154's review).
+
+    The folder was then most likely at another path under 0.9.13, so the
+    files are people's: no list and no delete command are given, and the
+    error says how to still move them. Error rather than warning: the step
+    reports it only once (the marker is written, the owner's choice of
+    2026-11-20 over waiting for the folder) and the team cannot open those
+    files until an administrator acts. The steps stand on their own,
+    because an administrator may meet this first after ``--files-gone``,
+    which they ran for another reason. A file the step refused at that
+    other path keeps records naming it, so a folder moved back from there
+    is reported again for those files; the error says so instead of
+    promising that the move back always finishes (C04). Folders come only
+    from gateway records and held guidance copies (A4); no file is named.
+    """
+
+    elsewhere = leftovers.elsewhere
+    shown = [str(folder) for folder in elsewhere.folders[:_NAMED_IN_WARNING]]
+    if not shown:
+        where = (
+            " (not shown: only conversation records name it, which agent processes write; it is the path "
+            "upload_dir named under 0.9.13)"
+        )
+    else:
+        more = len(elsewhere.folders) - len(shown)
+        where = f" ({', '.join(shown)}{f' and {more} more' if more else ''})"
+    logger.error(
+        "%s of the %s file(s) left in the adapter host's transfer folder that no record of this folder names are "
+        "named by records in another folder%s, so this folder was most likely at another path under 0.9.13 and "
+        "they are files people sent. No list and no delete command are given: do not delete any of them. They "
+        "were not moved into state/uploads, so the team cannot open them. To move them: move or mount this folder "
+        "back at the path their records name (a link does not work), set upload_dir to that path, delete the "
+        "marker %s and restart; the step then runs again and moves the files whose records name that path. If "
+        "this folder was just moved here from that path, these are most likely files the step could not move "
+        "there (an adapter_host_file_not_moved warning of that run names each): fix them, then do the same.%s See "
+        "upgrading.md. event=adapter_host_files_folder_moved folder=%s other_folders=%s files_without_records=%s "
+        "unlisted=%s named_elsewhere=%s by_gateway=%s by_held_guidance=%s by_turns=%s",
+        elsewhere.names,
+        leftovers.count,
+        where,
+        marker,
+        _unlisted_note(leftovers),
+        transfer,
+        _listed(shown),
+        leftovers.count,
+        leftovers.unlisted,
+        elsewhere.names,
+        elsewhere.by_gateway,
+        elsewhere.by_held_guidance,
+        elsewhere.by_turns,
+    )
+
+
 def _delete_command(marker: Path, transfer: Path, written: _WrittenList) -> str:
     """The shell command that deletes exactly the listed files, and refuses unless the marker was written with them.
 
@@ -908,6 +1007,10 @@ class _Step:
         self._unrecorded_turns: set[tuple[str, str]] = set()
         # Names in the transfer folder that a record ``find`` saw names, held-only ids included (F16).
         self._named: set[str] = set()
+        # Names of the gateway's form that ``find`` saw records place in another folder (``_elsewhere``): from
+        # turns the name only (A4), from held guidance copies with their folders.
+        self._turn_names_elsewhere: set[str] = set()
+        self._held_elsewhere: dict[str, set[Path]] = {}
         self._not_moved: list[_NotMoved] = []
         self._absent: dict[Path, bool] = {}
         self._sync_unsupported: set[Path] = set()
@@ -975,19 +1078,31 @@ class _Step:
                 )
                 continue
             for attachment in attachments:
-                path = self._in_transfer(attachment.local_path())
+                raw = attachment.local_path()
+                path = self._in_transfer(raw)
                 if path is not None:
                     yield _HeldEntry(held.correlation_id, attachment, path)
+                elif (elsewhere := self._elsewhere(raw)) is not None:
+                    self._held_elsewhere.setdefault(elsewhere[1], set()).add(elsewhere[0])
 
     def _entries(self) -> Iterator[_Entry]:
+        """Files in the transfer folder conversation turns name; notes the names turns place in another folder.
+
+        Of a turn naming a file in another folder only the name is noted:
+        agent processes write turns, so their paths are never kept or shown (A4).
+        """
+
         after: Optional[tuple[str, str]] = None
         while True:
             turns = self._conversations.scan_turn_attachments(after=after, limit=_BATCH)
             for conversation_id, task_id, attachments in turns:
                 for attachment in attachments:
-                    path = self._in_transfer(attachment.local_path())
+                    raw = attachment.local_path()
+                    path = self._in_transfer(raw)
                     if path is not None:
                         yield _Entry(conversation_id, task_id, attachment, path)
+                    elif (elsewhere := self._elsewhere(raw)) is not None:
+                        self._turn_names_elsewhere.add(elsewhere[1])
             if len(turns) < _BATCH:
                 return
             after = (turns[-1][0], turns[-1][1])
@@ -1014,6 +1129,24 @@ class _Step:
         if self._transfer_in_uploads or self._uploads == path:
             return None
         return path
+
+    def _elsewhere(self, raw: Optional[str]) -> Optional[tuple[Path, str]]:
+        """``(folder, name)`` when ``raw`` names a transfer file of the gateway's form in another folder, else None.
+
+        Normalized like ``_in_transfer`` (no link followed, no file system
+        call), so a path that normalizes into the transfer folder is a record
+        of this folder, never of another. Only the gateway's own names count
+        (``_GATEWAY_NAME``, the form the list holds, matched in full), so a
+        name of another length or case, or with a suffix, withholds nothing;
+        nor does a relative path, which names no folder.
+        """
+
+        if not raw or not os.path.isabs(raw):
+            return None
+        path = Path(os.path.normpath(raw))
+        if path.parent == self._transfer or not _GATEWAY_NAME.fullmatch(path.name):
+            return None
+        return path.parent, path.name
 
     @property
     def _transfer_in_uploads(self) -> bool:
@@ -1055,10 +1188,53 @@ class _Step:
             return None if unnamed is None else _Leftovers()
         try:
             unnamed -= self._files_the_gateway_reads()
+            leftovers = _Leftovers.of(unnamed)
+            if leftovers.listed:
+                leftovers = replace(leftovers, elsewhere=self._named_elsewhere(leftovers.listed))
         except Exception as exc:  # a database error: the count only reports (A2), so it is left unset, logged
+            # Also when the check for records in another folder fails: no list and so no command (C03).
             self._log_uncounted(f"{type(exc).__name__}: {exc}")
             return None
-        return _Leftovers.of(unnamed)
+        return leftovers
+
+    def _named_elsewhere(self, listed: tuple[str, ...]) -> _NamedElsewhere:
+        """Which ``listed`` names records place in another folder (A1 of F7 of PR #154's review).
+
+        Three kinds of record: conversation turns and held guidance copies,
+        noted by ``find``'s own scans (``_entries``, ``_held_entries``), and
+        the gateway's attachment records, read here in pages with a query not
+        limited to the transfer folder (``list_attachment_paths_containing``)
+        and kept only for listed names, so what is held stays bounded by the
+        list. Each path is checked by ``_elsewhere``, so the gateway query's
+        rows count only when they name a listed name exactly.
+        """
+
+        wanted = set(listed)
+        gateway: dict[str, set[Path]] = {}
+        after_id = ""
+        while True:
+            rows = self._gateway.list_attachment_paths_containing(
+                f"/{TRANSFER_FILE_PREFIX}", after_id=after_id, limit=_BATCH
+            )
+            for _attachment_id, local_path in rows:
+                elsewhere = self._elsewhere(local_path)
+                if elsewhere is not None and elsewhere[1] in wanted:
+                    gateway.setdefault(elsewhere[1], set()).add(elsewhere[0])
+            if len(rows) < _BATCH:
+                break
+            after_id = rows[-1][0]
+        held = {name: folders for name, folders in self._held_elsewhere.items() if name in wanted}
+        turns = self._turn_names_elsewhere & wanted
+        folders: set[Path] = set()
+        for found in (*gateway.values(), *held.values()):
+            folders |= found
+        return _NamedElsewhere(
+            names=len(turns | held.keys() | gateway.keys()),
+            by_gateway=len(gateway),
+            by_held_guidance=len(held),
+            by_turns=len(turns),
+            folders=tuple(sorted(folders)),
+        )
 
     def _list_unnamed_files(self) -> Optional[set[str]]:
         """The folder's files no found record names; None, logged, when the folder cannot be listed or changed."""
