@@ -1022,24 +1022,30 @@ def instantiate_agent_type(
     Returns:
         A typed startup acknowledgement. Readiness and admission are separate.
     """
-    from custom_agents.agent_instantiation_service import DEFINITION_CHANGED_BEFORE_CONSTRUCTION
+    from custom_agents.agent_instantiation_service import (
+        DEFINITION_CHANGED_BEFORE_CONSTRUCTION,
+        IDLE_TTL_NOT_POSITIVE,
+        LAUNCH_IDENTITY_MISMATCH,
+        MCP_LAUNCH_PROFILE_UNAVAILABLE,
+    )
+    from custom_agents.schedule_repair_guidance import AGENT_DEFINITION_UNAVAILABLE
     from custom_agents.schedule_definition_identity import launch_definition_digest
 
     config = load_agent_type_map().get(named_agent_type)
 
     if not config:
-        raise ValueError("agent_definition_unavailable")
+        raise ValueError(AGENT_DEFINITION_UNAVAILABLE)
     if launch_definition_digest(config) != launch.definition_digest:
         raise ValueError(DEFINITION_CHANGED_BEFORE_CONSTRUCTION)
     if (launch.named_agent_type, launch.team_id) != (named_agent_type, team_id) or is_team_lead:
-        raise ValueError("launch_identity_mismatch")
+        raise ValueError(LAUNCH_IDENTITY_MISMATCH)
     if idle_ttl_seconds is not None:
         try:
             idle_ttl_seconds = float(idle_ttl_seconds)
         except (TypeError, ValueError):
-            raise ValueError("idle_ttl_seconds_not_positive") from None
+            raise ValueError(IDLE_TTL_NOT_POSITIVE) from None
         if idle_ttl_seconds <= 0:
-            raise ValueError("idle_ttl_seconds_not_positive")
+            raise ValueError(IDLE_TTL_NOT_POSITIVE)
 
     # Copy config to avoid modifying the original
     agent_config = config.copy()
@@ -1073,7 +1079,7 @@ def instantiate_agent_type(
             shared_config.to_dict().get("mcp_profiles"),
         )
     except ValueError as exc:
-        raise ValueError("mcp_launch_profile_unavailable") from exc
+        raise ValueError(MCP_LAUNCH_PROFILE_UNAVAILABLE) from exc
     agent_config["external_mcp_servers"] = merge_external_mcp_server_configs(
         agent_config.get("external_mcp_servers"),
         profile_server_configs,

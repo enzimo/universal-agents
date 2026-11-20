@@ -27,17 +27,25 @@ from nats.js.errors import BadRequestError
 from pydantic import BaseModel, ValidationError
 
 from custom_agents.agent_instantiation_service import (
+    CONSTRUCTION_FAILED,
     CRASHED_BEFORE_READY,
     DEFINITION_CHANGED_BEFORE_START,
     EXITED_BEFORE_READY,
+    KNOWN_START_CODES,
     LAUNCH_POLICY_REVOKED,
     LAUNCHER_RECONCILIATION,
+    LAUNCHER_REJECTED_START,
     PROCESS_HOST_ID,
+    SCHEDULE_STARTUP_TIMED_OUT,
     STARTUP_TIMED_OUT,
     STOPPED_BY_RUNTIME,
+    UNCOUNTED_START_ENDS,
     AgentInstantiationService,
     counts_as_failed_start,
+    is_current_reason,
+    launcher_refusal_reason,
     record_worker_exit,
+    refusal_code,
     start_failure_reason,
 )
 from custom_agents.schedule_repair_guidance import SCHEDULE_LAUNCH_INTENT_CHANGED
@@ -91,10 +99,10 @@ def test_failed_starts_are_counted_back_to_the_last_worker_that_became_ready() -
         [
             _record(1, AgentLaunchState.FAILED, reason="crashed_before_ready: BadRequestError"),
             _record(2, AgentLaunchState.STARTING),  # still starting: neither
-            _record(3, AgentLaunchState.FAILED, reason="older"),
+            _record(3, AgentLaunchState.FAILED, reason=STARTUP_TIMED_OUT),
             _record(4, AgentLaunchState.FAILED, agent_type="OtherAgent"),
             _record(5, AgentLaunchState.RETIRED, ready=True),
-            _record(6, AgentLaunchState.FAILED, reason="before the last good worker"),
+            _record(6, AgentLaunchState.FAILED, reason=CRASH),  # before the last good worker
         ],
         TYPE,
     )
@@ -164,6 +172,7 @@ def test_ends_that_say_nothing_about_the_type_are_not_counted_but_shown() -> Non
         "launcher_authorization_mode_changed_restart_required",
         "worker_pools_disabled",
         "agent_type_ineligible_for_automatic_launch",
+        "schedule_startup_timed_out",
         None,
     ],
 )
@@ -490,6 +499,143 @@ def test_the_projects_own_refusals_keep_their_code_and_nothing_else_does() -> No
     assert start_failure_reason(PermissionError("denied")) == f"{CRASHED_BEFORE_READY}: PermissionError"
     token = "3f9a0c7be12d45f6a8b9c0d1e2f3a4b5"
     assert start_failure_reason(ValueError(token)) == f"{CRASHED_BEFORE_READY}: ValueError"
+
+
+# -- only known codes, and only reasons this release writes (second review round) ----
+
+
+@pytest.mark.parametrize("text", ["alex_smith", "agent_3f9a0c", "team_secret_value", "closed"])
+def test_text_that_only_looks_like_a_code_is_not_kept(lead, text) -> None:
+    """Review finding RC-3: a name or id with underscores is not a project code, so it is never stored."""
+
+    assert refusal_code(ValueError(text)) is None
+    assert start_failure_reason(ValueError(text)) == f"{CRASHED_BEFORE_READY}: ValueError"
+
+    def refuse(*_args, **_kwargs):
+        raise PermissionError(text)
+
+    lead._local_team_runtime.spawn_agent = refuse
+    result = AgentInstantiationService(lead).launch(agent_type="Worker", owner_id="owner", request_id=f"looks-{text}")
+    assert result.reason == "launcher_refused: PermissionError"
+
+
+def test_every_known_code_and_each_refused_rule_is_kept() -> None:
+    from runtime_settings.schedule_workers import OPERATOR_LIMITED_RULES, RULE_EXCEEDS_OPERATOR_LIMIT
+
+    for code in sorted(KNOWN_START_CODES):
+        assert refusal_code(LaunchConflict(code)) == code
+    for field in OPERATOR_LIMITED_RULES:
+        assert refusal_code(ValueError(f"{RULE_EXCEEDS_OPERATOR_LIMIT}:{field}")) == f"{RULE_EXCEEDS_OPERATOR_LIMIT}:{field}"
+    assert refusal_code(ValueError(f"{RULE_EXCEEDS_OPERATOR_LIMIT}:anything_else")) is None
+
+
+def _raised_codes(module) -> dict[str, int]:
+    """Code-shaped texts raised as PermissionError, ValueError or LaunchConflict in ``module``, with their lines."""
+
+    import ast
+    import inspect
+    import re
+
+    from custom_agents import agent_instantiation_service, schedule_repair_guidance
+
+    namespaces = (module, agent_instantiation_service, schedule_repair_guidance)
+    found: dict[str, int] = {}
+    for node in ast.walk(ast.parse(inspect.getsource(module))):
+        if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) and node.exc.args):
+            continue
+        if not (isinstance(node.exc.func, ast.Name) and node.exc.func.id in {"PermissionError", "ValueError", "LaunchConflict"}):
+            continue
+        argument = node.exc.args[0]
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+            text = argument.value
+        elif isinstance(argument, ast.Name):
+            values = [getattr(space, argument.id) for space in namespaces if hasattr(space, argument.id)]
+            assert values, f"cannot resolve {argument.id} raised in {module.__name__}:{node.lineno}"
+            text = values[0]
+        else:
+            continue  # computed text: the rule-limit form, checked on its own
+        if re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", text):
+            found[text] = node.lineno
+    return found
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "custom_agents.agent_instantiation_service",
+        "storage.agent_launch_repository",
+        "custom_agents.strands_team",
+        "custom_agents.schedule_definition_identity",
+    ],
+)
+def test_every_code_the_launch_path_raises_is_a_known_code(module_name) -> None:
+    """A new refusal code on the launch path must be listed, or it would reach people as 'launcher_refused: <type>'."""
+
+    import importlib
+
+    raised = _raised_codes(importlib.import_module(module_name))
+    assert raised, f"no codes found in {module_name}; the scan is broken"
+    assert {code: line for code, line in raised.items() if code not in KNOWN_START_CODES} == {}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        None,
+        RuntimeError("worker crashed: token=abc"),
+        BadRequestError(code=400, err_code=10026, description="maximum consumers limit reached [stream: work] (a: b)"),
+        LaunchConflict(LAUNCH_POLICY_REVOKED),
+        ValueError("cannot read /srv/team/x"),
+    ],
+)
+def test_every_crash_reason_the_thread_writes_is_current(error) -> None:
+    """Critique C02: a reason this release writes is always recognised, so failures keep counting."""
+
+    reason = start_failure_reason(error)
+    assert is_current_reason(reason)
+    assert counts_as_failed_start(reason) is (reason not in UNCOUNTED_START_ENDS)
+
+
+def test_a_wrapped_nats_refusal_reason_is_current() -> None:
+    try:
+        try:
+            raise BadRequestError(code=400, err_code=10026, description="limit: reached [x]")
+        except BadRequestError:
+            raise RuntimeError("cleanup failed")
+    except RuntimeError as wrapped:
+        reason = start_failure_reason(wrapped)
+    assert reason.startswith(f"{CRASHED_BEFORE_READY}: RuntimeError (NATS 10026")
+    assert counts_as_failed_start(reason)
+
+
+def test_every_reason_the_launcher_and_reconciler_write_is_current() -> None:
+    from custom_messages.contracts.schedule_worker_v1 import (
+        AUTOMATIC_WORKER_CAPACITY_LIMIT,
+        TEAM_WORKER_CAPACITY_LIMIT,
+        WORKER_LAUNCH_RATE_LIMIT,
+    )
+
+    for error in (ValueError("not a code"), PermissionError("agent_type_disallowed")):
+        assert is_current_reason(launcher_refusal_reason(error))
+    for written in (EXITED_BEFORE_READY, STARTUP_TIMED_OUT, SCHEDULE_STARTUP_TIMED_OUT, STOPPED_BY_RUNTIME,
+                    LAUNCHER_RECONCILIATION, LAUNCH_POLICY_REVOKED, CONSTRUCTION_FAILED, LAUNCHER_REJECTED_START):
+        assert is_current_reason(written), written
+    assert UNCOUNTED_START_ENDS <= KNOWN_START_CODES
+    assert {AUTOMATIC_WORKER_CAPACITY_LIMIT, TEAM_WORKER_CAPACITY_LIMIT, WORKER_LAUNCH_RATE_LIMIT} <= KNOWN_START_CODES
+
+
+@pytest.mark.parametrize(
+    "old_text",
+    ["idle_ttl_seconds must be a positive number", "MCP launch profile unavailable",
+     "[Errno 13] Permission denied: '/srv/team/secret.key'", "1 validation error for Rules\nvalue='/srv/x'"],
+)
+def test_an_older_releases_free_error_text_is_neither_counted_nor_shown(old_text) -> None:
+    """Review finding GEN-2: the previous launcher stored str(exc); such a record never reaches people."""
+
+    history = start_history([_record(5, AgentLaunchState.FAILED, reason=old_text)], TYPE)
+    assert (history.failures_in_row, history.uncounted_ends, history.last_uncounted_reason) == (0, 1, None)
+    shown = _observed([_record(5, AgentLaunchState.FAILED, reason=old_text)]).as_dict()
+    assert old_text not in str(shown)
 
 
 def test_a_project_refusal_under_a_cleanup_error_keeps_its_code() -> None:
@@ -1147,3 +1293,38 @@ async def test_a_scheduled_start_whose_types_own_rule_is_refused_counts(lead, mo
     stored = repository.get(record.launch_id, "team")
     assert reasons == [refused]
     assert start_history([stored], stored.named_agent_type).failures_in_row == 1
+
+
+@pytest.mark.asyncio
+async def test_a_schedules_own_short_startup_timeout_does_not_count_against_the_type(lead, monkeypatch) -> None:
+    """Review finding GEN-1 (probe test_probe_schedule_timeout): the schedule's 5 s ran out, not the type's 120 s."""
+
+    repository, record = _configured_schedule_start(
+        lead, monkeypatch, rules={"startup_timeout_seconds": 5},
+        config={"agent": {"schedule_workers": {"eligible_agent_types": ["Worker"]}}},
+    )
+    reasons = _launcher_stops(lead, stopped=True)
+    now = utc_now() + timedelta(seconds=10)
+    await _reconcile(lead, now)
+    stored = repository.get(record.launch_id, "team")
+    assert reasons == [SCHEDULE_STARTUP_TIMED_OUT]
+    assert (stored.state, stored.reason) == (AgentLaunchState.FAILED, SCHEDULE_STARTUP_TIMED_OUT)
+    history = start_history([stored], "Worker", since=now - timedelta(hours=1))
+    assert history.failures_in_row == 0
+    observation = _observation(agent_type="Worker", waiting=3, oldest_wait_seconds=60.0,
+                               failed_starts_in_row=history.failures_in_row,
+                               start_retry_in_seconds=start_retry_in(history, now))
+    assert decide(observation, team_active=0, team_limit_value=32, settings=WorkerPoolsConfig()).starts == 1
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_start_past_its_types_own_timeout_still_counts(lead, monkeypatch) -> None:
+    repository, record = _configured_schedule_start(
+        lead, monkeypatch, rules={"startup_timeout_seconds": 5},
+        config={"agent": {"schedule_workers": {"eligible_agent_types": ["Worker"]}}},
+    )
+    reasons = _launcher_stops(lead, stopped=True)
+    await _reconcile(lead, utc_now() + timedelta(seconds=130))  # past the type's own 120 s too
+    stored = repository.get(record.launch_id, "team")
+    assert reasons == [STARTUP_TIMED_OUT]
+    assert start_history([stored], "Worker").failures_in_row == 1

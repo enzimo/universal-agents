@@ -9,6 +9,7 @@ from typing import Any
 from custom_agents.agent_instantiation_service import (
     LAUNCH_POLICY_REVOKED,
     LAUNCHER_RECONCILIATION,
+    SCHEDULE_STARTUP_TIMED_OUT,
     STARTUP_TIMED_OUT,
     AgentInstantiationService,
     current_worker_limits,
@@ -253,7 +254,7 @@ class ScheduleWorkerController:
         - a scheduled start's policy or definition changed:
           ``LAUNCH_POLICY_REVOKED`` (does not count);
         - the start took longer than its startup timeout (a schedule's own
-          value when it sets one): ``STARTUP_TIMED_OUT``.
+          value when it sets one); ``_timeout_reason`` says whose ran out.
         """
 
         binding = (
@@ -274,8 +275,31 @@ class ScheduleWorkerController:
             if refused is not None:
                 return refused
         if record.created_at_utc + timedelta(seconds=rules.startup_timeout_seconds) <= now:
-            return STARTUP_TIMED_OUT
+            return self._timeout_reason(record, binding, now)
         return None
+
+    def _timeout_reason(self, record: Any, binding: Any, now: datetime) -> str:
+        """Whose startup timeout ran out: the type's own (``STARTUP_TIMED_OUT``, counts) or only a schedule's.
+
+        A schedule may set its own startup timeout. When only that shorter
+        value ran out, the type may be fine and the schedule's setting is the
+        cause: ``SCHEDULE_STARTUP_TIMED_OUT``, which does not count against the
+        type (review finding GEN-1, 2026-11-20); the schedule's own start
+        attempts and its owner's notice still report it. When the type's own
+        rules are refused (a schedule's override is what made the start
+        allowed), the type has no valid timeout to compare with, and the
+        timeout counts.
+        """
+
+        if binding is None:
+            return STARTUP_TIMED_OUT
+        try:
+            own = effective_worker_rules(self.agent, record.named_agent_type, {})
+        except (ValueError, PermissionError):
+            return STARTUP_TIMED_OUT
+        if record.created_at_utc + timedelta(seconds=own.startup_timeout_seconds) <= now:
+            return STARTUP_TIMED_OUT
+        return SCHEDULE_STARTUP_TIMED_OUT
 
     def _rules_refusal(self, record: Any, binding: Any, error: BaseException) -> str:
         """Whose worker rules were refused: the type's own (counted code) or only a schedule's overrides.

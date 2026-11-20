@@ -3,24 +3,30 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import uuid4
 
 from custom_agents.schedule_repair_guidance import (
     AGENT_DEFINITION_CHANGED,
+    AGENT_DEFINITION_UNAVAILABLE,
+    AGENT_TYPE_DISALLOWED,
     AGENT_TYPE_INELIGIBLE,
     SCHEDULE_LAUNCH_INTENT_CHANGED,
 )
 from custom_agents.schedule_definition_identity import (
+    DEFINITION_DECLARATION_MISSING,
+    DEFINITION_SOURCE_UNKNOWN,
     definition_is_current,
     definition_source_of,
     launch_definition_digest,
 )
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_worker_v1 import (
+    AUTOMATIC_WORKER_CAPACITY_LIMIT,
     DEFINITION_SOURCE_RELEASE,
+    TEAM_WORKER_CAPACITY_LIMIT,
+    WORKER_LAUNCH_RATE_LIMIT,
     AgentCreationResultV1,
     AgentLaunchResultV1,
     AgentLaunchState,
@@ -32,8 +38,13 @@ from custom_messages.contracts.schedule_worker_v1 import (
 )
 from runtime_hosting.process_run import current_process_identity
 from custom_agents.saved_runtime_config import current_launch_config
-from runtime_settings.schedule_workers import ScheduleWorkersConfig
+from runtime_settings.schedule_workers import (
+    OPERATOR_LIMITED_RULES,
+    RULE_EXCEEDS_OPERATOR_LIMIT,
+    ScheduleWorkersConfig,
+)
 from storage.agent_launch_repository import (
+    LAUNCH_CONFLICT_CODES,
     AgentLaunchRepository,
     LaunchCapacity,
     LaunchConflict,
@@ -57,6 +68,9 @@ CRASHED_BEFORE_READY = "crashed_before_ready"
 EXITED_BEFORE_READY = "exited_before_ready"
 LAUNCHER_REFUSED = "launcher_refused"
 STARTUP_TIMED_OUT = "startup_timed_out"
+# Only a schedule's own startup timeout, shorter than its type's, ran out: about
+# that schedule, not the type (custom_agents.schedule_worker_controller).
+SCHEDULE_STARTUP_TIMED_OUT = "schedule_startup_timed_out"
 # The runtime stopped or restarted while the worker started.
 STOPPED_BY_RUNTIME = "runtime_stopped_before_ready"
 # The launcher found the start's process or thread gone with no end recorded:
@@ -70,6 +84,22 @@ DEFINITION_CHANGED_DURING_STARTUP = "agent_definition_changed_during_startup"
 IDLE_TTL_LIMIT_CHANGED = "idle_ttl_limit_changed_before_start"
 AUTHORIZATION_MODE_CHANGED = "launcher_authorization_mode_changed_restart_required"
 WORKER_POOLS_DISABLED = "worker_pools_disabled"
+# The launcher's other refusals and failures.
+LOCAL_LAUNCHER_UNAVAILABLE = "local_launcher_unavailable"
+MANAGER_LAUNCH_FORBIDDEN = "automatic_manager_launch_forbidden"
+MCP_PROFILES_FROM_AGENTS = "mcp_profile_names_not_accepted_from_agents"
+LAUNCH_REQUIRES_OWNER = "launch_requires_canonical_owner"
+SCHEDULE_LAUNCH_IDENTITY_MISMATCH = "schedule_launch_identity_mismatch"
+IDLE_TTL_OUTSIDE_LIMITS = "idle_ttl_outside_operator_limits"
+SCHEDULE_LAUNCH_NEEDS_BINDING = "schedule_launch_requires_durable_binding"
+RUNTIME_LAUNCH_IDENTITY_MISMATCH = "runtime_launch_identity_mismatch"
+STALE_RUNTIME_NOT_READY = "stale_runtime_cannot_become_ready"
+CONSTRUCTION_FAILED = "construction_failed"
+LAUNCHER_REJECTED_START = "launcher_rejected_start"
+# Refusals of instantiate_agent_type (custom_agents.strands_team).
+LAUNCH_IDENTITY_MISMATCH = "launch_identity_mismatch"
+IDLE_TTL_NOT_POSITIVE = "idle_ttl_seconds_not_positive"
+MCP_LAUNCH_PROFILE_UNAVAILABLE = "mcp_launch_profile_unavailable"
 
 # Start ends that say nothing about the worker type, so they are not failed
 # starts of it (``counts_as_failed_start``): the runtime ended the start, or an
@@ -86,6 +116,7 @@ UNCOUNTED_START_ENDS = frozenset(
         LAUNCHER_RECONCILIATION,
         LAUNCH_POLICY_REVOKED,
         SCHEDULE_LAUNCH_INTENT_CHANGED,
+        SCHEDULE_STARTUP_TIMED_OUT,
         DEFINITION_CHANGED_BEFORE_START,
         DEFINITION_CHANGED_BEFORE_CONSTRUCTION,
         DEFINITION_CHANGED_DURING_STARTUP,
@@ -95,41 +126,109 @@ UNCOUNTED_START_ENDS = frozenset(
     }
 )
 
-# A project refusal code: two or more lower-case words joined by underscores
-# (every code the project raises has one), optionally followed by ":" and a
-# field name (``schedule_worker_rule_exceeds_operator_limit:idle_ttl_seconds``).
-# A single word or a hex string is not a code: such text says nothing reliable.
-_REFUSAL_CODE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?::[a-z][a-z0-9_]*)?")
-_REFUSAL_CODE_MAX_LENGTH = 160
+# Every code a start can end with or be refused with: the codes above, the
+# scheduled-worker reasons the launcher raises, the launch store's conflicts,
+# the capacity and hourly limits, and the definition checks. ``refusal_code``
+# keeps an error's text only when it is one of these (or a refused rule's
+# ``RULE_EXCEEDS_OPERATOR_LIMIT:<field>``), so text that merely looks like a
+# code (a name, an id) never reaches a stored reason. A new code raised on the
+# launch path must be added here; tests/test_worker_pool_failed_starts.py
+# scans the raise sites and fails until it is.
+KNOWN_START_CODES = (
+    frozenset(
+        {
+            EXITED_BEFORE_READY,
+            STARTUP_TIMED_OUT,
+            AGENT_DEFINITION_CHANGED,
+            AGENT_DEFINITION_UNAVAILABLE,
+            AGENT_TYPE_DISALLOWED,
+            DEFINITION_SOURCE_UNKNOWN,
+            DEFINITION_DECLARATION_MISSING,
+            LOCAL_LAUNCHER_UNAVAILABLE,
+            MANAGER_LAUNCH_FORBIDDEN,
+            MCP_PROFILES_FROM_AGENTS,
+            LAUNCH_REQUIRES_OWNER,
+            SCHEDULE_LAUNCH_IDENTITY_MISMATCH,
+            IDLE_TTL_OUTSIDE_LIMITS,
+            SCHEDULE_LAUNCH_NEEDS_BINDING,
+            RUNTIME_LAUNCH_IDENTITY_MISMATCH,
+            STALE_RUNTIME_NOT_READY,
+            CONSTRUCTION_FAILED,
+            LAUNCHER_REJECTED_START,
+            LAUNCH_IDENTITY_MISMATCH,
+            IDLE_TTL_NOT_POSITIVE,
+            MCP_LAUNCH_PROFILE_UNAVAILABLE,
+            AUTOMATIC_WORKER_CAPACITY_LIMIT,
+            TEAM_WORKER_CAPACITY_LIMIT,
+            WORKER_LAUNCH_RATE_LIMIT,
+        }
+    )
+    | UNCOUNTED_START_ENDS
+    | LAUNCH_CONFLICT_CODES
+)
+# The two formatted reasons; this release is the first to write them, so an
+# older release's free error text never starts with either.
+_FORMATTED_REASON_PREFIXES = (f"{CRASHED_BEFORE_READY}: ", f"{LAUNCHER_REFUSED}: ")
+
+
+def is_known_code(text: str) -> bool:
+    """Whether ``text`` is one of the project's start codes (``KNOWN_START_CODES``, or a refused rule with its field)."""
+
+    if text in KNOWN_START_CODES:
+        return True
+    prefix, _, field = text.partition(":")
+    return prefix == RULE_EXCEEDS_OPERATOR_LIMIT and field in OPERATOR_LIMITED_RULES
+
+
+def is_current_reason(reason: str | None) -> bool:
+    """Whether a start record's reason has a form this release writes.
+
+    A known code, or one of the two formatted forms
+    (``crashed_before_ready: <error type>...``, ``launcher_refused: <error type>``).
+    Until this release the launcher stored a refusal's free error text, which
+    can hold a host path or configuration values; such a reason is neither
+    counted (``counts_as_failed_start``) nor shown (``shown_reason``).
+    """
+
+    return reason is not None and (
+        is_known_code(reason) or reason.startswith(_FORMATTED_REASON_PREFIXES)
+    )
+
+
+def shown_reason(reason: str | None) -> str | None:
+    """A start record's reason as people may see it: None for one this release does not write."""
+
+    return reason if is_current_reason(reason) else None
 
 
 def counts_as_failed_start(reason: str | None) -> bool:
     """Whether a failed start record counts as a failed start of its type.
 
-    A record without a reason was written by a release before 2026-11-20,
-    which did not record why; it is not counted, so an upgrade right after an
-    old release's crash loop does not hold the type back.
+    Only a reason this release writes counts (``is_current_reason``), and not
+    one of ``UNCOUNTED_START_ENDS``. No reason, or the free error text an
+    older release stored, does not count: an upgrade right after an old
+    release's failures does not hold the type back. This release always
+    writes a reason (the round-trip tests in tests/test_worker_pool_failed_starts.py
+    check every writer), so its failures always count.
     """
 
-    return reason is not None and reason not in UNCOUNTED_START_ENDS
+    return is_current_reason(reason) and reason not in UNCOUNTED_START_ENDS
 
 
 def refusal_code(error: BaseException) -> str | None:
-    """The error's text when it is one of the project's refusal codes, else None.
+    """The error's text when it is one of the project's start codes, else None.
 
     Only a ``ValueError``, a ``LaunchConflict`` or a ``PermissionError`` can
-    carry a code, and only when its whole text is one. Any other text could
-    hold anything, such as a host path or a pydantic validation error's input
-    values; an operating-system ``PermissionError`` reads
-    ``[Errno 13] Permission denied: '<path>'`` and is never a code.
+    carry a code, and only when its whole text is a known one
+    (``is_known_code``). Any other text could hold anything, such as a host
+    path, a pydantic validation error's input values, or a name that merely
+    looks like a code.
     """
 
     if not isinstance(error, (ValueError, LaunchConflict, PermissionError)):
         return None
     text = str(error)
-    if len(text) > _REFUSAL_CODE_MAX_LENGTH or not _REFUSAL_CODE.fullmatch(text):
-        return None
-    return text
+    return text if is_known_code(text) else None
 
 
 def launcher_refusal_reason(error: BaseException) -> str:
@@ -179,10 +278,10 @@ class AgentInstantiationService:
     def resolve_definition(self, agent_type: str) -> dict[str, Any]:
         runtime = self.agent._local_team_runtime
         if runtime is None:
-            raise ValueError("local_launcher_unavailable")
+            raise ValueError(LOCAL_LAUNCHER_UNAVAILABLE)
         definition = runtime.resolve_definition(agent_type)
         if definition is None:
-            raise ValueError("agent_definition_unavailable")
+            raise ValueError(AGENT_DEFINITION_UNAVAILABLE)
         return cast(dict[str, Any], definition)
 
     def validate_type(
@@ -190,7 +289,7 @@ class AgentInstantiationService:
     ) -> tuple[dict[str, Any], ScheduleWorkersConfig]:
         limits = current_worker_limits(self.agent)
         if agent_type in limits.denied_agent_types:
-            raise PermissionError("agent_type_disallowed")
+            raise PermissionError(AGENT_TYPE_DISALLOWED)
         definition = self.resolve_definition(agent_type)
         if automatic:
             if not limits.enabled or (
@@ -199,7 +298,7 @@ class AgentInstantiationService:
             ):
                 raise PermissionError(AGENT_TYPE_INELIGIBLE)
             if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
-                raise PermissionError("automatic_manager_launch_forbidden")
+                raise PermissionError(MANAGER_LAUNCH_FORBIDDEN)
         return definition, limits
 
     def validate_pool_start(self, agent_type: str) -> None:
@@ -210,7 +309,7 @@ class AgentInstantiationService:
         if not current_worker_pool_settings(self.agent).enabled:
             raise PermissionError(WORKER_POOLS_DISABLED)
         if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
-            raise PermissionError("automatic_manager_launch_forbidden")
+            raise PermissionError(MANAGER_LAUNCH_FORBIDDEN)
 
     def capacity(self, agent_type: str, limits: ScheduleWorkersConfig) -> LaunchCapacity:
         """The limits a start is checked against, read now (custom_agents.worker_pool_limits)."""
@@ -243,7 +342,7 @@ class AgentInstantiationService:
             if mcp_profile_names:
                 # An agent cannot add MCP servers to a new agent; MCP
                 # connections are attached through the MCP registry.
-                raise PermissionError("mcp_profile_names_not_accepted_from_agents")
+                raise PermissionError(MCP_PROFILES_FROM_AGENTS)
             definition, limits = self.validate_type(
                 agent_type, automatic=source == "schedule"
             )
@@ -253,7 +352,7 @@ class AgentInstantiationService:
             if binding is not None and not definition_is_current(binding, definition):
                 raise PermissionError(AGENT_DEFINITION_CHANGED)
             if not owner_id:
-                raise PermissionError("launch_requires_canonical_owner")
+                raise PermissionError(LAUNCH_REQUIRES_OWNER)
             # Who may start agents is decided before this point: the per-call
             # access hook for instantiate_agent, the schedule's saved and
             # validated policy for scheduled starts, and trusted runtime code
@@ -264,11 +363,11 @@ class AgentInstantiationService:
                     or binding.owner_canonical_user_id != owner_id
                     or binding.target_agent_type != agent_type
                 ):
-                    raise PermissionError("schedule_launch_identity_mismatch")
+                    raise PermissionError(SCHEDULE_LAUNCH_IDENTITY_MISMATCH)
                 self.validate_schedule_start(binding, occurrence_id)
             ttl = idle_ttl_seconds
             if ttl is not None and (ttl <= 0 or ttl > limits.max_idle_ttl_seconds):
-                raise ValueError("idle_ttl_outside_operator_limits")
+                raise ValueError(IDLE_TTL_OUTSIDE_LIMITS)
             launch_id = (
                 "launch_"
                 + worker_digest([self.agent.team_id, owner_id, request_id])[:32]
@@ -337,7 +436,7 @@ class AgentInstantiationService:
                     status="denied", launch_id=launch_id, reason=reason, created=True
                 )
             except Exception:
-                self._fail_start(record, "construction_failed")
+                self._fail_start(record, CONSTRUCTION_FAILED)
                 self.agent._logger.exception(
                     "Worker construction failed",
                     extra={"launch_id": launch_id, "named_agent_type": agent_type},
@@ -345,7 +444,7 @@ class AgentInstantiationService:
                 return AgentLaunchResultV1(
                     status="failed",
                     launch_id=launch_id,
-                    reason="construction_failed",
+                    reason=CONSTRUCTION_FAILED,
                     created=True,
                 )
         except (ValueError, PermissionError, LaunchConflict) as exc:
@@ -361,7 +460,7 @@ class AgentInstantiationService:
         its type (a code says it all).
         """
 
-        reason = reason or "launcher_rejected_start"
+        reason = reason or LAUNCHER_REJECTED_START
         failed = self.repository.update(record, state=AgentLaunchState.FAILED, reason=reason)
         untold = error is not None and refusal_code(error) is None
         log_failed_start(failed, reason, error=error if untold else None)
@@ -395,7 +494,7 @@ class AgentInstantiationService:
         from custom_messages.contracts.schedule_worker_v1 import occurrence_identity
 
         if binding is None or occurrence_id is None:
-            raise PermissionError("schedule_launch_requires_durable_binding")
+            raise PermissionError(SCHEDULE_LAUNCH_NEEDS_BINDING)
         store = self.agent._schedule_store
         if bool(
             current_launch_config(self.agent).get("authorization.enabled", False)
@@ -561,13 +660,13 @@ def update_runtime_launch(
         or current.host_id != PROCESS_HOST_ID
         or current.fence != record.fence
     ):
-        raise LaunchConflict("runtime_launch_identity_mismatch")
+        raise LaunchConflict(RUNTIME_LAUNCH_IDENTITY_MISMATCH)
     if state == AgentLaunchState.READY:
         if (
             current.state != AgentLaunchState.STARTING
             or current.lease_expires_at_utc <= utc_now()
         ):
-            raise LaunchConflict("stale_runtime_cannot_become_ready")
+            raise LaunchConflict(STALE_RUNTIME_NOT_READY)
         definition, _ = AgentInstantiationService(agent).validate_type(
             record.named_agent_type, automatic=record.source == "schedule"
         )

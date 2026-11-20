@@ -66,7 +66,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Iterable, Optional
 
-from custom_agents.agent_instantiation_service import counts_as_failed_start
+from custom_agents.agent_instantiation_service import counts_as_failed_start, shown_reason
 from custom_agents.worker_pool_limits import PoolLimit, team_limit, type_limit, worker_pool_repository
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_worker_v1 import (
@@ -168,7 +168,8 @@ def start_history(
         last_failure_reason=newest_failure.reason if newest_failure else None,
         recovered=recovered and not failed,
         uncounted_ends=len(uncounted),
-        last_uncounted_reason=newest_uncounted.reason if newest_uncounted else None,
+        # An older release's free error text is never shown (shown_reason).
+        last_uncounted_reason=shown_reason(newest_uncounted.reason) if newest_uncounted else None,
         starts_in_progress=sum(
             1 for record in of_type if record.state in ACTIVE_LAUNCH_STATES and record.ready_at_utc is None
         ),

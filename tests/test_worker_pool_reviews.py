@@ -447,3 +447,44 @@ async def test_a_start_problem_without_failed_starts_ends_after_the_quiet_time(w
         open_now = worker_pool_repository(world.agent).list_open_incidents("team")
         assert bool(open_now) is still_open
         assert bool(world.told[-1]) is still_open  # the notice stands, then ends (the engine sends "working again")
+
+
+@pytest.mark.asyncio
+async def test_an_older_releases_free_error_text_never_reaches_the_review_or_notice(world):
+    """Review finding GEN-2: a failed record with the previous launcher's str(exc) is shown as 'no reason recorded'."""
+
+    from custom_agents.worker_pool_controller import PoolDecision, WorkerPoolController, start_history
+    from custom_messages.contracts.schedule_worker_v1 import (
+        WORKER_LAUNCH_RATE_LIMIT,
+        AgentLaunchResultV1,
+        AgentLaunchState,
+    )
+    from storage.worker_pool_repository import WorkerPoolIncidentV1
+    from tests.test_schedule_worker_transactions import make_launch
+
+    old_text = "cannot read /srv/team/private/agent.yaml"
+    now = datetime.now(timezone.utc)
+    history = start_history(
+        [make_launch(named_agent_type=WORKER_TYPE, state=AgentLaunchState.FAILED, reason=old_text,
+                     created_at_utc=now - timedelta(minutes=5), updated_at_utc=now - timedelta(minutes=5))],
+        WORKER_TYPE,
+    )
+    observation = _observation(
+        uncounted_start_ends=history.uncounted_ends, last_uncounted_start_end=history.last_uncounted_reason,
+    )
+    world.agent._pool_rate_limited_types = set()
+    controller = WorkerPoolController(world.agent)
+    controller._launch = lambda _agent_type: AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT)
+    incidents = reviews.WorkerPoolIncidents(world.agent, _settings())
+    await controller._start(observation, PoolDecision(1, "start"), incidents)
+    await incidents.settle()
+    ((opened),) = world.opened
+    incident = WorkerPoolIncidentV1(
+        incident_id="i", team_id="team", agent_type=WORKER_TYPE, kind=INCIDENT_START_FAILED,
+        opened_at_utc=now, last_seen_at_utc=now, details=opened["details"],
+    )
+    instructions = reviews._instructions(incident, recurring=False, recurrences=1, settings=_settings())
+    (finding,) = world.told[-1]
+    for shown in (instructions, finding.message.text, str(opened["details"])):
+        assert old_text not in shown
+    assert "the latest: no reason recorded." in instructions
