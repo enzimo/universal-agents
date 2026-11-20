@@ -26,8 +26,10 @@ pages' cards disappeared and later pages were refused (incident 2026-11-14
 follow-up).
 
 "Sent" means the result was accepted into the queue of the lead known then.
-A lead that stops before the gateway notices (the liveness check) can still
-lose it, as it can lose any message the gateway sends it.
+A lead that stops before the gateway sees it leave the team's records
+(``assistant_gateway.team_view.TeamLeadFollower``) can still lose it, as it
+can lose any message the gateway sends it; README_ARCHITECTURE.md lists the
+other such cases.
 """
 
 from __future__ import annotations

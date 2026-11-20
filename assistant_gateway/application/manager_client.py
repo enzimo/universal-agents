@@ -98,6 +98,7 @@ class GatewayManagerClient:
         on_unsolicited: EnvelopeHandler | None = None,
         on_manager_available: ManagerTransitionHandler | None = None,
         on_manager_unavailable: ManagerTransitionHandler | None = None,
+        on_lead_confirmed: ManagerTransitionHandler | None = None,
         on_leftover_lost: EnvelopeHandler | None = None,
         write_manager_route: ManagerRouteWriter | None = None,
         trace_enabled: TraceEnabled | None = None,
@@ -111,6 +112,7 @@ class GatewayManagerClient:
         self._on_unsolicited = on_unsolicited
         self._on_manager_available = on_manager_available
         self._on_manager_unavailable = on_manager_unavailable
+        self._on_lead_confirmed = on_lead_confirmed
         self._on_leftover_lost = on_leftover_lost
         self._write_manager_route = write_manager_route
         self._trace_enabled = trace_enabled or (lambda: False)
@@ -177,6 +179,7 @@ class GatewayManagerClient:
         on_unsolicited: EnvelopeHandler,
         on_manager_available: ManagerTransitionHandler,
         on_manager_unavailable: ManagerTransitionHandler,
+        on_lead_confirmed: ManagerTransitionHandler,
         on_leftover_lost: EnvelopeHandler,
     ) -> None:
         """Bind the composed application handlers before connecting the runtime."""
@@ -188,6 +191,7 @@ class GatewayManagerClient:
         self._on_unsolicited = on_unsolicited
         self._on_manager_available = on_manager_available
         self._on_manager_unavailable = on_manager_unavailable
+        self._on_lead_confirmed = on_lead_confirmed
         self._on_leftover_lost = on_leftover_lost
 
     async def connect(self) -> None:
@@ -602,6 +606,46 @@ class GatewayManagerClient:
                 source=source,
                 reason="the team lead is live in the team's records",
                 became_available=previous is None,
+            ),
+        )
+
+    async def confirm_lead(self, lead_id: str, *, source: str) -> None:
+        """The team's records name ``lead_id``, the lead chats already go to: no transition, only the work that
+        waits for a lead the records confirm (``on_lead_confirmed``: the setup results kept for the team lead).
+
+        The lead follower calls it once per stretch of read records when they name the routed lead, so kept
+        results are sent even when the lead did not change, for example a route saved by the previous run whose
+        lead is still live (``assistant_gateway.team_view.TeamLeadFollower``). The route is compared under the
+        route lock, which is released before the handler runs, as in ``set_lead``: a slow send never holds the
+        route. A route that changed meanwhile is left to its own transition.
+        """
+
+        async with self._manager_status_lock:
+            routed = self._manager_id
+        if routed != lead_id:
+            self._logger.info(
+                "The team's records confirmed a lead the gateway no longer routes to; nothing to do. "
+                "event=gateway_team_lead_confirm_skipped manager_id=%s routed_manager_id=%s source=%s",
+                lead_id,
+                routed,
+                source,
+            )
+            return
+        self._logger.info(
+            "The team's records confirm the team lead chats go to. event=gateway_team_lead_confirmed manager_id=%s "
+            "source=%s",
+            lead_id,
+            source,
+        )
+        # Described like an available transition so the handler logs the same fields, but nothing changed:
+        # became_available stays False and no notice or hook runs (manager_transitions.handle_lead_confirmed).
+        await self._run_transition_handler(
+            self._on_lead_confirmed,
+            GatewayManagerTransition(
+                manager_id=lead_id,
+                available=True,
+                source=source,
+                reason="the team's records confirm the routed team lead",
             ),
         )
 

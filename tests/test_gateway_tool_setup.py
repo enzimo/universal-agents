@@ -477,6 +477,8 @@ async def test_a_wait_nobody_watches_after_a_restart_is_reported_once(setup_gate
         credential_workflow=gateway._credential_workflow,
         status_page=gateway.application.status,
         stop_event=asyncio.Event(),
+        # No team view: the saved route is used as it is (UserGateway.connect).
+        resend_kept_results_at_start=True,
     )
     recovery = next(task for task in tasks if task.get_name() == "gateway_tool_setup_recovery")
     # Blocks are not enforced with authorization off, so stale ones are not reported.
@@ -1279,7 +1281,9 @@ async def test_a_page_ending_without_a_team_lead_keeps_its_result_for_the_next_s
         state_store=GatewayStateStore(str(tmp_path / "gateway.db")),
         manager_transport=after_restart,
     )
-    # Connecting found the restarted team lead (refresh_manager_id) before the start tasks run.
+    # This gateway has no team view, so it uses its saved route as it is and sends the kept results at start
+    # (resend_kept_results_at_start); with a team view the lead follower sends them once the records name the
+    # lead (tests/test_gateway_team_view.py).
     lead = "manager_after_restart"
     restarted._manager_client._manager_id = lead
     start_config = SimpleNamespace(
@@ -1295,6 +1299,8 @@ async def test_a_page_ending_without_a_team_lead_keeps_its_result_for_the_next_s
         credential_workflow=restarted._credential_workflow,
         status_page=restarted.application.status,
         stop_event=asyncio.Event(),
+        # No team view: the saved route is used as it is (UserGateway.connect).
+        resend_kept_results_at_start=True,
     )
     resend = next(task for task in tasks if task.get_name() == "gateway_tool_setup_resend")
     try:

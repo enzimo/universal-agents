@@ -434,6 +434,8 @@ async def _first_start_with_a_model_key(instance: Path, running, *, roles: tuple
         credential_workflow=idle,
         status_page=page,
         stop_event=stop,
+        # No team view: the saved route is used as it is (UserGateway.connect).
+        resend_kept_results_at_start=True,
     )
     try:
 

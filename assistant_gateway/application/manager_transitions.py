@@ -160,6 +160,19 @@ class GatewayManagerTransitionApplication:
         # failed send is logged by _step; the next transition, page end or gateway start sends the results.
         await self._step("resend_kept_results", transition, self._kept_results.resend_kept_results)
 
+    async def handle_lead_confirmed(self, transition: GatewayManagerTransition) -> None:
+        """The team's records name the lead chats already go to (``GatewayManagerClient.confirm_lead``).
+
+        Nothing changed, so there is no schedule check, notice or hook; only the setup results kept for the team
+        lead are sent, so they never wait for a lead change when the route saved by the previous run is the live
+        lead. Before ``start`` (the gateway's start decision) and after ``stop`` it does nothing; the lead
+        follower never confirms its start decision (``TeamLeadFollower``).
+        """
+
+        if not self._active:
+            return
+        await self._step("resend_kept_results", transition, self._kept_results.resend_kept_results)
+
     async def handle_unavailable(self, transition: GatewayManagerTransition) -> None:
         """The notice, the hook (pausing Telegram polling) and failing people's waiting replies, each on its own:
         one that fails does not skip the others. The replies a lead on another contract still answers

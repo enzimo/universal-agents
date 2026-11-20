@@ -3140,17 +3140,30 @@ person which command to run or asking whether to start:
    not reuse the old lead's id. When no lead is known, or the publish fails
    (NATS disconnected), the result stays kept and the chat request is never
    given a finished status (`secure_results.SecureResultPublisher`). Kept
-   results are sent when a page ends, at gateway start, on every
-   team-lead-available transition (`manager_transitions.handle_available`,
-   after the notice and the apps' hook), and by a retry with backoff (1 to 30
+   results are sent when a page ends; on every team-lead-available transition
+   (`manager_transitions.handle_available`, after the notice and the apps'
+   hook), which the lead follower reaches through
+   `GatewayManagerClient.set_lead`; when records the follower read name the
+   lead chats already go to (`GatewayManagerClient.confirm_lead`,
+   `manager_transitions.handle_lead_confirmed`, no transition), once per
+   stretch of read records, so a route saved by the previous run whose lead
+   is still live gets them without waiting for a lead change; and by a retry
+   with backoff (1 to 30
    seconds) after a failed publish or an unexpected error while a lead is
    known; the retry gives up after eight passes in a row in which a kept
    result failed with an error (`event=gateway_tool_setup_resend_gave_up`)
    and the next start or transition tries again, while a pass that cannot
    even list the kept results (the database is down) is retried like a
    failed publish. No retry starts once the gateway began to stop
-   (`event=gateway_tool_setup_retry_skipped_closed`); the next start sends
-   what is still kept. One pass at a time sends them, oldest first, and
+   (`event=gateway_tool_setup_retry_skipped_closed`); after the next start
+   the lead follower sends what is still kept. The start decision itself
+   sends nothing: the gateway starts its transitions after it, so the
+   follower's first regular check (within 5 seconds) confirms the lead it
+   set or kept at start and sends them. While the team's records are not
+   read yet the follower keeps the saved route and nothing confirms it
+   (`event=gateway_tool_setup_resend_deferred` at start); a gateway without
+   a team view, which uses its saved route as it is, sends them at start
+   instead. One pass at a time sends them, oldest first, and
    reads them afresh, so a result is never sent from two places at once; a
    missing lead or a failed publish stops the pass, while an error on one
    result is logged (`event=gateway_tool_setup_resend_failed`) and the pass
@@ -3159,8 +3172,16 @@ person which command to run or asking whether to start:
    (`event=gateway_tool_setup_result_unsendable`). The stored result leaves out
    the broker session id, which for an account link is the form's bearer. A
    result is "sent" once it is accepted into the queue of the lead known
-   then; a lead that stops before the gateway notices (the liveness check)
-   can still lose it, as it can lose any message the gateway sends it. The
+   then, and nothing sends it again. Three cases can still lose it, as they
+   can lose any message the gateway sends then: a lead that stops before the
+   gateway sees it leave the team's records (at most about 35 seconds); a
+   page that ends while the records are not read yet at start, whose result
+   goes to the saved route of the previous run; and, while a lead on another
+   message contract drains, a result for a task it still holds, which goes
+   to the new lead the chats go to: that lead does not hold the task, so it
+   tells the person to send a new message, while the draining lead's own
+   setup-run recovery continues the task (`resume_ended_setup_runs`). Moving
+   setup results to protocol 1 ends these cases. The
    team lead applies a page's result to its run once, before it checks
    whether the task ended (`tool_setup_run_runtime.apply_page_result`, with
    the applied ids in `ToolSetupRunV1.results_applied`), and marks it handled
@@ -6564,7 +6585,11 @@ the gateway acts on that view in four places.
   lead), and it is checked as soon as they are read. Afterwards it checks on every change
   and every 5 seconds, and a differing route goes through the usual transitions (the
   current lead unavailable, so replies waiting on a dead route are failed, then the new one
-  available). Among several lead records it keeps the current lead while it is live, and
+  available). Read records that name the lead chats already go to confirm it once per
+  stretch of read records (`confirm_lead`, no transition), so the setup results kept for
+  the team lead are sent even when the lead did not change; the start decision is never
+  confirmed, because the transitions start after it, so the first regular check confirms
+  it. Among several lead records it keeps the current lead while it is live, and
   otherwise takes the one whose record changed last (a crashed run's lead has not changed
   since the crash); it never flips between them (`event=gateway_multiple_leads`). A lead
   whose process runs another contract takes no new chats but finishes the tasks it holds,

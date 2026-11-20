@@ -44,8 +44,10 @@ known at that moment, under a message id naming that lead
 (``secure_results``). If no lead is known, or the publish fails (NATS
 disconnected), the result stays kept and the chat request is left as it was,
 so the task's other pages keep their cards and later pages still open. Kept
-results are sent at gateway start, on every team-lead-available transition
-(``manager_transitions``), and, after a failed publish while a lead is known,
+results are sent on every team-lead-available transition and whenever the
+team's records confirm the lead chats already go to (``manager_transitions``,
+from the lead follower, ``team_view.TeamLeadFollower``), at start by a
+gateway without a team view, and, after a failed publish while a lead is known,
 by a retry with backoff; one pass at a time sends them, oldest first. A
 result that can never be sent (its chat no longer exists, or the kept copy
 cannot be read) is marked ``unsendable`` and logged once. Rationale (review
@@ -1203,9 +1205,10 @@ class GatewayToolSetups:
     async def resend_kept_results(self) -> ResendPass:
         """Send every kept page result to the team lead known now, oldest first; one pass at a time.
 
-        The one way page results are sent: when a page ends, at gateway start,
-        on every team-lead-available transition (``manager_transitions``) and
-        from the retry after a failed publish. Each pass reads the kept results
+        The one way page results are sent: when a page ends, on every
+        team-lead-available transition and lead confirmation
+        (``manager_transitions``), at start by a gateway without a team view,
+        and from the retry after a failed publish. Each pass reads the kept results
         afresh under the lock, so a result is never sent twice at once. A pass
         stops at the first result it cannot send for want of a lead or because
         the publish failed; a result that can never be sent is marked and
