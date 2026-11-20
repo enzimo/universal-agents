@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tests.browser_assets import module_source
 
+from datetime import datetime, timedelta, timezone
 from http.cookiejar import CookieJar
 from http.server import ThreadingHTTPServer
 import json
@@ -1133,6 +1134,19 @@ def test_dev_preview_lists_threads_in_every_section_and_places_them_like_the_gat
         assert status == 200 and rows()["website:web-chat:offsite"]["list_state"] == "dismissed"
         patch("website:web-chat:offsite", {"thread_action": "restore"})
         assert rows()["website:web-chat:offsite"]["list_state"] is None
+
+        # Opening the woke sample clears its mark like the gateway (clear_woke);
+        # a snooze saved since is kept, and an unknown action names every action.
+        tls = "website:web-chat:tls"
+        assert rows()[tls]["list_state"] == "woke"
+        status, _ = patch(tls, {"thread_action": "clear_woke"})
+        assert status == 200 and rows()[tls]["list_state"] is None
+        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        patch(tls, {"thread_action": "snooze", "snooze_until": tomorrow, "seen_sequence": 2})
+        status, _ = patch(tls, {"thread_action": "clear_woke"})
+        assert status == 200 and rows()[tls]["list_state"] == "snoozed"
+        status, refusal = patch(tls, {"thread_action": "archive"})
+        assert status == 400 and "clear_woke" in refusal["message"] and "restore" in refusal["message"]
 
         # The hover preview's history page with the turn count, and Delete.
         history = get("/api/web-chat/sessions/website%3Aweb-chat%3Aoffsite/messages?limit=12&turn_count=1")

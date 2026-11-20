@@ -36,6 +36,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
+from typing import Protocol
 
 from assistant_gateway.application.person_maintenance import is_person_maintenance_session_key
 from assistant_gateway.application.proactive_delivery import is_proactive_session_key
@@ -217,7 +218,34 @@ def needs_you_reason(record: WebChatThreadRecord) -> NeedsYouReason | None:
     return None
 
 
-def thread_list_state(record: WebChatThreadRecord, *, now: datetime) -> ThreadListState | None:
+class ThreadPlacement(Protocol):
+    """The stored placement values the woke rule reads.
+
+    Both the thread list's ``WebChatThreadRecord`` and the placement read that
+    clears a Woke mark (``ThreadPlacementRecord``) have them, so the list and
+    ``clear_woke`` decide "woke" with this one function.
+    """
+
+    @property
+    def session_key(self) -> str: ...
+
+    @property
+    def hidden_as(self) -> str | None: ...
+
+    @property
+    def hidden_until(self) -> str | None: ...
+
+    @property
+    def hidden_at_sequence(self) -> int | None: ...
+
+    @property
+    def last_sequence(self) -> int: ...
+
+    @property
+    def team_posted_after_hiding(self) -> bool: ...
+
+
+def thread_list_state(record: ThreadPlacement, *, now: datetime) -> ThreadListState | None:
     """Whether a thread is snoozed, woke from a snooze, dismissed, or none of these, at ``now``."""
 
     if record.hidden_as is None:
@@ -348,6 +376,7 @@ __all__ = [
     "SNOOZE_MAX_AHEAD",
     "ThreadListState",
     "TITLE_MAX_CHARACTERS",
+    "ThreadPlacement",
     "WebChatThread",
     "WebChatThreadKind",
     "WebChatThreadMessage",

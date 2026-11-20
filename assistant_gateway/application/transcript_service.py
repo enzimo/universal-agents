@@ -30,6 +30,7 @@ from assistant_gateway.domain.message_types import (
     TOOL_SETUP_RESULT_MESSAGE_TYPE,
     SECURE_CREDENTIAL_RESULT_MESSAGE_TYPE,
     SYSTEM_NOTIFICATION_MESSAGE_TYPE,
+    TASK_PROGRESS_STATUS_MESSAGE_TYPE,
     TOOL_SETUP_MESSAGE_TYPE,
     TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE,
 )
@@ -43,6 +44,7 @@ from assistant_gateway.domain.transcript import (
     TRANSCRIPT_ROLE_USER,
     TRANSCRIPT_SOURCE_ACCESS_REVIEW,
     TRANSCRIPT_SOURCE_CLIENT_REQUEST,
+    TRANSCRIPT_SOURCE_GATEWAY_COMMAND,
     TRANSCRIPT_SOURCE_DELIVERY_EVENT,
     GatewayTranscriptMessage,
     TranscriptAppendRequest,
@@ -463,7 +465,7 @@ class GatewayTranscriptService:
             route=route,
             response=response,
             reply_to=user_message,
-            source_kind="gateway_command",
+            source_kind=TRANSCRIPT_SOURCE_GATEWAY_COMMAND,
         )
         if reply is None:
             raise RuntimeError("Web Chat command response was not persisted.")
@@ -737,7 +739,7 @@ class GatewayTranscriptService:
             SYSTEM_NOTIFICATION_MESSAGE_TYPE,
             "system_status",
             "status",
-            "task_progress_status",
+            TASK_PROGRESS_STATUS_MESSAGE_TYPE,
             ACCESS_REVIEW_MESSAGE_TYPE,
             "secure_credential_collection",
             TOOL_SETUP_MESSAGE_TYPE,

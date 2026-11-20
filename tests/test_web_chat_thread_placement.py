@@ -166,8 +166,81 @@ async def test_a_snooze_wakes_at_its_time_and_opening_the_thread_clears_the_mark
         woke = await browser.listed(key)
         assert (woke["list_state"], woke["snoozed_until"]) == ("woke", None)
 
-        assert (await browser.place(key, "restore")).status == 200
+        assert (await browser.place(key, "clear_woke")).status == 200
         assert (await browser.listed(key))["list_state"] is None
+
+
+@pytest.mark.asyncio
+async def test_opening_a_woke_thread_on_an_old_page_keeps_a_newer_snooze(tmp_path: Path, monkeypatch, caplog) -> None:
+    """F1: the page's clear_woke clears only what is still woke by the gateway's own rule."""
+
+    clock = _Clock()
+    gateway = _gateway(tmp_path, monkeypatch, clock)
+    app = InternalWebsiteInteractiveApp(gateway.config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        laptop = await _Browser.sign_in(client)
+        phone = await _Browser.sign_in(client)
+        key = (await _thread_with_reply(client, laptop))["session_key"]
+        await laptop.place(key, "snooze", snooze_until=(clock.now + timedelta(hours=1)).isoformat(), seen_sequence=2)
+        clock.now += timedelta(hours=2)
+        assert (await laptop.listed(key))["list_state"] == "woke", "the laptop's page last saw it woke"
+
+        # On the phone the person snoozes it again for a week; the laptop's page is behind.
+        week = (clock.now + timedelta(days=7)).isoformat()
+        assert (await phone.place(key, "snooze", snooze_until=week, seen_sequence=2)).status == 200
+        caplog.set_level("INFO")
+        response = await laptop.place(key, "clear_woke")
+        assert response.status == 200
+        row = await phone.listed(key)
+        assert row["list_state"] == "snoozed"
+        assert datetime.fromisoformat(row["snoozed_until"]) == datetime.fromisoformat(week)
+        assert "outcome=unchanged" in caplog.text and "action=clear_woke" in caplog.text
+
+        # The menu's Restore is still unconditional.
+        assert (await laptop.place(key, "restore")).status == 200
+        assert (await phone.listed(key))["list_state"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_persons_own_slash_command_does_not_wake_a_snooze(tmp_path: Path, monkeypatch) -> None:
+    """F11: only the team's posts end a snooze early (owner's rule)."""
+
+    clock = _Clock()
+    gateway = _gateway(tmp_path, monkeypatch, clock)
+    app = InternalWebsiteInteractiveApp(gateway.config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        browser = await _Browser.sign_in(client)
+        thread = await _thread_with_reply(client, browser)
+        key = thread["session_key"]
+        await browser.place(key, "snooze", snooze_until=(clock.now + timedelta(days=1)).isoformat(), seen_sequence=2)
+        response = await _send(client, thread, "/help", request_id="command")
+        assert response.status == 200, await response.text()
+        row = await browser.listed(key)
+        assert row["last_sequence"] == 4, "the command and its reply were recorded"
+        assert row["list_state"] == "snoozed"
+
+
+@pytest.mark.asyncio
+async def test_a_storage_failure_is_logged_with_the_thread_and_the_change(tmp_path: Path, monkeypatch, caplog) -> None:
+    """F14: a 500 from the placement route leaves a line naming the thread and the action."""
+
+    clock = _Clock()
+    gateway = _gateway(tmp_path, monkeypatch, clock)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(gateway.session_repository, "set_session_pinned", broken)
+    app = InternalWebsiteInteractiveApp(gateway.config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        browser = await _Browser.sign_in(client)
+        key = (await browser.new_thread())["session_key"]
+        caplog.set_level("ERROR")
+        response = await browser.place(key, "pin")
+        assert response.status == 500
+    (record,) = [item for item in caplog.records if "event=web_chat_thread_placement outcome=error" in item.getMessage()]
+    assert f"session_key={key}" in record.getMessage() and "action=pin" in record.getMessage()
+    assert record.exc_info and "database is locked" in str(record.exc_info[1])
 
 
 @pytest.mark.asyncio
@@ -223,6 +296,7 @@ async def test_one_person_cannot_place_another_persons_thread(tmp_path: Path, mo
             ("snooze", {"snooze_until": "not a time"}),
             ("dismiss", {"seen_sequence": 0}),
             ("restore", {}),
+            ("clear_woke", {}),
         ):
             response = await browser.place(OTHER_THREAD, action, **fields)
             assert response.status == 404, (action, await response.text())

@@ -34,3 +34,10 @@ TEAM_EXPORT_COMMAND_MESSAGE_TYPE = "command_upgrade"
 # gateway in the chat where they ran /link (assistant_gateway.application.link_results).
 # In Web Chat it also removes the /link card with the same correlation id.
 LINK_RESULT_MESSAGE_TYPE = "link_result"
+# The gateway's answer to "?" in a chat (or /status): how the thread's running
+# work stands. It answers the person, so it never wakes a snoozed thread.
+TASK_PROGRESS_STATUS_MESSAGE_TYPE = "task_progress_status"
+# Steering for a running request: the gateway's or the team lead's answer to a
+# message the person sent while a request ran ("This message will be passed to
+# it.", accepted or refused), and the team's own pause asking for a reply.
+TASK_STEERING_MESSAGE_TYPE = "task_steering"

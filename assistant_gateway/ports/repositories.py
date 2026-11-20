@@ -36,6 +36,7 @@ from assistant_gateway.domain.sessions import (
     WebChatThreadRecord,
     SessionRecord,
     ThreadHiddenAs,
+    ThreadPlacementRecord,
     SessionSearchRecord,
 )
 from assistant_gateway.domain.transcript import (
@@ -210,8 +211,15 @@ class SessionRepository(Protocol):
         """Snooze or dismiss an active thread as of the last message the person saw."""
         ...
 
-    def clear_session_hidden(self, session_key: str) -> bool:
-        """Bring an active thread back from snooze or dismiss and clear its Woke mark."""
+    def get_session_placement(self, session_key: str) -> ThreadPlacementRecord | None:
+        """Where an active thread sits now, with what the woke rule needs; ``None`` when not active."""
+        ...
+
+    def clear_session_hidden(self, session_key: str, *, only_if: ThreadPlacementRecord | None = None) -> bool:
+        """Bring an active thread back from snooze or dismiss and clear its Woke mark.
+
+        With ``only_if``, only while its stored placement still equals that read.
+        """
         ...
 
     def set_active_session_for_channel(

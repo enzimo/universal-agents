@@ -26,6 +26,7 @@ from assistant_gateway.application.pending_questions import (
 )
 from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.application.response_models import GatewayResponse
+from assistant_gateway.domain.message_types import TASK_STEERING_MESSAGE_TYPE
 from assistant_gateway.domain.request_state import REQUEST_STATUS_WAITING_FOR_STEERING
 from assistant_gateway.ports.repositories import SessionRepository
 from custom_messages.contracts.control_v1 import AgentStatus, SystemStatusMessage
@@ -225,7 +226,7 @@ class GatewayResponseCoordinator:
                     correlation_id=correlation_id,
                     conversation_id=conversation_id,
                     task_id=content.target_task_id,
-                    message_type="task_steering",
+                    message_type=TASK_STEERING_MESSAGE_TYPE,
                     envelope=envelope,
                 )
 

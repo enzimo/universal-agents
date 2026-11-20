@@ -7,6 +7,7 @@ from typing import Protocol
 
 from assistant_gateway.domain.message_types import (
     SYSTEM_NOTIFICATION_MESSAGE_TYPE,
+    TASK_STEERING_MESSAGE_TYPE,
     TOOL_SETUP_MESSAGE_TYPE,
 )
 from custom_messages.contracts.notification_v1 import (
@@ -145,7 +146,7 @@ class GatewayDeliveryPresentation:
         if isinstance(content, TaskQuery):
             return "task_query"
         if isinstance(content, TaskSteering):
-            return "task_steering"
+            return TASK_STEERING_MESSAGE_TYPE
         if isinstance(content, UserNotification):
             if content.reason == MODEL_PROVIDER_FAILOVER_NOTIFICATION_REASON:
                 return SYSTEM_NOTIFICATION_MESSAGE_TYPE

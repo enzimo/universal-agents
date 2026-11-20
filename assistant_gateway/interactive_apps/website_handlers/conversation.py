@@ -19,6 +19,7 @@ from assistant_gateway.application.gateway_application import (
 from assistant_gateway.application.transcript_service import TranscriptCursorError
 from assistant_gateway.application.web_chat_threads import InvalidThreadPlacement, thread_list_payload
 from assistant_gateway.application.website_application import (
+    WEB_CHAT_THREAD_ACTION_REFUSAL,
     WEB_CHAT_THREAD_LIST_LIMIT,
     GatewaySessionAliasConflict,
     WebChatParallelSettingResult,
@@ -330,7 +331,7 @@ class WebsiteConversationHandlers:
     def _set_web_chat_thread_placement(
         self, web_session: Any, session_key: str, payload: dict[str, Any]
     ) -> web.Response:
-        """Pin, unpin, snooze, dismiss or restore a thread (the thread list's menu).
+        """Pin, unpin, snooze, dismiss or restore a thread (the thread list's menu), or clear its Woke mark.
 
         The same route and checks as a rename; the service checks the owner
         before the snooze time or sequence, so another person's thread reads
@@ -340,7 +341,7 @@ class WebsiteConversationHandlers:
         try:
             action = WebChatThreadAction(str(payload.get("thread_action") or ""))
         except ValueError as exc:
-            raise web.HTTPBadRequest(text="thread_action must be pin, unpin, snooze, dismiss or restore.") from exc
+            raise web.HTTPBadRequest(text=WEB_CHAT_THREAD_ACTION_REFUSAL) from exc
         snooze_until = payload.get("snooze_until")
         seen_sequence = payload.get("seen_sequence")
         try:

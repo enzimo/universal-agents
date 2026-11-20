@@ -108,8 +108,10 @@ from assistant_gateway.application.workspace_browser import (
 )
 from assistant_gateway.application.web_chat_threads import (
     InvalidThreadPlacement,
+    ThreadListState,
     WebChatThread,
     snooze_wake_time,
+    thread_list_state,
     web_chat_thread,
 )
 from assistant_gateway.domain.sessions import SessionListRecord, SessionRecord, WebChatThreadRecord
@@ -117,6 +119,7 @@ from assistant_gateway.domain.transcript import (
     TRANSCRIPT_ROLE_USER,
     TRANSCRIPT_SOURCE_ACCESS_REVIEW,
     TRANSCRIPT_SOURCE_CLIENT_REQUEST,
+    TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE,
     GatewayTranscriptMessage,
 )
 from assistant_gateway.ports.repositories import DeliveryRepository, SessionRepository
@@ -547,7 +550,7 @@ class WebsiteSessionApplication:
         snooze_until: str | None = None,
         seen_sequence: int | None = None,
     ) -> WebChatThreadPlacementResult:
-        """Pin, unpin, snooze, dismiss or restore one of the person's Web Chat threads.
+        """Pin, unpin, snooze, dismiss, restore or clear the Woke mark of one of the person's threads.
 
         Checked like rename and archive: a Web Chat thread on the website
         channel that the person may update; someone else's or a missing thread
@@ -564,10 +567,10 @@ class WebsiteSessionApplication:
             or session.chat_id != WEB_CHAT_CHAT_ID
             or not self._owner_allows(session, owner_canonical_user_id, action=PRIVATE_ACTION_UPDATE)
         ):
-            saved = False
+            result = WebChatThreadPlacementResult.NOT_FOUND
         else:
             try:
-                saved = self._place_thread(session.session_key, action, snooze_until, seen_sequence)
+                result = self._place_thread(session.session_key, action, snooze_until, seen_sequence)
             except InvalidThreadPlacement as refused:
                 LOGGER.info(
                     "Web Chat thread placement refused. event=web_chat_thread_placement outcome=refused "
@@ -577,7 +580,15 @@ class WebsiteSessionApplication:
                     str(refused),
                 )
                 raise
-        result = WebChatThreadPlacementResult.SAVED if saved else WebChatThreadPlacementResult.NOT_FOUND
+            except Exception:
+                # The route answers 500; this line names the thread and the change.
+                LOGGER.exception(
+                    "Web Chat thread placement failed. event=web_chat_thread_placement outcome=error "
+                    "session_key=%s action=%s",
+                    session.session_key,
+                    action.value,
+                )
+                raise
         LOGGER.info(
             "Web Chat thread placement change. event=web_chat_thread_placement outcome=%s "
             "session_key=%s action=%s",
@@ -593,23 +604,48 @@ class WebsiteSessionApplication:
         action: WebChatThreadAction,
         snooze_until: str | None,
         seen_sequence: int | None,
-    ) -> bool:
+    ) -> WebChatThreadPlacementResult:
         repository = self._session_repository
+        if action is WebChatThreadAction.CLEAR_WOKE:
+            return self._clear_woke(session_key)
         if action is WebChatThreadAction.PIN or action is WebChatThreadAction.UNPIN:
-            return repository.set_session_pinned(session_key, pinned=action is WebChatThreadAction.PIN)
-        if action is WebChatThreadAction.RESTORE:
-            return repository.clear_session_hidden(session_key)
-        seen = seen_sequence if _valid_seen_sequence(seen_sequence) else None
-        if seen is None:
-            raise InvalidThreadPlacement("Reload the chat and try again.")
-        if action is WebChatThreadAction.SNOOZE:
-            wake = snooze_wake_time(snooze_until, now=self._clock.now_utc())
-            return repository.set_session_hidden(
-                session_key, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until=wake, seen_sequence=seen
-            )
-        return repository.set_session_hidden(
-            session_key, hidden_as=ThreadHiddenAs.DISMISSED, hidden_until=None, seen_sequence=seen
-        )
+            saved = repository.set_session_pinned(session_key, pinned=action is WebChatThreadAction.PIN)
+        elif action is WebChatThreadAction.RESTORE:
+            saved = repository.clear_session_hidden(session_key)
+        else:
+            seen = seen_sequence if _valid_seen_sequence(seen_sequence) else None
+            if seen is None:
+                raise InvalidThreadPlacement("Reload the chat and try again.")
+            if action is WebChatThreadAction.SNOOZE:
+                wake = snooze_wake_time(snooze_until, now=self._clock.now_utc())
+                saved = repository.set_session_hidden(
+                    session_key, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until=wake, seen_sequence=seen
+                )
+            else:
+                saved = repository.set_session_hidden(
+                    session_key, hidden_as=ThreadHiddenAs.DISMISSED, hidden_until=None, seen_sequence=seen
+                )
+        return WebChatThreadPlacementResult.SAVED if saved else WebChatThreadPlacementResult.NOT_FOUND
+
+    def _clear_woke(self, session_key: str) -> WebChatThreadPlacementResult:
+        """Clear a Woke mark only if the thread is woke by the gateway's own rule, as stored now.
+
+        The page asks when the person opens a thread its list showed as woke,
+        but its list may be older than a snooze or dismiss saved on another
+        device. The placement is read, judged by the list's own rule
+        (``thread_list_state``) and cleared only while it is unchanged, so
+        that newer choice is kept and the answer is ``UNCHANGED``.
+        """
+
+        repository = self._session_repository
+        placement = repository.get_session_placement(session_key)
+        if placement is None:
+            return WebChatThreadPlacementResult.NOT_FOUND
+        if thread_list_state(placement, now=self._clock.now_utc()) is not ThreadListState.WOKE:
+            return WebChatThreadPlacementResult.UNCHANGED
+        if repository.clear_session_hidden(session_key, only_if=placement):
+            return WebChatThreadPlacementResult.SAVED
+        return WebChatThreadPlacementResult.UNCHANGED
 
     def rename_web_chat_session(
         self,
@@ -952,7 +988,7 @@ class WebsiteTranscriptApplication:
             route=route,
             response=response,
             reply_to=user_message,
-            source_kind="gateway_local_response",
+            source_kind=TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE,
         )
         return self._message_view(reply) if reply is not None else None
 

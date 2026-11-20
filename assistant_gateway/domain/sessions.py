@@ -5,6 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from assistant_gateway.domain.message_types import (
+    LINK_RESULT_MESSAGE_TYPE,
+    TASK_PROGRESS_STATUS_MESSAGE_TYPE,
+    TASK_STEERING_MESSAGE_TYPE,
+)
+from assistant_gateway.domain.transcript import (
+    TRANSCRIPT_SOURCE_GATEWAY_COMMAND,
+    TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE,
+)
+
 
 class ParallelSettingOutcome(StrEnum):
     """What a change to a thread's **Run concurrently** setting did.
@@ -33,6 +43,46 @@ class ThreadHiddenAs(StrEnum):
 
     SNOOZED = "snoozed"
     DISMISSED = "dismissed"
+
+
+# What does not count as "the team posting" for a snoozed thread: the
+# person's own rows (role ``user``) and the gateway's answers to them (owner's
+# rule: a snoozed thread comes back early only when the team posts; the
+# person's own messages and slash commands never wake it). Answers are told
+# apart by how they were written, since their role is ``system`` or
+# ``assistant`` like the team's posts:
+# - replies to a slash command or a local request (their source kinds);
+# - how a /link the person ran ended (``link_result``);
+# - the answer to "?" (``task_progress_status``);
+# - the answer to a message sent while a request ran (``task_steering``: the
+#   gateway's "will be passed to it" and the team lead's accepted or refused
+#   reply). The team's own pause that asks the person for a reply is also
+#   ``task_steering``; it shows in Needs you while it waits, and the team's
+#   next post wakes the thread.
+SNOOZE_SILENT_SOURCE_KINDS = (TRANSCRIPT_SOURCE_GATEWAY_COMMAND, TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE)
+SNOOZE_SILENT_MESSAGE_TYPES = (
+    LINK_RESULT_MESSAGE_TYPE,
+    TASK_PROGRESS_STATUS_MESSAGE_TYPE,
+    TASK_STEERING_MESSAGE_TYPE,
+)
+
+
+@dataclass(frozen=True)
+class ThreadPlacementRecord:
+    """Where one active thread sits now, read to clear a Woke mark safely.
+
+    The same raw values the thread list reads (``WebChatThreadRecord``), so
+    the one woke rule (``web_chat_threads.thread_list_state``) applies to
+    both; ``clear_session_hidden(only_if=...)`` clears only while the stored
+    values still equal these.
+    """
+
+    session_key: str
+    hidden_as: str | None
+    hidden_until: str | None
+    hidden_at_sequence: int | None
+    last_sequence: int
+    team_posted_after_hiding: bool
 
 
 @dataclass
@@ -157,8 +207,8 @@ class WebChatThreadRecord:
     hidden_as: str | None = None
     hidden_until: str | None = None
     hidden_at_sequence: int | None = None
-    # Whether the team posted (a non-user row) after a snoozed thread's
-    # ``hidden_at_sequence``; read only for snoozed threads.
+    # Whether the team posted after a snoozed thread's ``hidden_at_sequence``
+    # (``SNOOZE_SILENT_*`` say what does not count); read only for snoozed threads.
     team_posted_after_hiding: bool = False
 
 

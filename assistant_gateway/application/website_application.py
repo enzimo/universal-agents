@@ -759,14 +759,27 @@ class WebChatThreadAction(StrEnum):
     UNPIN = "unpin"
     SNOOZE = "snooze"
     DISMISS = "dismiss"
-    # Back from snooze or dismiss; also clears the Woke mark when the person opens it.
+    # Back from snooze or dismiss right away (the menu's Restore).
     RESTORE = "restore"
+    # Sent by the page when the person opens a woke thread: clears the Woke
+    # mark only if the thread is still woke by the gateway's own rule, so a
+    # page with an old copy of the list cannot undo a newer snooze or dismiss.
+    CLEAR_WOKE = "clear_woke"
+
+
+# The refusal for an unknown ``thread_action``, built from the actions so a new
+# one is never missing from it (the gateway route and the aesthetic preview).
+WEB_CHAT_THREAD_ACTION_REFUSAL = "thread_action must be one of: " + ", ".join(
+    action.value for action in WebChatThreadAction
+) + "."
 
 
 class WebChatThreadPlacementResult(StrEnum):
     """What a thread placement change did; someone else's or a missing thread is not found."""
 
     SAVED = "saved"
+    # ``clear_woke`` on a thread that is not woke (any more): nothing to change.
+    UNCHANGED = "unchanged"
     NOT_FOUND = "not_found"
 
 

@@ -389,8 +389,16 @@ it back). Waking and coming back are derived when the list is read
 (`assistant_gateway.application.web_chat_threads.thread_list_state`), never
 written by the code that posts messages: a snoozed thread wakes at its time
 or when the team posts after it was snoozed and stays marked woke until the
-person opens it (the page then restores it); a dismissed thread comes back
-with any new message. Why: no background job or hook on the transcript path
+person opens it; a dismissed thread comes back with any new message. Only
+the team's posts count: the person's own rows and the gateway's answers to
+them (slash command and local replies, a /link result, the answer to "?" and
+to a message sent while a request runs; listed once in
+`assistant_gateway.domain.sessions` as `SNOOZE_SILENT_SOURCE_KINDS` and
+`SNOOZE_SILENT_MESSAGE_TYPES`) never wake it (owner's rule). Opening a woke thread sends `clear_woke`, not `restore`: the
+gateway judges the stored placement by the list's own rule and clears it
+only while it is unchanged (compare-and-set), because the page's copy of the
+list can be older than a snooze or dismiss saved on another device; the
+menu's Restore stays unconditional. Why: no background job or hook on the transcript path
 has to remember to clear anything, and live pages read the list every two
 seconds, so a wake shows within seconds. "Needs you" comes from what is
 already stored: an open question, the running request waiting for the

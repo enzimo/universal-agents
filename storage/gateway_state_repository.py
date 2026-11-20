@@ -53,8 +53,11 @@ from assistant_gateway.domain.sessions import (
     SessionListRecord,
     WebChatThreadRecord,
     SessionRecord,
+    SNOOZE_SILENT_MESSAGE_TYPES,
+    SNOOZE_SILENT_SOURCE_KINDS,
     SessionSearchRecord,
     ThreadHiddenAs,
+    ThreadPlacementRecord,
 )
 from assistant_gateway.domain.transcript import (
     TRANSCRIPT_SCHEMA_VERSION,
@@ -128,6 +131,30 @@ def _ordinary_message_sql(alias: str, bind: str) -> str:
 _MESSAGE_WHITESPACE = " \t\n\r"
 # The bound values of one _ordinary_message_sql condition, in order.
 _ORDINARY_MESSAGE_PARAMS = (_MESSAGE_WHITESPACE, "/%", _MESSAGE_WHITESPACE)
+
+def _team_posted_after_hiding_sql(bind: str) -> str:
+    """Whether the team posted in session ``s`` after its ``hidden_at_sequence``.
+
+    One rule for the thread list and for clearing a Woke mark: a row that is
+    not the person's own and not one of the gateway's answers to them
+    (``SNOOZE_SILENT_SOURCE_KINDS``, ``SNOOZE_SILENT_MESSAGE_TYPES``). Its
+    binds are ``_TEAM_POSTED_PARAMS``. The scan reads the thread's rows after
+    the baseline through the ``(session_key, session_sequence)`` key.
+    """
+
+    sources = ", ".join([bind] * len(SNOOZE_SILENT_SOURCE_KINDS))
+    types = ", ".join([bind] * len(SNOOZE_SILENT_MESSAGE_TYPES))
+    return f"""EXISTS (
+                    SELECT 1 FROM gateway_transcript_messages tp
+                    WHERE tp.session_key = s.session_key
+                      AND tp.session_sequence > COALESCE(s.hidden_at_sequence, 0)
+                      AND tp.role <> 'user'
+                      AND tp.source_kind NOT IN ({sources})
+                      AND tp.message_type NOT IN ({types})
+                )"""
+
+
+_TEAM_POSTED_PARAMS = (*SNOOZE_SILENT_SOURCE_KINDS, *SNOOZE_SILENT_MESSAGE_TYPES)
 
 # How much of a thread's latest message the thread list reads: transcript
 # content can be a megabyte, and the page shows one shortened line of it.
@@ -376,7 +403,11 @@ class GatewayStateRepository(
         seen_sequence: int,
     ) -> bool: ...
 
-    def clear_session_hidden(self, session_key: str) -> bool: ...
+    def get_session_placement(self, session_key: str) -> Optional[ThreadPlacementRecord]: ...
+
+    def clear_session_hidden(
+        self, session_key: str, *, only_if: Optional[ThreadPlacementRecord] = None
+    ) -> bool: ...
 
     def set_active_session_for_channel(
         self,
@@ -1980,12 +2011,8 @@ class _RelationalGatewayStateRepository:
                 s.hidden_as,
                 s.hidden_until,
                 s.hidden_at_sequence,
-                CASE WHEN s.hidden_as = {bind} THEN EXISTS (
-                    SELECT 1 FROM gateway_transcript_messages tp
-                    WHERE tp.session_key = s.session_key
-                      AND tp.session_sequence > COALESCE(s.hidden_at_sequence, 0)
-                      AND tp.role <> 'user'
-                ) ELSE FALSE END AS team_posted_after_hiding
+                CASE WHEN s.hidden_as = {bind} THEN {_team_posted_after_hiding_sql(bind)}
+                ELSE FALSE END AS team_posted_after_hiding
             FROM gateway_sessions s
             LEFT JOIN gateway_transcript_session_sequences q ON q.session_key = s.session_key{last_message_join}
             WHERE s.status = 'active'
@@ -2004,7 +2031,7 @@ class _RelationalGatewayStateRepository:
         params: list[Any] = [*ordinary, *ordinary, RUN_STATE_RUNNING, PendingQueryStatus.OPEN.value]
         # The setup pages' and credential forms' person, bound so each
         # subquery runs once per query.
-        params.extend([TOOL_SETUP_STATUS_WAITING, owner, owner, ThreadHiddenAs.SNOOZED.value])
+        params.extend([TOOL_SETUP_STATUS_WAITING, owner, owner, ThreadHiddenAs.SNOOZED.value, *_TEAM_POSTED_PARAMS])
         if include_last_message:
             params.extend(ordinary)
         params.extend([channel_name, chat_id, owner, limit])
@@ -2580,18 +2607,71 @@ class _RelationalGatewayStateRepository:
             conn.commit()
             return cursor.rowcount > 0
 
-    def clear_session_hidden(self, session_key: str) -> bool:
-        """Bring an active thread back from snooze or dismiss, which also clears its Woke mark."""
+    def get_session_placement(self, session_key: str) -> Optional[ThreadPlacementRecord]:
+        """Where an active thread sits now, with the values the woke rule needs; ``None`` when not active."""
 
         bind = self._dialect.bind
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT
+                    s.session_key,
+                    s.hidden_as,
+                    s.hidden_until,
+                    s.hidden_at_sequence,
+                    COALESCE(q.last_session_sequence, 0) AS last_sequence,
+                    CASE WHEN s.hidden_as = {bind} THEN {_team_posted_after_hiding_sql(bind)}
+                    ELSE FALSE END AS team_posted_after_hiding
+                FROM gateway_sessions s
+                LEFT JOIN gateway_transcript_session_sequences q ON q.session_key = s.session_key
+                WHERE s.session_key = {bind} AND s.status = 'active'
+                """,
+                (ThreadHiddenAs.SNOOZED.value, *_TEAM_POSTED_PARAMS, session_key),
+            ).fetchone()
+        if row is None:
+            return None
+        values = dict(row)
+        return ThreadPlacementRecord(
+            session_key=str(values["session_key"]),
+            hidden_as=values["hidden_as"],
+            hidden_until=values["hidden_until"],
+            hidden_at_sequence=values["hidden_at_sequence"],
+            last_sequence=int(values["last_sequence"] or 0),
+            team_posted_after_hiding=bool(values["team_posted_after_hiding"]),
+        )
+
+    def clear_session_hidden(self, session_key: str, *, only_if: Optional[ThreadPlacementRecord] = None) -> bool:
+        """Bring an active thread back from snooze or dismiss, which also clears its Woke mark.
+
+        With ``only_if`` it clears only while the thread's stored placement
+        still equals that read (a compare-and-set): a snooze or dismiss saved
+        since, from another device, is kept. A missing value is compared as
+        ``IS NULL`` rather than bound, so the statement is the same on SQLite
+        and PostgreSQL and a row with an empty value can still be cleared.
+        """
+
+        bind = self._dialect.bind
+        conditions = ""
+        params: list[Any] = [session_key]
+        if only_if is not None:
+            for column, value in (
+                ("hidden_as", only_if.hidden_as),
+                ("hidden_until", only_if.hidden_until),
+                ("hidden_at_sequence", only_if.hidden_at_sequence),
+            ):
+                if value is None:
+                    conditions += f" AND {column} IS NULL"
+                else:
+                    conditions += f" AND {column} = {bind}"
+                    params.append(value)
         with self._connect() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE gateway_sessions
                 SET hidden_as = NULL, hidden_until = NULL, hidden_at_sequence = NULL
-                WHERE session_key = {bind} AND status = 'active'
+                WHERE session_key = {bind} AND status = 'active'{conditions}
                 """,
-                (session_key,),
+                tuple(params),
             )
             conn.commit()
             return cursor.rowcount > 0

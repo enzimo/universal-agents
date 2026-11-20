@@ -25,8 +25,20 @@ from assistant_gateway.domain.request_state import (
     CredentialCollectionRecord,
     ToolSetupRecord,
 )
-from assistant_gateway.domain.sessions import ThreadHiddenAs
-from assistant_gateway.domain.transcript import TranscriptAppendRequest, TranscriptAttachmentReference
+from assistant_gateway.domain.message_types import (
+    LINK_RESULT_MESSAGE_TYPE,
+    SYSTEM_NOTIFICATION_MESSAGE_TYPE,
+    TASK_PROGRESS_STATUS_MESSAGE_TYPE,
+    TASK_STEERING_MESSAGE_TYPE,
+)
+from assistant_gateway.domain.sessions import ThreadHiddenAs, ThreadPlacementRecord
+from assistant_gateway.domain.transcript import (
+    TRANSCRIPT_SOURCE_DELIVERY_EVENT,
+    TRANSCRIPT_SOURCE_GATEWAY_COMMAND,
+    TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE,
+    TranscriptAppendRequest,
+    TranscriptAttachmentReference,
+)
 from storage.config import StorageSettings, resolve_storage_settings
 from storage.gateway_state_repository import LAST_MESSAGE_SQL_CHARACTERS, create_gateway_state_repository
 from tests.test_gateway_question_store import _postgres_settings
@@ -79,6 +91,8 @@ class _Store:
         session_key: str = THREAD,
         owner: str = ALICE,
         attachments: tuple[TranscriptAttachmentReference, ...] = (),
+        message_type: str | None = None,
+        source_kind: str = "test",
     ) -> int:
         number = next(self._ids)
         message = self.repo.append_transcript_message(
@@ -91,10 +105,10 @@ class _Store:
                 chat_id="web-chat",
                 role=role,
                 content=content,
-                message_type="user_message" if role == "user" else "assistant_message",
+                message_type=message_type or ("user_message" if role == "user" else "assistant_message"),
                 message_level="normal",
                 correlation_id=None,
-                source_kind="test",
+                source_kind=source_kind,
                 source_id=f"source_{number}",
                 idempotency_key=f"idempotency_{number}",
                 attachment_references=attachments,
@@ -260,8 +274,114 @@ def test_only_the_team_posting_after_a_snooze_counts(settings) -> None:
     assert store.one().team_posted_after_hiding is False
     store.post("the person writes from another device")
     assert store.one().team_posted_after_hiding is False
-    store.post("A card", role="system")
+    store.post("A notice from the team", role="system", message_type=SYSTEM_NOTIFICATION_MESSAGE_TYPE)
     assert store.one().team_posted_after_hiding is True
+
+
+# The gateway's own answers to the person (owner's rule, F11): a slash
+# command's reply, a local reply, how the person's /link ended, the answer to
+# "?" and the answer to a message sent while a request ran.
+GATEWAY_ANSWERS = [
+    pytest.param("system", "command", TRANSCRIPT_SOURCE_GATEWAY_COMMAND, id="command reply"),
+    pytest.param("system", "command_auth", TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE, id="local command reply"),
+    pytest.param("system", LINK_RESULT_MESSAGE_TYPE, TRANSCRIPT_SOURCE_DELIVERY_EVENT, id="link result"),
+    pytest.param("system", TASK_PROGRESS_STATUS_MESSAGE_TYPE, "gateway_response", id="answer to ?"),
+    pytest.param("assistant", TASK_STEERING_MESSAGE_TYPE, "gateway_response", id="message passed on"),
+]
+# What the team posts; the final reply is written like the "?" answer, so the
+# rule cannot leave out the source kind gateway_response as a whole.
+TEAM_POSTS = [
+    pytest.param("assistant", "assistant_message", "gateway_response", id="final reply"),
+    pytest.param("system", SYSTEM_NOTIFICATION_MESSAGE_TYPE, TRANSCRIPT_SOURCE_DELIVERY_EVENT, id="team notice"),
+    pytest.param("system", "access_review", "access_review", id="access review"),
+]
+
+
+def _snoozed_after_one_message(store: _Store) -> None:
+    store.thread()
+    seen = store.post("/status")
+    store.repo.set_session_hidden(
+        THREAD, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until="2030-01-01T09:00:00+00:00", seen_sequence=seen
+    )
+
+
+@pytest.mark.parametrize(("role", "message_type", "source_kind"), GATEWAY_ANSWERS)
+def test_the_gateways_answers_to_the_person_never_wake_a_snooze(settings, role, message_type, source_kind) -> None:
+    store = _Store(settings)
+    _snoozed_after_one_message(store)
+    store.post("an answer", role=role, message_type=message_type, source_kind=source_kind)
+    assert store.one().team_posted_after_hiding is False
+    assert store.repo.get_session_placement(THREAD).team_posted_after_hiding is False
+
+
+@pytest.mark.parametrize(("role", "message_type", "source_kind"), TEAM_POSTS)
+def test_the_teams_posts_wake_a_snooze(settings, role, message_type, source_kind) -> None:
+    store = _Store(settings)
+    _snoozed_after_one_message(store)
+    store.post("the team posts", role=role, message_type=message_type, source_kind=source_kind)
+    assert store.one().team_posted_after_hiding is True
+    assert store.repo.get_session_placement(THREAD).team_posted_after_hiding is True
+
+
+# Clearing a Woke mark safely (F1): the placement read and the compare-and-set.
+
+
+def test_the_placement_read_has_what_the_woke_rule_needs(settings) -> None:
+    store = _Store(settings)
+    store.thread()
+    seen = store.post("before the snooze")
+    store.post("a reply", role="assistant")
+    store.repo.set_session_hidden(
+        THREAD, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until="2030-01-01T09:00:00+00:00", seen_sequence=seen
+    )
+    assert store.repo.get_session_placement(THREAD) == ThreadPlacementRecord(
+        session_key=THREAD,
+        hidden_as="snoozed",
+        hidden_until="2030-01-01T09:00:00+00:00",
+        hidden_at_sequence=seen,
+        last_sequence=seen + 1,
+        team_posted_after_hiding=True,
+    )
+    store.repo.set_session_status(THREAD, "archived")
+    assert store.repo.get_session_placement(THREAD) is None
+    assert store.repo.get_session_placement("missing") is None
+
+
+def test_a_conditional_clear_keeps_a_placement_saved_since_it_was_read(settings) -> None:
+    store = _Store(settings)
+    store.thread()
+    store.repo.set_session_hidden(
+        THREAD, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until="2026-01-01T09:00:00+00:00", seen_sequence=0
+    )
+    read = store.repo.get_session_placement(THREAD)
+    # Another device snoozes the thread again before the clear arrives.
+    store.post("hello")
+    store.repo.set_session_hidden(
+        THREAD, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until="2030-01-01T09:00:00+00:00", seen_sequence=1
+    )
+    assert not store.repo.clear_session_hidden(THREAD, only_if=read)
+    record = store.one()
+    assert (record.hidden_as, record.hidden_until, record.hidden_at_sequence) == (
+        "snoozed", "2030-01-01T09:00:00+00:00", 1
+    )
+    assert store.repo.clear_session_hidden(THREAD, only_if=store.repo.get_session_placement(THREAD))
+    assert store.one().hidden_as is None
+
+
+def test_a_conditional_clear_matches_a_placement_with_an_empty_value(settings) -> None:
+    store = _Store(settings)
+    store.thread()
+    store.repo.set_session_hidden(
+        THREAD, hidden_as=ThreadHiddenAs.SNOOZED, hidden_until="2030-01-01T09:00:00+00:00", seen_sequence=0
+    )
+    bind = store.repo._dialect.bind
+    with store.repo._connect() as conn:
+        conn.execute(f"UPDATE gateway_sessions SET hidden_until = NULL WHERE session_key = {bind}", (THREAD,))
+        conn.commit()
+    read = store.repo.get_session_placement(THREAD)
+    assert (read.hidden_as, read.hidden_until) == ("snoozed", None)
+    assert store.repo.clear_session_hidden(THREAD, only_if=read)
+    assert store.one().hidden_as is None
 
 
 def test_the_team_post_check_is_only_for_snoozed_threads(settings) -> None:

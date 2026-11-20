@@ -22,6 +22,11 @@ TRANSCRIPT_SOURCE_CLIENT_REQUEST = "client_request"
 # the Web Chat card finds the request again after a reload.
 TRANSCRIPT_SOURCE_ACCESS_REVIEW = "access_review"
 TRANSCRIPT_SOURCE_DELIVERY_EVENT = "delivery_event"
+# The gateway's own replies to the person's slash commands and local requests
+# (``GatewayTranscriptService.append_local_exchange`` and
+# ``WebsiteSessionApplication.record_local_response``).
+TRANSCRIPT_SOURCE_GATEWAY_COMMAND = "gateway_command"
+TRANSCRIPT_SOURCE_GATEWAY_LOCAL_RESPONSE = "gateway_local_response"
 
 
 @dataclass(frozen=True)

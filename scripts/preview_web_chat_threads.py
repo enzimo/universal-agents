@@ -6,8 +6,9 @@ list (Needs you, Pinned, Recent with a woke thread, Snoozed, Dismissed) and
 builds each row through the gateway's own code (``WebChatThreadRecord`` ->
 ``web_chat_thread`` -> ``thread_list_payload``, and the same revision digest),
 so a change to the row format fails ``tests/test_onboarding_aesthetic_preview.py``
-instead of leaving the preview page broken. Pin, snooze, dismiss, restore and
-delete change the samples in memory, like the store would; nothing is saved.
+instead of leaving the preview page broken. Pin, snooze, dismiss, restore,
+clearing a Woke mark and delete change the samples in memory, like the store
+would; nothing is saved.
 """
 
 from __future__ import annotations
@@ -17,12 +18,15 @@ from datetime import datetime, timedelta
 
 from assistant_gateway.application.web_chat_threads import (
     InvalidThreadPlacement,
+    ThreadListState,
     WebChatThread,
     snooze_wake_time,
     thread_list_payload,
+    thread_list_state,
     web_chat_thread,
 )
 from assistant_gateway.application.website_application import (
+    WEB_CHAT_THREAD_ACTION_REFUSAL,
     WebChatThreadAction,
     web_chat_threads_revision,
 )
@@ -165,7 +169,7 @@ class PreviewThreads:
         try:
             action = WebChatThreadAction(str(payload.get("thread_action") or ""))
         except ValueError:
-            return "thread_action must be pin, unpin, snooze, dismiss or restore."
+            return WEB_CHAT_THREAD_ACTION_REFUSAL
         record = sample.record
         seen = payload.get("seen_sequence")
         baseline = min(seen, record.last_sequence) if isinstance(seen, int) and not isinstance(seen, bool) else None
@@ -176,6 +180,10 @@ class PreviewThreads:
                 record = replace(record, pinned=False)
             elif action is WebChatThreadAction.RESTORE:
                 record = replace(record, hidden_as=None, hidden_until=None, hidden_at_sequence=None)
+            elif action is WebChatThreadAction.CLEAR_WOKE:
+                # Like the gateway: only a thread that is woke by the list's own rule.
+                if thread_list_state(record, now=now) is ThreadListState.WOKE:
+                    record = replace(record, hidden_as=None, hidden_until=None, hidden_at_sequence=None)
             elif baseline is None or baseline < 0:
                 raise InvalidThreadPlacement("Reload the chat and try again.")
             elif action is WebChatThreadAction.SNOOZE:
