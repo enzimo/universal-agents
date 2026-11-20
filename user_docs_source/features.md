@@ -1314,7 +1314,8 @@ disappears once it is fixed:
   default), one of the team's message streams holds 80% of its size limit
   (`transport.queues.warn_at_percent`) and will soon refuse new messages, or
   the bundled message server started with less room than its streams set
-  aside, so it refuses new streams until the whole instance restarts.
+  aside, so it refuses new streams (and new messages once its streams store
+  more than that room) until the whole instance restarts with enough room.
 - **Warning**: something works, but not as configured, for example a
   variable in `team.env` or the container environment that overrides a saved
   setting or a key saved with `/auth model`, memory search that stopped
@@ -1322,8 +1323,9 @@ disappears once it is fixed:
   use the team's model keys and have no model of their own yet, a disk the
   instance uses, or the message server's storage, nearing its limit (80% by
   default), the bundled message server's disk having too little free space
-  for the room its streams need at its next start, or people's stored-data
-  totals that are out of date, so they get no storage notices.
+  and stored messages for the room its streams need at its next start, or
+  people's stored-data totals that are out of date, so they get no storage
+  notices.
 - **Note**: a deliberate choice worth knowing, such as access checks turned
   off, people whose work goes to their own model provider, a message
   server that sets no limit for stored messages, or knowledge pages, revisions,

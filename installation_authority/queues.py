@@ -30,9 +30,9 @@ creates and enlarges the others, and creates or updates the team consumers. A st
 only the streams whose settings differ in a field the contract sets, keeping metadata keys it
 does not own, so a restart with the same settings asks NATS for no change at all. That
 matters beyond speed: a NATS server whose storage is now smaller than what its streams set
-aside (the bundled server measures its storage from the disk's free space at every start)
-keeps serving the streams it has but refuses every new or changed stream, so a start that
-asked for no change still serves there. The Status page warns administrators before the
+aside (the bundled server measures its storage at every start from the disk's free space and
+what its streams already store) keeps serving the streams it has but refuses every new or
+changed stream, so a start that asked for no change still serves there. The Status page warns administrators before the
 bundled server would start that short, and shows a problem once it runs that short
 (``assistant_gateway.storage_capacity``, "The bundled server's room").
 

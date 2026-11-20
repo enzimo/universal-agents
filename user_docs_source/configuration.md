@@ -458,22 +458,30 @@ whole limit aside when it is created: each team's message streams about
 2.1 GiB at the default `transport.queues.max_bytes`, plus 64 MB for set-aside
 messages. Leave room for those.
 
-The bundled NATS server takes three quarters of the free space on the disk
-that holds its store as its room, each time the whole instance starts, and
-refuses every new or changed stream while its streams set aside that much or
-more. The streams it has keep working, so messages still flow, but the
-attachment store Web Chat creates the first time it copies an attachment,
-adding a team, and a start after a change to the message stream settings
-fail. So Status also warns, with one Inbox notice, when three quarters of that
-disk's free space is no more than what the streams set aside: the server would
-refuse new streams after its next start. The warning says how much to free,
-what each team's streams set aside and which setting changes it
-(`transport.queues.max_bytes`). It ends once the disk has 3% of its size more
-free than the server needs, so it does not come and go as the disk's use
-moves. If the server already runs with too little room, Status also shows a
-problem. Freeing space does not end that one: the server takes its room only
-when the whole instance (the container, or `ua start`) starts, and a
-team-wide restart keeps it running with the room it has. An external NATS
+The bundled NATS server takes as its room, each time the whole instance
+starts, three quarters of the free space on the disk that holds its store plus
+three quarters of what its stored messages take. It refuses every new or
+changed stream while its streams set aside that much or more, and every new
+message once its stored messages take more than that room. Until then the
+streams it has keep taking messages, but the attachment store Web Chat creates
+the first time it copies an attachment, adding a team, and a start after a
+change to the message stream settings fail. So Status also warns, with one
+Inbox notice, when three quarters of that disk's free space and the stored
+messages together is no more than what the streams set aside: the server would
+refuse new streams after its next start. The warning names one amount to free
+from other files on that disk. Removing messages does not help, because the
+server counts its stored messages back into its room. It also says what each
+team's streams set aside and which setting changes it
+(`transport.queues.max_bytes`). It ends once the free space and the stored
+messages come to 3% of the disk's size more than the server needs, so it does
+not come and go as other files on the disk grow and shrink. If the server
+already runs with too little room, Status also shows a problem, with its own
+title once the server refuses new messages too. Freeing space does not end
+that one: the server takes its room only when the whole instance (the
+container, or `ua start`) starts, and a team-wide restart keeps it running
+with the room it has. While the server refuses new messages, it takes them
+again as soon as its streams store less than its room, for example once agents
+take queued work. An external NATS
 server gets neither finding, because its storage is not on a disk the gateway
 can measure; give its account a limit, and Status shows the percentage.
 
