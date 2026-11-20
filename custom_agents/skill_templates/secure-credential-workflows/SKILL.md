@@ -193,7 +193,8 @@ account link form takes a new credential when none is stored yet; collect one
 beforehand with a `secure_credential_collection_request` (with
 `continue_task=true`, and wait for `credential_stored`) only when it must come
 from a template the form cannot take, such as X's OAuth file (`xurl_oauth2`).
-Every broker page has a **Decline** button. A form that comes back
+Every broker form a person answers has a **Decline** button (the `/auth model`
+and `/upgrade` pages end with **Close** instead). A form that comes back
 `credential_declined`, or a setup page that ends `declined`, means the person
 chose not to give it: do not ask for the same form or page again in this task;
 say what could not be done without it.

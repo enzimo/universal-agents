@@ -222,7 +222,7 @@ class _ModelKeyPage:
     kind = "form"
     page_seconds = MODEL_KEY_PAGE_SECONDS
     administrators_only = False
-    # Ends with its own Close; the service's Decline is refused here (SecureToolBrokerService._decline_refusal).
+    # Ends with its own Close; the service's Decline is refused here (page_decline.decline_refusal).
     declinable = False
 
     def start(self, session: Any, payload: Mapping[str, Any], logger: logging.Logger) -> None:

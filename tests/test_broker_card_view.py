@@ -230,6 +230,10 @@ def test_the_web_chat_origin_is_the_scheme_host_and_port_of_its_address() -> Non
         "https://chat.example:notaport",
         "https://chat.example:99999",
         "https://chat_example.test",
+        # A scoped IPv6 address: Python accepts any text after "%" (review finding F1).
+        "http://[fe80::1%x *;sandbox allow-same-origin allow-scripts allow-forms;]",
+        "http://[fe80::1%25eth0]:8080",
+        "http://[notip]/",
     ],
 )
 def test_an_address_that_could_change_the_policy_turns_the_card_view_off(address, caplog) -> None:

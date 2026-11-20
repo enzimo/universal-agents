@@ -589,3 +589,34 @@ def test_a_success_whose_size_and_parts_were_unreadable_shows_neither() -> None:
     assert "could not be read afterwards" in panel
     assert "0 bytes" not in panel and "It holds" not in panel
     assert "Next steps" in panel
+
+
+# -- Close after a result (review finding F5) -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("result", "outcome"),
+    [
+        (None, "declined"),  # closed before any export ran
+        (_result("exp_aaaaaaaaaaaaaaaaaaaaaa", ok=True), "finished"),
+        (_result("exp_aaaaaaaaaaaaaaaaaaaaaa", ok=False), "declined"),  # nothing was exported
+        # The export process took the passphrase and ended without reporting: a file may exist.
+        ({"ok": False, "error": "ended", team_export_page.RESULT_UNCONFIRMED: True}, "finished"),
+    ],
+)
+def test_a_closed_page_tells_the_card_how_it_ended(result: dict | None, outcome: str) -> None:
+    session = _session()
+    session.state = {"status": team_export_page.STATUS_CLOSED}
+    if result is not None:
+        session.state[team_export_page._RESULT] = result
+
+    from secure_tool_broker import page_view
+
+    token = page_view._CURRENT_VIEW.set(page_view.PageView(card=True, parent_origin="http://chat.example.test"))
+    try:
+        page = team_export_page.TeamExportFlow().render(session)
+    finally:
+        page_view._CURRENT_VIEW.reset(token)
+
+    assert "This page is closed." in page
+    assert f'data-card-outcome="{outcome}"' in page

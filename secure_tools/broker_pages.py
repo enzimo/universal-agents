@@ -63,17 +63,23 @@ def policy_origin(base_url: str | None) -> str | None:
     The result goes into a Content-Security-Policy header, so it is never
     copied from the text: a host of letters, digits, dots and hyphens (or an
     IPv6 address) and a numeric port. Anything else (a semicolon that would
-    start another directive, a space, a comma, a bad port) gives None.
+    start another directive, a space, a comma, a bad port, an unparsable
+    address) gives None. A scoped IPv6 address (``[fe80::1%eth0]``) is refused
+    too: Python accepts any text after the ``%``, including ``;`` and spaces,
+    and browsers do not accept zone ids in an origin, so no working address
+    has one.
     """
 
     text = str(base_url or "").strip()
     if not text:
         return None
-    parts = urlsplit(text)
-    host = parts.hostname or ""
     try:
+        parts = urlsplit(text)
+        host = parts.hostname or ""
         port = parts.port
     except ValueError:
+        return None
+    if "%" in host:
         return None
     if (
         parts.scheme not in {"http", "https"}

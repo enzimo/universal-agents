@@ -799,7 +799,8 @@ credentials such a tool uses. Send:
 
 `/link <tool_id>` (or `/link <tool_id> me`) links your own account;
 `/link <tool_id> team` links the team's account and needs a team owner or
-administrator. Chat shows **Open account link form**. The broker's form shows
+administrator. Web Chat shows the broker's form inside a card in the
+conversation (other chats get a link to it). The form shows
 whose account it is, which agents use it, where the credential goes, and how it
 is sent. Pick one of the stored credentials that fit, or type a new one under
 **Add a new credential**; the broker saves it and links it in the same step.

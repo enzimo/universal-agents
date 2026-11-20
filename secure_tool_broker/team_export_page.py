@@ -348,7 +348,7 @@ class TeamExportFlow:
     display_name = "Team export"
     kind = "form"
     page_seconds = TEAM_EXPORT_PAGE_SECONDS
-    # Ends with its own Close; the service's Decline is refused here (SecureToolBrokerService._decline_refusal).
+    # Ends with its own Close; the service's Decline is refused here (page_decline.decline_refusal).
     declinable = False
 
     def opening_refusal(self, roles: tuple[str, ...]) -> str | None:
@@ -435,7 +435,7 @@ class TeamExportFlow:
         _EXPORTS.drop_unstarted(session, datetime.now(timezone.utc))
         status = str(session.state.get(_STATUS) or STATUS_CREATED)
         if status == STATUS_CLOSED:
-            return _closed_page(exported=isinstance(session.state.get(_RESULT), dict))
+            return _closed_page(session.state.get(_RESULT))
         if status == STATUS_EXPORTING:
             page = _intro_panel(closable=False) + _exporting_panel()
             return render_broker_auth_page(self.display_name, page, script=_WAIT_SCRIPT)
@@ -659,18 +659,29 @@ def _restarted_panel() -> str:
     )
 
 
-def _closed_page(*, exported: bool) -> str:
+def _closed_card_outcome(result: Any) -> str:
+    """How the card reads once the page is closed.
+
+    Finished after a successful export, and after one whose outcome is not
+    known (the export process collected the passphrase and ended without
+    reporting, so a file may exist): "Done. This secure page is closed." claims
+    nothing about saving. Declined when the page closed before any export ran
+    or after a plain failure, when nothing was exported.
+    """
+
+    if isinstance(result, dict) and (result.get("ok") is True or result.get(RESULT_UNCONFIRMED) is True):
+        return CARD_OUTCOME_FINISHED
+    return CARD_OUTCOME_DECLINED
+
+
+def _closed_page(result: Any) -> str:
     body = (
         '<section class="content-panel"><p class="eyebrow">Team export</p><h1>This page is closed.</h1>'
         f"<p>If this tab stays open, close it yourself. Run {_e(UPGRADE_COMMAND)} when you need another export.</p>"
         "</section>"
     )
-    # Closed before any export ran, the card reads as declined; after a result, as finished.
     return render_broker_auth_page(
-        "Team export",
-        body,
-        script=close_page_script(),
-        card_outcome=CARD_OUTCOME_FINISHED if exported else CARD_OUTCOME_DECLINED,
+        "Team export", body, script=close_page_script(), card_outcome=_closed_card_outcome(result)
     )
 
 

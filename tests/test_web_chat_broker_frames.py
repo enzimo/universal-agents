@@ -43,7 +43,16 @@ def test_the_chat_may_frame_the_brokers_origin_and_nothing_broader(broker_public
 
 @pytest.mark.parametrize(
     "address",
-    ["https://broker.example; frame-src *", "https://broker.example *", "https://broker.example:notaport", ""],
+    [
+        "https://broker.example; frame-src *",
+        "https://broker.example *",
+        "https://broker.example:notaport",
+        # A scoped IPv6 address and an unparsable one (review finding F1).
+        "http://[fe80::1%x *;script-src *;]:18600",
+        "http://[fe80::1%25eth0]:18600",
+        "http://[notip]/",
+        "",
+    ],
 )
 def test_an_unusable_broker_address_adds_nothing_to_the_policy(address, caplog) -> None:
     assert web_chat_csp(address) == _WEB_CHAT_CSP
