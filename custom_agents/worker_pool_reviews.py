@@ -270,8 +270,9 @@ def _opened_by_failed_starts(incident: WorkerPoolIncidentV1) -> bool:
 
     Only such a problem ends as soon as a worker of the type is ready
     (``start_succeeded``): the ready worker is what the failures were missing.
-    A problem the hourly start limit opened, or a launcher refusal made before
-    any start record, has no failure for a ready worker to answer: workers of
+    A problem the hourly start limit opened, a launcher refusal made before
+    any start record, or a queue NATS refuses to create (``queue_unavailable``)
+    has no failure for a ready worker to answer: workers of
     the type may well become ready while it lasts (a crash right after ready,
     older workers still running). It closes after ``review_repeat_after_minutes``
     without a sighting, like capacity and provider problems; closing it on the

@@ -322,7 +322,7 @@ each. They run in parallel on as many workers as the team allows:
   exactly one start and none while it is still starting. A start the launcher
   stopped, or cannot check, that has stayed unknown for over five minutes (or
   the start lease, when longer) is hung: it no longer holds the next start,
-  but it keeps its pool slot, and for an hour the pool view (`starts_hung`) and
+  but it keeps its pool slot, and until an hour after it became unknown the pool view (`starts_hung`) and
   the start_failed and capacity texts name it; after that it shows only as
   `workers_unknown`. A worker of the type that becomes ready clears the failed
   starts before it: those that ended before it was ready, and those whose
@@ -343,7 +343,7 @@ each. They run in parallel on as many workers as the team allows:
   NATS refusal, the runtime log for a crash, what is slow at startup for a
   timeout, the definition and denied types for a refusal code. A schedule's
   blocked reason likewise keeps only known codes (`block_reason`). Only a problem of failed starts ends
-  as soon as a worker of the type is ready; the other two end after
+  as soon as a worker of the type is ready; the others end after
   `review_repeat_after_minutes` without being seen. Until
   2026-11-19 an accepted start counted as success at once. Workers that
   crashed at start (their stream was at its NATS consumer limit) were

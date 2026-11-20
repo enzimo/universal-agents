@@ -228,6 +228,9 @@ def _ended_since_ready(
 # (WorkerPoolController.observe). An unknown record is never renewed, so its
 # last change is when it became unknown. Before 2026-11-20 such a start held
 # the type's starts for up to an hour without saying so (review finding RC-1).
+# A hung start is named until an hour after it became unknown (start_history
+# reads the hour's records), so a start lease close to an hour shortens or
+# removes the time it is named; it still shows in workers_unknown.
 # A fixed value, not a setting (see FAILED_START_RETRY_SECONDS).
 HUNG_START_MARGIN = timedelta(minutes=5)
 
