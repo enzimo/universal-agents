@@ -35,6 +35,12 @@ export const SECTION_LABELS = Object.freeze({
 // The gateway's `list_state` values (web_chat_threads.ThreadListState).
 export const LIST_STATE = Object.freeze({ SNOOZED: "snoozed", WOKE: "woke", DISMISSED: "dismissed" });
 
+// The placement the page sends on its own (``WebChatThreadAction.CLEAR_WOKE``):
+// when the person opens a woke thread, the gateway clears the mark only if
+// the thread is still woke by its own rule, so an old copy of the list here
+// cannot undo a newer snooze or dismiss from another device.
+export const THREAD_PLACEMENT_ACTION = Object.freeze({ CLEAR_WOKE: "clear_woke" });
+
 // The gateway's `needs_you` values (web_chat_threads.NeedsYouReason) and the
 // row's second line for each, short enough to fit the line beside part 2's
 // agent trail; the full sentence is the line's title (plan review C24).

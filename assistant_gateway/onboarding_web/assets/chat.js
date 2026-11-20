@@ -21,6 +21,7 @@ import { createSettingsClient } from "./settings_support.mjs";
 import { createChatSubmission } from "./chat_submission.mjs";
 import {
   LIST_STATE,
+  THREAD_PLACEMENT_ACTION,
   createSectionCollapse,
   defaultThread,
   formatThreadAge,
@@ -886,8 +887,14 @@ function threadFromSeed(seed) {
       lastMessage: seed.lastMessage || null,
       lastActivityAt: Number(seed.lastActivityAt || 0),
       lastSequence: Number(seed.lastSequence || 0),
-      // A restore for its Woke mark was sent and the list has not caught up.
+      // A clear_woke for its Woke mark was sent and the list has not caught up.
       restoreRequested: false,
+      // Whether this page has the server's row for the thread in this sign-in.
+      // A thread drawn from the browser's saved list has none yet: its place
+      // may be out of date and its last message number is unknown, so
+      // Snooze, Dismiss and clearing a Woke mark wait for the server's list
+      // (review F1, F2).
+      hasServerRow: false,
     };
   }
 
@@ -898,15 +905,25 @@ function archiveThread(threadId) {
     if (!archivedThread || !archivedThread.sessionKey || !sharedState.authSessionActive) {
       return;
     }
+    // An answer after sign-out, or for someone who signed in since, is dropped (review F3).
+    var authGeneration = sharedState.authSessionGeneration;
+    var current = function () {
+      if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) {
+        throw new Error("Chat sign-in changed while deleting the chat.");
+      }
+    };
     requestClient.fetch(
       "/api/web-chat/sessions/" + encodeURIComponent(archivedThread.sessionKey) + "/archive",
       { method: "POST", credentials: "same-origin" }
     ).then(function (response) {
-      return parseApiResponse(response, "Archive failed.");
+      return parseApiResponse(response, "Archive failed.", current);
     }).then(function () {
       clearSystemError(archivedThread, shellState.SYSTEM_ERROR_SOURCE.ARCHIVE_THREAD);
       removeArchivedThread(threadId);
     }).catch(function (error) {
+      if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) {
+        return;
+      }
       appendSystemError(
         archivedThread,
         shellState.SYSTEM_ERROR_SOURCE.ARCHIVE_THREAD,
@@ -1563,6 +1580,16 @@ function fetchSessions(options) {
           }
         });
       }
+      if (options.fresh) {
+        // The read in flight may have left before the change this caller
+        // just saved, so read again after it; a read started meanwhile, after
+        // that change, is reused (review F16).
+        return shellState.sessionsRequest.then(function () {
+          if (sharedState.authSessionActive && authGeneration === sharedState.authSessionGeneration) {
+            return fetchSessions();
+          }
+        });
+      }
       return shellState.sessionsRequest;
     }
     shellState.sessionsRequestGeneration = authGeneration;
@@ -2035,6 +2062,8 @@ function clearThreadListOverlays() {
     shellState.threadMenu.close({ restoreFocus: false });
     shellState.threadPreview.clear();
     sharedState.renameDraft = null;
+    // Changes still waiting belong to the person who signed out.
+    shellState.placementChains = new Map();
   }
 
 function cancelThreadRename() {
@@ -2110,6 +2139,7 @@ function refreshThreadAges() {
 // The server's row for a thread: where it sits and, when the server's copy
 // is at least as new as what live events showed, its latest message.
 function applyServerThreadRow(thread, session) {
+    thread.hasServerRow = true;
     thread.pinned = Boolean(session.pinned);
     thread.listState = String(session.list_state || "");
     thread.needsYou = String(session.needs_you || "");
@@ -2143,47 +2173,95 @@ function applyEventToThreadRow(thread, event) {
   }
 
 // A woke thread loses its mark once the person reads it (the rule the
-// unread dot uses), with one request until the list shows it restored. The
-// person did not ask for it, so a failure shows nothing and is tried again
-// after half a minute, never on every draw (plan review C23).
+// unread dot uses), with one clear_woke until the list shows it cleared.
+// Only for a thread the server's list has shown in this sign-in: a mark drawn
+// from the saved list may be older than a snooze made on another device
+// (review F1). The person did not ask for it, so a failure shows nothing and
+// is tried again after half a minute, never on every draw (plan review C23);
+// so is a clear the gateway answered but left woke (review C05).
 function restoreWokeThreadWhenRead(thread) {
     var retryAfterMs = 30 * 1000;
-    if (thread.listState !== LIST_STATE.WOKE || thread.restoreRequested || !isReadingThread(thread)
-      || Date.now() < Number(thread.restoreRetryAt || 0)) {
+    if (thread.listState !== LIST_STATE.WOKE || !thread.hasServerRow || thread.restoreRequested
+      || !isReadingThread(thread) || Date.now() < Number(thread.restoreRetryAt || 0)) {
       return;
     }
     thread.restoreRequested = true;
-    sendThreadPlacement(thread, "restore").then(function () {
-      return fetchSessions();
-    }).catch(function () {
+    var tryLater = function () {
       thread.restoreRequested = false;
       thread.restoreRetryAt = Date.now() + retryAfterMs;
-    });
+    };
+    sendThreadPlacement(thread, THREAD_PLACEMENT_ACTION.CLEAR_WOKE).then(function () {
+      return fetchSessions({ fresh: true });
+    }).then(function () {
+      if (thread.listState === LIST_STATE.WOKE) tryLater();
+    }).catch(tryLater);
   }
 
-// Pin, unpin, snooze, dismiss or restore a thread on the server, then reload
-// the list; every open page follows through the list's revision. Snooze and
-// dismiss send the last message this page showed, so a message it never
-// showed brings the thread back. A refusal keeps the row and shows why.
-// A failure is shown where the person is looking: in the open chat, naming
-// the chat that was not moved when it is another one (plan review C23).
+// Pin, unpin, snooze, dismiss or restore a thread on the server, then read
+// the list again; every open page follows through the list's revision.
+// Changes for one thread go out one after another, in the order the person
+// chose them, so a change that waits for the list (below) is never sent after
+// a later one (review C06). Resolves true when the change was saved.
 function changeThreadPlacement(thread, action, extra) {
     if (!thread || !thread.persisted || !thread.sessionKey || !sharedState.authSessionActive) {
       return Promise.resolve(false);
     }
-    return sendThreadPlacement(thread, action, extra).then(function () {
-      clearSystemError(null, shellState.SYSTEM_ERROR_SOURCE.THREAD_PLACEMENT);
-      return fetchSessions();
-    }).then(function () {
-      return true;
+    var sessionKey = thread.sessionKey;
+    var chains = shellState.placementChains || (shellState.placementChains = new Map());
+    var previous = chains.get(sessionKey) || Promise.resolve();
+    var run = previous.then(function () {
+      return runThreadPlacement(thread, action, extra, sharedState.authSessionGeneration);
+    });
+    chains.set(sessionKey, run);
+    run.then(function () {
+      if (chains.get(sessionKey) === run) chains.delete(sessionKey);
+    });
+    return run;
+  }
+
+// One placement change for the thread with `thread`'s session key, made
+// while sign-in `authGeneration` lasts. Snooze and dismiss send the last
+// message this page showed, so a message it never showed brings the thread
+// back; a thread only known from the saved list waits for the server's list
+// first, since its saved number could be 0 (review F2). A thread gone from
+// the list by then is left alone. A refusal keeps the row and shows why.
+// Nothing is shown once the person signed out or someone else signed in
+// (review F3). A failure is shown in the open chat, naming the chat that was
+// not moved when it is another one (plan review C23).
+function runThreadPlacement(thread, action, extra, authGeneration) {
+    var sessionKey = thread.sessionKey;
+    var current = function () {
+      return sharedState.authSessionActive && sharedState.authSessionGeneration === authGeneration;
+    };
+    var named = thread.id === sharedState.activeThreadId ? "This chat" : "\u201c" + fullThreadTitle(thread) + "\u201d";
+    var needsSeen = action === THREAD_MENU_ACTION.SNOOZE || action === THREAD_MENU_ACTION.DISMISS;
+    var listed = threadForSession(sessionKey);
+    var ready = needsSeen && listed && !listed.hasServerRow ? fetchSessions() : Promise.resolve();
+    return ready.then(function () {
+      var target = current() ? threadForSession(sessionKey) : null;
+      if (!target) {
+        return false;
+      }
+      if (needsSeen && !target.hasServerRow) {
+        throw new Error("The chat list has not loaded yet.");
+      }
+      return sendThreadPlacement(target, action, extra).then(function () {
+        if (!current()) {
+          return false;
+        }
+        clearSystemError(null, shellState.SYSTEM_ERROR_SOURCE.THREAD_PLACEMENT);
+        return fetchSessions({ fresh: true }).then(function () { return true; });
+      });
     }).catch(function (error) {
-      var named = thread.id === sharedState.activeThreadId ? "This chat" : "\u201c" + fullThreadTitle(thread) + "\u201d";
+      if (!current()) {
+        return false;
+      }
       // The gateway's refusal says why, and repeating it cannot help; a
       // request that did not get through gets Retry for the same change.
       var refused = Boolean(error.refused);
       appendSystemError(null, shellState.SYSTEM_ERROR_SOURCE.THREAD_PLACEMENT,
         named + " was not moved. " + (refused ? error.message : "Try again."),
-        refused ? null : function () { changeThreadPlacement(thread, action, extra); });
+        refused ? null : function () { return changeThreadPlacement(threadForSession(sessionKey) || thread, action, extra); });
       renderMessages();
       return false;
     });
@@ -2192,7 +2270,7 @@ function changeThreadPlacement(thread, action, extra) {
 // One placement request; rejects with the gateway's reason when refused.
 function sendThreadPlacement(thread, action, extra) {
     var body = Object.assign({ thread_action: action }, extra || {});
-    if (action === "snooze" || action === "dismiss") {
+    if (action === THREAD_MENU_ACTION.SNOOZE || action === THREAD_MENU_ACTION.DISMISS) {
       body.seen_sequence = Number(thread.lastSequence || 0);
     }
     return requestClient.fetch("/api/web-chat/sessions/" + encodeURIComponent(thread.sessionKey), {

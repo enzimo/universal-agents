@@ -10,12 +10,14 @@ const source = fs.readFileSync(path.join(__dirname,
 
 // The thread list module chat.js imports (sections, snippets, default thread).
 const threadList = require("../assistant_gateway/onboarding_web/assets/chat_thread_list.mjs");
+const { THREAD_MENU_ACTION } = require("../assistant_gateway/onboarding_web/assets/chat_thread_menu.mjs");
 
 // The page's name for an unnamed thread, read from chat.js itself.
 const NEW_CHAT_TITLE = source.match(/const NEW_CHAT_TITLE = "([^"]+)";/)[1];
 
 function loadFunctions(sandbox, names) {
   if (!("NEW_CHAT_TITLE" in sandbox)) sandbox.NEW_CHAT_TITLE = NEW_CHAT_TITLE;
+  if (!("THREAD_MENU_ACTION" in sandbox)) sandbox.THREAD_MENU_ACTION = THREAD_MENU_ACTION;
   for (const [name, value] of Object.entries(threadList)) if (!(name in sandbox)) sandbox[name] = value;
   vm.createContext(sandbox);
   for (const name of names) {
@@ -64,6 +66,9 @@ function harness() {
         return { ok: !refusal, status: refusal ? 400 : 200, text: async () => refusal || "{}" };
       }
       calls.push(url);
+      // A slow list read waits for the test to open its gate; a failed one answers 503.
+      if (server.gate) await server.gate;
+      if (server.failReads) return { ok: false, status: 503, json: async () => ({}) };
       return { ok: true, json: async () => ({
         sessions: server.sessions, event_cursor: "snapshot", threads_revision: server.revision,
       }) };
@@ -71,7 +76,8 @@ function harness() {
   };
   loadFunctions(sandbox, [
     "fetchSessions", "threadIsBusy", "applyThreadStates", "applyServerThreadRow", "applyEventToThreadRow",
-    "restoreWokeThreadWhenRead", "changeThreadPlacement", "sendThreadPlacement", "placementRefusal",
+    "restoreWokeThreadWhenRead", "changeThreadPlacement", "runThreadPlacement", "sendThreadPlacement",
+    "placementRefusal", "threadForSession",
   ]);
   sandbox.fullThreadTitle = item => item.title;
   const thread = key => sandbox.sharedState.threads.find(item => item.sessionKey === key);
@@ -290,8 +296,141 @@ test("a snooze that wakes moves the thread to Recent marked Woke, and reading it
   sandbox.restoreWokeThreadWhenRead(thread("gamma"));
   sandbox.restoreWokeThreadWhenRead(thread("gamma"));
   assert.equal(patches.length, 1);
-  assert.deepEqual(patches[0].body, { thread_action: "restore" });
+  assert.deepEqual(patches[0].body, { thread_action: "clear_woke" });
   assert.match(patches[0].url, /\/api\/web-chat\/sessions\/gamma$/);
+});
+
+// A gate the test opens to let a slow list read answer.
+function gate() {
+  let open;
+  const promise = new Promise(resolve => { open = resolve; });
+  return { promise, open };
+}
+const flush = async () => { for (let i = 0; i < 6; i += 1) await new Promise(resolve => setImmediate(resolve)); };
+// A thread as the page draws it from the browser's saved list after a reload: no server row yet.
+const cachedThread = fields => ({ id: "gamma", sessionKey: "gamma", title: "Renew the certificate", persisted: true,
+  lastSequence: 0, listState: "", hasServerRow: false, messages: [], ...fields });
+
+test("a Woke mark from the saved list is cleared only after the server's list shows it (F1)", async () => {
+  const { sandbox, server, patches, thread } = harness();
+  sandbox.sharedState.activeThreadId = "gamma";
+  sandbox.sharedState.threads = [cachedThread({ listState: "woke" })];
+  sandbox.restoreWokeThreadWhenRead(thread("gamma"));
+  assert.equal(patches.length, 0, "nothing is sent from the saved list");
+  server.sessions = [{ ...SNOOZED, list_state: "woke", snoozed_until: null }];
+  await sandbox.fetchSessions();
+  sandbox.restoreWokeThreadWhenRead(thread("gamma"));
+  assert.deepEqual(patches.map(item => item.body), [{ thread_action: "clear_woke" }]);
+});
+
+test("a clear the gateway answered but left woke is asked again later, not never (C05)", async () => {
+  const { sandbox, server, patches, thread } = harness();
+  sandbox.sharedState.activeThreadId = "gamma";
+  server.sessions = [{ ...SNOOZED, list_state: "woke", snoozed_until: null }];
+  await sandbox.fetchSessions();
+  sandbox.restoreWokeThreadWhenRead(thread("gamma"));
+  await flush();
+  assert.equal(patches.length, 1);
+  assert.equal(thread("gamma").listState, "woke", "the server's list still says woke");
+  assert.equal(thread("gamma").restoreRequested, false);
+  assert.ok(thread("gamma").restoreRetryAt > Date.now(), "a retry is due later");
+  sandbox.restoreWokeThreadWhenRead(thread("gamma"));
+  assert.equal(patches.length, 1, "not on the next draw");
+});
+
+test("Dismiss on a thread from the saved list waits for the server's list and sends its real number (F2)", async () => {
+  const { sandbox, server, patches, thread } = harness();
+  sandbox.sharedState.activeThreadId = "alpha";
+  sandbox.sharedState.threads = [cachedThread()];
+  server.sessions = [{ ...SNOOZED, list_state: null }];
+  const slow = gate();
+  server.gate = slow.promise;
+  const dismissed = sandbox.changeThreadPlacement(thread("gamma"), "dismiss");
+  await flush();
+  assert.equal(patches.length, 0, "no PATCH with the saved list's number");
+  server.gate = null;
+  slow.open();
+  assert.equal(await dismissed, true);
+  assert.deepEqual(patches.map(item => item.body), [{ thread_action: "dismiss", seen_sequence: 4 }]);
+});
+
+test("a later choice is sent after a Dismiss that waits for the list; a thread gone by then is left alone (C06)", async () => {
+  const { sandbox, server, patches, errors, thread } = harness();
+  sandbox.sharedState.threads = [cachedThread()];
+  server.sessions = [{ ...SNOOZED, list_state: null }];
+  const slow = gate();
+  server.gate = slow.promise;
+  const first = sandbox.changeThreadPlacement(thread("gamma"), "dismiss");
+  const second = sandbox.changeThreadPlacement(thread("gamma"), "pin");
+  await flush();
+  assert.equal(patches.length, 0, "the pin waits behind the dismiss");
+  server.gate = null;
+  slow.open();
+  await Promise.all([first, second]);
+  assert.deepEqual(patches.map(item => item.body.thread_action), ["dismiss", "pin"]);
+
+  // Deleted on another device while the list was read: no PATCH, nothing shown.
+  const other = harness();
+  other.sandbox.sharedState.threads = [cachedThread()];
+  other.server.sessions = [{ session_key: "alpha", updated_at: "2026-11-19T09:00:00Z" }];
+  assert.equal(await other.sandbox.changeThreadPlacement(other.thread("gamma"), "dismiss"), false);
+  assert.equal(other.patches.length, 0);
+  assert.equal(other.errors.length, 0);
+  assert.equal(errors.length, 0);
+});
+
+test("Dismiss on a thread from the saved list fails with Retry when the list cannot be read (F2)", async () => {
+  const { sandbox, server, patches, errors, thread } = harness();
+  sandbox.sharedState.activeThreadId = "alpha";
+  sandbox.sharedState.threads = [cachedThread()];
+  server.failReads = true;
+  assert.equal(await sandbox.changeThreadPlacement(thread("gamma"), "dismiss"), false);
+  assert.equal(patches.length, 0);
+  const notice = errors.find(item => item.source === "thread_placement");
+  assert.equal(notice.message, "\u201cRenew the certificate\u201d was not moved. Try again.");
+  assert.equal(typeof notice.retry, "function");
+  server.failReads = false;
+  server.sessions = [{ ...SNOOZED, list_state: null }];
+  await notice.retry();
+  assert.deepEqual(patches.map(item => item.body), [{ thread_action: "dismiss", seen_sequence: 4 }]);
+});
+
+test("a change answered after sign-out shows nothing and offers no Retry (F3)", async () => {
+  const { sandbox, server, errors, thread } = harness();
+  server.sessions = [{ ...SNOOZED, list_state: null }];
+  await sandbox.fetchSessions();
+  const gamma = thread("gamma");
+  const original = sandbox.requestClient.fetch;
+  sandbox.requestClient.fetch = async (url, init = {}) => {
+    if (init.method === "PATCH") {
+      // The session ends while Pin is in flight; another person signs in on this tab.
+      sandbox.sharedState.authSessionGeneration += 1;
+      return { ok: false, status: 401, text: async () => "Sign in again." };
+    }
+    return original(url, init);
+  };
+  assert.equal(await sandbox.changeThreadPlacement(gamma, "pin"), false);
+  assert.equal(errors.length, 0);
+});
+
+test("a change saved while a list read is in flight is followed by a fresh read (F16)", async () => {
+  const { sandbox, server, calls, thread } = harness();
+  server.sessions = [{ ...SNOOZED, list_state: null }];
+  await sandbox.fetchSessions();
+  const slow = gate();
+  server.gate = slow.promise;
+  const heartbeat = sandbox.fetchSessions();
+  await flush();
+  const readsBefore = calls.length;
+  // The pin is saved; the read in flight left before it and still says unpinned.
+  const pinned = sandbox.changeThreadPlacement(thread("gamma"), "pin");
+  await flush();
+  server.sessions = [{ ...SNOOZED, list_state: null, pinned: true }];
+  server.gate = null;
+  slow.open();
+  await Promise.all([heartbeat, pinned]);
+  assert.equal(calls.length, readsBefore + 1, "one more read after the one in flight");
+  assert.equal(thread("gamma").pinned, true);
 });
 
 test("snooze and dismiss send the last message this page showed", async () => {
