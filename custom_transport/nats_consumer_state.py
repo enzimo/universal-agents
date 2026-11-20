@@ -59,7 +59,10 @@ def consumer_has_open_request(consumer_info: Any) -> bool:
 # account sets a consumer limit, although both fields then read -1 (no limit);
 # a limit set on the stream or the account replaces this default (checked on
 # NATS 2.15.3). Servers before 2.15 have no default. This is the limit the
-# 2026-11-19 incident hit.
+# 2026-11-19 incident hit. The server setting
+# ``jetstream { limits { default_max_consumers: N } }`` changes the default, but
+# no client can read it (the fields above still read -1), so the checks assume
+# 1,000 whatever it is: early warnings when it is higher, none when lower.
 NATS_DEFAULT_STREAM_CONSUMER_LIMIT = 1000
 NATS_DEFAULT_STREAM_LIMIT_SINCE = (2, 15)
 # Warn once a stream holds this share of its limit (a tenth left).
@@ -153,8 +156,8 @@ def log_capacity_if_high(logger: logging.Logger, capacity: StreamConsumerCapacit
         return False
     logger.warning(
         "A NATS work stream is near its consumer limit; new agents and workers will fail to start once it is "
-        "reached. event=nats_stream_consumer_capacity_high stream_name=%s consumer_count=%s consumer_limit=%s "
-        "limit_source=%s nats_server_version=%s reporter=%s",
+        "reached. event=nats_stream_consumer_capacity_high stream_name=%s stream_consumer_count=%s "
+        "stream_consumer_limit=%s stream_limit_source=%s nats_server_version=%s reporter=%s",
         capacity.stream_name,
         capacity.consumer_count,
         capacity.consumer_limit,

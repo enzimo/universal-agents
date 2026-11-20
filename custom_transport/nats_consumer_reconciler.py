@@ -176,15 +176,17 @@ class NatsConsumerReconciler:
             for stream_name, info in infos
         )
         deleted_count = await self._apply_decisions(decisions, delete_kinds) if apply else 0
-        # Capacity after the deletions: the state this pass leaves behind.
-        account_consumer_count, account_max_consumers = await self._account_capacity()
+        # Capacity after the deletions: the state this pass leaves behind. The
+        # account is read once for both uses, so a failed read is logged once.
+        account_info = await self._account_info()
+        account_consumer_count, account_max_consumers = self._account_capacity(account_info)
         return ConsumerReconciliationResult(
             decisions=decisions,
             applied=apply,
             account_consumer_count=account_consumer_count,
             account_max_consumers=account_max_consumers,
             deleted_consumer_count=deleted_count,
-            stream_capacity=await self.stream_capacity(),
+            stream_capacity=await self._stream_capacity(account_info),
         )
 
     async def _consumer_infos(self) -> list[tuple[str, Any]]:
@@ -235,10 +237,14 @@ class NatsConsumerReconciler:
     async def stream_capacity(self) -> StreamConsumerCapacity | None:
         """The team work stream's consumer count and the limit NATS enforces on it.
 
-        None when the stream does not exist yet (a new team: nothing to
-        report) or the count cannot be read (logged).
+        A stream that does not exist yet (a new team) gives no count but still
+        the limit and server version, with no warning. None only when the
+        stream cannot be read (logged).
         """
 
+        return await self._stream_capacity(await self._account_info())
+
+    async def _stream_capacity(self, account_info: Any) -> StreamConsumerCapacity | None:
         stream_name = self._mapper.work_stream_name()
         read_stream = getattr(self._js, "stream_info", None)
         if read_stream is None:
@@ -248,8 +254,9 @@ class NatsConsumerReconciler:
         except Exception as exc:
             if not self._is_stream_not_found(exc):
                 self._capacity_unavailable(exc)
-            return None
-        return stream_consumer_capacity(stream_name, stream_info, await self._account_info(), self._server_version)
+                return None
+            stream_info = None
+        return stream_consumer_capacity(stream_name, stream_info, account_info, self._server_version)
 
     def _capacity_unavailable(self, exc: Exception) -> None:
         self._logger.warning(
@@ -268,8 +275,7 @@ class NatsConsumerReconciler:
             self._capacity_unavailable(exc)
             return None
 
-    async def _account_capacity(self) -> tuple[int | None, int | None]:
-        info = await self._account_info()
+    def _account_capacity(self, info: Any) -> tuple[int | None, int | None]:
         if info is None:
             return None, None
         limits = getattr(info, "limits", None)

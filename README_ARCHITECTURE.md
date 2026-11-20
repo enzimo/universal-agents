@@ -796,7 +796,13 @@ Four repairs keep work from getting stuck in the first place:
   before it is ready, or retires while the work is still held, is followed by
   another 1, 5, 15 and 60 minutes after the previous one ended; after the
   fifth the lead gives up and logs `event=orphaned_work_takeover_gave_up` with
-  the task ids. Each attempt has its own start id
+  the task ids. The give-up is not lasting: the lead starts no further
+  replacement for that work until the attempt records are pruned
+  (`agent.schedule_workers.retention_days` after the last attempt ended, 30
+  days by default) and then begins a new series of five; an agent of the type
+  that starts before then for another reason still adopts the work. A dead
+  owner nobody it works for is known for is logged once
+  (`event=orphaned_work_takeover_skipped`). Each attempt has its own start id
   (`takeover:<owner>:<attempt>`): with one fixed id, a replacement that
   crashed on a full work stream (2026-11-19) was found again on every pass,
   and its work stayed stuck until the record was pruned about 30 days later.

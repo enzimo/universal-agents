@@ -325,6 +325,11 @@ def _observer_memory(agent: Any, name: str, empty: Callable[[], Any]) -> Any:
     return memory
 
 
+# Purposes whose per-owner decisions are logged at DEBUG: the consumer cleanup
+# decides about every leftover owner (about 500 on an affected team's first
+# start) and its done line carries the counts, kept owners by evidence included.
+_DEBUG_PURPOSES = frozenset({LivenessPurpose.CONSUMER_CLEANUP})
+
 # Decision records: (purpose, scope, owner) -> (evidence, unchecked process).
 _DecisionRecords = dict[tuple[LivenessPurpose, str, str], tuple[Any, ...]]
 
@@ -351,8 +356,9 @@ def _note_decision(agent: Any, decision: OwnerLiveness, purpose: LivenessPurpose
             decision.evidence.value,
             last_seen,
         )
-    agent._logger.info(
-        "Decided whether an agent holding saved work is gone. event=owner_liveness_decided "
+    log = agent._logger.debug if purpose in _DEBUG_PURPOSES else agent._logger.info
+    log(
+        "Decided whether an agent is gone. event=owner_liveness_decided "
         "purpose=%s owner_agent_id=%s gone=%s evidence=%s previous_evidence=%s last_seen_at=%s",
         purpose.value,
         decision.owner_agent_id,

@@ -875,7 +875,10 @@ launcher's consumer check deletes those older than an hour before any agent
 starts, and the team lead deletes the rest when it starts, before any worker
 starts, and again hourly while some may still belong to a running worker.
 Both keep the consumers of configured agents and of any agent still asking for
-messages. The
+messages. The launcher deletes only while its run lock proves no earlier run
+is alive; otherwise it only reports (`event=nats_consumer_preflight_report_only`),
+and leftovers the team lead cannot judge as gone need the offline cleanup
+described in the Docker guide, run with the runtime stopped. The
 runtime requires NATS Server 2.10 or newer for the consumer ownership metadata;
 the bundled image includes a newer pinned release.
 

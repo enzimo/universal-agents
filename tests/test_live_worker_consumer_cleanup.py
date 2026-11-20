@@ -38,6 +38,7 @@ from custom_agents.agent_team_runtime import LocalAgentTeamRuntime
 from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 from custom_transport.base import AGENT_CONTROL_ROLE, AGENT_DIRECT_ROLE, ConsumerScope
 from custom_transport.nats_adapter import NatsTransportAdapter
+from custom_transport.nats_consumer_state import server_version_of, version_label
 from custom_transport.nats_pull import PUSH_CONSUMER_METADATA_SCHEMA, ensure_pull_consumer
 from custom_transport.subjects import NatsSubjectMapper
 from id_generation import new_id
@@ -245,7 +246,7 @@ async def test_live_a_lead_starts_on_a_work_stream_full_of_leftovers(tmp_path, m
         ) in done[0]
         # The lead reads the stream again after its deletions, before its own consumers exist.
         assert (
-            f"stream_consumers={capacity.consumer_count - deleted} stream_consumer_limit={capacity.consumer_limit} "
+            f"stream_consumer_count={capacity.consumer_count - deleted} stream_consumer_limit={capacity.consumer_limit} "
         ) in done[0]
         assert _events(caplog.records)[:3] == ["deleted", "sweep_done", "lead_mailbox_ready"]
         remaining = {consumer.owner_agent_id for consumer in await inspector.agent_consumers()}
@@ -348,6 +349,12 @@ async def test_live_the_start_up_check_removes_lasting_leftovers_and_keeps_their
         )
         assert run.returncode == 0, run.stderr[-2000:]
         assert "deleted_count=4" in run.stderr, run.stderr[-2000:]  # the dead worker's and the push-era pair
+        # The script hands the server's version on, which decides NATS's default
+        # stream limit (this line holds on NATS 2.10 too, where no default applies).
+        version = server_version_of(inspector._nc)  # noqa: SLF001
+        assert f"nats_server_version={version_label(version)} " in run.stderr, run.stderr[-2000:]
+        if version >= (2, 15):
+            assert "stream_consumer_limit=1000 stream_limit_source=nats_default" in run.stderr, run.stderr[-2000:]
 
         remaining = sorted((c.owner_agent_id, c.consumer_role) for c in await inspector.agent_consumers())
         assert remaining == sorted(

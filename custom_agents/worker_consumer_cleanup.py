@@ -265,6 +265,9 @@ async def _sweep(agent: Any, sweep: str) -> SweepResult | None:
             sweep,
             RETRY_SECONDS,
         )
+        # A stream near its limit matters most when leftovers cannot be removed;
+        # this read also starts the hourly ones.
+        await _read_capacity(agent)
         return None
     again = RESWEEP_SECONDS if result.kept_owners else None
     agent._worker_consumer_sweep_at = None if again is None else time.monotonic() + again
@@ -275,7 +278,7 @@ async def _sweep(agent: Any, sweep: str) -> SweepResult | None:
         "event=worker_consumer_cleanup_done team_id=%s sweep=%s agent_consumers=%s lasting_consumers=%s "
         "push_era_consumers=%s configured_agents=%s kept_listening=%s kept_not_gone=%s kept_evidence=%s "
         "gone_with_start_record=%s gone_without_start_record=%s deleted=%s next_sweep_in_seconds=%s "
-        "stream_consumers=%s stream_consumer_limit=%s nats_server_version=%s",
+        "stream_consumer_count=%s stream_consumer_limit=%s stream_limit_source=%s nats_server_version=%s",
         agent.team_id,
         sweep,
         result.agent_consumers,
@@ -291,6 +294,7 @@ async def _sweep(agent: Any, sweep: str) -> SweepResult | None:
         again,
         None if capacity is None else capacity.consumer_count,
         None if capacity is None else capacity.consumer_limit,
+        None if capacity is None else capacity.limit_source,
         version_label(None if capacity is None else capacity.server_version),
     )
     return result

@@ -23,8 +23,13 @@ the lead gives up and logs it once. Each attempt has its own start id,
 so the start record of a replacement that crashed (for example on a work stream
 at its consumer limit) was found again on every later pass and nothing was
 started until that record was pruned, about 30 days later. The attempt number
-comes from the highest-numbered attempt record present, so the series starts
-again only once the records are pruned (``retention_days``).
+comes from the highest-numbered attempt record present.
+
+A give-up is not lasting. The lead starts no further replacement for that work
+until the attempt records are pruned (``agent.schedule_workers.retention_days``
+after the last attempt ended, 30 days by default), and then begins a new series
+of five. An agent of the same type that starts before then for another reason
+still adopts the work at its start.
 
 One replacement serves every dead owner of its type: its startup takeover adopts
 all their saved work, and starts for one type and person join (``reserve``), as
@@ -96,6 +101,9 @@ TAKEOVER_CHECK_SECONDS = 60.0
 TAKEOVER_RETRY_DELAYS_SECONDS = (60.0, 300.0, 900.0, 3600.0)
 MAX_TAKEOVER_ATTEMPTS = len(TAKEOVER_RETRY_DELAYS_SECONDS) + 1
 _TERMINAL_STATE_VALUES = frozenset({"completed", "failed", "cancelled", "abandoned"})
+
+# The logged-once key of a dead owner nobody it works for is known for.
+SKIPPED_NO_PERSON = "skipped:no_person"
 
 # What one pass does for one dead owner.
 STEP_START = "start"
@@ -267,7 +275,8 @@ def _give_up(agent: Any, owner: dict[str, Any], memory: _OwnerMemory, series: di
         memory,
         f"{STEP_GIVE_UP}:{series['owner_agent_id']}",
         agent._logger.error,
-        "Gave up starting replacements for a dead agent's unfinished work; it stays with the dead agent. "
+        "Gave up starting replacements for a dead agent's unfinished work; the lead starts no further "
+        "replacement for it until the attempt records are pruned (retention_days). "
         "event=orphaned_work_takeover_gave_up owner_agent_id=%s agent_type=%s task_ids=%s "
         "series_owner_agent_id=%s attempts=%s last_reason=%s",
         owner["owner_agent_id"],
@@ -409,7 +418,7 @@ async def take_over_orphaned_work(agent: Any, *, now: datetime | None = None, cl
     owners = await agent.task_manager.operations_runtime.run(partial(_orphaned_owners, agent, when))
     memory = _owner_memory(agent, owners)
     requested = 0
-    for group in _groups(agent, owners).values():
+    for group in _groups(agent, owners, memory).values():
         requested += await _take_over_group(agent, group, memory, when, moment)
     return requested
 
@@ -438,16 +447,26 @@ async def _take_over_group(
     return requested
 
 
-def _groups(agent: Any, owners: list[dict[str, Any]]) -> dict[tuple[str, str], list[dict[str, Any]]]:
-    """Dead owners by the agent type and person one replacement serves; skips owners without a person."""
+def _groups(
+    agent: Any, owners: list[dict[str, Any]], memory: dict[str, _OwnerMemory]
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """Dead owners by the agent type and person one replacement serves; skips owners without a person.
+
+    A skipped owner is logged once while it holds work, not on every pass.
+    """
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for owner in owners:
         if not owner["person"]:
-            agent._logger.warning(
+            _log_once(
+                memory.setdefault(owner["owner_agent_id"], _OwnerMemory()),
+                SKIPPED_NO_PERSON,
+                agent._logger.warning,
                 "A dead agent holds unfinished work but nobody it works for is known, so no "
-                "replacement was started. event=orphaned_work_takeover_skipped owner_agent_id=%s agent_type=%s",
+                "replacement was started. event=orphaned_work_takeover_skipped owner_agent_id=%s agent_type=%s "
+                "task_ids=%s",
                 owner["owner_agent_id"],
                 owner["agent_type"],
+                owner["task_ids"],
             )
             continue
         groups.setdefault((owner["agent_type"], owner["person"]), []).append(owner)

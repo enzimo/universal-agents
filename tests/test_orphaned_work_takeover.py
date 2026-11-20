@@ -692,3 +692,24 @@ async def test_a_pruned_first_attempt_does_not_restart_the_series(lead):
     _end(lead, 2)
     assert await take_over_orphaned_work(lead, now=long_after, clock=200.0) == 1
     assert _attempt(lead, 3) is not None and _attempt(lead, 2) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_dead_owner_nobody_is_known_for_is_logged_once_while_it_holds_work(lead, caplog):
+    """It was logged on every 60-second pass (review, RC-2)."""
+
+    held_work(lead)  # unsigned work and no start record: nobody it works for is known
+    _takeover_lead(lead)
+    with caplog.at_level(logging.WARNING):
+        for clock in (1.0, 100.0, 200.0):
+            assert await take_over_orphaned_work(lead, clock=clock) == 0
+    (skipped,) = _lines(caplog, "orphaned_work_takeover_skipped")
+    assert f"owner_agent_id={DEAD} agent_type=Worker task_ids=['work-1']" in skipped
+    # Once it holds no work it is forgotten; a new case is logged again.
+    held_work(lead, state=ProgressState.COMPLETED)
+    assert await take_over_orphaned_work(lead, clock=300.0) == 0
+    held_work(lead)
+    with caplog.at_level(logging.WARNING):
+        assert await take_over_orphaned_work(lead, clock=400.0) == 0
+    assert len(_lines(caplog, "orphaned_work_takeover_skipped")) == 2
+    assert _worker_starts(lead) == []

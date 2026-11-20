@@ -259,15 +259,19 @@ when both are set), and the default applies only when neither is set.
 The team's work stream is checked against the limit NATS enforces on it: by
 the start-up consumer report at each start, after its own cleanup, and by the
 team lead when it starts and then every hour while it runs. Both log the
-stream's count, its limit and the server version
-(`stream_consumer_count`/`stream_consumers`, `stream_consumer_limit`,
-`nats_server_version`), and warn with
-`event=nats_stream_consumer_capacity_high` once the stream holds 90 percent of
-its limit (`limit_source` says whether the limit came from the stream, the
-account or NATS's default). On NATS before 2.15, which has no default, only a
-limit set on the stream or the account is checked. A limit raised only in the
-server's own configuration is not visible to these checks, so they may warn
-early there.
+stream's count, its limit and the server version (`stream_consumer_count`,
+`stream_consumer_limit`, `stream_limit_source`, `nats_server_version`), and
+warn with `event=nats_stream_consumer_capacity_high` once the stream holds 90
+percent of its limit (`stream_limit_source` says whether the limit came from
+the stream, the account or NATS's default). On NATS before 2.15, which has no
+default, only a limit set on the stream or the account is checked.
+
+The server setting `jetstream { limits { default_max_consumers: N } }` changes
+NATS's default, but no client can read it: the stream and the account still
+report no limit. The checks then assume 1,000 whatever it is set to, so they
+warn early when it is higher and not at all when it is lower. To make them
+match, set the same limit on the work stream or the account, which the checks
+read and which replaces the default.
 
 For an external NATS cluster, follow the
 [NATS 2.15 upgrade guide](https://docs.nats.io/release-notes/upgrade-to-2.15).
@@ -374,7 +378,10 @@ for every worker they started. Nothing needs to be done by hand for those: on
 every start, before any agent starts, the launcher's consumer check removes
 the ones older than an hour, and the team lead removes the rest when it starts
 (`event=worker_consumer_cleanup_done` in the log), before it creates its own
-consumers. If the account still reaches its consumer limit, park the service as
+consumers. That line counts what was deleted and what was kept, with the kept
+owners by reason (`kept_evidence`); the reason for each owner is logged at
+DEBUG as `event=owner_liveness_decided purpose=consumer_cleanup`, and each
+deleted consumer as `event=nats_agent_consumer_deleted`. If the account still reaches its consumer limit, park the service as
 shown above and run the bundled reconciler inside the task container. The
 command starts only the local NATS service, reads the existing JetStream data,
 and stops NATS before it returns.

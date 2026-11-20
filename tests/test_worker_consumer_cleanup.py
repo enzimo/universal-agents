@@ -428,17 +428,48 @@ def test_the_warning_starts_at_ninety_percent_of_the_limit(caplog) -> None:
         assert not log_capacity_if_high(logging.getLogger("test.capacity"), None, reporter="tester")
     (line,) = [r.getMessage() for r in caplog.records]
     assert (
-        "event=nats_stream_consumer_capacity_high stream_name=S consumer_count=900 consumer_limit=1000 "
-        "limit_source=nats_default nats_server_version=2.15 reporter=tester"
+        "event=nats_stream_consumer_capacity_high stream_name=S stream_consumer_count=900 "
+        "stream_consumer_limit=1000 stream_limit_source=nats_default nats_server_version=2.15 reporter=tester"
     ) in line
 
 
 @pytest.mark.asyncio
-async def test_a_new_team_without_a_work_stream_reads_no_capacity_and_warns_nothing(caplog) -> None:
-    reconciler = NatsConsumerReconciler(jetstream=_JetStream([], stream_missing=True), mapper=MAPPER)
+async def test_a_new_team_without_a_work_stream_reports_no_count_and_warns_nothing(caplog) -> None:
+    reconciler = NatsConsumerReconciler(
+        jetstream=_JetStream([], stream_missing=True), mapper=MAPPER, server_version=(2, 15)
+    )
     with caplog.at_level(logging.DEBUG):
-        assert await reconciler.stream_capacity() is None
+        capacity = await reconciler.stream_capacity()
     assert caplog.records == []
+    # The version and limit are still known, so the log explains a later limit.
+    assert (capacity.consumer_count, capacity.consumer_limit, capacity.server_version) == (None, 1000, (2, 15))
+    assert not capacity.near_limit
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_account_is_logged_once_per_check(caplog) -> None:
+    class _NoAccountAccess(_JetStream):
+        async def account_info(self):
+            raise PermissionError("no permission for $JS.API.INFO")
+
+    reconciler = NatsConsumerReconciler(jetstream=_NoAccountAccess([]), mapper=MAPPER, server_version=(2, 15))
+    with caplog.at_level(logging.WARNING):
+        result = await reconciler.reconcile(apply=False, minimum_age_seconds=0)
+    assert [r.getMessage().count("nats_consumer_capacity_unavailable") for r in caplog.records] == [1]
+    assert result.stream_capacity.consumer_limit == 1000  # the stream's own read still worked
+
+
+def test_the_adapter_hands_its_connections_server_version_to_the_reconciler() -> None:
+    """Where no NATS 2.15 server runs (the CI live job uses 2.10), this guards the version line."""
+
+    from nats.aio.client import ServerVersion
+
+    from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+
+    adapter = NatsTransportAdapter(config=NatsTransportConfig(servers=["nats://127.0.0.1:1"]), mapper=MAPPER)
+    adapter._nc = SimpleNamespace(connected_server_version=ServerVersion("2.15.3"))
+    adapter._js = object()
+    assert adapter._consumer_reconciler()._server_version == (2, 15)
 
 
 @pytest.mark.asyncio
@@ -641,7 +672,7 @@ async def test_a_gone_worker_whose_start_record_was_pruned_loses_its_lasting_con
         "event=worker_consumer_cleanup_done team_id=team sweep=start agent_consumers=15 lasting_consumers=12 "
         f"push_era_consumers=0 configured_agents=2 kept_listening=0 kept_not_gone=2 kept_evidence={kept_evidence} "
         "gone_with_start_record=3 gone_without_start_record=1 deleted=7 next_sweep_in_seconds=3600.0 "
-        "stream_consumers=9 stream_consumer_limit=1000 nats_server_version=2.15"
+        "stream_consumer_count=9 stream_consumer_limit=1000 stream_limit_source=nats_default nats_server_version=2.15"
     ) in caplog.text
 
 
@@ -860,9 +891,9 @@ async def test_the_lead_warns_near_the_limit_also_when_it_found_no_agent_consume
     _attach(team, _Adapter([], extra_consumers=950))  # worker queues and other consumers only
     with caplog.at_level(logging.INFO):
         await sweep_worker_consumers_at_start(team)
-    assert "stream_consumers=950 stream_consumer_limit=1000 nats_server_version=2.15" in caplog.text
+    assert "stream_consumer_count=950 stream_consumer_limit=1000 stream_limit_source=nats_default" in caplog.text
     (warning,) = [r.getMessage() for r in caplog.records if "nats_stream_consumer_capacity_high" in r.getMessage()]
-    assert "consumer_count=950 consumer_limit=1000 limit_source=nats_default" in warning
+    assert "stream_consumer_count=950 stream_consumer_limit=1000 stream_limit_source=nats_default" in warning
     assert "reporter=team_lead" in warning
 
 
@@ -881,7 +912,7 @@ async def test_a_failed_capacity_read_leaves_the_finished_sweep_alone(team, cloc
     assert team._worker_consumer_sweep_at is None  # nothing kept: no retry was scheduled
     assert "event=worker_consumer_cleanup_failed" not in caplog.text
     assert "event=nats_consumer_capacity_unavailable" in caplog.text
-    assert "event=worker_consumer_cleanup_done" in caplog.text and "stream_consumers=None" in caplog.text
+    assert "event=worker_consumer_cleanup_done" in caplog.text and "stream_consumer_count=None" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -903,5 +934,46 @@ async def test_the_lead_reads_capacity_hourly_after_its_sweeps_stopped(team, clo
     with caplog.at_level(logging.WARNING):
         assert await sweep_worker_consumers_if_due(team) is None
     assert (adapter.listings, adapter.capacity_reads) == (1, 2)  # read again, no sweep
-    assert "event=nats_stream_consumer_capacity_high" in caplog.text and "consumer_count=960" in caplog.text
+    assert "event=nats_stream_consumer_capacity_high" in caplog.text and "stream_consumer_count=960" in caplog.text
     assert team._stream_capacity_check_at == clock[0] + CAPACITY_CHECK_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_that_keeps_failing_still_warns_near_the_limit(team, clock, monkeypatch, caplog) -> None:
+    """Leftovers cannot be removed then, so the warning matters most (review of checkpoint 1, C08)."""
+
+    adapter = _attach(team, _Adapter([], extra_consumers=990))
+
+    async def failing(agent):
+        raise ValueError("instance_config.yaml is malformed")
+
+    monkeypatch.setattr(cleanup, "remove_gone_worker_consumers", failing)
+    with caplog.at_level(logging.WARNING):
+        assert await sweep_worker_consumers_at_start(team) is None
+    assert "event=worker_consumer_cleanup_failed" in caplog.text
+    assert "event=nats_stream_consumer_capacity_high" in caplog.text and "stream_consumer_count=990" in caplog.text
+    assert adapter.capacity_reads == 1
+    assert team._stream_capacity_check_at == 1000.0 + CAPACITY_CHECK_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_cleanup_decisions_per_owner_are_debug_and_the_done_line_has_the_counts(team, caplog) -> None:
+    """About 500 per-owner INFO lines said each leftover owner was 'holding saved work' (review, GEN-3)."""
+
+    from custom_agents.agent_liveness import LivenessPurpose, owner_liveness
+
+    for index in range(5):
+        launch_record(team, AgentLaunchState.RETIRED, agent_id=f"retired_{index}")
+    _attach(team, _Adapter([_info(f"retired_{index}", AGENT_DIRECT_ROLE) for index in range(5)]))
+    with caplog.at_level(logging.DEBUG):
+        await sweep_worker_consumers_at_start(team)
+    decided = [r for r in caplog.records if "event=owner_liveness_decided" in r.getMessage()]
+    assert len(decided) == 5 and {r.levelno for r in decided} == {logging.DEBUG}
+    assert all("holding saved work" not in r.getMessage() for r in decided)
+    (done,) = [r for r in caplog.records if "event=worker_consumer_cleanup_done" in r.getMessage()]
+    assert done.levelno == logging.INFO and "gone_with_start_record=5 gone_without_start_record=0 deleted=5" in done.getMessage()
+    # Other purposes keep their INFO line.
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        owner_liveness(team, "retired_0", purpose=LivenessPurpose.REPLACEMENT_PASS)
+    assert [r.levelno for r in caplog.records if "event=owner_liveness_decided" in r.getMessage()] == [logging.INFO]
