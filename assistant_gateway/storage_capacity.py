@@ -1247,15 +1247,15 @@ def _margin_step(room: MessageRoom, to_free: int, restart: str, *, messages_refu
     what removing messages does instead of ``_REMOVING_MESSAGES``.
     """
 
-    free = f"free {readable_bytes(to_free)} from other files on that disk"
+    amount = f"{readable_bytes(to_free)} from other files on that disk"
     margin = "so the message server does not start short again as their use grows (that also ends the room warning on this page)"
     if messages_refused and not room.short:
         return (
             f"There is enough room for a start now, so {restart} now, which makes it take new messages again; then "
-            f"{free}, {margin}."
+            f"free {amount}, {margin}."
         )
     removing = "" if messages_refused else f" {_REMOVING_MESSAGES}"
-    return f"{free[0].upper()}{free[1:]} first, {margin}, then {restart}.{removing}"
+    return f"Free {amount} first, {margin}, then {restart}.{removing}"
 
 
 def _start_refuses_messages(room: MessageRoom, restart: str) -> str:
