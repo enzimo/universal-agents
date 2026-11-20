@@ -1275,10 +1275,9 @@ class UniversalAgent(BaseModel):
     # Worker queues the pool controller made sure exist, and its latest view of
     # every pool (custom_agents.worker_pool_controller; read by inspect_worker_pools).
     _ensured_worker_queues: set[str] = PrivateAttr(default_factory=set)
-    # The team lead's one removal of gone started workers' NATS consumers per
-    # process, and when a failed one is tried again (custom_agents.worker_consumer_cleanup).
-    _worker_consumers_swept: bool = PrivateAttr(default=False)
-    _worker_consumer_sweep_retry_at: float = PrivateAttr(default=0.0)
+    # When the team lead removes gone workers' NATS consumers again (monotonic
+    # time), or None when no further sweep is needed (custom_agents.worker_consumer_cleanup).
+    _worker_consumer_sweep_at: Optional[float] = PrivateAttr(default=None)
     _worker_pool_snapshot: Dict[str, Any] = PrivateAttr(default_factory=dict)
     # While a model provider refuses calls, the worker holds its task, takes no
     # new work and retries after this monotonic time (custom_agents.provider_limits).
@@ -4945,6 +4944,13 @@ class UniversalAgent(BaseModel):
                 storage_settings=self.task_manager.storage_settings,
             )
             self._scheduler_wake = asyncio.Event()
+            if self.is_team_lead and getattr(self, "_local_team_runtime", None) is not None:
+                # Before the lead's own consumers and before anything can start
+                # a worker: leftovers of gone workers can fill the work stream's
+                # consumer limit (custom_agents.worker_consumer_cleanup).
+                from custom_agents.worker_consumer_cleanup import sweep_worker_consumers_at_start
+
+                await sweep_worker_consumers_at_start(self)
             direct_durable = self._nats_mapper().durable_name(f"agent_{self.id}")
             await adapter.subscribe_route(
                 name=f"{self.id}:direct",

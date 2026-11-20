@@ -22,22 +22,29 @@ live check against a NATS server is in ``tests/test_live_nats_replacement_semant
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 import custom_agents.worker_consumer_cleanup as cleanup
 from config_loader import Config
 from custom_agents.agent_state_store import AgentStateStore
+from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_agents.strands_agent import _agent_consumer_scope, _direct_consumer_scope
 from custom_agents.worker_consumer_cleanup import (
     GONE_WORKER_REASON,
+    RESWEEP_SECONDS,
+    RETRY_SECONDS,
     SweepResult,
     remove_gone_worker_consumers,
-    sweep_gone_worker_consumers_once,
+    sweep_worker_consumers_at_start,
+    sweep_worker_consumers_if_due,
 )
+from custom_messages.contracts.control_v1 import AgentStatus, ControlType, MessageMetaType
 from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 from custom_transport.base import AGENT_CONTROL_ROLE, AGENT_DIRECT_ROLE, ConsumerScope
 from custom_transport.nats_consumer_reconciler import AgentConsumer, NatsConsumerReconciler
@@ -257,8 +264,7 @@ def team(lead, monkeypatch):
         storage_settings=lead.task_manager.storage_settings, logger=logging.getLogger("test.cleanup")
     )
     lead.schedule_maintenance = {}
-    lead._worker_consumers_swept = False
-    lead._worker_consumer_sweep_retry_at = 0.0
+    lead._worker_consumer_sweep_at = None
     # A start whose process is gone reads "absent"; every other one is running.
     absent = {"crashed_worker"}
     lead._local_team_runtime.inspect_launch = lambda record: (
@@ -276,6 +282,19 @@ def _configure_agent_id(monkeypatch, agent_id: str) -> None:
     """The saved configuration names ``agent.agent_id`` (``current_launch_config``)."""
 
     monkeypatch.setattr("config_loader._config", Config({"agent": {"agent_id": agent_id}}))
+
+
+def _reports_in(team, agent_id: str) -> None:
+    """A status row with a fresh heartbeat and no process: the heartbeat decides."""
+
+    team._agent_state_store.upsert_if_newer(
+        AgentStatus(
+            status_type=MessageMetaType.RESPONSE, info_type=ControlType.STATUS_REQUEST_BASIC,
+            named_agent_type="Research", self_id=agent_id, is_paused=False, name=agent_id,
+            team_id=TEAM, agent_role="worker", is_exiting=False,
+            last_seen_at=datetime.now(timezone.utc).isoformat(), process_identity=None,
+        )
+    )
 
 
 def _prune_ended_records(team) -> None:
@@ -299,6 +318,8 @@ async def test_a_gone_worker_whose_start_record_was_pruned_loses_its_lasting_con
     launch_record(team, AgentLaunchState.FAILED, agent_id="failed_worker")
     launch_record(team, AgentLaunchState.STARTING, agent_id="crashed_worker")
     launch_record(team, AgentLaunchState.READY, agent_id="busy_worker")
+    launch_record(team, AgentLaunchState.READY, agent_id="live_worker")
+    _reports_in(team, "reporting_agent")
     adapter = _attach(
         team,
         _Adapter(
@@ -312,12 +333,17 @@ async def test_a_gone_worker_whose_start_record_was_pruned_loses_its_lasting_con
                 # Running, and asking for nothing while it works: kept.
                 _info("busy_worker", AGENT_DIRECT_ROLE),
                 _info("busy_worker", AGENT_CONTROL_ROLE),
+                # No start record, but its heartbeat is fresh: the liveness rule keeps it.
+                _info("reporting_agent", AGENT_DIRECT_ROLE),
+                _info("reporting_agent", AGENT_CONTROL_ROLE),
                 # Configured agents: no start record and no status row, kept anyway.
                 _info("configured_agent", AGENT_DIRECT_ROLE),
                 _info("lead", AGENT_CONTROL_ROLE),
-                # Process-owned consumers are never deleted here: a startup agent
-                # that has not written its status row yet, and a gone worker's.
+                # Process-owned: kept without a start record (a startup agent that
+                # has not written its status row yet) or while its record is
+                # active; removed when its start record proves it gone.
                 _info(STARTUP_AGENT, AGENT_DIRECT_ROLE, scope="process"),
+                _info("live_worker", AGENT_DIRECT_ROLE, scope="process"),
                 _info("failed_worker", AGENT_CONTROL_ROLE, scope="process"),
                 _info("other_team_worker", AGENT_DIRECT_ROLE, team="team_other"),
             ]
@@ -325,7 +351,7 @@ async def test_a_gone_worker_whose_start_record_was_pruned_loses_its_lasting_con
     )
 
     with caplog.at_level(logging.INFO):
-        result = await remove_gone_worker_consumers(team)
+        result = await sweep_worker_consumers_at_start(team)
 
     assert adapter.deleted == sorted(
         [
@@ -334,23 +360,24 @@ async def test_a_gone_worker_whose_start_record_was_pruned_loses_its_lasting_con
             _name("retired_worker", AGENT_DIRECT_ROLE),
             _name("retired_worker", AGENT_CONTROL_ROLE),
             _name("failed_worker", AGENT_DIRECT_ROLE),
+            _name("failed_worker", AGENT_CONTROL_ROLE),
             _name("crashed_worker", AGENT_CONTROL_ROLE),
         ]
     )
     assert adapter.reasons == [GONE_WORKER_REASON]
     assert result == SweepResult(
-        agent_consumers=12,
-        lasting_consumers=10,
+        agent_consumers=15,
+        lasting_consumers=12,
         configured_agents=2,
-        kept_not_gone=1,
+        kept_not_gone=2,
         gone_with_start_record=3,
         gone_without_start_record=1,
-        deleted=6,
+        deleted=7,
     )
     assert (
-        "event=worker_consumer_cleanup_done team_id=team agent_consumers=12 lasting_consumers=10 "
-        "push_era_consumers=0 configured_agents=2 kept_listening=0 kept_not_gone=1 "
-        "gone_with_start_record=3 gone_without_start_record=1 deleted=6"
+        "event=worker_consumer_cleanup_done team_id=team sweep=start agent_consumers=15 lasting_consumers=12 "
+        "push_era_consumers=0 configured_agents=2 kept_listening=0 kept_not_gone=2 "
+        "gone_with_start_record=3 gone_without_start_record=1 deleted=7 next_sweep_in_seconds=3600.0"
     ) in caplog.text
 
 
@@ -409,18 +436,26 @@ async def test_nothing_is_deleted_when_the_configuration_cannot_be_read(team, mo
 
 
 @pytest.mark.asyncio
-async def test_without_lasting_consumers_no_records_or_configuration_are_read(team, monkeypatch) -> None:
+async def test_an_empty_stream_reads_no_records_or_configuration(team, monkeypatch) -> None:
     monkeypatch.setattr(cleanup, "AgentLaunchRepository", None)  # would fail if read
     monkeypatch.setattr(cleanup, "current_launch_config", None)
-    adapter = _attach(team, _Adapter([_info(STARTUP_AGENT, AGENT_DIRECT_ROLE, scope="process")]))
-    assert await remove_gone_worker_consumers(team) == SweepResult(agent_consumers=1)
+    adapter = _attach(team, _Adapter([]))
+    assert await remove_gone_worker_consumers(team) == SweepResult()
     assert adapter.listings == 1
 
 
+# -- when the lead sweeps -------------------------------------------------------
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(cleanup, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    return now
+
+
 @pytest.mark.asyncio
-async def test_the_sweep_runs_once_per_process_and_retries_a_failure_later(team, monkeypatch, caplog) -> None:
-    clock = [1000.0]
-    monkeypatch.setattr(cleanup, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+async def test_a_failed_sweep_is_tried_again_after_the_retry_delay(team, clock, monkeypatch, caplog) -> None:
     calls = []
 
     async def failing(agent):
@@ -429,21 +464,125 @@ async def test_the_sweep_runs_once_per_process_and_retries_a_failure_later(team,
 
     monkeypatch.setattr(cleanup, "remove_gone_worker_consumers", failing)
     with caplog.at_level(logging.ERROR):
-        await sweep_gone_worker_consumers_once(team)
-    assert "event=worker_consumer_cleanup_failed" in caplog.text
-    assert team._worker_consumers_swept is False
+        assert await sweep_worker_consumers_at_start(team) is None  # never raises
+    assert "event=worker_consumer_cleanup_failed team_id=team sweep=start" in caplog.text
+    assert team._worker_consumer_sweep_at == 1000.0 + RETRY_SECONDS
 
-    clock[0] += cleanup.RETRY_SECONDS - 1
-    await sweep_gone_worker_consumers_once(team)
+    clock[0] += RETRY_SECONDS - 1
+    await sweep_worker_consumers_if_due(team)
     assert calls == ["fail"]
 
     async def succeeding(agent):
         calls.append("ok")
-        return 0
+        return SweepResult()
 
     monkeypatch.setattr(cleanup, "remove_gone_worker_consumers", succeeding)
     clock[0] += 1
-    await sweep_gone_worker_consumers_once(team)
-    await sweep_gone_worker_consumers_once(team)
+    await sweep_worker_consumers_if_due(team)
     assert calls == ["fail", "ok"]
-    assert team._worker_consumers_swept is True
+    assert team._worker_consumer_sweep_at is None
+    clock[0] += RESWEEP_SECONDS
+    await sweep_worker_consumers_if_due(team)
+    assert calls == ["fail", "ok"]  # nothing was kept: no further sweep
+
+
+@pytest.mark.asyncio
+async def test_an_owner_kept_at_start_is_removed_by_a_later_sweep_once_it_is_gone(team, clock) -> None:
+    """Review of 2026-11-20 (FAIL-5): the sweep ran once per process."""
+
+    record = launch_record(team, AgentLaunchState.READY, agent_id="busy_worker")
+    adapter = _attach(
+        team, _Adapter([_info("busy_worker", AGENT_DIRECT_ROLE), _info("busy_worker", AGENT_CONTROL_ROLE)])
+    )
+    kept = await sweep_worker_consumers_at_start(team)
+    assert (kept.kept_not_gone, kept.deleted) == (1, 0)
+    assert team._worker_consumer_sweep_at == 1000.0 + RESWEEP_SECONDS
+
+    clock[0] += RESWEEP_SECONDS - 1
+    assert await sweep_worker_consumers_if_due(team) is None
+    assert adapter.listings == 1  # not due: no NATS request
+
+    AgentLaunchRepository(team.task_manager.storage_settings).update(record, state=AgentLaunchState.RETIRED)
+    clock[0] += 1
+    removed = await sweep_worker_consumers_if_due(team)
+    assert (removed.gone_with_start_record, removed.deleted) == (1, 2)
+    assert team._worker_consumer_sweep_at is None
+
+    clock[0] += 10 * RESWEEP_SECONDS
+    await sweep_worker_consumers_if_due(team)
+    assert adapter.listings == 2  # nothing kept: sweeping stopped
+
+
+@pytest.mark.asyncio
+async def test_the_lead_sweeps_once_before_its_own_consumers_and_before_any_worker_can_start(
+    tmp_path, monkeypatch
+) -> None:
+    """Review of 2026-11-20 (FAIL-1, EVD-3): the sweep ran inside the pool controller.
+
+    That was after the first scheduled starts and beside the startup takeover,
+    and no test noticed its call being removed. The lead's schedule and
+    scheduler loops are created at the end of ``_connect_nats``, after every
+    subscription, so a sweep before the first subscription comes before them.
+    """
+
+    from tests.test_schedule_startup_delivery import SubscriptionProbeComplete, startup_probe
+
+    order: list[str] = []
+
+    async def sweep(agent):
+        order.append("sweep")
+
+    async def subscribe_route(**kwargs):
+        order.append(f"subscribe {kwargs['consumer_role']}")
+        raise SubscriptionProbeComplete()
+
+    monkeypatch.setattr(cleanup, "sweep_worker_consumers_at_start", sweep)
+    for is_team_lead, team_runtime, expected in (
+        (True, object(), ["sweep", "subscribe agent_direct"]),
+        (False, object(), ["subscribe agent_direct"]),
+        (True, None, ["subscribe agent_direct"]),
+    ):
+        order.clear()
+        agent = startup_probe(tmp_path)
+        agent.is_team_lead = is_team_lead
+        agent._local_team_runtime = team_runtime
+        agent._ensure_nats_transport_adapter = lambda: SimpleNamespace(
+            connect=AsyncMock(), subscribe_route=subscribe_route, subscribe_subject=AsyncMock()
+        )
+        with pytest.raises(SubscriptionProbeComplete):
+            await agent._connect_nats()
+        assert order == expected
+
+
+@pytest.mark.asyncio
+async def test_each_schedule_loop_pass_sweeps_again_if_due_before_it_starts_workers(monkeypatch) -> None:
+    import custom_agents.schedule_worker_controller as controller
+
+    order: list[str] = []
+    exit_event = asyncio.Event()
+
+    async def step(name):
+        order.append(name)
+
+    async def last_step(agent):
+        order.append("pools")
+        exit_event.set()
+
+    monkeypatch.setattr(cleanup, "sweep_worker_consumers_if_due", lambda agent: step("sweep_if_due"))
+    monkeypatch.setattr(controller, "reconcile_schedule_workers", lambda agent: step("scheduled_starts"))
+    monkeypatch.setattr("custom_agents.worker_pool_controller.reconcile_worker_pools", last_step)
+    monkeypatch.setattr(
+        "custom_agents.memory_review_cleanup_runtime.ReviewCleanupController",
+        lambda agent: SimpleNamespace(reconcile=AsyncMock()),
+    )
+    monkeypatch.setattr(controller, "current_worker_limits", lambda agent: SimpleNamespace(reconcile_interval_seconds=0))
+    agent = SimpleNamespace(
+        is_team_lead=False,
+        team_id=TEAM,
+        _logger=logging.getLogger("test.cleanup"),
+        get_exit_event=lambda: exit_event,
+        task_manager=SimpleNamespace(operations_runtime=TaskOperationRuntime()),
+        _schedule_store=SimpleNamespace(get_all=lambda: []),
+    )
+    await asyncio.wait_for(controller.local_schedule_runtime_loop(agent), timeout=5)
+    assert order == ["sweep_if_due", "scheduled_starts", "pools"]

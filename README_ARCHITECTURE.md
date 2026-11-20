@@ -175,23 +175,38 @@ each. They run in parallel on as many workers as the team allows:
   check failed tasks that were only waiting.
 - **An agent's consumers last as long as its id.** Each agent reads its
   mailbox and its control queue through two consumers on the work stream. An id
-  set in configuration (`agent.agent_id`) is a lasting route, so its consumers
-  survive the process. Every other agent's consumers belong to its process:
-  deleted when it exits, expired by NATS after a crash
-  (`transport.process_consumer_inactive_threshold_seconds`). That includes
-  workers started from a start record (pool, scheduled, replacement and manual
-  starts), whose id `spawn_agent` sets but which is drawn for that one start
+  set in configuration (`agent.agent_id`, or `--agent-id` for an agent run by
+  hand) is a lasting route, so its consumers survive the process. Every other
+  agent's consumers belong to its process: deleted when it exits, and removed
+  by NATS once nothing has asked for
+  `transport.process_consumer_inactive_threshold_seconds` (after the ack wait
+  of a message a dead receiver held). That includes workers started from a
+  start record (pool, scheduled, replacement and manual starts), whose id
+  `spawn_agent` sets but which is drawn for that one start
   (`custom_agents/strands_agent.py`, `_direct_consumer_scope`). Until
   2026-11-19 a set id alone made the consumers lasting. Every worker start left
   two behind until the stream reached NATS 2.15's default of 1,000 consumers.
   After that, every new worker crashed while creating its mailbox, and the pool
-  controller restarted it until the hourly start limit refused it. Once per process, before starting
-  any worker, the team lead deletes the consumers that gone started workers
-  left (`custom_agents/worker_consumer_cleanup.py`). It decides "gone" by the
-  one liveness rule (`custom_agents/agent_liveness.py`: start record, then
-  process) and only for owners with a start record, never by whether a
-  consumer is asking for messages, since a busy worker asks for none. Messages
-  still in a deleted mailbox stay in the work stream.
+  controller restarted it until the hourly start limit refused it.
+- **The team lead removes what earlier releases left**
+  (`custom_agents/worker_consumer_cleanup.py`): once when it starts, before it
+  creates its own consumers and before its schedule loop, scheduler loop (with
+  the takeover of dead workers' work) or any message can start a worker, then
+  hourly while the last sweep kept leftovers whose owner may still run. It
+  removes lasting mailbox and control consumers, push-era ones
+  (`consumer-lifecycle-v1`, 2026-09-13 to 2026-10-05) included, whose owner is
+  not configured (the lead itself and `agent.agent_id`), has no request open
+  (only a live process holds one; a busy worker asks for nothing, so silence
+  proves nothing) and is gone by the one liveness rule
+  (`custom_agents/agent_liveness.py`), with or without a start record. Records
+  are pruned after `retention_days`; the first version kept those owners'
+  leftovers as configured agents for good. Process-owned consumers are removed
+  only when the owner's start record proves it gone, since an agent without one
+  may not have written its first status row yet. An agent run by hand with its
+  own `--agent-id` (outside the supervisor, not supported) is not recognised:
+  if it is stopped during a sweep it loses its consumers, not its messages.
+  Messages still in a deleted mailbox stay in the work stream, and a consumer
+  created again with the same name and filter delivers them.
 - **One message never stops a receiver.** A message the receiving release cannot
   read (malformed, or a message type or value another release added or removed)
   is logged without its content (`event=nats_message_undecodable`, with its id,

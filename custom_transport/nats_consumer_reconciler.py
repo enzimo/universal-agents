@@ -25,8 +25,10 @@ GENERATED_AGENT_ID_PATTERN = r"agent_id_[0-9a-f]{12}"
 # that ran those releases can still hold them (checked in the history before
 # the repository restart of 2026-10-15).
 AGENT_CONSUMER_SCHEMAS = frozenset({CONSUMER_METADATA_SCHEMA, PUSH_CONSUMER_METADATA_SCHEMA})
-# The one setting that gives an agent a lasting id (``strands_main``; the
-# supervisor never passes ``--agent-id``).
+# The setting that gives an agent a lasting id (``strands_main``). The other
+# source, ``--agent-id`` on the command line, is never used by the supervisor
+# and cannot be read here; an agent run by hand with it is not recognised
+# (``custom_agents.worker_consumer_cleanup``).
 CONFIGURED_AGENT_ID_SETTING = "agent.agent_id"
 
 

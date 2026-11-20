@@ -867,7 +867,9 @@ expire after this delay when a process crashes. This includes every worker the
 runtime starts (pool, scheduled and manual starts). Explicit `agent.agent_id`
 mailboxes, team lead routes, named-worker queues, and gateway routes remain
 persistent. Releases before this fix kept started workers' consumers. The team
-lead deletes those once at start, after checking that their workers are gone. The
+lead deletes those when it starts, before any worker starts, and again hourly
+while some may still belong to a running worker. It keeps the consumers of
+configured agents and of any agent still asking for messages. The
 runtime requires NATS Server 2.10 or newer for the consumer ownership metadata;
 the bundled image includes a newer pinned release.
 

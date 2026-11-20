@@ -1,4 +1,4 @@
-"""The team lead removes the lasting NATS consumers that gone started workers left behind.
+"""The team lead removes the NATS consumers that gone started workers left behind.
 
 Why: until 2026-11-19 a worker started from a start record (pool, scheduled,
 replacement or manual start) got lasting consumers, because ``spawn_agent``
@@ -13,20 +13,36 @@ releases (2026-09-13 to 2026-10-05) left the same consumers with the push
 schema; they are listed too (``nats_consumer_reconciler.AGENT_CONSUMER_SCHEMAS``).
 
 Started workers' consumers now belong to their process. This module removes
-the ones earlier versions left, once per team lead process, before the worker
-pool controller starts a worker (``worker_pool_controller.reconcile_worker_pools``).
+the ones earlier versions left.
 
-Which consumers it removes: an agent's lasting (route) mailbox or control
-consumer on the work stream (``NatsTransportAdapter.agent_consumers``) whose
-owner
+When: once when the team lead starts, before it creates its own consumers and
+before its schedule loop, scheduler loop (with the takeover of a dead worker's
+work) or any message can start a worker (``UniversalAgent._connect_nats``,
+``sweep_worker_consumers_at_start``). A full stream would otherwise refuse
+those first starts. Then again every ``RESWEEP_SECONDS`` from the lead's
+schedule loop, before that pass starts workers, for as long as the last sweep
+kept lasting consumers of owners that are neither configured nor gone (whose
+records settle later), and ``RETRY_SECONDS`` after a sweep failed
+(``sweep_worker_consumers_if_due``). Nothing creates lasting consumers for
+such owners any more, so the repeats end.
+
+Which lasting (route) mailbox and control consumers it removes
+(``NatsTransportAdapter.agent_consumers``): those whose owner
 
 - is not a configured agent. Only an id set in configuration
-  (``agent.agent_id``) gives an agent lasting consumers: the supervisor starts
-  the lead and every startup agent without one, so their ids are drawn per
-  process. The configured agents are therefore the lead itself and that one
-  setting, recognised positively; their consumers stay.
-- has no request open on any of its lasting consumers. Only a running process
-  can hold one, so it is kept whatever the next rule says.
+  (``agent.agent_id``) or on the command line (``--agent-id``) gives an agent
+  lasting consumers. The supervisor starts the lead and every startup agent
+  with neither, so their ids are drawn per process. The configured agents are
+  therefore the lead itself and ``agent.agent_id``, recognised positively;
+  their consumers stay. An agent somebody runs by hand with its own
+  ``--agent-id`` is not recognised: while it asks for messages the next rule
+  keeps it, but if it is stopped or silent when the lead sweeps, its consumers
+  are removed. Its messages stay in the stream and are delivered when it
+  starts again and creates them anew. That deployment, agents outside the one
+  supervisor run, is the one ``custom_agents.agent_liveness`` already lists as
+  not supported.
+- has no request open on any of its consumers. Only a running process can
+  hold one, so it is kept whatever the next rule says.
 - is gone by the one liveness rule (``custom_agents.agent_liveness``), with or
   without a start record: its start record ended or its process is gone, or,
   when the record was already pruned (``retention_days``, 30 days by default),
@@ -34,17 +50,19 @@ owner
   2026-11-20), owners without a start record were kept as configured, so the
   leftovers of workers that ended more than 30 days earlier stayed for good.
 
-Process-owned consumers are never deleted here. Their process deletes them at
-exit, and NATS removes them after ``transport.process_consumer_inactive_threshold_seconds``
-once nothing asks (after a held message's ack wait, when a dead receiver left
-one). Judging them would mean judging owners that may not have written a
-status row yet, such as a startup agent the supervisor starts at the same
-moment as the lead, whose fresh consumers would look gone.
+Process-owned consumers are removed only when the owner's start record proves
+it gone (ended, or its process absent); without a start record they are left
+to their process and to NATS. An owner without a start record may simply not
+have written its first status row yet, such as a startup agent the supervisor
+starts at the same moment as the lead, whose fresh consumers would look gone.
+NATS removes a process-owned consumer after
+``transport.process_consumer_inactive_threshold_seconds`` once nothing asks,
+but only after the ack wait of a message a dead receiver held
+(``transport.ack_wait_seconds``, 3,600 s by default), so a worker that was busy
+when its process died would otherwise keep its mailbox for about an hour.
 
 Messages a removed mailbox still held stay in the work stream; nothing reads
 them, as before, since their worker is gone.
-
-A sweep that fails is logged and tried again after ``RETRY_SECONDS``.
 """
 
 from __future__ import annotations
@@ -66,8 +84,16 @@ logger = logging.getLogger(__name__)
 
 # How long a failed sweep waits before the team lead tries again.
 RETRY_SECONDS = 300.0
+# How long the team lead waits before sweeping again while the last sweep kept
+# lasting consumers of owners that are neither configured nor gone. Fixed:
+# they are mostly the workers that ran when the previous process stopped, whose
+# start records settle within minutes, and a sweep costs a few NATS requests.
+RESWEEP_SECONDS = 3600.0
 # Why the consumers were deleted (``event=nats_agent_consumer_deleted reason=``).
 GONE_WORKER_REASON = "started_worker_gone"
+# Which sweep ran (``event=worker_consumer_cleanup_done sweep=``).
+SWEEP_AT_START = "start"
+SWEEP_AGAIN = "again"
 
 
 @dataclass(frozen=True)
@@ -81,13 +107,15 @@ class SweepResult:
     configured_agents: int = 0
     kept_listening: int = 0
     kept_not_gone: int = 0
+    # Gone owners whose consumers were deleted (lasting ones, and process-owned
+    # ones whose start record proves the owner gone).
     gone_with_start_record: int = 0
     gone_without_start_record: int = 0
     deleted: int = 0
 
     @property
     def kept_owners(self) -> int:
-        """Owners that may be leftovers later: neither configured nor gone."""
+        """Owners of lasting consumers that may be leftovers later: neither configured nor gone."""
         return self.kept_listening + self.kept_not_gone
 
 
@@ -101,53 +129,86 @@ def configured_owner_ids(agent: Any) -> frozenset[str]:
 
 
 async def remove_gone_worker_consumers(agent: Any) -> SweepResult:
-    """Delete the lasting consumers of gone agents that are not configured (module docstring)."""
+    """Delete the consumers of gone agents that are not configured (module docstring)."""
 
     adapter = agent._ensure_nats_transport_adapter()
     consumers: tuple[AgentConsumer, ...] = await adapter.agent_consumers()
-    lasting = [consumer for consumer in consumers if consumer.consumer_scope == ConsumerScope.ROUTE.value]
-    found = {
-        "agent_consumers": len(consumers),
-        "lasting_consumers": len(lasting),
-        "push_era_consumers": sum(c.schema == PUSH_CONSUMER_METADATA_SCHEMA for c in consumers),
-    }
-    if not lasting:
-        return _logged(agent, SweepResult(**found))
+    if not consumers:
+        return SweepResult()
     run = agent.task_manager.operations_runtime.run
     # An unreadable configuration fails the sweep: nothing is deleted without
     # knowing which agents are configured.
     configured = await run(partial(configured_owner_ids, agent))
-    owners = {consumer.owner_agent_id for consumer in lasting}
-    listening = {consumer.owner_agent_id for consumer in lasting if consumer.asking} - configured
-    candidates = sorted(owners - configured - listening)
     launches = await run(AgentLaunchRepository(agent.task_manager.storage_settings).list, agent.team_id)
+    started = {record.agent_id for record in launches}
+    lasting = [consumer for consumer in consumers if consumer.consumer_scope == ConsumerScope.ROUTE.value]
+    lasting_owners = {consumer.owner_agent_id for consumer in lasting} - configured
+    asking = {consumer.owner_agent_id for consumer in consumers if consumer.asking}
+    # Owners of process-owned consumers only when a start record can prove them gone.
+    recorded_owners = {consumer.owner_agent_id for consumer in consumers} & started
+    candidates = sorted((lasting_owners | recorded_owners) - configured - asking)
     gone = set(
         await gone_owner_ids(agent, candidates, purpose=LivenessPurpose.CONSUMER_CLEANUP, launches=launches)
     )
-    started = {record.agent_id for record in launches}
-    removable = [consumer for consumer in lasting if consumer.owner_agent_id in gone]
+    removable = [
+        consumer
+        for consumer in consumers
+        if consumer.owner_agent_id in gone
+        and (consumer.consumer_scope == ConsumerScope.ROUTE.value or consumer.owner_agent_id in started)
+    ]
     deleted: int = await adapter.delete_agent_consumers(removable, reason=GONE_WORKER_REASON)
-    return _logged(
-        agent,
-        SweepResult(
-            **found,
-            configured_agents=len(owners & configured),
-            kept_listening=len(listening),
-            kept_not_gone=len(candidates) - len(gone),
-            gone_with_start_record=len(gone & started),
-            gone_without_start_record=len(gone - started),
-            deleted=deleted,
-        ),
+    return SweepResult(
+        agent_consumers=len(consumers),
+        lasting_consumers=len(lasting),
+        push_era_consumers=sum(consumer.schema == PUSH_CONSUMER_METADATA_SCHEMA for consumer in consumers),
+        configured_agents=len({consumer.owner_agent_id for consumer in lasting} & configured),
+        kept_listening=len(lasting_owners & asking),
+        kept_not_gone=len(lasting_owners - asking - gone),
+        gone_with_start_record=len(gone & started),
+        gone_without_start_record=len(gone - started),
+        deleted=deleted,
     )
 
 
-def _logged(agent: Any, result: SweepResult) -> SweepResult:
+async def sweep_worker_consumers_at_start(agent: Any) -> SweepResult | None:
+    """The team lead's sweep when it starts (module docstring); never raises."""
+
+    return await _sweep(agent, SWEEP_AT_START)
+
+
+async def sweep_worker_consumers_if_due(agent: Any) -> SweepResult | None:
+    """Sweep again when the last sweep asked for it and its time has come; else nothing, not even NATS."""
+
+    due = getattr(agent, "_worker_consumer_sweep_at", None)
+    if due is None or time.monotonic() < due:
+        return None
+    return await _sweep(agent, SWEEP_AGAIN)
+
+
+async def _sweep(agent: Any, sweep: str) -> SweepResult | None:
+    """One sweep; schedules the next one. Failures are logged and never reach the caller."""
+
+    try:
+        result = await remove_gone_worker_consumers(agent)
+    except Exception:
+        agent._worker_consumer_sweep_at = time.monotonic() + RETRY_SECONDS
+        logger.exception(
+            "Could not remove the NATS consumers of gone agents; trying again later. "
+            "event=worker_consumer_cleanup_failed team_id=%s sweep=%s retry_in_seconds=%s",
+            agent.team_id,
+            sweep,
+            RETRY_SECONDS,
+        )
+        return None
+    again = RESWEEP_SECONDS if result.kept_owners else None
+    agent._worker_consumer_sweep_at = None if again is None else time.monotonic() + again
     logger.info(
-        "Removed the lasting NATS consumers of gone agents. "
-        "event=worker_consumer_cleanup_done team_id=%s agent_consumers=%s lasting_consumers=%s "
+        "Removed the NATS consumers of gone agents. "
+        "event=worker_consumer_cleanup_done team_id=%s sweep=%s agent_consumers=%s lasting_consumers=%s "
         "push_era_consumers=%s configured_agents=%s kept_listening=%s kept_not_gone=%s "
-        "gone_with_start_record=%s gone_without_start_record=%s deleted=%s",
+        "gone_with_start_record=%s gone_without_start_record=%s deleted=%s next_sweep_in_seconds=%s",
         agent.team_id,
+        sweep,
         result.agent_consumers,
         result.lasting_consumers,
         result.push_era_consumers,
@@ -157,38 +218,20 @@ def _logged(agent: Any, result: SweepResult) -> SweepResult:
         result.gone_with_start_record,
         result.gone_without_start_record,
         result.deleted,
+        again,
     )
     return result
 
 
-async def sweep_gone_worker_consumers_once(agent: Any) -> None:
-    """Run ``remove_gone_worker_consumers`` once per process; retry a failed sweep after ``RETRY_SECONDS``.
-
-    Failures are logged and never stop the caller: the worker pool controller
-    still runs its pass, and a start the full stream refuses is reported there.
-    """
-
-    if agent._worker_consumers_swept or time.monotonic() < agent._worker_consumer_sweep_retry_at:
-        return
-    try:
-        await remove_gone_worker_consumers(agent)
-    except Exception:
-        agent._worker_consumer_sweep_retry_at = time.monotonic() + RETRY_SECONDS
-        logger.exception(
-            "Could not remove the NATS consumers of gone started workers; trying again later. "
-            "event=worker_consumer_cleanup_failed team_id=%s retry_in_seconds=%s",
-            agent.team_id,
-            RETRY_SECONDS,
-        )
-        return
-    agent._worker_consumers_swept = True
-
-
 __all__ = [
     "GONE_WORKER_REASON",
+    "RESWEEP_SECONDS",
     "RETRY_SECONDS",
+    "SWEEP_AGAIN",
+    "SWEEP_AT_START",
     "SweepResult",
     "configured_owner_ids",
     "remove_gone_worker_consumers",
-    "sweep_gone_worker_consumers_once",
+    "sweep_worker_consumers_at_start",
+    "sweep_worker_consumers_if_due",
 ]
