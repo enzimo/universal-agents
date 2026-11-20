@@ -27,6 +27,7 @@ from assistant_gateway.config import GatewayInstanceConfig, InstanceConfigFileEr
 from default_values import TRANSPORT_DEFAULTS
 from docker.nats_service import (
     apply_local_nats_env,
+    drop_supplied_bundled_store_dir,
     local_nats_enabled_from_env,
     local_nats_url,
     start_local_nats,
@@ -294,9 +295,12 @@ def build_bundle_runtime_env(
     (``docker.settings_environment``); copying them here would freeze them.
     Every process applies the bundle's details in memory
     (``assistant_gateway.deployment_environment``); no file is written.
+    A bundled store folder the container supplied is dropped: only this
+    bundle's own start of the server sets it (``start_local_nats``).
     """
 
     env = dict(base_env if ambient_env is None else ambient_env)
+    drop_supplied_bundled_store_dir(env, source="the container's environment", logger=LOGGER)
     servers = bundle_nats_servers(config, env=base_env, bundled_nats_enabled=bundled_nats_enabled)
     env["TRANSPORT_TYPE"] = TRANSPORT_DEFAULTS.type.value
     env["NATS_URL"] = servers[0]

@@ -6,9 +6,11 @@ checks every new or changed stream against. So the Status page's storage check
 (``custom_transport.nats_adapter.NatsTransportAdapter.jetstream_account_usage``) and the
 installation authority's start checks (``installation_authority.queues``) both send the raw
 ``$JS.API.INFO`` request with ``request_account_info`` and read its byte figures with
-``reported_bytes``. This module opens no connection of its own and imports neither of them,
-so the authority does not load the protocol 0 adapter and the gateway does not load the
-authority.
+``reported_bytes``. This module opens no connection of its own and imports neither of them:
+the gateway does not load the authority through it, and the reader is kept apart from the
+adapter's code. Importing it still loads the protocol 0 adapter, because
+``custom_transport/__init__.py`` imports ``nats_adapter`` for every module in the package;
+the authority's process loads the adapter anyway (``installation_authority.process``).
 
 Measured on nats-server 2.15.1: an account with one flat set of limits reports
 ``reserved_storage`` at the top level; an account whose limits are kept per replica tier

@@ -38,6 +38,22 @@ INTERNAL_NATS_MONITOR_PORT = 8222
 LOCAL_NATS_ENABLED_ENV = "TEAM_LOCAL_NATS_ENABLED"
 NATS_USER_ENV = "NATS_USER"
 NATS_PASSWORD_ENV = "NATS_PASSWORD"
+NATS_URL_ENV = "NATS_URL"
+NATS_SERVERS_ENV = "NATS_SERVERS"
+# The bundled server's JetStream store folder (its ``-sd``), which ``start_local_nats``, and
+# nothing else, sets in the environment it is given, the one the runtime's processes get. The
+# bundled server sets no max_file_store, so it takes three quarters of the free space on that
+# folder's disk as its room at each start, and the Status page measures that disk
+# (``assistant_gateway.storage_capacity``). A hand-off to child processes, not a setting: both
+# launchers call ``start_local_nats`` (docker/launch_headless.py, and the bundle's
+# docker/run_bundle.py, which then hands the headless launcher TEAM_LOCAL_NATS_ENABLED=false),
+# so it is the one place that knows the server is the bundled one and where its store is. A
+# value from team.env, or from the bundle container's own environment, is dropped
+# (``drop_supplied_bundled_store_dir``). A headless launcher started directly cannot tell a
+# value its container set from one the bundle handed it, so ``bundled_nats_store_dir`` accepts
+# one only beside the bundled server's address; its own start of the server replaces any value.
+# The ``_DIR`` ending keeps it clear of the secret-name check.
+BUNDLED_NATS_STORE_DIR_ENV = "TEAM_BUNDLED_NATS_STORE_DIR"
 GENERATED_NATS_USER = "ua-runtime"
 _AUTH_DIR_NAME = "auth"
 # The JetStream store directory under the service root, passed to nats-server as ``-sd``.
@@ -71,9 +87,62 @@ def local_nats_enabled_from_env(env: Mapping[str, str] | None = None, *, default
 
 
 def apply_local_nats_env(env: dict[str, str]) -> None:
-    env["NATS_URL"] = local_nats_url()
-    env["NATS_SERVERS"] = local_nats_url()
+    env[NATS_URL_ENV] = local_nats_url()
+    env[NATS_SERVERS_ENV] = local_nats_url()
     env["NATS_JETSTREAM_ENABLED"] = "true"
+
+
+def drop_supplied_bundled_store_dir(values: MutableMapping[str, str], *, source: str, logger: logging.Logger) -> None:
+    """Remove a bundled store folder that ``source`` (team.env, the container's environment) supplied.
+
+    Only ``start_local_nats`` sets ``BUNDLED_NATS_STORE_DIR_ENV``. One from anywhere else could
+    point the Status page at a folder no server of this instance uses, so it is dropped and
+    named; the bundled server, when this start runs it, sets its own afterwards.
+    """
+
+    supplied = values.pop(BUNDLED_NATS_STORE_DIR_ENV, None)
+    if supplied is not None:
+        logger.warning(
+            "Ignoring %s from %s: only the start of the bundled NATS server sets it. "
+            "event=bundled_nats_marker_dropped source=%s",
+            BUNDLED_NATS_STORE_DIR_ENV,
+            source,
+            source,
+        )
+
+
+def bundled_nats_store_dir(env: Mapping[str, str], *, logger: logging.Logger | None = None) -> Path | None:
+    """The bundled NATS server's store folder when this process uses that server; None otherwise.
+
+    The folder counts only beside the bundled server's own address in both NATS_URL and
+    NATS_SERVERS, which both launchers set when they start that server. A folder beside any
+    other address, or one that is not an absolute path, is ignored with a warning, so the
+    Status page never measures a folder the server it uses does not keep its store in. The
+    addresses are not logged: an operator's address can carry a password. Absent, it gives
+    None without a log line; the caller says once that the room is not checked.
+    """
+
+    raw = str(env.get(BUNDLED_NATS_STORE_DIR_ENV) or "").strip()
+    if not raw:
+        return None
+    folder = Path(raw)
+    local = local_nats_url()
+    url = str(env.get(NATS_URL_ENV) or "").strip()
+    servers = [item.strip() for item in str(env.get(NATS_SERVERS_ENV) or "").split(",") if item.strip()]
+    bundled_address = url == local and servers == [local]
+    if bundled_address and folder.is_absolute():
+        return folder
+    (logger or logging.getLogger(__name__)).warning(
+        "Ignoring %s: this process does not use the bundled NATS server at %s, or the folder is not an "
+        "absolute path, so the Status page does not check the message server's room. "
+        "event=bundled_nats_marker_ignored folder=%s bundled_address=%s absolute=%s",
+        BUNDLED_NATS_STORE_DIR_ENV,
+        local,
+        raw,
+        bundled_address,
+        folder.is_absolute(),
+    )
+    return None
 
 
 def resolve_nats_service_root(env: Mapping[str, str] | None = None) -> Path:
@@ -389,8 +458,9 @@ def start_local_nats(
 ) -> subprocess.Popen[bytes]:
     """Start the local server with required authentication and the partition mappings.
 
-    ``env`` gains NATS_USER/NATS_PASSWORD when they were unset, so callers must
-    pass the same mapping they later give to runtime processes. ``partitions`` is the
+    ``env`` gains NATS_USER/NATS_PASSWORD when they were unset, and the store folder
+    (``BUNDLED_NATS_STORE_DIR_ENV``) once the server is ready, so callers must pass the
+    same mapping they later give to runtime processes. ``partitions`` is the
     saved ``transport.queues.partitions``; the installation authority checks the server
     maps at its own count before it serves.
 
@@ -482,4 +552,5 @@ def start_local_nats(
             )
             stop_local_nats(process, logger=logger)
         raise
+    env[BUNDLED_NATS_STORE_DIR_ENV] = str(data_dir.absolute())
     return process
