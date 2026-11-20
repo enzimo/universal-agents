@@ -1944,8 +1944,13 @@ function threadRow(thread) {
       button.appendChild(detailLine);
     }
     // The full title shows on keyboard focus; mouse users get the hover
-    // preview, which shows it too (plan review C03).
+    // preview, which shows it too (plan review C03). Focus the list moves
+    // after a mouse Dismiss or Delete is not keyboard focus, so no tooltip
+    // pops up over the next row then (review C16).
     lifecycle.listen(button, "focus", function () {
+      if (typeof button.matches === "function" && !button.matches(":focus-visible")) {
+        return;
+      }
       scheduleThreadTitleTooltip(title, fullThreadTitle(thread));
     });
     lifecycle.listen(button, "blur", hideThreadTitleTooltip);
@@ -2155,8 +2160,8 @@ function restoreThreadListFocus(target) {
       return;
     }
     if (target.section) {
-      var header = sectionHeader(target.section);
-      if (header) header.focus();
+      // A section that is no longer drawn (its last chat moved) hands focus to New Chat.
+      (sectionHeader(target.section) || sharedState.newThreadButton).focus();
       return;
     }
     var row = threadRowElement(target.sessionKey);

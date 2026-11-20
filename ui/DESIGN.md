@@ -1861,8 +1861,11 @@ its history. Steps with linked requests cannot use this correction.
 - Keyboard focus never falls to the page when the list is drawn again: it
   stays on the same row or header; when a row moved into a collapsed section
   or went away (Dismiss, Snooze, Delete) it goes to the row that took its
-  place, else the one before it, else its section's header, else New Chat.
-  After a rename is saved or cancelled it is on the renamed row.
+  place, else the one before it, else its section's header, else New Chat;
+  a focused header whose section is no longer drawn hands focus to New Chat.
+  After a rename is saved or cancelled it is on the renamed row. The full
+  title tooltip shows only for keyboard focus (`:focus-visible`), so a mouse
+  Dismiss does not leave one over the next row.
 - Rename and Delete live in the row's menu, not on the row. The menu opens
   with a right-click, a long press on touch screens, or the context-menu key
   or Shift+F10 on a focused row (`chat_thread_menu.mjs`): Pin to top or

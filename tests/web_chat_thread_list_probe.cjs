@@ -201,6 +201,24 @@ function inView(page) {
       await keys.page.waitForTimeout(600);
       return expected;
     };
+    // C16: a mouse Dismiss moves focus too, but no title tooltip pops up over the next row.
+    // A sample row whose next row has a cut title, so a tooltip would have something to show.
+    const mouseTarget = await keys.page.evaluate(() => {
+      const shown = [...document.querySelectorAll(".thread-row")].filter(row => row.dataset.sessionKey && !row.closest("[hidden]"));
+      const cut = row => { const title = row && row.querySelector(".thread-title"); return Boolean(title) && title.scrollWidth > title.clientWidth; };
+      const index = shown.findIndex((row, at) => !row.dataset.sessionKey.endsWith(":dev") && !row.closest(".is-needs-you") && cut(shown[at + 1]));
+      return index >= 0 ? shown[index].dataset.sessionKey : "";
+    });
+    assert.ok(mouseTarget, "the preview has a row followed by one with a cut title");
+    await keys.page.click(`.thread-row[data-session-key="${mouseTarget}"] .thread-button`, { button: "right" });
+    await keys.page.click('.thread-menu-item:has-text("Dismiss")');
+    await keys.page.mouse.move(700, 600);
+    await keys.page.waitForTimeout(1400);
+    const mouseTooltip = await keys.page.evaluate(() => {
+      const tooltip = document.querySelector("#thread-title-tooltip");
+      return { shown: Boolean(tooltip && !tooltip.hidden), focusedRow: document.activeElement.closest(".thread-row")?.dataset.sessionKey || "" };
+    });
+    assert.deepEqual([mouseTooltip.shown, Boolean(mouseTooltip.focusedRow)], [false, true], "mouse Dismiss: " + JSON.stringify(mouseTooltip));
     // The first sample in Recent (the preview's own chat is not a sample and cannot be moved).
     const dismissTarget = await keys.page.evaluate(() => [...document.querySelectorAll(".thread-section.is-recent .thread-row")]
       .map(row => row.dataset.sessionKey).find(key => key && !key.endsWith(":dev")));
@@ -208,6 +226,15 @@ function inView(page) {
     let state = await focusState();
     assert.deepEqual([state.focused, state.onButton], [expected, true], "Dismiss: " + JSON.stringify(state));
     assert.ok(!state.shown.includes(dismissTarget), "the dismissed row is in the collapsed section");
+    // Keyboard focus still shows a cut title in full after a second (C16).
+    const titleTooltip = () => keys.page.evaluate(() => {
+      const title = document.activeElement.querySelector(".thread-title");
+      const tooltip = document.querySelector("#thread-title-tooltip");
+      return { cut: Boolean(title) && title.scrollWidth > title.clientWidth, shown: Boolean(tooltip && !tooltip.hidden) };
+    });
+    await keys.page.waitForTimeout(1200);
+    const keyboardTooltip = await titleTooltip();
+    assert.equal(keyboardTooltip.shown, keyboardTooltip.cut, "keyboard focus: " + JSON.stringify(keyboardTooltip));
     const snoozeTarget = state.focused;
     expected = await menuChoice(snoozeTarget, ["ArrowDown", "ArrowRight", "Enter"]);
     state = await focusState();
@@ -234,7 +261,7 @@ function inView(page) {
     assert.deepEqual([state.focused, state.onButton], [expected, true], "Delete: " + JSON.stringify(state));
     assert.ok(!state.shown.includes(deleteTarget));
     assert.deepEqual(keys.errors, []);
-    checked.push("keyboard focus: after Dismiss, Snooze and Delete on the next row; after Rename (Enter or Escape) on the renamed row");
+    checked.push(`keyboard focus: after Dismiss, Snooze and Delete on the next row; after Rename (Enter or Escape) on the renamed row; title tooltip on keyboard focus only (cut title: ${keyboardTooltip.cut})`);
     await keys.context.close();
 
     // Narrow screens (C22) with touch: rows in view, a long press opens the

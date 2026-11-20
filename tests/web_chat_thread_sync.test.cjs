@@ -707,6 +707,16 @@ test("a row tells screen readers about its menu, its reply mark and its age in w
   assert.deepEqual(fakeDom.byClass(busy.children[1], "sr-only").map(node => node.textContent)[0], "Replying");
 });
 
+test("a focused header whose section is gone hands focus to New Chat (C17)", () => {
+  const { sandbox, document, list, newThreadButton } = domHarness();
+  drawSections(document, list, { pinned: ["p"], recent: ["r"] });
+  headerOf(list, "pinned").focus();
+  const target = sandbox.focusedThreadListTarget();
+  drawSections(document, list, { recent: ["p", "r"] });
+  sandbox.restoreThreadListFocus(target);
+  assert.equal(document.activeElement, newThreadButton);
+});
+
 test("Rename keeps focus in its field, then on the renamed row after Save or Cancel (F4)", () => {
   const { sandbox, document, list } = domHarness();
   drawSections(document, list, { recent: ["a", "b"] });
