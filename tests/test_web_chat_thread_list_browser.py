@@ -37,8 +37,8 @@ def test_thread_list_layout_menu_and_hover_preview_in_chromium(tmp_path: Path) -
         thread.join(timeout=5)
     assert result.returncode == 0, result.stdout + result.stderr
     checked = json.loads(result.stdout.strip().splitlines()[-1])
-    assert len(checked) == 8
+    assert len(checked) == 10
     assert {path.name for path in tmp_path.glob("*.png")} == {
         "thread-list-1280x880.png", "thread-menu.png", "thread-hover.png", "thread-status-failure.png",
-        "thread-list-390x844.png",
+        "thread-list-light.png", "thread-list-dark.png", "thread-list-390x844.png",
     }

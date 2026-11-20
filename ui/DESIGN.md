@@ -1836,7 +1836,16 @@ its history. Steps with linked requests cannot use this correction.
 - The thread list sits below New Chat as the sidebar's flexible, scrolling
   region, in sections (`chat_thread_list.mjs`): **Needs you** (a highlighted
   box in attention gold, Ember in dark mode, for threads waiting on the
-  person), **Pinned**, **Recent**, then **Snoozed** and **Dismissed**. Each
+  person), **Pinned**, **Recent**, then **Snoozed** and **Dismissed**. In the
+  light theme the Needs you box has a nearly opaque pale fill and dark amber
+  text (#8a4508), the status line's failure a pale fill, and the list's small
+  text (headers, ages, snippets) uses ink instead of --muted: the sidebar
+  glass shows a mid-dark band of the mesh where amber measured 1.0:1 and
+  --muted 1.4:1 (review F8). Measured in Chromium against what is drawn
+  behind the text (worst pixel, motion off): waiting reason 5.7, Needs you
+  header 5.5, status line 5.0, small text 3.2-4.3, titles 3.8 in that band;
+  dark mode 6.3 or more throughout. Raising the small text above 4.5:1 there
+  needs a firmer sidebar pane, an open owner decision. Each
   header is a button with the section's count and a chevron; it opens and
   closes its rows in place and keeps focus. Snoozed and Dismissed start
   collapsed; the person's choices are kept in this browser. Needs you,
@@ -1940,8 +1949,10 @@ its history. Steps with linked requests cannot use this correction.
   solid dot: green for ordinary unread replies, gold/yellow when the reply
   needs user attention such as an error or recoverable runtime-pause choice.
 - Truncated thread titles show their full title in a custom frosted tooltip
-  after one second of keyboard focus; mouse users see it in the hover card.
-  Do not rely on native browser title tooltips for this.
+  after one second of keyboard focus, or of mouse hover on the open chat's
+  row (it has no hover card, and Web Chat has no chat header); for other rows
+  mouse users see it in the hover card, whose title wraps instead of being
+  cut. Do not rely on native browser title tooltips for this.
 - The Web Chat sidebar header places the brand/UA lockup on the left and a
   compact Settings cog on the far right. The cog uses the same frosted control
   treatment as other icon buttons, has an accessible name, and opens Settings;

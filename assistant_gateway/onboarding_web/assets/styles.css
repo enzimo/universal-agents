@@ -2047,6 +2047,19 @@ h1 {
   color: var(--ocean-light);
 }
 
+/* Thread list in dark mode: Deep Ocean levels with Ember for waiting. The
+   light theme's darker text and nearly opaque fills (review F8) are not
+   needed over the dark glass, which measures 6.3:1 or more as it is. */
+:root[data-color-mode="dark"] .thread-section-header,
+:root[data-color-mode="dark"] .thread-age,
+:root[data-color-mode="dark"] .thread-detail {
+  color: var(--muted);
+}
+
+:root[data-color-mode="dark"] .thread-list-status.is-error {
+  background: transparent;
+}
+
 /* Thread list in dark mode: Deep Ocean levels with Ember for waiting. */
 :root[data-color-mode="dark"] .thread-row.is-active .thread-title,
 :root[data-color-mode="dark"] .thread-row:hover .thread-title {
@@ -5516,6 +5529,9 @@ body.is-theme-customizing {
 }
 
 .thread-list-status.is-error {
+  /* A pale fill so the danger colour reads at 4.5:1 or more over the light
+     theme's glass (review C15); dark mode needs none. */
+  background: rgba(255, 246, 246, 0.95);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -5549,7 +5565,10 @@ body.is-theme-customizing {
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: var(--muted);
+  /* Ink, not --muted, in the light theme: the sidebar glass shows a mid-dark
+     mesh band where --muted measured 1.4:1 (review F8); dark mode keeps
+     --muted below. */
+  color: var(--ink);
   cursor: pointer;
   font-size: 0.72rem;
   font-weight: 820;
@@ -5602,16 +5621,20 @@ body.is-theme-customizing {
   display: none;
 }
 
-/* Needs you: a highlighted box in the attention gold the unread dot uses. */
+/* Needs you: a highlighted box in the attention gold the unread dot uses.
+   In the light theme its pale fill is nearly opaque and its text a darker
+   amber, so the waiting reason reads at 4.5:1 or more whatever the mesh
+   behind it (review F8: --amber over the glass measured 1.0-1.6:1). */
 .thread-section.is-needs-you {
-  border: 1px solid rgba(183, 121, 31, 0.42);
+  border: 1px solid rgba(146, 64, 14, 0.45);
   border-radius: 10px;
-  background: rgba(255, 214, 10, 0.10);
+  background: rgba(255, 251, 235, 0.94);
   padding: 2px 4px 4px;
 }
 
-.thread-section.is-needs-you .thread-section-header {
-  color: var(--amber);
+.thread-section.is-needs-you .thread-section-header,
+.thread-detail.is-waiting {
+  color: #8a4508;
 }
 
 .chat-debug-controls {
@@ -6285,7 +6308,7 @@ body.is-theme-customizing {
 
 .thread-age {
   flex: 0 0 auto;
-  color: var(--muted);
+  color: var(--ink);
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
   font-weight: 650;
@@ -6303,13 +6326,12 @@ body.is-theme-customizing {
 }
 
 .thread-detail {
-  color: var(--muted);
+  color: var(--ink);
   font-size: 0.78rem;
   font-weight: 560;
 }
 
 .thread-detail.is-waiting {
-  color: var(--amber);
   font-weight: 700;
 }
 
@@ -6412,12 +6434,14 @@ body.is-theme-customizing {
   padding-bottom: 6px;
 }
 
+/* The card shows the whole title, on as many lines as it needs (titles are
+   at most 200 characters): it is where mouse users read a cut title in full
+   (review F6). */
 .thread-preview-title {
+  flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
   font-size: 0.84rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .thread-preview-age,

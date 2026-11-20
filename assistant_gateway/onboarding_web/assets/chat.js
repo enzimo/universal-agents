@@ -1944,7 +1944,7 @@ function threadRow(thread) {
       button.appendChild(detailLine);
     }
     // The full title shows on keyboard focus; mouse users get the hover
-    // preview, which shows it too (plan review C03). Focus the list moves
+    // card, which shows it in full (plan review C03). Focus the list moves
     // after a mouse Dismiss or Delete is not keyboard focus, so no tooltip
     // pops up over the next row then (review C16).
     lifecycle.listen(button, "focus", function () {
@@ -1954,6 +1954,18 @@ function threadRow(thread) {
       scheduleThreadTitleTooltip(title, fullThreadTitle(thread));
     });
     lifecycle.listen(button, "blur", hideThreadTitleTooltip);
+    // The open chat's row gets no hover card, and Web Chat has no chat
+    // header, so a mouse resting on that row shows its full title (review F6).
+    lifecycle.listen(button, "mouseenter", function () {
+      if (thread.id === sharedState.activeThreadId) {
+        scheduleThreadTitleTooltip(title, fullThreadTitle(thread));
+      }
+    });
+    lifecycle.listen(button, "mouseleave", function () {
+      if (shellState.threadTitleTooltipOwner === title) {
+        hideThreadTitleTooltip();
+      }
+    });
     lifecycle.listen(button, "click", function () {
       sharedState.activeThreadId = thread.id;
       sharedState.editingThreadId = "";

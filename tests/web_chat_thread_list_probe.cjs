@@ -30,6 +30,58 @@ async function openChat(browser, baseUrl, viewport, options = {}) {
   return { context, page, errors, writes };
 }
 
+// WCAG contrast of two sRGB colours.
+const luminance = ([r, g, b]) => {
+  const channel = value => { const v = value / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+};
+const contrast = (a, b) => { const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+
+// F8: the worst contrast of each kind of text against the pixels actually
+// drawn behind it (the glass over the mesh). For each selector, up to eight
+// elements in view are measured: their text (and their children's) is made
+// transparent, the box is captured, and every fifth pixel is compared with
+// the text colour. Elements scrolled out of the list are skipped.
+async function worstContrast(page, selectors) {
+  const result = {};
+  for (const [name, selector] of Object.entries(selectors)) {
+    const boxes = await page.evaluate(sel => {
+      const list = document.querySelector("#thread-list").getBoundingClientRect();
+      return [...document.querySelectorAll(sel)].filter(node => {
+        const box = node.getBoundingClientRect();
+        const inList = !node.closest("#thread-list") || (box.top >= list.top && box.bottom <= list.bottom);
+        return box.height > 0 && !node.closest("[hidden]") && inList;
+      }).slice(0, 8).map(node => {
+        const box = node.getBoundingClientRect();
+        const color = getComputedStyle(node).color.match(/[\d.]+/g).slice(0, 3).map(Number);
+        [node, ...node.querySelectorAll("*")].forEach(part => { part.dataset.probeColor = part.style.color; part.style.color = "transparent"; });
+        return { clip: { x: box.x, y: box.y, width: Math.min(box.width, 280), height: box.height }, color };
+      });
+    }, selector);
+    let worst = Infinity;
+    for (const { clip, color } of boxes) {
+      const png = await page.screenshot({ clip });
+      const pixels = await page.evaluate(async data => {
+        const image = new Image();
+        image.src = "data:image/png;base64," + data;
+        await image.decode();
+        const canvas = Object.assign(document.createElement("canvas"), { width: image.width, height: image.height });
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0);
+        const bytes = context.getImageData(0, 0, image.width, image.height).data;
+        const sample = [];
+        for (let index = 0; index < bytes.length; index += 4 * 5) sample.push([bytes[index], bytes[index + 1], bytes[index + 2]]);
+        return sample;
+      }, png.toString("base64"));
+      for (const pixel of pixels) worst = Math.min(worst, contrast(color, pixel));
+    }
+    await page.evaluate(sel => document.querySelectorAll(sel).forEach(node => [node, ...node.querySelectorAll("*")]
+      .forEach(part => { part.style.color = part.dataset.probeColor || ""; })), selector);
+    result[name] = boxes.length ? Math.round(worst * 100) / 100 : null;
+  }
+  return result;
+}
+
 // What lies fully inside the thread list's visible box.
 function inView(page) {
   return page.evaluate(() => {
@@ -142,6 +194,55 @@ function inView(page) {
     await wide.page.waitForTimeout(1000);
     assert.equal(await wide.page.locator(".thread-preview").count(), 0);
     checked.push("no card over the chat just opened");
+
+    // F6: a cut title is readable with the mouse. Another row's card shows it
+    // whole; the open chat's row, which has no card, shows it in the tooltip.
+    const cutRow = await wide.page.evaluate(() => [...document.querySelectorAll(".thread-row")].find(row => {
+      const title = row.querySelector(".thread-title");
+      // Not a woke row: opening it clears the Woke pill, and the title may then fit.
+      return row.dataset.sessionKey && !row.closest("[hidden]") && !row.classList.contains("is-woke")
+        && title && title.scrollWidth > title.clientWidth;
+    })?.dataset.sessionKey || "");
+    assert.ok(cutRow, "the preview has a row with a cut title");
+    // A name longer than one line of the card, as a person may give it (the rename field takes up to 80 characters).
+    const longTitle = "Draft the onboarding email for new hires with the links they ask for most";
+    const cutSelector = `.thread-row[data-session-key="${cutRow}"] .thread-button`;
+    await wide.page.click(cutSelector, { button: "right" });
+    await wide.page.click('.thread-menu-item:has-text("Rename")');
+    await wide.page.waitForSelector(".thread-rename-input:focus");
+    await wide.page.keyboard.press("Control+A");
+    await wide.page.keyboard.type(longTitle);
+    await wide.page.keyboard.press("Enter");
+    await wide.page.waitForTimeout(400);
+    await wide.page.mouse.move(700, 600);
+    await wide.page.hover(cutSelector);
+    await wide.page.waitForSelector(".thread-preview-title");
+    await wide.page.waitForTimeout(300);
+    const cardTitle = await wide.page.evaluate(() => {
+      const title = document.querySelector(".thread-preview-title");
+      const lineHeight = parseFloat(getComputedStyle(title).fontSize) * 1.6;
+      return { text: title.textContent, cut: title.scrollWidth > title.clientWidth, height: Math.round(title.getBoundingClientRect().height), lineHeight };
+    });
+    assert.equal(cardTitle.text, longTitle);
+    assert.equal(cardTitle.cut, false, "the card's title is not cut: " + JSON.stringify(cardTitle));
+    assert.ok(cardTitle.height > cardTitle.lineHeight, "it wraps onto more lines: " + JSON.stringify(cardTitle));
+    await wide.page.click(cutSelector);
+    // Focus leaves the row (a click in the chat), so only the hover can show the tooltip.
+    await wide.page.click("#message-list", { position: { x: 20, y: 20 } });
+    await wide.page.waitForTimeout(200);
+    assert.equal(await wide.page.evaluate(() => {
+      const tooltip = document.querySelector("#thread-title-tooltip");
+      return Boolean(tooltip && !tooltip.hidden);
+    }), false);
+    await wide.page.hover(cutSelector);
+    await wide.page.waitForTimeout(1300);
+    const openTooltip = await wide.page.evaluate(() => {
+      const tooltip = document.querySelector("#thread-title-tooltip");
+      return tooltip && !tooltip.hidden ? tooltip.textContent : "";
+    });
+    assert.equal(openTooltip, cardTitle.text, "the open chat's row shows its full title on hover");
+    assert.equal(await wide.page.locator(".thread-preview").count(), 0, "and no card");
+    checked.push(`full titles with the mouse: the card shows a ${longTitle.length}-character name whole (${cardTitle.height} px tall); the open chat's row shows it in the tooltip`);
     assert.deepEqual(wide.errors, []);
     await wide.context.close();
 
@@ -185,6 +286,49 @@ function inView(page) {
     assert.deepEqual(failing.errors, []);
     checked.push("status line: a failed pin shows in view beside the list, role status, Retry only when it did not get through");
     await failing.context.close();
+
+    // F8, C15: text contrast in both themes, measured against what is drawn
+    // behind it, with motion off so the mesh holds still. The waiting reason,
+    // the Needs you header and a failure in the status line must read at
+    // 4.5:1 or more in both. The other small text is measured and reported:
+    // in the light theme the glass shows a mid-dark band of the mesh where
+    // even the titles' ink stays under 4.5:1, which only a firmer pane could
+    // change (an owner decision, review F8); it must reach at least 3:1.
+    const measured = {};
+    for (const scheme of ["light", "dark"]) {
+      const themed = await openChat(browser, baseUrl, { width: 1280, height: 880 }, { colorScheme: scheme, reducedMotion: "reduce" });
+      await themed.page.evaluate(mode => window.UAAppearance.preview({ ...window.UAAppearance.current(), mode }), scheme);
+      await themed.page.waitForTimeout(400);
+      await themed.page.route("**/api/web-chat/sessions/*", route => (
+        route.request().method() === "PATCH" ? route.abort("failed") : route.continue()));
+      await themed.page.click('.thread-row[data-session-key="website:web-chat:onboarding"] .thread-button', { button: "right" });
+      await themed.page.click('.thread-menu-item:has-text("Pin to top")');
+      await themed.page.waitForSelector("#thread-list-status.is-error");
+      await themed.page.mouse.move(700, 500);
+      await themed.page.waitForTimeout(300);
+      await themed.page.screenshot({ path: path.join(shots, `thread-list-${scheme}.png`), clip: { x: 0, y: 0, width: 320, height: 880 } });
+      measured[scheme] = await worstContrast(themed.page, {
+        waiting: ".thread-detail.is-waiting",
+        needsYouHeader: ".thread-section.is-needs-you .thread-section-header",
+        status: ".thread-list-status-text",
+        header: ".thread-section:not(.is-needs-you) .thread-section-header",
+        age: ".thread-age",
+        snippet: ".thread-detail:not(.is-waiting)",
+        title: ".thread-title",
+      });
+      assert.equal(await themed.page.evaluate(() => document.documentElement.dataset.colorMode), scheme);
+      assert.deepEqual(themed.errors, []);
+      await themed.context.close();
+    }
+    for (const scheme of ["light", "dark"]) {
+      for (const name of ["waiting", "needsYouHeader", "status"]) {
+        assert.ok(measured[scheme][name] >= 4.5, `${scheme} ${name}: ${JSON.stringify(measured)}`);
+      }
+      for (const name of ["header", "age", "snippet"]) {
+        assert.ok(measured[scheme][name] >= (scheme === "dark" ? 4.5 : 3), `${scheme} ${name}: ${JSON.stringify(measured)}`);
+      }
+    }
+    checked.push("contrast (worst pixel): " + JSON.stringify(measured));
 
     // F4: after Dismiss, Snooze, Delete and Rename by keyboard, focus is on
     // the row that took the moved row's place (or the renamed row), never
