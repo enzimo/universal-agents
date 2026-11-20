@@ -59,6 +59,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Iterable, Optional
 
+from custom_agents.agent_instantiation_service import counts_as_failed_start
 from custom_agents.worker_pool_limits import PoolLimit, team_limit, type_limit, worker_pool_repository
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_worker_v1 import (
@@ -94,6 +95,15 @@ class StartHistory:
     last_failure_reason: Optional[str] = None
     # A worker of the type became ready after the last failure.
     recovered: bool = False
+    # Starts since the last ready worker that ended for a reason that does not
+    # count (``counts_as_failed_start``), and the newest such reason (None for
+    # a record an older release wrote without one). Shown, so that an end
+    # which repeats is still visible although it holds nothing back.
+    uncounted_ends: int = 0
+    last_uncounted_reason: Optional[str] = None
+    # Starts of the type in the window that never became ready and have not
+    # ended yet (reserved, starting, or unknown without ready_at_utc).
+    starts_in_progress: int = 0
 
 
 # Failed starts older than this no longer count: the hourly start limit's
@@ -108,29 +118,44 @@ def start_history(
 
     Starts from every source count (pool, scheduled, manual): a type whose
     workers crash at start fails for all of them. Starts still in progress are
-    skipped; a start that became ready ends the count, and so does one created
-    before ``since``.
+    skipped, and so are ends that say nothing about the type (restart cleanup,
+    the runtime stopping, an edit during the start, a record without a reason);
+    a start that became ready ends the count, and starts created before
+    ``since`` are not read.
     """
 
-    failures = 0
-    last_at: Optional[datetime] = None
-    last_reason: Optional[str] = None
     of_type = sorted(
-        (record for record in launches if record.named_agent_type == agent_type),
+        (
+            record
+            for record in launches
+            if record.named_agent_type == agent_type
+            and (since is None or record.created_at_utc >= since)
+        ),
         key=lambda record: record.created_at_utc,
         reverse=True,
     )
+    ended: list[AgentLaunchV1] = []
+    recovered = False
     for record in of_type:
-        if since is not None and record.created_at_utc < since:
-            break
         if record.ready_at_utc is not None:
-            return StartHistory(failures, last_at, last_reason, recovered=failures == 0)
-        if record.state != AgentLaunchState.FAILED:
-            continue
-        failures += 1
-        if last_at is None:
-            last_at, last_reason = record.updated_at_utc, record.reason
-    return StartHistory(failures, last_at, last_reason)
+            recovered = True
+            break
+        if record.state == AgentLaunchState.FAILED:
+            ended.append(record)
+    failed = [record for record in ended if counts_as_failed_start(record.reason)]
+    uncounted = [record for record in ended if not counts_as_failed_start(record.reason)]
+    newest_failure = failed[0] if failed else None
+    return StartHistory(
+        failures_in_row=len(failed),
+        last_failure_at=newest_failure.updated_at_utc if newest_failure else None,
+        last_failure_reason=newest_failure.reason if newest_failure else None,
+        recovered=recovered and not failed,
+        uncounted_ends=len(uncounted),
+        last_uncounted_reason=uncounted[0].reason if uncounted else None,
+        starts_in_progress=sum(
+            1 for record in of_type if record.state in ACTIVE_LAUNCH_STATES and record.ready_at_utc is None
+        ),
+    )
 
 
 # The wait after a failed start, doubled for each further failure in a row up

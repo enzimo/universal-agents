@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -40,6 +42,92 @@ from storage.agent_launch_repository import (
 # number and start time (runtime_hosting.process_run), so the team lead can
 # later prove whether the process is gone.
 PROCESS_HOST_ID = current_process_identity().text()
+
+logger = logging.getLogger(__name__)
+
+# Why a start ended before its worker was ready (``AgentLaunchV1.reason``).
+# The worker pool controller counts such a start as a failed start of its type
+# and waits longer before each next start (custom_agents.worker_pool_controller).
+# These reasons reach TeamArchitect's review and administrators' notices, so a
+# stored reason is only ever a project code, an error's type, or a NATS
+# refusal's code and description (``refusal_code``, ``launcher_refusal_reason``,
+# ``start_failure_reason``); the full error stays in the log.
+CRASHED_BEFORE_READY = "crashed_before_ready"
+EXITED_BEFORE_READY = "exited_before_ready"
+LAUNCHER_REFUSED = "launcher_refused"
+STARTUP_TIMED_OUT = "startup_timed_out"
+# The runtime stopped or restarted while the worker started.
+STOPPED_BY_RUNTIME = "runtime_stopped_before_ready"
+# The launcher found the start's process or thread gone with no end recorded:
+# after a restart, or when the worker's own exit record could not be written.
+LAUNCHER_RECONCILIATION = "launcher_reconciliation"
+# Edits made while the worker started; the next start uses the new version.
+LAUNCH_POLICY_REVOKED = "launch_policy_revoked_before_readiness"
+DEFINITION_CHANGED_BEFORE_START = "agent_definition_changed_before_start"
+DEFINITION_CHANGED_BEFORE_CONSTRUCTION = "agent_definition_changed_before_construction"
+DEFINITION_CHANGED_DURING_STARTUP = "agent_definition_changed_during_startup"
+IDLE_TTL_LIMIT_CHANGED = "idle_ttl_limit_changed_before_start"
+AUTHORIZATION_MODE_CHANGED = "launcher_authorization_mode_changed_restart_required"
+WORKER_POOLS_DISABLED = "worker_pools_disabled"
+
+# Start ends that say nothing about the worker type, so they are not failed
+# starts of it (``counts_as_failed_start``): the runtime ended the start, or an
+# edit made while it started ended it. Counting them made a routine restart, or
+# a schedule edited during its worker's start, hold back a healthy type and
+# open a start_failed review (review of PR #160, 2026-11-20).
+UNCOUNTED_START_ENDS = frozenset(
+    {
+        STOPPED_BY_RUNTIME,
+        LAUNCHER_RECONCILIATION,
+        LAUNCH_POLICY_REVOKED,
+        SCHEDULE_LAUNCH_INTENT_CHANGED,
+        DEFINITION_CHANGED_BEFORE_START,
+        DEFINITION_CHANGED_BEFORE_CONSTRUCTION,
+        DEFINITION_CHANGED_DURING_STARTUP,
+        IDLE_TTL_LIMIT_CHANGED,
+        AUTHORIZATION_MODE_CHANGED,
+        WORKER_POOLS_DISABLED,
+    }
+)
+
+# A project refusal code: lower-case words joined by underscores, optionally
+# followed by ":" and a field name
+# (``schedule_worker_rule_exceeds_operator_limit:idle_ttl_seconds``).
+_REFUSAL_CODE = re.compile(r"[a-z][a-z0-9_]{2,80}(?::[a-z][a-z0-9_]{0,80})?")
+
+
+def counts_as_failed_start(reason: str | None) -> bool:
+    """Whether a failed start record counts as a failed start of its type.
+
+    A record without a reason was written by a release before 2026-11-20,
+    which did not record why; it is not counted, so an upgrade right after an
+    old release's crash loop does not hold the type back.
+    """
+
+    return reason is not None and reason not in UNCOUNTED_START_ENDS
+
+
+def refusal_code(error: BaseException) -> str | None:
+    """The error's text when it is one of the project's refusal codes, else None.
+
+    Only a ``ValueError``, a ``LaunchConflict`` or a ``PermissionError`` the
+    project raised (no ``errno``; an operating-system one names a path) can
+    carry a code. Any other text could hold anything, such as a host path or a
+    pydantic validation error's input values.
+    """
+
+    if not isinstance(error, (ValueError, LaunchConflict, PermissionError)):
+        return None
+    if isinstance(error, PermissionError) and error.errno is not None:
+        return None
+    text = str(error)
+    return text if _REFUSAL_CODE.fullmatch(text) else None
+
+
+def launcher_refusal_reason(error: BaseException) -> str:
+    """The reason a refused start stores: its code, or ``launcher_refused: <error type>``."""
+
+    return refusal_code(error) or f"{LAUNCHER_REFUSED}: {type(error).__name__}"
 
 
 def current_worker_limits(agent: Any) -> ScheduleWorkersConfig:
@@ -112,7 +200,7 @@ class AgentInstantiationService:
         from custom_agents.worker_pool_settings import current_worker_pool_settings
 
         if not current_worker_pool_settings(self.agent).enabled:
-            raise PermissionError("worker_pools_disabled")
+            raise PermissionError(WORKER_POOLS_DISABLED)
         if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
             raise PermissionError("automatic_manager_launch_forbidden")
 
@@ -214,9 +302,9 @@ class AgentInstantiationService:
                     agent_type, automatic=source == "schedule"
                 )
                 if launch_definition_digest(final_definition) != record.definition_digest:
-                    raise PermissionError("agent_definition_changed_before_start")
+                    raise PermissionError(DEFINITION_CHANGED_BEFORE_START)
                 if ttl is not None and ttl > final_limits.max_idle_ttl_seconds:
-                    raise PermissionError("idle_ttl_limit_changed_before_start")
+                    raise PermissionError(IDLE_TTL_LIMIT_CHANGED)
                 if source == "schedule":
                     self.validate_schedule_start(binding, occurrence_id)
                 if source == "pool":
@@ -239,11 +327,12 @@ class AgentInstantiationService:
                     )
                 return result.model_copy(update={"created": True})
             except (ValueError, PermissionError) as exc:
+                reason = self._refusal_reason(exc, agent_type=agent_type, launch_id=launch_id)
                 self.repository.update(
-                    record, state=AgentLaunchState.FAILED, reason=str(exc)
+                    record, state=AgentLaunchState.FAILED, reason=reason
                 )
                 return AgentLaunchResultV1(
-                    status="denied", launch_id=launch_id, reason=str(exc), created=True
+                    status="denied", launch_id=launch_id, reason=reason, created=True
                 )
             except Exception:
                 self.repository.update(
@@ -260,7 +349,28 @@ class AgentInstantiationService:
                     created=True,
                 )
         except (ValueError, PermissionError, LaunchConflict) as exc:
-            return AgentLaunchResultV1(status="denied", reason=str(exc))
+            return AgentLaunchResultV1(
+                status="denied", reason=self._refusal_reason(exc, agent_type=agent_type)
+            )
+
+    def _refusal_reason(
+        self, error: BaseException, *, agent_type: str, launch_id: str | None = None
+    ) -> str:
+        """A refused start's reason (``launcher_refusal_reason``); the full error is logged when only its type is kept."""
+
+        reason = launcher_refusal_reason(error)
+        if refusal_code(error) is None:
+            logger.warning(
+                "A worker start was refused by an error that is not a refusal code; only "
+                "its type is kept as the reason. event=worker_launch_refused team_id=%s "
+                "agent_type=%s launch_id=%s reason=%s error=%s",
+                self.agent.team_id,
+                agent_type,
+                launch_id,
+                reason,
+                error,
+            )
+        return reason
 
     def validate_schedule_start(
         self, binding: ScheduleWorkerBindingV1 | None, occurrence_id: str | None
@@ -274,9 +384,7 @@ class AgentInstantiationService:
         if bool(
             current_launch_config(self.agent).get("authorization.enabled", False)
         ) != bool(self.agent.authorization_config.get("enabled", False)):
-            raise PermissionError(
-                "launcher_authorization_mode_changed_restart_required"
-            )
+            raise PermissionError(AUTHORIZATION_MODE_CHANGED)
         current = store.worker_records.get_binding(
             binding.schedule_id, team_id=self.agent.team_id
         )
@@ -375,30 +483,45 @@ def launch_result(record: AgentLaunchV1) -> AgentLaunchResultV1:
     )
 
 
-# Why a started worker ended before it was ready (``AgentLaunchV1.reason``).
-# The worker pool controller counts such starts as failed and waits longer
-# before each next start of the type (custom_agents.worker_pool_controller).
-CRASHED_BEFORE_READY = "crashed_before_ready"
-EXITED_BEFORE_READY = "exited_before_ready"
+def _nats_refusal(error: BaseException) -> tuple[int, str] | None:
+    """A NATS JetStream refusal's code and description, on the error or under it.
+
+    Followed through ``__cause__`` / ``__context__`` for a few steps, so a
+    cleanup error raised over the refusal still names it.
+    """
+
+    current: BaseException | None = error
+    for _ in range(5):
+        if current is None:
+            return None
+        err_code = getattr(current, "err_code", None)
+        description = getattr(current, "description", None)
+        if isinstance(err_code, int) and isinstance(description, str) and description:
+            return err_code, description[:200]
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def start_failure_reason(error: BaseException | None) -> str:
     """The start record's reason for a worker that ended before it was ready.
 
-    Only the error's type is kept, plus the code and description when a NATS
-    JetStream request was refused (server text such as "maximum consumers
-    limit reached"). Other error text can carry anything, and this reason
-    reaches TeamArchitect's review and administrators' notices; the full
-    error is in the log (``event=agent_thread_crash``).
+    A project refusal keeps its code (``refusal_code``), as refusals before
+    the start already do. Otherwise only the error's type is kept, plus the
+    code and description of a NATS JetStream refusal (server text such as
+    "maximum consumers limit reached"). Other error text can carry anything,
+    and this reason reaches TeamArchitect's review and administrators'
+    notices; the full error is in the log (``event=agent_thread_crash``).
     """
 
     if error is None:
         return EXITED_BEFORE_READY
+    code = refusal_code(error)
+    if code is not None:
+        return code
     reason = f"{CRASHED_BEFORE_READY}: {type(error).__name__}"
-    err_code = getattr(error, "err_code", None)
-    description = getattr(error, "description", None)
-    if isinstance(err_code, int) and isinstance(description, str) and description:
-        reason += f" (NATS {err_code}: {description[:200]})"
+    refusal = _nats_refusal(error)
+    if refusal is not None:
+        reason += f" (NATS {refusal[0]}: {refusal[1]})"
     return reason
 
 
@@ -427,7 +550,7 @@ def update_runtime_launch(
             record.named_agent_type, automatic=record.source == "schedule"
         )
         if launch_definition_digest(definition) != record.definition_digest:
-            raise LaunchConflict("agent_definition_changed_during_startup")
+            raise LaunchConflict(DEFINITION_CHANGED_DURING_STARTUP)
         if record.source == "schedule":
             binding = agent._schedule_store.worker_records.get_binding(
                 record.schedule_id, team_id=agent.team_id
@@ -449,27 +572,47 @@ def update_runtime_launch(
                 or schedule is None
                 or not schedule.enabled
             ):
-                raise LaunchConflict("launch_policy_revoked_before_readiness")
+                raise LaunchConflict(LAUNCH_POLICY_REVOKED)
     changes: dict[str, Any] = {"ready_at_utc": utc_now()} if state == AgentLaunchState.READY else {}
     if reason is not None:
         changes["reason"] = reason
     agent._worker_launch = repository.update(current, state=state, **changes)
 
 
-def record_worker_exit(agent: Any, crash: BaseException | None) -> None:
+def record_worker_exit(
+    agent: Any, crash: BaseException | None, *, stopped_because: str | None = None
+) -> None:
     """Settle a started worker's record when its thread ends (``strands_team.instantiate_agent_type``).
 
-    A worker that was ready retires. One that ended before it was ready failed,
-    with the reason (``start_failure_reason``); the worker pool controller
-    counts it as a failed start and waits before the next start of the type.
+    A worker that was ready retires. One that ended before it was ready failed:
+    with the reason the runtime asked it to stop for (``stopped_because``: a
+    startup timeout, a revoked start, the runtime stopping), since the stop
+    caused the exit, or else with its crash (``start_failure_reason``). The
+    worker pool controller counts it as a failed start of the type when the
+    reason counts (``counts_as_failed_start``) and waits before the next start.
     """
 
     if agent._worker_ready:
         update_runtime_launch(agent, state=AgentLaunchState.RETIRED)
-    else:
-        update_runtime_launch(
-            agent, state=AgentLaunchState.FAILED, reason=start_failure_reason(crash)
-        )
+        return
+    record = agent._worker_launch
+    if record is None:
+        return
+    reason = stopped_because or start_failure_reason(crash)
+    update_runtime_launch(agent, state=AgentLaunchState.FAILED, reason=reason)
+    counted = counts_as_failed_start(reason)
+    logger.log(
+        logging.WARNING if counted else logging.INFO,
+        "A started worker ended before it was ready. event=worker_start_failed team_id=%s "
+        "agent_type=%s launch_id=%s agent_id=%s source=%s reason=%s counted=%s",
+        agent.team_id,
+        record.named_agent_type,
+        record.launch_id,
+        agent.id,
+        record.source,
+        reason,
+        counted,
+    )
 
 
 def renew_runtime_launch(agent: Any) -> None:

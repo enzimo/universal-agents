@@ -16,17 +16,28 @@ queue is in ``tests/test_live_worker_pools.py``.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from nats.js.errors import BadRequestError
+from pydantic import BaseModel, ValidationError
 
 from custom_agents.agent_instantiation_service import (
     CRASHED_BEFORE_READY,
+    DEFINITION_CHANGED_BEFORE_START,
     EXITED_BEFORE_READY,
+    LAUNCH_POLICY_REVOKED,
+    LAUNCHER_RECONCILIATION,
     PROCESS_HOST_ID,
+    STARTUP_TIMED_OUT,
+    STOPPED_BY_RUNTIME,
+    AgentInstantiationService,
+    counts_as_failed_start,
     record_worker_exit,
     start_failure_reason,
 )
+from custom_agents.schedule_repair_guidance import SCHEDULE_LAUNCH_INTENT_CHANGED
 from custom_agents.worker_pool_controller import (
     PoolObservation,
     StartHistory,
@@ -37,12 +48,13 @@ from custom_agents.worker_pool_controller import (
 from custom_agents.worker_pool_limits import PoolLimit
 from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 from runtime_settings.worker_pools import WorkerPoolsConfig
-from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity
+from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity, LaunchConflict
 from tests.test_schedule_worker_service import lead  # noqa: F401
 from tests.test_schedule_worker_transactions import make_launch
 
 NOW = datetime(2026, 11, 19, 11, 15, tzinfo=timezone.utc)
 TYPE = "ResearchComparisonAgent"
+CRASH = "crashed_before_ready: BadRequestError"
 
 
 def _record(minutes_ago: float, state: AgentLaunchState, *, ready: bool = False, reason=None, agent_type=TYPE):
@@ -77,24 +89,71 @@ def test_failed_starts_are_counted_back_to_the_last_worker_that_became_ready() -
         last_failure_at=NOW - timedelta(minutes=1) + timedelta(seconds=1),
         last_failure_reason="crashed_before_ready: BadRequestError",
         recovered=False,
+        starts_in_progress=1,
     )
 
 
 def test_a_ready_worker_after_the_failures_means_the_type_recovered() -> None:
     history = start_history(
-        [_record(1, AgentLaunchState.READY, ready=True), _record(2, AgentLaunchState.FAILED)], TYPE
+        [_record(1, AgentLaunchState.READY, ready=True), _record(2, AgentLaunchState.FAILED, reason=CRASH)], TYPE
     )
     assert history.failures_in_row == 0 and history.recovered
 
 
 def test_failures_older_than_the_start_limit_window_no_longer_count() -> None:
-    launches = [_record(30, AgentLaunchState.FAILED), _record(90, AgentLaunchState.FAILED)]
+    launches = [_record(30, AgentLaunchState.FAILED, reason=CRASH), _record(90, AgentLaunchState.FAILED, reason=CRASH)]
     assert start_history(launches, TYPE, since=NOW - timedelta(hours=1)).failures_in_row == 1
     assert start_history(launches, TYPE, since=NOW - timedelta(minutes=10)) == StartHistory()
 
 
 def test_a_type_never_started_has_no_history() -> None:
     assert start_history([], TYPE) == StartHistory()
+
+
+def test_ends_that_say_nothing_about_the_type_are_not_counted_but_shown() -> None:
+    """Restart cleanup, a runtime stop, an edit during the start and an old reasonless record hold nothing back."""
+
+    uncounted = [LAUNCHER_RECONCILIATION, STOPPED_BY_RUNTIME, SCHEDULE_LAUNCH_INTENT_CHANGED,
+                 LAUNCH_POLICY_REVOKED, DEFINITION_CHANGED_BEFORE_START, None]
+    launches = [_record(index + 1, AgentLaunchState.FAILED, reason=reason) for index, reason in enumerate(uncounted)]
+    history = start_history(launches, TYPE)
+    assert (history.failures_in_row, history.last_failure_at) == (0, None)
+    assert (history.uncounted_ends, history.last_uncounted_reason) == (6, LAUNCHER_RECONCILIATION)
+    assert not any(counts_as_failed_start(reason) for reason in uncounted)
+
+
+def test_crashes_timeouts_and_refused_rules_count_between_uncounted_ends() -> None:
+    rule = "schedule_worker_rule_exceeds_operator_limit:startup_timeout_seconds"
+    history = start_history(
+        [
+            _record(1, AgentLaunchState.FAILED, reason=STOPPED_BY_RUNTIME),
+            _record(2, AgentLaunchState.FAILED, reason=STARTUP_TIMED_OUT),
+            _record(3, AgentLaunchState.FAILED, reason=LAUNCHER_RECONCILIATION),
+            _record(4, AgentLaunchState.FAILED, reason=rule),
+            _record(5, AgentLaunchState.FAILED, reason=CRASH),
+        ],
+        TYPE,
+    )
+    assert (history.failures_in_row, history.last_failure_reason) == (3, STARTUP_TIMED_OUT)
+    assert (history.uncounted_ends, history.last_uncounted_reason) == (2, STOPPED_BY_RUNTIME)
+
+
+def test_only_starts_that_never_became_ready_are_in_progress() -> None:
+    """A ready worker the launcher moved to unknown (its lease ran out) is not a start in progress."""
+
+    history = start_history(
+        [
+            _record(1, AgentLaunchState.UNKNOWN, ready=True),
+            _record(2, AgentLaunchState.UNKNOWN),
+            _record(3, AgentLaunchState.STARTING),
+            _record(4, AgentLaunchState.RESERVED),
+            _record(5, AgentLaunchState.FAILED, reason=CRASH),
+            _record(90, AgentLaunchState.STARTING),  # outside the window
+        ],
+        TYPE,
+        since=NOW - timedelta(hours=1),
+    )
+    assert history.starts_in_progress == 3
 
 
 def test_the_wait_doubles_with_each_failure_in_a_row_up_to_the_maximum() -> None:
@@ -160,6 +219,71 @@ def test_the_reason_keeps_the_error_type_and_a_nats_refusal_but_no_other_text() 
     assert start_failure_reason(None) == EXITED_BEFORE_READY
 
 
+def test_the_projects_own_refusals_keep_their_code_and_nothing_else_does() -> None:
+    assert start_failure_reason(LaunchConflict(LAUNCH_POLICY_REVOKED)) == LAUNCH_POLICY_REVOKED
+    assert start_failure_reason(PermissionError("agent_type_disallowed")) == "agent_type_disallowed"
+    rule = "schedule_worker_rule_exceeds_operator_limit:idle_ttl_seconds"
+    assert start_failure_reason(ValueError(rule)) == rule
+    # An operating-system refusal names a path; only its type is kept.
+    denied = PermissionError(13, "Permission denied", "/srv/team/secret.key")
+    assert start_failure_reason(denied) == f"{CRASHED_BEFORE_READY}: PermissionError"
+    assert start_failure_reason(ValueError("bad value in /srv/team/x")) == f"{CRASHED_BEFORE_READY}: ValueError"
+
+
+def test_a_nats_refusal_under_a_cleanup_error_is_still_named() -> None:
+    refusal = BadRequestError(code=400, err_code=10026, description="maximum consumers limit reached")
+    try:
+        try:
+            raise refusal
+        except BadRequestError:
+            raise RuntimeError("cleanup failed")
+    except RuntimeError as wrapped:
+        assert start_failure_reason(wrapped) == (
+            f"{CRASHED_BEFORE_READY}: RuntimeError (NATS 10026: maximum consumers limit reached)"
+        )
+
+
+class _Rules(BaseModel):
+    startup_timeout_seconds: int
+
+
+@pytest.mark.parametrize("make_error", ["path", "validation"])
+def test_a_launcher_refusal_stores_only_a_code_or_the_error_type(lead, caplog, make_error) -> None:
+    """Refusal text reaches administrators' notices; a path or a validation error's input never does."""
+
+    if make_error == "path":
+        error: Exception = ValueError("cannot read /srv/team/private/agent.yaml")
+    else:
+        try:
+            _Rules(startup_timeout_seconds="/srv/team/private")
+        except ValidationError as exc:
+            error = exc
+
+    def refuse(*_args, **_kwargs):
+        raise error
+
+    lead._local_team_runtime.spawn_agent = refuse
+    with caplog.at_level(logging.WARNING, logger="custom_agents.agent_instantiation_service"):
+        result = AgentInstantiationService(lead).launch(agent_type="Worker", owner_id="owner", request_id="refused")
+    expected = f"launcher_refused: {type(error).__name__}"
+    stored = AgentLaunchRepository(lead.task_manager.storage_settings).get(result.launch_id, "team")
+    assert (result.status, result.reason, stored.state, stored.reason) == (
+        "denied", expected, AgentLaunchState.FAILED, expected
+    )
+    assert "/srv/team/private" not in result.reason
+    # The full error is kept for operators in the log.
+    assert "event=worker_launch_refused" in caplog.text and "/srv/team/private" in caplog.text
+
+
+def test_a_launcher_refusal_code_is_kept_as_is(lead) -> None:
+    def refuse(*_args, **_kwargs):
+        raise ValueError("mcp_launch_profile_unavailable")
+
+    lead._local_team_runtime.spawn_agent = refuse
+    result = AgentInstantiationService(lead).launch(agent_type="Worker", owner_id="owner", request_id="code")
+    assert result.reason == "mcp_launch_profile_unavailable"
+
+
 class _Worker:
     def __init__(self, lead, record, *, ready: bool) -> None:
         self.id = record.agent_id
@@ -185,6 +309,25 @@ def test_a_worker_that_crashes_before_it_is_ready_fails_its_record_with_the_reas
     assert stored.state == AgentLaunchState.FAILED
     assert stored.reason == start_failure_reason(crash)
     assert start_history([stored], stored.named_agent_type).failures_in_row == 1
+
+
+def test_a_stop_the_runtime_asked_for_is_the_reason_and_is_logged(lead, caplog) -> None:
+    repository, record = _starting(lead)
+    with caplog.at_level(logging.INFO, logger="custom_agents.agent_instantiation_service"):
+        record_worker_exit(_Worker(lead, record, ready=False), RuntimeError("cancelled"), stopped_because=STARTUP_TIMED_OUT)
+    stored = repository.get(record.launch_id, "team")
+    assert (stored.state, stored.reason) == (AgentLaunchState.FAILED, STARTUP_TIMED_OUT)
+    (line,) = [r for r in caplog.records if "event=worker_start_failed" in r.getMessage()]
+    assert line.levelno == logging.WARNING and "counted=True" in line.getMessage()
+
+
+def test_a_stop_for_the_runtime_stopping_is_logged_as_not_counted(lead, caplog) -> None:
+    repository, record = _starting(lead)
+    with caplog.at_level(logging.INFO, logger="custom_agents.agent_instantiation_service"):
+        record_worker_exit(_Worker(lead, record, ready=False), None, stopped_because=STOPPED_BY_RUNTIME)
+    assert repository.get(record.launch_id, "team").reason == STOPPED_BY_RUNTIME
+    (line,) = [r for r in caplog.records if "event=worker_start_failed" in r.getMessage()]
+    assert line.levelno == logging.INFO and "counted=False" in line.getMessage()
 
 
 def test_a_worker_that_was_ready_retires_without_a_failure(lead) -> None:
