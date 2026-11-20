@@ -1,4 +1,74 @@
 {
+  "$defs": {
+    "WebChatThreadWorkingV1": {
+      "additionalProperties": false,
+      "description": "Who works on one listed thread's running request now, the team lead first.",
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/WebChatWorkingAgentV1"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Agents",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_key": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Session Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_key",
+        "agents"
+      ],
+      "title": "WebChatThreadWorkingV1",
+      "type": "object"
+    },
+    "WebChatWorkingAgentV1": {
+      "additionalProperties": false,
+      "description": "An agent type working on a thread's request now (Web Chat's agent trail), with the name the page shows.",
+      "properties": {
+        "agent_type": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Agent Type",
+          "type": "string"
+        },
+        "lead": {
+          "default": false,
+          "title": "Lead",
+          "type": "boolean"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agent_type",
+        "name"
+      ],
+      "title": "WebChatWorkingAgentV1",
+      "type": "object"
+    }
+  },
   "$id": "https://universal-agents.local/schemas/gateway/transcript/v1/WebChatThreadStatesV1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
@@ -31,6 +101,14 @@
       "minLength": 1,
       "title": "Threads Revision",
       "type": "string"
+    },
+    "working": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/WebChatThreadWorkingV1"
+      },
+      "title": "Working",
+      "type": "array"
     }
   },
   "required": [

@@ -135,6 +135,7 @@ class GatewayInteractiveSubmissionService:
         refresh_delivery_preferences: Callable[[], None],
         transcript: GatewayTranscriptService,
         personal_setup: GatewayPersonalSetupGate,
+        request_sent: Callable[[str], None] = lambda task_id: None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
@@ -151,6 +152,8 @@ class GatewayInteractiveSubmissionService:
         self._refresh_delivery_preferences = refresh_delivery_preferences
         self._transcript = transcript
         self._personal_setup = personal_setup
+        # Told the request's task once the team lead has it (Web Chat's agent trail, request_agents_service).
+        self._request_sent = request_sent
         self._logger = logger or logging.getLogger(__name__)
 
     async def submit(
@@ -583,6 +586,8 @@ class GatewayInteractiveSubmissionService:
                 len(request.attachments),
             )
             await self._publish_request(envelope, routing_key=manager_id, correlation_id=correlation_id)
+            # The team lead has the request and works on it first; the agent trail shows that at once.
+            self._request_sent(task.task_id)
             self._logger.info(
                 "Gateway published interactive user request. "
                 "event=gateway_user_request_published correlation_id=%s "

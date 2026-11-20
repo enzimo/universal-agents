@@ -5,7 +5,7 @@ from __future__ import annotations
 import hmac
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol, cast
 
 from typing_extensions import TypeIs
@@ -62,6 +62,8 @@ from assistant_gateway.application.website_application import (
     ActivatedWebEnrollmentTokenV1,
     WEB_CHAT_CHAT_ID,
     WebChatThreadStatesV1,
+    WebChatThreadWorkingV1,
+    WebChatWorkingAgentV1,
     web_chat_threads_revision,
     GatewayAttachmentContent,
     GatewayGeneratedSiteSession,
@@ -106,6 +108,7 @@ from assistant_gateway.application.workspace_browser import (
     GatewayWorkspaceAccess,
     WebsiteWorkspaceBrowser,
 )
+from assistant_gateway.application.request_agents_service import GatewayRequestAgents, agent_name
 from assistant_gateway.application.web_chat_threads import (
     InvalidThreadPlacement,
     ThreadListState,
@@ -377,6 +380,7 @@ class WebsiteSessionApplication:
         awaiting_reply_session_keys: Callable[[], frozenset[str]],
         proactive_session_key: str,
         clock: GatewayClock,
+        request_agents: GatewayRequestAgents | None = None,
     ) -> None:
         self._sessions = sessions
         self._session_repository = session_repository
@@ -394,6 +398,9 @@ class WebsiteSessionApplication:
         # When snoozes wake (web_chat_threads.thread_list_state) and whether a
         # snooze time is in the future.
         self._clock = clock
+        # Web Chat's agent trail: who works on each listed thread now, and the names the page shows
+        # (request_agents_service). None where the gateway has no team view: rows then show their stored trail.
+        self._request_agents = request_agents
 
     def _owner_allows(
         self,
@@ -440,7 +447,27 @@ class WebsiteSessionApplication:
             thread = web_chat_thread(record, proactive_session_key=self._proactive_session_key, now=now)
             if thread is not None:
                 threads.append(thread)
-        return threads
+        return self._with_agents(threads)
+
+    def _with_agents(self, threads: list[WebChatThread]) -> list[WebChatThread]:
+        """Each thread with who works on its running request now and its trail's agent names (agent trail).
+
+        Only this reader's own listed threads are matched (``GatewayRequestAgents.working``), so the owner rule
+        of the list holds for the agents too.
+        """
+
+        agents = self._request_agents
+        working = agents.working({thread.session_key: thread.running_task_id for thread in threads}) if agents else {}
+        shown = []
+        for thread in threads:
+            named = {(agent.agent_type, agent.lead) for agent in thread.trail.agents}
+            named |= {(entry.agent.agent_type, entry.agent.lead) for entry in thread.trail.entries if entry.agent}
+            names = (
+                agents.names(sorted(named)) if agents
+                else {agent_type: agent_name(agent_type, lead, {}) for agent_type, lead in named}
+            )
+            shown.append(replace(thread, working=working.get(thread.session_key, ()), agent_names=names))
+        return shown
 
     def web_chat_thread_states(
         self,
@@ -460,6 +487,17 @@ class WebsiteSessionApplication:
             ),
             open_request_session_keys=tuple(
                 thread.session_key for thread in threads if thread.has_open_request
+            ),
+            working=tuple(
+                WebChatThreadWorkingV1(
+                    session_key=thread.session_key,
+                    agents=tuple(
+                        WebChatWorkingAgentV1(agent_type=agent.agent_type, name=agent.name, lead=agent.lead)
+                        for agent in thread.working
+                    ),
+                )
+                for thread in threads
+                if thread.working
             ),
         )
 

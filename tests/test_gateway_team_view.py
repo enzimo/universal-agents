@@ -1449,3 +1449,36 @@ async def test_with_no_team_lead_routed_a_kept_result_waits_as_no_route(tmp_path
         await until(lambda: _sent_setup_results(gateway) == _sent_once_to("lead_1", KEPT))
     finally:
         await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_an_observer_that_fails_leaves_the_others_and_the_lead_follower_their_change(monkeypatch, caplog) -> None:
+    """Plan review C02: the agent trail's observer raising must not cost held guidance its wake-up, the other
+    members their notice, or the lead follower its ``changed``."""
+
+    reader = Reader()
+    woken: list[str] = []
+
+    def broken(status: AgentStatus) -> None:
+        raise RuntimeError("agent trail queue unavailable")
+
+    observe = team_view.change_observers({"agent_trail": broken, "held_guidance": lambda s: woken.append(s.self_id)})
+    async with Running(monkeypatch, reader, Host()) as running:
+        running.view._on_change = observe
+        await until(running.view.ready.is_set)
+        running.view.changed.clear()
+        with caplog.at_level(logging.WARNING):
+            reader.publish(member("lead_1", lead=True), member("worker_1"))
+        assert sorted(woken) == ["lead_1", "worker_1"]
+        assert running.view.changed.is_set()
+    assert caplog.text.count("event=gateway_team_observer_failed observer=agent_trail") == 2
+
+
+def test_a_members_report_carries_its_records_requests_and_a_departed_member_none() -> None:
+    from dataclasses import replace
+
+    working = replace(member("worker_1", state="busy"), requests=("task_1",))
+    status = team_view.record_status(working, TEAM)
+    assert team_view.agent_report(status).requests == ("task_1",)
+    left = team_view.record_status(working, TEAM, exiting=True)
+    assert team_view.agent_report(left).requests == () and team_view.agent_report(left).exiting

@@ -22,6 +22,12 @@ snooze); a dismissed thread comes back as soon as anything new is posted.
 Open pages read the list every two seconds (``web_chat_thread_states``), so a
 wake shows within seconds without a background job.
 
+Each row also carries its agent trail (``assistant_gateway.domain.agent_trail``):
+the last turns, the person's and each agent type's, and who works on the
+thread's running request now (``request_agents_service.working``), both with
+the names the page shows. A change to the trail changes the list's revision;
+who works now rides on every live read.
+
 A thread's name is fixed once given (owner's request, 2026-10-09; it used to
 follow the latest message): the name the person gave it, otherwise the
 delivery thread's fixed name, otherwise the first ordinary message the person
@@ -34,12 +40,14 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
-from typing import Protocol
+from typing import Mapping, Protocol
 
 from assistant_gateway.application.person_maintenance import is_person_maintenance_session_key
+from assistant_gateway.application.request_agents_service import WorkingAgent, agent_name
+from assistant_gateway.domain.agent_trail import EMPTY_TRAIL, AgentTrailUnreadable, ThreadTrail, decode_thread_trail
 from assistant_gateway.application.proactive_delivery import is_proactive_session_key
 from assistant_gateway.domain.request_state import (
     REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
@@ -136,6 +144,12 @@ class WebChatThread:
     list_state: ThreadListState | None = None
     # The snooze's wake time while the thread is snoozed.
     snoozed_until: str | None = None
+    # The agent trail (module docstring): the stored trail, the task of the running request agents name, who
+    # works on it now, and the name the page shows for each agent type in the trail.
+    trail: ThreadTrail = EMPTY_TRAIL
+    running_task_id: str | None = None
+    working: tuple[WorkingAgent, ...] = ()
+    agent_names: Mapping[str, str] = field(default_factory=dict)
 
 
 def thread_kind(session_key: str, *, proactive_session_key: str) -> WebChatThreadKind:
@@ -341,6 +355,8 @@ def web_chat_thread(
     title = alias or DELIVERY_THREAD_NAMES.get(kind) or first_message_title(record)
     list_state = thread_list_state(record, now=now)
     return WebChatThread(
+        trail=thread_trail_of(record),
+        running_task_id=record.running_task_id,
         session_key=record.session_key,
         session_alias=record.session_alias,
         conversation_id=record.conversation_id,
@@ -358,6 +374,45 @@ def web_chat_thread(
         snoozed_until=record.hidden_until if list_state is ThreadListState.SNOOZED else None,
     )
 
+
+
+def thread_trail_of(record: WebChatThreadRecord) -> ThreadTrail:
+    """The thread's stored agent trail; an unreadable one is logged and the row shows none."""
+
+    try:
+        return decode_thread_trail(record.agent_trail_json)
+    except AgentTrailUnreadable as error:
+        LOGGER.warning(
+            "A Web Chat thread's agent trail is unreadable; its row shows none until the next change rebuilds it. "
+            "event=web_chat_thread_trail_unreadable session_key=%s error=%s",
+            record.session_key,
+            error,
+        )
+        return EMPTY_TRAIL
+
+
+def _agent_payload(agent_type: str, lead: bool, names: Mapping[str, str]) -> dict[str, object]:
+    return {"agent_type": agent_type, "lead": lead, "name": names.get(agent_type) or agent_name(agent_type, lead, {})}
+
+
+def trail_payload(thread: WebChatThread) -> dict[str, object]:
+    """The row's trail as the page draws it: entries oldest first, whether older ones exist, and every agent
+    type that worked in the thread (the hover card's names)."""
+
+    trail, names = thread.trail, thread.agent_names
+    return {
+        "entries": [
+            {"by": "person"} if entry.agent is None
+            else {"by": "agent", **_agent_payload(entry.agent.agent_type, entry.agent.lead, names)}
+            for entry in trail.entries
+        ],
+        "has_older": trail.has_older,
+        "agents": [_agent_payload(agent.agent_type, agent.lead, names) for agent in trail.agents],
+    }
+
+
+def working_payload(working: tuple[WorkingAgent, ...]) -> list[dict[str, object]]:
+    return [{"agent_type": agent.agent_type, "lead": agent.lead, "name": agent.name} for agent in working]
 
 
 def thread_list_payload(thread: WebChatThread) -> dict[str, object]:
@@ -392,6 +447,8 @@ def thread_list_payload(thread: WebChatThread) -> dict[str, object]:
         "pinned": thread.pinned,
         "list_state": thread.list_state.value if thread.list_state else None,
         "snoozed_until": thread.snoozed_until,
+        "trail": trail_payload(thread),
+        "working": working_payload(thread.working),
     }
 
 __all__ = [
