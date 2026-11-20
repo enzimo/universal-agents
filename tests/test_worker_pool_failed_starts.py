@@ -604,10 +604,15 @@ async def test_a_timed_out_start_whose_thread_outlives_the_join_still_ends_start
     _use_config(monkeypatch, {})
     repository, record = _starting_record(lead)
     reasons = _launcher_stops(lead, stopped=False)
-    await _reconcile(lead, utc_now() + timedelta(seconds=150))  # the default startup timeout is 120 s
+    with caplog.at_level(logging.INFO):
+        await _reconcile(lead, utc_now() + timedelta(seconds=150))  # the default startup timeout is 120 s
     assert reasons == [STARTUP_TIMED_OUT]
     unknown = repository.get(record.launch_id, "team")
     assert (unknown.state, unknown.reason) == (AgentLaunchState.UNKNOWN, STARTUP_TIMED_OUT)
+    (pending,) = [r.getMessage() for r in caplog.records if "event=worker_launch_liveness_unknown" in r.getMessage()]
+    assert "reason=startup_timed_out" in pending
+    assert "event=worker_start_failed" not in caplog.text  # not failed yet
+    caplog.clear()
 
     lead._local_team_runtime.inspect_launch = lambda _record: "absent"
     with caplog.at_level(logging.INFO):
@@ -617,7 +622,8 @@ async def test_a_timed_out_start_whose_thread_outlives_the_join_still_ends_start
     assert start_history([failed], failed.named_agent_type).failures_in_row == 1
     (line,) = [r.getMessage() for r in caplog.records if "event=worker_start_failed" in r.getMessage()]
     assert "reason=startup_timed_out counted=True" in line and f"launch_id={record.launch_id}" in line
-    assert "event=worker_launch_unknown_settled" in caplog.text and "reason=startup_timed_out" in caplog.text
+    (settled,) = [r.getMessage() for r in caplog.records if "event=worker_launch_unknown_settled" in r.getMessage()]
+    assert "state=failed reason=startup_timed_out" in settled
 
 
 @pytest.mark.asyncio
