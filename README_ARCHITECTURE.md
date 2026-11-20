@@ -180,7 +180,13 @@ each. They run in parallel on as many workers as the team allows:
   agent's consumers belong to its process: deleted when it exits, and removed
   by NATS once nothing has asked for
   `transport.process_consumer_inactive_threshold_seconds` (after the ack wait
-  of a message a dead receiver held). That includes workers started from a
+  of a message a dead receiver held). That happens while an agent lives too: a
+  mailbox stops asking while its deferred inbox is full. The pull loop then
+  creates it again with the same name and filter, its messages still in the
+  stream, and logs it as expected (`event=nats_pull_consumer_recreated
+  expected=true`) only when the receiver had asked for nothing for that long; a
+  consumer that vanished while it was asking, or a lasting one, is a warning
+  (`expected=false`). That includes workers started from a
   start record (pool, scheduled, replacement and manual starts), whose id
   `spawn_agent` sets but which is drawn for that one start
   (`custom_agents/strands_agent.py`, `_direct_consumer_scope`). Until
@@ -791,10 +797,13 @@ Four repairs keep work from getting stuck in the first place:
   One replacement adopts the work of every dead agent of its type, and starts
   for one type and person join, so the series runs once per type and person:
   one dead owner leads it and the others wait. A give-up covers the owners
-  whose work was last saved before the series' last attempt ended, each logged
-  with its own task ids; a worker whose work was saved later was alive after
-  the series ended, so it leads a new series, whose replacement adopts the
-  given-up work too. A refusal that leaves no start
+  with no proof of life after the series' last attempt ended, each logged with
+  its own task ids. The proof is the latest of the owner's last save and its
+  last heartbeat (a worker waiting on an approval saves nothing for days but
+  heartbeats every 20 seconds); a start record's end is not proof, since the
+  lead ends earlier runs' records after the fact. A worker alive after the
+  series ended leads a new series, whose replacement adopts the given-up work
+  too; an owner whose own series gave up never leads again. A refusal that leaves no start
   record (the type was removed, a worker or start limit is reached) is paced
   with the same delays and then tried hourly, never given up, since a limit
   frees again. One rule
@@ -4277,7 +4286,12 @@ consumers that releases before 2026-11-19 left for started workers (owner id
 not configured, no request open, older than an hour). The launcher holds the
 instance's run lock and has started no agent, so none can be in use, and the
 lead, the startup agents and the gateway, which start together, find room for
-their first consumers. Everything else it only reports. Neither outcome stops
+their first consumers. It deletes only when the lock is proven: on a file
+system without locking an earlier run may still be alive, so it only reports
+(`event=nats_consumer_preflight_report_only`) and the lead's sweep, which
+judges owners by the liveness rule, removes them. The check takes the lock as
+an argument, so it cannot run before the lock is taken. Everything else it
+only reports. Neither outcome stops
 start-up, and agents report their own NATS errors. Making it a start-up gate
 would let a slow or briefly unreachable NATS server, or an external server
 that refuses consumer listing, stop the

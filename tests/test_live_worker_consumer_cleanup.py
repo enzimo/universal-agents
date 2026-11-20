@@ -261,14 +261,29 @@ async def test_live_a_lead_starts_on_a_work_stream_full_of_leftovers(tmp_path, m
 
 
 async def test_live_the_start_up_check_removes_lasting_leftovers_and_keeps_their_messages(tmp_path) -> None:
-    """The launcher's check (``--remove-lasting-agent-leftovers``) before any agent starts.
+    """The launcher's check before any agent starts, run as the launcher runs it.
+
+    The script runs as a separate process with the launcher's own arguments
+    (``REMOVE_LASTING_LEFTOVERS_ARGS``) and reads the configured agent id from
+    its configuration, so the whole path is covered: arguments, which kinds are
+    deleted, and which ids are protected. Only the minimum age is lowered,
+    because these consumers are seconds old. A standalone ``config.yaml`` is
+    used because an instance configuration has no ``agent.agent_id``.
 
     A worker that died while handling a message leaves its lasting mailbox with
     that message delivered and unacknowledged for good (NATS 2.15.3), so a check
     that counted held messages as a live receiver kept every such mailbox.
     """
 
-    from custom_transport.nats_consumer_reconciler import KIND_LASTING_AGENT, NatsConsumerReconciler
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import yaml
+
+    from config_loader import CONFIG_SCHEMA_VERSION
+    from docker.launch_headless import REMOVE_LASTING_LEFTOVERS_ARGS
 
     team_id = new_id("team_check")
     mapper = NatsSubjectMapper(team_id=team_id)
@@ -290,9 +305,36 @@ async def test_live_the_start_up_check_removes_lasting_leftovers_and_keeps_their
         info = await inspector._js.consumer_info(stream, durable)  # noqa: SLF001
         assert (info.num_waiting, info.num_ack_pending) == (0, 1)
 
-        result = await NatsConsumerReconciler(
-            jetstream=inspector._js, mapper=mapper, stable_agent_ids={CONFIGURED}  # noqa: SLF001
-        ).reconcile(apply=True, minimum_age_seconds=0, delete_kinds=frozenset({KIND_LASTING_AGENT}))
+        root = Path(__file__).resolve().parents[1]
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "schema_version": CONFIG_SCHEMA_VERSION,
+                    "agent": {"agent_id": CONFIGURED, "default_team_id": team_id},
+                    "transport": {"nats_servers": list(nats_transport_config_from_env().servers)},
+                }
+            )
+        )
+        run = subprocess.run(
+            [
+                sys.executable,
+                str(root / "scripts" / "reconcile_nats_consumers.py"),
+                "--config",
+                str(config_path),
+                *REMOVE_LASTING_LEFTOVERS_ARGS,
+                "--minimum-age-seconds",
+                "0",
+            ],
+            cwd=root,
+            env={**os.environ, "TEAM_LOCAL_NATS_ENABLED": "false"},
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert run.returncode == 0, run.stderr[-2000:]
+        assert "deleted_count=4" in run.stderr, run.stderr[-2000:]  # the dead worker's and the push-era pair
 
         remaining = sorted((c.owner_agent_id, c.consumer_role) for c in await inspector.agent_consumers())
         assert remaining == sorted(
@@ -300,7 +342,6 @@ async def test_live_the_start_up_check_removes_lasting_leftovers_and_keeps_their
             for owner in (CONFIGURED, "agent_id_0123456789ab")  # configured; process-owned, only reported
             for role in (AGENT_DIRECT_ROLE, AGENT_CONTROL_ROLE)
         )
-        assert result.deleted_count == 4  # the dead worker's and the push-era pair
         # Its message is still in the stream and comes back with the consumer.
         await ensure_pull_consumer(
             inspector._js, stream_name=stream,  # noqa: SLF001

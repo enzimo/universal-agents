@@ -863,7 +863,11 @@ transport:
 ```
 
 Agent mailboxes and control queues are deleted during clean shutdown and
-expire after this delay when a process crashes. This includes every worker the
+expire after this delay once nothing asks for messages: after a process
+crashes, and also while a live agent's mailbox waits for room in its deferred
+inbox. The agent then creates the mailbox again with its messages still in the
+stream; the log line `event=nats_pull_consumer_recreated expected=true` marks
+that case as expected. This includes every worker the
 runtime starts (pool, scheduled and manual starts). Explicit `agent.agent_id`
 mailboxes, team lead routes, named-worker queues, and gateway routes remain
 persistent. Releases before this fix kept started workers' consumers. The

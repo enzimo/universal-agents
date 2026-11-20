@@ -245,7 +245,7 @@ def _offline(consumers, **kwargs):
 
 
 def _reasons(result) -> dict[str, str]:
-    return {f"{d.owner_agent_id}:{d.consumer_role}": d.reason for d in result.decisions}
+    return {d.consumer_name: d.reason for d in result.decisions}
 
 
 @pytest.mark.asyncio
@@ -264,18 +264,28 @@ async def test_the_offline_scan_removes_lasting_leftovers_and_keeps_what_may_be_
             _info("stable_agent", AGENT_DIRECT_ROLE),
             young,
             lead_route,
+            # Not an agent's own consumer of this team: never a candidate.
+            _info("unknown_schema", AGENT_DIRECT_ROLE, schema="consumer-lifecycle-v0"),
+            _info("renamed", AGENT_DIRECT_ROLE, name="someone_elses_consumer"),
+            _info("refiltered", AGENT_DIRECT_ROLE, filter_subject=MAPPER.agent_work_subject("someone_else")),
+            _info("other_team_worker", AGENT_DIRECT_ROLE, team="team_other"),
         ]
     )
     result = await reconciler.reconcile(apply=True, minimum_age_seconds=3600.0)
+    lasting, unmanaged = "abandoned_lasting_agent_consumer", "unmanaged_or_persistent"
     assert _reasons(result) == {
-        "dead_worker:agent_direct": "abandoned_lasting_agent_consumer",
-        "dead_worker:agent_control": "abandoned_lasting_agent_consumer",
-        "push_worker:agent_direct": "abandoned_lasting_agent_consumer",
-        "asking_worker:agent_direct": "live_subscription",
-        "bound_worker:agent_direct": "live_subscription",
-        "stable_agent:agent_direct": "configured_stable_agent",
-        "young_worker:agent_direct": "younger_than_minimum_age",
-        "None:None": "unmanaged_or_persistent",
+        _name("dead_worker", AGENT_DIRECT_ROLE): lasting,
+        _name("dead_worker", AGENT_CONTROL_ROLE): lasting,
+        _name("push_worker", AGENT_DIRECT_ROLE): lasting,
+        _name("asking_worker", AGENT_DIRECT_ROLE): "live_subscription",
+        _name("bound_worker", AGENT_DIRECT_ROLE): "live_subscription",
+        _name("stable_agent", AGENT_DIRECT_ROLE): "configured_stable_agent",
+        _name("young_worker", AGENT_DIRECT_ROLE): "younger_than_minimum_age",
+        MAPPER.durable_name(f"lead_{TEAM}"): unmanaged,
+        _name("unknown_schema", AGENT_DIRECT_ROLE): unmanaged,
+        "someone_elses_consumer": unmanaged,
+        _name("refiltered", AGENT_DIRECT_ROLE): unmanaged,
+        _name("other_team_worker", AGENT_DIRECT_ROLE): unmanaged,
     }
     assert sorted(name for _stream, name in jetstream.deleted) == sorted(
         [

@@ -222,6 +222,32 @@ def _attempt(lead, attempt: int, owner: str = DEAD, person: str = "owner"):
     return repository.get(launch_id_for("team", person, takeover_request_id(owner, attempt)), "team")
 
 
+def _heartbeat(lead, agent_id: str, when: datetime) -> None:
+    """A started worker's last heartbeat (it reports no process of its own)."""
+
+    from custom_messages.contracts.control_v1 import AgentStatus, ControlType, MessageMetaType as MetaType
+
+    AgentStateStore(storage_settings=lead.task_manager.storage_settings).upsert_if_newer(
+        AgentStatus(
+            status_type=MetaType.RESPONSE, info_type=ControlType.STATUS_REQUEST_BASIC,
+            named_agent_type="Worker", self_id=agent_id, is_paused=False, name=agent_id,
+            team_id="team", agent_role="worker", is_exiting=False,
+            last_seen_at=when.isoformat(), process_identity=None,
+        )
+    )
+
+
+async def _run_series_to_give_up(lead, owner: str, start: datetime, clock: float) -> float:
+    """Five replacements for ``owner``'s series, each crashing 5 s after its start; returns the clock."""
+
+    for attempt, minute in enumerate([0, 2, 8, 24, 85], start=1):
+        now = start + timedelta(minutes=minute)
+        clock += 100.0
+        assert await take_over_orphaned_work(lead, now=now, clock=clock) == 1
+        _end(lead, attempt, owner=owner, now=now + timedelta(seconds=5))
+    return clock
+
+
 def _saved_at(lead, owner: str, when: datetime) -> None:
     """Set when the owner last saved its work (saves stamp the current time)."""
     with sqlite3.connect(lead.task_manager._db_path) as connection:
@@ -389,22 +415,94 @@ async def test_a_worker_that_dies_after_a_series_gave_up_leads_a_new_one(lead, c
     held_work(lead)
     _takeover_lead(lead)
     base = datetime.now(timezone.utc)
-    for attempt, minute in enumerate([0, 2, 8, 24, 85], start=1):
-        now = base + timedelta(minutes=minute)
-        assert await take_over_orphaned_work(lead, now=now, clock=100.0 * attempt) == 1
-        _end(lead, attempt, now=now + timedelta(seconds=5))
+    clock = await _run_series_to_give_up(lead, DEAD, base, 0.0)
     later = base + timedelta(days=3)
-    assert await take_over_orphaned_work(lead, now=later, clock=1000.0) == 0  # given up
+    assert await take_over_orphaned_work(lead, now=later, clock=clock + 100) == 0  # given up
     # Three days later the type starts again, and another of its workers dies holding work.
     newcomer = "agent_dead_worker_later"
     launch_record(lead, AgentLaunchState.FAILED, agent_id=newcomer)
     held_work(lead, owner=newcomer, task_id="work-2")
     _saved_at(lead, newcomer, later)
     with caplog.at_level(logging.INFO):
-        assert await take_over_orphaned_work(lead, now=later + timedelta(minutes=1), clock=2000.0) == 1
-    assert _attempt(lead, 1, newcomer).state == AgentLaunchState.STARTING
-    (waiting,) = _lines(caplog, "orphaned_work_takeover_waiting")
-    assert f"owner_agent_id={DEAD} " in waiting and f"for_owner_agent_id={newcomer}" in waiting
+        clock = await _run_series_to_give_up(lead, newcomer, later + timedelta(minutes=1), clock + 200)
+        (waiting,) = _lines(caplog, "orphaned_work_takeover_waiting")
+        assert f"owner_agent_id={DEAD} " in waiting and f"for_owner_agent_id={newcomer}" in waiting
+        # The newcomer's series gave up too: each owner is told once, naming it, and nothing starts.
+        for hours in (3, 30):
+            assert await take_over_orphaned_work(lead, now=later + timedelta(hours=hours), clock=clock + 100 * hours) == 0
+    second_give_ups = [line for line in _lines(caplog, "orphaned_work_takeover_gave_up") if f"series_owner_agent_id={newcomer}" in line]
+    assert sorted(line.split("owner_agent_id=")[1].split()[0] for line in second_give_ups) == sorted([DEAD, newcomer])
+    assert len(_worker_starts(lead)) == 2 * MAX_TAKEOVER_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_a_worker_alive_after_a_give_up_is_replaced_though_its_last_save_was_earlier(lead, caplog):
+    """Saves happen only when a task changes: a worker waiting on an approval saves nothing for days."""
+
+    busy = "agent_busy_worker"
+    busy_record = launch_record(lead, AgentLaunchState.READY, agent_id=busy)  # alive (inspect: starting)
+    held_work(lead, owner=busy, task_id="work-0")
+    launch_record(lead, AgentLaunchState.FAILED)
+    held_work(lead)
+    _takeover_lead(lead)
+    base = datetime.now(timezone.utc)
+    _saved_at(lead, busy, base + timedelta(minutes=30))
+    clock = await _run_series_to_give_up(lead, DEAD, base, 0.0)
+    # Three days later the busy worker dies; it heartbeat until then.
+    died = base + timedelta(days=3)
+    _heartbeat(lead, busy, died - timedelta(seconds=20))
+    AgentLaunchRepository(lead.task_manager.storage_settings).update(busy_record, state=AgentLaunchState.FAILED, now=died)
+    with caplog.at_level(logging.INFO):
+        assert await take_over_orphaned_work(lead, now=died + timedelta(minutes=1), clock=clock + 100) == 1
+    assert _attempt(lead, 1, busy).state == AgentLaunchState.STARTING
+    assert not [line for line in _lines(caplog, "orphaned_work_takeover_gave_up") if f"owner_agent_id={busy} " in line]
+
+
+@pytest.mark.asyncio
+async def test_after_a_give_up_the_later_owner_with_attempts_keeps_leading(lead, caplog):
+    """Two owners alive after a give-up: the one whose series runs leads, not the one saved first."""
+
+    launch_record(lead, AgentLaunchState.FAILED)
+    held_work(lead)
+    _takeover_lead(lead)
+    base = datetime.now(timezone.utc)
+    clock = await _run_series_to_give_up(lead, DEAD, base, 0.0)
+    later = base + timedelta(days=3)
+    newcomer, second = "agent_dead_worker_later", "agent_dead_worker_second"
+    launch_record(lead, AgentLaunchState.FAILED, agent_id=newcomer)
+    held_work(lead, owner=newcomer, task_id="work-2")
+    _saved_at(lead, newcomer, later)
+    assert await take_over_orphaned_work(lead, now=later + timedelta(minutes=1), clock=clock + 100) == 1
+    # Saved after the give-up but before the newcomer, so it is the first row; it dies now.
+    second_record = launch_record(lead, AgentLaunchState.READY, agent_id=second)
+    held_work(lead, owner=second, task_id="work-3")
+    _saved_at(lead, second, base + timedelta(hours=2))
+    AgentLaunchRepository(lead.task_manager.storage_settings).update(second_record, state=AgentLaunchState.FAILED)
+    with caplog.at_level(logging.INFO):
+        assert await take_over_orphaned_work(lead, now=later + timedelta(minutes=2), clock=clock + 200) == 0
+    assert _attempt(lead, 1, second) is None and _attempt(lead, 1, newcomer).state == AgentLaunchState.STARTING
+    # It waits for the newcomer's series; it does not start (or join) one of its own.
+    assert [line for line in _lines(caplog, "orphaned_work_takeover_waiting") if f"owner_agent_id={second} " in line]
+    assert _lines(caplog, "orphaned_work_takeover_joined") == []
+
+
+@pytest.mark.asyncio
+async def test_an_owner_whose_own_series_gave_up_never_leads_again(lead, caplog):
+    """Even with a proof of life dated after its series ended (a late or skewed heartbeat)."""
+
+    waiter = "agent_dead_worker_2"
+    launch_record(lead, AgentLaunchState.FAILED)
+    launch_record(lead, AgentLaunchState.FAILED, agent_id=waiter)
+    held_work(lead)
+    held_work(lead, owner=waiter, task_id="work-2")
+    _takeover_lead(lead)
+    base = datetime.now(timezone.utc)
+    clock = await _run_series_to_give_up(lead, DEAD, base, 0.0)
+    _heartbeat(lead, DEAD, base + timedelta(hours=2))
+    with caplog.at_level(logging.ERROR):
+        assert await take_over_orphaned_work(lead, now=base + timedelta(hours=3), clock=clock + 100) == 0
+    gave_up = _lines(caplog, "orphaned_work_takeover_gave_up")
+    assert sorted(line.split("owner_agent_id=")[1].split()[0] for line in gave_up) == sorted([DEAD, waiter])
 
 
 @pytest.mark.asyncio

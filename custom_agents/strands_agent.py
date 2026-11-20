@@ -491,8 +491,11 @@ def _direct_consumer_scope(*, configured_fields: set[str], started_worker: bool)
     id reads the same mailbox. A worker started from a start record (pool,
     scheduled, replacement or manual start; ``spawn_agent``) also arrives with
     its id set, but that id is drawn for that one start and never reused, so its
-    consumers belong to the process: deleted when it exits, expired by NATS
-    after a crash. Treating started workers as lasting routes left two
+    consumers belong to the process: deleted when it exits, and removed by NATS
+    once nothing asks for ``transport.process_consumer_inactive_threshold_seconds``,
+    after a crash or while a live mailbox waits for room in its deferred inbox;
+    the pull loop then creates it again with its messages (logged as expected,
+    ``custom_transport.nats_pull``). Treating started workers as lasting routes left two
     consumers on the work stream for every worker start, until the stream
     reached NATS 2.15's default limit of 1,000 consumers and no agent could
     start (2026-11-19).

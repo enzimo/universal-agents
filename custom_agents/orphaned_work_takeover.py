@@ -33,14 +33,19 @@ runs per type and person: one dead owner leads it (the one with the highest
 attempt, else the first), and the others wait for its replacement. Run per
 owner, four dead workers of one type started a replacement every minute.
 
-A give-up covers the owners whose work was last saved before the series' last
-attempt ended: they died before it or with it, and each is logged once as given
-up with its own task ids. An owner whose work was saved later was still alive
-after the series ended, so it leads a new series, and the given-up owners wait
-for that replacement, which adopts their work too. The saved work's time comes
-from storage, so this holds across a lead restart. Without it, one given-up
-series stopped replacements for every later dead worker of the type and person
-until the records were pruned.
+A give-up covers the owners with no proof that they were alive after the
+series' last attempt ended; each is logged once as given up with its own task
+ids. The proof is the latest of the owner's last save of its work and its last
+heartbeat (``AgentStatus.last_seen_at``): saves happen only when a task
+changes, so a worker waiting on an approval may save nothing for days while it
+heartbeats every 20 seconds. A start record's end is not proof, since the lead
+ends the records of an earlier run after the fact. An owner proven alive later,
+whose own series has not given up, leads a new series, and the given-up owners
+wait for that replacement, which adopts their work too. Saves and heartbeats are
+stored, so this holds across a lead restart. Without it, one given-up series
+stopped replacements for every later dead worker of the type and person until
+the records were pruned. A worker whose status row was already pruned and that
+saved nothing after the series ended is judged by its save alone.
 
 - A refusal that leaves no start record (the type was removed or is denied, the
   team's worker limit or the hourly start limit is reached) is paced with the
@@ -190,9 +195,10 @@ def _orphaned_owners(agent: Any, now: datetime) -> list[dict[str, Any]]:
         if not unfinished:
             continue
         decided.append(row.owner_agent_id)
-        if not owner_liveness(
+        liveness = owner_liveness(
             agent, row.owner_agent_id, purpose=LivenessPurpose.REPLACEMENT_PASS, now=now, launches=launches
-        ).gone:
+        )
+        if not liveness.gone:
             continue
         person = _person_for(agent, row.owner_agent_id, unfinished, launches)
         found.append(
@@ -202,8 +208,8 @@ def _orphaned_owners(agent: Any, now: datetime) -> list[dict[str, Any]]:
                 "person": person,
                 "tasks": len(unfinished),
                 "task_ids": [record.task_id for record in unfinished],
-                # Its last save while it was alive (what a give-up covers).
-                "saved_at": parse_utc(row.updated_at),
+                # Its latest proof of life: last save or last heartbeat (what a give-up covers).
+                "alive_at": _latest(parse_utc(row.updated_at), liveness.last_seen),
                 "attempts": _attempt_records(agent, row.owner_agent_id, person, by_id),
             }
         )
@@ -281,12 +287,21 @@ def _plan_group(group: list[dict[str, Any]], now: datetime) -> tuple[dict[str, A
     if not ended:
         return max(group, key=_highest_attempt), None
     gave_up_at, series = max(ended, key=lambda item: item[0])
-    later = [owner for owner in group if owner["saved_at"] is not None and owner["saved_at"] > gave_up_at]
+    given_up = {id(owner) for _end, owner in ended}
+    later = [
+        owner
+        for owner in group
+        if id(owner) not in given_up and owner["alive_at"] is not None and owner["alive_at"] > gave_up_at
+    ]
     return (max(later, key=_highest_attempt) if later else None), series
 
 
 def _highest_attempt(owner: dict[str, Any]) -> int:
     return max(owner["attempts"], default=0)
+
+
+def _latest(*moments: datetime | None) -> datetime | None:
+    return max((moment for moment in moments if moment is not None), default=None)
 
 
 def _refused(agent: Any, owner: dict[str, Any], memory: _OwnerMemory, reason: str | None, clock: float) -> None:
