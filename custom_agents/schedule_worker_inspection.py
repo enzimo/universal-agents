@@ -8,6 +8,7 @@ from custom_agents.agent_instantiation_service import (
     AgentInstantiationService,
     current_worker_limits,
     effective_worker_rules,
+    shown_reason,
 )
 from custom_agents.memory_review_runtime import is_memory_review_schedule_name
 from custom_agents.schedule_definition_identity import definition_changes
@@ -204,6 +205,19 @@ def _protected_schedule_inspection(schedule: ScheduledMessage) -> dict[str, Any]
     }
 
 
+def _shown_start_reason(view: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A start record or launch attempt as an agent may see it: an older release's free error text hidden.
+
+    The previous launcher stored a refusal's ``str(exc)`` as the reason, which
+    can hold a host path or configuration values; only reasons this release
+    writes are shown (``agent_instantiation_service.shown_reason``).
+    """
+
+    if view is None:
+        return None
+    return {**view, "reason": shown_reason(view.get("reason"))}
+
+
 def inspect_schedule_worker(agent: Any, schedule_id: str = "") -> dict[str, Any]:
     from custom_agents.schedule_worker_service import ScheduleWorkerService
 
@@ -350,8 +364,8 @@ def inspect_schedule_worker(agent: Any, schedule_id: str = "") -> dict[str, Any]
         ],
         "block_reason": binding.blocked_reason,
         "next_action_at_utc": next_action_at.isoformat() if next_action_at else None,
-        "launch_attempt": attempt,
-        "launch": launch.model_dump(mode="json") if launch else None,
+        "launch_attempt": _shown_start_reason(attempt),
+        "launch": _shown_start_reason(launch.model_dump(mode="json")) if launch else None,
         "last_occurrence": latest.model_dump(mode="json") if latest else None,
         "spawn_to_ready_seconds": (
             launch.ready_at_utc - launch.created_at_utc

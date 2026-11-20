@@ -1253,6 +1253,9 @@ class UniversalAgent(BaseModel):
     # Worker types whose starts the hourly start limit refuses right now; the
     # controller logs when a type enters and leaves this set.
     _pool_rate_limited_types: set[str] = PrivateAttr(default_factory=set)
+    # Refusals before a start record, in a row per worker type; the controller
+    # reports the type's start problem from the second on.
+    _pool_refusals_in_row: Dict[str, int] = PrivateAttr(default_factory=dict)
     _worker_pool_snapshot: Dict[str, Any] = PrivateAttr(default_factory=dict)
     # While a model provider refuses calls, the worker holds its task, takes no
     # new work and retries after this monotonic time (custom_agents.provider_limits).

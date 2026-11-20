@@ -67,6 +67,7 @@ from storage.worker_pool_repository import (
     INCIDENT_PROVIDER_LIMITED,
     INCIDENT_START_FAILED,
     POOL_FAILED_STARTS,
+    POOL_HUNG_STARTS,
     POOL_LAST_UNCOUNTED_END,
     POOL_UNCOUNTED_ENDS,
     TEAM_SCOPE,
@@ -124,8 +125,18 @@ def _start_failure_text(details: dict[str, Any], settings: WorkerPoolsConfig) ->
 
     pool = details.get(EVIDENCE_POOL) or {}
     if pool.get(POOL_FAILED_STARTS) or not details.get(EVIDENCE_HOURLY_LIMIT):
-        return _failed_start_text(details, pool)
-    return _hourly_limit_text(pool, settings)
+        happened, advice = _failed_start_text(details, pool)
+    else:
+        happened, advice = _hourly_limit_text(pool, settings)
+    if pool.get(POOL_HUNG_STARTS):
+        happened += (
+            f" {pool[POOL_HUNG_STARTS]} start(s) of this type stopped responding: the "
+            "runtime stopped them, or cannot check their process, and they have not ended "
+            "for several minutes. The runtime no longer waits for them, but each still "
+            "takes a pool slot until it ends or the runtime restarts; check the runtime "
+            "log for those workers' threads."
+        )
+    return happened, advice
 
 
 def _failed_start_text(details: dict[str, Any], pool: dict[str, Any]) -> tuple[str, str]:

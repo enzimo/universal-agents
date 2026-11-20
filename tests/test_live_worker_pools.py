@@ -243,6 +243,7 @@ def controller_world(tmp_path, monkeypatch):
         _local_team_runtime=_LocalRuntime([WORKER_TYPE, "TeamArchitect"]),
         _ensured_worker_queues=set(),
         _pool_rate_limited_types=set(),
+        _pool_refusals_in_row={},
         _worker_pool_snapshot={},
         _logger=logging.getLogger("controller-test"),
         _ensure_nats_transport_adapter=lambda: adapter,

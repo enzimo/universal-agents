@@ -35,6 +35,7 @@ _EXPLANATION = {
     "next_start_waits_seconds": "How long the controller still waits before the next start of the type; the wait doubles with each failed start in a row, and after it one start is tried at a time.",
     "starts_ended_not_counted": "Starts since the last ready worker that ended for a reason that is not a failure of the type (the runtime stopped them, or an edit ended them). They still count toward the hourly start limit.",
     "last_start_end_not_counted": "Why the newest of those starts ended.",
+    "starts_hung": "Starts the runtime stopped, or cannot check, that have not ended for several minutes. The runtime no longer waits for them before the next start, but each still takes a pool slot until it ends or the runtime restarts.",
     "decision": "What the controller did on its last pass and why.",
     "open_problems": "Worker pool problems still open (capacity, provider_limited, start_failed); each gives you a review.",
 }

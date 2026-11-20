@@ -205,11 +205,13 @@ def counts_as_failed_start(reason: str | None) -> bool:
     """Whether a failed start record counts as a failed start of its type.
 
     Only a reason this release writes counts (``is_current_reason``), and not
-    one of ``UNCOUNTED_START_ENDS``. No reason, or the free error text an
-    older release stored, does not count: an upgrade right after an old
-    release's failures does not hold the type back. This release always
-    writes a reason (the round-trip tests in tests/test_worker_pool_failed_starts.py
-    check every writer), so its failures always count.
+    one of ``UNCOUNTED_START_ENDS``. A record an older release wrote with no
+    reason, or with its free error text, does not count; one it wrote with a
+    code (``construction_failed``, ``launcher_rejected_start`` or a refusal's
+    code such as ``agent_type_disallowed``) counts like this release's for the
+    hour it stays in view. This release always writes a current reason (the
+    round-trip tests in tests/test_worker_pool_failed_starts.py check every
+    writer), and ``log_failed_start`` warns about any other.
     """
 
     return is_current_reason(reason) and reason not in UNCOUNTED_START_ENDS
@@ -455,11 +457,24 @@ class AgentInstantiationService:
     ) -> None:
         """Fail a reserved start with its reason and log it (``log_failed_start``).
 
-        A launcher refusal that gave no reason is ``launcher_rejected_start``.
-        The full error goes into the log line only when the reason kept just
-        its type (a code says it all).
+        A launcher refusal that gave no reason, or one this release does not
+        write (``is_current_reason``; a spawner's own text), is stored as
+        ``launcher_rejected_start``, which counts; the given text goes to the
+        log only. The full error goes into the log line only when the reason
+        kept just its type (a code says it all).
         """
 
+        if reason is not None and not is_current_reason(reason):
+            logger.warning(
+                "A worker start was refused with a reason this release does not know; it is "
+                "stored as launcher_rejected_start. event=worker_launch_reason_replaced "
+                "team_id=%s agent_type=%s launch_id=%s given_reason=%s",
+                record.team_id,
+                record.named_agent_type,
+                record.launch_id,
+                reason,
+            )
+            reason = None
         reason = reason or LAUNCHER_REJECTED_START
         failed = self.repository.update(record, state=AgentLaunchState.FAILED, reason=reason)
         untold = error is not None and refusal_code(error) is None
@@ -725,6 +740,18 @@ def log_failed_start(
         counted,
         "-" if error is None else error,
     )
+    if not is_current_reason(reason):
+        # Every writer in this release gives a current reason; one that does
+        # not would quietly switch the wait after failed starts off.
+        logger.warning(
+            "A failed start has a reason this release does not know, so it is not counted "
+            "as a failed start of its type. event=worker_start_reason_unknown team_id=%s "
+            "agent_type=%s launch_id=%s reason=%s",
+            record.team_id,
+            record.named_agent_type,
+            record.launch_id,
+            reason,
+        )
 
 
 def record_worker_exit(

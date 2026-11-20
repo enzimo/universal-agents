@@ -6,6 +6,7 @@ stuck-work notice engine are captured.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -41,6 +42,8 @@ def world(tmp_path, monkeypatch):
         id="lead",
         team_id="team",
         task_manager=SimpleNamespace(storage_settings=storage, operations_runtime=_Runtime()),
+        _pool_rate_limited_types=set(),
+        _pool_refusals_in_row={},
     )
     opened: list[dict] = []
 
@@ -296,7 +299,6 @@ async def test_the_evidence_the_controller_writes_reaches_both_texts(world):
     from custom_messages.contracts.schedule_worker_v1 import WORKER_LAUNCH_RATE_LIMIT, AgentLaunchResultV1
     from storage.worker_pool_repository import WorkerPoolIncidentV1
 
-    world.agent._pool_rate_limited_types = set()
     controller = WorkerPoolController(world.agent)
     controller._launch = lambda _agent_type: AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT)
     incidents = reviews.WorkerPoolIncidents(world.agent, _settings())
@@ -356,7 +358,6 @@ async def test_an_accepted_start_leaves_an_open_start_problem_open(world):
     from custom_agents.worker_pool_controller import PoolDecision, WorkerPoolController
     from custom_messages.contracts.schedule_worker_v1 import WORKER_LAUNCH_RATE_LIMIT, AgentLaunchResultV1
 
-    world.agent._pool_rate_limited_types = set()
     results = [
         AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT),
         AgentLaunchResultV1(status="starting", agent_id="w", launch_id="l"),
@@ -377,8 +378,15 @@ async def test_an_accepted_start_leaves_an_open_start_problem_open(world):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("refusal", ["hourly_limit", "no_start_record"])
-async def test_a_start_problem_no_failed_start_opened_stays_one_problem_while_workers_are_ready(world, refusal):
+@pytest.mark.parametrize(
+    ("refusal", "passes"),
+    [
+        ("hourly_limit", (1, 0, 1, 0, 1)),  # refused, no attempt, refused, no attempt, refused
+        # A refusal before any start record opens the problem on the second in a row.
+        ("no_start_record", (1, 1, 0, 1, 1)),
+    ],
+)
+async def test_a_start_problem_no_failed_start_opened_stays_one_problem_while_workers_are_ready(world, refusal, passes):
     """Critique C24: a pass with no refusal while a worker of the type is ready does not close and reopen it.
 
     The hourly limit with workers that do become ready, or a launcher refusal
@@ -391,18 +399,17 @@ async def test_a_start_problem_no_failed_start_opened_stays_one_problem_while_wo
     from custom_agents.worker_pool_controller import PoolDecision, WorkerPoolController
     from custom_messages.contracts.schedule_worker_v1 import WORKER_LAUNCH_RATE_LIMIT, AgentLaunchResultV1
 
-    world.agent._pool_rate_limited_types = set()
     refused = (
         AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT)
         if refusal == "hourly_limit"
         else AgentLaunchResultV1(status="denied", reason="agent_definition_unavailable")
     )
-    results = [refused, refused, refused]
+    results = [refused] * sum(passes)
     controller = WorkerPoolController(world.agent)
     controller._launch = lambda _agent_type: results.pop(0)
     # A worker of the type became ready since the last failure, so the type counts as recovered.
     healthy = _observation(running=1, start_recovered=True)
-    for starts in (1, 0, 1, 0, 1):  # refused, no attempt, refused, no attempt, refused
+    for starts in passes:
         incidents = reviews.WorkerPoolIncidents(world.agent, _settings())
         _report_start_history(healthy, incidents)
         await controller._start(healthy, PoolDecision(starts, "start" if starts else "a worker is free"), incidents)
@@ -472,7 +479,6 @@ async def test_an_older_releases_free_error_text_never_reaches_the_review_or_not
     observation = _observation(
         uncounted_start_ends=history.uncounted_ends, last_uncounted_start_end=history.last_uncounted_reason,
     )
-    world.agent._pool_rate_limited_types = set()
     controller = WorkerPoolController(world.agent)
     controller._launch = lambda _agent_type: AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT)
     incidents = reviews.WorkerPoolIncidents(world.agent, _settings())
@@ -488,3 +494,76 @@ async def test_an_older_releases_free_error_text_never_reaches_the_review_or_not
     for shown in (instructions, finding.message.text, str(opened["details"])):
         assert old_text not in shown
     assert "the latest: no reason recorded." in instructions
+
+
+@pytest.mark.asyncio
+async def test_refusals_before_any_start_record_open_review_and_notice_on_the_second_and_stay_seen(world):
+    """Review finding GEN-3 with real incidents: one refusal opens nothing; the second does; the third keeps it fresh."""
+
+    from custom_agents.worker_pool_controller import PoolDecision, WorkerPoolController
+    from custom_messages.contracts.schedule_worker_v1 import AgentLaunchResultV1
+
+    refused = AgentLaunchResultV1(status="denied", reason="agent_definition_unavailable")
+    controller = WorkerPoolController(world.agent)
+    controller._launch = lambda _agent_type: refused
+    repository = worker_pool_repository(world.agent)
+    start = datetime.now(timezone.utc)
+    seen = []
+    for minute in range(3):
+        incidents = reviews.WorkerPoolIncidents(world.agent, _settings())
+        incidents.now = start + timedelta(minutes=minute)
+        await controller._start(_observation(), PoolDecision(1, "start"), incidents)
+        await incidents.settle()
+        seen.append([incident.last_seen_at_utc for incident in repository.list_open_incidents("team")])
+    assert seen[0] == []  # one refusal: nothing opens
+    assert seen[1] == [start + timedelta(minutes=1)] and seen[2] == [start + timedelta(minutes=2)]
+    assert [item["kind"] for item in world.opened] == [INCIDENT_START_FAILED]
+    assert [finding.subject_id for finding in world.told[-1]] == [f"{WORKER_TYPE}:{INCIDENT_START_FAILED}"]
+
+
+def test_the_review_and_notice_name_hung_starts(world):
+    """Review finding RC-1: a hung start is named, and that it still takes a pool slot."""
+
+    details = {"pool": {"failed_starts_in_row": 2, "starts_hung": 1}, "start_refused_because": CRASH}
+    text = _notice_text(world, details)
+    now = datetime.now(timezone.utc)
+    from storage.worker_pool_repository import WorkerPoolIncidentV1
+
+    incident = WorkerPoolIncidentV1(incident_id="i", team_id="team", agent_type=WORKER_TYPE, kind=INCIDENT_START_FAILED,
+                                    opened_at_utc=now, last_seen_at_utc=now, details=details)
+    instructions = reviews._instructions(incident, recurring=False, recurrences=1, settings=_settings())
+    for shown in (text, instructions):
+        assert "1 start(s) of this type stopped responding" in shown
+        assert "still takes a pool slot until it ends or the runtime restarts" in shown
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_episode_ends_when_its_type_is_no_longer_registered(world, monkeypatch, caplog):
+    """Review finding RC-2 through reconcile: removed type ends its episode; an unreadable queue does not."""
+
+    from custom_agents.worker_pool_controller import WorkerPoolController
+    from custom_messages.contracts.schedule_worker_v1 import WORKER_LAUNCH_RATE_LIMIT, AgentLaunchResultV1
+
+    settings = _settings()
+    monkeypatch.setattr("custom_agents.worker_pool_settings.current_worker_pool_settings", lambda _agent: settings)
+    world.agent._worker_pool_snapshot = {}
+    team = PoolLimit(scope="*", effective=32, default=32, ceiling=64)
+    controller = WorkerPoolController(world.agent)
+    controller._launch = lambda _agent_type: AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT)
+
+    def passes(registered: set[str], observed: bool):
+        async def observe(_settings):
+            controller.registered_types = set(registered)
+            return ([_observation(running=0)] if observed else []), 0, team
+
+        return observe
+
+    with caplog.at_level(logging.INFO, logger="custom_agents.worker_pool_controller"):
+        for registered, observed in (({WORKER_TYPE}, True), ({WORKER_TYPE}, False), (set(), False), ({WORKER_TYPE}, True)):
+            controller.observe = passes(registered, observed)
+            await controller.reconcile()
+    messages = [r.getMessage() for r in caplog.records]
+    began = [m for m in messages if "event=worker_pool_start_rate_limited " in m]
+    ended = [m for m in messages if "event=worker_pool_start_rate_limit_ended" in m]
+    assert len(began) == 2
+    assert len(ended) == 1 and "because=no longer a worker type" in ended[0]
