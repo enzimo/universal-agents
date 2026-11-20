@@ -2,22 +2,31 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import uuid4
 
 from custom_agents.schedule_repair_guidance import (
     AGENT_DEFINITION_CHANGED,
+    AGENT_DEFINITION_UNAVAILABLE,
+    AGENT_TYPE_DISALLOWED,
+    AGENT_TYPE_INELIGIBLE,
     SCHEDULE_LAUNCH_INTENT_CHANGED,
 )
 from custom_agents.schedule_definition_identity import (
+    DEFINITION_DECLARATION_MISSING,
+    DEFINITION_SOURCE_UNKNOWN,
     definition_is_current,
     definition_source_of,
     launch_definition_digest,
 )
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_worker_v1 import (
+    AUTOMATIC_WORKER_CAPACITY_LIMIT,
     DEFINITION_SOURCE_RELEASE,
+    TEAM_WORKER_CAPACITY_LIMIT,
+    WORKER_LAUNCH_RATE_LIMIT,
     AgentCreationResultV1,
     AgentLaunchResultV1,
     AgentLaunchState,
@@ -29,8 +38,13 @@ from custom_messages.contracts.schedule_worker_v1 import (
 )
 from runtime_hosting.process_run import current_process_identity
 from custom_agents.saved_runtime_config import current_launch_config
-from runtime_settings.schedule_workers import ScheduleWorkersConfig
+from runtime_settings.schedule_workers import (
+    OPERATOR_LIMITED_RULES,
+    RULE_EXCEEDS_OPERATOR_LIMIT,
+    ScheduleWorkersConfig,
+)
 from storage.agent_launch_repository import (
+    LAUNCH_CONFLICT_CODES,
     AgentLaunchRepository,
     LaunchCapacity,
     LaunchConflict,
@@ -40,6 +54,189 @@ from storage.agent_launch_repository import (
 # number and start time (runtime_hosting.process_run), so the team lead can
 # later prove whether the process is gone.
 PROCESS_HOST_ID = current_process_identity().text()
+
+logger = logging.getLogger(__name__)
+
+# Why a start ended before its worker was ready (``AgentLaunchV1.reason``).
+# The worker pool controller counts such a start as a failed start of its type
+# and waits longer before each next start (custom_agents.worker_pool_controller).
+# These reasons reach TeamArchitect's review and administrators' notices, so a
+# stored reason is only ever a project code, an error's type, or a NATS
+# refusal's code and description (``refusal_code``, ``launcher_refusal_reason``,
+# ``start_failure_reason``); the full error stays in the log.
+CRASHED_BEFORE_READY = "crashed_before_ready"
+EXITED_BEFORE_READY = "exited_before_ready"
+LAUNCHER_REFUSED = "launcher_refused"
+STARTUP_TIMED_OUT = "startup_timed_out"
+# Only a schedule's own startup timeout, shorter than its type's, ran out: about
+# that schedule, not the type (custom_agents.schedule_worker_controller).
+SCHEDULE_STARTUP_TIMED_OUT = "schedule_startup_timed_out"
+# The runtime stopped or restarted while the worker started.
+STOPPED_BY_RUNTIME = "runtime_stopped_before_ready"
+# The launcher found the start's process or thread gone with no end recorded:
+# after a restart, or when the worker's own exit record could not be written.
+LAUNCHER_RECONCILIATION = "launcher_reconciliation"
+# Edits made while the worker started; the next start uses the new version.
+LAUNCH_POLICY_REVOKED = "launch_policy_revoked_before_readiness"
+DEFINITION_CHANGED_BEFORE_START = "agent_definition_changed_before_start"
+DEFINITION_CHANGED_BEFORE_CONSTRUCTION = "agent_definition_changed_before_construction"
+DEFINITION_CHANGED_DURING_STARTUP = "agent_definition_changed_during_startup"
+IDLE_TTL_LIMIT_CHANGED = "idle_ttl_limit_changed_before_start"
+AUTHORIZATION_MODE_CHANGED = "launcher_authorization_mode_changed_restart_required"
+WORKER_POOLS_DISABLED = "worker_pools_disabled"
+# The launcher's other refusals and failures.
+LOCAL_LAUNCHER_UNAVAILABLE = "local_launcher_unavailable"
+MANAGER_LAUNCH_FORBIDDEN = "automatic_manager_launch_forbidden"
+MCP_PROFILES_FROM_AGENTS = "mcp_profile_names_not_accepted_from_agents"
+LAUNCH_REQUIRES_OWNER = "launch_requires_canonical_owner"
+SCHEDULE_LAUNCH_IDENTITY_MISMATCH = "schedule_launch_identity_mismatch"
+IDLE_TTL_OUTSIDE_LIMITS = "idle_ttl_outside_operator_limits"
+SCHEDULE_LAUNCH_NEEDS_BINDING = "schedule_launch_requires_durable_binding"
+RUNTIME_LAUNCH_IDENTITY_MISMATCH = "runtime_launch_identity_mismatch"
+STALE_RUNTIME_NOT_READY = "stale_runtime_cannot_become_ready"
+CONSTRUCTION_FAILED = "construction_failed"
+LAUNCHER_REJECTED_START = "launcher_rejected_start"
+# Refusals of instantiate_agent_type (custom_agents.strands_team).
+LAUNCH_IDENTITY_MISMATCH = "launch_identity_mismatch"
+IDLE_TTL_NOT_POSITIVE = "idle_ttl_seconds_not_positive"
+MCP_LAUNCH_PROFILE_UNAVAILABLE = "mcp_launch_profile_unavailable"
+
+# Start ends that say nothing about the worker type, so they are not failed
+# starts of it (``counts_as_failed_start``): the runtime ended the start, or an
+# edit made while it started ended it. Counting them made a routine restart, or
+# a schedule edited during its worker's start, hold back a healthy type and
+# open a start_failed review (review of PR #160, 2026-11-20).
+# AGENT_TYPE_INELIGIBLE: the operator switched automatic (scheduled) starts off,
+# or took the type off their eligible list, while a scheduled worker started;
+# a rule about scheduled starting, like WORKER_POOLS_DISABLED for pool starts.
+UNCOUNTED_START_ENDS = frozenset(
+    {
+        AGENT_TYPE_INELIGIBLE,
+        STOPPED_BY_RUNTIME,
+        LAUNCHER_RECONCILIATION,
+        LAUNCH_POLICY_REVOKED,
+        SCHEDULE_LAUNCH_INTENT_CHANGED,
+        SCHEDULE_STARTUP_TIMED_OUT,
+        DEFINITION_CHANGED_BEFORE_START,
+        DEFINITION_CHANGED_BEFORE_CONSTRUCTION,
+        DEFINITION_CHANGED_DURING_STARTUP,
+        IDLE_TTL_LIMIT_CHANGED,
+        AUTHORIZATION_MODE_CHANGED,
+        WORKER_POOLS_DISABLED,
+    }
+)
+
+# Every code a start can end with or be refused with: the codes above, the
+# scheduled-worker reasons the launcher raises, the launch store's conflicts,
+# the capacity and hourly limits, and the definition checks. ``refusal_code``
+# keeps an error's text only when it is one of these (or a refused rule's
+# ``RULE_EXCEEDS_OPERATOR_LIMIT:<field>``), so text that merely looks like a
+# code (a name, an id) never reaches a stored reason. A new code raised on the
+# launch path must be added here; tests/test_worker_pool_failed_starts.py
+# scans the raise sites and fails until it is.
+KNOWN_START_CODES = (
+    frozenset(
+        {
+            EXITED_BEFORE_READY,
+            STARTUP_TIMED_OUT,
+            AGENT_DEFINITION_CHANGED,
+            AGENT_DEFINITION_UNAVAILABLE,
+            AGENT_TYPE_DISALLOWED,
+            DEFINITION_SOURCE_UNKNOWN,
+            DEFINITION_DECLARATION_MISSING,
+            LOCAL_LAUNCHER_UNAVAILABLE,
+            MANAGER_LAUNCH_FORBIDDEN,
+            MCP_PROFILES_FROM_AGENTS,
+            LAUNCH_REQUIRES_OWNER,
+            SCHEDULE_LAUNCH_IDENTITY_MISMATCH,
+            IDLE_TTL_OUTSIDE_LIMITS,
+            SCHEDULE_LAUNCH_NEEDS_BINDING,
+            RUNTIME_LAUNCH_IDENTITY_MISMATCH,
+            STALE_RUNTIME_NOT_READY,
+            CONSTRUCTION_FAILED,
+            LAUNCHER_REJECTED_START,
+            LAUNCH_IDENTITY_MISMATCH,
+            IDLE_TTL_NOT_POSITIVE,
+            MCP_LAUNCH_PROFILE_UNAVAILABLE,
+            AUTOMATIC_WORKER_CAPACITY_LIMIT,
+            TEAM_WORKER_CAPACITY_LIMIT,
+            WORKER_LAUNCH_RATE_LIMIT,
+        }
+    )
+    | UNCOUNTED_START_ENDS
+    | LAUNCH_CONFLICT_CODES
+)
+# The two formatted reasons; this release is the first to write them, so an
+# older release's free error text never starts with either.
+_FORMATTED_REASON_PREFIXES = (f"{CRASHED_BEFORE_READY}: ", f"{LAUNCHER_REFUSED}: ")
+
+
+def is_known_code(text: str) -> bool:
+    """Whether ``text`` is one of the project's start codes (``KNOWN_START_CODES``, or a refused rule with its field)."""
+
+    if text in KNOWN_START_CODES:
+        return True
+    prefix, _, field = text.partition(":")
+    return prefix == RULE_EXCEEDS_OPERATOR_LIMIT and field in OPERATOR_LIMITED_RULES
+
+
+def is_current_reason(reason: str | None) -> bool:
+    """Whether a start record's reason has a form this release writes.
+
+    A known code, or one of the two formatted forms
+    (``crashed_before_ready: <error type>...``, ``launcher_refused: <error type>``).
+    Until this release the launcher stored a refusal's free error text, which
+    can hold a host path or configuration values; such a reason is neither
+    counted (``counts_as_failed_start``) nor shown (``shown_reason``).
+    """
+
+    return reason is not None and (
+        is_known_code(reason) or reason.startswith(_FORMATTED_REASON_PREFIXES)
+    )
+
+
+def shown_reason(reason: str | None) -> str | None:
+    """A start record's reason as people may see it: None for one this release does not write."""
+
+    return reason if is_current_reason(reason) else None
+
+
+def counts_as_failed_start(reason: str | None) -> bool:
+    """Whether a failed start record counts as a failed start of its type.
+
+    Only a reason this release writes counts (``is_current_reason``), and not
+    one of ``UNCOUNTED_START_ENDS``. A record an older release wrote with no
+    reason, or with its free error text, does not count; one it wrote with a
+    code (``construction_failed``, ``launcher_rejected_start`` or a refusal's
+    code such as ``agent_type_disallowed``) counts like this release's for the
+    hour it stays in view. This release always writes a current reason (the
+    round-trip tests in tests/test_worker_pool_failed_starts.py check every
+    writer), and ``log_failed_start`` warns about any other.
+    """
+
+    return is_current_reason(reason) and reason not in UNCOUNTED_START_ENDS
+
+
+def refusal_code(error: BaseException) -> str | None:
+    """The error's text when it is one of the project's start codes, else None.
+
+    Only a ``ValueError``, a ``LaunchConflict`` or a ``PermissionError`` can
+    carry a code, and only when its whole text is a known one
+    (``is_known_code``). Any other text could hold anything, such as a host
+    path, a pydantic validation error's input values, or a name that merely
+    looks like a code.
+    """
+
+    if not isinstance(error, (ValueError, LaunchConflict, PermissionError)):
+        return None
+    text = str(error)
+    return text if is_known_code(text) else None
+
+
+def launcher_refusal_reason(error: BaseException) -> str:
+    """The reason a refused start stores: its code, or ``launcher_refused: <error type>``."""
+
+    return refusal_code(error) or f"{LAUNCHER_REFUSED}: {type(error).__name__}"
 
 
 def current_worker_limits(agent: Any) -> ScheduleWorkersConfig:
@@ -83,10 +280,10 @@ class AgentInstantiationService:
     def resolve_definition(self, agent_type: str) -> dict[str, Any]:
         runtime = self.agent._local_team_runtime
         if runtime is None:
-            raise ValueError("local_launcher_unavailable")
+            raise ValueError(LOCAL_LAUNCHER_UNAVAILABLE)
         definition = runtime.resolve_definition(agent_type)
         if definition is None:
-            raise ValueError("agent_definition_unavailable")
+            raise ValueError(AGENT_DEFINITION_UNAVAILABLE)
         return cast(dict[str, Any], definition)
 
     def validate_type(
@@ -94,16 +291,16 @@ class AgentInstantiationService:
     ) -> tuple[dict[str, Any], ScheduleWorkersConfig]:
         limits = current_worker_limits(self.agent)
         if agent_type in limits.denied_agent_types:
-            raise PermissionError("agent_type_disallowed")
+            raise PermissionError(AGENT_TYPE_DISALLOWED)
         definition = self.resolve_definition(agent_type)
         if automatic:
             if not limits.enabled or (
                 agent_type not in limits.eligible_agent_types
                 and not default_type_allowed(self.agent, agent_type, definition)
             ):
-                raise PermissionError("agent_type_ineligible_for_automatic_launch")
+                raise PermissionError(AGENT_TYPE_INELIGIBLE)
             if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
-                raise PermissionError("automatic_manager_launch_forbidden")
+                raise PermissionError(MANAGER_LAUNCH_FORBIDDEN)
         return definition, limits
 
     def validate_pool_start(self, agent_type: str) -> None:
@@ -112,9 +309,9 @@ class AgentInstantiationService:
         from custom_agents.worker_pool_settings import current_worker_pool_settings
 
         if not current_worker_pool_settings(self.agent).enabled:
-            raise PermissionError("worker_pools_disabled")
+            raise PermissionError(WORKER_POOLS_DISABLED)
         if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
-            raise PermissionError("automatic_manager_launch_forbidden")
+            raise PermissionError(MANAGER_LAUNCH_FORBIDDEN)
 
     def capacity(self, agent_type: str, limits: ScheduleWorkersConfig) -> LaunchCapacity:
         """The limits a start is checked against, read now (custom_agents.worker_pool_limits)."""
@@ -147,7 +344,7 @@ class AgentInstantiationService:
             if mcp_profile_names:
                 # An agent cannot add MCP servers to a new agent; MCP
                 # connections are attached through the MCP registry.
-                raise PermissionError("mcp_profile_names_not_accepted_from_agents")
+                raise PermissionError(MCP_PROFILES_FROM_AGENTS)
             definition, limits = self.validate_type(
                 agent_type, automatic=source == "schedule"
             )
@@ -157,7 +354,7 @@ class AgentInstantiationService:
             if binding is not None and not definition_is_current(binding, definition):
                 raise PermissionError(AGENT_DEFINITION_CHANGED)
             if not owner_id:
-                raise PermissionError("launch_requires_canonical_owner")
+                raise PermissionError(LAUNCH_REQUIRES_OWNER)
             # Who may start agents is decided before this point: the per-call
             # access hook for instantiate_agent, the schedule's saved and
             # validated policy for scheduled starts, and trusted runtime code
@@ -168,11 +365,11 @@ class AgentInstantiationService:
                     or binding.owner_canonical_user_id != owner_id
                     or binding.target_agent_type != agent_type
                 ):
-                    raise PermissionError("schedule_launch_identity_mismatch")
+                    raise PermissionError(SCHEDULE_LAUNCH_IDENTITY_MISMATCH)
                 self.validate_schedule_start(binding, occurrence_id)
             ttl = idle_ttl_seconds
             if ttl is not None and (ttl <= 0 or ttl > limits.max_idle_ttl_seconds):
-                raise ValueError("idle_ttl_outside_operator_limits")
+                raise ValueError(IDLE_TTL_OUTSIDE_LIMITS)
             launch_id = launch_id_for(self.agent.team_id, owner_id, request_id)
             now = utc_now()
             launch = AgentLaunchV1(
@@ -211,9 +408,9 @@ class AgentInstantiationService:
                     agent_type, automatic=source == "schedule"
                 )
                 if launch_definition_digest(final_definition) != record.definition_digest:
-                    raise PermissionError("agent_definition_changed_before_start")
+                    raise PermissionError(DEFINITION_CHANGED_BEFORE_START)
                 if ttl is not None and ttl > final_limits.max_idle_ttl_seconds:
-                    raise PermissionError("idle_ttl_limit_changed_before_start")
+                    raise PermissionError(IDLE_TTL_LIMIT_CHANGED)
                 if source == "schedule":
                     self.validate_schedule_start(binding, occurrence_id)
                 if source == "pool":
@@ -229,23 +426,16 @@ class AgentInstantiationService:
                     )
                 )
                 if not result.accepted:
-                    self.repository.update(
-                        record,
-                        state=AgentLaunchState.FAILED,
-                        reason=result.reason or "launcher_rejected_start",
-                    )
+                    self._fail_start(record, result.reason)
                 return result.model_copy(update={"created": True})
             except (ValueError, PermissionError) as exc:
-                self.repository.update(
-                    record, state=AgentLaunchState.FAILED, reason=str(exc)
-                )
+                reason = launcher_refusal_reason(exc)
+                self._fail_start(record, reason, error=exc)
                 return AgentLaunchResultV1(
-                    status="denied", launch_id=launch_id, reason=str(exc), created=True
+                    status="denied", launch_id=launch_id, reason=reason, created=True
                 )
             except Exception:
-                self.repository.update(
-                    record, state=AgentLaunchState.FAILED, reason="construction_failed"
-                )
+                self._fail_start(record, CONSTRUCTION_FAILED)
                 self.agent._logger.exception(
                     "Worker construction failed",
                     extra={"launch_id": launch_id, "named_agent_type": agent_type},
@@ -253,11 +443,61 @@ class AgentInstantiationService:
                 return AgentLaunchResultV1(
                     status="failed",
                     launch_id=launch_id,
-                    reason="construction_failed",
+                    reason=CONSTRUCTION_FAILED,
                     created=True,
                 )
         except (ValueError, PermissionError, LaunchConflict) as exc:
-            return AgentLaunchResultV1(status="denied", reason=str(exc))
+            return self._refused_before_reservation(exc, agent_type=agent_type)
+
+    def _fail_start(
+        self, record: AgentLaunchV1, reason: str | None, *, error: BaseException | None = None
+    ) -> None:
+        """Fail a reserved start with its reason and log it (``log_failed_start``).
+
+        A launcher refusal that gave no reason, or one this release does not
+        write (``is_current_reason``; a spawner's own text), is stored as
+        ``launcher_rejected_start``, which counts; the given text goes to the
+        log only. The full error goes into the log line only when the reason
+        kept just its type (a code says it all).
+        """
+
+        if reason is not None and not is_current_reason(reason):
+            logger.warning(
+                "A worker start was refused with a reason this release does not know; it is "
+                "stored as launcher_rejected_start. event=worker_launch_reason_replaced "
+                "team_id=%s agent_type=%s launch_id=%s given_reason=%s",
+                record.team_id,
+                record.named_agent_type,
+                record.launch_id,
+                reason,
+            )
+            reason = None
+        reason = reason or LAUNCHER_REJECTED_START
+        failed = self.repository.update(record, state=AgentLaunchState.FAILED, reason=reason)
+        untold = error is not None and refusal_code(error) is None
+        log_failed_start(failed, reason, error=error if untold else None)
+
+    def _refused_before_reservation(
+        self, error: BaseException, *, agent_type: str
+    ) -> AgentLaunchResultV1:
+        """A start refused before its record was reserved: no record to fail.
+
+        The reason is ``launcher_refusal_reason``; when it kept only the
+        error's type, the full error is logged for operators.
+        """
+
+        reason = launcher_refusal_reason(error)
+        if refusal_code(error) is None:
+            logger.warning(
+                "A worker start was refused by an error that is not a refusal code; only "
+                "its type is kept as the reason. event=worker_launch_refused team_id=%s "
+                "agent_type=%s reason=%s error=%s",
+                self.agent.team_id,
+                agent_type,
+                reason,
+                error,
+            )
+        return AgentLaunchResultV1(status="denied", reason=reason)
 
     def validate_schedule_start(
         self, binding: ScheduleWorkerBindingV1 | None, occurrence_id: str | None
@@ -266,14 +506,12 @@ class AgentInstantiationService:
         from custom_messages.contracts.schedule_worker_v1 import occurrence_identity
 
         if binding is None or occurrence_id is None:
-            raise PermissionError("schedule_launch_requires_durable_binding")
+            raise PermissionError(SCHEDULE_LAUNCH_NEEDS_BINDING)
         store = self.agent._schedule_store
         if bool(
             current_launch_config(self.agent).get("authorization.enabled", False)
         ) != bool(self.agent.authorization_config.get("enabled", False)):
-            raise PermissionError(
-                "launcher_authorization_mode_changed_restart_required"
-            )
+            raise PermissionError(AUTHORIZATION_MODE_CHANGED)
         current = store.worker_records.get_binding(
             binding.schedule_id, team_id=self.agent.team_id
         )
@@ -382,7 +620,121 @@ def launch_result(record: AgentLaunchV1) -> AgentLaunchResultV1:
     )
 
 
-def update_runtime_launch(agent: Any, *, state: AgentLaunchState) -> None:
+def _error_chain(error: BaseException, *, depth: int = 5) -> list[BaseException]:
+    """The error and those under it (``__cause__``, else ``__context__``), a few steps deep."""
+
+    chain: list[BaseException] = []
+    current: BaseException | None = error
+    while current is not None and len(chain) < depth:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _nats_refusal(error: BaseException) -> tuple[int, str] | None:
+    """A NATS JetStream refusal's code and description, when ``error`` is one."""
+
+    err_code = getattr(error, "err_code", None)
+    description = getattr(error, "description", None)
+    if isinstance(err_code, int) and isinstance(description, str) and description:
+        return err_code, description[:200]
+    return None
+
+
+def nats_refusal_in(error: BaseException) -> tuple[int, str] | None:
+    """The first NATS refusal (code, description) on the error or under it, else None."""
+
+    for current in _error_chain(error):
+        refusal = _nats_refusal(current)
+        if refusal is not None:
+            return refusal
+    return None
+
+
+# How a reason marks a NATS refusal: "<error type> (NATS <code>: <description>)".
+# Written by describe_error and read back by start_reason_kind.
+NATS_REFUSAL_MARK = " (NATS "
+
+
+def describe_error(error: BaseException) -> str:
+    """An error as people may see it: its type, plus a NATS refusal's code and description on it or under it."""
+
+    refusal = nats_refusal_in(error)
+    if refusal is None:
+        return type(error).__name__
+    return f"{type(error).__name__}{NATS_REFUSAL_MARK}{refusal[0]}: {refusal[1]})"
+
+
+def start_failure_reason(error: BaseException | None) -> str:
+    """The start record's reason for a worker that ended before it was ready.
+
+    A project refusal keeps its code (``refusal_code``), as refusals before
+    the start already do. Otherwise only the error's type is kept, plus the
+    code and description of a NATS JetStream refusal (server text such as
+    "maximum consumers limit reached"; ``describe_error``). Other error text
+    can carry anything, and this reason reaches TeamArchitect's review and
+    administrators' notices; the full error is in the log
+    (``event=agent_thread_crash``).
+
+    The errors under the one that ended the thread are read too, newest
+    first, so a cleanup error raised over the real refusal still names it.
+    """
+
+    if error is None:
+        return EXITED_BEFORE_READY
+    for current in _error_chain(error):
+        code = refusal_code(current)
+        if code is not None:
+            return code
+        if _nats_refusal(current) is not None:
+            break
+    return f"{CRASHED_BEFORE_READY}: {describe_error(error)}"
+
+
+# A worker type's shared queue on the NATS work stream could not be created
+# (custom_agents.worker_pool_controller); not a start record's reason, the
+# evidence of a start_failed problem.
+WORKER_QUEUE_UNAVAILABLE = "worker_queue_unavailable"
+
+
+def queue_failure_reason(error: BaseException) -> str:
+    """Why a worker type's queue could not be created, as people may see it."""
+
+    return f"{WORKER_QUEUE_UNAVAILABLE}: {describe_error(error)}"
+
+
+# The kinds of start failure, for the advice the start_failed texts give
+# (custom_agents.worker_pool_reviews): where to look differs for each.
+REASON_KIND_NATS = "nats_refusal"
+REASON_KIND_CRASH = "crash"
+REASON_KIND_STARTUP_TIMEOUT = "startup_timeout"
+REASON_KIND_REFUSAL = "refusal"
+
+
+def start_reason_kind(reason: str | None) -> str:
+    """Which kind of failure a reason written here describes.
+
+    Read back from the forms the writers above produce: a NATS refusal (a
+    crash or a queue failure with ``NATS_REFUSAL_MARK``, or any queue
+    failure), a crash or an exit before ready, a startup timeout, or else a
+    refusal code.
+    """
+
+    text = reason or ""
+    if text.startswith(f"{WORKER_QUEUE_UNAVAILABLE}: ") or (
+        text.startswith(f"{CRASHED_BEFORE_READY}: ") and NATS_REFUSAL_MARK in text
+    ):
+        return REASON_KIND_NATS
+    if text.startswith(f"{CRASHED_BEFORE_READY}: ") or text == EXITED_BEFORE_READY:
+        return REASON_KIND_CRASH
+    if text == STARTUP_TIMED_OUT:
+        return REASON_KIND_STARTUP_TIMEOUT
+    return REASON_KIND_REFUSAL
+
+
+def update_runtime_launch(
+    agent: Any, *, state: AgentLaunchState, reason: str | None = None
+) -> None:
     record = agent._worker_launch
     if record is None:
         return
@@ -394,18 +746,18 @@ def update_runtime_launch(agent: Any, *, state: AgentLaunchState) -> None:
         or current.host_id != PROCESS_HOST_ID
         or current.fence != record.fence
     ):
-        raise LaunchConflict("runtime_launch_identity_mismatch")
+        raise LaunchConflict(RUNTIME_LAUNCH_IDENTITY_MISMATCH)
     if state == AgentLaunchState.READY:
         if (
             current.state != AgentLaunchState.STARTING
             or current.lease_expires_at_utc <= utc_now()
         ):
-            raise LaunchConflict("stale_runtime_cannot_become_ready")
+            raise LaunchConflict(STALE_RUNTIME_NOT_READY)
         definition, _ = AgentInstantiationService(agent).validate_type(
             record.named_agent_type, automatic=record.source == "schedule"
         )
         if launch_definition_digest(definition) != record.definition_digest:
-            raise LaunchConflict("agent_definition_changed_during_startup")
+            raise LaunchConflict(DEFINITION_CHANGED_DURING_STARTUP)
         if record.source == "schedule":
             binding = agent._schedule_store.worker_records.get_binding(
                 record.schedule_id, team_id=agent.team_id
@@ -427,9 +779,73 @@ def update_runtime_launch(agent: Any, *, state: AgentLaunchState) -> None:
                 or schedule is None
                 or not schedule.enabled
             ):
-                raise LaunchConflict("launch_policy_revoked_before_readiness")
-    changes = {"ready_at_utc": utc_now()} if state == AgentLaunchState.READY else {}
+                raise LaunchConflict(LAUNCH_POLICY_REVOKED)
+    changes: dict[str, Any] = {"ready_at_utc": utc_now()} if state == AgentLaunchState.READY else {}
+    if reason is not None:
+        changes["reason"] = reason
     agent._worker_launch = repository.update(current, state=state, **changes)
+
+
+def log_failed_start(
+    record: AgentLaunchV1, reason: str, *, error: BaseException | None = None
+) -> None:
+    """One log line per start that ended before its worker was ready, where it ended.
+
+    Warning when the reason counts as a failed start of the type (the worker
+    pool controller then waits before the next start of it), info when it
+    does not. ``error`` is the full error when the stored reason kept only its
+    type; logs are for operators, the stored reason reaches people.
+    """
+
+    counted = counts_as_failed_start(reason)
+    logger.log(
+        logging.WARNING if counted else logging.INFO,
+        "A worker start ended before the worker was ready. event=worker_start_failed "
+        "team_id=%s agent_type=%s launch_id=%s agent_id=%s source=%s reason=%s counted=%s error=%s",
+        record.team_id,
+        record.named_agent_type,
+        record.launch_id,
+        record.agent_id,
+        record.source,
+        reason,
+        counted,
+        "-" if error is None else error,
+    )
+    if not is_current_reason(reason):
+        # Every writer in this release gives a current reason; one that does
+        # not would quietly switch the wait after failed starts off.
+        logger.warning(
+            "A failed start has a reason this release does not know, so it is not counted "
+            "as a failed start of its type. event=worker_start_reason_unknown team_id=%s "
+            "agent_type=%s launch_id=%s reason=%s",
+            record.team_id,
+            record.named_agent_type,
+            record.launch_id,
+            reason,
+        )
+
+
+def record_worker_exit(
+    agent: Any, crash: BaseException | None, *, stopped_because: str | None = None
+) -> None:
+    """Settle a started worker's record when its thread ends (``strands_team.instantiate_agent_type``).
+
+    A worker that was ready retires. One that ended before it was ready failed:
+    with the reason the runtime asked it to stop for (``stopped_because``: a
+    startup timeout, a revoked start, the runtime stopping), since the stop
+    caused the exit, or else with its crash (``start_failure_reason``). The
+    worker pool controller counts it as a failed start of the type when the
+    reason counts (``counts_as_failed_start``) and waits before the next start.
+    """
+
+    if agent._worker_ready:
+        update_runtime_launch(agent, state=AgentLaunchState.RETIRED)
+        return
+    if agent._worker_launch is None:
+        return
+    reason = stopped_because or start_failure_reason(crash)
+    update_runtime_launch(agent, state=AgentLaunchState.FAILED, reason=reason)
+    log_failed_start(agent._worker_launch, reason)
 
 
 def renew_runtime_launch(agent: Any) -> None:

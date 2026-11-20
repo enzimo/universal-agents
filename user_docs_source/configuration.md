@@ -905,14 +905,42 @@ agent:
     default_max_workers_per_type: 4   # Pool size until TeamArchitect sets another.
     max_workers_per_type_ceiling: 16  # Most workers of one type; TeamArchitect cannot go above it.
     max_total_workers_per_team: 32    # Most workers of the team, however they were started.
-    max_launches_per_type_per_hour: 60
+    max_launches_per_type_per_hour: 60 # Most starts of one worker type in an hour.
     scale_up_wait_seconds: 20         # A task waiting this long with no free worker starts another.
 ```
 
+A worker that fails to start, or stops before it is ready, counts as a failed
+start of its type. Starts the runtime stopped itself, for example during a
+restart, starts ended because someone changed a schedule or the agent
+definition at that moment, starts stopped by a schedule's own startup timeout
+when it is shorter than the type's (`schedule_startup_timed_out`: the
+schedule's setting is the cause), and failures an older release recorded
+without a reason or with its error text do not count. The next start of a type
+waits 10 seconds after a failure, twice as long after each further failure in
+a row, up to 10 minutes, and only one start is tried at a time; a start that
+stopped responding for several minutes no longer holds the next one, but still
+takes a pool slot (it is named as hung for an hour, then counted only among the
+workers whose state cannot be checked). A worker of the type that becomes
+ready resets the wait. A type whose workers keep crashing is
+tried about 11 times in its first hour instead of reaching
+`max_launches_per_type_per_hour`. When two starts in a row fail while tasks
+wait, TeamArchitect gets a review and administrators get an Inbox notice; both
+name the failure. A single failure only delays the next start. A start refused
+by `max_launches_per_type_per_hour` opens that review and notice at once; when
+no start failed, they point at why workers of the type start so often, for
+example workers that stop soon after they become ready. A start the runtime
+refuses before it begins, for example because the agent definition cannot be
+read, opens them on the second refusal in a row, and is tried again on every
+pass until the cause is fixed. So does a worker type whose queue the NATS
+server refuses to create, for example because the work stream has reached its
+consumer limit; a timeout or a temporarily unavailable NATS server is only
+logged. The review and the notice say where to look for each kind of failure.
+
 TeamArchitect sets pool sizes itself inside the ceilings, for a while or for
-good, when it reviews a pool at its limit, a model provider that keeps refusing
-calls, or workers that cannot start. Administrators get an Inbox notice of each
-change and of problems that keep coming back. Only an operator changes the
+good, when it reviews a pool at its limit or a model provider that keeps
+refusing calls. For workers that cannot start, a pool size does not help:
+TeamArchitect reports the failure to administrators. Administrators get an
+Inbox notice of each change and of problems that keep coming back. Only an operator changes the
 ceilings. The full list of settings, with comments, is in `config.example.yaml`.
 
 Upgrading moves `agent.schedule_workers.max_total_workers_per_team` and

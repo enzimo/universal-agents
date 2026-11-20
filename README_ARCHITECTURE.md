@@ -357,6 +357,51 @@ each. They run in parallel on as many workers as the team allows:
   when tasks waited `agent.worker_pools.scale_up_wait_seconds` with no free
   worker, up to the type's pool size and the team limit. Workers above a lowered
   size leave once they hold no work; idle workers leave after their idle time.
+  A start counts as successful only once its worker is ready. A start that
+  ends before then fails its start record with the reason: a crash (the error
+  type and a NATS refusal's code and text), `startup_timed_out`, or a refusal
+  code from a fixed list (`KNOWN_START_CODES`; never free error text, since
+  the reason reaches TeamArchitect and administrators). Only failures that say
+  something about the type count (`counts_as_failed_start`): a start the
+  runtime ended (shutdown, restart cleanup), one ended by an edit made while it
+  started (a schedule's policy, the definition, a limit, automatic starts
+  switched off), one ended by a schedule's own startup timeout that is shorter
+  than its type's (`schedule_startup_timed_out`), and an older release's record
+  without a reason or with its free error text (never shown either) do not.
+  After a failure the controller waits 10 seconds before the next start of the
+  type, doubling with each failure in a row up to 10 minutes (fixed values; a
+  new setting would change the team transfer's settings section), then makes
+  exactly one start and none while it is still starting. A start the launcher
+  stopped, or cannot check, that has stayed unknown for over five minutes (or
+  the start lease, when longer) is hung: it no longer holds the next start,
+  but it keeps its pool slot, and until an hour after it became unknown the pool view (`starts_hung`) and
+  the start_failed and capacity texts name it; after that it shows only as
+  `workers_unknown`. A worker of the type that becomes ready clears the failed
+  starts before it: those that ended before it was ready, and those whose
+  start was made before its own. Two failures in a row while tasks wait
+  open a `start_failed` review and an administrators' notice; both name the
+  failure and say that a larger pool or a higher start limit does not help. A
+  refusal by the hourly start limit opens it at once; with no failed start the
+  text points at how often workers of the type are started instead. A
+  launcher refusal made before a start is recorded (for example the type's
+  definition cannot be read) opens it on the second refusal in a row (the
+  controller counts them in memory) and its text names the refusal; such a
+  start is tried again every pass without a wait. A type whose shared queue
+  NATS refuses to create (for example 10026 at the work stream's consumer
+  limit) is shown in the pool view (`queue_unavailable`) and reported the same
+  way from the second pass; a timeout or a 503 "temporarily unavailable"
+  answer is only logged (`event=worker_pool_queue_create_failed`). The texts'
+  advice follows the kind of failure: the NATS server and stream limits for a
+  NATS refusal, the runtime log for a crash, what is slow at startup for a
+  timeout, the definition and denied types for a refusal code. A schedule's
+  blocked reason likewise keeps only known codes (`block_reason`). Only a problem of failed starts ends
+  as soon as a worker of the type is ready; the others end after
+  `review_repeat_after_minutes` without being seen. Until
+  2026-11-19 an accepted start counted as success at once. Workers that
+  crashed at start (their stream was at its NATS consumer limit) were
+  restarted every pass until the hourly start limit refused them, and
+  TeamArchitect saw only that refusal, with advice to check the start limits.
+  That refusal is now logged once when it begins and once when it ends.
 - **Pool sizes.** `agent.worker_pools.default_max_workers_per_type` (4) applies
   until TeamArchitect sets another size, lasting or until a time, with
   `set_worker_pool_limit`; it can never exceed the operator ceilings

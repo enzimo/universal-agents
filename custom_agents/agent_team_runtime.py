@@ -121,6 +121,16 @@ class LocalAgentShutdown(Protocol):
     ) -> None: ...
 
 
+class LocalLaunchStop(Protocol):
+    """Ask an unready worker of this process to stop; True once its thread ended.
+
+    ``reason`` is why (a startup timeout, a revoked start); a worker that was
+    not ready keeps it as its start record's reason.
+    """
+
+    def __call__(self, launch: AgentLaunchV1, *, reason: str) -> bool: ...
+
+
 @dataclass(frozen=True)
 class LocalAgentTeamRuntime:
     """Minimal team-owned capabilities consumed by ``UniversalAgent``."""
@@ -134,7 +144,7 @@ class LocalAgentTeamRuntime:
     shutdown_agents: LocalAgentShutdown
     resolve_definition: Callable[[str], dict[str, Any] | None]
     inspect_launch: Callable[[AgentLaunchV1], str]
-    stop_launch: Callable[[AgentLaunchV1], bool]
+    stop_launch: LocalLaunchStop
     local_workers: Callable[[str], tuple[LocalWorkerStatus, ...]] = local_worker_statuses
     drain_worker: Callable[[str], bool] = drain_local_worker
 

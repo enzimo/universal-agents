@@ -1280,6 +1280,12 @@ class UniversalAgent(BaseModel):
     # Worker queues the pool controller made sure exist, and its latest view of
     # every pool (custom_agents.worker_pool_controller; read by inspect_worker_pools).
     _ensured_worker_queues: set[str] = PrivateAttr(default_factory=set)
+    # Worker types whose starts the hourly start limit refuses right now; the
+    # controller logs when a type enters and leaves this set.
+    _pool_rate_limited_types: set[str] = PrivateAttr(default_factory=set)
+    # Refusals before a start record, in a row per worker type; the controller
+    # reports the type's start problem from the second on.
+    _pool_refusals_in_row: Dict[str, int] = PrivateAttr(default_factory=dict)
     # When the team lead removes gone workers' NATS consumers again (monotonic
     # time), or None when no further sweep is needed (custom_agents.worker_consumer_cleanup).
     _worker_consumer_sweep_at: Optional[float] = PrivateAttr(default=None)

@@ -70,6 +70,17 @@ class LaunchConflict(RuntimeError):
     """The launch fence, identity, or capacity changed before a transition."""
 
 
+# Codes of the LaunchConflict refusals below; one can become a start's reason
+# (custom_agents.agent_instantiation_service.KNOWN_START_CODES).
+LAUNCH_IDENTITY_CONFLICT = "launch_identity_conflict"
+LAUNCH_FENCE_MUST_ADVANCE = "launch_fence_must_advance"
+STALE_LAUNCH_FENCE = "stale_launch_fence"
+STALE_LAUNCH_LEASE = "stale_launch_lease"
+LAUNCH_CONFLICT_CODES = frozenset(
+    {LAUNCH_IDENTITY_CONFLICT, LAUNCH_FENCE_MUST_ADVANCE, STALE_LAUNCH_FENCE, STALE_LAUNCH_LEASE}
+)
+
+
 class AgentLaunchRepository:
     def __init__(self, settings: StorageSettings) -> None:
         self.settings = settings
@@ -171,7 +182,7 @@ class AgentLaunchRepository:
                     launch.owner_canonical_user_id,
                     launch.source,
                 ):
-                    raise LaunchConflict("launch_identity_conflict")
+                    raise LaunchConflict(LAUNCH_IDENTITY_CONFLICT)
                 conn.commit()
                 return existing, False
             active = [item for item in records if item.state in ACTIVE_LAUNCH_STATES]
@@ -260,7 +271,7 @@ class AgentLaunchRepository:
     ) -> AgentLaunchV1:
         p = self.dialect.bind
         if record.fence != expected_fence + 1:
-            raise LaunchConflict("launch_fence_must_advance")
+            raise LaunchConflict(LAUNCH_FENCE_MUST_ADVANCE)
         with self._connect() as conn:
             cursor = conn.execute(
                 f"UPDATE agent_launches SET state={p},fence={p},updated_at={p},payload_json={p} WHERE launch_id={p} AND team_id={p} AND agent_id={p} AND fence={p} AND state={p}",
@@ -277,7 +288,7 @@ class AgentLaunchRepository:
                 ),
             )
             if cursor.rowcount != 1:
-                raise LaunchConflict("stale_launch_fence")
+                raise LaunchConflict(STALE_LAUNCH_FENCE)
             conn.commit()
         return record
 
@@ -323,7 +334,7 @@ class AgentLaunchRepository:
                 or current.state
                 not in {AgentLaunchState.STARTING, AgentLaunchState.READY}
             ):
-                raise LaunchConflict("stale_launch_lease")
+                raise LaunchConflict(STALE_LAUNCH_LEASE)
             replacement = current.model_copy(
                 update={
                     "lease_expires_at_utc": now + timedelta(seconds=lease_seconds),
@@ -342,7 +353,7 @@ class AgentLaunchRepository:
                 ),
             )
             if cursor.rowcount != 1:
-                raise LaunchConflict("stale_launch_fence")
+                raise LaunchConflict(STALE_LAUNCH_FENCE)
             conn.commit()
             return replacement
 
