@@ -396,8 +396,9 @@ seconds. User actions still use authenticated HTTP requests.
 Messages accepted on one device reappear on another device signed in as the same
 canonical user, and Website process restarts do not erase them. The thread list
 also stays in step across devices within about two seconds: a thread renamed,
-deleted or started on one device updates on the others, and the pulsing dot
-shows on every device while the agent is working on a reply. Use a message
+deleted or started on one device updates on the others, and while the team
+works on a request, its chat's triangles pulse and the chat names who is
+working on every device. Use a message
 bubble's copy icon to copy that message's raw markdown or text. Each
 canonical user sees only their own server sessions and durable
 transcript. Use Log out, at the bottom of Settings' left column, before
@@ -449,8 +450,22 @@ chats into sections:
   select a header to open or close it. The page remembers this in your browser.
 
 Each row shows the chat's name and how long ago anything was last posted in it
-(now, 5m, 3h, 2d), and below it the latest message (**You:** or the
-assistant's name) or what the chat is waiting on.
+(now, 5m, 3h, 2d), and below it a short row of triangles, then what the chat is
+waiting on, who is working on it, or the latest message (**You:** or the
+assistant's name).
+
+The triangles are the chat's turns, oldest first: a grey one for each request
+you sent, followed by one for each kind of agent that worked on it, in that
+agent's color (gold for the team lead, the same colors as the activity mesh for
+the others). A row shows at most six; when the chat has older turns, the first
+one is drawn as a dotted outline. The triangles of the agents working on your
+request right now glow and pulse, and the line names them, for example
+**Web Research Agent working**. If you turned off Interface Animation or your
+system asks for reduced motion, the working triangles glow without pulsing.
+Rest the mouse on a chat to see its last messages; the bottom of that card
+shows the triangles again and names every kind of agent that worked in the
+chat. Screen readers hear who is working (for example "Working: team lead,
+Web Research Agent").
 
 Right-click a chat to open its menu. On a touch screen, press and hold the
 chat; with a keyboard, press the menu key or Shift+F10 on the chat. The menu

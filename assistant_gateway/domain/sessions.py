@@ -207,6 +207,10 @@ class WebChatThreadRecord:
     # Whether the team posted after a snoozed thread's ``hidden_at_sequence``
     # (``SNOOZE_SILENT_*`` say what does not count); read only for snoozed threads.
     team_posted_after_hiding: bool = False
+    # Web Chat's agent trail: the thread's stored copy (``assistant_gateway.domain.agent_trail``), and the task of
+    # the request running in its current conversation, which agents name in their records.
+    agent_trail_json: str | None = None
+    running_task_id: str | None = None
 
 
 @dataclass

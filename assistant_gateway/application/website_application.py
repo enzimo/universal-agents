@@ -595,6 +595,21 @@ class WebTranscriptEventPageV1(WebsiteContractV1):
     has_more: bool
 
 
+class WebChatWorkingAgentV1(WebsiteContractV1):
+    """An agent type working on a thread's request now (Web Chat's agent trail), with the name the page shows."""
+
+    agent_type: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=200)
+    lead: bool = False
+
+
+class WebChatThreadWorkingV1(WebsiteContractV1):
+    """Who works on one listed thread's running request now, the team lead first."""
+
+    session_key: str = Field(min_length=1, max_length=240)
+    agents: tuple[WebChatWorkingAgentV1, ...] = Field(min_length=1, max_length=64)
+
+
 class WebChatThreadStatesV1(WebsiteContractV1):
     """Live thread-list state each open page compares on every event read.
 
@@ -617,6 +632,9 @@ class WebChatThreadStatesV1(WebsiteContractV1):
     # Run concurrently switch stays locked for them; busy_session_keys can end
     # sooner (a reply wait times out or the gateway restarts).
     open_request_session_keys: tuple[str, ...] = ()
+    # Listed threads whose running request agents work on now, from the agents' signed records matched to the
+    # thread's own running request (request_agents_service.working). The page pulses their trail triangles.
+    working: tuple[WebChatThreadWorkingV1, ...] = ()
 
 
 # How many threads the sidebar lists. The sessions route and every live read
@@ -634,6 +652,8 @@ def web_chat_threads_revision(threads: list[WebChatThread]) -> str:
     # the list is read, so it changes the revision on the next live page.
     # Message snippets and times are left out: pages update them from the
     # transcript events they already receive, without refetching the list.
+    # The agent trail is in (a new turn or agent type redraws the row); who
+    # works now is not, since every live read carries it (``working``).
     shown = sorted(
         (
             thread.session_key,
@@ -644,6 +664,11 @@ def web_chat_threads_revision(threads: list[WebChatThread]) -> str:
             thread.list_state.value if thread.list_state else "",
             thread.snoozed_until or "",
             thread.needs_you.value if thread.needs_you else "",
+            [
+                [entry.agent.agent_type, entry.agent.lead] if entry.agent is not None else []
+                for entry in thread.trail.entries
+            ],
+            thread.trail.has_older,
         )
         for thread in threads
     )

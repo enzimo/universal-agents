@@ -418,6 +418,44 @@ they already receive. Pin, snooze, dismiss and restore use the thread update
 route with `thread_action`, with the same checks as rename. This state is not
 carried by the team transfer, like `parallel_thread`.
 
+**The agent trail.** Each thread row starts its second line with up to six triangles, one
+per turn: a request the person sent, then each agent type that worked on it (owner,
+2026-11-19 and 2026-11-20). The gateway learns who worked from the agents' signed records
+("The requests an agent works for"): `assistant_gateway.application.request_agents_service`
+hears every member change from the team view (`on_change`, each observer guarded on its
+own, `team_view.change_observers`) and hands each new (request, agent type) pair to one
+writer thread, which records it with `RequestRepository.record_request_agent`; the store
+changes only a request the gateway admitted as a thread's request (a row with a run state,
+running or finished) whose `active_task_id` the id names, so an id the gateway does not hold
+changes nothing (a plain read checks that before the write lock is taken), and the thread
+and its owner come from the gateway's own request record, never from the agent. The
+request's kind does not decide: the answer to the lead's question and a setup-page or
+credential-form result are recorded on the request's own row and rewrite its kind and
+creation time, so the trail is ordered by `first_agent_at`, written once when the first
+agent (the team lead, at hand-over) is recorded (review F1). A record that arrives after
+the request finished still counts (review F4). The writer's queue is bounded
+(4,096 pairs; a pair that does not fit is logged and taken again at the record's next
+change). The team lead is recorded when the
+gateway hands it the request (`interactive_submission`), because a lead turn shorter than
+the record's write interval would otherwise be missed. The writer keeps first-reported
+order and tries a failed write again after 0.5, 2 and 5 seconds, since the team view tells
+observers only when a record changes; a type the store refuses is final. The agent types
+live with the request (`gateway_requests.agent_types_json`); the thread keeps a copy
+(`gateway_sessions.agent_trail_json`: the last six entries, whether older ones exist, and
+every agent type that worked in it) because the thread list is read every two seconds and
+may only use index lookups. The copy is a pure function of the requests
+(`assistant_gateway.domain.agent_trail`), rebuilt from them in the same transaction
+whenever a request's agents change and after history cleanup, under the store's write
+lock (BEGIN IMMEDIATE on SQLite) and with the session row locked `FOR UPDATE` on
+PostgreSQL before the requests are read, so two writers of one thread take turns and
+neither writes a copy made before the other's change (`storage.gateway_agent_trails`).
+Who works now is not stored: each list and live read matches the live records against
+the running request of each thread that page lists (`GatewayRequestAgents.working`), so a
+page only ever sees its own person's threads; a failure there leaves the stored trails and
+nobody working, logged once a minute per person. The list revision follows the trail, not
+who works, which every live read carries as `working`. Neither the requests nor this copy
+is carried by the team transfer.
+
 **Parallel threads.** Web Chat's **Run concurrently** switch is a setting of
 each thread (owner, 2026-10-29), stored on its gateway session
 (`gateway_sessions.parallel_thread`; internally such a thread is a parallel
@@ -6538,6 +6576,29 @@ so control messages about the tasks they hold still reach them, marked with that
 logged once with both digests (`event=team_agents_host_other_contract`), and
 `other_contract_hosts` lists such hosts for the Status page. A draining agent's own record
 says it takes no work too.
+
+**The requests an agent works for** (Web Chat's agent trail, 2026-11-20): an agent record
+may also carry `requests`, the root task ids of the people's requests the agent's model
+turns ran for now or since its previous record. Agents send no status messages any more,
+so the record is where the gateway can learn it live; `AgentStatus.request_task_ids` is a
+private attribute the gateway's team view sets from the record (`team_view.record_status`),
+never a field a message can set or a dump can carry. Each turn decides once, when it starts
+(`custom_agents.working_requests.turn_request_id`, kept on `TaskWork.request_task_id`):
+only a task whose signed context the gateway issued for a person, with no schedule, counts,
+and its `root_task_id` is the gateway's own request task, which delegated tasks carry
+unchanged. A schedule-run identity or a task without a signed context is answered without
+reading the store, and scheduled runs and system work report nothing. The signed
+`context_id` was not used because for a new request it is a digest of the request's task
+and files (`access_control.ownership.request_context_id`), which the gateway does not keep.
+Turn start and end report the agent's state (`turn_registry`, through the agent's own
+`_report_record_state`); a changed set rewrites the record within the 2-second rule but
+does not move `since`, which says when the state began. Ids reported since the last
+write are named once in the next record, so a turn shorter than the interval still
+reaches one. Only ids the contract takes go in (`RecordId`, at most 16): an id it refused
+would make the whole record unwritable and drop the agent from the team. The record names
+no person; any host of the installation can read these opaque task ids, as it can the
+task ids in work frames. This changed the contract digest, so every host of an
+installation must run this build (the pre-release rule); the ua-rust hosts follow later.
 
 **An agent process on another contract drains** (`custom_agents.agent_host`,
 `custom_agents.contract_drain`). When its host learns that the process runs another

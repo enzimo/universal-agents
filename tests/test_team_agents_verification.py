@@ -875,3 +875,17 @@ async def test_a_retry_waiting_for_trust_never_overwrites_a_newer_record_or_revi
             assert reader.agent("lead").state == "busy" and reader._agents["lead"].sequence == 102
         else:
             assert reader.agent("lead") is None and "lead" not in reader._agents
+
+
+@pytest.mark.asyncio
+async def test_the_requests_an_agent_record_names_reach_the_view_in_order_and_once():
+    """Web Chat's agent trail: a record's ``requests`` (root task ids from verified gateway-signed contexts) are
+    read as they are signed, each once; a record without them names none."""
+
+    async with _reading() as (reader, records, host):
+        assert reader.lead().requests == ()
+        await records.feed("agent", AGENT_KEY, _signed(_agent(sequence=101, state="busy",
+                                                               requests=["task_b", "task_a", "task_b"])))
+        await _until(lambda: reader.lead() is not None and reader.lead().requests == ("task_b", "task_a"))
+        await records.feed("agent", AGENT_KEY, _signed(_agent(sequence=102, state="idle")))
+        await _until(lambda: reader.lead() is not None and reader.lead().requests == ())

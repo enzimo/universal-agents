@@ -117,6 +117,7 @@ WEB_CHAT_MODULE_ASSETS = (
     "chat_thread_menu.mjs",
     "chat_thread_preview.mjs",
     "chat_thread_status.mjs",
+    "agent_trail.mjs",
     "workflow.mjs",
     "workflow_graph.mjs",
     "workflow_card.mjs",

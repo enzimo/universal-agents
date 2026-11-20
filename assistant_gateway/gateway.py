@@ -22,6 +22,7 @@ from assistant_gateway.storage_usage import StorageUsageNotices, build_storage_u
 from assistant_gateway.upload_retention import UploadRetention
 from assistant_gateway.history_cleanup import GatewayHistoryCleanup
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgePages
+from assistant_gateway.application.request_agents_service import GatewayRequestAgents
 from assistant_gateway.access_inbox import (
     GatewayAccessInbox,
     build_gateway_access_inbox,
@@ -579,40 +580,74 @@ async def _report_stale_blocks(access_inbox: GatewayAccessInbox, team_id: str) -
         logger.exception("Could not check blocks against the tool catalog. event=stale_block_check_failed team_id=%s", team_id)
 
 
-def _team_view(config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance) -> GatewayTeamView | None:
+def _team_view(
+    config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance,
+    agent_trail: Callable[[Any], None],
+) -> GatewayTeamView | None:
     """Who is live and who leads, from the team's records through the gateway's host (``assistant_gateway.team_view``).
 
     ``None`` without a host (command-line runs, or a gateway service on an instance the
     launcher never prepared): the saved route to the team lead is used as it is, and that is
     said once at start (``_follow_team_lead_at_start``). A change to the lead's record wakes
-    held guidance.
+    held guidance, and every member's change tells the agent trail which requests it works for
+    (``request_agents_service``); each observer is guarded on its own (``change_observers``).
     """
 
     message_host = getattr(runtime, "message_host", None)
     if message_host is None:
         return None
 
-    from assistant_gateway.team_view import GatewayTeamView
+    from assistant_gateway.team_view import GatewayTeamView, change_observers
 
-    view = GatewayTeamView(config.manager.team_id, on_change=guidance.lead_reported, logger=logger)
+    observers = {"held_guidance": guidance.lead_reported, "agent_trail": agent_trail}
+    view = GatewayTeamView(config.manager.team_id, on_change=change_observers(observers, logger), logger=logger)
     message_host.observe_team(view)
     return view
 
 
-def _team_view_and_presence(
-    config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance
-) -> tuple[GatewayTeamView | None, GatewayTeamPresence]:
-    """The team view (``_team_view``) and the Team page's projection of it; without a view the page lists no
-    members. Composed here so the host stays a composition root."""
+def _live_agent_reports(view: GatewayTeamView | None) -> list[Any]:
+    """The live members' records for the agent trail (``team_view.live_agent_reports``); none without a view."""
 
-    view = _team_view(config, runtime, guidance)
+    if view is None:
+        return []
+    from assistant_gateway.team_view import live_agent_reports
+
+    return live_agent_reports(view)
+
+
+def _agent_display_names(config: GatewayInstanceConfig) -> dict[str, str]:
+    """Each defined agent type's display name, from the agent catalog (``team_presence.configured_agent_classes``)."""
+
+    return {item["named_agent_type"]: item["display_name"] for item in configured_agent_classes(config)}
+
+
+def _team_view_and_presence(
+    config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance, requests: RequestRepository
+) -> tuple[GatewayTeamView | None, GatewayTeamPresence, GatewayRequestAgents]:
+    """The team view (``_team_view``), the Team page's projection of it, and Web Chat's agent trail
+    (``request_agents_service``), which hears every member change and reads the live records; without a view the
+    page lists no members and nobody is shown working. Composed here so the host stays a composition root."""
+
+    def agent_trail(status: Any) -> None:
+        from assistant_gateway.team_view import agent_report
+
+        request_agents.observe(agent_report(status))
+
+    view = _team_view(config, runtime, guidance, agent_trail)
+    request_agents = GatewayRequestAgents(
+        repository=requests,
+        live_reports=lambda: _live_agent_reports(view),
+        lead_agent_type=config.manager.named_agent_type,
+        agent_names=lambda: _agent_display_names(config),
+        logger=logger,
+    )
     presence = GatewayTeamPresence(
         members=view.statuses if view is not None else tuple,
         want_details=view.want_details if view is not None else lambda: None,
         list_agent_classes=lambda: configured_agent_classes(config),
         logger=logger,
     )
-    return view, presence
+    return view, presence, request_agents
 
 
 def _team_lead_tasks(follower: TeamLeadFollower | None, stop_event: asyncio.Event) -> list[asyncio.Task[None]]:
@@ -1089,9 +1124,10 @@ class UserGateway:
             logger=logger,
         )
         signed_in = SignedInPerson(sessions=self.session_repository, request_context=self._request_context_service)
-        # Who is live and who leads, from the team's records (None without a message host), and the Team page.
-        self._team_view, self.team_presence = _team_view_and_presence(
-            config, resolved_manager_runtime, self._thread_guidance
+        # Who is live and who leads, from the team's records (None without a message host), the Team page, and
+        # Web Chat's agent trail: who worked and works on each person's request (request_agents_service).
+        self._team_view, self.team_presence, self.request_agents = _team_view_and_presence(
+            config, resolved_manager_runtime, self._thread_guidance, self.request_repository
         )
         # Approving an MCP server stores grants through the Inbox's access
         # service (created below; looked up when a person approves).
@@ -1293,6 +1329,7 @@ class UserGateway:
             transcript=self._transcript_service,
             # A newly added person's first-time setup (assistant_gateway.personal_setup).
             personal_setup=self.access_inbox.personal_setup,
+            request_sent=self.request_agents.request_sent,
             logger=logger,
         )
         self.automated_submission = GatewayAutomatedSubmissionApplication(
@@ -1402,6 +1439,7 @@ class UserGateway:
             ),
             proactive_session_key=config.heartbeat.session_key,
             clock=self._clock,
+            request_agents=self.request_agents,
         )
         website_operations = WebsiteOperationsApplication(
             team=self.team_presence,
@@ -1530,6 +1568,8 @@ class UserGateway:
                 name="gateway_held_guidance_loop",
             ),
             *_team_lead_tasks(self._team_lead, self._stop_event),
+            # Records which agents worked on each request; message routing's part of the agent trail.
+            asyncio.create_task(self.request_agents.run(self._stop_event), name="gateway_request_agents"),
         ]
 
         if start_services:

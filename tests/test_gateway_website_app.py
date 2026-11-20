@@ -3787,13 +3787,12 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
         "messageLevelFromPayload(lastMessage));" in script
     )
     # The unread dot is read in words inside the row's button (review F18).
-    assert 'return thread.hasUnreadReply ? "New reply" : "";' in script
-    assert ".thread-row.is-pending .thread-active-indicator {" in styles
-    unfocused_pending_indicator_style = styles.split(
-        ".thread-row.is-pending:not(.is-active) .thread-active-indicator::before {",
-        maxsplit=1,
-    )[1].split("}", maxsplit=1)[0]
-    assert "0 0 14px rgba(2, 132, 199, 0.52);" in unfocused_pending_indicator_style
+    assert ': thread.unreadReplyLevel === "attention" ? "Reply needs attention" : "New reply";' in script
+    # Work shows in the agent trail (agent_trail.mjs), so the busy dot is gone:
+    # the indicator shows only unread replies.
+    assert "is-pending" not in styles and "is-pending" not in script
+    assert "thread-reply-pulse" not in styles
+    assert ".thread-row.has-unread .thread-active-indicator {" in styles
     unfocused_unread_row_style = styles.split(
         ".thread-row.has-unread:not(.is-active) {", maxsplit=1
     )[1].split("}", maxsplit=1)[0]
@@ -3803,13 +3802,8 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
         ".thread-row.has-attention:not(.is-active) {", maxsplit=1
     )[1].split("}", maxsplit=1)[0]
     assert "border-color: rgba(255, 214, 10, 0.70);" in unfocused_attention_row_style
-    pending_pulse_style = styles.split("@keyframes thread-reply-pulse {", maxsplit=1)[
-        1
-    ].split(".thread-title-tooltip", maxsplit=1)[0]
-    assert "opacity: 0.78;" in pending_pulse_style
-    assert "opacity: 0.42;" not in pending_pulse_style
     unread_indicator_style = styles.split(
-        ".thread-row.has-unread:not(.is-pending) .thread-active-indicator::before {",
+        ".thread-row.has-unread .thread-active-indicator::before {",
         maxsplit=1,
     )[1].split("}", maxsplit=1)[0]
     assert "background: var(--green-bright);" in unread_indicator_style

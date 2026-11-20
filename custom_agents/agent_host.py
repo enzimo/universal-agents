@@ -62,6 +62,12 @@ Why it is shaped this way:
   which checks every agent record's key against the same count; a two-part key an earlier release wrote is left to
   expire within three minutes. Exits write `exiting`, close every session returned to the attachment, and conditionally
   remove its verified record. Cancellation retains that work for upkeep.
+- **The requests an agent works for.** The record names the people's requests its model
+  turns run for (``requests``, ``custom_agents.working_requests``), and those reported since
+  the last write, once, so a turn shorter than the two-second interval still reaches a
+  record. Only ids the contract takes go in, at most ``AGENT_RECORD_REQUESTS_MAX``: an id it
+  refuses would make the whole record unwritable and drop the agent from the team. A changed
+  set rewrites the record but keeps ``since``, which says when the state began.
 - **A process on another contract drains.** While the contract's label is a pre-release,
   hosts of one installation refuse a peer whose contract digest differs (contract README
   "Versions"). The host learns that its process runs another contract from the team
@@ -91,9 +97,11 @@ from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Coroutine, Iterable, Mapping, Optional
 
 import rfc8785
+from pydantic import TypeAdapter, ValidationError
 
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.kinds import STATE_RECORDS
+from custom_messages.wire.models import RecordId
 from custom_messages.wire.partitions import agent_record_key
 from custom_agents.contract_drain import drain_agent, holds_work
 from custom_messages.wire.frame import Receiver, VerifiedFrame
@@ -144,6 +152,9 @@ _NOT_IN_TOKEN = re.compile(r"[^A-Za-z0-9_-]")
 SESSION_RENEW_SECONDS = 24 * 3600.0
 # An agent's record is written when its state changes, at most this often (README "State records").
 AGENT_RECORD_INTERVAL_SECONDS = 2.0
+# At most this many request ids in one record (contract: agent.schema.json ``requests`` maxItems).
+AGENT_RECORD_REQUESTS_MAX = 16
+_RECORD_ID = TypeAdapter(RecordId)
 # Refresh unchanged records with current certificates and repair a removed record.
 _AGENT_RECORD_TTL = STATE_RECORDS["agent"].ttl_seconds
 assert _AGENT_RECORD_TTL is not None
@@ -256,7 +267,11 @@ class _HostedAgent:
     state: str = "starting"
     accepting_work: bool = True
     since: Optional[datetime] = None
-    written: Optional[tuple[str, bool, str]] = None
+    # The people's requests its turns run for now, and every one reported since its last record was written
+    # (``_record_requests``): a turn that starts and ends between two writes still reaches one record (C06).
+    requests: tuple[str, ...] = ()
+    requests_seen: dict[str, None] = field(default_factory=dict)
+    written: Optional[tuple[str, bool, Optional[str], tuple[str, ...]]] = None
     written_at: float = float("-inf")
     record_sequence: int = 0
     write_due: Optional[asyncio.TimerHandle] = None
@@ -327,13 +342,14 @@ class AgentProcessHost:
                               state=state[0], accepting_work=state[1])
         self.loop.call_soon_threadsafe(self._spawn, lambda: self._open(hosted), "open_session")
 
-    def report(self, agent_id: str, state: str, accepting_work: bool) -> None:
-        """The agent's state now, from any thread; its record follows (module docstring)."""
+    def report(self, agent_id: str, state: str, accepting_work: bool, requests: tuple[str, ...] = ()) -> None:
+        """The agent's state now and the people's requests its turns run for, from any thread; its record follows
+        (module docstring)."""
 
         if self.loop is None or self.loop.is_closed():
             return
         try:
-            self.loop.call_soon_threadsafe(self._noted, agent_id, state, accepting_work)
+            self.loop.call_soon_threadsafe(self._noted, agent_id, state, accepting_work, tuple(requests))
         except RuntimeError:  # the host's loop closed meanwhile
             return
 
@@ -1010,13 +1026,40 @@ class AgentProcessHost:
         hosted.closed_sessions.add(session)
         return True
 
-    def _noted(self, agent_id: str, state: str, accepting_work: bool) -> None:
+    def _noted(self, agent_id: str, state: str, accepting_work: bool, requests: tuple[str, ...] = ()) -> None:
         hosted = self.agents.get(agent_id)
-        if hosted is None or hosted.state == "exiting" or (state, accepting_work) == (hosted.state, hosted.accepting_work):
+        if hosted is None or hosted.state == "exiting":
             return
-        hosted.state, hosted.accepting_work = state, accepting_work
-        hosted.since = self.host.clock() if self.host is not None else None
+        state_changed = (state, accepting_work) != (hosted.state, hosted.accepting_work)
+        if not state_changed and requests == hosted.requests:
+            return
+        if state_changed:
+            # ``since`` is when the state began (team_view orders lead candidates by it); requests do not move it.
+            hosted.state, hosted.accepting_work = state, accepting_work
+            hosted.since = self.host.clock() if self.host is not None else None
+        hosted.requests = requests
+        hosted.requests_seen.update(dict.fromkeys(requests))
         self._record_soon(hosted)
+
+    def _record_requests(self, hosted: _HostedAgent) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The ids the agent's next record names, and those it leaves out (plan review C11).
+
+        The current turns' ids come first, then those reported since the last write. Only ids the contract
+        takes (``RecordId``) go in, at most ``AGENT_RECORD_REQUESTS_MAX``: one the schema refuses would make the
+        whole record unwritable, and the agent would drop out of the team. An exiting record names none.
+        """
+
+        if hosted.state == "exiting":
+            return (), ()
+        named = tuple(dict.fromkeys((*hosted.requests, *hosted.requests_seen)))
+        fitting = []
+        for item in named:
+            try:
+                fitting.append(_RECORD_ID.validate_python(item))
+            except ValidationError:
+                continue
+        kept = tuple(fitting[:AGENT_RECORD_REQUESTS_MAX])
+        return kept, tuple(item for item in named if item not in kept)
 
     def _record_soon(self, hosted: _HostedAgent) -> None:
         """Write the record now, or when the interval since the last write has passed."""
@@ -1040,7 +1083,8 @@ class AgentProcessHost:
 
         assert self.host is not None and self.host.records is not None and self.loop is not None
         async with hosted.write_lock:
-            current = (hosted.state, hosted.accepting_work, hosted.session)
+            requests, left_out = self._record_requests(hosted)
+            current = (hosted.state, hosted.accepting_work, hosted.session, requests)
             if hosted.session is None or hosted.session in hosted.closed_sessions:
                 return
             attached = self.agents.get(str(hosted.agent.id))
@@ -1055,12 +1099,8 @@ class AgentProcessHost:
             now = self.host.clock()
             # Above every earlier sequence for the key, also if the agent's id were ever used again.
             hosted.record_sequence = max(hosted.record_sequence + 1, int(now.timestamp() * 1000))
-            body: dict[str, Any] = {"team": self.team, "agent": str(hosted.agent.id), "agent_type": hosted.agent_type,
-                                    "session": hosted.session, "state": hosted.state,
-                                    "accepting_work": hosted.accepting_work,
-                                    "since": format_timestamp(hosted.since or now)}
-            if hosted.display_name:
-                body["display_name"] = hosted.display_name
+            body = self._record_body(hosted, requests, now)
+            self._leave_out(hosted, left_out)
             key = self._record_key(str(hosted.agent.id))
             try:
                 document = self.host.records.signed("agent", key, body, sequence=hosted.record_sequence, issued_at=now,
@@ -1075,8 +1115,35 @@ class AgentProcessHost:
                                  hosted.write_failures)
                 hosted.write_failures = 0
             hosted.written, hosted.written_at = current, self.loop.time()
-        if (hosted.state, hosted.accepting_work, hosted.session) != current:
+            for item in requests:  # named once; a turn that ended is left out of the next record
+                hosted.requests_seen.pop(item, None)
+        if (hosted.state, hosted.accepting_work, hosted.session, self._record_requests(hosted)[0]) != current:
             self._record_soon(hosted)  # it changed while this one was written
+
+    def _record_body(self, hosted: _HostedAgent, requests: tuple[str, ...], now: datetime) -> dict[str, Any]:
+        """The agent record's body as the agent's state is now (contract: state/agent.schema.json)."""
+
+        body: dict[str, Any] = {"team": self.team, "agent": str(hosted.agent.id), "agent_type": hosted.agent_type,
+                                "session": hosted.session, "state": hosted.state,
+                                "accepting_work": hosted.accepting_work,
+                                "since": format_timestamp(hosted.since or now)}
+        if hosted.display_name:
+            body["display_name"] = hosted.display_name
+        if requests:
+            body["requests"] = list(requests)
+        return body
+
+    def _leave_out(self, hosted: _HostedAgent, left_out: tuple[str, ...]) -> None:
+        """Log request ids the record cannot carry and forget them, so they never keep a record from being written."""
+
+        if not left_out:
+            return
+        self.logger.warning("An agent's record leaves out request ids the contract cannot carry or past its "
+                            "limit. event=agent_record_requests_left_out runtime=%s agent=%s left_out=%s "
+                            "limit=%s", self.profile.runtime, hosted.agent.id, len(left_out),
+                            AGENT_RECORD_REQUESTS_MAX)
+        for item in left_out:
+            hosted.requests_seen.pop(item, None)
 
     def _record_failed(self, hosted: _HostedAgent) -> None:
         assert self.loop is not None
@@ -1357,13 +1424,22 @@ def agent_record_state(agent: Any) -> tuple[str, bool]:
 
 
 def report_agent_state(agent: Any) -> None:
-    """Tell this process's host the agent's state (it writes the record when it changed)."""
+    """Tell this process's host the agent's state and the people's requests its turns run for
+    (``custom_agents.working_requests``); it writes the record when either changed."""
+
+    from custom_agents.working_requests import working_request_ids
 
     host = process_host()
     if host is None:
         return
     try:
-        host.report(str(agent.id), *agent_record_state(agent))
+        requests = working_request_ids(agent)
+    except Exception:  # the state is still reported, with no requests (plan review C01)
+        requests = ()
+        host.logger.warning("The requests an agent works for could not be read; its record leaves them out. "
+                            "event=agent_state_requests_failed agent=%s", getattr(agent, "id", None), exc_info=True)
+    try:
+        host.report(str(agent.id), *agent_record_state(agent), requests)
     except Exception:
         host.logger.warning("An agent's state could not be reported to its host. event=agent_state_report_failed "
                             "agent=%s", getattr(agent, "id", None), exc_info=True)

@@ -9,6 +9,14 @@ so a change to the row format fails ``tests/test_onboarding_aesthetic_preview.py
 instead of leaving the preview page broken. Pin, snooze, dismiss, restore,
 clearing a Woke mark and delete change the samples in memory, like the store
 would; nothing is saved.
+
+Each sample also has the agents that worked on its requests, built into the
+row's agent trail by the gateway's own rule (``assistant_gateway.domain.
+agent_trail``), and some have agents working now or a busy mark, which the
+preview's live updates carry like the gateway's (``live_states``): a row with
+two agents working, a busy row nobody has reported on yet, a row with twenty
+turns, a Needs you row, and specialists whose hashed colours are blue, violet,
+yellow and lime, the hardest for contrast.
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
+from assistant_gateway.application.request_agents_service import WorkingAgent, agent_name
 from assistant_gateway.application.web_chat_threads import (
     InvalidThreadPlacement,
     ThreadListState,
@@ -30,6 +39,7 @@ from assistant_gateway.application.website_application import (
     WebChatThreadAction,
     web_chat_threads_revision,
 )
+from assistant_gateway.domain.agent_trail import TRAIL_REQUESTS_READ, TrailAgent, encode_thread_trail, thread_trail
 from assistant_gateway.domain.request_state import REQUEST_STATUS_WAITING_FOR_CREDENTIAL
 from assistant_gateway.domain.sessions import ThreadHiddenAs, WebChatThreadRecord
 
@@ -37,12 +47,33 @@ OWNER = "usr_dev_preview"
 PROACTIVE_SESSION_KEY = "heartbeat"
 # One turn: who wrote it, what, and how many minutes ago.
 Turn = tuple[str, str, int]
+# The agent catalog's display names the preview shows (the gateway reads its own catalog).
+AGENT_NAMES = {
+    "WebResearchAgent": "Web Research Agent",
+    "MemReviewAgent": "Memory Review Agent",
+    "InternalImprovementAgent": "Internal Improvement Agent",
+    "LedgerAgent": "Ledger Keeper",
+    "SecurityAgent": "Security Reviewer",
+    "DocsWriterAgent": "Docs Writer",
+    "NetworkAgent": "Network Checker",
+}
+LEAD = TrailAgent("TeamArchitect", lead=True)
+
+
+def _agents(*types: str) -> tuple[TrailAgent, ...]:
+    """One request's agents: the team lead first (the gateway records it at hand-over), then these types."""
+
+    return (LEAD, *(TrailAgent(agent_type) for agent_type in types))
 
 
 @dataclass
 class _Sample:
     record: WebChatThreadRecord
     turns: list[Turn] = field(default_factory=list)
+    # The agents of each request, oldest request first; who works on the running one now; whether it is busy.
+    requests: list[tuple[TrailAgent, ...]] = field(default_factory=list)
+    working: tuple[str, ...] = ()
+    busy: bool = False
 
 
 def _record(session_key: str, title: str, **fields: object) -> WebChatThreadRecord:
@@ -75,25 +106,37 @@ def _samples(now: datetime) -> list[_Sample]:
                         running_request_status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
                         credential_form_expiries=(form_open_until,)),
                 [("user", "Can you check which Portainer stacks are unhealthy?", 2),
-                 ("assistant", "I need a Portainer API token to read your stacks. I've asked for one below.", 1)]),
+                 ("assistant", "I need a Portainer API token to read your stacks. I've asked for one below.", 1)],
+                requests=[_agents("NetworkAgent")]),
+        # Six triangles beside the longest waiting label (review C21).
         _Sample(_record("website:web-chat:github", "Finish the GitHub sign-in", has_waiting_setup=True),
                 [("user", "Open a pull request for the docs fix.", 6),
-                 ("assistant", "GitHub needs you to sign in first; the setup page is below.", 4)]),
+                 ("assistant", "GitHub needs you to sign in first; the setup page is below.", 4)],
+                requests=[_agents("DocsWriterAgent"), _agents(), _agents("NetworkAgent")]),
         _Sample(_record("website:web-chat:weekly", "Weekly infrastructure report", pinned=True),
-                [("assistant", "## Weekly report\n\n- All 14 hosts healthy\n- Disk on nas-2 at 81%", 2880)]),
+                [("assistant", "## Weekly report\n\n- All 14 hosts healthy\n- Disk on nas-2 at 81%", 2880)],
+                requests=[_agents("SecurityAgent"), _agents("SecurityAgent", "LedgerAgent")]),
         _Sample(_record("website:web-chat:vectors", "Compare vector databases"),
-                [("user", "Which of them support hybrid search out of the box?", 0)]),
+                [("user", "Which of them support hybrid search out of the box?", 0)],
+                requests=[_agents("WebResearchAgent"), _agents("WebResearchAgent", "InternalImprovementAgent")],
+                working=("WebResearchAgent", "InternalImprovementAgent"), busy=True),
         _Sample(_record("website:web-chat:tls", "Renew the TLS certificate", hidden_as=ThreadHiddenAs.SNOOZED.value),
                 [("user", "Remind me about the staging certificate.", 300),
                  ("assistant", "The staging certificate expires Friday.", 5)]),
         _Sample(_record("website:web-chat:onboarding", "Draft onboarding email for new hires"),
-                [("assistant", "Here's a draft with the three links new hires ask for most.", 12)]),
+                [("assistant", "Here's a draft with the three links new hires ask for most.", 12)],
+                requests=[_agents("DocsWriterAgent")]),
         _Sample(_record("website:web-chat:backup", "Fix flaky backup job"),
                 [("assistant", "The backup now retries twice before it reports a failure.", 190),
-                 ("user", "Thanks, that did it.", 180)]),
-        _Sample(_record("website:web-chat:offsite", "Plan the team offsite"), list(offsite)),
+                 ("user", "Thanks, that did it.", 180)],
+                requests=[_agents("InternalImprovementAgent"), _agents()]),
+        # Twenty turns: the row shows six, the leftmost hollow.
+        _Sample(_record("website:web-chat:offsite", "Plan the team offsite"), list(offsite),
+                requests=[_agents()] * 6 + [_agents("WebResearchAgent"), _agents("MemReviewAgent", "LedgerAgent")]),
         _Sample(_record("website:web-chat:contracts", "Summarize the vendor contracts"),
-                [("assistant", "Two contracts renew in January; both allow 60 days' notice.", 2900)]),
+                [("assistant", "Two contracts renew in January; both allow 60 days' notice.", 2900)],
+                # Busy, and nobody has reported yet: the team lead's triangle pulses.
+                requests=[_agents("LedgerAgent"), _agents()], busy=True),
         _Sample(_record("website:web-chat:budget", "Quarterly budget review", hidden_as=ThreadHiddenAs.SNOOZED.value),
                 [("assistant", "The draft budget is ready for your review.", 600)]),
         _Sample(_record("website:web-chat:newsletter", "Read the security newsletter", hidden_as=ThreadHiddenAs.SNOOZED.value),
@@ -103,6 +146,25 @@ def _samples(now: datetime) -> list[_Sample]:
         _Sample(_record("website:web-chat:printer", "Printer setup", hidden_as=ThreadHiddenAs.DISMISSED.value),
                 [("user", "The printer works now, thanks.", 7000)]),
     ]
+
+
+def _with_agents(thread: WebChatThread, sample: _Sample) -> WebChatThread:
+    """The row with who works now and its trail's names, as the gateway's ``_with_agents`` adds them."""
+
+    named = {(agent.agent_type, agent.lead) for agents in sample.requests for agent in agents}
+    names = {agent_type: agent_name(agent_type, lead, AGENT_NAMES) for agent_type, lead in named}
+    working = tuple(
+        WorkingAgent(agent_type, agent_name(agent_type, False, AGENT_NAMES), False) for agent_type in sample.working
+    )
+    return replace(thread, working=working, agent_names=names)
+
+
+def _trail_json(requests: list[tuple[TrailAgent, ...]]) -> str | None:
+    """The thread's stored trail, built like the store builds it (``storage.gateway_agent_trails``)."""
+
+    if not requests:
+        return None
+    return encode_thread_trail(thread_trail(list(reversed(requests[-TRAIL_REQUESTS_READ:])), requests))
 
 
 def _ordinary(role: str, content: str) -> bool:
@@ -116,6 +178,7 @@ class PreviewThreads:
         self._started = now
         self._samples = {sample.record.session_key: sample for sample in _samples(now)}
         for sample in self._samples.values():
+            sample.record = replace(sample.record, agent_trail_json=_trail_json(sample.requests))
             self._refresh(sample)
             if sample.record.hidden_as == ThreadHiddenAs.SNOOZED.value:
                 # The TLS thread woke a minute ago; the others sleep until tomorrow.
@@ -148,8 +211,25 @@ class PreviewThreads:
         for sample in self._samples.values():
             thread = web_chat_thread(sample.record, proactive_session_key=PROACTIVE_SESSION_KEY, now=now)
             if thread is not None:
-                threads.append(thread)
+                threads.append(_with_agents(thread, sample))
         return threads
+
+    def live_states(self, now: datetime) -> dict[str, object]:
+        """The live read's thread states as the gateway sends them (``WebChatThreadStatesV1``)."""
+
+        threads = self._threads(now)
+        busy = [sample.record.session_key for sample in self._samples.values() if sample.busy]
+        return {
+            "threads_revision": web_chat_threads_revision(threads),
+            "busy_session_keys": busy,
+            "open_request_session_keys": busy,
+            "working": [
+                {"session_key": thread.session_key, "agents": [
+                    {"agent_type": agent.agent_type, "lead": agent.lead, "name": agent.name} for agent in thread.working
+                ]}
+                for thread in threads if thread.working
+            ],
+        }
 
     def rows(self, now: datetime) -> list[dict[str, object]]:
         return [thread_list_payload(thread) for thread in self._threads(now)]

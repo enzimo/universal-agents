@@ -19,6 +19,7 @@ from assistant_gateway.domain.delivery import (
     DeliveryRecord,
     ScheduledTargetRecord,
 )
+from assistant_gateway.domain.agent_trail import trail_agent
 from assistant_gateway.domain.history import ConversationCut, GatewayHistoryDeleted, GatewayHistoryScope
 from assistant_gateway.domain.identity import (
     GatewayPersonRecordsDeleted,
@@ -95,6 +96,7 @@ from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
 from .turn_attachments import relocate_steering_attachment
+from .gateway_agent_trails import rebuild_thread_trail, record_request_agent, would_record
 
 
 def utc_now_iso() -> str:
@@ -1147,7 +1149,8 @@ class _RelationalGatewayStateRepository:
                     pinned INTEGER NOT NULL DEFAULT 0,
                     hidden_as TEXT,
                     hidden_until TEXT,
-                    hidden_at_sequence INTEGER
+                    hidden_at_sequence INTEGER,
+                    agent_trail_json TEXT
                 )
                 """
             )
@@ -1170,6 +1173,9 @@ class _RelationalGatewayStateRepository:
             )
             ensure_column(conn, "gateway_sessions", "hidden_as", "TEXT", logger=self._logger)
             ensure_column(conn, "gateway_sessions", "hidden_until", "TEXT", logger=self._logger)
+            # Web Chat's agent trail: a copy rebuilt from the thread's requests whenever their agents change
+            # (storage.gateway_agent_trails). Not carried by the team transfer, like the requests themselves.
+            ensure_column(conn, "gateway_sessions", "agent_trail_json", "TEXT", logger=self._logger)
             ensure_column(
                 conn, "gateway_sessions", "hidden_at_sequence", "INTEGER", logger=self._logger
             )
@@ -1202,7 +1208,9 @@ class _RelationalGatewayStateRepository:
                     owner_canonical_user_id TEXT,
                     created_at TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    run_state TEXT
+                    run_state TEXT,
+                    agent_types_json TEXT,
+                    first_agent_at TEXT
                 )
                 """
             )
@@ -1212,6 +1220,15 @@ class _RelationalGatewayStateRepository:
             )
             ensure_column(conn, "gateway_requests", "active_task_id", "TEXT", logger=self._logger)
             ensure_column(conn, "gateway_requests", "run_state", "TEXT", logger=self._logger)
+            # The agent types that worked on the request, first recorded first (assistant_gateway.domain.agent_trail).
+            ensure_column(conn, "gateway_requests", "agent_types_json", "TEXT", logger=self._logger)
+            # When its first agent was recorded: orders the trail, never rewritten (continuations rewrite created_at).
+            ensure_column(conn, "gateway_requests", "first_agent_at", "TEXT", logger=self._logger)
+            # Agents name a request by its task (storage.gateway_agent_trails.record_request_agent). Created after
+            # the column's ensure_column, so a store from before active_task_id opens too.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gateway_requests_active_task ON gateway_requests(active_task_id)"
+            )
             # Pending upload removals and original counts survive the same
             # commit that removes their attachment/transcript records.
             conn.execute("""CREATE TABLE IF NOT EXISTS gateway_history_cleanups (
@@ -2020,7 +2037,15 @@ class _RelationalGatewayStateRepository:
                       AND COALESCE(r.conversation_id, '') = COALESCE(s.conversation_id, '')
                       AND r.run_state = {bind}
                     LIMIT 1
-                ) AS running_request_status,{last_message_columns}
+                ) AS running_request_status,
+                (
+                    SELECT r.active_task_id FROM gateway_requests r
+                    WHERE r.session_key = s.session_key
+                      AND COALESCE(r.conversation_id, '') = COALESCE(s.conversation_id, '')
+                      AND r.run_state = {bind}
+                    LIMIT 1
+                ) AS running_task_id,
+                s.agent_trail_json,{last_message_columns}
                 q.updated_at_utc AS last_activity_at,
                 COALESCE(q.last_session_sequence, 0) AS last_sequence,
                 EXISTS (
@@ -2052,7 +2077,7 @@ class _RelationalGatewayStateRepository:
         ordinary = _ORDINARY_MESSAGE_PARAMS
         owner = owner_canonical_user_id
         # The naming message's condition is read twice (its text and files).
-        params: list[Any] = [*ordinary, *ordinary, RUN_STATE_RUNNING, PendingQueryStatus.OPEN.value]
+        params: list[Any] = [*ordinary, *ordinary, RUN_STATE_RUNNING, RUN_STATE_RUNNING, PendingQueryStatus.OPEN.value]
         # The setup pages' person, bound so that subquery runs once per query
         # (credential forms are read separately below).
         params.extend([TOOL_SETUP_STATUS_WAITING, owner, ThreadHiddenAs.SNOOZED.value, *_TEAM_POSTED_PARAMS])
@@ -2914,6 +2939,29 @@ class _RelationalGatewayStateRepository:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def record_request_agent(self, *, active_task_id: str, agent_type: str, lead: bool) -> Optional[str]:
+        """Record that ``agent_type`` worked on the person's request of ``active_task_id`` (Web Chat's agent trail).
+
+        The session key of the thread whose trail changed, or None when nothing changed: the type was already
+        recorded, or the id names no request of this gateway (storage.gateway_agent_trails). Raises
+        ``ValueError`` for an agent type the stored list could not be read back with, before writing. A plain read
+        decides first, so an id that changes nothing never takes the write lock (review F15).
+        """
+
+        agent = trail_agent(agent_type, lead)
+        with self._connect() as conn:
+            if not would_record(conn, self._dialect, active_task_id=active_task_id, agent=agent):
+                return None
+        with self._connect() as conn:
+            if not isinstance(conn, _BorrowedConnection):
+                conn.begin_write()  # reads then writes: take the write lock first
+            session_key = record_request_agent(
+                conn, self._dialect, active_task_id=active_task_id, agent=agent,
+                logger=self._logger, now=utc_now_iso(),
+            )
+            conn.commit()
+        return session_key
 
     def hold_guidance(self, record: HeldGuidanceRecord) -> None:
         values = asdict(record)
@@ -5258,6 +5306,7 @@ class _RelationalGatewayStateRepository:
             self._delete_history_deliveries(conn, scope, request_ids, deleted)
             self._restart_history_sessions(conn, scope, deleted)
             self._remove_emptied_threads(conn, scope, removable_thread, deleted, paths)
+            self._rebuild_agent_trails(conn, scope)
             deleted.attachment_paths = tuple(path for path in paths if path)
             if scope.order_id:
                 conn.execute(
@@ -5440,6 +5489,19 @@ class _RelationalGatewayStateRepository:
                 f"WHERE conversation_id = {bind} AND last_task_id = {bind}",
                 (now, cut.conversation_id, cut.latest_task_id),
             )
+
+    def _rebuild_agent_trails(self, conn: Any, scope: GatewayHistoryScope) -> None:
+        """Rebuild the agent trail of each of the person's threads that has one, so deleted requests leave no
+        triangles (storage.gateway_agent_trails)."""
+
+        bind = self._dialect.bind
+        rows = conn.execute(
+            f"SELECT session_key FROM gateway_sessions WHERE owner_canonical_user_id = {bind} "
+            "AND agent_trail_json IS NOT NULL ORDER BY session_key",
+            (scope.person_id,),
+        ).fetchall()
+        for row in rows:
+            rebuild_thread_trail(conn, self._dialect, str(row["session_key"]), logger=self._logger)
 
     def _remove_emptied_threads(
         self,

@@ -61,6 +61,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Protocol
 
+from assistant_gateway.application.request_agents_service import AgentReport
 from assistant_gateway.status_page import GATEWAY_SOURCE
 from custom_agents.agent_host import (
     LEAD_HOST_RUNTIME,
@@ -281,6 +282,43 @@ class JoinRefusal:
 ChangeObserver = Callable[[AgentStatus], None]
 
 
+def change_observers(observers: Mapping[str, ChangeObserver], logger: Optional[logging.Logger] = None) -> ChangeObserver:
+    """One observer for the view's ``on_change`` that tells each of ``observers`` in turn (plan review C02).
+
+    Each runs in its own ``try``: one that fails is logged with its name and the member, and the others, the rest
+    of the change and the view's ``changed`` (the lead follower's wake-up) still happen.
+    """
+
+    log = logger or _LOGGER
+
+    def observe(status: AgentStatus) -> None:
+        for name, observer in observers.items():
+            try:
+                observer(status)
+            except Exception:
+                log.warning("A team change observer failed; the others still ran. event=gateway_team_observer_failed "
+                            "observer=%s agent=%s", name, status.self_id, exc_info=True)
+
+    return observe
+
+
+def agent_report(status: AgentStatus) -> AgentReport:
+    """A member change as the request agents service reads it (``request_agents_service.AgentReport``)."""
+
+    return AgentReport(agent_id=str(status.self_id or ""), agent_type=str(status.named_agent_type or ""),
+                       lead=bool(status.is_team_lead), requests=status.request_task_ids,
+                       exiting=bool(status.is_exiting))
+
+
+def live_agent_reports(view: Optional["GatewayTeamView"]) -> list[AgentReport]:
+    """Every live member's record as a report, read straight from the records (no AgentStatus is built; C05)."""
+
+    if view is None:
+        return []
+    return [AgentReport(agent_id=item.agent, agent_type=item.agent_type, lead=item.is_lead, requests=item.requests)
+            for item in view.live().values()]
+
+
 @dataclass(frozen=True)
 class MemberDetails:
     """What one ``agent.status`` answer added to a member's records: its skills, its own Status page findings, and
@@ -314,7 +352,7 @@ def record_status(item: TeamAgent, team_id: str, *, details: Optional[MemberDeta
         available_skills=list(details.skills) if details is not None else [],
         status_findings=list(details.findings) if details is not None else [],
         last_seen_at=(seen_at or datetime.now(timezone.utc)).isoformat(), status_type=MessageMetaType.RESPONSE,
-    )
+    ).with_request_task_ids(() if exiting else item.requests)  # never serialized (AgentStatus.request_task_ids)
 
 
 class GatewayTeamView:

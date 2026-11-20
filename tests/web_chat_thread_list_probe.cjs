@@ -95,7 +95,8 @@ function inView(page) {
       twoLineRows: [...document.querySelectorAll(".thread-row")].filter(row => inside(row) && row.querySelector(".thread-detail")).length,
       rows: [...document.querySelectorAll(".thread-row")].filter(inside).length,
       headers: [...document.querySelectorAll(".thread-section-header")].filter(inside).map(header => header.querySelector(".thread-section-label").textContent),
-      cutWaiting: [...document.querySelectorAll(".thread-detail.is-waiting")].filter(line => line.scrollWidth > line.clientWidth).map(line => line.textContent),
+      // The words sit in .thread-detail-text beside the agent trail; that is the element that cuts (C21).
+      cutWaiting: [...document.querySelectorAll(".thread-detail.is-waiting .thread-detail-text")].filter(text => text.scrollWidth > text.clientWidth).map(text => text.textContent),
     };
   });
 }
@@ -174,14 +175,30 @@ function inView(page) {
     ]);
     checked.push("menu: right-click, arrows, Escape back to the row, Shift+F10 pin, Rename and Delete");
 
-    // A9: the hover card after ~400 ms with at most 4 two-line turns.
+    // A9: the hover card after ~400 ms with at most 4 two-line turns. The
+    // delay is timed inside the page, from the pointer reaching the row to the
+    // card being added, so a slow hover by Playwright (a live read can redraw
+    // the list while it hovers) cannot fail it (review C20).
+    await wide.page.evaluate(() => {
+      const timing = window.probePreviewTiming = { over: [], shown: [] };
+      document.querySelector("#thread-list").addEventListener("pointerover", event => {
+        const row = event.target.closest && event.target.closest(".thread-row");
+        if (row) timing.over.push([row.dataset.sessionKey, performance.now()]);
+      }, true);
+      new MutationObserver(records => records.forEach(record => record.addedNodes.forEach(node => {
+        if (node.classList && node.classList.contains("thread-preview")) timing.shown.push(performance.now());
+      }))).observe(document.body, { childList: true });
+    });
     await wide.page.hover('.thread-row[data-session-key="website:web-chat:weekly"] .thread-button');
     await wide.page.mouse.move(700, 600);
     const hoverTarget = '.thread-row[data-session-key="website:web-chat:offsite"] .thread-button';
     await wide.page.hover(hoverTarget);
-    await wide.page.waitForTimeout(250);
-    assert.equal(await wide.page.locator(".thread-preview").count(), 0, "nothing before about 400 ms");
-    await wide.page.waitForTimeout(600);
+    await wide.page.waitForSelector(".thread-preview .thread-preview-turn", { timeout: 5000 });
+    const timing = await wide.page.evaluate(() => window.probePreviewTiming);
+    const lastOther = Math.max(-1, ...timing.over.map(([key], index) => (key !== "website:web-chat:offsite" ? index : -1)));
+    const reached = timing.over.slice(lastOther + 1).find(([key]) => key === "website:web-chat:offsite")[1];
+    const shown = timing.shown.find(time => time >= reached);
+    assert.ok(shown - reached >= 350, `nothing before about 400 ms: ${JSON.stringify(timing)}`);
     const card = await wide.page.evaluate(() => ({
       turns: [...document.querySelectorAll(".thread-preview-turn")].length,
       lines: [...document.querySelectorAll(".thread-preview-text")].map(text => Math.round(text.getBoundingClientRect().height / parseFloat(getComputedStyle(text).lineHeight))),
@@ -189,7 +206,8 @@ function inView(page) {
     }));
     assert.ok(card.turns > 0 && card.turns <= 4, JSON.stringify(card));
     assert.ok(card.lines.every(lines => lines <= 2), JSON.stringify(card));
-    assert.equal(card.count, "4 turns");
+    // The footer names who worked in the thread before the count (agent trail, A7).
+    assert.equal(card.count, "Team lead, Web Research Agent, Memory Review Agent, Ledger Keeper · 4 turns");
     await wide.page.screenshot({ path: path.join(shots, "thread-hover.png") });
     // F7: Escape closes the card while the mouse stays on the row, and it does not come back.
     await wide.page.keyboard.press("Escape");
@@ -326,12 +344,14 @@ function inView(page) {
       await themed.page.waitForTimeout(300);
       await themed.page.screenshot({ path: path.join(shots, `thread-list-${scheme}.png`), clip: { x: 0, y: 0, width: 320, height: 880 } });
       measured[scheme] = await worstContrast(themed.page, {
-        waiting: ".thread-detail.is-waiting",
+        waiting: ".thread-detail.is-waiting .thread-detail-text",
         needsYouHeader: ".thread-section.is-needs-you .thread-section-header",
         status: ".thread-list-status-text",
         header: ".thread-section:not(.is-needs-you) .thread-section-header",
         age: ".thread-age",
-        snippet: ".thread-detail:not(.is-waiting)",
+        snippet: ".thread-detail.is-message .thread-detail-text",
+        // Who works now, in the team lead's gold (lead ruling on review C22).
+        working: ".thread-detail.is-working .thread-detail-text",
         title: ".thread-title",
       });
       assert.equal(await themed.page.evaluate(() => document.documentElement.dataset.colorMode), scheme);

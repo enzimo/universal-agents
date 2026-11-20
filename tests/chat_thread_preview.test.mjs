@@ -126,6 +126,25 @@ test("after about 400 ms over a row the card shows four turns with who and when 
   assert.equal(card().getAttribute("aria-hidden"), "true");
 });
 
+test("the footer shows the thread's agent trail and names the agent types that worked in it (A7)", async () => {
+  const { addRow, runTimers, over, answerAll, card } = fixture({ pages: { "": FIRST_PAGE } });
+  const trail = {
+    entries: [{ by: "person" }, { by: "agent", agent_type: "TeamArchitect", lead: true, name: "Team lead" },
+      { by: "agent", agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }],
+    has_older: true,
+    agents: [{ agent_type: "TeamArchitect", lead: true, name: "Team lead" },
+      { agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" },
+      { agent_type: "MemReviewAgent", lead: false, name: "Memory Review Agent" }],
+  };
+  over(addRow("alpha", { trail }).children[0]);
+  runTimers();
+  await answerAll();
+  const [footer] = byClass(card(), "thread-preview-footer");
+  assert.deepEqual(footer.children.map(child => child.className), ["thread-trail", "thread-preview-count"]);
+  assert.equal(footer.children[0].children.length, 3);
+  assert.equal(footer.children[1].textContent, "Team lead, Web Research Agent, Memory Review Agent · 12 turns");
+});
+
 test("touch and pen pointers never get a preview", () => {
   const { addRow, timers, over, card } = fixture({ pages: { "": FIRST_PAGE } });
   const row = addRow("alpha");

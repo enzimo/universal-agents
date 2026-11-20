@@ -5,7 +5,8 @@ from __future__ import annotations
 import hmac
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol, cast
 
 from typing_extensions import TypeIs
@@ -62,6 +63,8 @@ from assistant_gateway.application.website_application import (
     ActivatedWebEnrollmentTokenV1,
     WEB_CHAT_CHAT_ID,
     WebChatThreadStatesV1,
+    WebChatThreadWorkingV1,
+    WebChatWorkingAgentV1,
     web_chat_threads_revision,
     GatewayAttachmentContent,
     GatewayGeneratedSiteSession,
@@ -106,6 +109,7 @@ from assistant_gateway.application.workspace_browser import (
     GatewayWorkspaceAccess,
     WebsiteWorkspaceBrowser,
 )
+from assistant_gateway.application.request_agents_service import GatewayRequestAgents, agent_name
 from assistant_gateway.application.web_chat_threads import (
     InvalidThreadPlacement,
     ThreadListState,
@@ -135,6 +139,8 @@ from assistant_gateway.application.website_tasks import list_tasks, control_task
 from runtime_settings.appearance import DarkMetalAppearanceSettings, retired_dark_keys
 
 LOGGER = logging.getLogger(__name__)
+# A failure to read who works on a person's threads is logged at most this often per person (``_with_agents``).
+AGENTS_FAILURE_LOG_SECONDS = 60.0
 
 
 class GatewayBootstrapTokenSource(Protocol):
@@ -377,6 +383,7 @@ class WebsiteSessionApplication:
         awaiting_reply_session_keys: Callable[[], frozenset[str]],
         proactive_session_key: str,
         clock: GatewayClock,
+        request_agents: GatewayRequestAgents | None = None,
     ) -> None:
         self._sessions = sessions
         self._session_repository = session_repository
@@ -386,7 +393,7 @@ class WebsiteSessionApplication:
         self._manager_agent_id = manager_agent_id
         self._team_id = team_id
         # Sessions with a request whose agent reply the gateway still awaits
-        # (in memory, so every open page sees the same busy dot the sender does).
+        # (in memory, so every open page sees the same work the sender does).
         self._awaiting_reply_session_keys = awaiting_reply_session_keys
         # The configured key of the team's proactive session (heartbeat.
         # session_key): its threads are listed as "Updates" (web_chat_threads).
@@ -394,6 +401,11 @@ class WebsiteSessionApplication:
         # When snoozes wake (web_chat_threads.thread_list_state) and whether a
         # snooze time is in the future.
         self._clock = clock
+        # Web Chat's agent trail: who works on each listed thread now, and the names the page shows
+        # (request_agents_service). None where the gateway has no team view: rows then show their stored trail.
+        self._request_agents = request_agents
+        # When a failure to read who works was last logged, per person (``_with_agents``).
+        self._agents_failure_logged: dict[str, float] = {}
 
     def _owner_allows(
         self,
@@ -440,7 +452,59 @@ class WebsiteSessionApplication:
             thread = web_chat_thread(record, proactive_session_key=self._proactive_session_key, now=now)
             if thread is not None:
                 threads.append(thread)
-        return threads
+        return self._with_agents(threads, owner_canonical_user_id)
+
+    def _with_agents(self, threads: list[WebChatThread], owner_canonical_user_id: str) -> list[WebChatThread]:
+        """Each thread with who works on its running request now and its trail's agent names (agent trail).
+
+        Only this reader's own listed threads are matched (``GatewayRequestAgents.working``), so the owner rule
+        of the list holds for the agents too. The trail only decorates the list (plan review C15): if reading
+        who works fails, the threads keep their stored trails with type names and nobody working, and the
+        failure is logged at most once a minute per person, so the list and the live read never fail for it.
+        """
+
+        agents = self._request_agents
+        try:
+            working = (
+                agents.working({thread.session_key: thread.running_task_id for thread in threads}) if agents else {}
+            )
+            catalog_names = agents.names if agents else None
+        except Exception:
+            self._log_agents_failure(owner_canonical_user_id)
+            working, catalog_names = {}, None
+        shown = []
+        for thread in threads:
+            named = {(agent.agent_type, agent.lead) for agent in thread.trail.agents}
+            named |= {(entry.agent.agent_type, entry.agent.lead) for entry in thread.trail.entries if entry.agent}
+            names = self._trail_names(sorted(named), catalog_names, owner_canonical_user_id)
+            shown.append(replace(thread, working=working.get(thread.session_key, ()), agent_names=names))
+        return shown
+
+    def _trail_names(
+        self,
+        named: list[tuple[str, bool]],
+        catalog_names: Callable[[list[tuple[str, bool]]], dict[str, str]] | None,
+        owner_canonical_user_id: str,
+    ) -> dict[str, str]:
+        if catalog_names is not None:
+            try:
+                return catalog_names(named)
+            except Exception:
+                self._log_agents_failure(owner_canonical_user_id)
+        return {agent_type: agent_name(agent_type, lead, {}) for agent_type, lead in named}
+
+    def _log_agents_failure(self, owner_canonical_user_id: str) -> None:
+        now = time.monotonic()
+        last = self._agents_failure_logged.get(owner_canonical_user_id)
+        if last is not None and now - last < AGENTS_FAILURE_LOG_SECONDS:
+            return
+        self._agents_failure_logged[owner_canonical_user_id] = now
+        LOGGER.warning(
+            "Could not read who works on a person's Web Chat threads; the list shows the stored trails only. "
+            "event=web_chat_thread_agents_unreadable person_id=%s",
+            owner_canonical_user_id,
+            exc_info=True,
+        )
 
     def web_chat_thread_states(
         self,
@@ -460,6 +524,17 @@ class WebsiteSessionApplication:
             ),
             open_request_session_keys=tuple(
                 thread.session_key for thread in threads if thread.has_open_request
+            ),
+            working=tuple(
+                WebChatThreadWorkingV1(
+                    session_key=thread.session_key,
+                    agents=tuple(
+                        WebChatWorkingAgentV1(agent_type=agent.agent_type, name=agent.name, lead=agent.lead)
+                        for agent in thread.working
+                    ),
+                )
+                for thread in threads
+                if thread.working
             ),
         )
 

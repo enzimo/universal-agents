@@ -13,6 +13,8 @@ const threadList = require("../assistant_gateway/onboarding_web/assets/chat_thre
 const { THREAD_MENU_ACTION } = require("../assistant_gateway/onboarding_web/assets/chat_thread_menu.mjs");
 // The status line's wording (chat.js imports it from chat_thread_status.mjs).
 const threadStatus = require("../assistant_gateway/onboarding_web/assets/chat_thread_status.mjs");
+// The agent trail (chat.js imports it from agent_trail.mjs).
+const agentTrail = require("../assistant_gateway/onboarding_web/assets/agent_trail.mjs");
 
 // The page's name for an unnamed thread, read from chat.js itself.
 const NEW_CHAT_TITLE = source.match(/const NEW_CHAT_TITLE = "([^"]+)";/)[1];
@@ -23,7 +25,7 @@ function loadFunctions(sandbox, names) {
   if (!("NEW_CHAT_TITLE" in sandbox)) sandbox.NEW_CHAT_TITLE = NEW_CHAT_TITLE;
   if (!("THREAD_ROW_MENU_HINT_ID" in sandbox)) sandbox.THREAD_ROW_MENU_HINT_ID = THREAD_ROW_MENU_HINT_ID;
   if (!("THREAD_MENU_ACTION" in sandbox)) sandbox.THREAD_MENU_ACTION = THREAD_MENU_ACTION;
-  for (const [name, value] of Object.entries({ ...threadList, ...threadStatus })) if (!(name in sandbox)) sandbox[name] = value;
+  for (const [name, value] of Object.entries({ ...threadList, ...threadStatus, ...agentTrail })) if (!(name in sandbox)) sandbox[name] = value;
   vm.createContext(sandbox);
   for (const name of names) {
     const start = source.indexOf(`function ${name}(`);
@@ -92,14 +94,14 @@ function harness() {
     } },
   };
   loadFunctions(sandbox, [
-    "fetchSessions", "threadIsBusy", "applyThreadStates", "applyServerThreadRow", "applyEventToThreadRow",
+    "fetchSessions", "threadIsBusy", "workingKey", "applyThreadStates", "applyServerThreadRow", "applyEventToThreadRow",
     "restoreWokeThreadWhenRead", "changeThreadPlacement", "runThreadPlacement", "sendThreadPlacement",
     "threadChangeRequest", "refusalReason", "threadChangeFailure", "threadForSession", "quotedThreadTitle",
   ]);
   sandbox.fullThreadTitle = item => item.title;
   const thread = key => sandbox.sharedState.threads.find(item => item.sessionKey === key);
-  const page = (busy = [], revision = server.revision, open = []) => ({
-    threads_revision: revision, busy_session_keys: busy, open_request_session_keys: open });
+  const page = (busy = [], revision = server.revision, open = [], working = []) => ({
+    threads_revision: revision, busy_session_keys: busy, open_request_session_keys: open, working });
   const settle = () => sandbox.fetchSessions();
   return { sandbox, server, calls, patches, errors, announced, thread, page, settle,
     renders: () => renders, switchRenders: () => switchRenders };
@@ -119,6 +121,33 @@ test("a task running for another page shows the busy dot here too", async () => 
   sandbox.applyThreadStates(page([]));
   assert.equal(sandbox.threadIsBusy(thread("beta")), false);
   assert.equal(renders(), before + 2);
+});
+
+test("who works now reaches the rows from the live read without reloading the list (A3)", async () => {
+  const { sandbox, thread, page, calls, renders } = harness();
+  await sandbox.fetchSessions();
+  const reads = calls.length;
+  const before = renders();
+  const worker = { agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" };
+  sandbox.applyThreadStates(page(["beta"], undefined, [], [{ session_key: "beta", agents: [worker] }]));
+  assert.deepEqual(thread("beta").working.map(agent => agent.name), ["Web Research Agent"]);
+  assert.equal(thread("alpha").working.length, 0);
+  assert.equal(renders(), before + 1);
+  sandbox.applyThreadStates(page(["beta"], undefined, [], [{ session_key: "beta", agents: [worker] }]));
+  assert.equal(renders(), before + 1, "an unchanged read does not redraw");
+  sandbox.applyThreadStates(page(["beta"], undefined, [], []));
+  assert.equal(thread("beta").working.length, 0);
+  assert.equal(renders(), before + 2);
+  assert.equal(calls.length, reads, "no list reload");
+});
+
+test("the server's row brings its trail and who works", async () => {
+  const { sandbox, server, thread } = harness();
+  server.sessions[0] = { ...server.sessions[0], trail: TRAIL,
+    working: [{ agent_type: "TeamArchitect", lead: true, name: "Team lead" }] };
+  await sandbox.fetchSessions();
+  assert.deepEqual(thread("alpha").trail, TRAIL);
+  assert.deepEqual(thread("alpha").working.map(agent => agent.name), ["Team lead"]);
 });
 
 test("the server clearing its busy state keeps this page's own reply wait", async () => {
@@ -599,7 +628,7 @@ function domHarness() {
   };
   loadFunctions(sandbox, [
     "focusedThreadListTarget", "restoreThreadListFocus", "visibleThreadRows", "sectionHeader", "threadRowElement",
-    "threadRowButton", "appendRenameControls",
+    "threadRowButton", "appendRenameControls", "threadTrailView", "threadIsBusy",
   ]);
   return { sandbox, document, list, newThreadButton, runTimers: () => timers.splice(0).forEach(fn => fn()) };
 }
@@ -685,7 +714,7 @@ test("a row tells screen readers about its menu, its reply mark and its age in w
     hideThreadTitleTooltip() {},
   });
   loadFunctions(sandbox, ["threadRow", "threadActivityIndicator", "threadReplyMark", "threadAgeWords", "threadIsBusy",
-    "lastActivityTimestamp", "uiElement"]);
+    "threadTrailView", "lastActivityTimestamp", "uiElement"]);
   const now = Date.now();
   const thread = {
     id: "gamma", sessionKey: "gamma", title: "Renew the certificate", listState: "woke", hasUnreadReply: true,
@@ -702,9 +731,80 @@ test("a row tells screen readers about its menu, its reply mark and its age in w
   const age = fakeDom.byClass(button, "thread-age")[0];
   assert.equal(age.getAttribute("aria-hidden"), "true", "the short age is read in words instead");
   assert.equal(age.textContent, "5m");
-  // A thread the agent is replying in says so instead.
+  // A thread the team works in says who, instead of a busy dot (A5, A6).
   const busy = sandbox.threadRow({ ...thread, serverBusy: true });
-  assert.deepEqual(fakeDom.byClass(busy.children[1], "sr-only").map(node => node.textContent)[0], "Replying");
+  assert.deepEqual(fakeDom.byClass(busy.children[1], "sr-only").map(node => node.textContent)[0],
+    "Working: team lead. New reply", "and its unread reply (review F5)");
+});
+
+const TRAIL = {
+  entries: [{ by: "person" }, { by: "agent", agent_type: "TeamArchitect", lead: true, name: "Team lead" },
+    { by: "agent", agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }],
+  has_older: false,
+  agents: [],
+};
+
+function trailRow(overrides) {
+  const { sandbox } = domHarness();
+  Object.assign(sandbox, {
+    LIST_STATE: threadList.LIST_STATE,
+    sharedState: { ...sandbox.sharedState, activeThreadId: "", editingThreadId: "", assistantName: "Ava" },
+    scheduleThreadTitleTooltip() {},
+    hideThreadTitleTooltip() {},
+  });
+  loadFunctions(sandbox, ["threadRow", "threadActivityIndicator", "threadReplyMark", "threadAgeWords", "threadIsBusy",
+    "threadTrailView", "lastActivityTimestamp", "uiElement"]);
+  const row = sandbox.threadRow({ id: "delta", sessionKey: "delta", title: "Compare databases", trail: TRAIL, working: [],
+    trailAtSend: null, lastMessage: { role: "assistant", text: "Here is the comparison." }, ...overrides });
+  const [, button] = row.children;
+  const line = fakeDom.byClass(button, "thread-detail")[0];
+  const triangles = line ? fakeDom.byTag(line, "svg") : [];
+  return {
+    row, line, triangles,
+    said: fakeDom.byClass(button, "sr-only").map(node => node.textContent)[0],
+    pulsing: triangles.filter(svg => svg.getAttribute("class").includes("is-working")).map(svg => svg.getAttribute("data-who")),
+  };
+}
+
+test("a row draws its agent trail before the snippet and no busy dot (A4, A5)", () => {
+  const { row, line, triangles, pulsing } = trailRow({ serverBusy: true,
+    working: [{ agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }] });
+  assert.ok(!row.className.includes("is-pending"), "the busy dot is gone");
+  assert.deepEqual(line.children.map(child => child.className), ["thread-trail", "thread-detail-text"]);
+  // While someone works, line 2 says who in words instead of the latest message (lead ruling on C22); the
+  // hidden mark already tells screen readers, so the words are not read twice.
+  assert.ok(line.className.includes("is-working"));
+  assert.equal(line.children[1].textContent, "Web Research Agent working");
+  assert.equal(line.children[1].getAttribute("aria-hidden"), "true");
+  assert.equal(line.title, "Working: Web Research Agent");
+  assert.deepEqual(triangles.map(svg => svg.getAttribute("data-who")), ["person", "lead", "agent"]);
+  assert.deepEqual(pulsing, ["agent"]);
+  assert.equal(trailRow({ serverBusy: true, working: [{ agent_type: "WebResearchAgent", lead: false,
+    name: "Web Research Agent" }] }).said, "Working: Web Research Agent");
+  // Nobody works and nothing is busy: the trail stays still, line 2 shows the latest message again and the row
+  // says nothing about work.
+  const still = trailRow({});
+  assert.deepEqual(still.pulsing, []);
+  assert.equal(still.said, undefined);
+  assert.ok(still.line.className.includes("is-message"));
+  assert.equal(still.line.children[1].textContent, "Ava: Here is the comparison.");
+  // A waiting reason wins over who works.
+  const waiting = trailRow({ needsYou: "setup", serverBusy: true,
+    working: [{ agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }] });
+  assert.ok(waiting.line.className.includes("is-waiting"));
+  assert.equal(waiting.line.children[1].textContent, "Finish the setup page");
+  assert.deepEqual(waiting.pulsing, ["agent"]);
+});
+
+test("a reply this page sent before any agent reported pulses the new team-lead triangle (A5, C10)", () => {
+  const sent = trailRow({ pendingReply: true, trailAtSend: agentTrail.trailKey({ trail: TRAIL }) });
+  assert.deepEqual(sent.triangles.map(svg => svg.getAttribute("data-who")), ["person", "lead", "agent", "person", "lead"]);
+  assert.deepEqual(sent.pulsing, ["lead"]);
+  assert.equal(sent.said, "Working: team lead");
+  // A new thread with no trail yet still pulses one team-lead triangle.
+  const fresh = trailRow({ trail: null, lastMessage: null, pendingReply: true, trailAtSend: agentTrail.trailKey({ trail: null }) });
+  assert.deepEqual(fresh.triangles.map(svg => svg.getAttribute("data-who")), ["person", "lead"]);
+  assert.deepEqual(fresh.pulsing, ["lead"]);
 });
 
 test("a focused header whose section is gone hands focus to New Chat (C17)", () => {
@@ -776,4 +876,59 @@ test("a change that did not get through offers Retry for the same change; a refu
   await sandbox.changeThreadPlacement(thread("gamma"), "pin");
   assert.equal(errors[1].message, "\u201cRenew the certificate\u201d was not moved. Thread not found.");
   assert.equal(errors[1].retry, null, "repeating a refusal cannot help");
+});
+
+test("guidance and slash commands add no turn: the worker keeps pulsing (C18)", () => {
+  const sandbox = {};
+  loadFunctions(sandbox, ["sendStartsRequest", "threadRequestOpen", "threadIsBusy", "pendingReplyCount",
+    "startTerminalReplyWait", "setThreadPending"]);
+  sandbox.renderParallelSwitch = () => {};
+  const idle = { trail: TRAIL, working: [], pendingReplyCount: 0 };
+  assert.equal(sandbox.sendStartsRequest(idle, "Compare them again"), true);
+  assert.equal(sandbox.sendStartsRequest(idle, "  /status"), false, "a slash command");
+  assert.equal(sandbox.sendStartsRequest({ ...idle, serverRequestOpen: true }, "Also check prices"), false,
+    "guidance for a request another page started");
+  assert.equal(sandbox.sendStartsRequest({ ...idle, serverBusy: true }, "Also check prices"), false);
+  // Guidance from a page that was not waiting: the wait starts, but no turn is added.
+  const guided = { ...idle, serverRequestOpen: true,
+    working: [{ agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }] };
+  sandbox.startTerminalReplyWait(guided, sandbox.sendStartsRequest(guided, "Also check prices"));
+  assert.equal(guided.trailAtSend, null);
+  const row = trailRow(guided);
+  assert.deepEqual(row.triangles.map(svg => svg.getAttribute("data-who")), ["person", "lead", "agent"]);
+  assert.deepEqual(row.pulsing, ["agent"]);
+  assert.equal(row.said, "Working: Web Research Agent");
+  // A new request records the trail it started from.
+  const fresh = { ...idle };
+  sandbox.startTerminalReplyWait(fresh, sandbox.sendStartsRequest(fresh, "Compare them again"));
+  assert.equal(fresh.trailAtSend, agentTrail.trailKey(fresh));
+});
+
+test("screen readers hear who works and an unread reply together (review F5)", () => {
+  const worker = [{ agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }];
+  assert.equal(trailRow({ serverBusy: true, working: worker, hasUnreadReply: true, unreadReplyLevel: "attention" }).said,
+    "Working: Web Research Agent. Reply needs attention");
+  assert.equal(trailRow({ serverBusy: true, working: worker, hasUnreadReply: true, unreadReplyLevel: "normal" }).said,
+    "Working: Web Research Agent. New reply");
+});
+
+test("a busy row being renamed keeps its working triangles pulsing beside the field (review F7)", () => {
+  const { sandbox, document } = domHarness();
+  const row = document.createElement("div");
+  sandbox.sharedState.renameDraft = null;
+  sandbox.appendRenameControls(row, { id: "delta", sessionKey: "delta", title: "Compare databases", trail: TRAIL,
+    working: [{ agent_type: "WebResearchAgent", lead: false, name: "Web Research Agent" }], serverBusy: true,
+    trailAtSend: null });
+  const form = fakeDom.byClass(row, "thread-rename-form")[0];
+  assert.deepEqual(form.children.map(child => child.className), ["thread-trail", "thread-rename-input"]);
+  const triangles = fakeDom.byTag(form, "svg");
+  assert.deepEqual(triangles.map(svg => [svg.getAttribute("data-who"), svg.getAttribute("class")]),
+    [["agent", "trail-tri is-working"]]);
+  // Nobody works: the field stands alone.
+  const idle = document.createElement("div");
+  sandbox.sharedState.renameDraft = null;
+  sandbox.appendRenameControls(idle, { id: "echo", sessionKey: "echo", title: "Idle", trail: TRAIL, working: [],
+    trailAtSend: null });
+  assert.deepEqual(fakeDom.byClass(idle, "thread-rename-form")[0].children.map(child => child.className),
+    ["thread-rename-input"]);
 });
