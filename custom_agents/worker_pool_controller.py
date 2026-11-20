@@ -34,7 +34,8 @@ when they keep coming back, notices for administrators: a pool or the team at
 ``capacity_warning_ratio`` of its limit while tasks wait (``capacity``), a type
 whose provider keeps refusing calls (``provider_limited``), and workers that
 could not be started (``start_failed``: ``START_FAILURES_BEFORE_REVIEW`` starts
-in a row failed while tasks wait, or the hourly start limit refused a start).
+in a row failed while tasks wait; at once when the hourly start limit refused a
+start, or the launcher refused one before it was recorded, ``_refused``).
 
 A start counts as failed when the worker never became ready for a reason that
 says something about its type: it crashed, its startup timed out, or the

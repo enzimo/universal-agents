@@ -10,8 +10,11 @@ three kinds of problem per worker type (``*`` for the whole team):
   worker of the type is waiting one out while tasks wait;
 - ``start_failed``: workers the controller needed could not be started: two
   starts of the type in a row failed (crashed, timed out, or were refused)
-  while tasks waited, or the hourly start limit refused a start. The review
-  and the administrators' notice name the failure (``_start_failure_text``).
+  while tasks waited; or at once, the hourly start limit refused a start, or
+  the launcher refused one before it was recorded (tried again every pass).
+  The review and the administrators' notice name the failure
+  (``_start_failure_text``). Only a problem of failed starts ends as soon as
+  a worker of the type is ready (``_opened_by_failed_starts``).
 
 Each becomes one open incident (``storage.worker_pool_repository``) while it
 lasts. TeamArchitect gets a review task when the incident opens and again
@@ -186,6 +189,24 @@ def _provider_limit_evidence(
     }
 
 
+def _opened_by_failed_starts(incident: WorkerPoolIncidentV1) -> bool:
+    """Whether the incident's latest evidence has failed starts of the type in a row.
+
+    Only such a problem ends as soon as a worker of the type is ready
+    (``start_succeeded``): the ready worker is what the failures were missing.
+    A problem the hourly start limit opened, or a launcher refusal made before
+    any start record, has no failure for a ready worker to answer: workers of
+    the type may well become ready while it lasts (a crash right after ready,
+    older workers still running). It closes after ``review_repeat_after_minutes``
+    without a sighting, like capacity and provider problems; closing it on the
+    next ready worker reopened it at the next refusal with a new review and
+    notice (review critique C24, 2026-11-20).
+    """
+
+    pool = incident.details.get(EVIDENCE_POOL) or {}
+    return bool(pool.get(POOL_FAILED_STARTS))
+
+
 class WorkerPoolIncidents:
     """One controller pass's incident bookkeeping."""
 
@@ -318,7 +339,9 @@ class WorkerPoolIncidents:
             if key in self._seen:
                 continue
             cleared_by_start = (
-                incident.kind == INCIDENT_START_FAILED and incident.agent_type in self._started_types
+                incident.kind == INCIDENT_START_FAILED
+                and incident.agent_type in self._started_types
+                and _opened_by_failed_starts(incident)
             )
             if not cleared_by_start and self.now - incident.last_seen_at_utc < quiet:
                 continue

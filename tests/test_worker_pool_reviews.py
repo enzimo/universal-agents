@@ -127,7 +127,7 @@ async def test_fewer_provider_limit_events_than_the_threshold_open_nothing(world
 async def test_a_failed_start_is_reviewed_and_administrators_are_told_until_a_start_works(world):
     settings = _settings()
     failing = reviews.WorkerPoolIncidents(world.agent, settings)
-    failing.start_failed(_observation(), "the type is denied by the operator")
+    failing.start_failed(_observation(failed_starts_in_row=2, last_start_failure=CRASH), CRASH)
     await failing.settle()
     assert [item["kind"] for item in world.opened] == [INCIDENT_START_FAILED]
     (findings,) = world.told
@@ -343,10 +343,12 @@ async def test_failed_starts_decide_the_text_when_the_hourly_limit_also_refused(
 
 @pytest.mark.asyncio
 async def test_an_accepted_start_leaves_an_open_start_problem_open(world):
-    """Review finding EVD-1 as an outcome (critique C19): an hourly-limit problem stays open after an accepted start.
+    """Review finding EVD-1 as an outcome (critique C19): an accepted start leaves a start problem open.
 
-    The accepted worker may still crash; only one that becomes ready ends the
-    problem. Counting acceptance as success closed it at once and told
+    Here the hourly limit opened it while a failed start was in view. The
+    accepted worker may still crash; only one that becomes ready ends a problem
+    of failed starts (and one opened otherwise ends after the quiet time, see
+    the next test). Counting acceptance as success closed it at once and told
     administrators it works again.
     """
 
@@ -371,3 +373,55 @@ async def test_an_accepted_start_leaves_an_open_start_problem_open(world):
         INCIDENT_START_FAILED
     ]
     assert [item["kind"] for item in world.opened] == [INCIDENT_START_FAILED]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", ["hourly_limit", "no_start_record"])
+async def test_a_start_problem_no_failed_start_opened_stays_one_problem_while_workers_are_ready(world, refusal):
+    """Critique C24: a pass with no refusal while a worker of the type is ready does not close and reopen it.
+
+    The hourly limit with workers that do become ready, or a launcher refusal
+    made before any start record while older workers still run: no failed
+    start keeps the type from counting as recovered, so a ready worker must
+    not end the problem. It stays one problem with one review until it has not
+    been seen for the quiet time.
+    """
+
+    from custom_agents.worker_pool_controller import PoolDecision, WorkerPoolController
+    from custom_messages.contracts.schedule_worker_v1 import WORKER_LAUNCH_RATE_LIMIT, AgentLaunchResultV1
+
+    world.agent._pool_rate_limited_types = set()
+    refused = (
+        AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT)
+        if refusal == "hourly_limit"
+        else AgentLaunchResultV1(status="denied", reason="agent_definition_unavailable")
+    )
+    results = [refused, refused, refused]
+    controller = WorkerPoolController(world.agent)
+    controller._launch = lambda _agent_type: results.pop(0)
+    # A worker of the type became ready since the last failure, so the type counts as recovered.
+    healthy = _observation(running=1, start_recovered=True)
+    for starts in (1, 0, 1, 0, 1):  # refused, no attempt, refused, no attempt, refused
+        incidents = reviews.WorkerPoolIncidents(world.agent, _settings())
+        _report_start_history(healthy, incidents)
+        await controller._start(healthy, PoolDecision(starts, "start" if starts else "a worker is free"), incidents)
+        await incidents.settle()
+    assert results == []
+    repository = worker_pool_repository(world.agent)
+    assert [incident.kind for incident in repository.list_open_incidents("team")] == [INCIDENT_START_FAILED]
+    assert [item["kind"] for item in world.opened] == [INCIDENT_START_FAILED]
+    assert len(repository.recent_incidents("team", since=datetime.now(timezone.utc) - timedelta(hours=1))) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_problem_of_failed_starts_ends_with_the_first_ready_worker(world):
+    """The control for C24: failed starts in its evidence, so a ready worker ends it at once."""
+
+    settings = _settings()
+    failing = reviews.WorkerPoolIncidents(world.agent, settings)
+    _report_start_history(_observation(failed_starts_in_row=2, last_start_failure=CRASH), failing)
+    await failing.settle()
+    recovered = reviews.WorkerPoolIncidents(world.agent, settings)
+    _report_start_history(_observation(waiting=0, start_recovered=True), recovered)
+    await recovered.settle()
+    assert worker_pool_repository(world.agent).list_open_incidents("team") == ()

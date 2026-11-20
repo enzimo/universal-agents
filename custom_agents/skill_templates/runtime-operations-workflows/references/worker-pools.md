@@ -97,7 +97,7 @@ The runtime gives you a `worker_pool_review_...` task when:
 |---|---|
 | `capacity` | A pool (or the team, scope `*`) reached about 95% of its limit while tasks waited. For small pools that is the limit itself. |
 | `provider_limited` | Tasks of a type keep hitting the model provider's limits (rate limit, quota, overload), or a worker waits one out while tasks wait. No workers are added meanwhile. |
-| `start_failed` | Two starts of a type in a row failed (crashed, timed out at startup, or were refused) while tasks waited, or the hourly start limit refused a start. The review names the failure; the evidence has `start_refused_because` and `pool.last_start_failure`. One failure alone only delays the next start. |
+| `start_failed` | Two starts of a type in a row failed (crashed, timed out at startup, or were refused) while tasks waited; or, at once, the hourly start limit refused a start, or the launcher refused one before it was recorded (for example the type's definition cannot be read; tried again every pass). The review names the failure; the evidence has `start_refused_because` and `pool.last_start_failure`. One failure alone only delays the next start. |
 
 Each review works for the team's maintenance owner (an administrator), so
 `notify_user` reaches them. Check `inspect_worker_pools`, then choose:
@@ -115,9 +115,11 @@ Each review works for the team's maintenance owner (an administrator), so
 
 Never choose A or B for `provider_limited`: more workers make more calls and
 more refusals. Neither a pool size nor a higher start-rate limit fixes a
-`start_failed` review that names a failure: the runtime already waits longer
-before each next try (`next_start_waits_seconds`) and tries one start at a
-time, and more starts only fail more often. Read `start_refused_because` and
+`start_failed` review that names a failure. After failed starts
+(`failed_starts_in_row` > 0) the runtime already waits longer before each next
+try (`next_start_waits_seconds`) and tries one start at a time, and more
+starts only fail more often; when the launcher refuses every start, nothing
+starts until the cause is fixed. Read `start_refused_because` and
 `last_start_failure`, check the agent type's definition and the operator's
 denied types, and tell an administrator the failure and what to change. A
 refusal by the hourly start limit after failed starts is a symptom; report the

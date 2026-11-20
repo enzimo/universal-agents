@@ -321,7 +321,12 @@ each. They run in parallel on as many workers as the team allows:
   open a `start_failed` review and an administrators' notice; both name the
   failure and say that a larger pool or a higher start limit does not help. A
   refusal by the hourly start limit opens it at once; with no failed start the
-  text points at how often workers of the type are started instead. Until
+  text points at how often workers of the type are started instead. So does a
+  launcher refusal made before a start is recorded (for example the type's
+  definition cannot be read): nothing is counted for it, so the controller
+  tries again every pass without a wait. Only a problem of failed starts ends
+  as soon as a worker of the type is ready; the other two end after
+  `review_repeat_after_minutes` without being seen. Until
   2026-11-19 an accepted start counted as success at once. Workers that
   crashed at start (their stream was at its NATS consumer limit) were
   restarted every pass until the hourly start limit refused them, and

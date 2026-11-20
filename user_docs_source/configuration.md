@@ -906,7 +906,10 @@ wait, TeamArchitect gets a review and administrators get an Inbox notice; both
 name the failure. A single failure only delays the next start. A start refused
 by `max_launches_per_type_per_hour` opens that review and notice at once; when
 no start failed, they point at why workers of the type start so often, for
-example workers that stop soon after they become ready.
+example workers that stop soon after they become ready. A start the runtime
+refuses before it begins, for example because the agent definition cannot be
+read, also opens them at once, and is tried again on every pass until the
+cause is fixed.
 
 TeamArchitect sets pool sizes itself inside the ceilings, for a while or for
 good, when it reviews a pool at its limit or a model provider that keeps
