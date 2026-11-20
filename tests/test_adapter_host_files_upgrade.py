@@ -55,6 +55,7 @@ Runs on SQLite and, with ``LIVE_TEST_POSTGRES_DSN``, on PostgreSQL.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import errno
 import fcntl
@@ -1183,7 +1184,7 @@ def test_the_gateway_query_finds_text_literally_in_any_folder(instance: _Instanc
 
 
 def test_records_naming_the_folder_at_another_path_withhold_the_list_and_the_command(
-    instance: _Instance, monkeypatch, caplog, tmp_path
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
     """A1, A2, A5: the reviewer's probe. The listed photo is a live file whose records name P1, so nothing is listed.
 
@@ -1244,7 +1245,7 @@ def test_records_naming_the_folder_at_another_path_withhold_the_list_and_the_com
 
 
 def test_a_database_error_checking_other_folders_gives_no_list_and_no_command(
-    instance: _Instance, monkeypatch, caplog, tmp_path
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
     """C03: a failing check for records in another folder must never leave the delete command. Uncounted, not stopped.
 
@@ -1295,7 +1296,7 @@ _LIVE = _hex_name("live")
     ids=["13_hex", "11_hex", "uppercase", "suffix", "relative", "dot_dot_into_this_folder", "double_slash_into_this_folder"],
 )
 def test_names_that_are_not_a_listed_name_in_another_folder_withhold_nothing(
-    instance: _Instance, caplog, path_of, in_this_folder
+    instance: _Instance, caplog: pytest.LogCaptureFixture, path_of: Callable[[Path, Path], str], in_this_folder: bool
 ) -> None:
     """C03: only a listed name exactly, in an absolute path of another folder, counts; each kind of record is tried.
 
@@ -1330,19 +1331,29 @@ def test_names_that_are_not_a_listed_name_in_another_folder_withhold_nothing(
 _SHA_X = hashlib.sha256(b"x").hexdigest()  # what ``_record_named`` records
 
 
-def _run_operator_command(instance: _Instance, monkeypatch: pytest.MonkeyPatch, capsys, **args: Any) -> str:
+def _run_operator_command(
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], **args: Any
+) -> str:
     """Run ``upgrade adapter-host-files`` on ``instance`` as the operator does; returns what it printed."""
 
     import assistant_cli
 
-    monkeypatch.setattr(assistant_cli.GatewayInstanceConfig, "load_for_process", staticmethod(lambda _path: instance.config()))
-    assistant_cli._upgrade_adapter_host_files(SimpleNamespace(**{"config": "instance_config.yaml", "files_gone": False, **args}))
+    monkeypatch.setattr(
+        "assistant_cli.GatewayInstanceConfig.load_for_process", staticmethod(lambda _path: instance.config())
+    )
+    assistant_cli._upgrade_adapter_host_files(
+        argparse.Namespace(**{"config": "instance_config.yaml", "files_gone": False, **args})
+    )
     return capsys.readouterr().out
 
 
 @pytest.mark.parametrize("source", ["turn", "held_guidance"])
 def test_a_match_only_a_turn_or_held_guidance_names_gives_no_steps_that_cannot_move_it(
-    instance: _Instance, monkeypatch, caplog, capsys, source
+    instance: _Instance,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+    source: str,
 ) -> None:
     """A1, A4, C05: no gateway record names the listed file in another folder, so no run can move it there either.
 
@@ -1387,7 +1398,7 @@ def test_a_match_only_a_turn_or_held_guidance_names_gives_no_steps_that_cannot_m
 
 
 def test_a_match_through_a_gateway_record_on_a_later_page_gives_the_steps_for_that_file(
-    instance: _Instance, monkeypatch, caplog
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A1, C05: gateway records outside the folder are read in pages, and only the file one names gets the move-back steps.
 
@@ -1428,7 +1439,7 @@ def test_a_match_through_a_gateway_record_on_a_later_page_gives_the_steps_for_th
 
 
 def test_gateway_records_in_two_other_folders_give_steps_for_each_path(
-    instance: _Instance, monkeypatch, caplog, capsys
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """C08: gateway records place two listed files in two folders, so one move back moves one of them.
 
@@ -1479,7 +1490,9 @@ def test_gateway_records_in_two_other_folders_give_steps_for_each_path(
     assert "one of the" not in error and "for each of them" not in error
 
 
-def test_a_record_in_another_folder_whose_name_is_not_listed_changes_nothing(instance: _Instance, caplog) -> None:
+def test_a_record_in_another_folder_whose_name_is_not_listed_changes_nothing(
+    instance: _Instance, caplog: pytest.LogCaptureFixture
+) -> None:
     """A7: its file is not here (still in its own folder, deleted or moved earlier), so it says nothing about this folder.
 
     The listed file is named by no record anywhere, so the list and the
@@ -1500,7 +1513,7 @@ def test_a_record_in_another_folder_whose_name_is_not_listed_changes_nothing(ins
 
 @pytest.mark.parametrize("refused_at_p2", [False, True], ids=["moved_at_p2", "refused_at_p2"])
 def test_records_of_both_paths_move_what_each_path_can_and_the_error_s_steps_finish_it(
-    instance: _Instance, caplog, refused_at_p2
+    instance: _Instance, caplog: pytest.LogCaptureFixture, refused_at_p2: bool
 ) -> None:
     """C01, C04 and A3's finish path: records name the folder at P1 and, for a newer file, at P2, where it is now.
 
@@ -1543,7 +1556,9 @@ def test_records_of_both_paths_move_what_each_path_can_and_the_error_s_steps_fin
         assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())[NAMED_ELSEWHERE_FIELD] == 0
 
 
-def test_files_gone_as_the_first_run_to_find_the_match_reports_it_the_same_way(instance: _Instance, caplog) -> None:
+def test_files_gone_as_the_first_run_to_find_the_match_reports_it_the_same_way(
+    instance: _Instance, caplog: pytest.LogCaptureFixture
+) -> None:
     """C02: a P2-era record whose file is gone makes the normal run wait, so ``--files-gone`` is the first to see the match.
 
     It drops only that record; the records naming P1 stay as they are, and
@@ -3356,12 +3371,14 @@ def test_the_operator_command_says_when_the_leftover_files_could_not_be_counted(
     assert "never opens" not in printed, "0.10 reads the files of messages it had not handled (PR #150's review)"
 
 
-def test_the_operator_command_gives_the_steps_only_for_files_a_gateway_record_names(monkeypatch, capsys) -> None:
-    """C05: after a run that found records in another folder, the line replaces the delete advice and splits like the error."""
+def test_the_operator_command_gives_the_steps_only_for_files_a_gateway_record_names(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C05, C08: after a run that found records in another folder, the line replaces the delete advice and splits like the error."""
 
     import assistant_cli
 
-    monkeypatch.setattr(assistant_cli.GatewayInstanceConfig, "load_for_process", staticmethod(lambda _path: object()))
+    monkeypatch.setattr("assistant_cli.GatewayInstanceConfig.load_for_process", staticmethod(lambda _path: object()))
     counts = upgrade_module.UpgradeCounts(files_without_records=3)
     outcomes = [
         upgrade_module.UpgradeResult(finished=True, counts=counts, elsewhere=NamedElsewhere(names=1, by_gateway=1)),
@@ -3373,7 +3390,7 @@ def test_the_operator_command_gives_the_steps_only_for_files_a_gateway_record_na
         ),
     ]
     monkeypatch.setattr(upgrade_module, "upgrade_adapter_host_files", lambda _config, *, files_gone: outcomes.pop(0))
-    args = SimpleNamespace(config="instance_config.yaml", files_gone=False)
+    args = argparse.Namespace(config="instance_config.yaml", files_gone=False)
     printed = []
     for _ in range(4):
         assistant_cli._upgrade_adapter_host_files(args)
