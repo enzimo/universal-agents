@@ -2025,8 +2025,8 @@ class _RelationalGatewayStateRepository:
         owner = owner_canonical_user_id
         # The naming message's condition is read twice (its text and files).
         params: list[Any] = [*ordinary, *ordinary, RUN_STATE_RUNNING, PendingQueryStatus.OPEN.value]
-        # The setup pages' and credential forms' person, bound so each
-        # subquery runs once per query.
+        # The setup pages' person, bound so that subquery runs once per query
+        # (credential forms are read separately below).
         params.extend([TOOL_SETUP_STATUS_WAITING, owner, ThreadHiddenAs.SNOOZED.value, *_TEAM_POSTED_PARAMS])
         if include_last_message:
             params.extend(ordinary)

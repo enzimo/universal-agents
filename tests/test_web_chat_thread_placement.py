@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from assistant_gateway.domain.request_state import REQUEST_KIND_INTERACTIVE, RUN_STATE_RUNNING
+from assistant_gateway.domain.request_state import REQUEST_KIND_INTERACTIVE, RUN_STATE_RUNNING, CredentialCollectionRecord
 from assistant_gateway.domain.transcript import TRANSCRIPT_SOURCE_GUIDANCE_ANSWER
 from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
@@ -376,6 +376,46 @@ async def test_a_failed_thread_lookup_is_logged_with_the_thread_and_the_change(t
         assert (await browser.place(key, "dismiss", seen_sequence=0)).status == 500
     (record,) = [item for item in caplog.records if "event=web_chat_thread_placement outcome=error" in item.getMessage()]
     assert f"session_key={key}" in record.getMessage() and "action=dismiss" in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_credential_form_leaves_needs_you_when_it_expires(tmp_path: Path, monkeypatch) -> None:
+    """F10, C12: the sessions route and the live read follow the form's expiry with the gateway's clock."""
+
+    clock = _Clock()
+    gateway = _gateway(tmp_path, monkeypatch, clock)
+    app = InternalWebsiteInteractiveApp(gateway.config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        browser = await _Browser.sign_in(client)
+        thread = await _thread_with_reply(client, browser)
+        key = thread["session_key"]
+        owner = gateway.session_repository.get_session(key).owner_canonical_user_id
+        gateway.state_store.credential_collection_repository.record_credential_collection(
+            CredentialCollectionRecord(
+                credential_request_id="form_1",
+                broker_session_id="broker_1",
+                person_id=owner,
+                session_key=key,
+                correlation_id="request_form",
+                conversation_id=thread["conversation_id"],
+                parent_task_id="task_1",
+                service_name="portainer",
+                credential_key="api_token",
+                display_name="Portainer",
+                flow="api_key",
+                source=None,
+                source_item_id=None,
+                source_item_name=None,
+                continue_task=True,
+                expires_at_utc=(clock.now + timedelta(minutes=5)).isoformat(),
+            )
+        )
+        assert (await browser.listed(key))["needs_you"] == "credential"
+        waiting_revision = await browser.revision()
+
+        clock.now += timedelta(minutes=10)
+        assert await browser.revision() != waiting_revision, "open pages reload the list without a write"
+        assert (await browser.listed(key))["needs_you"] is None
 
 
 @pytest.mark.asyncio
