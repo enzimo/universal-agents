@@ -7,9 +7,13 @@ from functools import partial
 from typing import Any
 
 from custom_agents.agent_instantiation_service import (
+    LAUNCH_POLICY_REVOKED,
+    LAUNCHER_RECONCILIATION,
+    STARTUP_TIMED_OUT,
     AgentInstantiationService,
     current_worker_limits,
     effective_worker_rules,
+    launcher_refusal_reason,
 )
 from custom_agents.schedule_definition_identity import (
     definition_changes,
@@ -170,6 +174,7 @@ class ScheduleWorkerController:
                 self.agent._local_team_runtime.inspect_launch, record
             )
             target = None
+            stop_reason = None
             if evidence == "absent":
                 if record.ready_at_utc or record.lease_expires_at_utc <= now:
                     target = (
@@ -182,48 +187,12 @@ class ScheduleWorkerController:
             elif evidence == "ready" and record.lease_expires_at_utc <= now:
                 target = AgentLaunchState.UNKNOWN
             elif evidence == "starting":
-                binding = (
-                    self.store.worker_records.get_binding(
-                        record.schedule_id, team_id=self.agent.team_id
-                    )
-                    if record.schedule_id
-                    else None
-                )
-                revoked = False
-                startup_timeout = limits.defaults.startup_timeout_seconds
-                try:
-                    startup_timeout = effective_worker_rules(
-                        self.agent,
-                        record.named_agent_type,
-                        binding.policy.rules if binding else {},
-                    ).startup_timeout_seconds
-                except (ValueError, PermissionError):
-                    revoked = True
-                if record.source == "schedule":
-                    try:
-                        definition, _ = self.launcher.validate_type(
-                            record.named_agent_type, automatic=True
-                        )
-                        revoked = revoked or (
-                            binding is None
-                            or not binding.policy.enabled
-                            or (binding.authority_mode == "runtime_default" and not limits.default_startup_policy_enabled)
-                            or launch_definition_digest(definition)
-                            != record.definition_digest
-                            or not definition_is_current(binding, definition)
-                            or (
-                                binding.policy.expires_at_utc is not None
-                                and binding.policy.expires_at_utc <= now
-                            )
-                        )
-                    except (ValueError, PermissionError):
-                        revoked = True
-                if (
-                    revoked
-                    or record.created_at_utc + timedelta(seconds=startup_timeout) <= now
-                ):
+                stop_reason = self._why_stop_starting(record, now, limits)
+                if stop_reason is not None:
                     stopped = await self.runtime.run(
-                        self.agent._local_team_runtime.stop_launch, record
+                        self.agent._local_team_runtime.stop_launch,
+                        record,
+                        reason=stop_reason,
                     )
                     target = (
                         AgentLaunchState.FAILED if stopped else AgentLaunchState.UNKNOWN
@@ -243,7 +212,11 @@ class ScheduleWorkerController:
                         self.launcher.repository.update,
                         record,
                         state=target,
-                        reason="launcher_reconciliation",
+                        # A start stopped here keeps why (a timed-out start
+                        # whose thread outlived the join is "unknown" first and
+                        # "failed" later, still startup_timed_out); one found
+                        # gone keeps an earlier reason, else this generic one.
+                        reason=stop_reason or record.reason or LAUNCHER_RECONCILIATION,
                     )
                 except LaunchConflict:
                     # The child can publish readiness or exit while inspected.
@@ -253,6 +226,62 @@ class ScheduleWorkerController:
                     )
                     continue
                 self._log_launch_transition(record, target, evidence)
+
+    def _why_stop_starting(
+        self, record: Any, now: datetime, limits: Any
+    ) -> str | None:
+        """Why a worker of this process that is still starting must stop, or None.
+
+        Checked in this order, and the reason becomes its start record's:
+
+        - the type's worker rules are refused (any source; a pool start is not
+          checked against them before it starts): the refusal's code, for
+          example ``schedule_worker_rule_exceeds_operator_limit:<field>``. It
+          lasts until the configuration is fixed, so it counts as a failed
+          start of the type;
+        - a scheduled start's type is refused now: its code (counts);
+        - a scheduled start's policy or definition changed:
+          ``LAUNCH_POLICY_REVOKED``, which does not count;
+        - the start took longer than its startup timeout: ``STARTUP_TIMED_OUT``.
+        """
+
+        binding = (
+            self.store.worker_records.get_binding(
+                record.schedule_id, team_id=self.agent.team_id
+            )
+            if record.schedule_id
+            else None
+        )
+        try:
+            rules = effective_worker_rules(
+                self.agent,
+                record.named_agent_type,
+                binding.policy.rules if binding else {},
+            )
+        except (ValueError, PermissionError) as exc:
+            return launcher_refusal_reason(exc)
+        if record.source == "schedule":
+            try:
+                definition, _ = self.launcher.validate_type(
+                    record.named_agent_type, automatic=True
+                )
+            except (ValueError, PermissionError) as exc:
+                return launcher_refusal_reason(exc)
+            if (
+                binding is None
+                or not binding.policy.enabled
+                or (binding.authority_mode == "runtime_default" and not limits.default_startup_policy_enabled)
+                or launch_definition_digest(definition) != record.definition_digest
+                or not definition_is_current(binding, definition)
+                or (
+                    binding.policy.expires_at_utc is not None
+                    and binding.policy.expires_at_utc <= now
+                )
+            ):
+                return LAUNCH_POLICY_REVOKED
+        if record.created_at_utc + timedelta(seconds=rules.startup_timeout_seconds) <= now:
+            return STARTUP_TIMED_OUT
+        return None
 
     def _log_launch_transition(
         self, record: Any, target: AgentLaunchState, evidence: str

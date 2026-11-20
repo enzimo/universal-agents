@@ -90,10 +90,12 @@ UNCOUNTED_START_ENDS = frozenset(
     }
 )
 
-# A project refusal code: lower-case words joined by underscores, optionally
-# followed by ":" and a field name
-# (``schedule_worker_rule_exceeds_operator_limit:idle_ttl_seconds``).
-_REFUSAL_CODE = re.compile(r"[a-z][a-z0-9_]{2,80}(?::[a-z][a-z0-9_]{0,80})?")
+# A project refusal code: two or more lower-case words joined by underscores
+# (every code the project raises has one), optionally followed by ":" and a
+# field name (``schedule_worker_rule_exceeds_operator_limit:idle_ttl_seconds``).
+# A single word or a hex string is not a code: such text says nothing reliable.
+_REFUSAL_CODE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?::[a-z][a-z0-9_]*)?")
+_REFUSAL_CODE_MAX_LENGTH = 160
 
 
 def counts_as_failed_start(reason: str | None) -> bool:
@@ -120,7 +122,9 @@ def refusal_code(error: BaseException) -> str | None:
     if not isinstance(error, (ValueError, LaunchConflict, PermissionError)):
         return None
     text = str(error)
-    return text if _REFUSAL_CODE.fullmatch(text) else None
+    if len(text) > _REFUSAL_CODE_MAX_LENGTH or not _REFUSAL_CODE.fullmatch(text):
+        return None
+    return text
 
 
 def launcher_refusal_reason(error: BaseException) -> str:
@@ -319,24 +323,16 @@ class AgentInstantiationService:
                     )
                 )
                 if not result.accepted:
-                    self.repository.update(
-                        record,
-                        state=AgentLaunchState.FAILED,
-                        reason=result.reason or "launcher_rejected_start",
-                    )
+                    self._fail_start(record, result.reason)
                 return result.model_copy(update={"created": True})
             except (ValueError, PermissionError) as exc:
-                reason = self._refusal_reason(exc, agent_type=agent_type, launch_id=launch_id)
-                self.repository.update(
-                    record, state=AgentLaunchState.FAILED, reason=reason
-                )
+                reason = launcher_refusal_reason(exc)
+                self._fail_start(record, reason, error=exc)
                 return AgentLaunchResultV1(
                     status="denied", launch_id=launch_id, reason=reason, created=True
                 )
             except Exception:
-                self.repository.update(
-                    record, state=AgentLaunchState.FAILED, reason="construction_failed"
-                )
+                self._fail_start(record, "construction_failed")
                 self.agent._logger.exception(
                     "Worker construction failed",
                     extra={"launch_id": launch_id, "named_agent_type": agent_type},
@@ -348,28 +344,44 @@ class AgentInstantiationService:
                     created=True,
                 )
         except (ValueError, PermissionError, LaunchConflict) as exc:
-            return AgentLaunchResultV1(
-                status="denied", reason=self._refusal_reason(exc, agent_type=agent_type)
-            )
+            return self._refused_before_reservation(exc, agent_type=agent_type)
 
-    def _refusal_reason(
-        self, error: BaseException, *, agent_type: str, launch_id: str | None = None
-    ) -> str:
-        """A refused start's reason (``launcher_refusal_reason``); the full error is logged when only its type is kept."""
+    def _fail_start(
+        self, record: AgentLaunchV1, reason: str | None, *, error: BaseException | None = None
+    ) -> None:
+        """Fail a reserved start with its reason and log it (``log_failed_start``).
+
+        A launcher refusal that gave no reason is ``launcher_rejected_start``.
+        The full error goes into the log line only when the reason kept just
+        its type (a code says it all).
+        """
+
+        reason = reason or "launcher_rejected_start"
+        failed = self.repository.update(record, state=AgentLaunchState.FAILED, reason=reason)
+        untold = error is not None and refusal_code(error) is None
+        log_failed_start(failed, reason, error=error if untold else None)
+
+    def _refused_before_reservation(
+        self, error: BaseException, *, agent_type: str
+    ) -> AgentLaunchResultV1:
+        """A start refused before its record was reserved: no record to fail.
+
+        The reason is ``launcher_refusal_reason``; when it kept only the
+        error's type, the full error is logged for operators.
+        """
 
         reason = launcher_refusal_reason(error)
         if refusal_code(error) is None:
             logger.warning(
                 "A worker start was refused by an error that is not a refusal code; only "
                 "its type is kept as the reason. event=worker_launch_refused team_id=%s "
-                "agent_type=%s launch_id=%s reason=%s error=%s",
+                "agent_type=%s reason=%s error=%s",
                 self.agent.team_id,
                 agent_type,
-                launch_id,
                 reason,
                 error,
             )
-        return reason
+        return AgentLaunchResultV1(status="denied", reason=reason)
 
     def validate_schedule_start(
         self, binding: ScheduleWorkerBindingV1 | None, occurrence_id: str | None
@@ -482,22 +494,24 @@ def launch_result(record: AgentLaunchV1) -> AgentLaunchResultV1:
     )
 
 
-def _nats_refusal(error: BaseException) -> tuple[int, str] | None:
-    """A NATS JetStream refusal's code and description, on the error or under it.
+def _error_chain(error: BaseException, *, depth: int = 5) -> list[BaseException]:
+    """The error and those under it (``__cause__``, else ``__context__``), a few steps deep."""
 
-    Followed through ``__cause__`` / ``__context__`` for a few steps, so a
-    cleanup error raised over the refusal still names it.
-    """
-
+    chain: list[BaseException] = []
     current: BaseException | None = error
-    for _ in range(5):
-        if current is None:
-            return None
-        err_code = getattr(current, "err_code", None)
-        description = getattr(current, "description", None)
-        if isinstance(err_code, int) and isinstance(description, str) and description:
-            return err_code, description[:200]
+    while current is not None and len(chain) < depth:
+        chain.append(current)
         current = current.__cause__ or current.__context__
+    return chain
+
+
+def _nats_refusal(error: BaseException) -> tuple[int, str] | None:
+    """A NATS JetStream refusal's code and description, when ``error`` is one."""
+
+    err_code = getattr(error, "err_code", None)
+    description = getattr(error, "description", None)
+    if isinstance(err_code, int) and isinstance(description, str) and description:
+        return err_code, description[:200]
     return None
 
 
@@ -510,18 +524,22 @@ def start_failure_reason(error: BaseException | None) -> str:
     "maximum consumers limit reached"). Other error text can carry anything,
     and this reason reaches TeamArchitect's review and administrators'
     notices; the full error is in the log (``event=agent_thread_crash``).
+
+    The errors under the one that ended the thread are read too, newest
+    first, so a cleanup error raised over the real refusal still names it.
     """
 
     if error is None:
         return EXITED_BEFORE_READY
-    code = refusal_code(error)
-    if code is not None:
-        return code
-    reason = f"{CRASHED_BEFORE_READY}: {type(error).__name__}"
-    refusal = _nats_refusal(error)
-    if refusal is not None:
-        reason += f" (NATS {refusal[0]}: {refusal[1]})"
-    return reason
+    crashed = f"{CRASHED_BEFORE_READY}: {type(error).__name__}"
+    for current in _error_chain(error):
+        code = refusal_code(current)
+        if code is not None:
+            return code
+        refusal = _nats_refusal(current)
+        if refusal is not None:
+            return f"{crashed} (NATS {refusal[0]}: {refusal[1]})"
+    return crashed
 
 
 def update_runtime_launch(
@@ -578,6 +596,33 @@ def update_runtime_launch(
     agent._worker_launch = repository.update(current, state=state, **changes)
 
 
+def log_failed_start(
+    record: AgentLaunchV1, reason: str, *, error: BaseException | None = None
+) -> None:
+    """One log line per start that ended before its worker was ready, where it ended.
+
+    Warning when the reason counts as a failed start of the type (the worker
+    pool controller then waits before the next start of it), info when it
+    does not. ``error`` is the full error when the stored reason kept only its
+    type; logs are for operators, the stored reason reaches people.
+    """
+
+    counted = counts_as_failed_start(reason)
+    logger.log(
+        logging.WARNING if counted else logging.INFO,
+        "A worker start ended before the worker was ready. event=worker_start_failed "
+        "team_id=%s agent_type=%s launch_id=%s agent_id=%s source=%s reason=%s counted=%s error=%s",
+        record.team_id,
+        record.named_agent_type,
+        record.launch_id,
+        record.agent_id,
+        record.source,
+        reason,
+        counted,
+        "-" if error is None else error,
+    )
+
+
 def record_worker_exit(
     agent: Any, crash: BaseException | None, *, stopped_because: str | None = None
 ) -> None:
@@ -594,24 +639,11 @@ def record_worker_exit(
     if agent._worker_ready:
         update_runtime_launch(agent, state=AgentLaunchState.RETIRED)
         return
-    record = agent._worker_launch
-    if record is None:
+    if agent._worker_launch is None:
         return
     reason = stopped_because or start_failure_reason(crash)
     update_runtime_launch(agent, state=AgentLaunchState.FAILED, reason=reason)
-    counted = counts_as_failed_start(reason)
-    logger.log(
-        logging.WARNING if counted else logging.INFO,
-        "A started worker ended before it was ready. event=worker_start_failed team_id=%s "
-        "agent_type=%s launch_id=%s agent_id=%s source=%s reason=%s counted=%s",
-        agent.team_id,
-        record.named_agent_type,
-        record.launch_id,
-        agent.id,
-        record.source,
-        reason,
-        counted,
-    )
+    log_failed_start(agent._worker_launch, reason)
 
 
 def renew_runtime_launch(agent: Any) -> None:
