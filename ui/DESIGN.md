@@ -1108,9 +1108,10 @@ that leads to it (owner's request 2026-10-12).
   says "The secure pages to choose the credentials are in the conversation."
   with a secondary **Show in the conversation** button that closes Settings
   and brings the first card into view. The credential is chosen only on the
-  broker's page. A form the chat cannot show as a card, and the standalone
-  workflow page, keep a **Choose the credential** link button that opens the
-  form in a new tab.
+  broker's page. A form the chat cannot show as a card keeps a **Choose the
+  credential** link button that opens the form in a new tab. The standalone
+  workflow page's decided card shows no follow-up today: the approver reaches
+  the forms through the Inbox notice (a proposed follow-up).
 
 ### Delivery Request Cards
 

@@ -3419,8 +3419,10 @@ page, the gateway, agents and models still never see what is typed.
   where they are and has **Show in the conversation**. The Inbox list is
   redrawn after every decision, so a frame inside it would reload at once. The
   cards live only in that browser tab, like every broker card; the Inbox
-  notice keeps the forms' links. The standalone workflow page is not Web Chat
-  and keeps plain links.
+  notice keeps the forms' links. The standalone workflow page is not Web Chat;
+  its decided card shows no follow-up today (`workflow.mjs` passes no links),
+  so an approver there reaches the forms through the Inbox notice (proposed
+  follow-up).
 - **Keyboard.** The frame is in the tab order with the page's title: Tab moves
   into the broker page (its fields, its button, Decline) and on to "Open in
   its own tab". When a card whose frame has focus closes (an outcome, expiry,
