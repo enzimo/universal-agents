@@ -1790,6 +1790,10 @@ def test_the_consumer_check_runs_its_compiled_program_in_a_source_stripped_image
         str(app_root / "scripts" / "reconcile_nats_consumers.pyc"),
         "--config",
         str(config_path),
+        # Only lasting agent leftovers are removed, and only because the
+        # launcher holds the run lock and has started no agent yet.
+        "--remove-lasting-agent-leftovers",
+        "--confirm-runtime-stopped",
     ]
     assert kwargs["cwd"] == app_root
     # A check that finished reports what it found in its own log (for example

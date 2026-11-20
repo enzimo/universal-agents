@@ -233,6 +233,104 @@ async def test_the_offline_scan_also_removes_an_abandoned_process_control_consum
     ]
 
 
+# -- the offline script: lasting leftovers with the runtime stopped -----------
+# Review of 2026-11-20 (DATA-4, CRIT-1): the documented fallback skipped every
+# lasting consumer and every push-era one, so it removed none of the leftovers.
+
+
+def _offline(consumers, **kwargs):
+    jetstream = _JetStream(consumers)
+    reconciler = NatsConsumerReconciler(jetstream=jetstream, mapper=MAPPER, stable_agent_ids={"stable_agent"})
+    return jetstream, reconciler
+
+
+def _reasons(result) -> dict[str, str]:
+    return {f"{d.owner_agent_id}:{d.consumer_role}": d.reason for d in result.decisions}
+
+
+@pytest.mark.asyncio
+async def test_the_offline_scan_removes_lasting_leftovers_and_keeps_what_may_be_in_use() -> None:
+    young = _info("young_worker", AGENT_DIRECT_ROLE)
+    young.created = datetime.now(timezone.utc) - timedelta(minutes=5)
+    lead_route = _info("lead", "team_lead", name=MAPPER.durable_name(f"lead_{TEAM}"))
+    jetstream, reconciler = _offline(
+        [
+            # Died holding a message: num_ack_pending stays 1 for good (NATS 2.15.3).
+            _info("dead_worker", AGENT_DIRECT_ROLE, held=1),
+            _info("dead_worker", AGENT_CONTROL_ROLE),
+            _info("push_worker", AGENT_DIRECT_ROLE, schema=PUSH_CONSUMER_METADATA_SCHEMA),
+            _info("asking_worker", AGENT_DIRECT_ROLE, waiting=1),
+            _info("bound_worker", AGENT_DIRECT_ROLE, schema=PUSH_CONSUMER_METADATA_SCHEMA, push_bound=True),
+            _info("stable_agent", AGENT_DIRECT_ROLE),
+            young,
+            lead_route,
+        ]
+    )
+    result = await reconciler.reconcile(apply=True, minimum_age_seconds=3600.0)
+    assert _reasons(result) == {
+        "dead_worker:agent_direct": "abandoned_lasting_agent_consumer",
+        "dead_worker:agent_control": "abandoned_lasting_agent_consumer",
+        "push_worker:agent_direct": "abandoned_lasting_agent_consumer",
+        "asking_worker:agent_direct": "live_subscription",
+        "bound_worker:agent_direct": "live_subscription",
+        "stable_agent:agent_direct": "configured_stable_agent",
+        "young_worker:agent_direct": "younger_than_minimum_age",
+        "None:None": "unmanaged_or_persistent",
+    }
+    assert sorted(name for _stream, name in jetstream.deleted) == sorted(
+        [
+            _name("dead_worker", AGENT_DIRECT_ROLE),
+            _name("dead_worker", AGENT_CONTROL_ROLE),
+            _name("push_worker", AGENT_DIRECT_ROLE),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_launchers_mode_removes_only_lasting_leftovers_and_reports_the_rest() -> None:
+    from custom_transport.nats_consumer_reconciler import KIND_LASTING_AGENT
+
+    jetstream, reconciler = _offline(
+        [
+            _info("dead_worker", AGENT_DIRECT_ROLE),
+            _info("agent_id_aaaaaaaaaaaa", AGENT_DIRECT_ROLE, scope="process"),
+        ]
+    )
+    result = await reconciler.reconcile(
+        apply=True, minimum_age_seconds=3600.0, delete_kinds=frozenset({KIND_LASTING_AGENT})
+    )
+    assert result.candidate_count == 2
+    assert jetstream.deleted == [(MAPPER.work_stream_name(), _name("dead_worker", AGENT_DIRECT_ROLE))]
+    assert result.deleted_count == 1
+
+
+def test_the_script_deletes_only_with_the_runtime_confirmed_stopped(monkeypatch) -> None:
+    import scripts.reconcile_nats_consumers as script
+    from custom_transport.nats_consumer_reconciler import KIND_LASTING_AGENT
+
+    calls = []
+
+    async def recorded(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            decisions=(), applied=kwargs["apply"], scanned_count=0, candidate_count=0, deleted_count=0,
+            account_consumer_count=None, account_max_consumers=None,
+        )
+
+    monkeypatch.setattr(script, "reconcile_nats_consumers", recorded)
+    monkeypatch.setattr(script, "local_nats_enabled_from_env", lambda env, default: False)
+    with pytest.raises(SystemExit):
+        script.main(["--config", "c.yaml", "--remove-lasting-agent-leftovers"])
+    assert calls == []
+    for flags, apply, kinds in (
+        ([], False, None),
+        (["--remove-lasting-agent-leftovers", "--confirm-runtime-stopped"], True, frozenset({KIND_LASTING_AGENT})),
+        (["--apply", "--confirm-runtime-stopped"], True, None),
+    ):
+        assert script.main(["--config", "c.yaml", *flags]) == 0
+        assert (calls[-1]["apply"], calls[-1]["delete_kinds"]) == (apply, kinds)
+
+
 # -- the team lead's removal ---------------------------------------------------
 
 

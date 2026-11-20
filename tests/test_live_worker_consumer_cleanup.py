@@ -258,3 +258,60 @@ async def test_live_a_lead_starts_on_a_work_stream_full_of_leftovers(tmp_path, m
             with contextlib.suppress(Exception):
                 await inspector._js.delete_stream(stream)  # noqa: SLF001
         await inspector.close()
+
+
+async def test_live_the_start_up_check_removes_lasting_leftovers_and_keeps_their_messages(tmp_path) -> None:
+    """The launcher's check (``--remove-lasting-agent-leftovers``) before any agent starts.
+
+    A worker that died while handling a message leaves its lasting mailbox with
+    that message delivered and unacknowledged for good (NATS 2.15.3), so a check
+    that counted held messages as a live receiver kept every such mailbox.
+    """
+
+    from custom_transport.nats_consumer_reconciler import KIND_LASTING_AGENT, NatsConsumerReconciler
+
+    team_id = new_id("team_check")
+    mapper = NatsSubjectMapper(team_id=team_id)
+    stream = mapper.work_stream_name()
+    inspector = NatsTransportAdapter(config=nats_transport_config_from_env(), mapper=mapper)
+    try:
+        await inspector.connect(reconcile_topology=True)
+        for owner in ("agent_died_holding", CONFIGURED, "agent_id_0123456789ab"):
+            scope = ConsumerScope.PROCESS if owner.startswith("agent_id_") else ConsumerScope.ROUTE
+            await _leftover(inspector, owner, scope)
+        await _push_era_leftover(inspector, PUSH_ERA)
+        # The dead worker had received a message and not acknowledged it.
+        subject, durable = _names(mapper, "agent_died_holding", AGENT_DIRECT_ROLE)
+        await inspector._nc.publish(subject, b"held when it died")  # noqa: SLF001
+        await inspector._nc.flush()  # noqa: SLF001
+        holder = await inspector._js.pull_subscribe_bind(durable=durable, stream=stream)  # noqa: SLF001
+        assert len(await holder.fetch(1, timeout=5)) == 1  # delivered, never acknowledged
+        await holder.unsubscribe()
+        info = await inspector._js.consumer_info(stream, durable)  # noqa: SLF001
+        assert (info.num_waiting, info.num_ack_pending) == (0, 1)
+
+        result = await NatsConsumerReconciler(
+            jetstream=inspector._js, mapper=mapper, stable_agent_ids={CONFIGURED}  # noqa: SLF001
+        ).reconcile(apply=True, minimum_age_seconds=0, delete_kinds=frozenset({KIND_LASTING_AGENT}))
+
+        remaining = sorted((c.owner_agent_id, c.consumer_role) for c in await inspector.agent_consumers())
+        assert remaining == sorted(
+            (owner, role)
+            for owner in (CONFIGURED, "agent_id_0123456789ab")  # configured; process-owned, only reported
+            for role in (AGENT_DIRECT_ROLE, AGENT_CONTROL_ROLE)
+        )
+        assert result.deleted_count == 4  # the dead worker's and the push-era pair
+        # Its message is still in the stream and comes back with the consumer.
+        await ensure_pull_consumer(
+            inspector._js, stream_name=stream,  # noqa: SLF001
+            config=_config(inspector, "agent_died_holding", AGENT_DIRECT_ROLE, ConsumerScope.PROCESS), logger=log,
+        )
+        again = await inspector._js.pull_subscribe_bind(durable=durable, stream=stream)  # noqa: SLF001
+        (message,) = await again.fetch(1, timeout=5)
+        assert message.data == b"held when it died"
+        await message.ack()
+    finally:
+        if inspector._js is not None:  # noqa: SLF001
+            with contextlib.suppress(Exception):
+                await inspector._js.delete_stream(stream)  # noqa: SLF001
+        await inspector.close()

@@ -44,6 +44,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from assistant_gateway.runtime_config import load_runtime_config_file  # noqa: E402
 from custom_transport.nats_consumer_reconciler import (  # noqa: E402
+    KIND_LASTING_AGENT,
     ConsumerReconciliationResult,
     NatsConsumerReconciler,
     configured_agent_ids,
@@ -146,8 +147,12 @@ async def reconcile_nats_consumers(
     apply: bool,
     minimum_age_seconds: float,
     stable_agent_ids: Sequence[str] = (),
+    delete_kinds: frozenset[str] | None = None,
 ) -> ConsumerReconciliationResult:
-    """Load runtime configuration and run one consumer reconciliation pass."""
+    """Load runtime configuration and run one consumer reconciliation pass.
+
+    ``delete_kinds`` limits what ``apply`` deletes (``NatsConsumerReconciler.reconcile``).
+    """
 
     config = load_runtime_config_file(config_path)
     servers = list(
@@ -200,6 +205,7 @@ async def reconcile_nats_consumers(
         return await reconciler.reconcile(
             apply=apply,
             minimum_age_seconds=minimum_age_seconds,
+            delete_kinds=delete_kinds,
         )
     finally:
         await connection.close()
@@ -216,6 +222,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="Delete eligible consumers. Without this flag the command is read-only.",
+    )
+    parser.add_argument(
+        "--remove-lasting-agent-leftovers",
+        action="store_true",
+        help=(
+            "Delete only the lasting mailbox and control consumers of agents whose id "
+            "is not configured (what releases before 2026-11-19 left for every started "
+            "worker) and report the rest. Requires --confirm-runtime-stopped. The "
+            "launcher runs this before any agent starts."
+        ),
     )
     parser.add_argument(
         "--confirm-runtime-stopped",
@@ -259,71 +275,34 @@ def _stop_local_nats(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=5)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-    if args.minimum_age_seconds < 0:
-        parser.error("--minimum-age-seconds cannot be negative.")
-    if args.apply and not args.confirm_runtime_stopped:
-        parser.error(
-            "--apply requires --confirm-runtime-stopped. Stop every Universal "
-            "Agents process for this team before deleting legacy consumers."
-        )
+def _deletion_mode(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> tuple[bool, frozenset[str] | None]:
+    """Whether to delete, and which kinds (None: every candidate); deleting needs the runtime stopped."""
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    local_nats_process = None
-    try:
-        if args.start_local_nats:
-            local_nats_env = dict(os.environ)
-            apply_local_nats_env(local_nats_env)
-            local_nats_process = start_local_nats(
-                env=local_nats_env,
-                logger=LOGGER,
-                cwd=PROJECT_ROOT,
-            )
-            os.environ.update(
-                {
-                    "NATS_URL": local_nats_env["NATS_URL"],
-                    "NATS_SERVERS": local_nats_env["NATS_SERVERS"],
-                    "NATS_JETSTREAM_ENABLED": "true",
-                    NATS_USER_ENV: local_nats_env[NATS_USER_ENV],
-                    NATS_PASSWORD_ENV: local_nats_env[NATS_PASSWORD_ENV],
-                }
-            )
-        elif local_nats_enabled_from_env(os.environ, default=True):
-            # The running local server requires the credentials it generated.
-            ensure_local_nats_credentials(os.environ, logger=LOGGER, create=False)
-        result = asyncio.run(
-            reconcile_nats_consumers(
-                config_path=args.config,
-                apply=bool(args.apply),
-                minimum_age_seconds=float(args.minimum_age_seconds),
-                stable_agent_ids=tuple(args.stable_agent_id),
-            )
+    if (args.apply or args.remove_lasting_agent_leftovers) and not args.confirm_runtime_stopped:
+        parser.error(
+            "--apply and --remove-lasting-agent-leftovers require --confirm-runtime-stopped. "
+            "Stop every Universal Agents process for this team before deleting consumers."
         )
-    except Exception as exc:
-        LOGGER.exception(
-            "NATS consumer reconciliation failed. "
-            "event=nats_consumer_reconciliation_failed config_path=%s apply=%s error=%s",
-            Path(args.config).expanduser(),
-            bool(args.apply),
-            _describe_error(exc),
-        )
-        return 1
-    finally:
-        if local_nats_process is not None:
-            _stop_local_nats(local_nats_process)
+    apply = bool(args.apply or args.remove_lasting_agent_leftovers)
+    # --apply deletes every candidate; the narrower flag only lasting agent leftovers.
+    return apply, (None if args.apply or not apply else frozenset({KIND_LASTING_AGENT}))
+
+
+def _report(
+    result: ConsumerReconciliationResult, *, apply: bool, delete_kinds: frozenset[str] | None, verbose: bool
+) -> None:
+    """Log what one pass found and did."""
 
     reason_counts = Counter(decision.reason for decision in result.decisions)
     LOGGER.info(
         "NATS consumer reconciliation complete. "
-        "event=nats_consumer_reconciliation_complete apply=%s scanned_count=%s "
+        "event=nats_consumer_reconciliation_complete apply=%s delete_kinds=%s scanned_count=%s "
         "candidate_count=%s deleted_count=%s account_consumer_count=%s "
         "account_max_consumers=%s reasons=%s",
         result.applied,
+        sorted(delete_kinds) if delete_kinds is not None else ("all" if apply else None),
         result.scanned_count,
         result.candidate_count,
         result.deleted_count,
@@ -357,7 +336,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result.account_consumer_count,
             result.account_max_consumers,
         )
-    if args.verbose:
+    if verbose:
         for decision in result.decisions:
             LOGGER.info(
                 "Consumer decision. event=nats_consumer_reconciliation_decision "
@@ -374,6 +353,64 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decision.delete,
                 decision.reason,
             )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.minimum_age_seconds < 0:
+        parser.error("--minimum-age-seconds cannot be negative.")
+    apply, delete_kinds = _deletion_mode(parser, args)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    local_nats_process = None
+    try:
+        if args.start_local_nats:
+            local_nats_env = dict(os.environ)
+            apply_local_nats_env(local_nats_env)
+            local_nats_process = start_local_nats(
+                env=local_nats_env,
+                logger=LOGGER,
+                cwd=PROJECT_ROOT,
+            )
+            os.environ.update(
+                {
+                    "NATS_URL": local_nats_env["NATS_URL"],
+                    "NATS_SERVERS": local_nats_env["NATS_SERVERS"],
+                    "NATS_JETSTREAM_ENABLED": "true",
+                    NATS_USER_ENV: local_nats_env[NATS_USER_ENV],
+                    NATS_PASSWORD_ENV: local_nats_env[NATS_PASSWORD_ENV],
+                }
+            )
+        elif local_nats_enabled_from_env(os.environ, default=True):
+            # The running local server requires the credentials it generated.
+            ensure_local_nats_credentials(os.environ, logger=LOGGER, create=False)
+        result = asyncio.run(
+            reconcile_nats_consumers(
+                config_path=args.config,
+                apply=apply,
+                minimum_age_seconds=float(args.minimum_age_seconds),
+                stable_agent_ids=tuple(args.stable_agent_id),
+                delete_kinds=delete_kinds,
+            )
+        )
+    except Exception as exc:
+        LOGGER.exception(
+            "NATS consumer reconciliation failed. "
+            "event=nats_consumer_reconciliation_failed config_path=%s apply=%s error=%s",
+            Path(args.config).expanduser(),
+            apply,
+            _describe_error(exc),
+        )
+        return 1
+    finally:
+        if local_nats_process is not None:
+            _stop_local_nats(local_nats_process)
+
+    _report(result, apply=apply, delete_kinds=delete_kinds, verbose=bool(args.verbose))
     return 0
 
 

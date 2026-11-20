@@ -797,14 +797,27 @@ def run_nats_consumer_preflight(
     config_path: Path,
     env: Mapping[str, str],
 ) -> None:
-    """Run the read-only consumer check before any agent creates a consumer.
+    """Run the consumer check before any agent creates a consumer.
 
     The check (``scripts/reconcile_nats_consumers.py``) exits 0 whenever it
     finishes its scan. What it finds, such as consumer usage near the account's
     limit, it logs itself, and start-up continues. Any other result means the
     check could not run: that is logged once at error level with its reason,
-    separately from the check's own findings. Start-up continues then too,
-    because the check only reports; it never changes or protects anything.
+    separately from the check's own findings. Start-up continues then too:
+    the check is not a gate.
+
+    It changes one thing (``--remove-lasting-agent-leftovers``): it deletes the
+    lasting mailbox and control consumers that releases before 2026-11-19 left
+    for every started worker, those of agents whose id is not configured, that
+    no process is asking and that are older than an hour. The launcher holds the
+    instance's run lock here (``acquire_process_run``) and has started no agent
+    process, so none of them can be in use; hence ``--confirm-runtime-stopped``.
+    Doing it here, before the lead, the startup agents and the gateway start
+    together, means a stream those leftovers filled to NATS's consumer limit
+    cannot refuse a startup agent's first consumer (which would stop the whole
+    runtime) while the lead is still removing them. The lead removes younger
+    leftovers itself when it starts (``custom_agents.worker_consumer_cleanup``).
+    Everything else the check finds it only reports.
 
     Images keep only compiled files, so the program is found through
     ``resolve_python_entrypoint`` like every other program the launcher starts.
@@ -821,7 +834,14 @@ def run_nats_consumer_preflight(
         return
     try:
         result = subprocess.run(
-            [sys.executable, str(program), "--config", str(config_path)],
+            [
+                sys.executable,
+                str(program),
+                "--config",
+                str(config_path),
+                "--remove-lasting-agent-leftovers",
+                "--confirm-runtime-stopped",
+            ],
             cwd=REPO_ROOT,
             env=environment_for(PROCESS_CONSUMER_CHECK, env),
             check=False,

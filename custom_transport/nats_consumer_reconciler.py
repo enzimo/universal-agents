@@ -30,6 +30,17 @@ AGENT_CONSUMER_SCHEMAS = frozenset({CONSUMER_METADATA_SCHEMA, PUSH_CONSUMER_META
 # and cannot be read here; an agent run by hand with it is not recognised
 # (``custom_agents.worker_consumer_cleanup``).
 CONFIGURED_AGENT_ID_SETTING = "agent.agent_id"
+# What kind of abandoned consumer a candidate is (``ConsumerReconciliationDecision.kind``).
+KIND_MANAGED_PROCESS = "managed"  # process-owned, with ownership metadata
+KIND_LEGACY_PROCESS = "legacy"  # a generated agent id's consumer from before the metadata
+# A lasting agent mailbox or control consumer whose owner is not configured:
+# what releases before 2026-11-19 left for every started worker.
+KIND_LASTING_AGENT = "lasting_agent"
+_ABANDONED_REASONS = {
+    KIND_MANAGED_PROCESS: "abandoned_managed_process_consumer",
+    KIND_LEGACY_PROCESS: "abandoned_legacy_process_consumer",
+    KIND_LASTING_AGENT: "abandoned_lasting_agent_consumer",
+}
 
 
 def configured_agent_ids(config: Any) -> frozenset[str]:
@@ -74,6 +85,8 @@ class ConsumerReconciliationDecision:
     listening: bool | None
     num_pending: int | None
     num_ack_pending: int | None
+    # Which kind of candidate (``KIND_*``), or None when it is not one.
+    kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,7 +113,14 @@ class ConsumerReconciliationResult:
 
 
 class NatsConsumerReconciler:
-    """Classify and delete abandoned process-owned consumers for one team."""
+    """Classify and delete one team's abandoned consumers with the runtime stopped.
+
+    Candidates are process-owned agent consumers, legacy generated-id ones and,
+    since 2026-11-20, lasting agent mailbox and control consumers whose owner is
+    not configured (``KIND_LASTING_AGENT``). The team lead's own removal while
+    the runtime runs is ``agent_consumers``/``delete_agent_consumers`` with the
+    liveness rule (``custom_agents.worker_consumer_cleanup``).
+    """
 
     def __init__(
         self,
@@ -125,8 +145,14 @@ class NatsConsumerReconciler:
         apply: bool,
         minimum_age_seconds: float,
         now: datetime | None = None,
+        delete_kinds: frozenset[str] | None = None,
     ) -> ConsumerReconciliationResult:
-        """Scan every team consumer, then optionally delete safe candidates."""
+        """Scan every team consumer, then optionally delete safe candidates.
+
+        ``delete_kinds`` limits deletion to candidates of those kinds; the
+        others are only reported. The launcher removes only lasting agent
+        leftovers this way before any agent starts (``run_nats_consumer_preflight``).
+        """
 
         observed_at = now or datetime.now(timezone.utc)
         infos = await self._consumer_infos()
@@ -140,7 +166,7 @@ class NatsConsumerReconciler:
             for stream_name, info in infos
         )
         account_consumer_count, account_max_consumers = await self._account_capacity()
-        deleted_count = await self._apply_decisions(decisions) if apply else 0
+        deleted_count = await self._apply_decisions(decisions, delete_kinds) if apply else 0
         return ConsumerReconciliationResult(
             decisions=decisions,
             applied=apply,
@@ -160,10 +186,11 @@ class NatsConsumerReconciler:
     async def _apply_decisions(
         self,
         decisions: tuple[ConsumerReconciliationDecision, ...],
+        delete_kinds: frozenset[str] | None = None,
     ) -> int:
         deleted_count = 0
         for decision in decisions:
-            if not decision.delete:
+            if not decision.delete or (delete_kinds is not None and decision.kind not in delete_kinds):
                 continue
             try:
                 await self._js.delete_consumer(
@@ -246,7 +273,6 @@ class NatsConsumerReconciler:
         consumer_name = str(getattr(info, "name", "") or "")
         filter_subject = str(getattr(config, "filter_subject", "") or "")
         metadata = dict(getattr(config, "metadata", None) or {})
-        listening = consumer_listening_state(info)
         owner_agent_id, consumer_role, candidate_kind = self._managed_identity(
             metadata=metadata,
             stream_name=stream_name,
@@ -260,26 +286,22 @@ class NatsConsumerReconciler:
                 consumer_name=consumer_name,
                 filter_subject=filter_subject,
             )
-            candidate_kind = "legacy" if owner_agent_id else None
+            candidate_kind = KIND_LEGACY_PROCESS if owner_agent_id else None
+        # A lasting consumer outlives its receiver with the messages it held
+        # still pending, so only an open request proves a receiver for it.
+        listening: bool | None = (
+            consumer_has_open_request(info)
+            if candidate_kind == KIND_LASTING_AGENT
+            else consumer_listening_state(info)
+        )
 
-        reason = "unmanaged_or_persistent"
-        delete = False
-        if candidate_kind is not None:
-            if listening is None:
-                reason = "listening_unknown"
-            elif listening:
-                reason = "live_subscription"
-            elif owner_agent_id in self._stable_agent_ids:
-                reason = "configured_stable_agent"
-            elif not self._old_enough(
-                info,
-                minimum_age_seconds=minimum_age_seconds,
-                observed_at=observed_at,
-            ):
-                reason = "younger_than_minimum_age"
-            else:
-                reason = f"abandoned_{candidate_kind}_process_consumer"
-                delete = True
+        reason = self._candidate_reason(
+            candidate_kind,
+            listening=listening,
+            owner_agent_id=owner_agent_id,
+            old_enough=self._old_enough(info, minimum_age_seconds=minimum_age_seconds, observed_at=observed_at),
+        )
+        delete = candidate_kind is not None and reason == _ABANDONED_REASONS[candidate_kind]
 
         return ConsumerReconciliationDecision(
             stream_name=stream_name,
@@ -292,7 +314,25 @@ class NatsConsumerReconciler:
             listening=listening,
             num_pending=self._optional_int(getattr(info, "num_pending", None)),
             num_ack_pending=self._optional_int(getattr(info, "num_ack_pending", None)),
+            kind=candidate_kind,
         )
+
+    def _candidate_reason(
+        self, candidate_kind: str | None, *, listening: bool | None, owner_agent_id: str | None, old_enough: bool
+    ) -> str:
+        """Why a consumer is kept, or the ``_ABANDONED_REASONS`` entry when it is deleted."""
+
+        if candidate_kind is None:
+            return "unmanaged_or_persistent"
+        if listening is None:
+            return "listening_unknown"
+        if listening:
+            return "live_subscription"
+        if owner_agent_id in self._stable_agent_ids:
+            return "configured_stable_agent"
+        if not old_enough:
+            return "younger_than_minimum_age"
+        return _ABANDONED_REASONS[candidate_kind]
 
     def _managed_identity(
         self,
@@ -302,33 +342,50 @@ class NatsConsumerReconciler:
         consumer_name: str,
         filter_subject: str,
     ) -> tuple[str | None, str | None, str | None]:
-        if (
-            metadata.get("ua.managed") != "true"
-            or metadata.get("ua.schema") != CONSUMER_METADATA_SCHEMA
-            or metadata.get("ua.team_id") != self._mapper.team_id
-            or metadata.get("ua.consumer_scope") != "process"
-        ):
-            return None, None, None
+        """Owner, role and candidate kind of a consumer with ownership metadata, or Nones.
+
+        Process-owned consumers of this release (agent mailboxes and control
+        queues of both schemas, presence snapshots) and lasting agent mailbox
+        and control consumers of both schemas are candidates; every other
+        consumer (team-lead routes, worker queues, gateway routes) is not.
+        """
+
+        schema = metadata.get("ua.schema")
         owner_agent_id = str(metadata.get("ua.owner_agent_id") or "").strip()
         consumer_role = str(metadata.get("ua.consumer_role") or "").strip()
-        if not owner_agent_id:
+        scope = metadata.get("ua.consumer_scope")
+        if (
+            metadata.get("ua.managed") != "true"
+            or metadata.get("ua.team_id") != self._mapper.team_id
+            or not owner_agent_id
+        ):
             return None, None, None
+        kind: str | None
         if consumer_role in AGENT_CONSUMER_ROLES:
-            matches = self._is_agent_consumer(
-                stream_name=stream_name,
-                consumer_name=consumer_name,
-                filter_subject=filter_subject,
-                owner_agent_id=owner_agent_id,
-                consumer_role=consumer_role,
+            kind = {"route": KIND_LASTING_AGENT, "process": KIND_MANAGED_PROCESS}.get(str(scope))
+            matches = (
+                kind is not None
+                and schema in AGENT_CONSUMER_SCHEMAS
+                and self._is_agent_consumer(
+                    stream_name=stream_name,
+                    consumer_name=consumer_name,
+                    filter_subject=filter_subject,
+                    owner_agent_id=owner_agent_id,
+                    consumer_role=consumer_role,
+                )
             )
         else:
-            matches = consumer_role == "presence_snapshot" and (stream_name, filter_subject) == (
-                self._mapper.presence_stream_name(),
-                f"{self._mapper.prefix}.presence.*",
+            kind = KIND_MANAGED_PROCESS
+            matches = (
+                consumer_role == "presence_snapshot"
+                and scope == "process"
+                and schema == CONSUMER_METADATA_SCHEMA
+                and (stream_name, filter_subject)
+                == (self._mapper.presence_stream_name(), f"{self._mapper.prefix}.presence.*")
             )
         if not matches:
             return None, None, None
-        return owner_agent_id, consumer_role, "managed"
+        return owner_agent_id, consumer_role, kind
 
     def _is_agent_consumer(
         self,

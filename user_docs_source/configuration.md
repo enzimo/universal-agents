@@ -866,10 +866,12 @@ Agent mailboxes and control queues are deleted during clean shutdown and
 expire after this delay when a process crashes. This includes every worker the
 runtime starts (pool, scheduled and manual starts). Explicit `agent.agent_id`
 mailboxes, team lead routes, named-worker queues, and gateway routes remain
-persistent. Releases before this fix kept started workers' consumers. The team
-lead deletes those when it starts, before any worker starts, and again hourly
-while some may still belong to a running worker. It keeps the consumers of
-configured agents and of any agent still asking for messages. The
+persistent. Releases before this fix kept started workers' consumers. The
+launcher's consumer check deletes those older than an hour before any agent
+starts, and the team lead deletes the rest when it starts, before any worker
+starts, and again hourly while some may still belong to a running worker.
+Both keep the consumers of configured agents and of any agent still asking for
+messages. The
 runtime requires NATS Server 2.10 or newer for the consumer ownership metadata;
 the bundled image includes a newer pinned release.
 
@@ -878,7 +880,9 @@ when it can act on it. Workers of one type share one queue and ask for a task
 only while they are free, so a busy worker never holds tasks another worker
 could run. Upgrading from a release that used push consumers replaces them on
 the first start (each replacement is logged as `nats_consumer_replaced`);
-messages still in the stream are kept and delivered by the new consumers.
+messages still in the stream are kept and delivered by the new consumers. The
+push consumers of workers those releases started are never created again;
+they are deleted with the other leftovers above.
 
 ## Worker pools
 

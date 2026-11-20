@@ -356,13 +356,15 @@ security boundaries, and verification steps.
 ### Remove abandoned JetStream consumers in Docker Swarm
 
 Older releases left generated agent consumers in NATS after every restart,
-and releases before the started-worker fix left two for every worker they
-started. The team lead now deletes gone workers' consumers by itself when it
-starts (`event=worker_consumer_cleanup_done` in the log). If the account still
-reaches its consumer limit, park the service as shown above and run the bundled
-reconciler inside the task container. The command starts only the
-local NATS service, reads the existing JetStream data, and stops NATS before it
-returns.
+and releases before the started-worker fix (2026-11-19) left two lasting ones
+for every worker they started. Nothing needs to be done by hand for those: on
+every start, before any agent starts, the launcher's consumer check removes
+the ones older than an hour, and the team lead removes the rest when it starts
+(`event=worker_consumer_cleanup_done` in the log), before it creates its own
+consumers. If the account still reaches its consumer limit, park the service as
+shown above and run the bundled reconciler inside the task container. The
+command starts only the local NATS service, reads the existing JetStream data,
+and stops NATS before it returns.
 
 Use the reconciler shipped with the same container image as its `/app` runtime
 modules. After updating the reconciler implementation, rebuild and redeploy the
@@ -384,7 +386,7 @@ docker exec --user 0 "$UA_CONTAINER" \
   --start-local-nats
 ```
 
-Then apply the exact generated-id candidates:
+Then delete the candidates it reported:
 
 ```bash
 docker exec --user 0 "$UA_CONTAINER" \
@@ -395,10 +397,21 @@ docker exec --user 0 "$UA_CONTAINER" \
   --confirm-runtime-stopped
 ```
 
-Apply mode protects live consumers, configured stable agent ids, team-lead
-routes, worker queues, gateway routes, malformed records, and records younger
-than one hour. A consumer is live while a process is asking it for messages
-or holds messages it has not acknowledged yet. Add `--verbose` to print every classification. For an external
+Apply mode deletes the process consumers of generated agent ids and the
+lasting mailbox and control consumers of every agent whose id is not
+configured (`agent.agent_id`), including those the push-delivery releases left.
+Pass `--stable-agent-id <id>` for each agent you run by hand with its own
+`--agent-id`, or its lasting mailbox is deleted too. Messages a deleted
+consumer held, delivered or not, stay in the stream and are delivered when an
+agent with that id creates its consumer again. Apply mode protects live
+consumers, configured stable agent ids, team-lead routes, worker queues,
+gateway routes, malformed records, and records younger than one hour. A
+process-owned consumer is live while a process is asking it for messages or
+holds messages it has not acknowledged yet; a lasting one only while a process
+is asking, because the messages a dead worker held stay pending for good.
+`--remove-lasting-agent-leftovers --confirm-runtime-stopped` deletes only the
+lasting leftovers and reports the rest; that is what the start-up check runs.
+Add `--verbose` to print every classification. For an external
 NATS deployment, omit `--start-local-nats`; the command uses `NATS_URL` or
 `NATS_SERVERS` and the configured credentials. Before scanning, the command
 prints the resolved team id, subject prefix, and exact stream names. Stop if
@@ -409,11 +422,15 @@ also expires them after
 `transport.process_consumer_inactive_threshold_seconds`, so this manual command
 is only needed for records created by older releases.
 
-Every start runs the same read-only report before any agent starts, and its
-lines appear in the container log. What the report finds stays in its own
-lines, for example the warning `event=nats_consumer_capacity_high` when the
-team uses 90 percent or more of the account's consumer limit, and the agents
-start. When the report cannot run at all, the log shows one error,
+Every start runs the same report before any agent starts, and its lines
+appear in the container log. It deletes only the lasting leftovers described
+above (`event=nats_consumer_reconciler_deleted`, with
+`reason=abandoned_lasting_agent_consumer`); the launcher holds the instance's
+run lock then and has started no agent, so none of them can be in use. What
+else it finds stays in its own lines, for example the warning
+`event=nats_consumer_capacity_high` when the team uses 90 percent or more of
+the account's consumer limit, and the agents start. When the report cannot run
+at all, the log shows one error,
 `event=nats_consumer_preflight_not_run`, with a `reason`:
 
 | `reason` | Meaning |

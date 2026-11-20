@@ -4266,15 +4266,21 @@ and that each one is listed. The build is where a packaging mistake has to
 fail: one launcher call that named its `.py` file only logged a warning at
 start-up, and nobody noticed it for several releases.
 
-Before any agent creates a JetStream consumer, the launcher runs the read-only
+Before any agent creates a JetStream consumer, the launcher runs the
 consumer report (`run_nats_consumer_preflight`,
-`scripts/reconcile_nats_consumers.py`). A report that finishes exits 0 and logs
-its own findings, such as consumer usage near the account's limit; a report
-that cannot run is one error, `event=nats_consumer_preflight_not_run`, with a
-`reason`, so the two never look alike. Neither stops start-up: the report only
-informs, it neither changes nor protects anything, and agents report their own
-NATS errors. Making it a start-up gate would let a slow or briefly unreachable
-NATS server, or an external server that refuses consumer listing, stop the
+`scripts/reconcile_nats_consumers.py --remove-lasting-agent-leftovers`). A
+report that finishes exits 0 and logs its own findings, such as consumer usage
+near the account's limit; a report that cannot run is one error,
+`event=nats_consumer_preflight_not_run`, with a `reason`, so the two never look
+alike. It changes one thing: it deletes the lasting agent mailbox and control
+consumers that releases before 2026-11-19 left for started workers (owner id
+not configured, no request open, older than an hour). The launcher holds the
+instance's run lock and has started no agent, so none can be in use, and the
+lead, the startup agents and the gateway, which start together, find room for
+their first consumers. Everything else it only reports. Neither outcome stops
+start-up, and agents report their own NATS errors. Making it a start-up gate
+would let a slow or briefly unreachable NATS server, or an external server
+that refuses consumer listing, stop the
 whole team. Because start-up waits for it, the report's first connection fails
 fast: nats-py retries a failed first connection about 60 times, two seconds
 apart, even with `allow_reconnect=False`, so the report sets
