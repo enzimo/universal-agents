@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from custom_agents import worker_pool_reviews as reviews
-from custom_agents.worker_pool_controller import PoolObservation
+from custom_agents.worker_pool_controller import PoolObservation, _report_start_history
 from custom_agents.worker_pool_limits import PoolLimit, worker_pool_repository
 from runtime_settings.worker_pools import WorkerPoolsConfig
 from storage import resolve_storage_settings
@@ -136,6 +136,26 @@ async def test_a_failed_start_is_reviewed_and_administrators_are_told_until_a_st
     await recovered.settle()
     assert worker_pool_repository(world.agent).list_open_incidents("team") == ()
     assert world.told[-1] == []  # nothing left to report; the engine sends the recovery notice
+
+
+@pytest.mark.asyncio
+async def test_one_failed_start_opens_nothing_and_a_second_in_a_row_opens_review_and_notice(world):
+    """The lead's decision on CRIT-2: a single passing failure no longer reaches TeamArchitect or administrators."""
+
+    crash = "crashed_before_ready: BadRequestError (NATS 10026: maximum consumers limit reached)"
+    settings = _settings()
+    first = reviews.WorkerPoolIncidents(world.agent, settings)
+    _report_start_history(_observation(failed_starts_in_row=1, last_start_failure=crash, start_retry_in_seconds=9.0), first)
+    await first.settle()
+    assert world.opened == [] and world.told == [[]]
+
+    second = reviews.WorkerPoolIncidents(world.agent, settings)
+    _report_start_history(_observation(failed_starts_in_row=2, last_start_failure=crash, start_retry_in_seconds=19.0), second)
+    await second.settle()
+    assert [(item["kind"], item["details"]["start_refused_because"]) for item in world.opened] == [
+        (INCIDENT_START_FAILED, crash)
+    ]
+    assert [finding.subject_id for finding in world.told[-1]] == [f"{WORKER_TYPE}:{INCIDENT_START_FAILED}"]
 
 
 @pytest.mark.asyncio

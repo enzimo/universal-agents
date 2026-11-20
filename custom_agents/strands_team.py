@@ -228,8 +228,8 @@ def _settle_worker_exit(
     outlived the 1 s join, the launcher already wrote the record with the
     stop reason (custom_agents.schedule_worker_controller), so the worker's
     own write loses the fence. That one case is expected and logged at info,
-    with the conflict's text; every other failure stays an error (a ready
-    worker whose end nothing recorded, a missing or foreign record).
+    with the conflict's text; every other failure stays an error: a ready
+    worker whose end nothing recorded, or any failure when no stop was asked.
     """
 
     from custom_agents.agent_instantiation_service import record_worker_exit

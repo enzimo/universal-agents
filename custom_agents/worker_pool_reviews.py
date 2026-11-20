@@ -124,12 +124,13 @@ class WorkerPoolIncidents:
     def start_succeeded(self, agent_type: str) -> None:
         self._started_types.add(agent_type)
 
-    def start_failed(self, observation: Any, reason: str) -> None:
-        self._see(
-            observation.agent_type,
-            INCIDENT_START_FAILED,
-            {"pool": observation.as_dict(), "start_refused_because": reason},
-        )
+    def start_failed(self, observation: Any, reason: str, *, hourly_start_limit: bool = False) -> None:
+        evidence: dict[str, Any] = {"pool": observation.as_dict(), "start_refused_because": reason}
+        if hourly_start_limit:
+            # The hourly start limit refused it (custom_agents.worker_pool_controller):
+            # with no failed start, the limit itself is what to look at.
+            evidence["hourly_start_limit_reached"] = True
+        self._see(observation.agent_type, INCIDENT_START_FAILED, evidence)
 
     async def observe_team(self, observations: list[Any], *, team_active: int, team: Any) -> None:
         threshold = math.ceil(self.settings.capacity_warning_ratio * team.effective) if team.effective else 0

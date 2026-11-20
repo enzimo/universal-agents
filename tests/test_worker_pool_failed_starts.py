@@ -20,6 +20,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from nats.js.errors import BadRequestError
@@ -42,14 +43,24 @@ from custom_agents.agent_instantiation_service import (
 from custom_agents.schedule_repair_guidance import SCHEDULE_LAUNCH_INTENT_CHANGED
 from custom_agents.schedule_worker_controller import ScheduleWorkerController
 from custom_agents.worker_pool_controller import (
+    START_FAILURES_BEFORE_REVIEW,
+    PoolDecision,
     PoolObservation,
     StartHistory,
+    WorkerPoolController,
+    _report_start_history,
     decide,
     start_history,
+    start_retry_in,
     start_retry_seconds,
 )
 from custom_agents.worker_pool_limits import PoolLimit
-from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState, utc_now
+from custom_messages.contracts.schedule_worker_v1 import (
+    WORKER_LAUNCH_RATE_LIMIT,
+    AgentLaunchResultV1,
+    AgentLaunchState,
+    utc_now,
+)
 from runtime_settings.worker_pools import WorkerPoolsConfig
 from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity, LaunchConflict
 from tests.test_schedule_worker_service import lead  # noqa: F401
@@ -234,6 +245,189 @@ def test_one_worker_is_tried_again_once_the_wait_ran_out() -> None:
         team_active=0, team_limit_value=32, settings=WorkerPoolsConfig(),
     )
     assert decision.starts == 1
+
+
+def _observed(launches, **overrides) -> PoolObservation:
+    """The observation the controller builds from start records (as in WorkerPoolController.observe)."""
+
+    history = start_history(launches, TYPE, since=NOW - timedelta(hours=1))
+    values = dict(
+        failed_starts_in_row=history.failures_in_row,
+        last_start_failure=history.last_failure_reason,
+        start_retry_in_seconds=start_retry_in(history, NOW),
+        start_recovered=history.recovered,
+        starts_in_progress=history.starts_in_progress,
+        uncounted_start_ends=history.uncounted_ends,
+        last_uncounted_start_end=history.last_uncounted_reason,
+    )
+    values.update(overrides)
+    return _observation(**values)
+
+
+def _three_failures_the_last_50_seconds_ago():
+    # The wait after a third failure is 40 s, so it is over.
+    return [
+        make_launch(named_agent_type=TYPE, state=AgentLaunchState.FAILED, reason=CRASH,
+                    created_at_utc=NOW - timedelta(seconds=100 - index * 20),
+                    updated_at_utc=NOW - timedelta(seconds=90 - index * 20))
+        for index in range(3)
+    ]
+
+
+def test_no_more_starts_while_the_retry_after_failures_is_still_starting() -> None:
+    """Review probe probe_backoff_inflight: the retry made 6 s ago is still starting; 8f13f6af started 4 more."""
+
+    launches = _three_failures_the_last_50_seconds_ago() + [
+        make_launch(named_agent_type=TYPE, state=AgentLaunchState.STARTING,
+                    created_at_utc=NOW - timedelta(seconds=6), updated_at_utc=NOW - timedelta(seconds=6)),
+    ]
+    observation = _observed(
+        launches, waiting=6, oldest_wait_seconds=600.0, starting=1,
+        limit=PoolLimit(scope=TYPE, effective=5, default=5, ceiling=10),
+    )
+    assert observation.start_retry_in_seconds == 0.0
+    decision = decide(observation, team_active=1, team_limit_value=20, settings=WorkerPoolsConfig())
+    assert decision.starts == 0
+    assert "one more start is in progress" in decision.reason
+
+
+def test_a_slow_start_left_unknown_still_holds_the_next_start() -> None:
+    """A timed-out start whose thread outlived the join stays unknown, never ready, until its lease ends."""
+
+    launches = _three_failures_the_last_50_seconds_ago() + [
+        make_launch(named_agent_type=TYPE, state=AgentLaunchState.UNKNOWN, reason=STARTUP_TIMED_OUT,
+                    created_at_utc=NOW - timedelta(seconds=30), updated_at_utc=NOW - timedelta(seconds=5)),
+    ]
+    observation = _observed(launches, waiting=6, oldest_wait_seconds=600.0, unknown=1)
+    assert decide(observation, team_active=1, team_limit_value=20, settings=WorkerPoolsConfig()).starts == 0
+
+
+def test_a_ready_worker_left_unknown_does_not_hold_the_next_start() -> None:
+    """Its lease ran out while it worked; it is not a start in progress (critique C04)."""
+
+    launches = _three_failures_the_last_50_seconds_ago() + [
+        make_launch(named_agent_type=TYPE, state=AgentLaunchState.UNKNOWN, ready_at_utc=NOW - timedelta(hours=2),
+                    created_at_utc=NOW - timedelta(minutes=20), updated_at_utc=NOW - timedelta(minutes=1)),
+    ]
+    observation = _observed(launches, waiting=6, oldest_wait_seconds=600.0, unknown=1)
+    decision = decide(observation, team_active=1, team_limit_value=20, settings=WorkerPoolsConfig())
+    assert decision.starts == 1
+
+
+def test_after_failures_one_start_is_made_even_with_ready_workers_running() -> None:
+    observation = _observed(
+        _three_failures_the_last_50_seconds_ago(), waiting=6, oldest_wait_seconds=600.0, running=2,
+    )
+    decision = decide(observation, team_active=2, team_limit_value=20, settings=WorkerPoolsConfig())
+    assert decision.starts == 1
+    # Without failures the same pass may start up to max_starts_per_pass.
+    healthy = _observation(waiting=6, oldest_wait_seconds=600.0, running=2)
+    assert decide(healthy, team_active=2, team_limit_value=20, settings=WorkerPoolsConfig()).starts > 1
+
+
+class _Incidents:
+    def __init__(self) -> None:
+        self.failed: list[tuple[str, dict]] = []
+        self.succeeded: list[str] = []
+
+    def start_failed(self, observation, reason, **flags) -> None:
+        self.failed.append((reason, flags))
+
+    def start_succeeded(self, agent_type) -> None:
+        self.succeeded.append(agent_type)
+
+
+def test_one_failure_opens_no_review_and_two_in_a_row_do() -> None:
+    """The lead's decision on CRIT-2: a single passing failure only holds the next start."""
+
+    assert START_FAILURES_BEFORE_REVIEW == 2
+    one, two = _Incidents(), _Incidents()
+    _report_start_history(_observation(failed_starts_in_row=1, last_start_failure=CRASH, start_retry_in_seconds=9.0), one)
+    _report_start_history(_observation(failed_starts_in_row=2, last_start_failure=CRASH, start_retry_in_seconds=0.0), two)
+    assert one.failed == []
+    assert two.failed == [(CRASH, {})]  # also in the pass that retries (no wait left)
+
+
+def test_no_review_while_no_tasks_wait() -> None:
+    idle, busy = _Incidents(), _Incidents()
+    _report_start_history(_observation(waiting=0, failed_starts_in_row=3, last_start_failure=CRASH, start_retry_in_seconds=5.0), idle)
+    _report_start_history(_observation(waiting=1, failed_starts_in_row=3, last_start_failure=CRASH, start_retry_in_seconds=5.0), busy)
+    assert idle.failed == [] and len(busy.failed) == 1
+
+
+def _controller(results: list) -> WorkerPoolController:
+    class _Runtime:
+        async def run(self, fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+    agent = SimpleNamespace(team_id="team", task_manager=SimpleNamespace(operations_runtime=_Runtime()),
+                            _pool_rate_limited_types=set())
+    controller = WorkerPoolController(agent)
+    controller._launch = lambda _agent_type: results.pop(0)
+    return controller
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_start_is_not_counted_as_a_success() -> None:
+    """Only a worker that became ready ends a start_failed incident (review finding EVD-1)."""
+
+    incidents = _Incidents()
+    started = await _controller([AgentLaunchResultV1(status="starting", agent_id="w", launch_id="l")])._start(
+        _observation(failed_starts_in_row=2, last_start_failure=CRASH), PoolDecision(1, "retry"), incidents
+    )
+    assert started == 1 and incidents.succeeded == []
+
+
+@pytest.mark.asyncio
+async def test_each_hourly_limit_episode_is_logged_when_it_begins_and_ends(caplog) -> None:
+    """Tasks stop waiting while the limit refuses: the episode ends; a later refusal begins a new one (CONC-5)."""
+
+    refused = AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT)
+    controller = _controller([refused, refused])
+    incidents = _Incidents()
+    with caplog.at_level(logging.INFO, logger="custom_agents.worker_pool_controller"):
+        await controller._start(_observation(waiting=3), PoolDecision(1, "start"), incidents)
+        await controller._start(_observation(waiting=0), PoolDecision(0, "no tasks waiting"), incidents)
+        await controller._start(_observation(waiting=3), PoolDecision(1, "start"), incidents)
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("event=worker_pool_start_rate_limited " in m for m in messages) == 2
+    (ended,) = [m for m in messages if "event=worker_pool_start_rate_limit_ended" in m]
+    assert "because=no tasks wait" in ended
+    assert [flags for _, flags in incidents.failed] == [{"hourly_start_limit": True}] * 2
+
+
+@pytest.mark.asyncio
+async def test_an_hourly_limit_refusal_after_only_uncounted_ends_names_them() -> None:
+    """Critique C01: ends that do not count still used up the limit, so the review names them."""
+
+    incidents = _Incidents()
+    controller = _controller([AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT)])
+    observation = _observation(uncounted_start_ends=7, last_uncounted_start_end=LAUNCH_POLICY_REVOKED)
+    await controller._start(observation, PoolDecision(1, "start"), incidents)
+    ((reason, flags),) = incidents.failed
+    assert reason == (
+        f"{WORKER_LAUNCH_RATE_LIMIT}; no start failed, 7 start(s) ended for a reason that does not count, "
+        f"the latest: {LAUNCH_POLICY_REVOKED}"
+    )
+    assert flags == {"hourly_start_limit": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "opens"),
+    [
+        # Refused before a record was reserved: tried every pass, so it opens at once.
+        (AgentLaunchResultV1(status="denied", reason="agent_definition_unavailable"), True),
+        # Its reason does not count (pools turned off meanwhile).
+        (AgentLaunchResultV1(status="denied", reason="worker_pools_disabled"), False),
+        # Refused after its record was reserved: the next pass counts the failed record.
+        (AgentLaunchResultV1(status="denied", reason="agent_type_disallowed", launch_id="l", created=True), False),
+    ],
+)
+async def test_a_launcher_refusal_opens_an_incident_at_once_only_when_it_will_repeat(result, opens) -> None:
+    incidents = _Incidents()
+    await _controller([result])._start(_observation(), PoolDecision(1, "start"), incidents)
+    assert bool(incidents.failed) is opens
 
 
 def test_the_pool_view_shows_the_failures_and_the_wait() -> None:
@@ -908,3 +1102,19 @@ def test_an_exit_write_that_fails_otherwise_is_an_error(lead, monkeypatch, caplo
         _thread_gone(record)
     recorded, errors = _exit_lines(caplog)
     assert recorded == [] and len(errors) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_start_whose_types_own_rule_is_refused_counts(lead, monkeypatch) -> None:
+    """A saved schedule that overrides another rule: the type's own refused rule still counts (critique C16)."""
+
+    refused = "schedule_worker_rule_exceeds_operator_limit:startup_timeout_seconds"
+    repository, record = _configured_schedule_start(lead, monkeypatch, rules={"claim_wait_seconds": 30}, config={
+        "agent": {"schedule_workers": {"eligible_agent_types": ["Worker"], "max_startup_timeout_seconds": 300}},
+        "agent_types": {"Worker": {"agent": {"schedule_worker_rules": {"startup_timeout_seconds": 600}}}},
+    })
+    reasons = _launcher_stops(lead, stopped=True)
+    await _reconcile(lead)
+    stored = repository.get(record.launch_id, "team")
+    assert reasons == [refused]
+    assert start_history([stored], stored.named_agent_type).failures_in_row == 1

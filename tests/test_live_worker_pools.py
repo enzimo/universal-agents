@@ -256,14 +256,17 @@ def controller_world(tmp_path, monkeypatch):
         lambda _agent: ScheduleWorkersConfig(),
     )
     reviews: list = []
+    review_details: list = []
 
     async def record_review(_agent, incident, **kwargs):
         reviews.append((incident.agent_type, incident.kind, kwargs.get("recurring")))
+        review_details.append(incident.details)
         return f"review_{len(reviews)}"
 
     monkeypatch.setattr("custom_agents.worker_pool_reviews.open_review", record_review)
     return SimpleNamespace(
-        agent=agent, adapter=adapter, mapper=mapper, reviews=reviews, settings=settings, storage=storage
+        agent=agent, adapter=adapter, mapper=mapper, reviews=reviews, review_details=review_details,
+        settings=settings, storage=storage,
     )
 
 
@@ -334,9 +337,11 @@ async def test_live_workers_that_crash_at_start_are_retried_ever_later_and_revie
 
     A start counts as successful only once its worker is ready. Each worker
     here ends before that, so its record fails with the reason, and the next
-    start waits the retry time, doubling with each failure. TeamArchitect gets
-    a "cannot start workers" review. A hourly-limit refusal is logged once and
-    names the last failure; a worker that becomes ready ends the problem.
+    start waits the retry time, doubling with each failure. One failure opens
+    nothing; the second in a row gives TeamArchitect one "cannot start
+    workers" review naming the failure, which stays open, reviewed once,
+    across the retries. An hourly-limit refusal is logged once and names the
+    last failure; a worker that becomes ready ends the problem.
     """
 
     from custom_agents.agent_instantiation_service import PROCESS_HOST_ID
@@ -376,6 +381,15 @@ async def test_live_workers_that_crash_at_start_are_retried_ever_later_and_revie
         await controller.reconcile()
         return len(launches) - before
 
+    def start_failed_reviews() -> list:
+        return [review for review in world.reviews if review[:2] == (WORKER_TYPE, "start_failed")]
+
+    def start_failed_open() -> bool:
+        return (WORKER_TYPE, "start_failed") in {
+            (incident.agent_type, incident.kind)
+            for incident in worker_pool_repository(world.agent).list_open_incidents(world.mapper.team_id)
+        }
+
     await world.adapter.connect(reconcile_topology=True)
     try:
         with patch("custom_agents.worker_pool_controller.WorkerPoolController._launch", launch):
@@ -386,13 +400,20 @@ async def test_live_workers_that_crash_at_start_are_retried_ever_later_and_revie
             pool = world.agent._worker_pool_snapshot["pools"][WORKER_TYPE]
             assert pool["failed_starts_in_row"] == 1 and pool["last_start_failure"] == crash
             assert "the next start waits" in pool["decision"]["reason"]
-            assert (WORKER_TYPE, "start_failed", False) in world.reviews
+            # One failure only holds the next start: no review, no incident.
+            assert start_failed_reviews() == [] and not start_failed_open()
 
             await asyncio.sleep(1.1)
             assert await pass_and_count() == 1  # tried again; crashes again
-            await asyncio.sleep(1.1)
-            assert await pass_and_count() == 0  # two failures: waits 2 s
-            await asyncio.sleep(1.0)
+            assert await pass_and_count() == 0  # two failures: waits 2 s, and a review opens
+            assert start_failed_reviews() == [(WORKER_TYPE, "start_failed", False)]
+            assert world.review_details[-1]["start_refused_because"] == crash
+
+            await asyncio.sleep(2.1)
+            assert await pass_and_count() == 1  # the retry is accepted, then crashes
+            # An accepted start is not a success: the problem stays open, reviewed once.
+            assert start_failed_open() and len(start_failed_reviews()) == 1
+            await asyncio.sleep(2.1)
 
             outcome["next"] = "rate_limited"
             with caplog.at_level(logging.INFO):
@@ -400,21 +421,19 @@ async def test_live_workers_that_crash_at_start_are_retried_ever_later_and_revie
                 assert await pass_and_count() == 0  # still refused, waits ran out: not logged again
             limited = [r for r in caplog.records if "event=worker_pool_start_rate_limited" in r.getMessage()]
             assert len(limited) == 1
-            assert "failed_starts_in_row=2" in limited[0].getMessage()
+            assert "failed_starts_in_row=3" in limited[0].getMessage()
+            assert len(start_failed_reviews()) == 1
 
             outcome["next"] = "ready"
             caplog.clear()
             with caplog.at_level(logging.INFO):
                 assert await pass_and_count() == 1
             assert "event=worker_pool_start_rate_limit_ended" in caplog.text
+            assert "because=a worker started" in caplog.text
             await controller.reconcile()
             pool = world.agent._worker_pool_snapshot["pools"][WORKER_TYPE]
             assert pool["failed_starts_in_row"] == 0
-            open_kinds = {
-                (incident.agent_type, incident.kind)
-                for incident in worker_pool_repository(world.agent).list_open_incidents(world.mapper.team_id)
-            }
-            assert (WORKER_TYPE, "start_failed") not in open_kinds
+            assert not start_failed_open()
     finally:
         await world.adapter.close()
 
