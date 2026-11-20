@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,7 +17,16 @@ from custom_transport.base import (
     TransportPublishOptions,
 )
 from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAdapter, NatsTransportConfig
+from custom_transport.nats_pull import UNHANDLED_RETURN_DELAY_SECONDS
 from custom_transport.subjects import NatsSubjectMapper
+
+logger = logging.getLogger(__name__)
+
+# How long the response receiver waits before it offers again a message whose
+# handling failed. A message left on a closed reply wait is retried on the same
+# schedule (assistant_gateway.application.reply_leftovers), so the gateway reads
+# it here: the gateway itself does not import the transport.
+HANDLING_RETRY_DELAY_SECONDS = UNHANDLED_RETURN_DELAY_SECONDS
 
 
 @dataclass(frozen=True)
@@ -229,17 +239,28 @@ class NatsGatewayManagerRuntime:
         *,
         routing_key: str,
     ) -> None:
-        await self._adapter.publish(
+        """Publish to the work stream; a message NATS already holds under the same id is logged, not stored again.
+
+        The work stream drops a repeated message id within its duplicate
+        window, and the publish still succeeds. That is how a retry after a
+        lost acknowledgement stays single, but it also hides a message that
+        reused an id by mistake, so every such answer is logged.
+        """
+
+        idempotency_key = envelope.msg_header.idempotency_key or envelope.msg_header.message_id
+        ack = await self._adapter.publish(
             envelope=envelope,
             routing_key=routing_key,
-            options=TransportPublishOptions(
-                durable=True,
-                idempotency_key=(
-                    envelope.msg_header.idempotency_key
-                    or envelope.msg_header.message_id
-                ),
-            ),
+            options=TransportPublishOptions(durable=True, idempotency_key=idempotency_key),
         )
+        if getattr(ack, "duplicate", False):
+            logger.warning(
+                "NATS already held a message with this id, so it did not store this one again. "
+                "event=gateway_durable_publish_duplicate routing_key=%s idempotency_key=%s message_class=%s",
+                routing_key,
+                idempotency_key,
+                type(envelope.msg_content).__name__,
+            )
 
     async def publish_operational(
         self,

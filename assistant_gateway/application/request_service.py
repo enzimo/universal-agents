@@ -7,6 +7,7 @@ import logging
 from assistant_gateway.domain.request_state import (
     GUIDANCE_STATUS_HELD,
     REQUEST_KIND_TASK_STEERING,
+    RUN_STATE_FINISHED,
     HeldGuidanceRecord,
     RequestRecord,
 )
@@ -29,6 +30,23 @@ TERMINAL_REQUEST_STATUSES = frozenset(
         "expired",
     }
 )
+
+
+def request_task_ended(record: RequestRecord) -> bool:
+    """Whether the task a chat request waits on has ended: the one rule for setup page cards and new pages.
+
+    A thread's request (one with a run state) ends only when its run
+    finishes. Its status changes while its task still runs: every setup
+    page's result sets ``waiting_for_credential_result``, and the
+    team-lead-unavailable transition writes ``manager_unavailable`` onto a
+    request with an open reply wait although the task resumes when a lead is
+    back. Other rows (a delegated task's page, rows from before run states)
+    have only their status, so a terminal status ends them.
+    """
+
+    if record.run_state is not None:
+        return record.run_state == RUN_STATE_FINISHED
+    return record.status in TERMINAL_REQUEST_STATUSES
 
 
 class GatewayRequestService:

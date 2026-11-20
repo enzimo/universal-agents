@@ -5,7 +5,9 @@ its next new tool call: ``RuntimeSteeringPlugin`` cancels that call with the
 guidance text. After each call to the agent that did not pause, the turn
 checks again before carrying out its decision: a fresh turn in
 ``custom_agents.sdk.strands.turn``, a resumed one in
-``_call_until_guidance_read``. The decision is not always a tool call
+``_call_until_guidance_read``. A call that paused is handed on without the
+check: a paused Strands agent takes only interrupt answers, so the guidance
+waits for the resumed turn. The decision is not always a tool call
 (providers that enforce structured output themselves answer Strands' forced
 decision as JSON text), so this check is what keeps a final answer from going
 out before the guidance is read. Guidance that arrives after it is found when
@@ -84,7 +86,7 @@ from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.prompt_context_sanitization import render_replied_message_lines
 from custom_agents.provider_error_runtime import ProviderTimeoutError, is_provider_timeout_error
 from custom_agents.sent_files_runtime import keep_sent_files
-from custom_agents.sdk.strands.paused_tool_calls import INTERRUPT_STOP_REASON, PausedToolCalls
+from custom_agents.sdk.strands.paused_tool_calls import PausedToolCalls, call_paused
 from custom_agents.sdk.strands.turn import late_guidance_instruction
 from custom_agents.sdk.strands.turn_tool_stop import (
     TURN_CANCELLED_REASON,
@@ -99,10 +101,10 @@ from custom_tools.tool_stop import ToolStop
 from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
-from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND
+from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND, TOOL_SETUP_RUN_RESPONSE_KIND
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
-    clear_answered_access_blocker,
+    clear_answered_blocker,
     clear_human_interaction_blocker,
     record_human_interaction_blocker,
 )
@@ -236,9 +238,12 @@ def _rotate_main_strands_agent(agent: Any, *, task_id: Optional[str], session_ow
         raise RuntimeError(
             "Could not isolate a live Strands interrupt from a new task turn."
         )
+    # No interrupted task ids: the old agent holds a pause no session will
+    # resume (a turn ended before saving it, or its task ended while it waited).
     agent._logger.warning(
         "[%s] Rotated the default Strands agent before a new turn because the "
-        "prior instance belongs to an interrupted session. "
+        "prior instance still holds an interrupt, kept by a paused session or "
+        "left by a pause no session will resume. "
         "event=strands_agent_rotated_after_interrupt task_id=%s "
         "interrupted_task_ids=%s previous_strands_agent_id=%s "
         "replacement_strands_agent_id=%s",
@@ -998,6 +1003,7 @@ async def _take_interrupt_response(
     # Read again: the live session may have ended while the files were recorded.
     session = agent._interrupted_turn_sessions.get(task_id)
     if session is not None:
+        _note_replaced_setup_answer(agent, task_id, steering)
         agent._pending_interrupt_responses[task_id] = steering
         await _send_steering_status_response(
             agent,
@@ -1035,9 +1041,9 @@ async def _take_interrupt_response(
         f"{response_text}"
     )
     await agent.task_manager.operations_runtime.run(
-        partial(clear_answered_access_blocker, agent.task_manager),
+        partial(clear_answered_blocker, agent.task_manager),
         task_id,
-        _answered_access_ids(steering),
+        _structured_answers(steering),
     )
     await agent.task_manager.operations_runtime.run(
         agent.task_manager.append_runtime_resume_directive, task_id, directive
@@ -1071,6 +1077,29 @@ async def _take_interrupt_response(
         reason="Interrupt response accepted as durable recovery guidance.",
     )
     schedule_pending_work(agent)
+
+
+def _note_replaced_setup_answer(agent: Any, task_id: str, steering: TaskSteering) -> None:
+    """Log an answer that replaces a held ``set_up_tools`` answer before the turn took it.
+
+    The turn still gets the run's result: ``set_up_tools`` re-reads the run
+    when it resumes, and the resumed turn removes the run's marked record
+    (``clear_answered_blocker``).
+    """
+
+    pending = agent._pending_interrupt_responses.get(task_id)
+    if pending is None or not any(
+        isinstance(item.get("response"), dict) and item["response"].get("kind") == TOOL_SETUP_RUN_RESPONSE_KIND
+        for item in pending.interrupt_responses or []
+    ):
+        return
+    agent._logger.warning(
+        "An answer replaced a held setup answer before the paused turn took it. "
+        "event=tool_setup_answer_replaced task_id=%s steering_id=%s replaced_steering_id=%s",
+        task_id,
+        steering.steering_id,
+        pending.steering_id,
+    )
 
 
 def _format_interrupt_responses(steering: TaskSteering) -> str:
@@ -1127,19 +1156,35 @@ def _build_interrupt_response_blocks(
     return blocks
 
 
-def _answered_access_ids(
+def _structured_answers(
     steering: TaskSteering,
-) -> list[tuple[str, str]]:
-    """The (interrupt id, access request id) pairs a structured access outcome answers."""
+) -> list[tuple[str, Dict[str, Any]]]:
+    """The (interrupt id, structured answer) pairs an answer carries.
+
+    Trusted code answers access and setup-run waits with a dict
+    (``clear_answered_blocker`` matches it to the task's record); a text
+    answer from a person names no saved wait.
+    """
     answers = []
     for item in steering.interrupt_responses or []:
         response = item.get("response")
-        if isinstance(response, dict):
-            interrupt_id = item.get("interrupt_id") or item.get("interruptId")
-            request_id = response.get(ACCESS_REQUEST_ID_KEY)
-            if interrupt_id and request_id:
-                answers.append((str(interrupt_id), str(request_id)))
+        interrupt_id = item.get("interrupt_id") or item.get("interruptId")
+        if isinstance(response, dict) and interrupt_id:
+            answers.append((str(interrupt_id), dict(response)))
     return answers
+
+
+async def _answer_not_taken(agent: Any, task_id: str, steering: TaskSteering, *, why: str) -> None:
+    """An answer no paused turn can take: a ``set_up_tools`` answer resumes its task from a note.
+
+    Its record would otherwise keep the task waiting with nothing left to
+    resume it (``tool_setup_run_runtime.resume_without_paused_turn``). Other
+    answers keep their handling here.
+    """
+
+    from custom_agents.tool_setup_run_runtime import resume_without_paused_turn
+
+    await resume_without_paused_turn(agent, task_id, steering, why=why)
 
 
 async def resume_interrupted_task_turn(agent: Any, task_id: str) -> Optional[Any]:
@@ -1157,6 +1202,8 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
     session = agent._interrupted_turn_sessions.get(task_id)
     steering = agent._pending_interrupt_responses.pop(task_id, None)
     if session is None or steering is None:
+        if steering is not None:
+            await _answer_not_taken(agent, task_id, steering, why="paused_turn_gone")
         return None
 
     task_info = await agent.task_manager.operations_runtime.run(
@@ -1182,6 +1229,7 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
                 "steering_id": steering.steering_id,
             },
         )
+        await _answer_not_taken(agent, task_id, steering, why="answer_not_converted")
         return None
 
     work.strands = session.strands
@@ -1189,9 +1237,10 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
     # The access-request handler already checked the stored decision; every
     # tool call is still decided again when the SDK resumes.
     await agent.task_manager.operations_runtime.run(
-        partial(clear_answered_access_blocker, agent.task_manager),
+        partial(clear_answered_blocker, agent.task_manager),
         task_id,
-        _answered_access_ids(steering),
+        _structured_answers(steering),
+        resumed_interrupt_ids=[item.interrupt_id for item in session.interrupts],
     )
     # A resumed turn is a new turn: it gets its own stop for its commands.
     tool_stop = agent._set_active_execution_context(task_id)
@@ -1267,7 +1316,7 @@ async def _call_until_guidance_read(
             callback_handler=session.callback_handler,
             logger=agent._logger,
         )
-        if getattr(result, "stop_reason", None) == INTERRUPT_STOP_REASON:
+        if call_paused(result):
             return result
         guidance = await consume_pending_proactive_guidance_message(agent, session.task_id)
         if not guidance:
@@ -1289,14 +1338,14 @@ async def _run_resumed_turn(
     response_blocks: list[dict[str, Any]],
     tool_stop: ToolStop,
 ) -> Optional[Any]:
-    """Answer the SDK interrupt, then apply the turn's decision to the task."""
+    """Answer the SDK interrupt, then apply the turn's decision (or its work session's yield) to the task."""
 
     task_id = session.task_id
     result = await _call_until_guidance_read(agent, session, response_blocks, tool_stop)
     result = agent.turn_executor._apply_agent_result_transformer(
         session.msg_content, result
     )
-    if getattr(result, "stop_reason", None) == "interrupt":
+    if call_paused(result):
         return await send_interrupt_request_for_result(
             agent,
             result=result,
@@ -1308,6 +1357,16 @@ async def _run_resumed_turn(
             full_prompt=session.full_prompt,
             start_notes=session.start_notes,
         )
+    # A fresh turn whose call paused left the work session's required-skill
+    # check to this turn (sdk.strands.turn._finalize_objective_work_invocation).
+    work_yield = await agent.turn_executor.yield_for_missing_work_skills(
+        msg_content=session.msg_content,
+        msg_meta=session.msg_meta,
+        task_id=task_id,
+        start_notes=session.start_notes,
+    )
+    if work_yield is not None:
+        return await _finish_resumed_turn(agent, session, steering, task_info, work_yield)
 
     outcome = agent.turn_executor.decode_result(
         result=result,
@@ -1343,6 +1402,15 @@ async def _run_resumed_turn(
         task_id=task_id, decision=outcome.decision, content=content, strands_agent=session.strands_agent,
         decision_tool_name=decision_tool_name,
     )
+    return await _finish_resumed_turn(agent, session, steering, task_info, content)
+
+
+async def _finish_resumed_turn(
+    agent: Any, session: StrandsInterruptedTurnSession, steering: TaskSteering, task_info: Any, content: Any
+) -> Any:
+    """Apply a resumed turn's result to its task and free its Strands agent for later turns."""
+
+    task_id = session.task_id
     await agent._apply_task_processing_result(task_id, task_info, content)
     agent._interrupted_turn_sessions.pop(task_id, None)
     _mark_strands_resumable(agent, resumed=session.strands)
@@ -1477,6 +1545,8 @@ async def send_interrupt_request_for_result(
                 "conversation_id": getattr(msg_meta, "conversation_id", None),
             },
         )
+    # Already set when the call paused (strands_parts.mark_paused), and kept by
+    # a resumed turn's parts since their first pause; the session holds them now.
     strands.replace_before_next_turn = True
     await agent.task_manager.operations_runtime.run(
         agent.task_manager.append_history_entry,

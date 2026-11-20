@@ -36,7 +36,7 @@ from strands.types.exceptions import EventLoopException
 from strands.types.tools import ToolContext
 
 from custom_agents.sdk.strands.changes_first import ChangesFirstToolExecutor
-from custom_agents.sdk.strands.paused_tool_calls import INTERRUPT_STOP_REASON, PausedToolCalls
+from custom_agents.sdk.strands.paused_tool_calls import INTERRUPT_STOP_REASON, PausedToolCalls, call_paused
 from custom_agents.sdk.strands.turn_tool_stop import invoke_with_tool_stop
 from custom_agents.structured_llm_messages import StructuredAgentTurnDecision, StructuredTaskPayload, TaskResponseAction
 from custom_agents.task_manager import TaskManager
@@ -576,6 +576,8 @@ async def test_strands_runs_a_paused_call_again_without_an_after_event_for_the_p
 
     paused = await sdk.invoke_async("Check the services.")
     assert recorder.events == [("before", "step1-call0"), ("end", "interrupt")]
+    # The runtime recognises Strands' own stop reason through one constant.
+    assert paused.stop_reason == INTERRUPT_STOP_REASON and call_paused(paused)
     await sdk.invoke_async(_answers(paused))
     assert recorder.events[2:] == [("before", "step1-call0"), ("after", "step1-call0"), ("end", "end_turn")]
 

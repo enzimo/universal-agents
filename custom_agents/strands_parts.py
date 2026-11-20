@@ -20,7 +20,13 @@ agent's main parts serve (``UniversalAgent._strands_parts``).
 ``replace_before_next_turn`` marks parts whose Strands agent still holds an
 interrupt that no session will resume (or that a session holds until its
 resume); a new turn never starts on them
-(``task_steering_runtime.ensure_fresh_strands_agent_for_new_turn``).
+(``task_steering_runtime.ensure_fresh_strands_agent_for_new_turn``). A fresh
+turn sets it as soon as its call returns paused (``mark_paused``), before it
+saves the paused session: a paused agent takes only interrupt answers, so a
+turn that ends before the session is saved (a stop recorded as the call
+paused, an error while saving) must not leave it to the next turn, which would
+fail on it the same way. Saving the session sets it again, and a finished
+resume clears it (``task_steering_runtime._mark_strands_resumable``).
 
 ``generation`` is the agent's model generation the parts were built for
 (``UniversalAgent._strands_generation``): a turn whose parts are older than the
@@ -61,6 +67,21 @@ def current_parts(agent: Any) -> StrandsParts | None:
     return main
 
 
+def mark_paused(strands_agent: Any) -> bool:
+    """Keep new turns off ``strands_agent``, whose call just paused (module docstring).
+
+    Marks the bound turn's parts when they hold that agent and returns
+    whether it did; the caller logs when it could not.
+    """
+
+    work = current_task_work()
+    parts = work.strands if work is not None else None
+    if parts is None or parts.agent is not strands_agent:
+        return False
+    parts.replace_before_next_turn = True
+    return True
+
+
 def turn_strands_agent(agent: Any) -> Any:
     """The Strands agent the turn bound in this context calls, else the agent's main one."""
 
@@ -88,4 +109,4 @@ def task_strands_messages(task_id: str) -> list[dict[str, Any]]:
     return deepcopy(list(getattr(work.strands.agent, "messages", []) or []))
 
 
-__all__ = ["StrandsParts", "current_parts", "task_strands_messages", "turn_strands_agent"]
+__all__ = ["StrandsParts", "current_parts", "mark_paused", "task_strands_messages", "turn_strands_agent"]

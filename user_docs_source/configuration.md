@@ -862,9 +862,23 @@ transport:
   process_consumer_inactive_threshold_seconds: 300
 ```
 
-Generated agent mailboxes are deleted during clean shutdown and expire after
-this delay when a process crashes. Explicit `agent.agent_id` mailboxes, team
-lead routes, named-worker queues, and gateway routes remain persistent. The
+Agent mailboxes and control queues are deleted during clean shutdown and
+expire after this delay once nothing asks for messages: after a process
+crashes, and also while a live agent's mailbox waits for room in its deferred
+inbox. The agent then creates the mailbox again with its messages still in the
+stream; the log line `event=nats_pull_consumer_recreated expected=true` marks
+that case as expected. This includes every worker the
+runtime starts (pool, scheduled and manual starts). Explicit `agent.agent_id`
+mailboxes, team lead routes, named-worker queues, and gateway routes remain
+persistent. Releases before this fix kept started workers' consumers. The
+launcher's consumer check deletes those older than an hour before any agent
+starts, and the team lead deletes the rest when it starts, before any worker
+starts, and again hourly while some may still belong to a running worker.
+Both keep the consumers of configured agents and of any agent still asking for
+messages. The launcher deletes only while its run lock proves no earlier run
+is alive; otherwise it only reports (`event=nats_consumer_preflight_report_only`),
+and leftovers the team lead cannot judge as gone need the offline cleanup
+described in the Docker guide, run with the runtime stopped. The
 runtime requires NATS Server 2.10 or newer for the consumer ownership metadata;
 the bundled image includes a newer pinned release.
 
@@ -873,7 +887,9 @@ when it can act on it. Workers of one type share one queue and ask for a task
 only while they are free, so a busy worker never holds tasks another worker
 could run. Upgrading from a release that used push consumers replaces them on
 the first start (each replacement is logged as `nats_consumer_replaced`);
-messages still in the stream are kept and delivered by the new consumers.
+messages still in the stream are kept and delivered by the new consumers. The
+push consumers of workers those releases started are never created again;
+they are deleted with the other leftovers above.
 
 ## Worker pools
 
@@ -1800,7 +1816,8 @@ No profile budget resets per model turn. `active_seconds` is the total
 wall-clock window for one session. `turns` counts model cycles across the
 session. `total_tokens` accumulates input plus output tokens across those
 cycles, including repeated prompt and tool-schema input. `tool_calls` counts
-all tool calls across the session. The checkpoint fields reserve subsets of
+the session's tool calls. One exception applies to all three counts: work
+after a paused call resumes is not counted yet (see below). The checkpoint fields reserve subsets of
 those totals, and the runtime withholds them from material work. If a safe boundary is reached
 without a checkpoint, it uses the reserve for a narrow checkpoint-only model
 invocation and falls back to a deterministic degraded checkpoint only if that
@@ -1808,6 +1825,21 @@ pass cannot persist the handoff. Input, output, total, and cache token usage are
 stored separately for tuning. Suggestion rules, the required skill list,
 default-profile selection, activity snapshot emission, and checkpoint retention
 are policy-wide rather than per-profile.
+
+A step can pause while it waits for a person, for example for an access
+decision or a setup step. Such a step keeps its pause even when the session
+reaches its limit or a required skill is not yet activated. The session
+records the usage up to the pause. The work after the person answers is not
+counted against the session budget yet: each resumed model call gets the
+step's per-call turn and token allowance again, and the step's tool-call
+limit is not checked after a resume. A step that pauses at the limit, once or
+several times, can therefore do more work than the budget allows; counting
+that work is planned. A required skill that is still missing stops the step
+when the person has answered, before its result is used, and the session ends
+with the runtime's degraded checkpoint. A session past its limit lets the
+step finish; when the step belongs to a plan, the session then does not start
+the next plan step and also ends with the degraded checkpoint, not the
+model's own checkpoint pass.
 
 The same policy file owns `custom_profiles`; these controls are deliberately
 separate from the main runtime config. The built-in envelope enables one-time

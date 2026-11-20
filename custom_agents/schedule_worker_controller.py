@@ -705,6 +705,7 @@ async def local_schedule_runtime_loop(agent: Any) -> None:
     from custom_agents.local_schedule_policy import install_schedule_default
     from custom_agents.memory_review_cleanup_runtime import ReviewCleanupController
 
+    from custom_agents.worker_consumer_cleanup import sweep_worker_consumers_if_due
     from custom_agents.worker_pool_controller import reconcile_worker_pools
 
     review_cleanup = ReviewCleanupController(agent)
@@ -724,6 +725,9 @@ async def local_schedule_runtime_loop(agent: Any) -> None:
             )
     while not agent.get_exit_event().is_set():
         try:
+            # Before this pass starts workers: remove gone workers' consumers
+            # again while the lead's last sweep kept some (worker_consumer_cleanup).
+            await sweep_worker_consumers_if_due(agent)
             rows = await agent.task_manager.operations_runtime.run(agent._schedule_store.get_all)
             for row in rows:
                 try:

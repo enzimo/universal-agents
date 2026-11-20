@@ -1772,8 +1772,15 @@ def _record_consumer_check_runs(monkeypatch, outcome) -> list[tuple[list[str], d
     return runs
 
 
+def _run_lock(tmp_path: Path, *, proven: bool = True):
+    from runtime_hosting.process_run import ProcessRunLock
+
+    return ProcessRunLock(run_id="run_test", fd=None, proven=proven, path=tmp_path / "process_run.lock")
+
+
+@pytest.mark.parametrize("proven", [True, False])
 def test_the_consumer_check_runs_its_compiled_program_in_a_source_stripped_image(
-    tmp_path: Path, monkeypatch, caplog
+    tmp_path: Path, monkeypatch, caplog, proven: bool
 ) -> None:
     import docker.launch_headless as lh
 
@@ -1783,19 +1790,29 @@ def test_the_consumer_check_runs_its_compiled_program_in_a_source_stripped_image
     config_path = tmp_path / "instance_config.yaml"
 
     with caplog.at_level("INFO", logger="docker.launch_headless"):
-        lh.run_nats_consumer_preflight(config_path=config_path, env={"NATS_URL": "nats://127.0.0.1:4222"})
+        lh.run_nats_consumer_preflight(
+            config_path=config_path,
+            env={"NATS_URL": "nats://127.0.0.1:4222"},
+            process_run=_run_lock(tmp_path, proven=proven),
+        )
 
     [(command, kwargs)] = runs
+    # Lasting agent leftovers are removed only when the run lock proves that
+    # no earlier run is alive; otherwise the check only reports.
     assert command[1:] == [
         str(app_root / "scripts" / "reconcile_nats_consumers.pyc"),
         "--config",
         str(config_path),
+        *(["--remove-lasting-agent-leftovers", "--confirm-runtime-stopped"] if proven else []),
     ]
     assert kwargs["cwd"] == app_root
     # A check that finished reports what it found in its own log (for example
-    # event=nats_consumer_capacity_high) and start-up continues; the launcher
-    # adds nothing, as before.
-    assert [record for record in caplog.records if record.levelno >= 30] == []
+    # event=nats_stream_consumer_capacity_high) and start-up continues; the launcher
+    # adds only the report-only warning when the lock is unproven.
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= 30]
+    assert len(warnings) == (0 if proven else 1)
+    if not proven:
+        assert "event=nats_consumer_preflight_report_only run_id=run_test" in warnings[0]
 
 
 @pytest.mark.parametrize(
@@ -1818,7 +1835,9 @@ def test_a_consumer_check_that_cannot_run_is_logged_as_an_error_with_its_reason(
 
     with caplog.at_level("INFO", logger="docker.launch_headless"):
         # Returns normally: agents still start without the check.
-        lh.run_nats_consumer_preflight(config_path=tmp_path / "instance_config.yaml", env={})
+        lh.run_nats_consumer_preflight(
+            config_path=tmp_path / "instance_config.yaml", env={}, process_run=_run_lock(tmp_path)
+        )
 
     [record] = [record for record in caplog.records if record.levelno >= 30]
     assert record.levelname == "ERROR", case
@@ -1847,7 +1866,7 @@ def test_an_unreachable_nats_server_is_reported_quickly_with_its_connection_erro
     started = time.monotonic()
     with caplog.at_level("INFO", logger="docker.launch_headless"):
         # Runs the real check program; nothing listens on the port.
-        lh.run_nats_consumer_preflight(config_path=config_path, env=env)
+        lh.run_nats_consumer_preflight(config_path=config_path, env=env, process_run=_run_lock(tmp_path))
     elapsed = time.monotonic() - started
 
     assert elapsed < lh.CONSUMER_CHECK_TIMEOUT_SECONDS / 2
