@@ -106,11 +106,14 @@ def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatc
             # so an upgraded instance finds its queued work.
             assert varz["jetstream"]["config"]["store_dir"] == str(store / "jetstream")
             # With no max_file_store the server's room is three quarters of the free space on the store's
-            # disk, as the Status page measures it (assistant_gateway.storage_capacity.disk_space).
+            # disk, as the Status page measures it (assistant_gateway.storage_capacity.disk_space), and the
+            # page reads the room it runs with through bundled_running_room.
             # Within 1%: other programs write to the disk between the server's start and this measurement.
             disk = disk_space("disk:message_store", "The store's disk", store)
             assert isinstance(disk, SpaceUse)
-            assert varz["jetstream"]["config"]["max_storage"] == pytest.approx(BUNDLED_STORAGE_SHARE * disk.free, rel=0.01)
+            running = nats_service.bundled_running_room(monitor_port)
+            assert running == varz["jetstream"]["config"]["max_storage"]
+            assert running == pytest.approx(BUNDLED_STORAGE_SHARE * disk.free, rel=0.01)
 
         asyncio.run(probe())
         # A connection line as long as the largest credential the contract allows, plus the rest

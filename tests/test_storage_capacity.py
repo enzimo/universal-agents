@@ -12,10 +12,14 @@ entered anew; a message server that does not answer listed as unavailable;
 the transport's reading of the account's limits and of what its streams set
 aside; the bundled server's room warning (raised at the line and below it,
 quiet above it, its three wordings, its release margin, its level kept while it
-cannot be measured and ended when it no longer applies, and an unreported
-figure logged once); and, with a real NATS server (``LIVE_TEST_NATS_SERVER`` or
-``nats-server`` on PATH), the account with and without a JetStream limit and
-the room warning from its real set-aside figure.
+cannot be measured and ended when it no longer applies, an unreported figure
+logged once, and what adding a team needs); the problem that the running server
+already refuses new streams (from its room as it runs, at the line, kept after
+space is freed until it runs with more room, kept while its monitoring endpoint
+does not answer, beside the warning and with a disk that cannot be measured);
+and, with a real NATS server (``LIVE_TEST_NATS_SERVER`` or ``nats-server`` on
+PATH), the account with and without a JetStream limit and the room warning from
+its real set-aside figure.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from assistant_gateway.config import GatewayInstanceConfig, StorageWarningSettin
 from assistant_gateway.status_page import StatusPage
 from assistant_gateway.storage_capacity import (
     MESSAGE_ROOM_KEY,
+    MESSAGE_ROOM_NOW_KEY,
     MESSAGE_STORE_DISK_KEY,
     NEARING_LIMIT,
     NEARLY_FULL,
@@ -327,6 +332,7 @@ RESERVED = 3 * GB  # what the account's streams set aside: the server needs more
 NEED = 4 * GB
 TEAM_SET_ASIDE = 2_300_000_000
 STORE_DISK = 10 * GB  # three percent of it, the release margin, is 300 MB
+ROOM_ENOUGH = 6 * GB  # the room a server runs with when it started while the disk had 8 GB free
 
 
 class _StoreDisk:
@@ -342,31 +348,63 @@ class _StoreDisk:
                         used=self.capacity - self.free, capacity=self.capacity, location=str(folder))
 
 
+class _RunningRoom:
+    """The bundled server's monitoring endpoint: the room it runs with, or a failure to answer."""
+
+    def __init__(self, room: int | Exception = ROOM_ENOUGH) -> None:
+        self.room = room
+        self.reads = 0
+
+    def __call__(self) -> int:
+        self.reads += 1
+        if isinstance(self.room, Exception):
+            raise self.room
+        return self.room
+
+
 def _bundled(
-    tmp_path: Path, store_disk, clock: _Clock, *, kind: str = "file", bundled: bool = True
+    tmp_path: Path, store_disk, clock: _Clock, *, kind: str = "file", bundled: bool = True,
+    running: _RunningRoom | None = None,
 ) -> StorageCapacity:
-    """The check on the bundled server, its levels in one file per test (a new one is what a restart builds)."""
+    """The check on the bundled server, its levels in one file per test (a new one is what a restart builds).
+
+    The running room is enough unless the test says otherwise; no test reaches a real monitoring port.
+    """
 
     return StorageCapacity(
         disks=_Disk(10.0), databases=list, levels=StorageLevels(tmp_path / "levels.json"),
         nearing_limit_percent=80, nearly_full_percent=95, message_storage_kind=kind,
         message_store=BundledMessageStore(folder=STORE, team_set_aside=TEAM_SET_ASIDE) if bundled else None,
-        measure_store=store_disk, now=clock,
+        measure_store=store_disk, read_running_room=running or _RunningRoom(), now=clock,
     )
+
+
+def _check(capacity: StorageCapacity, usage: JetStreamAccountUsage | None = None):
+    return capacity.findings(_usage(storage=12_000_000, reserved_storage=RESERVED) if usage is None else usage)
+
+
+def _one(found, prefix: str):
+    matching = [finding for finding in found if finding.finding_id.startswith(prefix)]
+    assert len(matching) <= 1
+    return matching[0] if matching else None
 
 
 def _room(capacity: StorageCapacity, usage: JetStreamAccountUsage | None = None):
     """The room warning among this check's findings, or None."""
 
-    found = capacity.findings(_usage(storage=12_000_000, reserved_storage=RESERVED) if usage is None else usage)
-    rooms = [finding for finding in found if finding.finding_id.startswith("storage_message_room:")]
-    assert len(rooms) <= 1
-    return rooms[0] if rooms else None
+    return _one(_check(capacity, usage), "storage_message_room:")
 
 
-def _saved_room_level(tmp_path: Path) -> bool:
+def _rooms(capacity: StorageCapacity, usage: JetStreamAccountUsage | None = None):
+    """This check's problem that the server refuses new streams now, and its room warning; each or None."""
+
+    found = _check(capacity, usage)
+    return _one(found, "storage_message_room_now:"), _one(found, "storage_message_room:")
+
+
+def _saved_room_level(tmp_path: Path, key: str = MESSAGE_ROOM_KEY) -> bool:
     saved = json.loads((tmp_path / "levels.json").read_text())["levels"] if (tmp_path / "levels.json").is_file() else {}
-    return MESSAGE_ROOM_KEY in saved
+    return key in saved
 
 
 def test_the_room_warning_says_what_fails_what_keeps_working_and_how_much_to_free(tmp_path: Path) -> None:
@@ -385,21 +423,29 @@ def test_the_room_warning_says_what_fails_what_keeps_working_and_how_much_to_fre
     )
     assert "the attachment store Web Chat creates the first time" in finding.summary
     assert "adding a team" in finding.summary and "a change to the message stream settings" in finding.summary
+    # It runs with enough room now (it started while the disk had more free).
+    assert finding.summary.endswith(
+        "Running now, it has 6 GB of room, taken when it last started, so it refuses nothing now and needs no restart."
+    )
     # 750 MB short: the server needs more than 4 GB, so 750 MB and a byte, rounded up to the 100 MB shown.
-    assert finding.action.startswith(
+    # Adding a team needs room for its 2.3 GB on top of the 3 GB: more than 7.07 GB free, shown as 7.1 GB.
+    assert finding.action == (
         "Free 800 MB on that disk before the message server next starts. The warning ends once 4.4 GB is free. "
-        "The message server measures its room only when the whole instance starts (the container, or ua start); "
+        "The message server measures its room only when the whole instance (the container, or ua start) starts; "
         "a team-wide restart keeps it running. Each team's work and dead-letter streams set aside 2.3 GB at this "
-        "instance's settings; transport.queues.max_bytes sets how much."
+        "instance's settings (transport.queues.max_bytes sets how much), so adding a team needs the message server "
+        "to have started with at least 7.1 GB free on that disk."
     )
     assert finding.details == (
         "Store folder: /data/services/nats/data\n"
         "Free on its disk: 3.2 GB of 10 GB\n"
         "Room at the next start (three quarters of the free space): 2.4 GB\n"
+        "Room as it runs (taken when it last started): 6 GB\n"
         "Set aside by its streams: 3 GB\n"
         "Free space needed: more than 4,000,000,000 bytes; the warning ends at 4.4 GB free\n"
         "Stored messages (JetStream): 12 MB\n"
-        "Each team's work and dead-letter streams: 2.3 GB (transport.queues.max_bytes)"
+        "Each team's work and dead-letter streams: 2.3 GB (transport.queues.max_bytes)\n"
+        "Free space adding a team needs when the message server starts: more than 7,066,666,667 bytes"
     )
     assert store_disk.measured == [STORE]
 
@@ -445,11 +491,13 @@ def test_the_room_warning_keeps_its_id_through_the_margin_and_a_restart_then_end
     assert band is not None and band.finding_id == entered.finding_id and band.severity is StatusSeverity.WARNING
     assert band.title == "The message server's room is only just above what its streams set aside"
     assert band.summary.endswith(
-        "the disk has 4.2 GB. So it has enough room again, but the disk has only 200 MB more free than it needs. "
-        "The warning stays until 4.4 GB is free, so it does not come and go as the disk's use moves."
+        "the disk has 4.2 GB. So it has enough room again for the streams it has, but the disk has only 200 MB more "
+        "free than it needs. The warning stays until 4.4 GB is free, so it does not come and go as the disk's use "
+        "moves. Running now, it has 6 GB of room, taken when it last started, so it refuses nothing now and needs no "
+        "restart."
     )
     assert band.action.startswith(
-        "Keep at least 4.1 GB free on that disk until the message server next starts. "
+        "Keep at least 4.1 GB free on that disk: the message server needs it every time it starts. "
         "The warning ends once 4.4 GB is free."
     )
     assert "Free " not in band.action
@@ -462,8 +510,9 @@ def test_the_room_warning_keeps_its_id_through_the_margin_and_a_restart_then_end
 @pytest.mark.parametrize(
     ("capacity", "frees", "first"),
     [(4_100_000_000, [GB], "Free 3.1 GB on that disk before the message server next starts. "),  # freeable, never ends
-     (4_100_000_000, [GB, 4_050_000_000],  # entered, then enough room again
-      "Keep at least 4.1 GB free on that disk until the message server next starts. "),
+     (4_100_000_000, [GB, 4_050_000_000],  # entered, then enough room again, by less than the 100 MB step
+      "Keep the free space on that disk from falling: it is only just above what the message server needs, and "
+      "the server needs that every time it starts. "),
      (3_500_000_000, [GB], "")],  # even an empty disk is short
     ids=["warning-cannot-end", "enough-but-cannot-end", "never-enough"],
 )
@@ -481,10 +530,10 @@ def test_a_disk_too_small_for_what_the_streams_set_aside_says_so(
     assert finding.action.startswith(
         f"{first}This disk is too small for what the streams set aside: the warning ends only once 4.2 GB is free, "
         f"more than the {capacity / GB:g} GB it holds. Give it more space, or lower transport.queues.max_bytes and "
-        "make a team-wide restart while the message server still has room: that restart keeps it running, so the "
-        "streams give back what they set aside."
+        "make a team-wide restart, which lowers the streams' limits so they set aside less. Do that before the whole "
+        "instance next starts: a message server that has started with too little room refuses lowered limits too."
     )
-    assert finding.action.endswith("transport.queues.max_bytes sets how much.")  # nothing cut off
+    assert finding.action.endswith("at least 7.1 GB free on that disk.")  # nothing cut off
     assert len(finding.action) < 1000
 
 
@@ -513,7 +562,7 @@ def test_the_room_warning_keeps_its_level_while_it_cannot_be_measured(tmp_path: 
     unreadable = StorageCapacity(
         disks=list, databases=list, levels=capacity.levels, nearing_limit_percent=80, nearly_full_percent=95,
         message_storage_kind="file", message_store=BundledMessageStore(folder=tmp_path / "store", team_set_aside=1),
-        now=clock,
+        read_running_room=_RunningRoom(), now=clock,
     ).findings(_usage(storage=1, reserved_storage=RESERVED))
     monkeypatch.setattr(os, "statvfs", original)
     clock.advance()
@@ -530,26 +579,194 @@ def test_the_room_warning_keeps_its_level_while_it_cannot_be_measured(tmp_path: 
 
 
 @pytest.mark.parametrize("change", ["account_limit", "memory_storage", "external_server"])
-def test_the_room_warning_ends_when_the_check_no_longer_applies(tmp_path: Path, change: str) -> None:
-    store_disk, clock = _StoreDisk(free=3_500_000_000), _Clock()
-    entered = _room(_bundled(tmp_path, store_disk, clock))
-    assert entered is not None
+def test_the_room_findings_end_when_the_check_no_longer_applies(tmp_path: Path, change: str) -> None:
+    store_disk, clock, refusing = _StoreDisk(free=3_500_000_000), _Clock(), _RunningRoom(RESERVED)
+    entered_now, entered = _rooms(_bundled(tmp_path, store_disk, clock, running=refusing))
+    assert entered_now is not None and entered is not None
 
     clock.advance()
     if change == "account_limit":
-        changed = _bundled(tmp_path, store_disk, clock)
+        changed = _bundled(tmp_path, store_disk, clock, running=refusing)
         found = changed.findings(_usage(storage=1, max_storage=100 * GB, reserved_storage=RESERVED))
     else:
         changed = _bundled(tmp_path, store_disk, clock, kind="memory" if change == "memory_storage" else "file",
-                           bundled=change != "external_server")
+                           bundled=change != "external_server", running=refusing)
         found = changed.findings(_usage(storage=1, reserved_storage=RESERVED))
-    measured = len(store_disk.measured)
+    measured, reads = len(store_disk.measured), refusing.reads
+    saved = _saved_room_level(tmp_path) or _saved_room_level(tmp_path, MESSAGE_ROOM_NOW_KEY)
     clock.advance()
-    back = _room(_bundled(tmp_path, store_disk, clock))
+    back_now, back = _rooms(_bundled(tmp_path, store_disk, clock, running=refusing))
 
-    assert not any(finding.finding_id.startswith("storage_message_room:") for finding in found)
-    assert measured == 1  # only the first check measured the store's disk
-    assert back is not None and back.finding_id != entered.finding_id  # a new notice when it returns
+    assert not any(finding.finding_id.startswith("storage_message_room") for finding in found)
+    assert not saved  # both levels ended
+    assert measured == 1 and reads == 1  # only the first check measured the store's disk and read the endpoint
+    # A new notice for each when it returns.
+    assert back is not None and back.finding_id != entered.finding_id
+    assert back_now is not None and back_now.finding_id != entered_now.finding_id
+
+
+WHAT_FAILS = (
+    "the attachment store Web Chat creates the first time it copies an attachment through the message server, "
+    "adding a team, and starting after a change to the message stream settings, which then stops"
+)
+WHOLE_RESTART = "restart the whole instance (the container, or ua start)."
+NOW_ENDS = (
+    "A team-wide restart keeps the message server running with the room it has. This problem ends once it runs "
+    "with more room than its streams set aside."
+)
+
+
+def test_a_server_that_started_with_too_little_room_is_a_problem_beside_the_warning(tmp_path: Path) -> None:
+    # It last started while the disk had 3.2 GB free, so it runs with 2.4 GB, less than the 3 GB set aside.
+    store_disk = _StoreDisk(free=3_250_000_000)
+
+    now, warning = _rooms(_bundled(tmp_path, store_disk, _Clock(), running=_RunningRoom(2_400_000_000)))
+
+    assert now is not None and now.severity is StatusSeverity.PROBLEM
+    assert now.finding_id == "storage_message_room_now:20261027T120000Z" and now.since == START
+    assert now.title == "The message server refuses new streams now"
+    assert now.summary == (
+        "The bundled message server (NATS) took 2.4 GB as its room when it last started (three quarters of the free "
+        "space on the disk holding its store then), and its streams set aside 3 GB, as much or more. So it refuses "
+        "every new or changed stream now, lowered limits too. The streams it has keep working, so messages still "
+        f"flow, but these fail: {WHAT_FAILS}. Freeing space alone does not end this: the server takes its room only "
+        "when it starts."
+    )
+    assert now.action == f"Free 800 MB on that disk, then {WHOLE_RESTART} {NOW_ENDS}"
+    assert now.details == (
+        "Room as it runs (taken when it last started): 2.4 GB\n"
+        "Set aside by its streams: 3 GB\n"
+        "Free space needed when it starts: more than 4,000,000,000 bytes\n"
+        "Store folder: /data/services/nats/data\n"
+        "Free on its disk: 3.2 GB of 10 GB\n"
+        "Stored messages (JetStream): 12 MB"
+    )
+    # The warning still says what to free; it points at the problem instead of saying no restart is needed.
+    assert warning is not None and warning.action.startswith("Free 800 MB on that disk")
+    assert warning.summary.endswith(
+        'It already refuses new streams now, because it last started with too little room: see the problem '
+        '"The message server refuses new streams now".'
+    )
+
+
+def test_the_problem_starts_when_the_running_room_equals_what_is_set_aside(tmp_path: Path) -> None:
+    roomy = _StoreDisk(free=9 * GB)  # no warning: only the running room decides the problem
+    at_line = _rooms(_bundled(tmp_path / "at", roomy, _Clock(), running=_RunningRoom(RESERVED)))
+    above = _rooms(_bundled(tmp_path / "above", roomy, _Clock(), running=_RunningRoom(RESERVED + 1)))
+    nothing_set_aside = _rooms(_bundled(tmp_path / "none", _StoreDisk(free=0), _Clock(), running=_RunningRoom(0)),
+                               _usage(storage=0, reserved_storage=0))
+
+    # At a room equal to what is set aside every new stream is refused (measured on 2.15.1).
+    assert at_line[0] is not None and at_line[1] is None
+    assert at_line[0].action == f"The disk has enough free space again (9 GB; it needs more than 4 GB), so {WHOLE_RESTART} {NOW_ENDS}"
+    assert above == (None, None)
+    assert nothing_set_aside == (None, None)
+    assert not _saved_room_level(tmp_path / "none", MESSAGE_ROOM_NOW_KEY)
+
+
+def test_the_problem_stays_after_space_is_freed_until_the_server_runs_with_more_room(tmp_path: Path) -> None:
+    store_disk, clock, running = _StoreDisk(free=3_500_000_000), _Clock(), _RunningRoom(RESERVED)
+    capacity = _bundled(tmp_path, store_disk, clock, running=running)
+    entered, _ = _rooms(capacity)
+    assert entered is not None
+
+    store_disk.free = 8 * GB  # space freed, no restart of the whole instance yet
+    clock.advance()
+    freed, freed_warning = _rooms(capacity)
+    clock.advance()
+    after_gateway_restart, _ = _rooms(_bundled(tmp_path, store_disk, clock, running=running))
+    running.room = ROOM_ENOUGH  # the whole instance started again with 8 GB free
+    clock.advance()
+    ended = _rooms(capacity)
+    kept_after_end = _saved_room_level(tmp_path, MESSAGE_ROOM_NOW_KEY)
+    running.room = RESERVED  # it starts with too little room again later
+    clock.advance(minutes=60 * 24)
+    again, _ = _rooms(capacity)
+
+    assert freed is not None and freed.finding_id == entered.finding_id and freed_warning is None
+    assert freed.action == f"The disk has enough free space again (8 GB; it needs more than 4 GB), so {WHOLE_RESTART} {NOW_ENDS}"
+    assert after_gateway_restart is not None and after_gateway_restart.finding_id == entered.finding_id
+    assert ended == (None, None) and not kept_after_end
+    assert again is not None and again.finding_id != entered.finding_id and again.since == clock.now
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"), TimeoutError("timed out"),
+     ValueError("the monitoring endpoint reports no jetstream.config.max_storage (got None)")],
+    ids=["refused", "timeout", "no-figure"],
+)
+def test_the_problem_keeps_its_level_while_the_monitoring_endpoint_does_not_answer(
+    tmp_path: Path, caplog, failure: Exception
+) -> None:
+    store_disk, clock, running = _StoreDisk(free=3_500_000_000), _Clock(), _RunningRoom(RESERVED)
+    capacity = _bundled(tmp_path, store_disk, clock, running=running)
+    entered, _ = _rooms(capacity)
+    assert entered is not None
+
+    running.room = failure
+    with caplog.at_level("INFO", logger="assistant_gateway.storage_capacity"):
+        silent = []
+        for _ in range(3):
+            clock.advance()
+            silent.append(_rooms(capacity))
+        kept = _saved_room_level(tmp_path, MESSAGE_ROOM_NOW_KEY)
+        running.room = RESERVED
+        clock.advance()
+        back, _ = _rooms(capacity)
+
+    assert all(now is None for now, _ in silent)
+    for _, warning in silent:
+        assert warning is not None and warning.finding_id.startswith("storage_message_room:")
+        assert warning.summary.endswith(
+            "This page cannot tell whether it already refuses new streams, because its monitoring endpoint did not "
+            "answer; a start of the whole instance while the disk has enough free space makes sure it does not."
+        )
+        assert "Room as it runs (taken when it last started): unknown (its monitoring endpoint did not answer)" in (
+            warning.details
+        )
+    assert kept
+    assert caplog.text.count("event=storage_running_room_unknown") == 1  # when it stops answering, not every check
+    assert caplog.text.count("event=storage_running_room_known") == 1
+    assert back is not None and back.finding_id == entered.finding_id  # no second notice
+
+
+def test_a_disk_too_small_while_the_server_refuses_offers_no_lowered_limits(tmp_path: Path) -> None:
+    store_disk = _StoreDisk(free=GB, capacity=3_500_000_000)  # even an empty disk is short
+
+    now, warning = _rooms(_bundled(tmp_path, store_disk, _Clock(), running=_RunningRoom(RESERVED)))
+
+    assert now is not None and now.action == (
+        "This disk is too small for what the streams set aside: it needs more than 4 GB free and holds 3.5 GB. "
+        f"Give it more space, then {WHOLE_RESTART} {NOW_ENDS}"
+    )
+    assert warning is not None and warning.action.startswith(
+        "This disk is too small for what the streams set aside: the warning ends only once 4.2 GB is free, more "
+        "than the 3.5 GB it holds. Give it more space. The message server measures its room"
+    )
+    assert "transport.queues.max_bytes and" not in warning.action
+
+
+def test_the_problem_shows_when_the_store_disk_cannot_be_measured(tmp_path: Path) -> None:
+    def unreadable(folder: Path) -> UnmeasuredDisk:
+        return UnmeasuredDisk(key=MESSAGE_STORE_DISK_KEY, label="The disk holding the message server's store",
+                              location=str(folder), error="OSError: input/output error")
+
+    found = _check(_bundled(tmp_path, unreadable, _Clock(), running=_RunningRoom(RESERVED)))
+
+    assert [finding.finding_id for finding in found] == [
+        NO_MESSAGE_LIMIT_FINDING_ID, "storage_unmeasured:disk:message_store", "storage_message_room_now:20261027T120000Z",
+    ]
+    now = found[-1]
+    assert now.action == (
+        f"Make sure the disk holding its store has more than 4 GB free, then {WHOLE_RESTART} {NOW_ENDS}"
+    )
+    assert now.details == (
+        "Room as it runs (taken when it last started): 3 GB\n"
+        "Set aside by its streams: 3 GB\n"
+        "Free space needed when it starts: more than 4,000,000,000 bytes\n"
+        "Stored messages (JetStream): 12 MB"
+    )
 
 
 def test_the_no_limit_note_on_the_bundled_server_points_at_the_room_warning(tmp_path: Path) -> None:

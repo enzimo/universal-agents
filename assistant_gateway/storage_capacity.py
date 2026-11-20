@@ -81,6 +81,11 @@ SOURCE = "gateway"
 MESSAGE_ROOM_KEY: Final = "message_room"
 MESSAGE_ROOM_FINDING_PREFIX: Final = f"storage_{MESSAGE_ROOM_KEY}:"
 MESSAGE_ROOM_LINE: Final = 100
+# The problem that the running bundled server already refuses new streams: its room as it runs,
+# taken when it last started, is at or below what its streams set aside. Its own key and finding
+# id prefix; its reading is MESSAGE_ROOM_LINE while it refuses and 0 otherwise.
+MESSAGE_ROOM_NOW_KEY: Final = "message_room_now"
+MESSAGE_ROOM_NOW_FINDING_PREFIX: Final = f"storage_{MESSAGE_ROOM_NOW_KEY}:"
 # The disk holding the bundled server's store, when it cannot be measured.
 MESSAGE_STORE_DISK_KEY: Final = "disk:message_store"
 MESSAGE_STORE_DISK_LABEL: Final = "The disk holding the message server's store"
@@ -88,6 +93,13 @@ MESSAGE_STORE_DISK_LABEL: Final = "The disk holding the message server's store"
 # shows, so the amount shown is never below what is needed.
 ADVICE_STEP_BYTES: Final = 100 * 10**6
 QUEUE_BYTES_SETTING: Final = "transport.queues.max_bytes"
+# Shared by the room warning and the problem that the server refuses new streams now.
+RUNNING_ROOM_TITLE: Final = "The message server refuses new streams now"
+_WHOLE_INSTANCE: Final = "the whole instance (the container, or ua start)"
+_WHAT_FAILS: Final = (
+    "the attachment store Web Chat creates the first time it copies an attachment through the message server, "
+    "adding a team, and starting after a change to the message stream settings, which then stops"
+)
 
 
 @dataclass(frozen=True)
@@ -171,7 +183,17 @@ class MessageRoom:
     def need(self) -> int:
         """The free space whose share equals what is set aside: the server needs more than this."""
 
-        return math.ceil(self.reserved / BUNDLED_STORAGE_SHARE)
+        return _free_needed(self.reserved)
+
+    def need_with(self, extra: int) -> int:
+        """The free space needed at the server's start for ``extra`` more set aside, such as a new team's streams.
+
+        NATS accepts a new stream with a byte limit only while what is set aside plus that limit
+        is no more than its room (measured on 2.15.1), so a team's streams need their whole total
+        on top of what the streams already set aside.
+        """
+
+        return _free_needed(self.reserved + extra)
 
     @property
     def short(self) -> bool:
@@ -198,6 +220,22 @@ class MessageRoom:
         if self.reserved == 0:
             return 0.0
         return 100.0 - 100.0 * (self.disk.free - self.need) / self.disk.capacity
+
+
+def _free_needed(set_aside: int) -> int:
+    """The free space on the store's disk whose share (``BUNDLED_STORAGE_SHARE``) equals ``set_aside``."""
+
+    return math.ceil(set_aside / BUNDLED_STORAGE_SHARE)
+
+
+def refuses_now(*, running: int, reserved: int) -> bool:
+    """Whether a server running with ``running`` room refuses every new or changed stream.
+
+    Equality counts: at a room equal to what is set aside every new stream is refused, and below
+    it a lowered limit too (measured on 2.15.1). Nothing set aside is never refused by this rule.
+    """
+
+    return reserved > 0 and running <= reserved
 
 
 @dataclass(frozen=True)
@@ -443,7 +481,8 @@ class StorageCapacity:
     gateway runs (Settings > Team); each check reads the current numbers.
     ``message_store`` is set only when the instance runs the bundled NATS server; then
     the room check (``MessageRoom``) measures the disk holding its store with
-    ``measure_store``.
+    ``measure_store``, and reads the room the server runs with from its monitoring endpoint
+    with ``read_running_room`` (``docker.nats_service.bundled_running_room``).
     """
 
     def __init__(
@@ -457,6 +496,7 @@ class StorageCapacity:
         message_storage_kind: str,
         message_store: BundledMessageStore | None = None,
         measure_store: Callable[[Path], SpaceUse | UnmeasuredDisk] | None = None,
+        read_running_room: Callable[[], int] | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._disks = disks
@@ -468,9 +508,14 @@ class StorageCapacity:
         self._message_storage_kind = message_storage_kind
         self.message_store = message_store
         self._measure_store = measure_store or _store_disk
+        self._read_running_room = read_running_room or _bundled_running_room
         self._now = now
         # Set without a lock: two checks at the same moment may both log it, which is harmless.
         self._reserved_unknown_logged = False
+        # Whether the bundled server's monitoring endpoint gave its room at the last check (None
+        # before the first), so its failing is logged when it starts, not at every check. Also
+        # without a lock, for the same reason.
+        self._running_room_answering: bool | None = None
 
     def findings(self, messages: JetStreamAccountUsage | None) -> list[StatusFindingV1]:
         """This check's storage findings; reads disks and databases, so it runs off the gateway's loop."""
@@ -512,38 +557,84 @@ class StorageCapacity:
         return findings
 
     def _room_findings(self, storage: MessageStorage | None) -> list[StatusFindingV1]:
-        """The bundled server's room warning, or the problem that its store's disk cannot be measured.
+        """The bundled server's room findings, or the problem that its store's disk cannot be measured.
 
-        The level ends when the check does not apply (no bundled server, memory storage, an
-        account with a limit). It is kept, neither ended nor entered, while the check cannot
-        measure: the message server does not answer, it does not report what its streams set
-        aside, or the store's disk cannot be read. So a warning that comes back after such a
-        check keeps its id and is not announced twice.
+        Two levels, each under its own key: the warning that the server's room at its next start
+        (``MessageRoom``, from the store's disk) is short or only just enough, and the problem that
+        the room it runs with now is already short (``refuses_now``, from its monitoring endpoint),
+        which ends only once it runs with more room, whatever the disk shows. Both end when the
+        check does not apply (no bundled server, memory storage, an account with a limit). Each is
+        kept, neither ended nor entered, while it cannot be measured: the message server does not
+        answer or does not report what its streams set aside (both), the store's disk cannot be read
+        (the warning), or the monitoring endpoint does not give the room (the problem). So a finding
+        that comes back after such a check keeps its id and is not announced twice.
         """
 
         store = self.message_store
         if store is None or self._message_storage_kind == "memory" or (storage is not None and storage.limit):
-            self._track_room(0.0)
+            self._track_rooms([(MESSAGE_ROOM_KEY, 0.0), (MESSAGE_ROOM_NOW_KEY, 0.0)])
             return []
         if storage is None or storage.reserved is None:
             return []
+        reserved = storage.reserved
+        running = self._running_room()
+        readings: list[tuple[str, float]] = []
+        if running is not None:
+            refusing = refuses_now(running=running, reserved=reserved)
+            readings.append((MESSAGE_ROOM_NOW_KEY, float(MESSAGE_ROOM_LINE) if refusing else 0.0))
+        findings: list[StatusFindingV1] = []
+        room: MessageRoom | None = None
         disk = self._measure_store(store.folder)
         if isinstance(disk, UnmeasuredDisk):
-            return [unmeasured_disk_finding(disk)]
-        if disk.capacity <= 0:
-            return []
-        room = MessageRoom(disk=disk, reserved=storage.reserved)
-        since = self._track_room(room.reading)
-        if since is None:
-            return []
-        return [message_room_finding(room, since=since, team_set_aside=store.team_set_aside, stored=storage.used)]
+            findings.append(unmeasured_disk_finding(disk))
+        elif disk.capacity > 0:
+            room = MessageRoom(disk=disk, reserved=reserved)
+            readings.append((MESSAGE_ROOM_KEY, room.reading))
+        entered = self._track_rooms(readings)
+        if running is not None and (since := entered.get(MESSAGE_ROOM_NOW_KEY)) is not None:
+            findings.append(
+                running_room_finding(running=running, reserved=reserved, room=room, since=since, stored=storage.used)
+            )
+        if room is not None and (since := entered.get(MESSAGE_ROOM_KEY)) is not None:
+            findings.append(
+                message_room_finding(
+                    room, since=since, running=running, team_set_aside=store.team_set_aside, stored=storage.used
+                )
+            )
+        return findings
 
-    def _track_room(self, reading: float) -> datetime | None:
-        """When the room warning's level was entered, or None when it is not at it; saves what changed."""
+    def _track_rooms(self, readings: list[tuple[str, float]]) -> dict[str, datetime]:
+        """When each room level given a reading was entered, for those at it; saves what changed."""
 
-        return self.levels.track_one(
-            [(MESSAGE_ROOM_KEY, reading)], threshold=MESSAGE_ROOM_LINE, now=self._now()
-        ).get(MESSAGE_ROOM_KEY)
+        if not readings:
+            return {}
+        return self.levels.track_one(readings, threshold=MESSAGE_ROOM_LINE, now=self._now())
+
+    def _running_room(self) -> int | None:
+        """The room the bundled server runs with, or None when its monitoring endpoint does not give it.
+
+        Logged when the endpoint stops giving it, and when it gives it again, not at every check.
+        """
+
+        try:
+            room = self._read_running_room()
+        except (OSError, ValueError) as exc:
+            if self._running_room_answering is not False:
+                logger.warning(
+                    "The bundled message server's monitoring endpoint did not give the room it runs with, so the "
+                    "Status page cannot tell whether it already refuses new streams. "
+                    "event=storage_running_room_unknown error=%s",
+                    f"{type(exc).__name__}: {exc}",
+                )
+            self._running_room_answering = False
+            return None
+        if self._running_room_answering is False:
+            logger.info(
+                "The bundled message server's monitoring endpoint gives the room it runs with again. "
+                "event=storage_running_room_known"
+            )
+        self._running_room_answering = True
+        return room
 
     def _log_reserved_unknown(self, storage: MessageStorage) -> None:
         if self._reserved_unknown_logged:
@@ -558,6 +649,14 @@ class StorageCapacity:
 
 def _store_disk(folder: Path) -> SpaceUse | UnmeasuredDisk:
     return disk_space(MESSAGE_STORE_DISK_KEY, MESSAGE_STORE_DISK_LABEL, folder)
+
+
+def _bundled_running_room() -> int:
+    # Imported here: the gateway needs the launcher's module only on an instance that runs the
+    # bundled server, as team_transfer does.
+    from docker.nats_service import bundled_running_room
+
+    return bundled_running_room()
 
 
 def unmeasured_disk_finding(disk: UnmeasuredDisk) -> StatusFindingV1:
@@ -679,17 +778,24 @@ def no_message_limit_finding(storage: MessageStorage, *, bundled: bool) -> Statu
     )
 
 
-def message_room_finding(room: MessageRoom, *, since: datetime, team_set_aside: int, stored: int) -> StatusFindingV1:
+def message_room_finding(
+    room: MessageRoom, *, since: datetime, running: int | None, team_set_aside: int, stored: int
+) -> StatusFindingV1:
     """The warning while the bundled server's room at its next start is short or only just enough again.
 
     Its id stays the same while the level lasts. Three wordings: below the line, how much to
     free and where the warning ends; in the release band above it, that there is room again by
     only a little and where the warning ends; and, when the warning could not end even with
-    that much free, that the disk is too small for what the streams set aside.
+    that much free, that the disk is too small for what the streams set aside. ``running`` is
+    the room the server runs with now, None when its monitoring endpoint did not give it: the
+    summary says whether it already refuses new streams (``running_room_finding``), or that
+    this page cannot tell. The last sentence says what adding a team needs, which is more than
+    this warning's line: a new team's streams set their whole limits aside on top.
     """
 
     disk, need = room.disk, room.need
     ends_at = _rounded_up(room.release_at)
+    refusing = running is not None and refuses_now(running=running, reserved=room.reserved)
     rule = (
         "The bundled message server (NATS) takes three quarters of the free space on the disk holding its store as "
         f"its room, measured each time it starts. Its streams set aside {readable_bytes(room.reserved)}, so it needs "
@@ -700,60 +806,171 @@ def message_room_finding(room: MessageRoom, *, since: datetime, team_set_aside: 
         title = "The message server will have less room than its streams set aside"
         summary = (
             f"{rule} After its next start it will refuse every new or changed stream. The streams it has keep "
-            "working, so messages still flow, but these fail: the attachment store Web Chat creates the first time it "
-            "copies an attachment through the message server, adding a team, and starting after a change to the "
-            "message stream settings, which then stops."
+            f"working, so messages still flow, but these fail: {_WHAT_FAILS}."
         )
-        to_free = _rounded_up(need - disk.free + 1)
-        if to_free <= disk.used:
+        to_free = _to_free(room)
+        if to_free is not None:
             steps.append(f"Free {readable_bytes(to_free)} on that disk before the message server next starts.")
     else:
         title = "The message server's room is only just above what its streams set aside"
         summary = (
-            f"{rule} So it has enough room again, but the disk has only {readable_bytes(disk.free - need)} more free "
-            f"than it needs. The warning stays until {readable_bytes(ends_at)} is free, so it does not come and go as "
-            "the disk's use moves."
+            f"{rule} So it has enough room again for the streams it has, but the disk has only "
+            f"{readable_bytes(disk.free - need)} more free than it needs. The warning stays until "
+            f"{readable_bytes(ends_at)} is free, so it does not come and go as the disk's use moves."
         )
-        steps.append(
-            f"Keep at least {readable_bytes(_rounded_up(need + 1))} free on that disk until the message server next "
-            "starts."
-        )
+        keep = _rounded_up(need + 1)
+        if keep <= disk.free:
+            steps.append(
+                f"Keep at least {readable_bytes(keep)} free on that disk: the message server needs it every time it "
+                "starts."
+            )
+        else:  # the rounded figure would be more than the disk has free, although there is enough room
+            steps.append(
+                "Keep the free space on that disk from falling: it is only just above what the message server needs, "
+                "and the server needs that every time it starts."
+            )
     if ends_at > disk.capacity:
-        steps.append(
+        too_small = (
             f"This disk is too small for what the streams set aside: the warning ends only once "
             f"{readable_bytes(ends_at)} is free, more than the {readable_bytes(disk.capacity)} it holds. Give it more "
-            f"space, or lower {QUEUE_BYTES_SETTING} and make a team-wide restart while the message server still has "
-            "room: that restart keeps it running, so the streams give back what they set aside."
+            "space"
         )
+        if refusing:  # a server that refuses new streams refuses lowered limits too (running_room_finding)
+            steps.append(f"{too_small}.")
+        else:
+            steps.append(
+                f"{too_small}, or lower {QUEUE_BYTES_SETTING} and make a team-wide restart, which lowers the streams' "
+                "limits so they set aside less. Do that before the whole instance next starts: a message server that "
+                "has started with too little room refuses lowered limits too."
+            )
     else:
         steps.append(f"The warning ends once {readable_bytes(ends_at)} is free.")
     steps.append(
-        "The message server measures its room only when the whole instance starts (the container, or ua start); "
-        "a team-wide restart keeps it running."
+        f"The message server measures its room only when {_WHOLE_INSTANCE} starts; a team-wide restart keeps it "
+        "running."
     )
+    team_need = room.need_with(team_set_aside)
     steps.append(
         f"Each team's work and dead-letter streams set aside {readable_bytes(team_set_aside)} at this instance's "
-        f"settings; {QUEUE_BYTES_SETTING} sets how much."
+        f"settings ({QUEUE_BYTES_SETTING} sets how much), so adding a team needs the message server to have started "
+        f"with at least {readable_bytes(_rounded_up(team_need + 1))} free on that disk."
     )
     details = [
         f"Store folder: {disk.location}",
         f"Free on its disk: {readable_bytes(disk.free)} of {readable_bytes(disk.capacity)}",
         f"Room at the next start (three quarters of the free space): {readable_bytes(room.room)}",
+        _running_line(running),
         _set_aside_line(room.reserved),
         f"Free space needed: more than {need:,} bytes; the warning ends at {readable_bytes(ends_at)} free",
         f"Stored messages (JetStream): {readable_bytes(stored)}",
         f"Each team's work and dead-letter streams: {readable_bytes(team_set_aside)} ({QUEUE_BYTES_SETTING})",
+        f"Free space adding a team needs when the message server starts: more than {team_need:,} bytes",
     ]
     return StatusFindingV1(
         finding_id=f"{MESSAGE_ROOM_FINDING_PREFIX}{since.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}",
         severity=StatusSeverity.WARNING,
         title=title,
-        summary=summary[:2000],
+        summary=f"{summary} {_running_state(running, refusing=refusing)}"[:2000],
         action=" ".join(steps)[:1000],
         source=SOURCE,
         since=since,
         details="\n".join(details)[:2000],
     )
+
+
+def running_room_finding(
+    *, running: int, reserved: int, room: MessageRoom | None, since: datetime, stored: int
+) -> StatusFindingV1:
+    """The problem while the bundled server runs with no more room than its streams set aside.
+
+    Freeing space does not end it: the server took its room when it last started, so only a
+    start of the whole instance with enough free space (or streams removed) does. Its id stays
+    the same while the level lasts. ``room`` is the store's disk now, None when it could not be
+    measured; the action names what to free first when the disk is still short.
+    """
+
+    need = _free_needed(reserved)
+    summary = (
+        f"The bundled message server (NATS) took {readable_bytes(running)} as its room when it last started (three "
+        f"quarters of the free space on the disk holding its store then), and its streams set aside "
+        f"{readable_bytes(reserved)}, as much or more. So it refuses every new or changed stream now, lowered limits "
+        f"too. The streams it has keep working, so messages still flow, but these fail: {_WHAT_FAILS}. Freeing space "
+        "alone does not end this: the server takes its room only when it starts."
+    )
+    if room is None:
+        first = (
+            f"Make sure the disk holding its store has more than {readable_bytes(need)} free, then restart "
+            f"{_WHOLE_INSTANCE}."
+        )
+    elif not room.short:
+        first = (
+            f"The disk has enough free space again ({readable_bytes(room.disk.free)}; it needs more than "
+            f"{readable_bytes(need)}), so restart {_WHOLE_INSTANCE}."
+        )
+    elif (to_free := _to_free(room)) is not None:
+        first = f"Free {readable_bytes(to_free)} on that disk, then restart {_WHOLE_INSTANCE}."
+    else:
+        first = (
+            f"This disk is too small for what the streams set aside: it needs more than {readable_bytes(need)} free "
+            f"and holds {readable_bytes(room.disk.capacity)}. Give it more space, then restart {_WHOLE_INSTANCE}."
+        )
+    details = [
+        _running_line(running),
+        _set_aside_line(reserved),
+        f"Free space needed when it starts: more than {need:,} bytes",
+    ]
+    if room is not None:
+        details += [
+            f"Store folder: {room.disk.location}",
+            f"Free on its disk: {readable_bytes(room.disk.free)} of {readable_bytes(room.disk.capacity)}",
+        ]
+    details.append(f"Stored messages (JetStream): {readable_bytes(stored)}")
+    return StatusFindingV1(
+        finding_id=f"{MESSAGE_ROOM_NOW_FINDING_PREFIX}{since.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}",
+        severity=StatusSeverity.PROBLEM,
+        title=RUNNING_ROOM_TITLE,
+        summary=summary[:2000],
+        action=(
+            f"{first} A team-wide restart keeps the message server running with the room it has. This problem ends "
+            "once it runs with more room than its streams set aside."
+        )[:1000],
+        source=SOURCE,
+        since=since,
+        details="\n".join(details)[:2000],
+    )
+
+
+def _running_state(running: int | None, *, refusing: bool) -> str:
+    """The room warning's sentence on whether the running server already refuses new streams."""
+
+    if running is None:
+        return (
+            "This page cannot tell whether it already refuses new streams, because its monitoring endpoint did not "
+            "answer; a start of the whole instance while the disk has enough free space makes sure it does not."
+        )
+    if refusing:
+        return (
+            "It already refuses new streams now, because it last started with too little room: see the problem "
+            f'"{RUNNING_ROOM_TITLE}".'
+        )
+    return (
+        f"Running now, it has {readable_bytes(running)} of room, taken when it last started, so it refuses nothing "
+        "now and needs no restart."
+    )
+
+
+def _running_line(running: int | None) -> str:
+    """The room the server runs with, for the details, or that it is unknown."""
+
+    figure = "unknown (its monitoring endpoint did not answer)" if running is None else readable_bytes(running)
+    return f"Room as it runs (taken when it last started): {figure}"
+
+
+def _to_free(room: MessageRoom) -> int | None:
+    """What to free for enough room at the next start, rounded up; None when freeing all the disk holds is not enough."""
+
+    to_free = _rounded_up(room.need - room.disk.free + 1)
+    return to_free if to_free <= room.disk.used else None
 
 
 def _rounded_up(size: int) -> int:
@@ -808,11 +1025,14 @@ __all__ = [
     "MESSAGE_ROOM_FINDING_PREFIX",
     "MESSAGE_ROOM_KEY",
     "MESSAGE_ROOM_LINE",
+    "MESSAGE_ROOM_NOW_FINDING_PREFIX",
+    "MESSAGE_ROOM_NOW_KEY",
     "MESSAGE_STORE_DISK_KEY",
     "NEARING_LIMIT",
     "NEARLY_FULL",
     "NO_MESSAGE_LIMIT_FINDING_ID",
     "RELEASE_POINTS",
+    "RUNNING_ROOM_TITLE",
     "BundledMessageStore",
     "MessageRoom",
     "MessageStorage",
@@ -827,6 +1047,8 @@ __all__ = [
     "disk_spaces",
     "message_room_finding",
     "no_message_limit_finding",
+    "refuses_now",
+    "running_room_finding",
     "space_finding",
     "tells_administrators",
 ]

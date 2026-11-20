@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import time
 from typing import Mapping, MutableMapping
+import urllib.request
 
 from custom_messages.wire.partitions import account_mappings, mapping_line
 from env_secrets import PROCESS_NATS, environment_for
@@ -35,6 +36,10 @@ from env_secrets import PROCESS_NATS, environment_for
 INTERNAL_NATS_HOST = "127.0.0.1"
 INTERNAL_NATS_PORT = 4222
 INTERNAL_NATS_MONITOR_PORT = 8222
+# How long the Status page waits for the bundled server's monitoring endpoint (bundled_running_room):
+# it is on the same machine, so an answer takes milliseconds; the whole storage check runs in a
+# worker thread within the page's own wait.
+MONITOR_TIMEOUT_SECONDS = 2.0
 LOCAL_NATS_ENABLED_ENV = "TEAM_LOCAL_NATS_ENABLED"
 NATS_USER_ENV = "NATS_USER"
 NATS_PASSWORD_ENV = "NATS_PASSWORD"
@@ -143,6 +148,30 @@ def bundled_nats_store_dir(env: Mapping[str, str], *, logger: logging.Logger | N
         folder.is_absolute(),
     )
     return None
+
+
+def bundled_running_room(port: int | None = None, *, timeout: float = MONITOR_TIMEOUT_SECONDS) -> int:
+    """The bundled server's room as it runs: ``jetstream.config.max_storage`` from its ``/varz``.
+
+    The server takes its room once, when it starts (three quarters of the free space on its
+    store's disk, since its configuration sets no max_file_store), and checks every new or
+    changed stream against it until it starts again, whatever the disk shows meanwhile. So this
+    figure, not the disk, tells whether it refuses new streams now (Status page,
+    ``assistant_gateway.storage_capacity``). It comes from the loopback monitoring port
+    ``start_local_nats`` always opens (``port`` for a test's own server), read directly, never
+    through an HTTP proxy the environment names. Raises ``OSError`` when the endpoint does not
+    answer and ``ValueError`` when its reply is not JSON or has no whole number of 0 or more there.
+    """
+
+    url = f"http://{INTERNAL_NATS_HOST}:{INTERNAL_NATS_MONITOR_PORT if port is None else port}/varz"
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout) as response:
+        reply = json.loads(response.read())
+    jetstream = reply.get("jetstream") if isinstance(reply, dict) else None
+    config = jetstream.get("config") if isinstance(jetstream, dict) else None
+    room = config.get("max_storage") if isinstance(config, dict) else None
+    if type(room) is not int or room < 0:  # a JSON true is refused too
+        raise ValueError(f"the monitoring endpoint reports no jetstream.config.max_storage (got {room!r})")
+    return room
 
 
 def resolve_nats_service_root(env: Mapping[str, str] | None = None) -> Path:
