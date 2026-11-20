@@ -215,8 +215,9 @@ folder was at another path under 0.9.13 and no record shows it (below), and
 only then gives a command that deletes exactly the listed files. A list is
 valid only beside the marker of the run that wrote it: every later run that
 does not find the marker removes it, under the step's lock and before it
-reads any record, and a run with nothing to list removes it too. Removing it can fail while the marker is still written, so
-the marker holds a random id for the list its run wrote
+reads any record, and a run with nothing to list removes it too. Removing it
+can fail while the marker is still written, so the marker holds a random id
+for the list its run wrote
 (``without_records_list_id``, null without one), and the command deletes
 nothing, saying so, unless the marker holds its list's id (F1 of PR #154's
 review). A failure writing or removing the list is logged
@@ -1041,8 +1042,8 @@ def _folder_moved_advice(marker: Path, elsewhere: NamedElsewhere) -> str:
         where = f"one of the {len(paths)} paths their gateway records name ({_shown_folders(paths)})"
         source = "one of those paths"
         repeat = (
-            " and reports the files whose gateway records name another of those paths here again, so do this for "
-            "each of them"
+            " and reports again the files whose gateway records name another of those paths, so do this for each "
+            "of them"
         )
     else:
         where, source, repeat = str(paths[0]), "that path", ""

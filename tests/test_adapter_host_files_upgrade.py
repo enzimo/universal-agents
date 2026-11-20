@@ -1469,7 +1469,7 @@ def test_gateway_records_in_two_other_folders_give_steps_for_each_path(
         f"To move the 2 a gateway record names: move or mount this folder back at one of the 2 paths their gateway "
         f"records name ({old_a}, {old_b}) (a link does not work), set upload_dir to that path, delete the marker "
         f"{marker} and restart; the step then runs again and moves the files a gateway record names at that path and "
-        "reports the files whose gateway records name another of those paths here again, so do this for each of them. "
+        "reports again the files whose gateway records name another of those paths, so do this for each of them. "
         "If this folder was just moved here from one of those paths" in error
     )
     assert "one of the 2 paths the log's steps name" in printed and "so do this for each path" in printed
