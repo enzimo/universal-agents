@@ -82,19 +82,16 @@ from storage.worker_pool_repository import (
     INCIDENT_CAPACITY,
     INCIDENT_PROVIDER_LIMITED,
     INCIDENT_START_FAILED,
+    POOL_FAILED_STARTS,
+    POOL_LAST_START_FAILURE,
+    POOL_LAST_UNCOUNTED_END,
+    POOL_UNCOUNTED_ENDS,
     TEAM_SCOPE,
 )
 
 logger = logging.getLogger(__name__)
 
 POOL_LAUNCH_OWNER_PREFIX = "worker_pool:"
-# Keys of the pool view (``PoolObservation.as_dict``) that the start_failed
-# review and notice read from an incident's evidence
-# (custom_agents.worker_pool_reviews); named once so both sides agree.
-POOL_FAILED_STARTS = "failed_starts_in_row"
-POOL_LAST_START_FAILURE = "last_start_failure"
-POOL_UNCOUNTED_ENDS = "starts_ended_not_counted"
-POOL_LAST_UNCOUNTED_END = "last_start_end_not_counted"
 # Start refusals that only mean "the limit was reached meanwhile", not a fault.
 _CAPACITY_REFUSALS = frozenset({AUTOMATIC_WORKER_CAPACITY_LIMIT, TEAM_WORKER_CAPACITY_LIMIT})
 

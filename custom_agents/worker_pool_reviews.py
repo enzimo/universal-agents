@@ -45,11 +45,6 @@ from functools import partial
 from typing import Any, Optional
 
 from custom_agents.stuck_work import Recovery, StuckFinding, StuckMessage, report_stuck_work
-from custom_agents.worker_pool_controller import (
-    POOL_FAILED_STARTS,
-    POOL_LAST_UNCOUNTED_END,
-    POOL_UNCOUNTED_ENDS,
-)
 from custom_agents.worker_pool_limits import worker_pool_repository
 from custom_messages.contracts.routing_v1 import (
     GatewayContext,
@@ -62,9 +57,15 @@ from custom_messages.enums import MessageMetaType, RequesterType
 from runtime_settings.worker_pools import WorkerPoolsConfig
 from storage.stuck_work_repository import StuckSubjectKind, StuckWorkIncidentV1
 from storage.worker_pool_repository import (
+    EVIDENCE_HOURLY_LIMIT,
+    EVIDENCE_POOL,
+    EVIDENCE_REFUSED_BECAUSE,
     INCIDENT_CAPACITY,
     INCIDENT_PROVIDER_LIMITED,
     INCIDENT_START_FAILED,
+    POOL_FAILED_STARTS,
+    POOL_LAST_UNCOUNTED_END,
+    POOL_UNCOUNTED_ENDS,
     TEAM_SCOPE,
     IncidentKind,
     WorkerPoolIncidentV1,
@@ -73,11 +74,6 @@ from storage.worker_pool_repository import (
 logger = logging.getLogger(__name__)
 
 WORKER_POOL_REVIEW_TASK_PREFIX = "worker_pool_review_"
-# A start_failed incident's evidence: the controller's pool view, why the start
-# was refused, and, when the hourly start limit refused it, that mark.
-EVIDENCE_POOL = "pool"
-EVIDENCE_REFUSED_BECAUSE = "start_refused_because"
-EVIDENCE_HOURLY_LIMIT = "hourly_start_limit_reached"
 WORKER_POOL_SUBJECT: StuckSubjectKind = "worker_pool"
 
 _TITLES = {
