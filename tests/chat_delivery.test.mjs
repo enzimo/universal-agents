@@ -219,3 +219,36 @@ test("a broker page's card view is kept only when it is the same page", () => {
     assert.equal(item.url, "https://broker.example.test/account-link/bearer");
   }
 });
+
+// An approved proposal's credential forms as broker cards (review finding F2).
+test("an approval's credential forms become account link cards right after the review, http included", () => {
+  const forms = [
+    { label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/a",
+      frameUrl: "http://127.0.0.1:18600/account-link/a?view=card", expiresAtUtc: "2026-11-20T10:15:00Z" },
+    // A frame address on another page is not shown as a card; neither is a page without one.
+    { label: "Choose the credential for Gitea", url: "https://broker.example.test/account-link/b",
+      frameUrl: "https://evil.example.test/account-link/b?view=card" },
+    { label: "Choose the credential for Jira", url: "https://broker.example.test/account-link/c" },
+    { label: "Not a page", url: "javascript:alert(1)", frameUrl: "javascript:alert(1)" },
+  ];
+  const pages = delivery.followUpPageItems("acc_req_1", 7, forms, "http://127.0.0.1:18090");
+
+  assert.equal(pages.length, 1);
+  const [{ item, link }] = pages;
+  assert.equal(link, forms[0]);
+  assert.equal(item.itemId, "account_link:acc_req_1:1");
+  assert.equal(item.kind, "account_link");
+  assert.equal(item.sessionSequence, 7);
+  assert.equal(item.correlationId, "acc_req_1");
+  assert.equal(item.url, forms[0].url);
+  assert.equal(item.frameUrl, forms[0].frameUrl);
+  assert.equal(item.expiresAtUtc, forms[0].expiresAtUtc);
+  assert.equal(item.content, "Choose the credential for Portainer");
+  // Placed after the review message (sequence 7) and before anything later.
+  const timeline = delivery.buildTimeline(
+    [message({ messageId: "m7", sessionSequence: 7 }), message({ messageId: "m8", sessionSequence: 8 })], [item],
+  );
+  assert.deepEqual(timeline.map(entry => entry.value.messageId || entry.value.itemId), ["m7", "account_link:acc_req_1:1", "m8"]);
+  assert.deepEqual(delivery.followUpPageItems("", 7, forms, "http://127.0.0.1:18090"), []);
+  assert.deepEqual(delivery.followUpPageItems("acc_req_1", 0, forms, "http://127.0.0.1:18090"), [], "no position, no card");
+});

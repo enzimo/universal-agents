@@ -469,6 +469,7 @@ const activityMesh = createActivityMesh({
 
 sharedState.settingsControls = createSettingsControls({
     teamActivity,
+    onFollowUpPages: function (requestId, links) { return addFollowUpPages(requestId, links); },
     onClose: function () { renderThreads(); },
     returnFocus: sharedState.settingsButton,
     onUnauthorized: authentication.handleUnauthorizedResponse,
@@ -2287,6 +2288,36 @@ function updateTransientCountdown() {
       stopTransientCountdown();
     }
     return shouldContinue;
+  }
+
+// An approved access proposal's credential forms become broker cards in the
+// open conversation, right after its access review message when that is in
+// the thread (a decision in the chat), otherwise after its latest message (a
+// decision in the Inbox panel). Returns the links shown as cards; the decided
+// card keeps any other as a link (access_inbox.mjs followUpPages).
+function addFollowUpPages(requestId, links) {
+    var thread = activeThread();
+    if (!thread) {
+      return [];
+    }
+    var review = thread.messages.find(function (message) {
+      return String(message.accessRequestId || "") === String(requestId || "");
+    });
+    var position = review
+      ? Number(review.sessionSequence || 0)
+      : window.UAChatDelivery.latestDurableSessionSequence(thread.messages);
+    var pages = window.UAChatDelivery.followUpPageItems(requestId, position, links, window.location.origin);
+    if (!pages.length) {
+      console.warn("An approved request's credential forms could not be shown as cards; they stay links.", requestId);
+      return [];
+    }
+    pages.forEach(function (page) {
+      thread.transientItems = window.UAChatDelivery.upsertTransientItem(thread.transientItems, page.item);
+    });
+    thread.transientItems = window.UAChatDelivery.reconcileTransientItems(thread.transientItems, thread.messages);
+    // Drawn on the next tick: the caller first saves the decided card that says where the forms are.
+    lifecycle.timeout(renderMessages, 0);
+    return pages.map(function (page) { return page.link; });
   }
 
 function setBrokerCardState(thread, itemId, state) {

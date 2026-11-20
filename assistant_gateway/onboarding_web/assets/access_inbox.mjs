@@ -627,22 +627,70 @@ export function renderReviewRows(document, model, { canDecide, keepBoxes, handOn
   return section;
 }
 
-/** Credential forms an approved proposal opened: only https links from the server are shown. */
+/**
+ * Hand an approved proposal's credential forms to the conversation as broker cards.
+ *
+ * ``onFollowUpPages(requestId, links)`` returns the links the chat now shows as
+ * cards; the decided card says where they are (``pages``) and keeps any other
+ * link as a button. Without the hand-off every link stays a button.
+ */
+export function followUpPages(requestId, links, onFollowUpPages, pages) {
+  if (!links.length || typeof onFollowUpPages !== "function") return { links, pages: null };
+  const shown = onFollowUpPages(requestId, links) || [];
+  return {
+    links: links.filter(link => !shown.includes(link)),
+    pages: shown.length ? pages : null,
+  };
+}
+
+/**
+ * Credential forms an approved proposal opened (broker account link pages).
+ *
+ * Only http(s) addresses are kept, so a server value can never become a
+ * javascript: or data: link; the default deployment serves the broker on http.
+ * ``frameUrl`` (the page's card view) and ``expiresAtUtc`` let Web Chat show
+ * the form as a broker card (``onFollowUpPages``); the chat checks the frame
+ * address again (chat_delivery.js normalizeTransientItem).
+ */
 export function followUpLinks(review) {
   const links = Array.isArray(review && review.follow_up_links) ? review.follow_up_links : [];
   return links.flatMap(link => {
     const label = text(link && link.label);
     const url = text(link && link.url);
-    return label && /^https:\/\//i.test(url) ? [{ label, url }] : [];
+    if (!label || !/^https?:\/\//i.test(url)) return [];
+    return [{ label, url, frameUrl: text(link.frame_url), expiresAtUtc: text(link.expires_at_utc) }];
   });
 }
 
-/** The card that replaces a request after a decision was saved in this page. */
-export function renderDecidedCard(document, { id, title, outcome, links = [] }) {
+// Said on a decided card when its credential forms were handed to the conversation as broker cards.
+export const FOLLOW_UP_PAGES_BELOW = "Choose the credentials in the secure pages below.";
+export const FOLLOW_UP_PAGES_IN_CONVERSATION = "The secure pages to choose the credentials are in the conversation.";
+export const SHOW_CONVERSATION_LABEL = "Show in the conversation";
+
+/**
+ * The card that replaces a request after a decision was saved in this page.
+ *
+ * ``links`` are drawn as buttons that open the page in a new tab (the
+ * workflow page, or a form the chat could not show as a card). ``pages``
+ * (``{ note, actionLabel, onAction }``) says the forms are broker cards in
+ * the conversation instead, with an optional button that shows them.
+ */
+export function renderDecidedCard(document, { id, title, outcome, links = [], pages = null }) {
   const card = element(document, "article", `permission-request-card access-review-card is-decided is-${outcome.tone}`);
   card.setAttribute("data-request-id", id);
   cardHeading(document, card, title, statusBadge(document, outcome.label, outcome.tone));
   card.append(element(document, "p", "permission-effect-summary", outcome.explanation));
+  if (pages && pages.note) {
+    const row = element(document, "div", "permission-choice-row access-review-follow-up");
+    row.append(element(document, "p", "access-review-follow-up-note", pages.note));
+    if (pages.actionLabel && typeof pages.onAction === "function") {
+      const show = element(document, "button", "button secondary permission-choice-button", pages.actionLabel);
+      show.type = "button";
+      show.addEventListener("click", () => pages.onAction());
+      row.append(show);
+    }
+    card.append(row);
+  }
   if (links.length) {
     const group = element(document, "div", "permission-choice-row access-review-follow-up");
     links.forEach(link => {
@@ -802,7 +850,7 @@ export function createInboxCounts({ get, onChange, browser = globalThis, pollMs 
  * with only the parts that read knows (`decidableRequests`, `unreadNotices`).
  */
 export function createAccessInbox({
-  container, get, post, beginAction, failureMessage, onCounts, paginate,
+  container, get, post, beginAction, failureMessage, onCounts, paginate, onFollowUpPages, showConversation,
   browser = globalThis, formatTime = localTime,
 }) {
   const document = browser.document;
@@ -1075,7 +1123,9 @@ export function createAccessInbox({
         saved = true;
         const outcome = { id, title: text(review.title) || "Access request",
           outcome: decisionOutcome(choice.choice, payload && payload.review, kept),
-          links: followUpLinks(payload && payload.review) };
+          ...followUpPages(id, followUpLinks(payload && payload.review), onFollowUpPages, {
+            note: FOLLOW_UP_PAGES_IN_CONVERSATION, actionLabel: SHOW_CONVERSATION_LABEL, onAction: showConversation,
+          }) };
         state.outcomes.set(id, outcome);
         const decided = renderDecidedCard(document, outcome);
         card.replaceWith(decided);

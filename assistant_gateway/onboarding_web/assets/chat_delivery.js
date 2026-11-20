@@ -247,6 +247,37 @@
     }
   }
 
+  // An approved access proposal's credential forms (access_inbox.mjs
+  // followUpLinks) as broker card items placed after ``sessionSequence``:
+  // one "account_link" item per form, built through normalizeTransientItem so
+  // the same address checks apply (http or https, the frame address on the
+  // page's own origin and path). Only forms that get a card view are returned,
+  // each with the link it came from, so the caller keeps any other as a link.
+  function followUpPageItems(requestId, sessionSequence, links, origin) {
+    var id = String(requestId || "").trim();
+    if (!id) {
+      return [];
+    }
+    return (Array.isArray(links) ? links : []).flatMap(function (link, index) {
+      var pageId = id + ":" + String(index + 1);
+      var item = normalizeTransientItem({
+        kind: "account_link",
+        item_id: "account_link:" + pageId,
+        request_id: pageId,
+        correlation_id: id,
+        session_sequence: sessionSequence,
+        content: String(link && link.label || ""),
+        action: {
+          label: String(link && link.label || ""),
+          url: String(link && link.url || ""),
+          frame_url: String(link && link.frameUrl || ""),
+          expires_at_utc: String(link && link.expiresAtUtc || ""),
+        },
+      }, origin);
+      return item && item.frameUrl ? [{ item: item, link: link }] : [];
+    });
+  }
+
   function reconcileTransientItems(currentItems, messages) {
     var durableMessages = Array.isArray(messages) ? messages : [];
     return (Array.isArray(currentItems) ? currentItems : []).filter(function (item) {
@@ -401,6 +432,7 @@
     clearErrorNotice: clearErrorNotice,
     create: create,
     createErrorNotice: createErrorNotice,
+    followUpPageItems: followUpPageItems,
     latestDurableSessionSequence: latestDurableSessionSequence,
     normalizeTransientItem: normalizeTransientItem,
     reconcileMessages: reconcileMessages,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  DETAILS_LABEL, NEEDS_DECISION, WAITING_FOR_ADMINISTRATOR, decisionRequestBody, localTimeFormatter,
+  DETAILS_LABEL, FOLLOW_UP_PAGES_BELOW, NEEDS_DECISION, WAITING_FOR_ADMINISTRATOR, decisionRequestBody, localTimeFormatter,
   storedDecisionOutcome,
 } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
 import {
@@ -43,7 +43,7 @@ function message(id = "req-1") {
   return { role: "system", messageType: "access_review", accessRequestId: id, content: "announcement" };
 }
 
-function harness({ reviews = { "req-1": changeReview() }, decide, readError } = {}) {
+function harness({ reviews = { "req-1": changeReview() }, decide, readError, onFollowUpPages } = {}) {
   const document = fakeDocument();
   const calls = { gets: [], posts: [], opened: [], decided: [] };
   let clock = 1_000_000;
@@ -69,6 +69,7 @@ function harness({ reviews = { "req-1": changeReview() }, decide, readError } = 
     failureMessage: (error, fallback) => (error && error.message) || fallback,
     openInbox: id => calls.opened.push(id),
     onDecided: id => calls.decided.push(id),
+    onFollowUpPages,
   });
   const bubble = document.createElement("article");
   document.body.append(bubble);
@@ -238,4 +239,40 @@ test("the decision body is shared with the Inbox: keep for access requests, kept
   assert.deepEqual(decisionRequestBody({ review: changeReview(), choice, note: { value: "ok" },
     keepBoxes: [box(true, "r1"), box(false, "r2")], handOnBoxes: [box(true)] }).body,
   { choice: "approve", note: "ok", kept_item_ids: ["r1"], hand_on: true });
+});
+
+
+// An approved proposal's credential forms (review finding F2).
+const FORMS = [{ label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/a",
+  frame_url: "http://127.0.0.1:18600/account-link/a?view=card", expires_at_utc: "2026-11-20T10:15:00Z" }];
+const approveWithForms = () => Promise.resolve({ status: "ok", review: { ...changeReview(), status: "granted", follow_up_links: FORMS } });
+
+test("an approval's credential forms become broker cards in the conversation, not new-tab links", async () => {
+  const handed = [];
+  const { reviewer, bubble } = harness({
+    decide: approveWithForms, onFollowUpPages: (id, links) => { handed.push({ id, links }); return links; },
+  });
+  const slot = reviewer.mount(bubble, message());
+  await settle();
+  byTag(slot, "button").find(button => button.textContent === "Approve").click();
+  await settle();
+
+  assert.equal(handed.length, 1);
+  assert.equal(handed[0].id, "req-1");
+  assert.equal(handed[0].links[0].frameUrl, FORMS[0].frame_url);
+  const decided = byClass(slot, "access-review-card")[0];
+  assert.equal(byTag(decided, "a").length, 0);
+  assert.equal(byClass(decided, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_BELOW);
+});
+
+test("forms the conversation cannot show as cards stay links", async () => {
+  const { reviewer, bubble } = harness({ decide: approveWithForms, onFollowUpPages: () => [] });
+  const slot = reviewer.mount(bubble, message());
+  await settle();
+  byTag(slot, "button").find(button => button.textContent === "Approve").click();
+  await settle();
+
+  const decided = byClass(slot, "access-review-card")[0];
+  assert.deepEqual(byTag(decided, "a").map(anchor => anchor.getAttribute("href")), [FORMS[0].url]);
+  assert.equal(byClass(decided, "access-review-follow-up-note").length, 0);
 });
