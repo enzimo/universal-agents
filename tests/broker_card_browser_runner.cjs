@@ -43,11 +43,11 @@ const FRAME = "iframe.broker-card-frame";
         return true;
       }
     };
-    const readable = await page.$$eval(FRAME, (frames, source) => {
+    const cardsUnreadable = () => page.$$eval(FRAME, (frames, source) => {
       const test = new Function("frame", `return (${source})(frame);`);
       return frames.map((frame) => test(frame));
     }, unreadable.toString());
-    check(readable.every(Boolean), "chat page cannot read the card's document");
+    check((await cardsUnreadable()).every(Boolean), "chat page cannot read the card's document");
 
     const unsandboxed = await page.evaluate(async (selector) => {
       const source = document.querySelector(selector).getAttribute("src");
@@ -78,6 +78,12 @@ const FRAME = "iframe.broker-card-frame";
     const sameFrame = await page.evaluate((selector) => document.querySelector(selector) === window.__liveFrame, `${CARD(0)} ${FRAME}`);
     const kept = await card.locator("input[type=password]").inputValue();
     check(sameFrame && kept === typed, "typed value kept across two chat updates in the same frame");
+    // With the value in the field, the chat page still reads neither the document nor the value.
+    const pageText = await page.evaluate(() => document.documentElement.outerHTML);
+    check(
+      (await cardsUnreadable()).every(Boolean) && !pageText.includes(typed),
+      "chat page still cannot read the card or the typed value after typing and two updates",
+    );
 
     await card.locator("button[type=submit]", {hasText: "Store Credential"}).click();
     await page.waitForFunction(

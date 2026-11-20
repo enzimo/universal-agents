@@ -167,6 +167,7 @@ def test_broker_cards_in_the_real_chat_page(deployment: str, monkeypatch: pytest
         "chat page cannot read the card's document",
         "an unsandboxed frame of the card address cannot be read either",
         "typed value kept across two chat updates in the same frame",
+        "chat page still cannot read the card or the typed value after typing and two updates",
         "submission from the frame reached the broker and the card shrank to Done",
         "frames posted only height and outcome",
         "an expired card lost its frame",
