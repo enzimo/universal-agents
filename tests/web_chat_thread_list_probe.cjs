@@ -123,6 +123,19 @@ function inView(page) {
     assert.deepEqual(wideView.cutWaiting, [], "waiting labels fit their line (C24)");
     await wide.page.screenshot({ path: path.join(shots, "thread-list-1280x880.png") });
     checked.push(`1280x880: ${wideView.twoLineRows} two-line rows and all five headers in view, app 868 px tall, 6 px gaps`);
+    // C19: the light theme's backing behind the list takes none of its height,
+    // so the same rows and all five headers fit there too.
+    const lightLayout = await openChat(browser, baseUrl, { width: 1280, height: 880 }, { colorScheme: "light", reducedMotion: "reduce" });
+    await lightLayout.page.evaluate(() => window.UAAppearance.preview({ ...window.UAAppearance.current(), mode: "light" }));
+    await lightLayout.page.waitForTimeout(400);
+    assert.equal(await lightLayout.page.evaluate(() => document.documentElement.dataset.colorMode), "light");
+    const lightView = await inView(lightLayout.page);
+    assert.ok(lightView.twoLineRows >= 8, JSON.stringify(lightView));
+    for (const header of ["Needs you", "Pinned", "Recent", "Snoozed", "Dismissed"]) assert.ok(lightView.headers.includes(header), "light: " + header);
+    assert.equal(lightView.listHeight, wideView.listHeight, "the list is as tall in light as in dark");
+    assert.deepEqual(lightLayout.errors, []);
+    await lightLayout.context.close();
+    checked.push(`1280x880 light: ${lightView.twoLineRows} two-line rows and all five headers in view, list ${lightView.listHeight} px as in dark`);
 
     // A8: right-click, arrows into Snooze's choices, Escape back to the row.
     await wide.page.click('.thread-row[data-session-key="website:web-chat:offsite"] .thread-button', { button: "right" });

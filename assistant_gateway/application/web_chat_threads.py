@@ -16,10 +16,11 @@ or dismissed. Placement is stored as a baseline on the thread
 (``gateway_sessions``) and undone here, when the list is read, never by the
 code that posts messages: a snoozed thread wakes at its time or when the team
 posts after it was snoozed, and stays marked "woke" until the person opens it
-(the page then restores it); a dismissed thread comes back as soon as
-anything new is posted. Open pages read the list every two seconds
-(``web_chat_thread_states``), so a wake shows within seconds without a
-background job.
+(the page then sends ``clear_woke``, and the gateway clears the mark only while
+the thread is still woke by this rule, so an old page cannot undo a newer
+snooze); a dismissed thread comes back as soon as anything new is posted.
+Open pages read the list every two seconds (``web_chat_thread_states``), so a
+wake shows within seconds without a background job.
 
 A thread's name is fixed once given (owner's request, 2026-10-09; it used to
 follow the latest message): the name the person gave it, otherwise the

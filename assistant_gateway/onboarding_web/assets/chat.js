@@ -2346,8 +2346,9 @@ function changeThreadPlacement(thread, action, extra) {
 // first, since its saved number could be 0 (review F2). A thread gone from
 // the list by then is left alone. A refusal keeps the row and shows why.
 // Nothing is shown once the person signed out or someone else signed in
-// (review F3). A failure is shown in the open chat, naming the chat that was
-// not moved when it is another one (plan review C23).
+// (review F3). A failure is shown in the status line beside the list, naming
+// the chat that was not moved, with Retry only when the request did not get
+// through (review F5).
 function runThreadPlacement(thread, action, extra, authGeneration) {
     var sessionKey = thread.sessionKey;
     var current = function () {

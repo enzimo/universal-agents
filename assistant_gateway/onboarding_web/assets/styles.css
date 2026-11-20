@@ -2053,6 +2053,7 @@ h1 {
 :root[data-color-mode="dark"] .chat-thread-history {
   border-radius: 0;
   background: none;
+  margin: 0;
   padding: 0;
 }
 
@@ -5502,7 +5503,9 @@ body.is-theme-customizing {
    backing (owner's choice, 2026-11-20, review F8): the sidebar glass shows a
    mid-dark band of the mesh where the list's small grey text measured 1.4 to
    2.5:1 and even the titles' ink 3.8:1. The rest of the sidebar stays glassy;
-   dark mode has none (see the dark rules). */
+   dark mode has none (see the dark rules). The backing reaches 4 px beyond
+   the list (negative margin, same padding), so the list keeps the height it
+   has in dark mode and all five section headers still fit (review C19). */
 .chat-thread-history {
   min-height: 0;
   display: flex;
@@ -5511,6 +5514,7 @@ body.is-theme-customizing {
   gap: 8px;
   border-radius: 12px;
   background: rgba(248, 253, 251, 0.82);
+  margin: -4px;
   padding: 4px;
 }
 
