@@ -33,6 +33,15 @@ runs per type and person: one dead owner leads it (the one with the highest
 attempt, else the first), and the others wait for its replacement. Run per
 owner, four dead workers of one type started a replacement every minute.
 
+A give-up covers the owners whose work was last saved before the series' last
+attempt ended: they died before it or with it, and each is logged once as given
+up with its own task ids. An owner whose work was saved later was still alive
+after the series ended, so it leads a new series, and the given-up owners wait
+for that replacement, which adopts their work too. The saved work's time comes
+from storage, so this holds across a lead restart. Without it, one given-up
+series stopped replacements for every later dead worker of the type and person
+until the records were pruned.
+
 - A refusal that leaves no start record (the type was removed or is denied, the
   team's worker limit or the hourly start limit is reached) is paced with the
   same delays and then tried hourly, never given up: a limit frees again, and a
@@ -99,7 +108,6 @@ class _OwnerMemory:
 
     refusals: int = 0
     retry_at: float = 0.0
-    last_refusal: str | None = None
     logged: set[str] = field(default_factory=set)
 
 
@@ -194,6 +202,8 @@ def _orphaned_owners(agent: Any, now: datetime) -> list[dict[str, Any]]:
                 "person": person,
                 "tasks": len(unfinished),
                 "task_ids": [record.task_id for record in unfinished],
+                # Its last save while it was alive (what a give-up covers).
+                "saved_at": parse_utc(row.updated_at),
                 "attempts": _attempt_records(agent, row.owner_agent_id, person, by_id),
             }
         )
@@ -235,27 +245,53 @@ def _log_once(memory: _OwnerMemory, key: str, log: Any, message: str, *args: Any
         log(message, *args)
 
 
-def _give_up(agent: Any, owner: dict[str, Any], memory: _OwnerMemory, step: TakeoverStep) -> None:
-    """After the last attempt ended: ``step`` holds the newest attempt and its record."""
+def _give_up(agent: Any, owner: dict[str, Any], memory: _OwnerMemory, series: dict[str, Any], now: datetime) -> None:
+    """One owner the given-up ``series`` covers; logged once per owner and series."""
+    step = takeover_step(series["attempts"], now)
     _log_once(
         memory,
-        STEP_GIVE_UP,
+        f"{STEP_GIVE_UP}:{series['owner_agent_id']}",
         agent._logger.error,
         "Gave up starting replacements for a dead agent's unfinished work; it stays with the dead agent. "
-        "event=orphaned_work_takeover_gave_up owner_agent_id=%s agent_type=%s task_ids=%s attempts=%s "
-        "last_reason=%s",
+        "event=orphaned_work_takeover_gave_up owner_agent_id=%s agent_type=%s task_ids=%s "
+        "series_owner_agent_id=%s attempts=%s last_reason=%s",
         owner["owner_agent_id"],
         owner["agent_type"],
         owner["task_ids"],
+        series["owner_agent_id"],
         step.attempt,
         step.previous.reason if step.previous is not None else None,
     )
 
 
+def _series_end(owner: dict[str, Any], now: datetime) -> datetime | None:
+    """When this owner's series gave up (its last attempt's end), or None."""
+    step = takeover_step(owner["attempts"], now)
+    if step.action != STEP_GIVE_UP or step.previous is None:
+        return None
+    return parse_utc(step.previous.updated_at_utc)
+
+
+def _plan_group(group: list[dict[str, Any]], now: datetime) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The owner that runs the group's series, and the latest series that gave up (module docstring).
+
+    No runner means the given-up series covers every owner of the group.
+    """
+    ended = [(end, owner) for owner in group if (end := _series_end(owner, now)) is not None]
+    if not ended:
+        return max(group, key=_highest_attempt), None
+    gave_up_at, series = max(ended, key=lambda item: item[0])
+    later = [owner for owner in group if owner["saved_at"] is not None and owner["saved_at"] > gave_up_at]
+    return (max(later, key=_highest_attempt) if later else None), series
+
+
+def _highest_attempt(owner: dict[str, Any]) -> int:
+    return max(owner["attempts"], default=0)
+
+
 def _refused(agent: Any, owner: dict[str, Any], memory: _OwnerMemory, reason: str | None, clock: float) -> None:
     """A refusal that left no start record: paced like an attempt, then hourly; never given up."""
     memory.refusals += 1
-    memory.last_refusal = reason
     delay = TAKEOVER_RETRY_DELAYS_SECONDS[min(memory.refusals, len(TAKEOVER_RETRY_DELAYS_SECONDS)) - 1]
     memory.retry_at = clock + delay
     _log_once(
@@ -281,10 +317,8 @@ async def _take_over_one(
     from custom_agents.agent_instantiation_service import launch_id_for
 
     step = takeover_step(owner["attempts"], now)
-    if step.action == STEP_GIVE_UP:
-        _give_up(agent, owner, memory, step)
-        return False
-    if step.action == STEP_WAIT or clock < memory.retry_at:
+    # The runner's own series never gave up (_plan_group); it starts or waits.
+    if step.action != STEP_START or clock < memory.retry_at:
         return False
     result = await agent.task_manager.operations_runtime.run(partial(_launch_takeover, agent, owner, step.attempt))
     if result.launch_id is None:
@@ -341,13 +375,24 @@ async def take_over_orphaned_work(agent: Any, *, now: datetime | None = None, cl
     memory = _owner_memory(agent, owners)
     requested = 0
     for group in _groups(agent, owners).values():
-        leader = max(group, key=lambda owner: max(owner["attempts"], default=0))
-        for owner in group:
-            remembered = memory.setdefault(owner["owner_agent_id"], _OwnerMemory())
-            if owner is leader:
-                requested += await _take_over_one(agent, owner, remembered, when, moment)
-            else:
-                _wait_for(agent, owner, remembered, leader)
+        requested += await _take_over_group(agent, group, memory, when, moment)
+    return requested
+
+
+async def _take_over_group(
+    agent: Any, group: list[dict[str, Any]], memory: dict[str, _OwnerMemory], now: datetime, clock: float
+) -> int:
+    """One pass for the dead owners one replacement serves; returns how many starts it requested."""
+    runner, given_up = _plan_group(group, now)
+    requested = 0
+    for owner in group:
+        remembered = memory.setdefault(owner["owner_agent_id"], _OwnerMemory())
+        if runner is None and given_up is not None:
+            _give_up(agent, owner, remembered, given_up, now)
+        elif owner is runner:
+            requested += await _take_over_one(agent, owner, remembered, now, clock)
+        elif runner is not None:
+            _wait_for(agent, owner, remembered, runner)
     return requested
 
 

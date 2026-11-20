@@ -790,7 +790,11 @@ Four repairs keep work from getting stuck in the first place:
   and its work stayed stuck until the record was pruned about 30 days later.
   One replacement adopts the work of every dead agent of its type, and starts
   for one type and person join, so the series runs once per type and person:
-  one dead owner leads it and the others wait. A refusal that leaves no start
+  one dead owner leads it and the others wait. A give-up covers the owners
+  whose work was last saved before the series' last attempt ended, each logged
+  with its own task ids; a worker whose work was saved later was alive after
+  the series ended, so it leads a new series, whose replacement adopts the
+  given-up work too. A refusal that leaves no start
   record (the type was removed, a worker or start limit is reached) is paced
   with the same delays and then tried hourly, never given up, since a limit
   frees again. One rule
