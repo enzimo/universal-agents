@@ -15,23 +15,32 @@ then its heartbeat after ``owner_gone_after_seconds``), the same rule the
 replacement's startup takeover applies, so the lead never starts a replacement
 that would then refuse the work, and a live startup agent keeps its work.
 
-Retries: a replacement that fails before it is ready, or retires while the dead
-owner still holds the work, is followed by another one, after
-``TAKEOVER_RETRY_DELAYS_SECONDS``, up to ``MAX_TAKEOVER_ATTEMPTS``; then the lead
-gives up and logs it once. Each attempt has its own start id,
+Retries: a replacement that fails before it is ready, or retires while the work
+is still held, is followed by another one, after ``TAKEOVER_RETRY_DELAYS_SECONDS``
+counted from the end of the previous one, up to ``MAX_TAKEOVER_ATTEMPTS``; then
+the lead gives up and logs it once. Each attempt has its own start id,
 ``takeover:<owner>:<attempt>``. Until the review of 2026-11-20 the id was fixed,
 so the start record of a replacement that crashed (for example on a work stream
 at its consumer limit) was found again on every later pass and nothing was
 started until that record was pruned, about 30 days later. The attempt number
 comes from the highest-numbered attempt record present, so the series starts
-again only once the records are pruned (``retention_days``). Two more cases:
+again only once the records are pruned (``retention_days``).
+
+One replacement serves every dead owner of its type: its startup takeover adopts
+all their saved work, and starts for one type and person join (``reserve``), as
+dead pool workers of one type do (they share the pool's owner). So the series
+runs per type and person: one dead owner leads it (the one with the highest
+attempt, else the first), and the others wait for its replacement. Run per
+owner, four dead workers of one type started a replacement every minute.
 
 - A refusal that leaves no start record (the type was removed or is denied, the
-  team's worker limit is reached) is paced and bounded the same way, counted in
-  memory per process, so a restarted lead tries once more.
-- A start can join another start of the same type and person that is still
-  starting (``reserve``), for example another dead owner's replacement; that
-  uses no attempt, and the next pass looks again.
+  team's worker limit or the hourly start limit is reached) is paced with the
+  same delays and then tried hourly, never given up: a limit frees again, and a
+  refusal starts no process. The count is kept in memory, is reset by a start,
+  and a restarted lead starts it again.
+- A start can still join another start of the same type and person that is
+  starting (a pool start, say); that uses no attempt, and the next pass looks
+  again.
 """
 
 from __future__ import annotations
@@ -59,10 +68,11 @@ logger = logging.getLogger(__name__)
 
 # How often the lead looks for dead owners holding unfinished work.
 TAKEOVER_CHECK_SECONDS = 60.0
-# How long the lead waits after replacement attempt n ended (or was refused)
-# before attempt n+1, for n = 1 to 4; after the fifth it gives up. Fixed: a work
-# stream at its consumer limit or a provider's brief refusal clears within that
-# span, a broken definition does not, and the 60-second check already paces passes.
+# How long the lead waits after replacement attempt n ended before attempt n+1,
+# for n = 1 to 4; after the fifth it gives up. Refusals use the same delays, then
+# the last one for good. Fixed: a work stream at its consumer limit or a
+# provider's brief refusal clears within that span, a broken definition does
+# not, and the 60-second check already paces passes.
 TAKEOVER_RETRY_DELAYS_SECONDS = (60.0, 300.0, 900.0, 3600.0)
 MAX_TAKEOVER_ATTEMPTS = len(TAKEOVER_RETRY_DELAYS_SECONDS) + 1
 _TERMINAL_STATE_VALUES = frozenset({"completed", "failed", "cancelled", "abandoned"})
@@ -89,6 +99,7 @@ class _OwnerMemory:
 
     refusals: int = 0
     retry_at: float = 0.0
+    last_refusal: str | None = None
     logged: set[str] = field(default_factory=set)
 
 
@@ -225,28 +236,27 @@ def _log_once(memory: _OwnerMemory, key: str, log: Any, message: str, *args: Any
 
 
 def _give_up(agent: Any, owner: dict[str, Any], memory: _OwnerMemory, step: TakeoverStep) -> None:
+    """After the last attempt ended: ``step`` holds the newest attempt and its record."""
     _log_once(
         memory,
         STEP_GIVE_UP,
         agent._logger.error,
         "Gave up starting replacements for a dead agent's unfinished work; it stays with the dead agent. "
         "event=orphaned_work_takeover_gave_up owner_agent_id=%s agent_type=%s task_ids=%s attempts=%s "
-        "refusals=%s last_reason=%s",
+        "last_reason=%s",
         owner["owner_agent_id"],
         owner["agent_type"],
         owner["task_ids"],
         step.attempt,
-        memory.refusals,
         step.previous.reason if step.previous is not None else None,
     )
 
 
 def _refused(agent: Any, owner: dict[str, Any], memory: _OwnerMemory, reason: str | None, clock: float) -> None:
-    """A refusal that left no start record: paced and bounded like an attempt."""
+    """A refusal that left no start record: paced like an attempt, then hourly; never given up."""
     memory.refusals += 1
-    if memory.refusals >= MAX_TAKEOVER_ATTEMPTS:
-        return
-    delay = TAKEOVER_RETRY_DELAYS_SECONDS[memory.refusals - 1]
+    memory.last_refusal = reason
+    delay = TAKEOVER_RETRY_DELAYS_SECONDS[min(memory.refusals, len(TAKEOVER_RETRY_DELAYS_SECONDS)) - 1]
     memory.retry_at = clock + delay
     _log_once(
         memory,
@@ -271,7 +281,7 @@ async def _take_over_one(
     from custom_agents.agent_instantiation_service import launch_id_for
 
     step = takeover_step(owner["attempts"], now)
-    if step.action == STEP_GIVE_UP or memory.refusals >= MAX_TAKEOVER_ATTEMPTS:
+    if step.action == STEP_GIVE_UP:
         _give_up(agent, owner, memory, step)
         return False
     if step.action == STEP_WAIT or clock < memory.retry_at:
@@ -279,8 +289,6 @@ async def _take_over_one(
     result = await agent.task_manager.operations_runtime.run(partial(_launch_takeover, agent, owner, step.attempt))
     if result.launch_id is None:
         _refused(agent, owner, memory, result.reason, clock)
-        if memory.refusals >= MAX_TAKEOVER_ATTEMPTS:
-            _give_up(agent, owner, memory, step)
         return False
     expected = launch_id_for(agent.team_id, owner["person"], takeover_request_id(owner["owner_agent_id"], step.attempt))
     if result.launch_id != expected:
@@ -296,6 +304,8 @@ async def _take_over_one(
             result.launch_id,
         )
         return False
+    # This attempt has a start record now; refusals before it count no longer.
+    memory.refusals, memory.retry_at = 0, 0.0
     log = agent._logger.warning if result.accepted or result.status == "waiting" else agent._logger.error
     log(
         "A dead agent holds unfinished work; a replacement of its type takes it over. "
@@ -330,6 +340,20 @@ async def take_over_orphaned_work(agent: Any, *, now: datetime | None = None, cl
     owners = await agent.task_manager.operations_runtime.run(partial(_orphaned_owners, agent, when))
     memory = _owner_memory(agent, owners)
     requested = 0
+    for group in _groups(agent, owners).values():
+        leader = max(group, key=lambda owner: max(owner["attempts"], default=0))
+        for owner in group:
+            remembered = memory.setdefault(owner["owner_agent_id"], _OwnerMemory())
+            if owner is leader:
+                requested += await _take_over_one(agent, owner, remembered, when, moment)
+            else:
+                _wait_for(agent, owner, remembered, leader)
+    return requested
+
+
+def _groups(agent: Any, owners: list[dict[str, Any]]) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """Dead owners by the agent type and person one replacement serves; skips owners without a person."""
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for owner in owners:
         if not owner["person"]:
             agent._logger.warning(
@@ -339,6 +363,20 @@ async def take_over_orphaned_work(agent: Any, *, now: datetime | None = None, cl
                 owner["agent_type"],
             )
             continue
-        memory.setdefault(owner["owner_agent_id"], _OwnerMemory())
-        requested += await _take_over_one(agent, owner, memory[owner["owner_agent_id"]], when, moment)
-    return requested
+        groups.setdefault((owner["agent_type"], owner["person"]), []).append(owner)
+    return groups
+
+
+def _wait_for(agent: Any, owner: dict[str, Any], memory: _OwnerMemory, leader: dict[str, Any]) -> None:
+    _log_once(
+        memory,
+        f"waiting:{leader['owner_agent_id']}",
+        agent._logger.info,
+        "A dead agent's unfinished work waits for the replacement started for another dead agent of its "
+        "type. event=orphaned_work_takeover_waiting owner_agent_id=%s agent_type=%s task_ids=%s "
+        "for_owner_agent_id=%s",
+        owner["owner_agent_id"],
+        owner["agent_type"],
+        owner["task_ids"],
+        leader["owner_agent_id"],
+    )

@@ -23,9 +23,13 @@ from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.liveness_observation import observe_liveness
 from custom_agents.orphaned_work_takeover import (
     MAX_TAKEOVER_ATTEMPTS,
+    STEP_GIVE_UP,
+    STEP_START,
+    STEP_WAIT,
     TAKEOVER_RETRY_DELAYS_SECONDS,
     take_over_orphaned_work,
     takeover_request_id,
+    takeover_step,
 )
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import RuntimeSnapshotV3, TaskSnapshotRecord
@@ -217,8 +221,17 @@ def _attempt(lead, attempt: int, owner: str = DEAD):
     return repository.get(launch_id_for("team", "owner", takeover_request_id(owner, attempt)), "team")
 
 
-def _end(lead, attempt: int, state: AgentLaunchState = AgentLaunchState.FAILED, reason: str | None = CRASH):
-    AgentLaunchRepository(lead.task_manager.storage_settings).update(_attempt(lead, attempt), state=state, reason=reason)
+def _end(
+    lead,
+    attempt: int,
+    state: AgentLaunchState = AgentLaunchState.FAILED,
+    reason: str | None = CRASH,
+    owner: str = DEAD,
+    now: datetime | None = None,
+):
+    AgentLaunchRepository(lead.task_manager.storage_settings).update(
+        _attempt(lead, attempt, owner), state=state, reason=reason, now=now
+    )
 
 
 def _later(seconds: float) -> datetime:
@@ -272,54 +285,146 @@ async def test_the_lead_gives_up_after_the_last_attempt_and_says_so_once(lead, c
 
 
 @pytest.mark.asyncio
-async def test_a_refusal_without_a_start_record_is_paced_logged_once_and_given_up(lead, monkeypatch, caplog):
-    """A removed agent type is refused before any record exists; it used to be retried every pass."""
+async def test_a_refusal_without_a_start_record_is_paced_then_tried_hourly_until_a_start_works(
+    lead, monkeypatch, caplog
+):
+    """Refused before any record exists (here: the type is gone for a while; likewise a limit).
+
+    It used to be tried every pass; it is paced like an attempt, then tried
+    hourly and never given up, since a limit frees again (review of 2026-11-20).
+    """
 
     launch_record(lead, AgentLaunchState.FAILED)
     held_work(lead)
     _takeover_lead(lead)
-    del lead.definitions["Worker"]
-    attempts = []
+    definition = lead.definitions.pop("Worker")
+    tries = []
     real_launch = takeover._launch_takeover
 
     def counted(agent, owner, attempt):
-        attempts.append(attempt)
+        tries.append(attempt)
         return real_launch(agent, owner, attempt)
 
     monkeypatch.setattr(takeover, "_launch_takeover", counted)
     clock = 1.0
-    with caplog.at_level(logging.ERROR):
-        for _ in range(20):  # a pass every 61 s of the lead's monotonic clock, about 20 minutes:
+    with caplog.at_level(logging.INFO):
+        for _ in range(150):  # a pass every 61 s of the lead's monotonic clock, about 150 minutes
             await take_over_orphaned_work(lead, clock=clock)
             clock += 61.0
-        assert len(attempts) == 3  # tries at 0, 1 and 6 minutes; the next waits 15 minutes
-        for _ in range(100):  # about 100 minutes more: tries at about 21 and 81 minutes, then gives up
+        # Tries at about 0, 1, 6, 21, 81 and 141 minutes: the delays, then hourly.
+        assert tries == [1] * 6
+        assert _worker_starts(lead) == [] and _attempt(lead, 1) is None
+        lead.definitions["Worker"] = definition
+        for _ in range(61):  # the next hourly try starts the replacement
             await take_over_orphaned_work(lead, clock=clock)
             clock += 61.0
-    assert attempts == [1] * MAX_TAKEOVER_ATTEMPTS
-    assert _worker_starts(lead) == [] and _attempt(lead, 1) is None
+    assert len(tries) == 7 and len(_worker_starts(lead)) == 1
+    assert _attempt(lead, 1).state == AgentLaunchState.STARTING
+    assert lead._orphaned_work_takeovers[DEAD].refusals == 0  # a start resets the count
     (refused,) = _lines(caplog, "orphaned_work_takeover_refused")
     assert f"owner_agent_id={DEAD} agent_type=Worker task_ids=['work-1'] reason=agent_definition_unavailable" in refused
-    (gave_up,) = _lines(caplog, "orphaned_work_takeover_gave_up")
-    assert f"refusals={MAX_TAKEOVER_ATTEMPTS}" in gave_up
+    assert _lines(caplog, "orphaned_work_takeover_gave_up") == []
+
+
+def _fail_running_replacements(lead, now: datetime) -> None:
+    """Every replacement still starting crashes (``now``: when, for the delays)."""
+    repository = AgentLaunchRepository(lead.task_manager.storage_settings)
+    for record in repository.list("team"):
+        if record.state == AgentLaunchState.STARTING:
+            repository.update(record, state=AgentLaunchState.FAILED, reason=CRASH, now=now)
 
 
 @pytest.mark.asyncio
-async def test_two_dead_owners_of_one_type_and_person_share_one_start_without_using_an_attempt(lead, caplog):
-    second = "agent_dead_worker_2"
-    launch_record(lead, AgentLaunchState.FAILED)
-    launch_record(lead, AgentLaunchState.FAILED, agent_id=second)
-    held_work(lead)
-    held_work(lead, owner=second, task_id="work-2")
+async def test_dead_workers_of_one_type_and_person_share_one_paced_series_of_replacements(lead, caplog):
+    """Run per dead owner, four dead workers started a replacement every minute (review of 2026-11-20)."""
+
+    owners = [DEAD, "agent_dead_worker_2", "agent_dead_worker_3", "agent_dead_worker_4"]
+    for index, owner in enumerate(owners):
+        launch_record(lead, AgentLaunchState.FAILED, agent_id=owner)
+        held_work(lead, owner=owner, task_id=f"work-{index + 1}")
     _takeover_lead(lead)
+    base = datetime.now(timezone.utc)
+    started_at = []
     with caplog.at_level(logging.INFO):
-        assert await take_over_orphaned_work(lead, clock=1.0) == 1
-        assert await take_over_orphaned_work(lead, clock=100.0) == 0
-    (started,) = _worker_starts(lead)
-    own = {owner: _attempt(lead, 1, owner) for owner in (DEAD, second)}
-    assert sorted(record is None for record in own.values()) == [False, True]
-    (joined,) = _lines(caplog, "orphaned_work_takeover_joined")
-    assert f"launch_id={started.launch_id}" in joined
+        for minute in range(100):  # a pass a minute; each replacement crashes 5 s after it starts
+            now = base + timedelta(minutes=minute)
+            if await take_over_orphaned_work(lead, now=now, clock=1.0 + 60.0 * minute):
+                started_at.append(minute)
+            _fail_running_replacements(lead, now + timedelta(seconds=5))
+    # 1, 5, 15 and 60 minutes after each crash, then give up: five starts in all.
+    assert started_at == [0, 2, 8, 24, 85]
+    leaders = {owner for owner in owners if _attempt(lead, 1, owner) is not None}
+    assert len(leaders) == 1
+    waiting = _lines(caplog, "orphaned_work_takeover_waiting")
+    assert len(waiting) == 3 and all(f"for_owner_agent_id={next(iter(leaders))}" in line for line in waiting)
+    (gave_up,) = _lines(caplog, "orphaned_work_takeover_gave_up")
+    assert f"attempts={MAX_TAKEOVER_ATTEMPTS} last_reason={CRASH}" in gave_up
+
+
+@pytest.mark.asyncio
+async def test_a_failed_replacement_under_the_old_start_id_does_not_block_the_takeover(lead):
+    """The running team after the upgrade: a replacement that crashed under ``takeover:<owner>``."""
+
+    repository = AgentLaunchRepository(lead.task_manager.storage_settings)
+    old, _ = repository.reserve(
+        make_launch(
+            launch_id=launch_id_for("team", "owner", f"takeover:{DEAD}"),
+            agent_id="agent_old_replacement",
+            source="delegation",
+        ),
+        LaunchCapacity.defaults(),
+        join=False,
+    )
+    repository.update(repository.update(old, state=AgentLaunchState.STARTING), state=AgentLaunchState.FAILED, reason=CRASH)
+    launch_record(lead, AgentLaunchState.FAILED)
+    held_work(lead)
+    _takeover_lead(lead)
+    assert await take_over_orphaned_work(lead, clock=1.0) == 1
+    assert _attempt(lead, 1).state == AgentLaunchState.STARTING
+
+
+@pytest.mark.asyncio
+async def test_the_lead_forgets_an_owner_once_it_holds_no_work(lead, monkeypatch):
+    launch_record(lead, AgentLaunchState.FAILED)
+    held_work(lead)
+    _takeover_lead(lead)
+    del lead.definitions["Worker"]  # refused: remembered
+    await take_over_orphaned_work(lead, clock=1.0)
+    assert lead._orphaned_work_takeovers[DEAD].refusals == 1
+    held_work(lead, state=ProgressState.COMPLETED)
+    await take_over_orphaned_work(lead, clock=100.0)
+    assert DEAD not in lead._orphaned_work_takeovers
+
+
+def _ended(attempt_ended_at: datetime, *, state=AgentLaunchState.FAILED, ran=timedelta(hours=1)):
+    return make_launch(state=state, created_at_utc=attempt_ended_at - ran, updated_at_utc=attempt_ended_at, reason=CRASH)
+
+
+def test_takeover_step_waits_each_delay_from_the_attempts_end_and_gives_up_after_the_last():
+    end = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
+    second = timedelta(seconds=1)
+    first = takeover_step({}, end)
+    assert (first.action, first.attempt, first.previous) == (STEP_START, 1, None)
+    for attempt, delay in enumerate(TAKEOVER_RETRY_DELAYS_SECONDS, start=1):
+        record = _ended(end)  # it ran an hour: the delay counts from its end
+        due = end + timedelta(seconds=delay)
+        waiting = takeover_step({attempt: record}, due - second)
+        starting = takeover_step({attempt: record}, due)
+        assert (waiting.action, waiting.attempt) == (STEP_WAIT, attempt)
+        assert (starting.action, starting.attempt, starting.previous) == (STEP_START, attempt + 1, record)
+    for state in (
+        AgentLaunchState.RESERVED,
+        AgentLaunchState.STARTING,
+        AgentLaunchState.READY,
+        AgentLaunchState.UNKNOWN,
+    ):
+        assert takeover_step({1: _ended(end, state=state)}, end + timedelta(days=30)).action == STEP_WAIT
+    retired = takeover_step({2: _ended(end, state=AgentLaunchState.RETIRED)}, end + timedelta(minutes=5))
+    assert (retired.action, retired.attempt) == (STEP_START, 3)
+    # The highest attempt decides, whatever was pruned before it.
+    assert takeover_step({1: _ended(end), 3: _ended(end)}, end + timedelta(days=1)).attempt == 4
+    gave_up = takeover_step({MAX_TAKEOVER_ATTEMPTS: _ended(end)}, end + timedelta(days=30))
+    assert (gave_up.action, gave_up.attempt) == (STEP_GIVE_UP, MAX_TAKEOVER_ATTEMPTS)
 
 
 @pytest.mark.asyncio
