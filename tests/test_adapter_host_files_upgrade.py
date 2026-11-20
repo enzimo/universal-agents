@@ -1205,7 +1205,9 @@ def test_records_naming_the_folder_at_another_path_withhold_the_list_and_the_com
     monkeypatch.undo()
 
     assert result.finished and result.counts.files_without_records == 2
-    assert result.elsewhere == NamedElsewhere(names=1, by_gateway=1, by_held_guidance=0, by_turns=1, folders=(old,))
+    assert result.elsewhere == NamedElsewhere(
+        names=1, by_gateway=1, by_held_guidance=0, by_turns=1, folders=(old,), gateway_folders=(old,)
+    )
     assert name not in opened and (moved / name).read_bytes() == CONTENT["att_photo"]
     assert instance.gateway().get_attachment("att_photo").local_path == str(old / name)
     assert instance.turn_paths("task_1")["att_photo"] == instance.turn_paths("task_2")["att_photo"] == str(old / name)
@@ -1230,8 +1232,8 @@ def test_records_naming_the_folder_at_another_path_withhold_the_list_and_the_com
     assert "No list and no delete command are given: do not delete any of them." in error
     assert "They were not moved into state/uploads, so the team cannot open them." in error, "C02"
     assert (
-        "To move the 1 a gateway record names: move or mount this folder back at the path their records name (a link "
-        f"does not work), set upload_dir to that path, delete the marker {marker} and restart" in error
+        f"To move the 1 a gateway record names: move or mount this folder back at {old} (a link does not work), set "
+        f"upload_dir to that path, delete the marker {marker} and restart" in error
     ), "C02: the way to still move them"
     assert "fix them, then do the same" in error, "C04: no promise that moving it back always finishes"
     assert "no gateway record" not in error.lower(), "C05: a gateway record names the one match"
@@ -1334,7 +1336,7 @@ def _run_operator_command(instance: _Instance, monkeypatch: pytest.MonkeyPatch, 
     import assistant_cli
 
     monkeypatch.setattr(assistant_cli.GatewayInstanceConfig, "load_for_process", staticmethod(lambda _path: instance.config()))
-    assistant_cli._upgrade_adapter_host_files(SimpleNamespace(config="instance_config.yaml", files_gone=False, **args))
+    assistant_cli._upgrade_adapter_host_files(SimpleNamespace(**{"config": "instance_config.yaml", "files_gone": False, **args}))
     return capsys.readouterr().out
 
 
@@ -1408,7 +1410,9 @@ def test_a_match_through_a_gateway_record_on_a_later_page_gives_the_steps_for_th
     with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
         result = instance.run()
 
-    assert result.elsewhere == NamedElsewhere(names=2, by_gateway=1, by_held_guidance=0, by_turns=1, folders=(old,))
+    assert result.elsewhere == NamedElsewhere(
+        names=2, by_gateway=1, by_held_guidance=0, by_turns=1, folders=(old,), gateway_folders=(old,)
+    )
     (error,) = _events(caplog, "adapter_host_files_folder_moved")
     assert error.endswith(
         f"other_folders={old} files_without_records=2 unlisted=0 named_elsewhere=2 by_gateway=1 by_held_guidance=0 by_turns=1"
@@ -1421,6 +1425,58 @@ def test_a_match_through_a_gateway_record_on_a_later_page_gives_the_steps_for_th
     assert "agent-folder" not in error and not _events(caplog, "adapter_host_files_without_records")
     assert json.loads(instance.layout.adapter_host_files_upgrade_path.read_text())[LIST_ID_FIELD] is None
     _assert_no_list(instance.layout)
+
+
+def test_gateway_records_in_two_other_folders_give_steps_for_each_path(
+    instance: _Instance, monkeypatch, caplog, capsys
+) -> None:
+    """C08: gateway records place two listed files in two folders, so one move back moves one of them.
+
+    The error's steps name both gateway folders, not the folder only a held
+    copy names (nothing can move there), and say to repeat them; so does the
+    operator's line. Following them for the first folder moves its file and
+    reports the other again, with the steps for that one path.
+    """
+
+    old_a, old_b, old_c = (instance.root / f"old-{label}" for label in "abc")
+    file_a = _write(instance.transfer / _hex_name("sent at a"), b"x")
+    file_b = _write(instance.transfer / _hex_name("sent at b"), b"x")
+    _record_named(instance, "att_a", str(old_a / file_a.name))
+    _record_named(instance, "att_b", str(old_b / file_b.name))
+    _hold(instance, "corr_a", _record("att_a", str(old_c / file_a.name), _SHA_X))
+    marker = instance.layout.adapter_host_files_upgrade_path
+
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        printed = _run_operator_command(instance, monkeypatch, capsys)
+
+    (error,) = _events(caplog, "adapter_host_files_folder_moved")
+    assert error.endswith(
+        f"other_folders={old_a},{old_b},{old_c} files_without_records=2 unlisted=0 named_elsewhere=2 by_gateway=2 "
+        "by_held_guidance=1 by_turns=0"
+    )
+    assert (
+        f"To move the 2 a gateway record names: move or mount this folder back at one of the 2 paths their gateway "
+        f"records name ({old_a}, {old_b}) (a link does not work), set upload_dir to that path, delete the marker "
+        f"{marker} and restart; the step then runs again and moves the files a gateway record names at that path and "
+        "reports the files whose gateway records name another of those paths here again, so do this for each of them. "
+        "If this folder was just moved here from one of those paths" in error
+    )
+    assert "one of the 2 paths the log's steps name" in printed and "so do this for each path" in printed
+    caplog.clear()
+
+    instance.transfer.rename(old_a)
+    marker.unlink()
+    config = instance.config()
+    config.interactive_apps.adapter_host = AdapterHostSettings(upload_dir=str(old_a))
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        result = upgrade_adapter_host_files(config)
+
+    assert result.finished and result.counts.moved == 1 and not (old_a / file_a.name).exists()
+    assert result.elsewhere == NamedElsewhere(names=1, by_gateway=1, folders=(old_b,), gateway_folders=(old_b,))
+    (error,) = _events(caplog, "adapter_host_files_folder_moved")
+    assert f"other_folders={old_b} " in error and (old_a / file_b.name).read_bytes() == b"x"
+    assert f"move or mount this folder back at {old_b} (a link does not work)" in error
+    assert "one of the" not in error and "for each of them" not in error
 
 
 def test_a_record_in_another_folder_whose_name_is_not_listed_changes_nothing(instance: _Instance, caplog) -> None:
@@ -1508,7 +1564,7 @@ def test_files_gone_as_the_first_run_to_find_the_match_reports_it_the_same_way(i
     assert result.finished and result.counts.gateway_rows_removed == 1 and result.elsewhere.names == 1
     (error,) = _events(caplog, "adapter_host_files_folder_moved")
     assert f"other_folders={instance.transfer} " in error
-    assert "To move the 1 a gateway record names: move or mount this folder back at the path their records name" in error
+    assert f"To move the 1 a gateway record names: move or mount this folder back at {instance.transfer} (a link" in error
     assert instance.gateway().get_attachment("att_photo").local_path == str(instance.transfer / name)
     assert instance.turn_paths("task_1")["att_photo"] == str(instance.transfer / name)
     assert (moved / name).read_bytes() == CONTENT["att_photo"]
@@ -3311,11 +3367,15 @@ def test_the_operator_command_gives_the_steps_only_for_files_a_gateway_record_na
         upgrade_module.UpgradeResult(finished=True, counts=counts, elsewhere=NamedElsewhere(names=1, by_gateway=1)),
         upgrade_module.UpgradeResult(finished=True, counts=counts, elsewhere=NamedElsewhere(names=2, by_gateway=1, by_turns=1)),
         upgrade_module.UpgradeResult(finished=True, counts=counts, elsewhere=NamedElsewhere(names=1, by_held_guidance=1)),
+        upgrade_module.UpgradeResult(
+            finished=True, counts=counts,
+            elsewhere=NamedElsewhere(names=2, by_gateway=2, gateway_folders=(Path("/old-a"), Path("/old-b"))),
+        ),
     ]
     monkeypatch.setattr(upgrade_module, "upgrade_adapter_host_files", lambda _config, *, files_gone: outcomes.pop(0))
     args = SimpleNamespace(config="instance_config.yaml", files_gone=False)
     printed = []
-    for _ in range(3):
+    for _ in range(4):
         assistant_cli._upgrade_adapter_host_files(args)
         printed.append(capsys.readouterr().out)
 
@@ -3323,10 +3383,16 @@ def test_the_operator_command_gives_the_steps_only_for_files_a_gateway_record_na
         assert "3 file(s) are left in the transfer folder that no record of it names, and records in another folder" in text
         assert "do not delete any of them" in text and "See event=adapter_host_files_folder_moved in the log." in text
         assert "which may be deleted" not in text
-    steps = "To move the 1 a gateway record names: move or mount the folder back at the path the log names"
-    assert steps in printed[0] and "no gateway record" not in printed[0]
+    steps = "To move the 1 a gateway record names: move or mount the folder back at the path the log's steps name"
+    assert steps in printed[0] and "no gateway record" not in printed[0] and "for each" not in printed[0]
     assert steps in printed[1] and "The other 1 have no gateway record, so they cannot be moved: keep them" in printed[1]
     assert "No gateway record names them, so they cannot be moved: keep them" in printed[2] and "move or mount" not in printed[2]
+    assert (
+        "To move the 2 a gateway record names: move or mount the folder back at one of the 2 paths the log's steps "
+        "name (a link does not work), set upload_dir to that path, delete the marker and restart. That run moves only "
+        "the files whose gateway records name that path, so do this for each path." in printed[3]
+    ), "C08: one move back is not enough with two folders"
+    assert "old-a" not in printed[3], "the log names the folders"
 
 
 def test_the_fixture_matches_the_bytes_it_was_written_for() -> None:

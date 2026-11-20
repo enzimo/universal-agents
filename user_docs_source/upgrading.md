@@ -66,10 +66,13 @@ supported, because it may not read what a newer one saved.
     `state/upgrades/adapter-host-files.without-records.txt`, one name per
     line. The list leaves out files of messages the gateway took in but had
     not handled yet: at its start 0.10 handles those messages, 0.9's
-    included, reads their files and then removes them. Unless the folder
-    was at another path under 0.9 (see below: then keep every file), you
-    may delete exactly the listed files, but only after the gateway has
-    started on 0.10 since `state/upgrades/adapter-host-files.json` (the
+    included, reads their files and then removes them. When records name
+    any of these files in another folder, the upgrade gives no list and no
+    command at all (see "The folder was at another path under 0.9" below).
+    Unless the folder was at another path under 0.9 (see below: then keep
+    every file), you may delete exactly the listed files, but only after
+    the gateway has started on 0.10 since
+    `state/upgrades/adapter-host-files.json` (the
     upgrade's marker) was written, and only while the instance is stopped.
     The warning first says when not to delete, then gives the command. The
     command deletes nothing, and says so, unless the marker is the one
@@ -112,16 +115,53 @@ supported, because it may not read what a newer one saved.
     `state/upgrades/adapter-host-files.json` and restart to list them all.
   - **The folder was at another path under 0.9** (moved, mounted elsewhere
     or reached through another link): its records name that path, so every
-    file here looks like one no record names. Do not delete them. Move or
-    mount the folder back at that path (a link does not work), set
+    file here looks like one no record names. The upgrade notices this when
+    a record names one of these files in another folder. It then lists
+    nothing, gives no delete command (a command from an earlier warning
+    deletes nothing either) and logs one error instead
+    (`event=adapter_host_files_folder_moved`): how many files records name
+    in another folder, the folders it may show (from gateway records and
+    held guidance, never from conversation records, which agents write) and
+    what to do. Do not delete any of the files. They were not moved, so the
+    team cannot open them. The upgrade moves a file only with its gateway
+    record. For the files a gateway record names, move or mount the folder
+    back at the path the error names (a link does not work), set
     `upload_dir` to that path, delete
-    `state/upgrades/adapter-host-files.json` and restart. Putting the folder
-    back without changing `upload_dir` moves nothing: the upgrade looks only
-    where `upload_dir` points.
+    `state/upgrades/adapter-host-files.json` and restart; that start moves
+    the files whose gateway records name that path. Putting the folder back
+    without changing `upload_dir` moves nothing: the upgrade looks only
+    where `upload_dir` points. When the error names several paths, do this
+    for each in turn: each start moves only the files whose gateway records
+    name the path the folder is at, and reports the others again. A file
+    the upgrade refused at the other path keeps records naming that path,
+    so after the move back the error names that path for it: fix the file
+    (see "A file it refuses" above), then do the same. Files only a
+    conversation record or held guidance names cannot be moved at any path,
+    and the error says so: keep them, and the people who sent them can send
+    them again. The error is logged once and its count stays in the marker
+    (`named_elsewhere`); to see the error again, delete
+    `state/upgrades/adapter-host-files.json` and restart.
+  - **Files named in another folder that cannot be moved** stay in the
+    transfer folder. The upgrade never gives a command that deletes them,
+    because they are files people sent and it cannot tell which are still
+    needed. Keep them while anyone may need them. If you
+    decide to remove them later, that is your decision: back the folder up
+    first, stop the instance, and remove only files sent before the upgrade
+    (a file's modification time is when it was sent), because the 0.10
+    adapter host passes new files through the same folder.
+  - **When the upgrade cannot tell that the folder moved.** If no record
+    names any of the files (their records were all deleted, for example),
+    the upgrade lists them as above. The warning then says not to delete
+    them if the folder was at another path under 0.9, before it gives the
+    command.
   - **The files could not be counted**: the warning
     `event=adapter_host_files_without_records_uncounted` gives the reason
     (a folder that cannot be listed, or one replaced during the upgrade).
-    Counting them changed nothing and startup goes on.
+    Counting them changed nothing and startup goes on. When the files were
+    counted but the check for records naming them in another folder did
+    not finish (`reason=other_folders_unchecked`), nothing is listed and
+    no command is given: do not delete any of them; delete
+    `state/upgrades/adapter-host-files.json` and restart to check again.
   - **The transfer folder is not here.** It belongs to the gateway: 0.9
     wrote it on the gateway's machine, also when the adapter host ran
     elsewhere. It is missing when it was not copied or mounted with the

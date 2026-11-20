@@ -4709,8 +4709,9 @@ the desktop app never offers an older version.
   after the credential import and before the gateway, the adapter host and
   the agents start (`docker.launch_headless.build_first_start_tasks`), while
   `InstanceLayout.adapter_host_files_upgrade_path`
-  (`state/upgrades/adapter-host-files.json`, the finish time, the counts and
-  the id of the list its run wrote)
+  (`state/upgrades/adapter-host-files.json`, the finish time, the counts,
+  the id of the list its run wrote and how many listed names records place
+  in another folder)
   is missing. Nothing else on the host writes the files or their records
   then. The operator's `--files-gone` run (`docker exec`, while the team
   runs) is safe beside the team for reasons a later change must keep: no
@@ -4910,24 +4911,69 @@ the desktop app never offers an older version.
   keeps the epoch, `AdapterHostApplicationService.heartbeat`), so an upload
   it finished just before the list may still resolve for a message after
   the gateway's start. The warning therefore says to let the team run a few
-  minutes after that start before stopping it to delete. If the folder was
-  at another path under 0.9.13, its records name that
-  path and every file here looks unrecorded, so the warning says not to
-  delete them then, before it gives the command: that is the one case where
-  the list is wrong by design, and the command deletes on one paste, so a
+  minutes after that start before stopping it to delete.
+  A folder that was at another path under 0.9.13 (moved, mounted elsewhere
+  or reached through another link) makes the list wrong: its records name
+  that path and match nothing here, so every file people sent looks
+  unrecorded (F7 of the review of PR #154). Before it writes the list, the
+  step therefore checks whether records name a listed file in another
+  folder (`NamedElsewhere`). It collects the gateway names (the same 12-hex
+  rule) of record paths outside the transfer folder from conversation turns
+  and held guidance copies, during the scans it already makes, and from
+  gateway records through
+  `GatewayStateRepository.list_attachment_paths_containing`: one paged scan
+  of two columns, not limited to the transfer folder's prefix as
+  `list_attachments_under` is, run only when there is a name to check. It
+  matches with `instr` in SQLite and `strpos` in PostgreSQL
+  (`SqlDialect.contains`), literally and with case on both, because
+  SQLite's `LIKE` ignores case and would return other rows than
+  PostgreSQL's. One match shows that the folder moved, and every other
+  listed file is equally suspect (its records may have been cleaned up
+  meanwhile), so the run treats the whole list as unsafe: it writes no list
+  and no list id (an earlier warning's command then refuses), gives no
+  command and logs one error instead of the warning
+  (`event=adapter_host_files_folder_moved`, with counts per kind of record).
+  Dropping only the matched names would leave a partial list that looks
+  safe. The run still writes its marker: the owner chose finishing once over
+  holding the marker back until the folder returns, so startup never waits
+  on it and the error is not repeated at every start. The error is
+  therefore said once, at error level, and the marker keeps its count
+  (`named_elsewhere`) as the trace once the log is gone. The error says how
+  to finish. The step moves a file only with its gateway record, so for the
+  files a gateway record names it says to move or mount the folder back at
+  the path those records name (a link does not work, because the step reads
+  only `upload_dir`, resolved through links), set `upload_dir` to it, delete
+  the marker and restart; with several such paths it names them and says to
+  do this for each, because each run moves only the files whose records name
+  the path the folder is at. A file the step refused at the other path
+  keeps records naming that path, so a folder moved back from there is
+  reported again for those files, and the error says so. Files only a
+  conversation turn or a held copy names cannot be moved at any path, and
+  the error says to keep them. Agent processes write conversation turns, so
+  a turn's folder may withhold the command but is never kept, logged or
+  shown; the error names only folders from gateway records and held
+  guidance copies, and never a file. A record in another folder whose name
+  is not listed changes nothing: its file is not here and the listed files
+  are named by no record anywhere, so withholding the command for it would
+  withhold it on every instance where an earlier `upload_dir`'s records
+  linger. When no record anywhere names a listed file (all of them cleaned
+  up, for example), the step cannot tell, so the warning keeps its sentence
+  before the command: if the folder was at another path under 0.9.13, do
+  not delete the files, and move the folder back as above. That sentence
+  comes before the command because the command deletes on one paste, and a
   person who acts on it before reading the whole line must already have
-  read when not to. Putting the folder back is not enough, because the step
-  reads only `upload_dir` (resolved through links), so it says to move or
-  mount the folder back at that path and set `upload_dir` to it. A folder
-  that is not there counts 0. One gone or with another device and inode
-  than the step saw when it started (every look opens it by path, so a
-  folder unmounted or replaced meanwhile would look empty), any other error
-  listing it and a database error reading the adapter host's records log
-  `event=adapter_host_files_without_records_uncounted` and leave the count
-  unset (`null` in the marker), because the count only reports: it never
-  stops startup, keeps the marker from being written or changes a record.
-  Only the run that writes the marker reports, so the count is said once; a
-  run that stops part way never counts, and the run that finishes it does.
+  read when not to. A folder that is not there counts 0. One gone or with
+  another device and inode than the step saw when it started (every look
+  opens it by path, so a folder unmounted or replaced meanwhile would look
+  empty), any other error listing it, a database error reading the adapter
+  host's records and one checking for records in another folder (its text
+  says the files were counted, gives no list and says how to check again)
+  log `event=adapter_host_files_without_records_uncounted` and leave the
+  count unset (`null` in the marker), because the count only reports: it
+  never stops startup, keeps the marker from being written or changes a
+  record. Only the run that writes the marker reports, so the count is said
+  once; a run that stops part way never counts, and the run that finishes
+  it does.
   Guidance
   the gateway still holds (`gateway_held_guidance`) is rewritten with its
   moved file, between the turns and the gateway record and under the same

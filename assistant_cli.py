@@ -2691,7 +2691,9 @@ def _print_folder_moved(left: int, elsewhere: NamedElsewhere) -> None:
 
     Only a file a gateway record names can move, so the steps are given for
     those alone (C05 of F7 of PR #154's review). No folder is printed: the
-    log names it when it may be shown.
+    log's steps name it. A run moves only the files whose gateway records
+    name the path the folder is at, so with several such folders this says
+    to repeat the steps for each (C08).
     """
 
     text = (
@@ -2701,10 +2703,14 @@ def _print_folder_moved(left: int, elsewhere: NamedElsewhere) -> None:
     )
     keep = "keep them; the people who sent them can send them again."
     if elsewhere.by_gateway:
+        paths = len(elsewhere.gateway_folders)
+        where = f"one of the {paths} paths the log's steps name" if paths > 1 else "the path the log's steps name"
         text += (
-            f" To move the {elsewhere.by_gateway} a gateway record names: move or mount the folder back at the path "
-            "the log names (a link does not work), set upload_dir to that path, delete the marker and restart."
+            f" To move the {elsewhere.by_gateway} a gateway record names: move or mount the folder back at {where} "
+            "(a link does not work), set upload_dir to that path, delete the marker and restart."
         )
+        if paths > 1:
+            text += " That run moves only the files whose gateway records name that path, so do this for each path."
         if elsewhere.without_gateway_record:
             text += f" The other {elsewhere.without_gateway_record} have no gateway record, so they cannot be moved: {keep}"
     else:
