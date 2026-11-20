@@ -296,12 +296,9 @@ function inView(page) {
     await failing.context.close();
 
     // F8, C15: text contrast in both themes, measured against what is drawn
-    // behind it, with motion off so the mesh holds still. The waiting reason,
-    // the Needs you header and a failure in the status line must read at
-    // 4.5:1 or more in both. The other small text is measured and reported:
-    // in the light theme the glass shows a mid-dark band of the mesh where
-    // even the titles' ink stays under 4.5:1, which only a firmer pane could
-    // change (an owner decision, review F8); it must reach at least 3:1.
+    // behind it, with motion off so the mesh holds still. Every kind of text
+    // in the list must read at 4.5:1 or more in both: in the light theme it
+    // sits on the pale backing the owner chose (2026-11-20).
     const measured = {};
     for (const scheme of ["light", "dark"]) {
       const themed = await openChat(browser, baseUrl, { width: 1280, height: 880 }, { colorScheme: scheme, reducedMotion: "reduce" });
@@ -329,11 +326,8 @@ function inView(page) {
       await themed.context.close();
     }
     for (const scheme of ["light", "dark"]) {
-      for (const name of ["waiting", "needsYouHeader", "status"]) {
-        assert.ok(measured[scheme][name] >= 4.5, `${scheme} ${name}: ${JSON.stringify(measured)}`);
-      }
-      for (const name of ["header", "age", "snippet"]) {
-        assert.ok(measured[scheme][name] >= (scheme === "dark" ? 4.5 : 3), `${scheme} ${name}: ${JSON.stringify(measured)}`);
+      for (const [name, value] of Object.entries(measured[scheme])) {
+        assert.ok(value >= 4.5, `${scheme} ${name}: ${JSON.stringify(measured)}`);
       }
     }
     checked.push("contrast (worst pixel): " + JSON.stringify(measured));

@@ -1837,15 +1837,16 @@ its history. Steps with linked requests cannot use this correction.
   region, in sections (`chat_thread_list.mjs`): **Needs you** (a highlighted
   box in attention gold, Ember in dark mode, for threads waiting on the
   person), **Pinned**, **Recent**, then **Snoozed** and **Dismissed**. In the
-  light theme the Needs you box has a nearly opaque pale fill and dark amber
-  text (#8a4508), the status line's failure a pale fill, and the list's small
-  text (headers, ages, snippets) uses ink instead of --muted: the sidebar
-  glass shows a mid-dark band of the mesh where amber measured 1.0:1 and
-  --muted 1.4:1 (review F8). Measured in Chromium against what is drawn
-  behind the text (worst pixel, motion off): waiting reason 5.7, Needs you
-  header 5.5, status line 5.0, small text 3.2-4.3, titles 3.8 in that band;
-  dark mode 6.3 or more throughout. Raising the small text above 4.5:1 there
-  needs a firmer sidebar pane, an open owner decision. Each
+  light theme the status line and the list sit on a pale backing (about 82%
+  cover; owner's choice, 2026-11-20), while the rest of the sidebar stays
+  glassy, because the glass shows a mid-dark band of the mesh where the list's
+  text measured 1.0 to 2.5:1 (review F8). On it the Needs you box has a
+  nearly opaque pale fill and dark amber text (#8a4508), and the status
+  line's failure a pale fill. Measured in Chromium against what is drawn
+  behind the text (worst pixel, motion off), light: waiting reason 6.1,
+  Needs you header 5.9, status line 5.3, section headers 6.5, ages 6.8,
+  snippets 6.9, titles 7.0; dark mode, which has no backing, 6.3 or more.
+  The browser probe holds all of them to 4.5:1. Each
   header is a button with the section's count and a chevron; it opens and
   closes its rows in place and keeps focus. Snoozed and Dismissed start
   collapsed; the person's choices are kept in this browser. Needs you,
