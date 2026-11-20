@@ -4,7 +4,8 @@ The server takes its room once, when it starts, so the Status page reads this fi
 whether the server refuses new streams now (assistant_gateway.storage_capacity). These tests
 serve a ``/varz`` reply from a local HTTP server: the figure read, directly although the
 environment names an HTTP proxy; a reply without the figure, or not JSON, refused as
-``ValueError``; an endpoint that fails or does not answer in time raising ``OSError``. The
+``ValueError``; an endpoint that fails, does not answer in time, cuts its reply off or answers
+with something that is not HTTP raising ``OSError``. The
 real server's figure is read in test_local_nats_auth_live.
 """
 
@@ -74,6 +75,41 @@ def test_a_reply_without_a_whole_figure_is_refused(body: bytes) -> None:
 
 def test_an_endpoint_that_fails_raises_os_error() -> None:
     with _monitoring(b"{}", status=500) as port, pytest.raises(OSError):
+        bundled_running_room(port)
+
+
+@contextmanager
+def _raw_reply(reply: bytes) -> Iterator[int]:
+    """A local endpoint that answers one request with exactly ``reply`` and closes; yields its port."""
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def answer() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            connection.recv(65536)
+            connection.sendall(reply)
+
+    thread = threading.Thread(target=answer, daemon=True)
+    thread.start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        thread.join(5)
+        listener.close()
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [b'HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"jetstream":',
+     b"not an HTTP reply\r\n\r\n"],
+    ids=["cut-off-body", "not-http"],
+)
+def test_a_reply_that_is_not_valid_http_raises_os_error(reply: bytes) -> None:
+    # urllib passes http.client's errors on unchanged; the reader raises OSError, as for no answer.
+    with _raw_reply(reply) as port, pytest.raises(OSError, match="not valid HTTP"):
         bundled_running_room(port)
 
 

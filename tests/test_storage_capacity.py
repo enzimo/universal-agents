@@ -13,13 +13,20 @@ the transport's reading of the account's limits and of what its streams set
 aside; the bundled server's room warning (raised at the line and below it,
 quiet above it, its three wordings, its release margin, its level kept while it
 cannot be measured and ended when it no longer applies, an unreported figure
-logged once, and what adding a team needs); the problem that the running server
-already refuses new streams (from its room as it runs, at the line, kept after
-space is freed until it runs with more room, kept while its monitoring endpoint
-does not answer, beside the warning and with a disk that cannot be measured);
-and, with a real NATS server (``LIVE_TEST_NATS_SERVER`` or ``nats-server`` on
-PATH), the account with and without a JetStream limit and the room warning from
-its real set-aside figure.
+logged once, what adding a team needs, and whether the running server has room
+for another team); the problem that the running server already refuses new
+streams (from its room as it runs, at the line, kept after space is freed until
+it runs with more room, asking for more space when the disk has only just
+enough, kept while its monitoring endpoint does not answer and that endpoint
+listed as unavailable, beside the warning and with a disk that cannot be
+measured); on the Status page, administrators told once about the room
+warning, also after a restart, and not again when the problem returns after a
+check without the monitoring endpoint; the gateway checking the room only where
+the launcher named the bundled server's store; and, with a real NATS server
+(``LIVE_TEST_NATS_SERVER`` or ``nats-server`` on PATH), the account with and
+without a JetStream limit, the room warning from its real set-aside figure, and
+a server running with no more room than its streams set aside shown as a
+problem on the Status page through its real monitoring endpoint.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ import asyncio
 import errno
 import json
 import os
+import re
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -36,7 +44,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from nats.js.errors import ServiceUnavailableError
+from nats.js.errors import APIError, ServiceUnavailableError
 
 from assistant_gateway.config import GatewayInstanceConfig, StorageWarningSettings
 from assistant_gateway.status_page import StatusPage
@@ -62,6 +70,7 @@ from custom_messages.contracts.access_v2 import AccessNoticeKind
 from custom_messages.contracts.status_v1 import StatusSeverity
 from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAdapter, NatsTransportConfig
 from custom_transport.subjects import NatsSubjectMapper
+from docker.nats_service import bundled_running_room
 from storage.config import resolve_storage_settings
 from tests.knowledge_support import BACKENDS, knowledge_storage
 from tests.own_nats_server import own_nats_server
@@ -226,12 +235,12 @@ def test_findings_at_each_level(tmp_path: Path) -> None:
     disk, clock = _Disk(50.0), _Clock()
     capacity = _capacity(tmp_path, disk, clock)
 
-    assert capacity.findings(None) == []
+    assert capacity.findings(None, unavailable=[]) == []
     disk.percent = 83.4
-    [nearing] = capacity.findings(None)
+    [nearing] = capacity.findings(None, unavailable=[])
     disk.percent = 96.2
     clock.advance()
-    [full] = capacity.findings(None)
+    [full] = capacity.findings(None, unavailable=[])
 
     assert nearing.severity is StatusSeverity.WARNING
     assert nearing.finding_id == "storage_nearing_limit:disk:instance:20261027T120000Z"
@@ -251,9 +260,9 @@ def test_the_thresholds_follow_the_settings(tmp_path: Path) -> None:
     disk = _Disk(72.0)
     capacity = _capacity(tmp_path, disk, _Clock())
 
-    assert capacity.findings(None) == []
+    assert capacity.findings(None, unavailable=[]) == []
     capacity.nearing_limit_percent, capacity.nearly_full_percent = 70, 90  # changed in Settings
-    [finding] = capacity.findings(None)
+    [finding] = capacity.findings(None, unavailable=[])
 
     assert finding.severity is StatusSeverity.WARNING and "told again at 90% full" in finding.action
     with pytest.raises(ValueError, match="below nearly_full_percent"):
@@ -265,9 +274,11 @@ def test_the_thresholds_follow_the_settings(tmp_path: Path) -> None:
 def test_stored_messages_are_measured_against_the_accounts_limit_or_noted_without_one(tmp_path: Path) -> None:
     capacity = _capacity(tmp_path, _Disk(10.0), _Clock())
 
-    [limited] = capacity.findings(_usage(storage=9 * GB, max_storage=10 * GB, reserved_storage=2_300_000_000))
-    [unlimited] = capacity.findings(_usage(storage=12_000_000, reserved_storage=2_300_000_000))
-    [unknown] = capacity.findings(_usage(storage=12_000_000, reserved_storage=None))
+    [limited] = capacity.findings(
+        _usage(storage=9 * GB, max_storage=10 * GB, reserved_storage=2_300_000_000), unavailable=[]
+    )
+    [unlimited] = capacity.findings(_usage(storage=12_000_000, reserved_storage=2_300_000_000), unavailable=[])
+    [unknown] = capacity.findings(_usage(storage=12_000_000, reserved_storage=None), unavailable=[])
 
     assert limited.finding_id.startswith("storage_nearing_limit:message_storage:file:")
     assert limited.title == "The message server's storage is 90% full"
@@ -364,7 +375,7 @@ class _RunningRoom:
 
 def _bundled(
     tmp_path: Path, store_disk, clock: _Clock, *, kind: str = "file", bundled: bool = True,
-    running: _RunningRoom | None = None,
+    running: _RunningRoom | None = None, disk: _Disk | None = None,
 ) -> StorageCapacity:
     """The check on the bundled server, its levels in one file per test (a new one is what a restart builds).
 
@@ -372,15 +383,20 @@ def _bundled(
     """
 
     return StorageCapacity(
-        disks=_Disk(10.0), databases=list, levels=StorageLevels(tmp_path / "levels.json"),
+        disks=disk or _Disk(10.0), databases=list, levels=StorageLevels(tmp_path / "levels.json"),
         nearing_limit_percent=80, nearly_full_percent=95, message_storage_kind=kind,
         message_store=BundledMessageStore(folder=STORE, team_set_aside=TEAM_SET_ASIDE) if bundled else None,
         measure_store=store_disk, read_running_room=running or _RunningRoom(), now=clock,
     )
 
 
-def _check(capacity: StorageCapacity, usage: JetStreamAccountUsage | None = None):
-    return capacity.findings(_usage(storage=12_000_000, reserved_storage=RESERVED) if usage is None else usage)
+def _check(capacity: StorageCapacity, usage: JetStreamAccountUsage | None = None, unavailable: list[str] | None = None):
+    """This check's findings; ``unavailable`` collects the sources it could not ask, as the Status page's list."""
+
+    return capacity.findings(
+        _usage(storage=12_000_000, reserved_storage=RESERVED) if usage is None else usage,
+        unavailable=[] if unavailable is None else unavailable,
+    )
 
 
 def _one(found, prefix: str):
@@ -395,10 +411,10 @@ def _room(capacity: StorageCapacity, usage: JetStreamAccountUsage | None = None)
     return _one(_check(capacity, usage), "storage_message_room:")
 
 
-def _rooms(capacity: StorageCapacity, usage: JetStreamAccountUsage | None = None):
+def _rooms(capacity: StorageCapacity, usage: JetStreamAccountUsage | None = None, unavailable: list[str] | None = None):
     """This check's problem that the server refuses new streams now, and its room warning; each or None."""
 
-    found = _check(capacity, usage)
+    found = _check(capacity, usage, unavailable)
     return _one(found, "storage_message_room_now:"), _one(found, "storage_message_room:")
 
 
@@ -423,9 +439,10 @@ def test_the_room_warning_says_what_fails_what_keeps_working_and_how_much_to_fre
     )
     assert "the attachment store Web Chat creates the first time" in finding.summary
     assert "adding a team" in finding.summary and "a change to the message stream settings" in finding.summary
-    # It runs with enough room now (it started while the disk had more free).
+    # It runs with enough room now (it started while the disk had more free), more than 3 GB + 2.3 GB.
     assert finding.summary.endswith(
-        "Running now, it has 6 GB of room, taken when it last started, so it refuses nothing now and needs no restart."
+        "Running now, it has 6 GB of room, taken when it last started: enough for the streams it has and for another "
+        "team's, so it needs no restart."
     )
     # 750 MB short: the server needs more than 4 GB, so 750 MB and a byte, rounded up to the 100 MB shown.
     # Adding a team needs room for its 2.3 GB on top of the 3 GB: more than 7.07 GB free, shown as 7.1 GB.
@@ -448,6 +465,22 @@ def test_the_room_warning_says_what_fails_what_keeps_working_and_how_much_to_fre
         "Free space adding a team needs when the message server starts: more than 7,066,666,667 bytes"
     )
     assert store_disk.measured == [STORE]
+
+
+@pytest.mark.parametrize("running", [4 * GB, RESERVED + TEAM_SET_ASIDE], ids=["between", "exactly-with-a-team"])
+def test_the_room_warning_says_when_the_running_server_refuses_another_team(tmp_path: Path, running: int) -> None:
+    # Above the line it refuses nothing it has, but a new team's streams set aside 2.3 GB more, and NATS
+    # refuses a stream whose limit does not fit beside what is set aside (measured on 2.15.1). A team that
+    # fits exactly would leave it refusing everything new, so that counts as not fitting.
+    finding = _room(_bundled(tmp_path, _StoreDisk(free=3_250_000_000), _Clock(), running=_RunningRoom(running)))
+
+    assert finding is not None
+    assert finding.summary.endswith(
+        f"Running now, it has {running / GB:g} GB of room, taken when it last started: enough for the streams it "
+        "has, but not for another team's too (they would bring what its streams set aside to 5.3 GB), so adding a "
+        "team is refused until the whole instance (the container, or ua start) starts with at least 7.1 GB free on "
+        "that disk."
+    )
 
 
 def test_the_room_warning_starts_at_the_line_and_not_above_it(tmp_path: Path) -> None:
@@ -491,10 +524,10 @@ def test_the_room_warning_keeps_its_id_through_the_margin_and_a_restart_then_end
     assert band is not None and band.finding_id == entered.finding_id and band.severity is StatusSeverity.WARNING
     assert band.title == "The message server's room is only just above what its streams set aside"
     assert band.summary.endswith(
-        "the disk has 4.2 GB. So it has enough room again for the streams it has, but the disk has only 200 MB more "
-        "free than it needs. The warning stays until 4.4 GB is free, so it does not come and go as the disk's use "
-        "moves. Running now, it has 6 GB of room, taken when it last started, so it refuses nothing now and needs no "
-        "restart."
+        "the disk has 4.2 GB. So a start now would give it enough room again for the streams it has, but the disk "
+        "has only 200 MB more free than it needs. The warning stays until 4.4 GB is free, so it does not come and go "
+        "as the disk's use moves. Running now, it has 6 GB of room, taken when it last started: enough for the "
+        "streams it has and for another team's, so it needs no restart."
     )
     assert band.action.startswith(
         "Keep at least 4.1 GB free on that disk: the message server needs it every time it starts. "
@@ -544,10 +577,10 @@ def test_the_room_warning_keeps_its_level_while_it_cannot_be_measured(tmp_path: 
     assert entered is not None
 
     clock.advance()
-    no_server = capacity.findings(None)  # the message server does not answer
+    no_server = capacity.findings(None, unavailable=[])  # the message server does not answer
     clock.advance()
     with caplog.at_level("WARNING", logger="assistant_gateway.storage_capacity"):
-        unreported = [capacity.findings(_usage(storage=1, reserved_storage=None)) for _ in range(3)]
+        unreported = [capacity.findings(_usage(storage=1, reserved_storage=None), unavailable=[]) for _ in range(3)]
     clock.advance()
     # The store's disk cannot be read: measured for real, its statvfs failing.
     original = os.statvfs
@@ -563,7 +596,7 @@ def test_the_room_warning_keeps_its_level_while_it_cannot_be_measured(tmp_path: 
         disks=list, databases=list, levels=capacity.levels, nearing_limit_percent=80, nearly_full_percent=95,
         message_storage_kind="file", message_store=BundledMessageStore(folder=tmp_path / "store", team_set_aside=1),
         read_running_room=_RunningRoom(), now=clock,
-    ).findings(_usage(storage=1, reserved_storage=RESERVED))
+    ).findings(_usage(storage=1, reserved_storage=RESERVED), unavailable=[])
     monkeypatch.setattr(os, "statvfs", original)
     clock.advance()
     back = _room(capacity)
@@ -587,11 +620,11 @@ def test_the_room_findings_end_when_the_check_no_longer_applies(tmp_path: Path, 
     clock.advance()
     if change == "account_limit":
         changed = _bundled(tmp_path, store_disk, clock, running=refusing)
-        found = changed.findings(_usage(storage=1, max_storage=100 * GB, reserved_storage=RESERVED))
+        found = changed.findings(_usage(storage=1, max_storage=100 * GB, reserved_storage=RESERVED), unavailable=[])
     else:
         changed = _bundled(tmp_path, store_disk, clock, kind="memory" if change == "memory_storage" else "file",
                            bundled=change != "external_server", running=refusing)
-        found = changed.findings(_usage(storage=1, reserved_storage=RESERVED))
+        found = changed.findings(_usage(storage=1, reserved_storage=RESERVED), unavailable=[])
     measured, reads = len(store_disk.measured), refusing.reads
     saved = _saved_room_level(tmp_path) or _saved_room_level(tmp_path, MESSAGE_ROOM_NOW_KEY)
     clock.advance()
@@ -691,6 +724,37 @@ def test_the_problem_stays_after_space_is_freed_until_the_server_runs_with_more_
 
 
 @pytest.mark.parametrize(
+    ("capacity", "free", "where_it_ends"),
+    [(STORE_DISK, NEED + 100_000_000, " (the room warning on this page ends once 4.4 GB is free)"),
+     (4_100_000_000, 4_050_000_000, "")],  # the warning could not end on this disk
+    ids=["margin-reachable", "disk-too-small-for-the-margin"],
+)
+def test_the_problem_asks_for_more_space_when_the_disk_has_only_just_enough(
+    tmp_path: Path, capacity: int, free: int, where_it_ends: str
+) -> None:
+    store_disk, clock = _StoreDisk(free=GB, capacity=capacity), _Clock()
+    capacity_check = _bundled(tmp_path, store_disk, clock, running=_RunningRoom(RESERVED))
+    _rooms(capacity_check)  # short: both entered
+    # Then above the line by less than the room warning's margin: a restart now could start short again.
+    store_disk.free = free
+    clock.advance()
+
+    now, warning = _rooms(capacity_check)
+
+    assert now is not None and now.action == (
+        "The disk has enough free space again, but only just. Free more first, so the message server does not start "
+        f"short again as the disk's use moves{where_it_ends}, then {WHOLE_RESTART} {NOW_ENDS}"
+    )
+    # The warning's band wording, while the server refuses: a start would give it room, it has none now.
+    assert warning is not None
+    assert "So a start now would give it enough room again for the streams it has" in warning.summary
+    assert warning.summary.endswith(
+        'It already refuses new streams now, because it last started with too little room: see the problem '
+        '"The message server refuses new streams now".'
+    )
+
+
+@pytest.mark.parametrize(
     "failure",
     [ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"), TimeoutError("timed out"),
      ValueError("the monitoring endpoint reports no jetstream.config.max_storage (got None)")],
@@ -706,16 +770,21 @@ def test_the_problem_keeps_its_level_while_the_monitoring_endpoint_does_not_answ
 
     running.room = failure
     with caplog.at_level("INFO", logger="assistant_gateway.storage_capacity"):
-        silent = []
+        silent, unavailable = [], []
         for _ in range(3):
             clock.advance()
-            silent.append(_rooms(capacity))
+            listed: list[str] = []
+            silent.append(_rooms(capacity, unavailable=listed))
+            unavailable.append(listed)
         kept = _saved_room_level(tmp_path, MESSAGE_ROOM_NOW_KEY)
         running.room = RESERVED
         clock.advance()
-        back, _ = _rooms(capacity)
+        answering: list[str] = []
+        back, _ = _rooms(capacity, unavailable=answering)
 
     assert all(now is None for now, _ in silent)
+    # Listed at every such check, so the Status page shows it and keeps the problems it found before.
+    assert unavailable == [["message server's monitoring endpoint"]] * 3 and answering == []
     for _, warning in silent:
         assert warning is not None and warning.finding_id.startswith("storage_message_room:")
         assert warning.summary.endswith(
@@ -728,7 +797,8 @@ def test_the_problem_keeps_its_level_while_the_monitoring_endpoint_does_not_answ
     assert kept
     assert caplog.text.count("event=storage_running_room_unknown") == 1  # when it stops answering, not every check
     assert caplog.text.count("event=storage_running_room_known") == 1
-    assert back is not None and back.finding_id == entered.finding_id  # no second notice
+    # The same id; the Status page test below shows that this sends no second notice.
+    assert back is not None and back.finding_id == entered.finding_id
 
 
 def test_a_disk_too_small_while_the_server_refuses_offers_no_lowered_limits(tmp_path: Path) -> None:
@@ -770,9 +840,7 @@ def test_the_problem_shows_when_the_store_disk_cannot_be_measured(tmp_path: Path
 
 
 def test_the_no_limit_note_on_the_bundled_server_points_at_the_room_warning(tmp_path: Path) -> None:
-    found = _bundled(tmp_path, _StoreDisk(free=9 * GB), _Clock()).findings(
-        _usage(storage=12_000_000, reserved_storage=RESERVED)
-    )
+    found = _check(_bundled(tmp_path, _StoreDisk(free=9 * GB), _Clock()))
 
     [note] = found
     assert note.finding_id == NO_MESSAGE_LIMIT_FINDING_ID
@@ -868,6 +936,70 @@ async def test_administrators_hear_once_per_level_entered_not_on_every_check(tmp
     assert "/webchat?view=status" in warning.summary
 
 
+ACCOUNT = _usage(storage=12_000_000, reserved_storage=RESERVED)
+
+
+@pytest.mark.asyncio
+async def test_administrators_hear_once_about_the_room_warning_also_after_a_restart(tmp_path: Path) -> None:
+    config, clock, notices = _config(tmp_path), _Clock(), _Notices()
+    store_disk = _StoreDisk(free=3_500_000_000)
+
+    def page() -> StatusPage:  # a new page and check are what a gateway restart builds
+        return _page(config, _bundled(tmp_path / "levels", store_disk, clock), notices, clock, messages=ACCOUNT)
+
+    current = page()
+    await current.notify_new_problems()
+    [warning] = notices.stored.values()
+    store_disk.free = 4_200_000_000  # enough room again by only a little: the same warning, reworded
+    clock.advance()
+    await current.notify_new_problems()
+    clock.advance()
+    await page().notify_new_problems()  # after a restart
+    assert len(notices.stored) == 1
+
+    store_disk.free = 8 * GB  # ended
+    clock.advance()
+    await current.notify_new_problems()
+    store_disk.free = 3_900_000_000  # and short again later
+    clock.advance(minutes=60 * 24)
+    await current.notify_new_problems()
+
+    assert [notice.title for notice in notices.stored.values()] == ["1 warning on the Status page"] * 2
+    assert "- The message server will have less room than its streams set aside" in warning.summary
+
+
+@pytest.mark.asyncio
+async def test_a_monitoring_endpoint_that_misses_a_check_is_listed_and_its_problem_is_not_announced_again(
+    tmp_path: Path,
+) -> None:
+    config, clock, notices = _config(tmp_path), _Clock(), _Notices()
+    disk, store_disk, running = _Disk(96.0), _StoreDisk(free=3_500_000_000), _RunningRoom(RESERVED)
+    capacity = _bundled(tmp_path / "levels", store_disk, clock, running=running, disk=disk)
+    page = _page(config, capacity, notices, clock, messages=ACCOUNT)
+
+    await page.notify_new_problems()  # the instance's disk nearly full, the server refusing, the room warning
+    [first] = notices.stored.values()
+    disk.percent, store_disk.free = 50.0, 8 * GB  # space freed; the whole instance not restarted yet
+    clock.advance()
+    await page.notify_new_problems()
+    running.room = TimeoutError("timed out")  # one check without an answer
+    clock.advance()
+    missed = await page.report()
+    await page.notify_new_problems()
+    running.room = RESERVED
+    clock.advance()
+    back = await page.report()
+    await page.notify_new_problems()
+
+    assert first.title == "2 problems and 1 warning on the Status page"
+    assert missed.unavailable_sources == ("message server's monitoring endpoint",)
+    assert not any(finding.finding_id.startswith("storage_message_room_now:") for finding in missed.findings)
+    assert [finding.title for finding in back.findings if finding.severity is StatusSeverity.PROBLEM] == [
+        "The message server refuses new streams now"
+    ]
+    assert len(notices.stored) == 1  # the problem that came back was announced in the first notice
+
+
 @pytest.mark.asyncio
 async def test_a_message_server_that_does_not_answer_is_listed_and_the_disks_still_show(tmp_path: Path) -> None:
     clock = _Clock()
@@ -956,14 +1088,53 @@ def test_the_gateway_measures_its_instance_folder_and_databases(tmp_path: Path) 
     config = _config(tmp_path)
     config.layout.dbs_dir.mkdir(parents=True)
 
-    capacity = build_storage_capacity(config)
+    capacity = build_storage_capacity(config, env={})
     capacity.nearing_limit_percent, capacity.nearly_full_percent = 1, 2  # any used disk is "nearly full" here
 
-    findings = capacity.findings(None)
+    findings = capacity.findings(None, unavailable=[])
     keys = [finding.finding_id.split(":")[1:3] for finding in findings]
 
     assert keys and keys[0] == ["disk", "instance"]
     assert config.layout.storage_levels_path.is_file()
+
+
+def test_the_gateway_checks_the_room_only_where_the_launcher_named_the_bundled_servers_store(
+    tmp_path: Path, caplog
+) -> None:
+    from assistant_gateway.storage_usage import readable_bytes
+    from docker.nats_service import BUNDLED_NATS_STORE_DIR_ENV, local_nats_url
+
+    config = _config(tmp_path)
+    store = tmp_path / "nats" / "data"
+    bundled_env = {BUNDLED_NATS_STORE_DIR_ENV: str(store), "NATS_URL": local_nats_url(),
+                   "NATS_SERVERS": local_nats_url()}
+
+    with caplog.at_level("INFO", logger="assistant_gateway.storage_capacity"):
+        bundled = build_storage_capacity(config, env=bundled_env)
+        other = build_storage_capacity(config, env={})
+    queues = config.transport.queues
+    queues.max_bytes.partition += 1_000_000
+    raised = build_storage_capacity(config, env=bundled_env)
+
+    assert bundled.message_store is not None and bundled.message_store.folder == store
+    # What one team's streams set aside at this instance's settings: about 2.3 GB at the defaults.
+    assert readable_bytes(bundled.message_store.team_set_aside) == "2.3 GB"
+    assert raised.message_store is not None
+    assert raised.message_store.team_set_aside == bundled.message_store.team_set_aside + queues.partitions * 1_000_000
+    assert other.message_store is None
+    assert caplog.text.count("event=storage_room_not_checked") == 1  # once at start, not at every check
+    # A team id the message contract does not accept: the room is not checked, and the gateway still starts.
+    config.manager.team_id = "not one token"
+    with caplog.at_level("WARNING", logger="assistant_gateway.storage_capacity"):
+        caplog.clear()
+        unlisted = build_storage_capacity(config, env=bundled_env)
+    assert unlisted.message_store is None
+    assert "event=storage_room_not_checked team=not one token" in caplog.text
+    # The bundled server's note points at the room check.
+    bundled._read_running_room = _RunningRoom()  # no test reaches a real monitoring port
+    [note] = [finding for finding in bundled.findings(ACCOUNT, unavailable=[])
+              if finding.finding_id == NO_MESSAGE_LIMIT_FINDING_ID]
+    assert note.action.startswith("This page warns when the free space on the disk holding the bundled server's store")
 
 
 # -- a real NATS server -------------------------------------------------------------------------
@@ -1032,7 +1203,7 @@ def test_the_account_reports_its_stored_messages_what_its_streams_set_aside_and_
         StorageCapacity(
             disks=list, databases=list, levels=StorageLevels(tmp_path / "levels.json"), nearing_limit_percent=80,
             nearly_full_percent=95, message_storage_kind="file",
-        ).findings(usage)
+        ).findings(usage, unavailable=[])
     )
     if expected_limit is None:
         assert [item.finding_id for item in finding] == [NO_MESSAGE_LIMIT_FINDING_ID]
@@ -1041,6 +1212,67 @@ def test_the_account_reports_its_stored_messages_what_its_streams_set_aside_and_
     # The room check on the real figure, with a stand-in for the store's disk that has exactly the free
     # space the server needs: warned without an account limit, and nothing new with one.
     need = -(-usage.reserved_storage * 4 // 3)
-    room = _bundled(tmp_path / "room", _StoreDisk(free=need, capacity=need * 10), _Clock()).findings(usage)
+    room = _bundled(tmp_path / "room", _StoreDisk(free=need, capacity=need * 10), _Clock()).findings(usage, unavailable=[])
     rooms = [item for item in room if item.finding_id.startswith("storage_message_room:")]
     assert len(rooms) == (1 if expected_limit is None else 0)
+
+
+@pytest.mark.integration
+@pytest.mark.live
+@pytest.mark.nats
+@pytest.mark.asyncio
+async def test_a_real_server_running_with_no_more_room_than_its_streams_set_aside_is_a_problem_on_the_status_page(
+    tmp_path: Path,
+) -> None:
+    # The server's room is fixed here (max_file_store) instead of taken from the disk, so the streams can set
+    # aside all of it, as on a bundled server that started while its disk was nearly full.
+    room = 256 << 20
+    server_config = tmp_path / "nats.conf"
+    server_config.write_text(
+        f"jetstream {{ max_file_store: {room} }}\n"
+        'accounts { TEAM { jetstream: enabled, users: [ { user: "team", password: "team-pass" } ] } }\n'
+    )
+    clock, notices = _Clock(), _Notices()
+    with own_nats_server(_nats_server(), tmp_path, "-c", str(server_config), "-m", "-1") as url:
+        monitoring = re.search(r"Starting http monitor on 127\.0\.0\.1:(\d+)", (tmp_path / "nats.log").read_text())
+        assert monitoring is not None
+        adapter = NatsTransportAdapter(
+            config=NatsTransportConfig(servers=[url], user="team", password="team-pass", storage="file"),
+            mapper=NatsSubjectMapper(team_id="team_storage"),
+        )
+        await adapter.connect(reconcile_topology=True)
+        try:
+            # The team's own streams set aside part of the room; one more stream sets aside the rest.
+            before = await adapter.jetstream_account_usage()
+            assert before is not None and before.reserved_storage is not None and before.reserved_storage < room
+            await adapter._js.add_stream(name="ROOM_REST", subjects=["room.rest"], max_bytes=room - before.reserved_storage)
+            # What the problem says: the server refuses every new stream now (10047).
+            with pytest.raises(APIError) as refused:
+                await adapter._js.add_stream(name="ROOM_MORE", subjects=["room.more"])
+            capacity = StorageCapacity(
+                disks=list, databases=list, levels=StorageLevels(tmp_path / "levels.json"), nearing_limit_percent=80,
+                nearly_full_percent=95, message_storage_kind="file",
+                message_store=BundledMessageStore(folder=tmp_path / "store", team_set_aside=TEAM_SET_ASIDE),
+                read_running_room=lambda: bundled_running_room(int(monitoring.group(1))), now=clock,
+            )
+
+            async def keys() -> dict:
+                return {"endpoints": [{"address": "https://api.openai.com", "state": "stored"}]}
+
+            page = StatusPage(config=_config(tmp_path), model_key_status=keys, send_notice_once=notices, now=clock,
+                              storage=capacity, jetstream_usage=adapter.jetstream_account_usage)
+            report = await page.report()
+            await page.notify_new_problems()
+            clock.advance()
+            await page.notify_new_problems()
+        finally:
+            await adapter.close()
+
+    assert refused.value.err_code == 10047
+    assert report.unavailable_sources == ()
+    [problem] = [finding for finding in report.findings if finding.severity is StatusSeverity.PROBLEM]
+    assert problem.title == "The message server refuses new streams now"
+    assert problem.details.startswith(
+        "Room as it runs (taken when it last started): 268.4 MB\nSet aside by its streams: 268.4 MB\n"
+    )
+    assert [notice.title for notice in notices.stored.values()] == ["1 problem on the Status page"]

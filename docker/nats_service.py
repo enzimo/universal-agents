@@ -17,6 +17,7 @@ environment (``env_secrets.environment_for``, process ``nats``).
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -36,9 +37,10 @@ from env_secrets import PROCESS_NATS, environment_for
 INTERNAL_NATS_HOST = "127.0.0.1"
 INTERNAL_NATS_PORT = 4222
 INTERNAL_NATS_MONITOR_PORT = 8222
-# How long the Status page waits for the bundled server's monitoring endpoint (bundled_running_room):
-# it is on the same machine, so an answer takes milliseconds; the whole storage check runs in a
-# worker thread within the page's own wait.
+# How long each step of reading the bundled server's monitoring endpoint (bundled_running_room) may
+# wait: connecting, and each read of the reply. It is on the same machine, so an answer takes
+# milliseconds. This is the only bound on that wait: the Status page runs its storage check in a
+# worker thread with no time limit of its own.
 MONITOR_TIMEOUT_SECONDS = 2.0
 LOCAL_NATS_ENABLED_ENV = "TEAM_LOCAL_NATS_ENABLED"
 NATS_USER_ENV = "NATS_USER"
@@ -160,12 +162,19 @@ def bundled_running_room(port: int | None = None, *, timeout: float = MONITOR_TI
     ``assistant_gateway.storage_capacity``). It comes from the loopback monitoring port
     ``start_local_nats`` always opens (``port`` for a test's own server), read directly, never
     through an HTTP proxy the environment names. Raises ``OSError`` when the endpoint does not
-    answer and ``ValueError`` when its reply is not JSON or has no whole number of 0 or more there.
+    answer or its reply is not valid HTTP, and ``ValueError`` when the reply is not JSON or has no
+    whole number of 0 or more there.
     """
 
     url = f"http://{INTERNAL_NATS_HOST}:{INTERNAL_NATS_MONITOR_PORT if port is None else port}/varz"
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout) as response:
-        reply = json.loads(response.read())
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout) as response:
+            body = response.read()
+    except http.client.HTTPException as exc:
+        # urllib passes these on unchanged: a reply cut off (a server stopping), or one that is not
+        # HTTP. The endpoint did not answer properly, so callers treat it as not answering.
+        raise OSError(f"the monitoring endpoint's reply is not valid HTTP: {type(exc).__name__}: {exc}") from exc
+    reply = json.loads(body)
     jetstream = reply.get("jetstream") if isinstance(reply, dict) else None
     config = jetstream.get("config") if isinstance(jetstream, dict) else None
     room = config.get("max_storage") if isinstance(config, dict) else None

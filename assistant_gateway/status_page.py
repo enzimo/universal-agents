@@ -485,7 +485,8 @@ class StatusPage:
             unavailable.append(MESSAGE_SERVER_SOURCE)
             messages = None
         try:
-            return await asyncio.to_thread(self.storage.findings, messages)
+            # The check adds the sources it could not ask itself (the bundled server's monitoring endpoint).
+            return await asyncio.to_thread(self.storage.findings, messages, unavailable=unavailable)
         except Exception:  # noqa: BLE001 - listed as unavailable; the rest of the page still shows
             LOGGER.exception("The storage checks failed. event=status_storage_check_failed")
             unavailable.append(STORAGE_SOURCE)
