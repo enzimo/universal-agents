@@ -27,7 +27,15 @@ function mountPage() {
 const lifecycle = createPageLifecycle(window);
 const requestClient = createRequestClient(window, lifecycle);
 // Broker pages shown inside their chat cards as sandboxed frames (broker_card.mjs).
-const brokerCards = createBrokerCards({ browser: window, document, lifecycle });
+// A broker card that held focus and closed hands focus to the message box, which the
+// chat's re-renders never rebuild (broker_card.mjs).
+function focusMessageBox() {
+  var input = document.getElementById("message-input");
+  if (input) {
+    input.focus({ preventScroll: true });
+  }
+}
+const brokerCards = createBrokerCards({ browser: window, document, lifecycle, onFocusLost: focusMessageBox });
 // Read Inbox and Access links before anything checks the address: they only
 // choose a panel to open after sign-in, so the address goes back to plain chat
 // and a reload stays on the chat.
@@ -2494,12 +2502,19 @@ function renderMessages(options) {
       return node.getAttribute("data-item-id");
     }));
     var list = sharedState.messageList;
+    // Focus on a broker card's control (such as "Open in its own tab") that this
+    // render replaces goes to the message box, not to the page body.
+    var focused = document.activeElement;
+    var focusedInCard = Boolean(focused && focused.closest && list.contains(focused) && focused.closest("[data-broker-card]"));
     var live = new Set(nodes.filter(function (node) { return node.parentNode === list; }));
     if (!replaceChildrenKeeping(list, nodes, live)) {
       console.warn(
         "Web Chat rebuilt the conversation around open secure pages; their forms reloaded.",
         Array.from(live).map(function (node) { return node.getAttribute("data-item-id"); })
       );
+    }
+    if (focusedInCard && !focused.isConnected) {
+      focusMessageBox();
     }
     var shouldRunTransientCountdown = updateTransientCountdown();
     if (shouldRunTransientCountdown && shellState.transientCountdownTimer === 0) {

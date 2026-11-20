@@ -24,6 +24,13 @@
  * an iframe that leaves the document reloads and loses what was typed. A card
  * is closed, and its frame removed, when its item leaves the conversation, the
  * thread changes or the person signs out (``retainOnly``, ``closeAll``).
+ *
+ * Keyboard: the frame is in the tab order with the page's title, so Tab moves
+ * into the broker page (its fields, its button, Decline) and on to "Open in
+ * its own tab". When a frame that holds focus closes (an outcome, expiry, the
+ * item leaving), ``onFocusLost`` moves focus somewhere that survives the
+ * chat's next re-render (Web Chat: the message box); the closed card's one
+ * line is a status, so it is announced.
  */
 
 export const CARD_MESSAGE_TYPE = "ua-broker-card";
@@ -68,7 +75,7 @@ export function isCardMessage(data) {
  * ``onOutcome(outcome)`` once at a confirmed end or ``onUnavailable()`` when
  * the frame never reported.
  */
-export function createBrokerCards({ browser, document, lifecycle, logger = browser.console }) {
+export function createBrokerCards({ browser, document, lifecycle, logger = browser.console, onFocusLost }) {
   const cards = new Map();
 
   function maxHeight() {
@@ -146,12 +153,16 @@ export function createBrokerCards({ browser, document, lifecycle, logger = brows
     return card ? card.element : null;
   }
 
+  /** Close a card; returns whether its frame held focus (then ``onFocusLost(itemId)`` has run). */
   function close(itemId) {
     const card = cards.get(itemId);
-    if (!card) return;
+    if (!card) return false;
     cards.delete(itemId);
     clearTimers(card);
+    const hadFocus = document.activeElement === card.frame;
     card.frame.remove();
+    if (hadFocus && typeof onFocusLost === "function") onFocusLost(itemId);
+    return hadFocus;
   }
 
   /** Close every card whose item is not in ``itemIds`` (it left the conversation, or the thread changed). */
@@ -222,6 +233,13 @@ function element(document, tagName, className, text) {
   return node;
 }
 
+// A closed card's one line, announced to screen readers when it replaces the frame.
+function statusNote(document, text) {
+  const note = element(document, "p", "broker-card-note", text);
+  note.setAttribute("role", "status");
+  return note;
+}
+
 function notice(document, item, extraClass) {
   const node = element(document, "div", `message-transient-notice broker-card ${extraClass}`.trim());
   node.setAttribute("data-item-id", item.itemId);
@@ -276,13 +294,13 @@ function countdown(document, item) {
 export function brokerCardElement({ document, cards, item, state, expiredMessage, onState }) {
   if (state === BROKER_CARD_FINISHED || state === BROKER_CARD_DECLINED || state === BROKER_CARD_EXPIRED) {
     const closed = notice(document, item, "is-closed");
-    closed.appendChild(element(document, "p", "broker-card-note", state === BROKER_CARD_EXPIRED ? expiredMessage : BROKER_CARD_NOTES[state]));
+    closed.appendChild(statusNote(document, state === BROKER_CARD_EXPIRED ? expiredMessage : BROKER_CARD_NOTES[state]));
     return closed;
   }
   if (state === BROKER_CARD_UNAVAILABLE) {
     const linked = notice(document, item, "is-unavailable");
     linked.append(...reason(document, item));
-    linked.appendChild(element(document, "p", "broker-card-note", BROKER_CARD_NOTES[BROKER_CARD_UNAVAILABLE]));
+    linked.appendChild(statusNote(document, BROKER_CARD_NOTES[BROKER_CARD_UNAVAILABLE]));
     const actions = element(document, "div", "message-transient-actions broker-card-footer");
     actions.append(...countdown(document, item), openInOwnTab(document, item));
     linked.appendChild(actions);

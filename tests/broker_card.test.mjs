@@ -21,7 +21,7 @@ import { buttonLabels, byClass, byTag, fakeDocument } from "./fake_dom.mjs";
 
 const FRAME_URL = "https://broker.example.test/credential-collection/s1?view=card";
 
-function harness() {
+function harness({ onFocusLost } = {}) {
   const document = fakeDocument();
   const browser = new EventTarget();
   browser.innerHeight = 1000;
@@ -38,7 +38,9 @@ function harness() {
       if (timer) timer.cleared = true;
     },
   };
-  const cards = createBrokerCards({ browser, document, lifecycle, logger: { warn: (...args) => warnings.push(args) } });
+  const cards = createBrokerCards({
+    browser, document, lifecycle, logger: { warn: (...args) => warnings.push(args) }, onFocusLost,
+  });
   const events = [];
   function open(itemId = "secure_credential_collection:req-1") {
     const element = document.createElement("div");
@@ -337,4 +339,38 @@ test("the card asks for the chat's light or dark mode", () => {
   const [frame] = byTag(h.render(""), "iframe");
   assert.equal(frame.getAttribute("src"), `${ITEM.frameUrl}&mode=light`);
   assert.equal(withColorMode(ITEM.frameUrl, "sepia"), ITEM.frameUrl, "only light or dark");
+});
+
+
+// Keyboard (A3, critique C02): a frame that holds focus and closes hands focus on.
+test("a card that ends while its frame has focus hands focus on; one without focus takes none", () => {
+  const lost = [];
+  const { document, open, post } = harness({ onFocusLost: (itemId) => lost.push(itemId) });
+  const first = open("secure_credential_collection:req-1");
+  const second = open("secure_credential_collection:req-2");
+  first.frame.focus();
+  post(first.frame.contentWindow, { type: "ua-broker-card", outcome: "finished" });
+  post(second.frame.contentWindow, { type: "ua-broker-card", outcome: "declined" });
+  assert.deepEqual(lost, ["secure_credential_collection:req-1"], "only the focused card hands focus on");
+  assert.notEqual(document.activeElement, second.frame);
+});
+
+test("a focused card whose item leaves the conversation hands focus on too", () => {
+  const lost = [];
+  const { cards, open } = harness({ onFocusLost: (itemId) => lost.push(itemId) });
+  const { frame } = open("secure_credential_collection:req-1");
+  frame.focus();
+  // A finishing message removed the item: the chat's next render keeps no frame for it.
+  cards.retainOnly([]);
+  assert.deepEqual(lost, ["secure_credential_collection:req-1"]);
+  assert.equal(cards.close("secure_credential_collection:req-1"), false, "already closed");
+});
+
+test("a closed or unavailable card's line is a status, so it is announced", () => {
+  const { document, cards } = harness();
+  const item = { itemId: "tool_setup:req-1", url: "https://broker.example.test/x", frameUrl: FRAME_URL, label: "Page" };
+  for (const state of ["finished", "declined", "unavailable"]) {
+    const card = brokerCardElement({ document, cards, item, state, expiredMessage: "Expired.", onState() {} });
+    assert.equal(byClass(card, "broker-card-note")[0].getAttribute("role"), "status", state);
+  }
 });
