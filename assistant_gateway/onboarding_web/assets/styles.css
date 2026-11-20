@@ -6556,6 +6556,17 @@ body.is-theme-customizing {
   font-size: 0.72rem;
 }
 
+/* The Pick a time dialog's focus guards: focusable but never seen; focus on
+   one moves to the other end of the dialog (chat_thread_menu.mjs). Being
+   absolutely placed, they take no grid gap. */
+.thread-snooze-guard {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
 .thread-snooze-dialog {
   display: grid;
   gap: 8px;

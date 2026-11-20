@@ -68,7 +68,8 @@ const ALWAYS_SHOWN = new Set([THREAD_SECTION.RECENT]);
 // messages are cut the same way before their snippet is made.
 export const SNIPPET_SOURCE_CHARACTERS = 400;
 export const SNIPPET_MAX_CHARACTERS = 160;
-const ATTACHMENT_SNIPPET = "Attachment";
+// What a message with only a file and no file name shows.
+export const ATTACHMENT_SNIPPET = "Attachment";
 
 export function threadSection(thread) {
   if (thread.needsYou) return THREAD_SECTION.NEEDS_YOU;

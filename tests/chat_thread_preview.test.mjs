@@ -6,6 +6,7 @@ import {
   createThreadPreview,
   previewTurns,
 } from "../assistant_gateway/onboarding_web/assets/chat_thread_preview.mjs";
+import { ATTACHMENT_SNIPPET } from "../assistant_gateway/onboarding_web/assets/chat_thread_list.mjs";
 import { FakeElement, byClass, fakeDocument, settle } from "./fake_dom.mjs";
 
 FakeElement.prototype.getBoundingClientRect = function () {
@@ -27,6 +28,9 @@ const message = (role, content, minutes, extra = {}) => ({ role, content, create
 
 function fixture({ pages = {}, canPreview = () => true } = {}) {
   const document = fakeDocument();
+  // The card listens for Escape on the document.
+  const documentEvents = new EventTarget();
+  for (const name of ["addEventListener", "removeEventListener", "dispatchEvent"]) document[name] = documentEvents[name].bind(documentEvents);
   const window = new EventTarget();
   Object.assign(window, { innerWidth: 1280, innerHeight: 880 });
   const timers = new Map();
@@ -114,7 +118,7 @@ test("after about 400 ms over a row the card shows four turns with who and when 
   assert.deepEqual(requests, ["/api/web-chat/sessions/alpha/messages?limit=12&turn_count=1"], "the existing history route, a small page");
   await answerAll();
   assert.equal(byClass(card(), "thread-preview-title")[0].textContent, "Plan the team offsite");
-  assert.equal(byClass(card(), "thread-preview-age")[0].textContent, "last message 1d ago");
+  assert.equal(byClass(card(), "thread-preview-age")[0].textContent, "active 1d ago");
   assert.deepEqual(byClass(card(), "thread-preview-who").map(node => node.textContent),
     ["You · 1d", "Ava · 1d", "You · 1d", "Ava · 1d"]);
   assert.equal(byClass(card(), "thread-preview-turn").length, 4);
@@ -223,13 +227,13 @@ test("a failed read says the preview is not available", async () => {
   assert.equal(byClass(card(), "thread-preview-status")[0].textContent, "Preview not available.");
 });
 
-test("a thread with a message in the last minute reads 'last message just now' (C31)", async () => {
+test("a thread with something posted in the last minute reads 'active just now' (C31, F12)", async () => {
   const { addRow, runTimers, over, answerAll, card } = fixture({ pages: { "": FIRST_PAGE } });
   const row = addRow("alpha", { lastActivityAt: NOW - 12000 });
   over(row.children[0]);
   runTimers();
   await answerAll();
-  assert.equal(byClass(card(), "thread-preview-age")[0].textContent, "last message just now");
+  assert.equal(byClass(card(), "thread-preview-age")[0].textContent, "active just now");
 });
 
 test("the open chat, a row just pressed and rows under an open menu get no card (C30)", async () => {
@@ -280,4 +284,49 @@ test("sign-out removes the card and forgets the cached text (C29)", async () => 
   runTimers();
   await answerAll();
   assert.equal(requests.length, 2, "a new hover reads the thread again");
+});
+
+test("Escape closes the card, and it stays closed until the pointer leaves that row (F7)", async () => {
+  const { document, addRow, runTimers, over, answerAll, card, list } = fixture({ pages: { "": FIRST_PAGE } });
+  const alpha = addRow("alpha");
+  const beta = addRow("beta");
+  over(alpha.children[0]);
+  runTimers();
+  await answerAll();
+  assert.ok(card());
+  document.dispatchEvent(Object.assign(new Event("keydown"), { key: "Escape" }));
+  assert.equal(card(), undefined);
+  over(alpha.children[0]);
+  runTimers();
+  assert.equal(card(), undefined, "still over the same row: no card");
+  over(beta.children[0]);
+  runTimers();
+  await answerAll();
+  assert.ok(card(), "another row previews again");
+  // A card about to show is cancelled too.
+  list.dispatchEvent(new Event("pointerleave"));
+  over(alpha.children[0]);
+  document.dispatchEvent(Object.assign(new Event("keydown"), { key: "Escape" }));
+  runTimers();
+  assert.equal(card(), undefined);
+});
+
+test("a preview answering after sign-out is not kept in page memory (F15)", async () => {
+  const { addRow, runTimers, over, answerAll, card, preview, requests, list } = fixture({ pages: { "": FIRST_PAGE } });
+  const row = addRow("alpha");
+  over(row.children[0]);
+  runTimers();
+  assert.equal(requests.length, 1, "the history read is still running");
+  preview.clear();
+  await answerAll();
+  assert.equal(card(), undefined);
+  list.dispatchEvent(new Event("pointerleave"));
+  over(row.children[0]);
+  runTimers();
+  assert.equal(requests.length, 2, "nothing was cached: the next person's hover reads again");
+});
+
+test("a message with only an unnamed file reads as the list's attachment word (F13)", () => {
+  const turns = previewTurns([message("user", "", 3, { attachments: [{ filename: "" }] })]);
+  assert.deepEqual(turns.map(turn => turn.text), [ATTACHMENT_SNIPPET]);
 });

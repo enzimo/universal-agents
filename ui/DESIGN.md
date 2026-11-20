@@ -1874,8 +1874,13 @@ its history. Steps with linked requests cannot use this correction.
   **Comes back early if the team posts.**), Dismiss or Restore, Rename and
   Delete (danger color). It is a compact frosted list placed where it opened
   with Snooze's choices beside it; arrow keys, Home and End move through it,
-  Escape closes it and gives focus back to the row. Pick a time opens a small
-  labelled dialog with a date and time field, Snooze and Cancel. Delete keeps
+  Escape closes it and gives focus back to the row. Each Snooze choice is
+  described by the note, which arrow keys do not reach. Pick a time opens a
+  small labelled dialog with a date and time field, Snooze and Cancel; Tab
+  and Shift+Tab stay inside it (a hidden focusable guard at each end sends
+  focus to the other end, so Tab still moves between the field's own parts),
+  and switching to another app closes the menu but keeps the dialog and the
+  time chosen in it. Delete keeps
   the archive behaviour: it hides the thread without deleting its messages.
   While renaming, the row shows the name field with Save and Cancel icons;
   Enter saves and Escape cancels.
@@ -1889,9 +1894,11 @@ its history. Steps with linked requests cannot use this correction.
   text ("Dismissed “Check the backups”.") and takes no room. Failures are
   never shown in the open chat: the person was working in the list.
 - A mouse resting on a row for about 400 ms shows a hover card beside it
-  (`chat_thread_preview.mjs`): the title and "last message 1d ago", the last
-  four turns with who and when, each cut to two lines, and the turn count.
-  Never on touch, never for the chat already open, never under an open menu.
+  (`chat_thread_preview.mjs`): the title and "active 1d ago" (when anything
+  was last posted, as the row's age), the last four turns with who and when,
+  each cut to two lines, and the turn count. Escape closes it, and it stays
+  closed until the pointer leaves that row (WCAG 1.4.13). Never on touch,
+  never for the chat already open, never under an open menu.
 - Opening or refreshing Web Chat must not create a conversation. Restore an
   existing selection when available; otherwise, once the server has answered
   with no thread, show one selected, unsaved "New Chat" row (no menu;

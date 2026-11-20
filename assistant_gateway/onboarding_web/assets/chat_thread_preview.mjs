@@ -1,6 +1,7 @@
 // The thread list's hover preview: about 400 ms after a mouse rests on a row,
-// a small card shows the thread's last four turns (two lines each, with who
-// wrote them and when) and how many turns it has.
+// a small card shows the thread's title in full, when anything was last
+// posted, its last four turns (two lines each, with who wrote them and when)
+// and how many turns it has. Escape closes it.
 //
 // It reads the existing history route with a small page and asks for the turn
 // count (`turn_count=1`), and it caches each thread's card until the thread's
@@ -8,7 +9,7 @@
 // listens once on the list, because the list is drawn again on many events.
 // Touch screens never get it: a long press there opens the menu instead.
 
-import { formatThreadAge, isOrdinaryMessage, plainSnippet } from "./chat_thread_list.mjs";
+import { ATTACHMENT_SNIPPET, formatThreadAge, isOrdinaryMessage, plainSnippet } from "./chat_thread_list.mjs";
 
 export const PREVIEW_DELAY_MS = 400;
 export const PREVIEW_TURNS = 4;
@@ -29,7 +30,7 @@ export function previewTurns(messages, limit = PREVIEW_TURNS) {
 
 function attachmentName(message) {
   const first = Array.isArray(message.attachments) && message.attachments[0];
-  return (first && String(first.filename || "")) || "Attachment";
+  return (first && String(first.filename || "")) || ATTACHMENT_SNIPPET;
 }
 
 // `canPreview(sessionKey)` says whether a card may show now: never for the
@@ -43,6 +44,8 @@ export function createThreadPreview({ document, window, lifecycle, requestClient
   let timer = 0;
   let card = null;
   let generation = 0;
+  // Moves on at sign-out: an answer for an earlier sign-in is not cached (review F15).
+  let signIn = 0;
 
   function hide() {
     if (timer) lifecycle.clearTimeout(timer);
@@ -78,8 +81,10 @@ export function createThreadPreview({ document, window, lifecycle, requestClient
     }
     draw(thread, null);
     const current = ++generation;
+    const loadedFor = signIn;
     const sequence = Number(thread.lastSequence || 0);
     load(sessionKey).then(content => {
+      if (loadedFor !== signIn) return;
       cache.set(sessionKey, { sequence, ...content });
       // Drop an answer for a row the pointer has left, or an older request.
       if (current === generation && hovered === sessionKey) draw(threadFor(sessionKey) || thread, cache.get(sessionKey));
@@ -124,7 +129,8 @@ export function createThreadPreview({ document, window, lifecycle, requestClient
     const at = Number(thread.lastActivityAt || 0);
     if (at) {
       const age = formatThreadAge(at, now());
-      header.appendChild(element("span", "thread-preview-age", age === "now" ? "last message just now" : "last message " + age + " ago"));
+      // When anything was last posted, as the row's age (review F12).
+      header.appendChild(element("span", "thread-preview-age", age === "now" ? "active just now" : "active " + age + " ago"));
     }
     card.appendChild(header);
     if (!content) {
@@ -185,6 +191,13 @@ export function createThreadPreview({ document, window, lifecycle, requestClient
   lifecycle.listen(list, "scroll", hide);
   lifecycle.listen(list, "contextmenu", hide);
   lifecycle.listen(window, "blur", hide);
+  // Escape closes the card (or one about to show) wherever focus is, and it
+  // stays closed until the pointer leaves that row (review F7, WCAG 1.4.13).
+  lifecycle.listen(document, "keydown", event => {
+    if (event.key !== "Escape" || !(card || timer)) return;
+    pressed = hovered;
+    hide();
+  });
 
   return {
     hide,
@@ -194,6 +207,7 @@ export function createThreadPreview({ document, window, lifecycle, requestClient
       hide();
       cache.clear();
       pressed = "";
+      signIn += 1;
     },
     // After the list is drawn again: keep the card beside the same thread's
     // row, or close it when that row is gone (plan review C03).

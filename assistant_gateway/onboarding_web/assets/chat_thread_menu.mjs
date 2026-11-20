@@ -33,6 +33,8 @@ const VIEWPORT_MARGIN_PX = 8;
 const RELEASE_CLICK_MS = 400;
 
 const ROW_SELECTOR = ".thread-row";
+// The Snooze note's id; each Snooze choice is described by it (review F18).
+const SNOOZE_NOTE_ID = "thread-menu-snooze-note";
 const MENU_SELECTOR = ".thread-menu, .thread-snooze-dialog";
 
 // Wire the ways a row opens its menu, once for the whole list: the list is
@@ -176,11 +178,12 @@ export function createThreadMenu({ document, window, lifecycle, onAction, focusR
     onAction(sessionKey, item.id, item.until ? { until: item.until } : {});
   }
 
-  function itemButton(sessionKey, item, list) {
+  function itemButton(sessionKey, item, list, describedBy = "") {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "thread-menu-item" + (item.danger ? " is-danger" : "") + (item.submenu ? " has-submenu" : "");
     button.setAttribute("role", "menuitem");
+    if (describedBy) button.setAttribute("aria-describedby", describedBy);
     button.tabIndex = -1;
     const label = document.createElement("span");
     label.className = "thread-menu-label";
@@ -270,10 +273,12 @@ export function createThreadMenu({ document, window, lifecycle, onAction, focusR
     closeSubmenu({ focusOwner: false });
     const submenu = menuElement(item.label);
     submenu.classList.add("is-submenu");
-    item.submenu.forEach(child => itemButton(sessionKey, child, submenu));
+    // Arrow keys never reach the note, so each choice is described by it.
+    item.submenu.forEach(child => itemButton(sessionKey, child, submenu, item.note ? SNOOZE_NOTE_ID : ""));
     if (item.note) {
       const note = document.createElement("p");
       note.className = "thread-menu-note";
+      note.id = SNOOZE_NOTE_ID;
       note.textContent = item.note;
       submenu.appendChild(note);
     }
@@ -335,7 +340,17 @@ export function createThreadMenu({ document, window, lifecycle, onAction, focusR
     submit.className = "button primary small";
     submit.textContent = "Snooze";
     actions.append(cancel, submit);
-    dialog.append(label, message, actions);
+    // Tab and Shift+Tab stay in the dialog: a guard at each end sends focus to
+    // the other end. Deciding from the key press would break Tab between the
+    // date field's own parts, which keep the field focused (review F17, C03).
+    const guard = target => {
+      const node = document.createElement("span");
+      node.className = "thread-snooze-guard";
+      node.tabIndex = 0;
+      lifecycle.listen(node, "focus", () => target.focus());
+      return node;
+    };
+    dialog.append(guard(submit), label, message, actions, guard(input));
     state = { sessionKey, menu: null, submenu: null, dialog };
     lifecycle.listen(cancel, "click", () => close());
     lifecycle.listen(dialog, "keydown", event => {
@@ -374,7 +389,11 @@ export function createThreadMenu({ document, window, lifecycle, onAction, focusR
     if (!inside) close({ restoreFocus: false });
   }, { capture: true });
   lifecycle.listen(window, "resize", closeKeepingFocus);
-  lifecycle.listen(window, "blur", closeKeepingFocus);
+  // Switching to another app closes the menu but keeps "Pick a time…" and
+  // what the person chose in it, for when they come back (review F17).
+  lifecycle.listen(window, "blur", () => {
+    if (state && !state.dialog) closeKeepingFocus();
+  });
   // Only the thread list scrolling (or the page around it) leaves the menu
   // beside the wrong row; the open chat scrolls itself as messages arrive,
   // and that must not close it (plan review C26).

@@ -9,7 +9,7 @@ import {
   localInputValue,
   threadMenuItems,
 } from "../assistant_gateway/onboarding_web/assets/chat_thread_menu.mjs";
-import { FakeElement, byClass, fakeDocument } from "./fake_dom.mjs";
+import { FakeElement, byClass, byTag, fakeDocument } from "./fake_dom.mjs";
 
 // What the menu needs beyond the shared stand-in: positions and styles.
 FakeElement.prototype.getBoundingClientRect = function () {
@@ -357,4 +357,52 @@ test("Tab closes the menu and gives focus back to the row, so the page moves on 
   assert.equal(tab.defaultPrevented, false, "the browser still moves focus on");
   assert.equal(menu.isOpen(), false);
   assert.equal(document.activeElement, rows.get("alpha"));
+});
+
+test("switching to another app closes the menu but keeps Pick a time and what was chosen (F17)", () => {
+  const { document, window, menu } = fixture();
+  menu.open(THREAD, { x: 0, y: 0 });
+  window.dispatchEvent(new Event("blur"));
+  assert.equal(menu.isOpen(), false, "the menu closes");
+  menu.open(THREAD, { x: 0, y: 0 });
+  byClass(openMenus(document)[0], "thread-menu-item")[1].click();
+  byClass(openMenus(document)[1], "thread-menu-item").at(-1).click();
+  const [input] = byClass(document.body, "thread-snooze-input");
+  input.value = "2026-11-21T14:30";
+  window.dispatchEvent(new Event("blur"));
+  assert.equal(byClass(document.body, "thread-snooze-dialog").length, 1, "the dialog stays");
+  assert.equal(byClass(document.body, "thread-snooze-input")[0].value, "2026-11-21T14:30");
+});
+
+test("Tab and Shift+Tab stay in the Pick a time dialog through its guards (F17, C03)", () => {
+  const { document, menu } = fixture();
+  menu.open(THREAD, { x: 0, y: 0 });
+  byClass(openMenus(document)[0], "thread-menu-item")[1].click();
+  byClass(openMenus(document)[1], "thread-menu-item").at(-1).click();
+  const [dialog] = byClass(document.body, "thread-snooze-dialog");
+  const guards = byClass(dialog, "thread-snooze-guard");
+  assert.equal(guards.length, 2);
+  assert.equal(dialog.children[0], guards[0], "one guard before the controls");
+  assert.equal(dialog.children.at(-1), guards[1], "one after them");
+  assert.ok(guards.every(guard => guard.tabIndex === 0));
+  const [input] = byClass(dialog, "thread-snooze-input");
+  const submit = byTag(dialog, "button").find(button => button.textContent === "Snooze");
+  // Tab past Snooze lands on the end guard, which sends focus to the field.
+  guards[1].dispatchEvent(new Event("focus"));
+  assert.equal(document.activeElement, input);
+  // Shift+Tab before the field lands on the start guard, which sends it to Snooze.
+  guards[0].dispatchEvent(new Event("focus"));
+  assert.equal(document.activeElement, submit);
+});
+
+test("each Snooze choice is described by the note, which arrow keys never reach (F18)", () => {
+  const { document, menu } = fixture();
+  menu.open(THREAD, { x: 0, y: 0 });
+  byClass(openMenus(document)[0], "thread-menu-item")[1].click();
+  const submenu = openMenus(document)[1];
+  const [note] = byClass(submenu, "thread-menu-note");
+  assert.equal(note.textContent, "Comes back early if the team posts.");
+  assert.ok(note.id);
+  for (const item of byClass(submenu, "thread-menu-item")) assert.equal(item.getAttribute("aria-describedby"), note.id);
+  assert.equal(byClass(openMenus(document)[0], "thread-menu-item")[0].getAttribute("aria-describedby"), null);
 });

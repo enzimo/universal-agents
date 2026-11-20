@@ -126,7 +126,16 @@ function inView(page) {
     assert.ok(card.lines.every(lines => lines <= 2), JSON.stringify(card));
     assert.equal(card.count, "4 turns");
     await wide.page.screenshot({ path: path.join(shots, "thread-hover.png") });
-    checked.push(`hover: ${card.turns} turns of at most two lines after 400 ms, '${card.count}'`);
+    // F7: Escape closes the card while the mouse stays on the row, and it does not come back.
+    await wide.page.keyboard.press("Escape");
+    assert.equal(await wide.page.locator(".thread-preview").count(), 0, "Escape closes the card");
+    await wide.page.mouse.move(...await wide.page.evaluate(selector => {
+      const box = document.querySelector(selector).getBoundingClientRect();
+      return [box.left + 30, box.top + 12];
+    }, hoverTarget));
+    await wide.page.waitForTimeout(700);
+    assert.equal(await wide.page.locator(".thread-preview").count(), 0, "it stays closed while the pointer is on the row");
+    checked.push(`hover: ${card.turns} turns of at most two lines after 400 ms, '${card.count}'; Escape closes it`);
 
     // C30: clicking a row opens it and no card comes back over it.
     await wide.page.click(hoverTarget);
@@ -260,6 +269,41 @@ function inView(page) {
     state = await focusState();
     assert.deepEqual([state.focused, state.onButton], [expected, true], "Delete: " + JSON.stringify(state));
     assert.ok(!state.shown.includes(deleteTarget));
+    // F17, C03: in Pick a time, Tab moves through the date field's parts and
+    // the buttons and wraps; Shift+Tab inside the field stays in the field;
+    // focus never leaves the dialog.
+    await keys.page.keyboard.press("Shift+F10");
+    await keys.page.keyboard.press("ArrowDown");
+    await keys.page.keyboard.press("ArrowRight");
+    await keys.page.keyboard.press("End");
+    await keys.page.keyboard.press("Enter");
+    await keys.page.waitForSelector(".thread-snooze-input:focus");
+    const where = () => keys.page.evaluate(() => {
+      const active = document.activeElement;
+      if (!active.closest(".thread-snooze-dialog")) return "outside";
+      return active.classList.contains("thread-snooze-input") ? "field" : active.textContent || active.className;
+    });
+    const forward = [];
+    for (let press = 0; press < 14; press += 1) {
+      await keys.page.keyboard.press("Tab");
+      forward.push(await where());
+    }
+    assert.ok(!forward.includes("outside"), "Tab: " + forward.join(","));
+    const snoozeAt = forward.indexOf("Snooze");
+    assert.ok(forward.indexOf("Cancel") >= 0 && snoozeAt > forward.indexOf("Cancel"), forward.join(","));
+    assert.equal(forward[snoozeAt + 1], "field", "Tab after Snooze wraps to the field: " + forward.join(","));
+    await keys.page.keyboard.press("Tab");
+    assert.equal(await where(), "field");
+    await keys.page.keyboard.press("Shift+Tab");
+    assert.equal(await where(), "field", "Shift+Tab inside the field stays in it");
+    const backward = [];
+    for (let press = 0; press < 14; press += 1) {
+      await keys.page.keyboard.press("Shift+Tab");
+      backward.push(await where());
+    }
+    assert.ok(!backward.includes("outside") && backward.includes("Snooze"), "Shift+Tab: " + backward.join(","));
+    await keys.page.keyboard.press("Escape");
+    checked.push("Pick a time: Tab and Shift+Tab move through the field's parts and the buttons and never leave the dialog");
     assert.deepEqual(keys.errors, []);
     checked.push(`keyboard focus: after Dismiss, Snooze and Delete on the next row; after Rename (Enter or Escape) on the renamed row; title tooltip on keyboard focus only (cut title: ${keyboardTooltip.cut})`);
     await keys.context.close();

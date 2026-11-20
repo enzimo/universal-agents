@@ -477,8 +477,9 @@ If a change from the menu does not go through, a red line above the list says
 which chat was not moved or deleted and why. It offers **Retry** when trying
 again can help, and stays until you close it.
 
-With a mouse, rest the pointer on a chat for a moment to see its last four
-messages and how many messages it has, without opening it.
+With a mouse, rest the pointer on a chat for a moment to see its name,
+its last four messages and how many messages it has, without opening it.
+Press Escape to close that preview.
 
 ### Web Chat Commands
 
