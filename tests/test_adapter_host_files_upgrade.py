@@ -2082,7 +2082,9 @@ def test_a_listed_file_beside_files_recorded_in_another_folder_gives_both_report
     leftover of a removed person. That file gets the usual warning, its
     list and its command; the photo, whose name is not listed, gets the
     error with the steps, through the operator command too. Following the
-    steps moves the photo and opens or deletes no listed file.
+    steps moves the photo and opens or deletes no listed file. The steps
+    end the stray's list (C15), and upgrading.md's way to get it back works:
+    ``upload_dir`` set back to P2, the marker deleted, one more run.
     """
 
     name = _hex_name("photo")
@@ -2132,6 +2134,18 @@ def test_a_listed_file_beside_files_recorded_in_another_folder_gives_both_report
     assert instance.photo_destination.read_bytes() == CONTENT["att_photo"]
     assert stray.read_bytes() == STRAY
     assert not _events(caplog, "adapter_host_files_folder_moved")
+    assert json.loads(marker.read_text())[LIST_ID_FIELD] is None, "the stray's list and command no longer apply"
+    caplog.clear()
+
+    marker.unlink()
+    config.interactive_apps.adapter_host = AdapterHostSettings(upload_dir=str(p2))
+    with caplog.at_level(logging.INFO, logger=MODULE_LOGGER):
+        third = upgrade_adapter_host_files(config)
+
+    assert third.finished and third.counts.files_without_records == 1 and third.recorded_elsewhere == NamedElsewhere()
+    assert json.loads(marker.read_text())[LIST_ID_FIELD] is not None
+    _assert_listed(instance.layout, [STRAY_NAME])
+    assert not _events(caplog, "adapter_host_files_folder_moved")
 
 
 def test_a_database_error_in_the_later_count_keeps_the_list_and_says_how_to_check_again(
@@ -2175,7 +2189,9 @@ def test_a_database_error_in_the_later_count_keeps_the_list_and_says_how_to_chec
     assert "could not be counted" not in printed and "Nothing is listed" not in printed
 
 
-@pytest.mark.parametrize("kind", ["gateway_record", "held_copy", "gateway_record_through_link"])
+@pytest.mark.parametrize(
+    "kind", ["gateway_record", "held_copy", "gateway_record_through_link", "gateway_record_directly_in_uploads"]
+)
 def test_records_of_files_already_inside_state_uploads_give_no_error(
     instance: _Instance, caplog: pytest.LogCaptureFixture, tmp_path: Path, kind: str
 ) -> None:
@@ -2183,12 +2199,17 @@ def test_records_of_files_already_inside_state_uploads_give_no_error(
 
     The file is where agents open it, so nothing needs moving and the count
     of files recorded in another folder leaves it out, also when the record
-    names state/uploads through the configured root's link (C10).
+    names state/uploads through the configured root's link (C10), and when
+    0.9's upload_dir was state/uploads itself, so the record names a file
+    directly in it (C16: the rule covers the folder itself, not only the
+    folders inside it).
     """
 
     name = _hex_name(kind)
     config = instance.config()
-    kept = instance.layout.uploads_dir / "adapter"
+    kept = instance.layout.uploads_dir
+    if kind != "gateway_record_directly_in_uploads":
+        kept = kept / "adapter"
     _write(kept / name, b"a person's file, where agents open it")
     if kind == "gateway_record_through_link":
         alias = tmp_path / "alias root"

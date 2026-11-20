@@ -190,7 +190,14 @@ supported, because it may not read what a newer one saved.
     `state/upgrades/adapter-host-files.json` and restart. Moving the folder
     to where `upload_dir` points does not work: the upgrade finds files by
     the path their records name. If those files are gone, nothing more is
-    needed. Conversation records, copies sent to people and records of
+    needed. These steps also end the list and delete command of a usual
+    warning given beside this error: the start after them lists only files
+    in the folder `upload_dir` then names, and the earlier command deletes
+    nothing and says so. To delete the files that warning listed, do it
+    before these steps, under that warning's conditions, or afterwards set
+    `upload_dir` back to the earlier folder, delete
+    `state/upgrades/adapter-host-files.json` and restart to get a new list
+    and command. Conversation records, copies sent to people and records of
     files already inside `state/uploads` (where agents open files) do not
     count here, so a normal instance gets no such error.
   - **The files could not be counted**: the warning

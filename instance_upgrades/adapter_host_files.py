@@ -1281,9 +1281,10 @@ def _folder_moved_advice(marker: Path, elsewhere: NamedElsewhere, *, here: bool 
     reports those files: a turn or held copy may name a folder other than
     the one the folder goes back to, and then nothing reports them there
     (GEN-2). With no record of receiving the error says so instead of giving
-    steps that cannot succeed. ``here`` is False for the error given when
-    nothing is listed (``_report_recorded_elsewhere``): the files are then
-    in the folder their records name, not in this one.
+    steps that cannot succeed. ``here`` is False for the error of files
+    recorded in another folder (``_report_recorded_elsewhere``), given when
+    no listed name is in another folder: the files are then in the folder
+    their records name, not in this one.
     """
 
     keep = "keep them, and the people who sent them can send them again"
