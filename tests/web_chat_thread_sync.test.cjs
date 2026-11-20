@@ -379,6 +379,25 @@ test("a later choice is sent after a Dismiss that waits for the list; a thread g
   assert.equal(errors.length, 0);
 });
 
+test("a change still queued when the sign-in ends is dropped, even for the same person signing in again (C13)", async () => {
+  const { sandbox, server, patches, errors, thread } = harness();
+  sandbox.sharedState.threads = [cachedThread()];
+  server.sessions = [{ ...SNOOZED, list_state: null }];
+  const slow = gate();
+  server.gate = slow.promise;
+  const first = sandbox.changeThreadPlacement(thread("gamma"), "dismiss");
+  const second = sandbox.changeThreadPlacement(thread("gamma"), "pin");
+  await flush();
+  // The session ends and the same person signs in again before the slow read answers.
+  sandbox.sharedState.authSessionGeneration += 1;
+  sandbox.sharedState.threads = [cachedThread()];
+  server.gate = null;
+  slow.open();
+  assert.deepEqual(await Promise.all([first, second]), [false, false]);
+  assert.equal(patches.length, 0);
+  assert.equal(errors.length, 0);
+});
+
 test("Dismiss on a thread from the saved list fails with Retry when the list cannot be read (F2)", async () => {
   const { sandbox, server, patches, errors, thread } = harness();
   sandbox.sharedState.activeThreadId = "alpha";

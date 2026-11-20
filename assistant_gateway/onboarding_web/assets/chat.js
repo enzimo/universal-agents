@@ -2207,11 +2207,17 @@ function changeThreadPlacement(thread, action, extra) {
       return Promise.resolve(false);
     }
     var sessionKey = thread.sessionKey;
+    // The sign-in the person chose this in: a change still queued when it
+    // ends is dropped, even if the same person signs in again (review C13).
+    var authGeneration = sharedState.authSessionGeneration;
     var chains = shellState.placementChains || (shellState.placementChains = new Map());
     var previous = chains.get(sessionKey) || Promise.resolve();
-    var run = previous.then(function () {
-      return runThreadPlacement(thread, action, extra, sharedState.authSessionGeneration);
-    });
+    var start = function () {
+      return runThreadPlacement(thread, action, extra, authGeneration);
+    };
+    // A rejection before this one (not expected: each change resolves) never
+    // stops the changes queued after it.
+    var run = previous.then(start, start);
     chains.set(sessionKey, run);
     run.then(function () {
       if (chains.get(sessionKey) === run) chains.delete(sessionKey);
