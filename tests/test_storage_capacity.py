@@ -10,23 +10,34 @@ limit; administrators told once when a level is entered, not on every check
 as the percentage moves, also after a restart, and again when a level is
 entered anew; a message server that does not answer listed as unavailable;
 the transport's reading of the account's limits and of what its streams set
-aside; the bundled server's room warning (raised at the line and below it,
-quiet above it, its three wordings, its release margin, its level kept while it
-cannot be measured and ended when it no longer applies, an unreported figure
-logged once, what adding a team needs, and whether the running server has room
-for another team); the problem that the running server already refuses new
-streams (from its room as it runs, at the line, kept after space is freed until
-it runs with more room, asking for more space when the disk has only just
-enough, kept while its monitoring endpoint does not answer and that endpoint
-listed as unavailable, beside the warning and with a disk that cannot be
-measured); on the Status page, administrators told once about the room
+aside; the bundled server's room warning, from the free space and the stored
+bytes together (raised at the line and below it, quiet above it, its wordings
+for messages stopping once the streams fill to the room or at once, and for
+the release band, one amount to free that ends it, removing stored messages
+neither ending it nor changing that amount, other files only counted as
+freeable, its release margin, a disk too small for that margin, lowered limits
+offered only while the running server is known to accept them, its level kept
+while it cannot be measured and ended when it no longer applies, memory
+storage keeping the check on the file streams, an unreported figure logged
+once, and whether the running server has room for another team); the store's
+free space counted in the block size NATS uses; the problem that the running
+server already refuses new streams (from its room as it runs, at the line,
+saying when messages stop, leading with messages refused now under its own
+title once its streams store more than its room, kept after space is freed
+until it runs with more room, asking for more space when the disk has only
+just enough, kept while its monitoring endpoint does not answer and that
+endpoint listed as unavailable, beside the warning and with a disk that cannot
+be measured); on the Status page, administrators told once about the room
 warning, also after a restart, and not again when the problem returns after a
-check without the monitoring endpoint; the gateway checking the room only where
-the launcher named the bundled server's store; and, with a real NATS server
-(``LIVE_TEST_NATS_SERVER`` or ``nats-server`` on PATH), the account with and
-without a JetStream limit, the room warning from its real set-aside figure, and
-a server running with no more room than its streams set aside shown as a
-problem on the Status page through its real monitoring endpoint.
+check without the monitoring endpoint; the gateway checking the room only
+where the launcher named the bundled server's store; and, with a real NATS
+server (``LIVE_TEST_NATS_SERVER`` or ``nats-server`` on PATH), the account
+with and without a JetStream limit, the room warning from its real figures, a
+restarted server's room matching the prediction with its stored bytes counted
+back in, a server running with no more room than its streams set aside shown
+as a problem on the Status page through its real monitoring endpoint, and one
+whose streams store more than its room refusing messages (10023) with the
+problem saying so first.
 """
 
 from __future__ import annotations
