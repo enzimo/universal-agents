@@ -30,7 +30,7 @@ from custom_transport.protocol1.authority_tokens import command_binding_id, comm
 from custom_transport.protocol1.host_keys import HostKeys
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.joining import JoinRefused
-from custom_transport.protocol1.live import LiveHost, RequestRefused
+from custom_transport.protocol1.live import NO_RESPONDERS, LiveHost, RequestRefused, ServiceUnavailable
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
@@ -442,6 +442,29 @@ def test_the_gateway_service_builds_its_gateway_with_the_host(tmp_path: Path, mo
 # -- live, on a real NATS server with the real authority and team services --------------------------
 
 
+async def _refusal_once_team_services_answer(gateway: GatewayMessageHost, *, attempts: int = 50) -> RequestRefused:
+    """Send the person's command until the team services answer, and return their refusal.
+
+    The team services serve their address only after they hold the team's lock, which can come
+    after the gateway is ready (``serve_team`` runs beside the gateway's join). Until then the
+    command gets "no responders", which this waits through like ``open_session`` in
+    ``tests/test_live_team_services.py``; any other failure, or an answer, fails the test.
+    """
+
+    for _ in range(attempts):
+        try:
+            await gateway.command("memory.list", LIST_BODY, person_ref=REFERENCE, timeout=10)
+        except RequestRefused as refused:
+            return refused
+        except ServiceUnavailable as unanswered:
+            if unanswered.reason != NO_RESPONDERS:
+                raise
+            await asyncio.sleep(0.1)
+        else:
+            pytest.fail("the team services answered memory.list, which they do not serve yet")
+    raise AssertionError("the team services never answered")
+
+
 @pytest.mark.integration
 @pytest.mark.live
 @pytest.mark.nats
@@ -459,9 +482,8 @@ async def test_the_gateway_joins_in_the_background_and_sends_a_persons_command(
         host_started = await gateway.ready(timeout=20)
         assert host_started.identity.certificate.roles == frozenset({"gateway"})
         # The team services check the command token and answer; memory is not served there yet.
-        with pytest.raises(RequestRefused) as refused:
-            await gateway.command("memory.list", LIST_BODY, person_ref=REFERENCE, timeout=10)
-        assert refused.value.code == "unsupported"
+        refused = await _refusal_once_team_services_answer(gateway)
+        assert refused.code == "unsupported"
         await gateway.close()
         stop.set()
         await serving
