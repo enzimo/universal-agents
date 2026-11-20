@@ -14,6 +14,8 @@ from custom_agents.agent_instantiation_service import (
     current_worker_limits,
     effective_worker_rules,
     launcher_refusal_reason,
+    log_failed_start,
+    refusal_code,
 )
 from custom_agents.schedule_definition_identity import (
     definition_changes,
@@ -207,16 +209,19 @@ class ScheduleWorkerController:
                     except LaunchConflict:
                         pass  # Readiness or exit won the same fence.
             if target is not None and target != record.state:
+                # The first reason stays, as on the worker's handle: a start
+                # that timed out and outlived the join is "unknown" with
+                # startup_timed_out, and keeps it when it later fails, even if
+                # another check (a schedule edit) stops it again meanwhile. A
+                # start still starting has no reason yet; one found gone with
+                # none gets this generic one.
+                reason = record.reason or stop_reason or LAUNCHER_RECONCILIATION
                 try:
                     await self.runtime.run(
                         self.launcher.repository.update,
                         record,
                         state=target,
-                        # A start stopped here keeps why (a timed-out start
-                        # whose thread outlived the join is "unknown" first and
-                        # "failed" later, still startup_timed_out); one found
-                        # gone keeps an earlier reason, else this generic one.
-                        reason=stop_reason or record.reason or LAUNCHER_RECONCILIATION,
+                        reason=reason,
                     )
                 except LaunchConflict:
                     # The child can publish readiness or exit while inspected.
@@ -225,7 +230,7 @@ class ScheduleWorkerController:
                         extra={"launch_id": record.launch_id},
                     )
                     continue
-                self._log_launch_transition(record, target, evidence)
+                self._log_launch_transition(record, target, evidence, reason)
 
     def _why_stop_starting(
         self, record: Any, now: datetime, limits: Any
@@ -234,14 +239,17 @@ class ScheduleWorkerController:
 
         Checked in this order, and the reason becomes its start record's:
 
-        - the type's worker rules are refused (any source; a pool start is not
-          checked against them before it starts): the refusal's code, for
+        - the type's own worker rules are refused (any source; a pool start is
+          not checked against them before it starts): the refusal's code, for
           example ``schedule_worker_rule_exceeds_operator_limit:<field>``. It
           lasts until the configuration is fixed, so it counts as a failed
           start of the type;
+        - a schedule's own rules (its policy's overrides) are refused, for
+          example after the operator lowered a maximum: ``LAUNCH_POLICY_REVOKED``,
+          which does not count, since it is about that schedule;
         - a scheduled start's type is refused now: its code (counts);
         - a scheduled start's policy or definition changed:
-          ``LAUNCH_POLICY_REVOKED``, which does not count;
+          ``LAUNCH_POLICY_REVOKED`` (does not count);
         - the start took longer than its startup timeout: ``STARTUP_TIMED_OUT``.
         """
 
@@ -253,61 +261,101 @@ class ScheduleWorkerController:
             else None
         )
         try:
-            rules = effective_worker_rules(
-                self.agent,
-                record.named_agent_type,
-                binding.policy.rules if binding else {},
-            )
+            rules = effective_worker_rules(self.agent, record.named_agent_type, {})
         except (ValueError, PermissionError) as exc:
-            return launcher_refusal_reason(exc)
-        if record.source == "schedule":
+            return self._stop_refusal_reason(record, exc)
+        if binding is not None:
             try:
-                definition, _ = self.launcher.validate_type(
-                    record.named_agent_type, automatic=True
+                rules = effective_worker_rules(
+                    self.agent, record.named_agent_type, binding.policy.rules
                 )
-            except (ValueError, PermissionError) as exc:
-                return launcher_refusal_reason(exc)
-            if (
-                binding is None
-                or not binding.policy.enabled
-                or (binding.authority_mode == "runtime_default" and not limits.default_startup_policy_enabled)
-                or launch_definition_digest(definition) != record.definition_digest
-                or not definition_is_current(binding, definition)
-                or (
-                    binding.policy.expires_at_utc is not None
-                    and binding.policy.expires_at_utc <= now
-                )
-            ):
+            except (ValueError, PermissionError):
                 return LAUNCH_POLICY_REVOKED
+        if record.source == "schedule":
+            refused = self._scheduled_start_refusal(record, binding, now, limits)
+            if refused is not None:
+                return refused
         if record.created_at_utc + timedelta(seconds=rules.startup_timeout_seconds) <= now:
             return STARTUP_TIMED_OUT
         return None
 
+    def _scheduled_start_refusal(
+        self, record: Any, binding: Any, now: datetime, limits: Any
+    ) -> str | None:
+        """Why a scheduled start may no longer become ready: its type is refused (its code), or its policy or definition changed."""
+
+        try:
+            definition, _ = self.launcher.validate_type(
+                record.named_agent_type, automatic=True
+            )
+        except (ValueError, PermissionError) as exc:
+            return self._stop_refusal_reason(record, exc)
+        if (
+            binding is None
+            or not binding.policy.enabled
+            or (binding.authority_mode == "runtime_default" and not limits.default_startup_policy_enabled)
+            or launch_definition_digest(definition) != record.definition_digest
+            or not definition_is_current(binding, definition)
+            or (
+                binding.policy.expires_at_utc is not None
+                and binding.policy.expires_at_utc <= now
+            )
+        ):
+            return LAUNCH_POLICY_REVOKED
+        return None
+
+    def _stop_refusal_reason(self, record: Any, error: BaseException) -> str:
+        """The stop reason for a refused check (``launcher_refusal_reason``); the full error is logged when only its type is kept."""
+
+        reason = launcher_refusal_reason(error)
+        if refusal_code(error) is None:
+            self.agent._logger.warning(
+                "A starting worker is stopped because a check refused it with an error "
+                "that is not a refusal code; only its type is kept as the reason. "
+                "event=worker_launch_refused team_id=%s agent_type=%s launch_id=%s "
+                "reason=%s error=%s",
+                record.team_id,
+                record.named_agent_type,
+                record.launch_id,
+                reason,
+                error,
+            )
+        return reason
+
     def _log_launch_transition(
-        self, record: Any, target: AgentLaunchState, evidence: str
+        self, record: Any, target: AgentLaunchState, evidence: str, reason: str
     ) -> None:
-        """One log line per state change, so an unknown start is never silent."""
+        """One log line per state change, so an unknown start is never silent.
+
+        A start failed here also gets the one ``event=worker_start_failed``
+        line every failed start gets (``log_failed_start``).
+        """
+        if target == AgentLaunchState.FAILED:
+            log_failed_start(record, reason)
         if target == AgentLaunchState.UNKNOWN:
             self.agent._logger.warning(
-                "A worker start's process cannot be checked, so its slot stays taken "
-                "until its process is proven gone. event=worker_launch_liveness_unknown "
-                "launch_id=%s agent_type=%s schedule_id=%s host_id=%s evidence=%s",
+                "A worker start's process cannot be checked, or the worker was asked to "
+                "stop and has not ended yet, so its slot stays taken until it is proven "
+                "gone. event=worker_launch_liveness_unknown launch_id=%s agent_type=%s "
+                "schedule_id=%s host_id=%s evidence=%s reason=%s",
                 record.launch_id,
                 record.named_agent_type,
                 record.schedule_id,
                 record.host_id,
                 evidence,
+                reason,
             )
         elif record.state == AgentLaunchState.UNKNOWN:
             self.agent._logger.warning(
                 "A worker start whose process could not be checked is now settled. "
                 "event=worker_launch_unknown_settled launch_id=%s agent_type=%s "
-                "schedule_id=%s host_id=%s state=%s",
+                "schedule_id=%s host_id=%s state=%s reason=%s",
                 record.launch_id,
                 record.named_agent_type,
                 record.schedule_id,
                 record.host_id,
                 target.value,
+                reason,
             )
 
     async def _cover(

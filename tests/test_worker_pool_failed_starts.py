@@ -534,6 +534,22 @@ def test_a_worker_stopped_for_its_startup_timeout_records_that(lead, monkeypatch
     assert counts_as_failed_start(stored.reason)
 
 
+def test_a_worker_stopped_for_its_timeout_keeps_that_reason_when_the_runtime_then_stops(lead, monkeypatch) -> None:
+    """The first stop reason stays: a timed-out worker that leaves slowly is not 'runtime stopped'."""
+
+    from custom_agents import strands_team
+
+    async def leaves_slowly(worker) -> None:
+        await worker.get_exit_event().wait()
+        await asyncio.sleep(1.5)  # longer than the launcher's 1 s join
+
+    repository, record, _ = _spawn(lead, monkeypatch, leaves_slowly)
+    _running_loop(record)
+    assert not strands_team.stop_worker_launch(record, reason=STARTUP_TIMED_OUT)
+    strands_team.shutdown_spawned_agents("team", "lead", 5.0)
+    assert _ended(repository, record).reason == STARTUP_TIMED_OUT
+
+
 def test_a_worker_still_starting_when_the_runtime_stops_is_not_a_failed_start(lead, monkeypatch) -> None:
     from custom_agents import strands_team
 
@@ -582,8 +598,8 @@ def _use_config(monkeypatch, data: dict) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_timed_out_start_whose_thread_outlives_the_join_still_ends_startup_timed_out(lead, monkeypatch) -> None:
-    """Slow join: unknown first, failed once the thread is gone, and the reason survives both writes."""
+async def test_a_timed_out_start_whose_thread_outlives_the_join_still_ends_startup_timed_out(lead, monkeypatch, caplog) -> None:
+    """Slow join: unknown first, failed once the thread is gone, and the reason survives both writes and is logged."""
 
     _use_config(monkeypatch, {})
     repository, record = _starting_record(lead)
@@ -594,24 +610,53 @@ async def test_a_timed_out_start_whose_thread_outlives_the_join_still_ends_start
     assert (unknown.state, unknown.reason) == (AgentLaunchState.UNKNOWN, STARTUP_TIMED_OUT)
 
     lead._local_team_runtime.inspect_launch = lambda _record: "absent"
-    await _reconcile(lead, utc_now() + timedelta(minutes=10))  # after the lease ran out
+    with caplog.at_level(logging.INFO):
+        await _reconcile(lead, utc_now() + timedelta(minutes=10))  # after the lease ran out
     failed = repository.get(record.launch_id, "team")
     assert (failed.state, failed.reason) == (AgentLaunchState.FAILED, STARTUP_TIMED_OUT)
     assert start_history([failed], failed.named_agent_type).failures_in_row == 1
+    (line,) = [r.getMessage() for r in caplog.records if "event=worker_start_failed" in r.getMessage()]
+    assert "reason=startup_timed_out counted=True" in line and f"launch_id={record.launch_id}" in line
+    assert "event=worker_launch_unknown_settled" in caplog.text and "reason=startup_timed_out" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_a_timed_out_start_whose_thread_is_already_gone_fails_startup_timed_out(lead, monkeypatch) -> None:
+async def test_a_timed_out_start_keeps_its_reason_when_another_check_stops_it_again(lead, monkeypatch) -> None:
+    """The first reason stays in the record too (critique C10): a later stop for another reason does not replace it."""
+
     _use_config(monkeypatch, {})
     repository, record = _starting_record(lead)
-    _launcher_stops(lead, stopped=True)
+    _launcher_stops(lead, stopped=False)
     await _reconcile(lead, utc_now() + timedelta(seconds=150))
+    assert repository.get(record.launch_id, "team").reason == STARTUP_TIMED_OUT
+
+    _use_config(monkeypatch, {
+        "agent": {"schedule_workers": {"max_startup_timeout_seconds": 300}},
+        "agent_types": {"Worker": {"agent": {"schedule_worker_rules": {"startup_timeout_seconds": 600}}}},
+    })
+    reasons = _launcher_stops(lead, stopped=True)
+    await _reconcile(lead, utc_now() + timedelta(seconds=160))
     stored = repository.get(record.launch_id, "team")
+    assert reasons == ["schedule_worker_rule_exceeds_operator_limit:startup_timeout_seconds"]
     assert (stored.state, stored.reason) == (AgentLaunchState.FAILED, STARTUP_TIMED_OUT)
 
 
 @pytest.mark.asyncio
-async def test_a_pool_start_whose_type_rules_are_refused_counts_as_a_failed_start(lead, monkeypatch) -> None:
+async def test_a_timed_out_start_whose_thread_is_already_gone_fails_startup_timed_out(lead, monkeypatch, caplog) -> None:
+    _use_config(monkeypatch, {})
+    repository, record = _starting_record(lead)
+    _launcher_stops(lead, stopped=True)
+    with caplog.at_level(logging.INFO):
+        await _reconcile(lead, utc_now() + timedelta(seconds=150))
+    stored = repository.get(record.launch_id, "team")
+    assert (stored.state, stored.reason) == (AgentLaunchState.FAILED, STARTUP_TIMED_OUT)
+    (line,) = [r.getMessage() for r in caplog.records if "event=worker_start_failed" in r.getMessage()]
+    assert "reason=startup_timed_out counted=True" in line
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["pool", "schedule"])
+async def test_a_start_whose_type_rules_are_refused_counts_as_a_failed_start(lead, monkeypatch, source) -> None:
     """A type rule above an operator maximum stops every start of the type until it is fixed (critique C01)."""
 
     _use_config(monkeypatch, {
@@ -619,7 +664,7 @@ async def test_a_pool_start_whose_type_rules_are_refused_counts_as_a_failed_star
         "agent_types": {"Worker": {"agent": {"schedule_worker_rules": {"startup_timeout_seconds": 600}}}},
     })
     refused = "schedule_worker_rule_exceeds_operator_limit:startup_timeout_seconds"
-    repository, record = _starting_record(lead)
+    repository, record = _starting_record(lead, source=source)
     reasons = _launcher_stops(lead, stopped=True)
     await _reconcile(lead)
     stored = repository.get(record.launch_id, "team")
@@ -638,3 +683,68 @@ async def test_a_scheduled_start_whose_policy_was_revoked_does_not_count(lead, m
     assert reasons == [LAUNCH_POLICY_REVOKED]
     assert (stored.state, stored.reason) == (AgentLaunchState.FAILED, LAUNCH_POLICY_REVOKED)
     assert start_history([stored], stored.named_agent_type).failures_in_row == 0
+
+
+@pytest.mark.asyncio
+async def test_a_schedules_own_rule_above_a_maximum_does_not_count_against_the_type(lead, monkeypatch) -> None:
+    """The operator lowered a maximum under one schedule's own override (critique C12): about that schedule only."""
+
+    from custom_messages.contracts.schedule_worker_v1 import ScheduleWorkerPolicySpecV1
+    from tests.test_schedule_worker_service import configure
+
+    _use_config(monkeypatch, {"agent": {"schedule_workers": {"eligible_agent_types": ["Worker"]}}})
+    configure(lead, policy=ScheduleWorkerPolicySpecV1(rules={"startup_timeout_seconds": 600}))
+    _use_config(monkeypatch, {"agent": {"schedule_workers": {
+        "eligible_agent_types": ["Worker"], "max_startup_timeout_seconds": 300,
+    }}})
+    repository, record = _starting_record(lead, source="schedule", schedule_id="job")
+    reasons = _launcher_stops(lead, stopped=True)
+    await _reconcile(lead)
+    stored = repository.get(record.launch_id, "team")
+    assert reasons == [LAUNCH_POLICY_REVOKED]
+    assert start_history([stored], stored.named_agent_type).failures_in_row == 0
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_start_of_a_denied_type_counts_as_a_failed_start(lead, monkeypatch) -> None:
+    _use_config(monkeypatch, {"agent": {"schedule_workers": {
+        "eligible_agent_types": ["Worker"], "denied_agent_types": ["Worker"],
+    }}})
+    repository, record = _starting_record(lead, source="schedule", schedule_id="removed")
+    reasons = _launcher_stops(lead, stopped=True)
+    await _reconcile(lead)
+    stored = repository.get(record.launch_id, "team")
+    assert reasons == ["agent_type_disallowed"]
+    assert (stored.state, stored.reason) == (AgentLaunchState.FAILED, "agent_type_disallowed")
+    assert start_history([stored], stored.named_agent_type).failures_in_row == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refused_check_that_is_not_a_code_keeps_only_its_type_and_logs_the_error(lead, monkeypatch, caplog) -> None:
+    _use_config(monkeypatch, {
+        "agent_types": {"Worker": {"agent": {"schedule_worker_rules": {"startup_timeout_seconds": "/srv/team/x"}}}},
+    })
+    repository, record = _starting_record(lead)
+    reasons = _launcher_stops(lead, stopped=True)
+    with caplog.at_level(logging.WARNING):
+        await _reconcile(lead)
+    assert reasons == ["launcher_refused: ValidationError"]
+    assert repository.get(record.launch_id, "team").reason == "launcher_refused: ValidationError"
+    refused = [r.getMessage() for r in caplog.records if "event=worker_launch_refused" in r.getMessage()]
+    assert refused and "/srv/team/x" in refused[0]
+
+
+@pytest.mark.asyncio
+async def test_the_real_launcher_stops_a_timed_out_worker_through_its_thread(lead, monkeypatch) -> None:
+    """The reason's whole way: _why_stop_starting, the real stop_worker_launch, the real thread's own record."""
+
+    from custom_agents import strands_team
+
+    _use_config(monkeypatch, {})
+    repository, record, _ = _spawn(lead, monkeypatch, _wait_for_exit)
+    _running_loop(record)
+    lead._local_team_runtime.inspect_launch = strands_team.inspect_worker_launch
+    lead._local_team_runtime.stop_launch = strands_team.stop_worker_launch
+    await _reconcile(lead, utc_now() + timedelta(seconds=150))
+    stored = _ended(repository, record)
+    assert (stored.state, stored.reason) == (AgentLaunchState.FAILED, STARTUP_TIMED_OUT)

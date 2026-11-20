@@ -219,6 +219,37 @@ def stop_worker_launch(launch: AgentLaunchV1, *, reason: str) -> bool:
     return not handle.thread.is_alive()
 
 
+def _settle_worker_exit(
+    agent: Any, handle: _SpawnedAgentHandle, crash: BaseException | None, *, launch_id: str
+) -> None:
+    """Record a worker thread's end on its start record; a failure is logged, never raised.
+
+    When the launcher stopped the worker and its thread outlived the 1 s
+    join, the launcher already wrote the record with the stop reason
+    (custom_agents.schedule_worker_controller), so the worker's own write
+    loses the fence. That is expected and logged as such, not as an error.
+    """
+
+    from custom_agents.agent_instantiation_service import record_worker_exit
+    from storage.agent_launch_repository import LaunchConflict
+
+    try:
+        record_worker_exit(agent, crash, stopped_because=handle.stop_reason)
+    except LaunchConflict:
+        if handle.stop_reason is None:
+            _logger.exception("Could not record worker exit", extra={"launch_id": launch_id, "agent_id": agent.id})
+            return
+        _logger.info(
+            "A stopped worker's start was already recorded by the launcher. "
+            "event=worker_exit_recorded_by_launcher launch_id=%s agent_id=%s reason=%s",
+            launch_id,
+            agent.id,
+            handle.stop_reason,
+        )
+    except Exception:
+        _logger.exception("Could not record worker exit", extra={"launch_id": launch_id, "agent_id": agent.id})
+
+
 def _register_spawned_agent(handle: _SpawnedAgentHandle) -> None:
     with _SPAWNED_AGENT_LOCK:
         _SPAWNED_AGENTS[handle.agent.id] = handle
@@ -988,10 +1019,7 @@ def instantiate_agent_type(
     Returns:
         A typed startup acknowledgement. Readiness and admission are separate.
     """
-    from custom_agents.agent_instantiation_service import (
-        DEFINITION_CHANGED_BEFORE_CONSTRUCTION,
-        record_worker_exit,
-    )
+    from custom_agents.agent_instantiation_service import DEFINITION_CHANGED_BEFORE_CONSTRUCTION
     from custom_agents.schedule_definition_identity import launch_definition_digest
 
     config = load_agent_type_map().get(named_agent_type)
@@ -1152,10 +1180,7 @@ def instantiate_agent_type(
                 threading.current_thread().name,
             )
         finally:
-            try:
-                record_worker_exit(agent, crash, stopped_because=agent_handle.stop_reason)
-            except Exception:
-                _logger.exception("Could not record worker exit", extra={"launch_id": launch.launch_id, "agent_id": agent.id})
+            _settle_worker_exit(agent, agent_handle, crash, launch_id=launch.launch_id)
             _unregister_spawned_agent(agent.id)
             _logger.debug(
                 "event=agent_thread_exit agent_id=%s named_agent_type=%s team_id=%s thread_name=%s",
