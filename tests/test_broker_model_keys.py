@@ -477,8 +477,9 @@ async def test_the_page_lasts_a_day_and_close_ends_it(broker) -> None:
     closed = await (await broker.post(page, data={"form_id": "page-top", "action": "close"})).text()
 
     assert "This page is closed." in closed and "window.close()" in closed
-    assert (await broker.get(page)).status == 410
-    assert (await broker.post(page, data={"action": "save"})).status == 410
+    # Opened or sent again, it stays closed and applies nothing (ended_pages).
+    for again in (await broker.get(page), await broker.post(page, data={"action": "save"})):
+        assert again.status == 200 and "This page is closed." in await again.text()
 
 
 class _People:

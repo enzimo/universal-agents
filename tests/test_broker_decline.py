@@ -232,8 +232,9 @@ async def test_a_declined_token_form_reports_declined_and_takes_no_token(broker,
     assert (await (await client.get(f"{path}/status")).json())["status"] == "declined"
     assert _outcome(await (await client.get(card_view_url(path))).text()) == "declined"
 
+    # A token sent after the Decline is not taken; the page still shows it was declined.
     late = await client.post(card_view_url(path), data={"token": "ghp_x"})
-    assert late.status == 410
+    assert late.status == 200 and _outcome(await late.text()) == "declined"
     assert calls == []
 
 
@@ -606,3 +607,163 @@ async def test_a_result_that_cannot_be_recorded_still_ends_the_page(caplog) -> N
 
     assert session.used and session.state["status"] == "error" and not session.submission_in_progress
     assert "event=broker_form_result_record_failed page=auth_github abc123" in caplog.text
+
+
+# -- a sign-in page that ended shows its ending, not an error (review finding F3) ---------
+
+
+@pytest.mark.asyncio
+async def test_a_token_sign_in_that_finished_shows_it_in_the_other_view(broker, monkeypatch) -> None:
+    client, service = broker
+    monkeypatch.setattr(
+        "secure_tool_broker.service.login_github_with_token", lambda *a, **k: ToolResult(status="success", content={})
+    )
+    path = await _sign_in(client, "github", "token")
+    await client.post(path, data={"token": "ghp_x"})  # finished in its own tab
+
+    reopened = await client.get(card_view_url(path))  # the card, rebuilt after a thread switch
+    stale = await client.post(card_view_url(path), data=DECLINE, headers=FROM_CARD)  # its Decline, no longer current
+
+    assert reopened.status == 200 and _outcome(await reopened.text()) == "finished"
+    assert stale.status == 200 and _outcome(await stale.text()) == "finished"
+    assert next(iter(service._auth_sessions.values())).state["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_a_token_sign_in_declined_in_its_own_tab_shows_declined_in_the_card(broker) -> None:
+    client, _service = broker
+    path = await _sign_in(client, "github", "token")
+    await client.post(path, data=DECLINE)  # own tab
+
+    reopened = await client.get(card_view_url(path))
+    second = await client.post(card_view_url(path), data=DECLINE, headers=FROM_CARD)
+
+    assert reopened.status == 200 and _outcome(await reopened.text()) == "declined"
+    assert second.status == 200 and _outcome(await second.text()) == "declined"
+
+
+@pytest.mark.asyncio
+async def test_a_token_sign_in_that_failed_says_so_when_opened_again(broker, monkeypatch) -> None:
+    client, _service = broker
+    monkeypatch.setattr(
+        "secure_tool_broker.service.login_github_with_token",
+        lambda *a, **k: ToolResult(status="error", content={}, error="bad token"),
+    )
+    path = await _sign_in(client, "github", "token")
+    await client.post(path, data={"token": "ghp_x"})
+
+    page = await (await client.get(card_view_url(path))).text()
+
+    assert "This sign-in did not work." in page and "/link cli:github" in page
+    assert _outcome(page) is None and 'name="token"' not in page
+
+
+@pytest.mark.asyncio
+async def test_the_team_google_app_and_a_bitwarden_restart_unlock_show_their_own_ending(broker, monkeypatch) -> None:
+    client, _service = broker
+    monkeypatch.setattr(
+        "secure_tool_broker.service.store_team_client", lambda *a, **k: ToolResult(status="success", content={})
+    )
+    monkeypatch.setattr(
+        "secure_tool_broker.service.save_bitwarden_restart_unlock_request",
+        lambda **_k: ToolResult(
+            status="success",
+            content={"action": "pending_restart_unlock.saved", "pending_file": "pending-unlock.json", "expires_at_epoch": 0},
+        ),
+    )
+    created = await client.post(
+        "/v1/auth/google/sessions", headers=gateway_headers(), json={"context": _context(["admin"]), "method": "team_client"}
+    )
+    google = _path((await created.json())["login_url"])
+    await client.post(google, data={"credentials_json": "{}"})
+    bitwarden = await _sign_in(client, "bitwarden", "form")
+    await client.post(bitwarden, data={"master_password": "pw", "submit_mode": "defer_restart"})
+
+    google_page = await (await client.get(card_view_url(google))).text()
+    bitwarden_page = await (await client.get(card_view_url(bitwarden))).text()
+
+    assert "The team's Google sign-in app is stored." in google_page and _outcome(google_page) == "finished"
+    # Still no outcome: the person has to restart the broker, and only this page says so.
+    assert "Bitwarden restart unlock saved." in bitwarden_page and "pending-unlock.json" in bitwarden_page
+    assert _outcome(bitwarden_page) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "method", "roles", "outcome"),
+    [("model", "team", ["admin"], "finished"), ("team", "export", ["owner"], "declined")],
+)
+async def test_a_page_closed_in_its_own_tab_shows_closed_in_the_card(broker, provider, method, roles, outcome) -> None:
+    client, _service = broker
+    created = await client.post(
+        f"/v1/auth/{provider}/sessions", headers=gateway_headers(), json={"context": _context(roles), "method": method}
+    )
+    page = _path((await created.json())["login_url"])
+    opened = await (await client.get(page)).text()
+    form_id = re.search(r'name="form_id" value="([^"]*)"', opened)
+    await client.post(page, data={"action": "close", **({"form_id": form_id.group(1)} if form_id else {})})
+
+    reopened = await client.get(card_view_url(page))
+    stale = await client.post(card_view_url(page), data={"action": "save"}, headers=FROM_CARD)
+
+    for answer in (reopened, stale):
+        text = await answer.text()
+        assert answer.status == 200 and "This page is closed." in text and _outcome(text) == outcome
+
+
+# A Decline whose request body is still arriving while the other view's submission finishes
+# (critique C08): it is not applied, and its view shows the finished ending, not an error.
+_FORM_FROM_CARD = {"Content-Type": "application/x-www-form-urlencoded", **FROM_CARD}
+
+
+async def _decline_arriving_during(client: TestClient, path: str, submit):
+    body_may_go = asyncio.Event()
+
+    async def body():
+        whole = f"{DECLINE_FIELD}=yes".encode()
+        yield whole[:3]  # the handler starts and passes its checks, then waits for the rest
+        await body_may_go.wait()
+        yield whole[3:]
+
+    decline = asyncio.ensure_future(client.post(path, data=body(), headers=_FORM_FROM_CARD))
+    await asyncio.sleep(0.3)
+    answer = await submit()
+    body_may_go.set()
+    return answer, await decline
+
+
+@pytest.mark.asyncio
+async def test_a_decline_still_arriving_when_a_credential_is_stored_shows_the_stored_ending(broker, monkeypatch) -> None:
+    client, _service = broker
+    monkeypatch.setattr(
+        "secure_tool_broker.service.collect_credential",
+        lambda *_a, **_k: ToolResult(status="success", content={"status": "credential_stored"}),
+    )
+    created = await _collection(client)
+    path = card_view_url(_path(created["form_url"]))
+
+    answer, late = await _decline_arriving_during(
+        client, path, lambda: client.post(path, data={"field__username": "me", "field__password": "pw"}, headers=FROM_CARD)
+    )
+    status = await (await client.get(_path(created["status_url"]), headers=gateway_headers())).json()
+
+    assert _outcome(await answer.text()) == "finished"
+    assert late.status == 200 and _outcome(await late.text()) == "finished"
+    assert status["status"] == "credential_stored"
+
+
+@pytest.mark.asyncio
+async def test_a_decline_still_arriving_when_a_token_sign_in_finishes_shows_the_finished_ending(broker, monkeypatch) -> None:
+    client, service = broker
+    monkeypatch.setattr(
+        "secure_tool_broker.service.login_github_with_token", lambda *a, **k: ToolResult(status="success", content={})
+    )
+    path = card_view_url(await _sign_in(client, "github", "token"))
+
+    answer, late = await _decline_arriving_during(
+        client, path, lambda: client.post(path, data={"token": "ghp_x"}, headers=FROM_CARD)
+    )
+
+    assert _outcome(await answer.text()) == "finished"
+    assert late.status == 200 and _outcome(await late.text()) == "finished"
+    assert next(iter(service._auth_sessions.values())).state["status"] == "success"

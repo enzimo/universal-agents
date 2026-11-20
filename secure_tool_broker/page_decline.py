@@ -18,7 +18,9 @@ A Decline goes through the same one-time claim as a submission
 sign-in page that already ended, whose process already finished signing in, or
 that ends with its own Close (``/auth model``, ``/upgrade``) is not declined:
 it is answered as it stands (``decline_refusal``), because the card and its own
-tab can both show a Decline that is no longer current.
+tab can both show a Decline that is no longer current. A page already used
+(answered, declined or closed) never gets here: the service answers any form
+sent to it with its ending (``ended_pages.ended_sign_in_page``).
 """
 
 from __future__ import annotations

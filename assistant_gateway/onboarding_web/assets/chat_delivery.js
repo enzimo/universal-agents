@@ -13,7 +13,10 @@
   // ("account_link", or "broker_authentication" for a sign-in) and an /auth
   // team sign-in app card disappear once the gateway posts how the page ended.
   // Other /auth cards (password managers) share the "broker_authentication"
-  // kind but get no result, so they stay until dismissed.
+  // kind but get no result message: in Web Chat their card closes on the
+  // broker page's own ending (broker_card.mjs; a page opened again after it
+  // ended shows that ending, secure_tool_broker/ended_pages.py), and a plain
+  // link card stays until dismissed.
   var FINISHING_MESSAGE_TYPES = Object.freeze({
     secure_credential_collection: "task",
     tool_setup: "task",

@@ -3194,13 +3194,16 @@ async def test_used_one_time_sign_in_form_still_reports_how_it_ended(
         after = await client.get(f"{page_path}/status")
         after_payload = await after.json()
         reopened = await client.get(page_path)
+        reopened_text = await reopened.text()
 
     assert before["status"] == "pending"
     assert after.status == 200
     assert after_payload["status"] == expected
     assert "ghp_secret_token" not in json.dumps(after_payload)
-    # The one-time form itself stays closed.
-    assert reopened.status == 410
+    # The one-time form is not offered again; the page shows how it ended.
+    assert reopened.status == 200 and 'name="token"' not in reopened_text
+    ending = "GitHub authentication complete." if expected == "success" else "This sign-in did not work."
+    assert ending in reopened_text and "ghp_secret_token" not in reopened_text
 
 
 @pytest.mark.asyncio

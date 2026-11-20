@@ -41,6 +41,13 @@ from secure_tool_broker.auth_pages import (
     render_session_countdown,
 )
 from secure_tool_broker.sign_in_pages import SESSION_RESTORED_AFTER_RESTART, SIGN_IN_PAGE_SECONDS
+from secure_tool_broker.ended_pages import (
+    BITWARDEN_RESTART_UNLOCK_STATE,
+    bitwarden_restart_unlock_saved_page,
+    ended_sign_in_page,
+    google_team_client_stored_page,
+    token_sign_in_success_page,
+)
 from secure_tool_broker.x_sign_in import CALLBACK_PATH as X_CALLBACK_PATH
 from secure_tool_broker.auth_flows import (
     BrokerAuthSession,
@@ -1944,6 +1951,9 @@ class SecureToolBrokerService:
             )
         require_credential_collection_submission_available(session)
         form = await request.post()
+        if session.used:
+            # Stored or deleted while this request's form was still arriving: show that ending.
+            return web.Response(text=credential_collection_ended_page(session), content_type="text/html")
         if is_decline(form):
             decline_credential_collection(
                 session_id, session, prune_expired=self._prune_credential_collection_sessions, logger=self._logger
@@ -2318,14 +2328,6 @@ class SecureToolBrokerService:
         with credential_owner_context(owner_id):
             return callback(*args, **kwargs)
 
-    def _get_auth_session(self, provider: str, session_id: str) -> BrokerAuthSession:
-        """The open sign-in page; a used one-time form answers 410."""
-
-        session = self._find_auth_session(provider, session_id)
-        if session.used:
-            raise web.HTTPGone(text="Auth session has already been used.")
-        return session
-
     def _find_auth_session(self, provider: str, session_id: str) -> BrokerAuthSession:
         """The sign-in page, used or not (its status route reports how a used one ended)."""
 
@@ -2348,6 +2350,27 @@ class SecureToolBrokerService:
             )
         return session
 
+    def _auth_page_already_ended(
+        self, session_id: str, session: BrokerAuthSession, flow: Any, *, declined: bool | None
+    ) -> web.Response:
+        """A POST to a sign-in page that already ended: nothing is applied; the page shows how it ended.
+
+        A card and its own tab can both send a form (or Decline) that is no
+        longer current; answering with the ending lets the card shrink to its
+        note instead of showing an error until it expires.
+        """
+
+        self._logger.info(
+            "A form was sent to a sign-in page that already ended; nothing was applied. "
+            "event=broker_auth_form_already_ended provider=%s method=%s status=%s decline=%s session_id_prefix=%s",
+            session.provider,
+            session.method,
+            session.state.get("status") or "-",
+            "unknown" if declined is None else declined,
+            session_id[:12],
+        )
+        return web.Response(text=ended_sign_in_page(session, flow), content_type="text/html")
+
     def _ensure_flow_started(self, session: BrokerAuthSession, flow: Any) -> None:
         if session.process is not None or session.state.get("flow_started"):
             return
@@ -2365,12 +2388,11 @@ class SecureToolBrokerService:
         provider = str(request.match_info["provider"] or "").strip().lower()
         session_id = str(request.match_info["session_id"] or "").strip()
         session = self._find_auth_session(provider, session_id)
-        if session.state.get("status") == SIGN_IN_STATUS_DECLINED:
-            return web.Response(text=declined_page(auth_display_name(provider)), content_type="text/html")
-        if session.used:
-            raise web.HTTPGone(text="Auth session has already been used.")
-        require_auth_form_available(session)
         flow = get_auth_flow(provider, session.method)
+        if session.used or session.state.get("status") == SIGN_IN_STATUS_DECLINED:
+            # Ended in this view or the other (card or own tab): show how (ended_pages).
+            return web.Response(text=ended_sign_in_page(session, flow), content_type="text/html")
+        require_auth_form_available(session)
         if flow is not None:
             self._ensure_flow_started(session, flow)
             return web.Response(text=flow.render(session), content_type="text/html")
@@ -2666,10 +2688,15 @@ class SecureToolBrokerService:
     async def _handle_submit_auth_form(self, request: web.Request) -> web.Response:
         provider = str(request.match_info["provider"] or "").strip().lower()
         session_id = str(request.match_info["session_id"] or "").strip()
-        session = self._get_auth_session(provider, session_id)
-        require_auth_form_available(session)
+        session = self._find_auth_session(provider, session_id)
         flow = get_auth_flow(provider, session.method)
+        if session.used:
+            return self._auth_page_already_ended(session_id, session, flow, declined=None)
+        require_auth_form_available(session)
         form = await request.post()
+        if session.used:
+            # Ended while this request's form was still arriving (a submission in the other view finished).
+            return self._auth_page_already_ended(session_id, session, flow, declined=is_decline(form))
         if is_decline(form):
             return await decline_auth_session(
                 session_id, session, flow, prune_expired=self._prune_auth_sessions, logger=self._logger
@@ -2843,57 +2870,23 @@ class SecureToolBrokerService:
             )
         if (
             provider == "bitwarden"
-            and result.status == "success"
-            and str((result.content or {}).get("action") or "")
-            == "pending_restart_unlock.saved"
+            and str((result.content or {}).get("action") or "") == "pending_restart_unlock.saved"
         ):
             content = dict(result.content or {})
-            expires_at = _format_epoch_seconds_for_display(
-                content.get("expires_at_epoch"), user_timezone=user_timezone
-            )
-            body = (
-                '<section class="content-panel">'
-                '<p class="eyebrow">Bitwarden</p>'
-                "<h1>Bitwarden restart unlock saved.</h1>"
-                '<p class="lede">Restart the broker or container now. On startup, the broker will complete Bitwarden login, verify the session, write <code>BW_SESSION_FILE</code>, and delete the pending request.</p>'
-                f"<p>Pending file: <code>{html.escape(str(content.get('pending_file') or ''))}</code></p>"
-                f"<p>Expires at: <code>{html.escape(expires_at)}</code></p>"
-                "</section>"
-            )
+            saved = {
+                "pending_file": str(content.get("pending_file") or ""),
+                "expires_at": _format_epoch_seconds_for_display(content.get("expires_at_epoch"), user_timezone=user_timezone),
+            }
+            # Shown again when the page is opened later (ended_pages).
+            session.state[BITWARDEN_RESTART_UNLOCK_STATE] = saved
             return web.Response(
-                # No outcome: the person still has to restart the broker, and only this page says so.
-                text=render_broker_auth_page("Bitwarden restart unlock saved", body),
+                text=bitwarden_restart_unlock_saved_page(saved["pending_file"], saved["expires_at"]),
                 content_type="text/html",
             )
         if provider == "google" and session.method == GOOGLE_TEAM_CLIENT_METHOD:
-            body = (
-                '<section class="content-panel">'
-                '<p class="eyebrow">Google</p>'
-                "<h1>The team's Google sign-in app is stored.</h1>"
-                f'<p class="lede">People who have not signed in yet run <code>{sign_in_command("google")}</code>. '
-                "A sign-in made through a different app must be made again.</p>"
-                f"{render_close_page_button()}"
-                "</section>"
-            )
-            return web.Response(
-                text=render_broker_auth_page("Google sign-in app stored", body, card_outcome=CARD_OUTCOME_FINISHED),
-                content_type="text/html",
-            )
+            return web.Response(text=google_team_client_stored_page(), content_type="text/html")
         self._logger.info("%s broker auth form completed successfully.", provider)
-        success_body = (
-            '<section class="content-panel">'
-            f'<p class="eyebrow">{html.escape(display_name)}</p>'
-            f"<h1>{html.escape(display_name)} authentication complete.</h1>"
-            '<p class="lede">You can close this browser tab and retry the agent task.</p>'
-            f"{render_close_page_button()}"
-            "</section>"
-        )
-        return web.Response(
-            text=render_broker_auth_page(
-                f"{display_name} authentication complete", success_body, card_outcome=CARD_OUTCOME_FINISHED
-            ),
-            content_type="text/html",
-        )
+        return web.Response(text=token_sign_in_success_page(provider), content_type="text/html")
 
 
 # A collection request of these kinds that stored the credential reports "manual_signup_collected".
