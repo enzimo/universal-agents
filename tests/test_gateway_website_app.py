@@ -3786,10 +3786,8 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
         "setThreadUnread(thread, !isReadingThread(thread), "
         "messageLevelFromPayload(lastMessage));" in script
     )
-    assert (
-        'indicator.setAttribute("aria-label", "New reply in this thread");'
-        in script
-    )
+    # The unread dot is read in words inside the row's button (review F18).
+    assert 'return thread.hasUnreadReply ? "New reply" : "";' in script
     assert ".thread-row.is-pending .thread-active-indicator {" in styles
     unfocused_pending_indicator_style = styles.split(
         ".thread-row.is-pending:not(.is-active) .thread-active-indicator::before {",

@@ -448,9 +448,9 @@ chats into sections:
 - **Snoozed** and **Dismissed**: chats you set aside. Both start collapsed;
   select a header to open or close it. The page remembers this in your browser.
 
-Each row shows the chat's name and how long ago its last message came (now,
-5m, 3h, 2d), and below it the latest message (**You:** or the assistant's
-name) or what the chat is waiting on.
+Each row shows the chat's name and how long ago anything was last posted in it
+(now, 5m, 3h, 2d), and below it the latest message (**You:** or the
+assistant's name) or what the chat is waiting on.
 
 Right-click a chat to open its menu. On a touch screen, press and hold the
 chat; with a keyboard, press the menu key or Shift+F10 on the chat. The menu

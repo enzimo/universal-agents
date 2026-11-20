@@ -11,6 +11,7 @@ import {
   createSectionCollapse,
   defaultThread,
   formatThreadAge,
+  formatThreadAgeWords,
   groupThreadSections,
   isOrdinaryMessage,
   messageSnippet,
@@ -155,6 +156,16 @@ test("ages read now, minutes, hours, days, weeks and years", () => {
   assert.equal(formatThreadAge(now - 15 * 24 * 60 * MINUTE, now), "2w");
   assert.equal(formatThreadAge(now - 400 * 24 * 60 * MINUTE, now), "1y");
   assert.equal(formatThreadAge(0, now), "");
+});
+
+test("the same ages in words, short enough for a row's name (F18)", () => {
+  const now = Date.UTC(2026, 10, 19, 12);
+  const words = minutes => formatThreadAgeWords(now - minutes * MINUTE, now);
+  assert.deepEqual(
+    [words(0.3), words(1), words(5), words(60), words(3 * 60), words(24 * 60), words(2 * 24 * 60), words(15 * 24 * 60), words(400 * 24 * 60)],
+    ["just now", "1 minute ago", "5 minutes ago", "1 hour ago", "3 hours ago", "1 day ago", "2 days ago", "2 weeks ago", "1 year ago"],
+  );
+  assert.equal(formatThreadAgeWords(0, now), "");
 });
 
 test("snooze choices are worked out in local time; this evening only before 5 PM", () => {

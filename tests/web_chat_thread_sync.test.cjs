@@ -16,9 +16,12 @@ const threadStatus = require("../assistant_gateway/onboarding_web/assets/chat_th
 
 // The page's name for an unnamed thread, read from chat.js itself.
 const NEW_CHAT_TITLE = source.match(/const NEW_CHAT_TITLE = "([^"]+)";/)[1];
+// The id of the hidden sentence each row points to (chat.html).
+const THREAD_ROW_MENU_HINT_ID = source.match(/const THREAD_ROW_MENU_HINT_ID = "([^"]+)";/)[1];
 
 function loadFunctions(sandbox, names) {
   if (!("NEW_CHAT_TITLE" in sandbox)) sandbox.NEW_CHAT_TITLE = NEW_CHAT_TITLE;
+  if (!("THREAD_ROW_MENU_HINT_ID" in sandbox)) sandbox.THREAD_ROW_MENU_HINT_ID = THREAD_ROW_MENU_HINT_ID;
   if (!("THREAD_MENU_ACTION" in sandbox)) sandbox.THREAD_MENU_ACTION = THREAD_MENU_ACTION;
   for (const [name, value] of Object.entries({ ...threadList, ...threadStatus })) if (!(name in sandbox)) sandbox[name] = value;
   vm.createContext(sandbox);
@@ -230,7 +233,7 @@ function listHarness() {
     saveThreads() {},
     shellState: { threadPreview: { refresh() {} } },
   };
-  loadFunctions(sandbox, ["renderThreads", "unsavedThreadRow", "focusedThreadListTarget", "restoreWokeThreadWhenRead"]);
+  loadFunctions(sandbox, ["renderThreads", "unsavedThreadRow", "focusedThreadListTarget", "restoreThreadListFocus", "restoreWokeThreadWhenRead"]);
   const click = target => listeners.filter(item => item.target === target && item.type === "click")
     .forEach(item => item.handler());
   return { sandbox, rows: () => sandbox.sharedState.threadList.children, click, focused: () => focused };
@@ -582,9 +585,11 @@ function domHarness() {
   const list = document.createElement("div");
   document.body.appendChild(list);
   const timers = [];
+  const newThreadButton = document.createElement("button");
+  document.body.appendChild(newThreadButton);
   const sandbox = {
     document,
-    sharedState: { threadList: list, threads: [] },
+    sharedState: { threadList: list, threads: [], newThreadButton },
     lifecycle: { listen: (target, type, handler) => target.addEventListener(type, handler), timeout: fn => timers.push(fn) },
     fullThreadTitle: item => item.title,
     renameThread() {},
@@ -592,43 +597,132 @@ function domHarness() {
     checkIconMarkup: () => "",
     closeIconMarkup: () => "",
   };
-  loadFunctions(sandbox, ["focusedThreadListTarget", "restoreThreadListFocus", "threadRowButton", "appendRenameControls"]);
-  return { sandbox, document, list, runTimers: () => timers.splice(0).forEach(fn => fn()) };
+  loadFunctions(sandbox, [
+    "focusedThreadListTarget", "restoreThreadListFocus", "visibleThreadRows", "sectionHeader", "threadRowElement",
+    "threadRowButton", "appendRenameControls",
+  ]);
+  return { sandbox, document, list, newThreadButton, runTimers: () => timers.splice(0).forEach(fn => fn()) };
 }
 
-function drawSections(document, list, sessionKeys) {
-  list.replaceChildren();
-  for (const id of ["recent", "snoozed"]) {
-    const section = Object.assign(document.createElement("section"), { className: "thread-section" });
-    section.dataset.section = id;
-    const header = Object.assign(document.createElement("button"), { className: "thread-section-header" });
-    section.appendChild(header);
-    for (const key of sessionKeys[id] || []) {
-      const row = Object.assign(document.createElement("div"), { className: "thread-row" });
+// Draw the list as the page does (renderThreadSections), Snoozed and
+// Dismissed collapsed; `renaming` draws that row as a rename field.
+function drawSections(document, list, sessionKeys, { renaming = "" } = {}) {
+  threadList.renderThreadSections({
+    document,
+    container: list,
+    groups: Object.entries(sessionKeys).map(([id, keys]) => ({ id, label: id, threads: keys.map(key => ({ key })) })),
+    collapse: { isCollapsed: id => id === "snoozed" || id === "dismissed", toggle() {} },
+    renderRow: ({ key }) => {
+      const row = Object.assign(document.createElement("div"), { className: "thread-row" + (key === renaming ? " is-renaming" : "") });
       row.dataset.sessionKey = key;
-      row.appendChild(Object.assign(document.createElement("button"), { className: "thread-button" }));
-      section.appendChild(row);
-    }
-    list.appendChild(section);
-  }
+      row.appendChild(Object.assign(document.createElement(key === renaming ? "input" : "button"),
+        { className: key === renaming ? "thread-rename-input" : "thread-button" }));
+      return row;
+    },
+  });
 }
+
+const rowButton = (list, key) => list.querySelectorAll(".thread-row").find(row => row.dataset.sessionKey === key).children[0];
+const headerOf = (list, id) => list.querySelectorAll(".thread-section").find(section => section.dataset.section === id).children[0];
 
 test("a focused section header or row is focused again after the list is drawn again", () => {
   const { sandbox, document, list } = domHarness();
   drawSections(document, list, { recent: ["alpha"], snoozed: ["beta"] });
-  list.children[1].children[0].focus();
+  headerOf(list, "snoozed").focus();
   const header = sandbox.focusedThreadListTarget();
   assert.deepEqual({ ...header }, { section: "snoozed" });
   drawSections(document, list, { recent: ["alpha"], snoozed: ["beta"] });
   sandbox.restoreThreadListFocus(header);
-  assert.equal(document.activeElement, list.children[1].children[0]);
+  assert.equal(document.activeElement, headerOf(list, "snoozed"));
 
-  list.children[0].children[1].children[0].focus();
+  rowButton(list, "alpha").focus();
   const row = sandbox.focusedThreadListTarget();
-  assert.deepEqual({ ...row }, { sessionKey: "alpha" });
+  assert.deepEqual({ ...row }, { sessionKey: "alpha", next: "", previous: "", rowSection: "recent" });
   drawSections(document, list, { recent: ["alpha"], snoozed: ["beta"] });
   sandbox.restoreThreadListFocus(row);
-  assert.equal(document.activeElement, list.children[0].children[1].children[0]);
+  assert.equal(document.activeElement, rowButton(list, "alpha"));
+});
+
+test("a row that moves out of view or goes away hands focus on, never to the page (F4)", () => {
+  const { sandbox, document, list, newThreadButton } = domHarness();
+  // Dismiss the middle row: the row that took its place gets focus.
+  drawSections(document, list, { recent: ["a", "b", "c"], dismissed: [] });
+  rowButton(list, "b").focus();
+  let target = sandbox.focusedThreadListTarget();
+  assert.deepEqual({ ...target }, { sessionKey: "b", next: "c", previous: "a", rowSection: "recent" });
+  drawSections(document, list, { recent: ["a", "c"], dismissed: ["b"] });
+  sandbox.restoreThreadListFocus(target);
+  assert.equal(document.activeElement, rowButton(list, "c"));
+
+  // Snooze the last row: the one before it.
+  target = sandbox.focusedThreadListTarget();
+  drawSections(document, list, { recent: ["a"], snoozed: ["c"], dismissed: ["b"] });
+  sandbox.restoreThreadListFocus(target);
+  assert.equal(document.activeElement, rowButton(list, "a"));
+
+  // Delete the only row of its section, with nothing else in view: its header.
+  drawSections(document, list, { pinned: ["p"], snoozed: ["c"] });
+  rowButton(list, "p").focus();
+  target = sandbox.focusedThreadListTarget();
+  drawSections(document, list, { recent: [], snoozed: ["c"] });
+  sandbox.restoreThreadListFocus(target);
+  assert.equal(document.activeElement, newThreadButton, "its section is gone, so New Chat");
+
+  drawSections(document, list, { recent: ["r"], snoozed: ["c"] });
+  rowButton(list, "r").focus();
+  target = sandbox.focusedThreadListTarget();
+  drawSections(document, list, { recent: [], snoozed: ["c"] });
+  sandbox.restoreThreadListFocus(target);
+  assert.equal(document.activeElement, headerOf(list, "recent"));
+});
+
+test("a row tells screen readers about its menu, its reply mark and its age in words (F9, F12, F18)", () => {
+  const { sandbox, document } = domHarness();
+  Object.assign(sandbox, {
+    LIST_STATE: threadList.LIST_STATE,
+    sharedState: { ...sandbox.sharedState, activeThreadId: "", editingThreadId: "", assistantName: "Ava" },
+    scheduleThreadTitleTooltip() {},
+    hideThreadTitleTooltip() {},
+  });
+  loadFunctions(sandbox, ["threadRow", "threadActivityIndicator", "threadReplyMark", "threadAgeWords", "threadIsBusy",
+    "lastActivityTimestamp", "uiElement"]);
+  const now = Date.now();
+  const thread = {
+    id: "gamma", sessionKey: "gamma", title: "Renew the certificate", listState: "woke", hasUnreadReply: true,
+    unreadReplyLevel: "normal", lastActivityAt: now - 5 * 60 * 1000, lastMessage: { role: "assistant", text: "Renewed." },
+  };
+  const row = sandbox.threadRow(thread);
+  const [indicator, button] = row.children;
+  assert.equal(indicator.getAttribute("aria-hidden"), "true", "the dot itself is not read");
+  assert.equal(button.getAttribute("aria-keyshortcuts"), "Shift+F10 ContextMenu");
+  assert.equal(button.getAttribute("aria-describedby"), THREAD_ROW_MENU_HINT_ID);
+  assert.equal(button.getAttribute("aria-haspopup"), null, "Enter opens the chat, not a menu");
+  const hidden = fakeDom.byClass(button, "sr-only").map(node => node.textContent);
+  assert.deepEqual(hidden, ["New reply", "active 5 minutes ago"]);
+  const age = fakeDom.byClass(button, "thread-age")[0];
+  assert.equal(age.getAttribute("aria-hidden"), "true", "the short age is read in words instead");
+  assert.equal(age.textContent, "5m");
+  // A thread the agent is replying in says so instead.
+  const busy = sandbox.threadRow({ ...thread, serverBusy: true });
+  assert.deepEqual(fakeDom.byClass(busy.children[1], "sr-only").map(node => node.textContent)[0], "Replying");
+});
+
+test("Rename keeps focus in its field, then on the renamed row after Save or Cancel (F4)", () => {
+  const { sandbox, document, list } = domHarness();
+  drawSections(document, list, { recent: ["a", "b"] });
+  rowButton(list, "a").focus();
+  // Rename chosen from the menu: the field focuses itself, nothing else moves focus.
+  let target = sandbox.focusedThreadListTarget();
+  drawSections(document, list, { recent: ["a", "b"] }, { renaming: "a" });
+  sandbox.restoreThreadListFocus(target);
+  assert.notEqual(document.activeElement, rowButton(list, "b"));
+  rowButton(list, "a").focus();
+  // Enter or Escape: the row is drawn as a row again and gets focus.
+  target = sandbox.focusedThreadListTarget();
+  assert.equal(target.sessionKey, "a");
+  drawSections(document, list, { recent: ["a", "b"] });
+  sandbox.restoreThreadListFocus(target);
+  assert.equal(document.activeElement, rowButton(list, "a"));
 });
 
 test("what the person typed in a rename field survives a redraw", () => {

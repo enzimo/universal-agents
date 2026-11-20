@@ -177,6 +177,66 @@ function inView(page) {
     checked.push("status line: a failed pin shows in view beside the list, role status, Retry only when it did not get through");
     await failing.context.close();
 
+    // F4: after Dismiss, Snooze, Delete and Rename by keyboard, focus is on
+    // the row that took the moved row's place (or the renamed row), never
+    // on the page body.
+    const keys = await openChat(browser, baseUrl, { width: 1280, height: 880 });
+    const focusState = () => keys.page.evaluate(() => {
+      const shown = [...document.querySelectorAll(".thread-row")].filter(row => row.dataset.sessionKey && !row.closest("[hidden]"));
+      const active = document.activeElement;
+      const row = active && active.closest ? active.closest(".thread-row") : null;
+      return {
+        shown: shown.map(item => item.dataset.sessionKey),
+        focused: row ? row.dataset.sessionKey : (active === document.body ? "body" : active.id || active.className),
+        onButton: Boolean(active && active.classList.contains("thread-button")),
+      };
+    });
+    const menuChoice = async (sessionKey, presses) => {
+      await keys.page.focus(`.thread-row[data-session-key="${sessionKey}"] .thread-button`);
+      const before = await focusState();
+      const index = before.shown.indexOf(sessionKey);
+      const expected = before.shown[index + 1] || before.shown[index - 1];
+      await keys.page.keyboard.press("Shift+F10");
+      for (const key of presses) await keys.page.keyboard.press(key);
+      await keys.page.waitForTimeout(600);
+      return expected;
+    };
+    // The first sample in Recent (the preview's own chat is not a sample and cannot be moved).
+    const dismissTarget = await keys.page.evaluate(() => [...document.querySelectorAll(".thread-section.is-recent .thread-row")]
+      .map(row => row.dataset.sessionKey).find(key => key && !key.endsWith(":dev")));
+    let expected = await menuChoice(dismissTarget, ["ArrowDown", "ArrowDown", "Enter"]);
+    let state = await focusState();
+    assert.deepEqual([state.focused, state.onButton], [expected, true], "Dismiss: " + JSON.stringify(state));
+    assert.ok(!state.shown.includes(dismissTarget), "the dismissed row is in the collapsed section");
+    const snoozeTarget = state.focused;
+    expected = await menuChoice(snoozeTarget, ["ArrowDown", "ArrowRight", "Enter"]);
+    state = await focusState();
+    assert.deepEqual([state.focused, state.onButton], [expected, true], "Snooze: " + JSON.stringify(state));
+    const renameTarget = state.focused;
+    await keys.page.keyboard.press("Shift+F10");
+    for (const key of ["ArrowDown", "ArrowDown", "ArrowDown", "Enter"]) await keys.page.keyboard.press(key);
+    await keys.page.waitForSelector(".thread-rename-input:focus");
+    await keys.page.keyboard.press("Escape");
+    await keys.page.waitForTimeout(200);
+    state = await focusState();
+    assert.deepEqual([state.focused, state.onButton], [renameTarget, true], "Rename, Escape: " + JSON.stringify(state));
+    await keys.page.keyboard.press("Shift+F10");
+    for (const key of ["ArrowDown", "ArrowDown", "ArrowDown", "Enter"]) await keys.page.keyboard.press(key);
+    await keys.page.waitForSelector(".thread-rename-input:focus");
+    await keys.page.keyboard.type(" (renamed)");
+    await keys.page.keyboard.press("Enter");
+    await keys.page.waitForTimeout(500);
+    state = await focusState();
+    assert.deepEqual([state.focused, state.onButton], [renameTarget, true], "Rename, Enter: " + JSON.stringify(state));
+    const deleteTarget = state.focused;
+    expected = await menuChoice(deleteTarget, ["End", "Enter"]);
+    state = await focusState();
+    assert.deepEqual([state.focused, state.onButton], [expected, true], "Delete: " + JSON.stringify(state));
+    assert.ok(!state.shown.includes(deleteTarget));
+    assert.deepEqual(keys.errors, []);
+    checked.push("keyboard focus: after Dismiss, Snooze and Delete on the next row; after Rename (Enter or Escape) on the renamed row");
+    await keys.context.close();
+
     // Narrow screens (C22) with touch: rows in view, a long press opens the
     // menu, and touch never shows the hover card.
     const narrow = await openChat(browser, baseUrl, { width: 390, height: 844 }, { hasTouch: true, isMobile: true });

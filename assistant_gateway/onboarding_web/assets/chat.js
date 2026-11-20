@@ -25,6 +25,7 @@ import {
   createSectionCollapse,
   defaultThread,
   formatThreadAge,
+  formatThreadAgeWords,
   groupThreadSections,
   messageSnippet,
   plainSnippet,
@@ -55,6 +56,8 @@ const shellState = {};
 // What the page calls a thread that nothing has named yet (the server sends
 // no title until the thread's first ordinary message, web_chat_threads.py).
 const NEW_CHAT_TITLE = "New Chat";
+// The hidden sentence (chat.html) each thread row points to: the row has a menu.
+const THREAD_ROW_MENU_HINT_ID = "thread-row-menu-hint";
 const attention = createChatAttention({
   browser: window, document, lifecycle,
   isChatView: !new URLSearchParams(window.location.search).has("view"),
@@ -1863,6 +1866,7 @@ function renderThreads() {
       if (sharedState.threadsRevision) {
         sharedState.threadList.appendChild(unsavedThreadRow());
       }
+      restoreThreadListFocus(focusTarget);
     } else {
       renderThreadSections({
         document: document,
@@ -1881,10 +1885,12 @@ function renderThreads() {
     attention.refresh();
   }
 
-// One two-line row: the title, a Woke mark and the time since the last
-// message, then what the thread waits on or its latest message. Rename and
-// Delete live in the row's menu; while renaming, the row shows the name field
-// with Save and Cancel.
+// One two-line row: the title, a Woke mark and the time since anything was
+// last posted, then what the thread waits on or its latest message. Rename
+// and Delete live in the row's menu; while renaming, the row shows the name
+// field with Save and Cancel. Its name for screen readers says the same in
+// words, with the reply marks the dot shows, and that the row has a menu
+// (review F9, F12, F18).
 function threadRow(thread) {
     var renaming = thread.id === sharedState.editingThreadId;
     var row = document.createElement("div");
@@ -1905,9 +1911,17 @@ function threadRow(thread) {
     button.type = "button";
     button.className = "thread-button";
     if (thread.id === sharedState.activeThreadId) button.setAttribute("aria-current", "true");
+    // The menu is the only way to rename or delete; Enter opens the chat, so
+    // no aria-haspopup (review F9).
+    button.setAttribute("aria-keyshortcuts", "Shift+F10 ContextMenu");
+    button.setAttribute("aria-describedby", THREAD_ROW_MENU_HINT_ID);
     var titleLine = uiElement("span", "thread-line thread-title-line");
     var title = uiElement("span", "thread-title", fullThreadTitle(thread));
     titleLine.appendChild(title);
+    var mark = threadReplyMark(thread);
+    if (mark) {
+      titleLine.appendChild(uiElement("span", "sr-only", mark));
+    }
     if (thread.listState === LIST_STATE.WOKE) {
       titleLine.appendChild(uiElement("span", "thread-woke-badge", "Woke"));
     }
@@ -1916,8 +1930,11 @@ function threadRow(thread) {
       var age = uiElement("time", "thread-age", formatThreadAge(at, Date.now()));
       age.dataset.at = String(at);
       age.dateTime = new Date(at).toISOString();
-      age.setAttribute("aria-label", "Last message " + formatFullLocalTimestamp(new Date(at).toISOString()));
+      age.setAttribute("aria-hidden", "true");
       titleLine.appendChild(age);
+      var ageWords = uiElement("span", "sr-only thread-age-words", threadAgeWords(at, Date.now()));
+      ageWords.dataset.at = String(at);
+      titleLine.appendChild(ageWords);
     }
     button.appendChild(titleLine);
     var detail = threadDetail(thread, sharedState.assistantName);
@@ -1980,19 +1997,29 @@ function threadMenuAction(sessionKey, action, detail) {
     }
   }
 
-function threadActivityIndicator(thread) {
+// The dot beside a row. What it means is read inside the row's button
+// (threadReplyMark), where a screen reader announces it with the row.
+function threadActivityIndicator() {
     var indicator = document.createElement("span");
     indicator.className = "thread-active-indicator";
-    if (threadIsBusy(thread)) {
-      indicator.setAttribute("aria-label", "Agent is replying in this thread");
-    } else if (thread.hasUnreadReply && thread.unreadReplyLevel === "attention") {
-      indicator.setAttribute("aria-label", "Reply needs attention in this thread");
-    } else if (thread.hasUnreadReply) {
-      indicator.setAttribute("aria-label", "New reply in this thread");
-    } else {
-      indicator.setAttribute("aria-hidden", "true");
-    }
+    indicator.setAttribute("aria-hidden", "true");
     return indicator;
+  }
+
+// The reply dot in words, or "" when the row shows none.
+function threadReplyMark(thread) {
+    if (threadIsBusy(thread)) {
+      return "Replying";
+    }
+    if (thread.hasUnreadReply && thread.unreadReplyLevel === "attention") {
+      return "Reply needs attention";
+    }
+    return thread.hasUnreadReply ? "New reply" : "";
+  }
+
+// "active 5 minutes ago": the row's age as part of its name (review F12, F18).
+function threadAgeWords(at, now) {
+    return "active " + formatThreadAgeWords(at, now);
   }
 
 // The name field with Save and Cancel; Enter saves and Escape cancels. What
@@ -2089,8 +2116,11 @@ function threadSectionCollapse() {
     return sharedState.sectionCollapse;
   }
 
-// What has keyboard focus in the list: a thread's row (by session key) or
-// a section header (by section). A rename field refocuses itself.
+// What has keyboard focus in the list, read before the list is drawn again:
+// a section header (by section), or a thread's row or rename field (by
+// session key) with the rows shown just after and before it and its section,
+// so focus has somewhere to go when the row moves into a collapsed section
+// or goes away (review F4).
 function focusedThreadListTarget() {
     var active = document.activeElement;
     if (!active || typeof active.closest !== "function" || !sharedState.threadList.contains(active)) {
@@ -2102,47 +2132,96 @@ function focusedThreadListTarget() {
       return section ? { section: String(section.dataset.section || "") } : null;
     }
     var row = active.closest(".thread-row");
-    return row && active.classList.contains("thread-button") ? { sessionKey: String(row.dataset.sessionKey || "") } : null;
+    if (!row || !row.dataset.sessionKey) {
+      return null;
+    }
+    var shown = visibleThreadRows();
+    var index = shown.indexOf(row);
+    var rowSection = row.closest(".thread-section");
+    return {
+      sessionKey: String(row.dataset.sessionKey),
+      next: index >= 0 && shown[index + 1] ? String(shown[index + 1].dataset.sessionKey || "") : "",
+      previous: index > 0 ? String(shown[index - 1].dataset.sessionKey || "") : "",
+      rowSection: rowSection ? String(rowSection.dataset.section || "") : "",
+    };
   }
 
+// Focus what `target` named, once the list is drawn again. A row still being
+// renamed is left alone: its field takes focus itself. A row that moved out
+// of view or went away hands focus to the row that took its place, else the
+// one before it, else its section's header, else New Chat, never the page.
 function restoreThreadListFocus(target) {
     if (!target) {
       return;
     }
-    var element = null;
     if (target.section) {
-      var sections = sharedState.threadList.querySelectorAll(".thread-section");
-      for (var sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
-        if (sections[sectionIndex].dataset.section === target.section) {
-          element = sections[sectionIndex].querySelector(".thread-section-header");
-        }
-      }
-    } else {
-      element = threadRowButton(target.sessionKey);
+      var header = sectionHeader(target.section);
+      if (header) header.focus();
+      return;
     }
-    if (element && !element.closest("[hidden]")) element.focus();
+    var row = threadRowElement(target.sessionKey);
+    if (row && row.classList.contains("is-renaming")) {
+      return;
+    }
+    var candidates = [target.sessionKey, target.next, target.previous];
+    for (var index = 0; index < candidates.length; index += 1) {
+      var button = candidates[index] ? threadRowButton(candidates[index]) : null;
+      if (button && !button.closest("[hidden]")) {
+        button.focus();
+        return;
+      }
+    }
+    var fallback = target.rowSection ? sectionHeader(target.rowSection) : null;
+    (fallback || sharedState.newThreadButton).focus();
   }
 
-function threadRowButton(sessionKey) {
-    var rows = sharedState.threadList.querySelectorAll(".thread-row");
-    for (var index = 0; index < rows.length; index += 1) {
-      if (rows[index].dataset.sessionKey === sessionKey) {
-        return rows[index].querySelector(".thread-button");
+// Rows a person can see now: not inside a collapsed section.
+function visibleThreadRows() {
+    return Array.prototype.filter.call(sharedState.threadList.querySelectorAll(".thread-row"), function (row) {
+      return Boolean(row.dataset.sessionKey) && !row.closest("[hidden]");
+    });
+  }
+
+function sectionHeader(sectionId) {
+    var sections = sharedState.threadList.querySelectorAll(".thread-section");
+    for (var index = 0; index < sections.length; index += 1) {
+      if (sections[index].dataset.section === sectionId) {
+        return sections[index].querySelector(".thread-section-header");
       }
     }
     return null;
+  }
+
+function threadRowElement(sessionKey) {
+    var rows = sharedState.threadList.querySelectorAll(".thread-row");
+    for (var index = 0; index < rows.length; index += 1) {
+      if (rows[index].dataset.sessionKey === sessionKey) {
+        return rows[index];
+      }
+    }
+    return null;
+  }
+
+function threadRowButton(sessionKey) {
+    var row = threadRowElement(sessionKey);
+    return row ? row.querySelector(".thread-button") : null;
   }
 
 function lastActivityTimestamp(thread) {
     return Number(thread.lastActivityAt || 0);
   }
 
-// Ages ("5m") move on once a minute, in place, without drawing the list again.
+// Ages ("5m", and "active 5 minutes ago" for screen readers) move on once a
+// minute, in place, without drawing the list again.
 function refreshThreadAges() {
     var now = Date.now();
     var ages = sharedState.threadList.querySelectorAll(".thread-age");
     for (var index = 0; index < ages.length; index += 1) {
       ages[index].textContent = formatThreadAge(Number(ages[index].dataset.at), now);
+    }
+    var words = sharedState.threadList.querySelectorAll(".thread-age-words");
+    for (var wordIndex = 0; wordIndex < words.length; wordIndex += 1) {
+      words[wordIndex].textContent = threadAgeWords(Number(words[wordIndex].dataset.at), now);
     }
   }
 

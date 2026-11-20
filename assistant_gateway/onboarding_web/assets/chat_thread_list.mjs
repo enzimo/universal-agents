@@ -125,6 +125,24 @@ export function formatThreadAge(timestamp, now) {
   return Math.floor(days / 365) + "y";
 }
 
+// "just now", "5 minutes ago", "1 hour ago": the same time as formatThreadAge
+// in words, short enough to be read as part of a row's name (review F18).
+export function formatThreadAgeWords(timestamp, now) {
+  const seconds = Math.max(0, Math.floor((Number(now) - Number(timestamp)) / 1000));
+  if (!Number.isFinite(seconds) || !timestamp) return "";
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  const [count, unit] = minutes < 1 ? [0, ""]
+    : minutes < 60 ? [minutes, "minute"]
+      : hours < 24 ? [hours, "hour"]
+        : days < 7 ? [days, "day"]
+          : days < 365 ? [Math.floor(days / 7), "week"]
+            : [Math.floor(days / 365), "year"];
+  if (!unit) return "just now";
+  return count + " " + unit + (count === 1 ? "" : "s") + " ago";
+}
+
 // The one rule for an ordinary message (gateway: _ordinary_message_sql): not
 // a system card or command reply, not a slash command, with text or a file.
 export function isOrdinaryMessage(message) {

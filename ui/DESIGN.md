@@ -1842,13 +1842,27 @@ its history. Steps with linked requests cannot use this correction.
   collapsed; the person's choices are kept in this browser. Needs you,
   Pinned, Snoozed and Dismissed show only when they hold a thread.
 - Each thread row has two lines: the title, a **Woke** pill when a snooze
-  ended and the person has not opened the thread yet, and the time since the
-  last message (now, 5m, 3h, 2d, 3w, 1y); then what the thread waits on
+  ended and the person has not opened the thread yet, and the time since
+  anything was last posted in it, cards included (now, 5m, 3h, 2d, 3w, 1y;
+  the list is ordered by the same time, so it is not the snippet's time);
+  then what the thread waits on
   (gold/Ember, at most about 28 characters so part 2's agent trail fits
   before it, with the full sentence as its title) or the latest message as
   "You: ..." or "<assistant name>: ...". The snippet is plain text: no
   Markdown markers, inline code as written, never a system card or a slash
   command. Ages move on once a minute in place.
+- A row's name for screen readers is its title, the reply dot in words
+  ("New reply", "Reply needs attention", "Replying"; the dot itself is
+  hidden from them), Woke, the age in words ("active 5 minutes ago") and the
+  second line. Each row's button carries `aria-keyshortcuts="Shift+F10
+  ContextMenu"` and a hidden description saying the row has a menu, because
+  the menu is the only way to rename or delete; no `aria-haspopup`, since
+  Enter opens the chat.
+- Keyboard focus never falls to the page when the list is drawn again: it
+  stays on the same row or header; when a row moved into a collapsed section
+  or went away (Dismiss, Snooze, Delete) it goes to the row that took its
+  place, else the one before it, else its section's header, else New Chat.
+  After a rename is saved or cancelled it is on the renamed row.
 - Rename and Delete live in the row's menu, not on the row. The menu opens
   with a right-click, a long press on touch screens, or the context-menu key
   or Shift+F10 on a focused row (`chat_thread_menu.mjs`): Pin to top or
