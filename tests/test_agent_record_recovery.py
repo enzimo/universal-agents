@@ -215,7 +215,7 @@ async def test_the_real_universal_agent_refresh_reports_its_state(monkeypatch):
     agent._worker_ready = True
     agent._agent_state_store = None
     await agent._refresh_self_agent_state()
-    assert reports == [("a1", "paused", False)]
+    assert reports == [("a1", "paused", False, ())]
 
 
 @pytest.mark.asyncio

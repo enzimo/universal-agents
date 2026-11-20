@@ -16,6 +16,7 @@ from id_generation import new_id
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import PrivateAttr
 from typing import Any
 from typing import Dict
 from typing import List
@@ -301,16 +302,6 @@ class AgentStatus(BaseModel):
             "workers started inside another process leave it empty and their start record decides."
         ),
     )
-    request_task_ids: List[str] = Field(
-        default_factory=list,
-        exclude=True,
-        description=(
-            "The root task ids of the people's requests the agent's model turns ran for now or since its previous "
-            "record. Only the gateway's team view fills it, from the agent's signed record "
-            "(assistant_gateway.team_view.record_status), and only gateway code reads it. Never serialized: one "
-            "person's request ids must not reach another person's status or a model."
-        ),
-    )
     info_type: ControlType = Field(
         default=ControlType.STATUS_REQUEST_BASIC
     )  # specify type of info that is requested (STATUS_REQUEST_BASIC, STATUS_REQUEST_FULL)
@@ -318,6 +309,22 @@ class AgentStatus(BaseModel):
         ...,
         description="Indicates whether this is a request for status or a response to a request with own status.",
     )
+
+    # The root task ids of the people's requests the agent's model turns ran for now or since its previous
+    # record. Not a field: only the gateway's team view sets it, from the agent's signed record
+    # (assistant_gateway.team_view.record_status), and only gateway code reads it. So no message can set it, no
+    # dump or schema carries it, and one person's request ids never reach another person's status or a model.
+    _request_task_ids: tuple[str, ...] = PrivateAttr(default=())
+
+    @property
+    def request_task_ids(self) -> tuple[str, ...]:
+        return self._request_task_ids
+
+    def with_request_task_ids(self, request_task_ids: tuple[str, ...]) -> "AgentStatus":
+        """Set the ids read from the agent's signed record (the team view only); returns the status."""
+
+        self._request_task_ids = tuple(request_task_ids)
+        return self
 
     def get_id(self) -> str:
         return self.agent_status_id
@@ -329,12 +336,10 @@ class AgentStatus(BaseModel):
             self.is_busy = self.is_executing
 
 
-# Fields that are never shown to a model or a person. Agents exchange
-# ``process_identity`` for liveness checks (custom_agents.agent_liveness):
-# process numbers and host names say nothing useful there. The gateway's team
-# view fills ``request_task_ids`` from agent records; its field definition also
-# keeps it out of every dump, since it names other people's requests.
-AGENT_STATUS_RUNTIME_ONLY_FIELDS = frozenset({"process_identity", "request_task_ids"})
+# Fields agents exchange for liveness checks (custom_agents.agent_liveness) that
+# are never shown to a model or a person: process numbers and host names say
+# nothing useful there.
+AGENT_STATUS_RUNTIME_ONLY_FIELDS = frozenset({"process_identity"})
 
 
 class AgentStatusMap(BaseModel):

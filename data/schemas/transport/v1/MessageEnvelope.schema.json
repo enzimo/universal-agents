@@ -540,14 +540,6 @@
           "description": "The agent's own process (runtime run, host, process number and start time; runtime_hosting.process_run), so other agents can prove whether it still runs. Set only by agents that are their own process (startup agents and the team lead); workers started inside another process leave it empty and their start record decides.",
           "title": "Process Identity"
         },
-        "request_task_ids": {
-          "description": "The root task ids of the people's requests the agent's model turns ran for now or since its previous record. Only the gateway's team view fills it, from the agent's signed record (assistant_gateway.team_view.record_status), and only gateway code reads it. Never serialized: one person's request ids must not reach another person's status or a model.",
-          "items": {
-            "type": "string"
-          },
-          "title": "Request Task Ids",
-          "type": "array"
-        },
         "self_id": {
           "anyOf": [
             {
