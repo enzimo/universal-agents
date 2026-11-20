@@ -66,6 +66,7 @@ from secure_tool_broker.auth_pages import (
     SECRET_INPUT_TOGGLE_SCRIPT,
     CARD_OUTCOME_DECLINED,
     CARD_OUTCOME_FINISHED,
+    CardOutcome,
     close_page_script,
     render_broker_auth_page,
     render_credential_input,
@@ -660,7 +661,7 @@ def _restarted_panel() -> str:
     )
 
 
-def _closed_card_outcome(result: Any) -> str:
+def _closed_card_outcome(result: Any) -> CardOutcome:
     """How the card reads once the page is closed.
 
     Finished after a successful export, and after one whose outcome is not
