@@ -36,6 +36,7 @@ from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_agents.strands_agent import _agent_consumer_scope, _direct_consumer_scope
 from custom_agents.worker_consumer_cleanup import (
+    CAPACITY_CHECK_SECONDS,
     GONE_WORKER_REASON,
     RESWEEP_SECONDS,
     RETRY_SECONDS,
@@ -48,7 +49,16 @@ from custom_messages.contracts.control_v1 import AgentStatus, ControlType, Messa
 from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 from custom_transport.base import AGENT_CONTROL_ROLE, AGENT_DIRECT_ROLE, ConsumerScope
 from custom_transport.nats_consumer_reconciler import AgentConsumer, NatsConsumerReconciler
-from custom_transport.nats_consumer_state import consumer_has_open_request
+from custom_transport.nats_consumer_state import (
+    LIMIT_FROM_ACCOUNT,
+    LIMIT_FROM_NATS_DEFAULT,
+    LIMIT_FROM_STREAM,
+    consumer_has_open_request,
+    log_capacity_if_high,
+    server_version_of,
+    stream_consumer_capacity,
+    version_label,
+)
 from custom_transport.nats_pull import CONSUMER_METADATA_SCHEMA, PUSH_CONSUMER_METADATA_SCHEMA
 from custom_transport.subjects import NatsSubjectMapper
 from storage.agent_launch_repository import AgentLaunchRepository
@@ -91,10 +101,22 @@ class NotFoundError(Exception):
 
 
 class _JetStream:
-    def __init__(self, consumers, *, missing=()) -> None:
+    """A work stream's consumers; stream and account info count what is left after deletions."""
+
+    def __init__(
+        self, consumers, *, missing=(), stream_limit=-1, account_limit=-1, stream_missing=False, extra_consumers=0
+    ) -> None:
         self.consumers = list(consumers)
         self.missing = set(missing)
         self.deleted: list[tuple[str, str]] = []
+        self.stream_limit = stream_limit
+        self.account_limit = account_limit
+        self.stream_missing = stream_missing
+        # Consumers of the stream that are not agents' (worker queues, other roles).
+        self.extra_consumers = extra_consumers
+
+    def _left(self) -> int:
+        return len(self.consumers) - len(self.deleted) + self.extra_consumers
 
     async def consumers_info(self, stream_name, *, offset=0):
         listed = self.consumers if stream_name == MAPPER.work_stream_name() else []
@@ -104,6 +126,17 @@ class _JetStream:
         if consumer_name in self.missing:
             raise NotFoundError("consumer not found")
         self.deleted.append((stream_name, consumer_name))
+
+    async def stream_info(self, stream_name):
+        if self.stream_missing:
+            raise NotFoundError("stream not found")
+        return SimpleNamespace(
+            config=SimpleNamespace(max_consumers=self.stream_limit),
+            state=SimpleNamespace(consumer_count=self._left()),
+        )
+
+    async def account_info(self):
+        return SimpleNamespace(consumers=self._left(), limits=SimpleNamespace(max_consumers=self.account_limit))
 
 
 def _name(owner: str, role: str) -> str:
@@ -324,7 +357,7 @@ def test_the_script_deletes_only_with_the_runtime_confirmed_stopped(monkeypatch)
         calls.append(kwargs)
         return SimpleNamespace(
             decisions=(), applied=kwargs["apply"], scanned_count=0, candidate_count=0, deleted_count=0,
-            account_consumer_count=None, account_max_consumers=None,
+            account_consumer_count=None, account_max_consumers=None, stream_capacity=None,
         )
 
     monkeypatch.setattr(script, "reconcile_nats_consumers", recorded)
@@ -341,21 +374,138 @@ def test_the_script_deletes_only_with_the_runtime_confirmed_stopped(monkeypatch)
         assert (calls[-1]["apply"], calls[-1]["delete_kinds"]) == (apply, kinds)
 
 
+# -- how full the work stream is ------------------------------------------------
+# Review of 2026-11-20 (GEN-1, GEN-2): the start-up check compared the account's
+# count with the account's limit, which NATS 2.15 leaves at -1 while it refuses a
+# stream's 1,001st consumer, so it could never warn; and it read the count before
+# its own deletions.
+
+
+def _stream_info(limit=-1, count=0):
+    return SimpleNamespace(config=SimpleNamespace(max_consumers=limit), state=SimpleNamespace(consumer_count=count))
+
+
+def _account_info(limit=-1):
+    return SimpleNamespace(consumers=0, limits=SimpleNamespace(max_consumers=limit))
+
+
+@pytest.mark.parametrize(
+    ("stream_limit", "account_limit", "version", "expected"),
+    [
+        (-1, -1, (2, 15), (1000, LIMIT_FROM_NATS_DEFAULT)),  # the incident: both fields read -1
+        (1500, -1, (2, 15), (1500, LIMIT_FROM_STREAM)),  # a raised stream limit replaces the default
+        (-1, 1500, (2, 15), (1500, LIMIT_FROM_ACCOUNT)),
+        (1200, 1500, (2, 15), (1200, LIMIT_FROM_STREAM)),
+        (20, -1, (2, 16), (20, LIMIT_FROM_STREAM)),
+        (-1, -1, (2, 10), (None, None)),  # no default before 2.15
+        (-1, -1, None, (None, None)),  # unknown version: no guessed default
+        (300, -1, (2, 10), (300, LIMIT_FROM_STREAM)),
+    ],
+)
+def test_the_enforced_stream_limit(stream_limit, account_limit, version, expected) -> None:
+    capacity = stream_consumer_capacity("S", _stream_info(stream_limit, 10), _account_info(account_limit), version)
+    assert (capacity.consumer_limit, capacity.limit_source) == expected
+    assert capacity.consumer_count == 10
+
+
+def test_the_server_version_is_read_or_unknown() -> None:
+    from nats.aio.client import ServerVersion
+
+    assert server_version_of(SimpleNamespace(connected_server_version=ServerVersion("2.15.3"))) == (2, 15)
+    assert server_version_of(SimpleNamespace(connected_server_version=ServerVersion("0.0.0-unknown"))) is None
+    assert server_version_of(SimpleNamespace(connected_server_version=ServerVersion("not a version"))) is None
+    assert server_version_of(None) is None
+    assert version_label(None) == "unknown"
+
+
+def test_the_warning_starts_at_ninety_percent_of_the_limit(caplog) -> None:
+    def capacity(count):
+        return stream_consumer_capacity("S", _stream_info(-1, count), _account_info(), (2, 15))
+
+    with caplog.at_level(logging.WARNING):
+        assert not log_capacity_if_high(logging.getLogger("test.capacity"), capacity(899), reporter="tester")
+        assert log_capacity_if_high(logging.getLogger("test.capacity"), capacity(900), reporter="tester")
+        assert not log_capacity_if_high(logging.getLogger("test.capacity"), None, reporter="tester")
+    (line,) = [r.getMessage() for r in caplog.records]
+    assert (
+        "event=nats_stream_consumer_capacity_high stream_name=S consumer_count=900 consumer_limit=1000 "
+        "limit_source=nats_default nats_server_version=2.15 reporter=tester"
+    ) in line
+
+
+@pytest.mark.asyncio
+async def test_a_new_team_without_a_work_stream_reads_no_capacity_and_warns_nothing(caplog) -> None:
+    reconciler = NatsConsumerReconciler(jetstream=_JetStream([], stream_missing=True), mapper=MAPPER)
+    with caplog.at_level(logging.DEBUG):
+        assert await reconciler.stream_capacity() is None
+    assert caplog.records == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_stream_is_logged_and_gives_no_capacity(caplog) -> None:
+    class _Broken(_JetStream):
+        async def stream_info(self, stream_name):
+            raise RuntimeError("timeout")
+
+    with caplog.at_level(logging.WARNING):
+        assert await NatsConsumerReconciler(jetstream=_Broken([]), mapper=MAPPER).stream_capacity() is None
+    assert "event=nats_consumer_capacity_unavailable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_check_reports_capacity_after_its_own_deletions() -> None:
+    from custom_transport.nats_consumer_reconciler import KIND_LASTING_AGENT
+
+    jetstream = _JetStream(
+        [_info(f"gone_{index}", AGENT_DIRECT_ROLE) for index in range(3)] + [_info("asking", AGENT_DIRECT_ROLE, waiting=1)],
+        extra_consumers=5,
+    )
+    reconciler = NatsConsumerReconciler(jetstream=jetstream, mapper=MAPPER, server_version=(2, 15))
+    result = await reconciler.reconcile(
+        apply=True, minimum_age_seconds=3600.0, delete_kinds=frozenset({KIND_LASTING_AGENT})
+    )
+    assert result.deleted_count == 3
+    assert result.stream_capacity.consumer_count == 6  # 9 before: the asking one and 5 others are left
+    assert result.account_consumer_count == 6
+
+
+def test_the_scripts_report_names_the_stream_and_warns_near_its_limit(caplog) -> None:
+    import scripts.reconcile_nats_consumers as script
+
+    near = stream_consumer_capacity(MAPPER.work_stream_name(), _stream_info(-1, 950), _account_info(), (2, 15))
+    result = SimpleNamespace(
+        decisions=(), applied=True, scanned_count=0, candidate_count=0, deleted_count=0,
+        account_consumer_count=1200, account_max_consumers=1000, stream_capacity=near,
+    )
+    with caplog.at_level(logging.INFO):
+        script._report(result, apply=True, delete_kinds=None, verbose=False)
+    assert "stream_consumer_count=950 stream_consumer_limit=1000 stream_limit_source=nats_default" in caplog.text
+    assert "nats_server_version=2.15" in caplog.text
+    assert "event=nats_stream_consumer_capacity_high" in caplog.text and "reporter=consumer_check" in caplog.text
+    # The whole account's count against a per-stream limit is no longer a warning.
+    assert "event=nats_consumer_capacity_high" not in caplog.text
+
+
 # -- the team lead's removal ---------------------------------------------------
 
 
 class _Adapter:
-    """The adapter's two calls, through the real reconciler over the in-memory JetStream."""
+    """The adapter's calls, through the real reconciler over the in-memory JetStream."""
 
-    def __init__(self, consumers) -> None:
-        self.jetstream = _JetStream(consumers)
-        self.reconciler = NatsConsumerReconciler(jetstream=self.jetstream, mapper=MAPPER)
+    def __init__(self, consumers, *, server_version=(2, 15), **jetstream) -> None:
+        self.jetstream = _JetStream(consumers, **jetstream)
+        self.reconciler = NatsConsumerReconciler(jetstream=self.jetstream, mapper=MAPPER, server_version=server_version)
         self.reasons: list[str] = []
         self.listings = 0
+        self.capacity_reads = 0
 
     async def agent_consumers(self):
         self.listings += 1
         return await self.reconciler.agent_consumers()
+
+    async def stream_consumer_capacity(self):
+        self.capacity_reads += 1
+        return await self.reconciler.stream_capacity()
 
     async def delete_agent_consumers(self, consumers, *, reason):
         self.reasons.append(reason)
@@ -373,6 +523,7 @@ def team(lead, monkeypatch):
     )
     lead.schedule_maintenance = {}
     lead._worker_consumer_sweep_at = None
+    lead._stream_capacity_check_at = None
     # A start whose process is gone reads "absent"; every other one is running.
     absent = {"crashed_worker"}
     lead._local_team_runtime.inspect_launch = lambda record: (
@@ -473,6 +624,7 @@ async def test_a_gone_worker_whose_start_record_was_pruned_loses_its_lasting_con
         ]
     )
     assert adapter.reasons == [GONE_WORKER_REASON]
+    kept_evidence = {"heartbeat_fresh": 1, "launch_active": 1}  # reporting_agent; busy_worker
     assert result == SweepResult(
         agent_consumers=15,
         lasting_consumers=12,
@@ -481,11 +633,15 @@ async def test_a_gone_worker_whose_start_record_was_pruned_loses_its_lasting_con
         gone_with_start_record=3,
         gone_without_start_record=1,
         deleted=7,
+        kept_evidence=kept_evidence,
     )
+    # The stream's count after the deletions (16 on it, one with another team's
+    # metadata; 7 deleted) against NATS 2.15's default.
     assert (
         "event=worker_consumer_cleanup_done team_id=team sweep=start agent_consumers=15 lasting_consumers=12 "
-        "push_era_consumers=0 configured_agents=2 kept_listening=0 kept_not_gone=2 "
-        "gone_with_start_record=3 gone_without_start_record=1 deleted=7 next_sweep_in_seconds=3600.0"
+        f"push_era_consumers=0 configured_agents=2 kept_listening=0 kept_not_gone=2 kept_evidence={kept_evidence} "
+        "gone_with_start_record=3 gone_without_start_record=1 deleted=7 next_sweep_in_seconds=3600.0 "
+        "stream_consumers=9 stream_consumer_limit=1000 nats_server_version=2.15"
     ) in caplog.text
 
 
@@ -694,3 +850,58 @@ async def test_each_schedule_loop_pass_sweeps_again_if_due_before_it_starts_work
     )
     await asyncio.wait_for(controller.local_schedule_runtime_loop(agent), timeout=5)
     assert order == ["sweep_if_due", "scheduled_starts", "pools"]
+
+
+# -- the lead's reads of how full its work stream is -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_lead_warns_near_the_limit_also_when_it_found_no_agent_consumers(team, clock, caplog) -> None:
+    _attach(team, _Adapter([], extra_consumers=950))  # worker queues and other consumers only
+    with caplog.at_level(logging.INFO):
+        await sweep_worker_consumers_at_start(team)
+    assert "stream_consumers=950 stream_consumer_limit=1000 nats_server_version=2.15" in caplog.text
+    (warning,) = [r.getMessage() for r in caplog.records if "nats_stream_consumer_capacity_high" in r.getMessage()]
+    assert "consumer_count=950 consumer_limit=1000 limit_source=nats_default" in warning
+    assert "reporter=team_lead" in warning
+
+
+@pytest.mark.asyncio
+async def test_a_failed_capacity_read_leaves_the_finished_sweep_alone(team, clock, caplog) -> None:
+    adapter = _attach(team, _Adapter([_info("retired_worker", AGENT_DIRECT_ROLE)]))
+    launch_record(team, AgentLaunchState.RETIRED, agent_id="retired_worker")
+
+    async def unreadable():
+        raise RuntimeError("not connected")
+
+    adapter.stream_consumer_capacity = unreadable
+    with caplog.at_level(logging.INFO):
+        result = await sweep_worker_consumers_at_start(team)
+    assert result is not None and result.deleted == 1
+    assert team._worker_consumer_sweep_at is None  # nothing kept: no retry was scheduled
+    assert "event=worker_consumer_cleanup_failed" not in caplog.text
+    assert "event=nats_consumer_capacity_unavailable" in caplog.text
+    assert "event=worker_consumer_cleanup_done" in caplog.text and "stream_consumers=None" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_lead_reads_capacity_hourly_after_its_sweeps_stopped(team, clock, caplog) -> None:
+    """The incident built up over weeks of running; a start-only check would not have seen it."""
+
+    adapter = _attach(team, _Adapter([], extra_consumers=10))
+    await sweep_worker_consumers_at_start(team)
+    assert team._worker_consumer_sweep_at is None  # nothing kept: no further sweep
+    assert team._stream_capacity_check_at == 1000.0 + CAPACITY_CHECK_SECONDS
+    assert (adapter.listings, adapter.capacity_reads) == (1, 1)
+
+    clock[0] += CAPACITY_CHECK_SECONDS - 1
+    await sweep_worker_consumers_if_due(team)
+    assert adapter.capacity_reads == 1
+
+    adapter.jetstream.extra_consumers = 960  # the stream filled while the team ran
+    clock[0] += 1
+    with caplog.at_level(logging.WARNING):
+        assert await sweep_worker_consumers_if_due(team) is None
+    assert (adapter.listings, adapter.capacity_reads) == (1, 2)  # read again, no sweep
+    assert "event=nats_stream_consumer_capacity_high" in caplog.text and "consumer_count=960" in caplog.text
+    assert team._stream_capacity_check_at == clock[0] + CAPACITY_CHECK_SECONDS

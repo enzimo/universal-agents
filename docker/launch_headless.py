@@ -806,8 +806,8 @@ def run_nats_consumer_preflight(
     """Run the consumer check before any agent creates a consumer.
 
     The check (``scripts/reconcile_nats_consumers.py``) exits 0 whenever it
-    finishes its scan. What it finds, such as consumer usage near the account's
-    limit, it logs itself, and start-up continues. Any other result means the
+    finishes its scan. What it finds, such as the work stream nearing its
+    consumer limit, it logs itself, and start-up continues. Any other result means the
     check could not run: that is logged once at error level with its reason,
     separately from the check's own findings. Start-up continues then too:
     the check is not a gate.

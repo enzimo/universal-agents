@@ -34,6 +34,11 @@ that record stays active until it is removed): those stay, and the sweep keeps
 repeating hourly, until the launcher's removal step or the offline script
 (``scripts/reconcile_nats_consumers.py``) deletes them with the runtime stopped.
 
+After each sweep, and every ``CAPACITY_CHECK_SECONDS`` while the lead runs,
+it reads its work stream's consumer count against the limit NATS enforces and
+warns near it (``custom_transport.nats_consumer_state``); the launcher's check
+does the same at each start.
+
 Which lasting (route) mailbox and control consumers it removes
 (``NatsTransportAdapter.agent_consumers``): those whose owner
 
@@ -77,14 +82,16 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
-from custom_agents.agent_liveness import LivenessPurpose, gone_owner_ids
+from custom_agents.agent_liveness import LivenessPurpose, OwnerLiveness, owner_decisions
 from custom_agents.saved_runtime_config import current_launch_config
 from custom_transport.base import ConsumerScope
 from custom_transport.nats_consumer_reconciler import AgentConsumer, configured_agent_ids
+from custom_transport.nats_consumer_state import StreamConsumerCapacity, log_capacity_if_high, version_label
 from custom_transport.nats_pull import PUSH_CONSUMER_METADATA_SCHEMA
 from storage.agent_launch_repository import AgentLaunchRepository
 
@@ -103,6 +110,12 @@ GONE_WORKER_REASON = "started_worker_gone"
 # Which sweep ran (``event=worker_consumer_cleanup_done sweep=``).
 SWEEP_AT_START = "start"
 SWEEP_AGAIN = "again"
+# How often the lead reads its work stream's consumer count between sweeps, to
+# warn before the stream reaches its limit (``nats_stream_consumer_capacity_high``).
+# Fixed: one or two NATS requests an hour; the 2026-11-19 incident built up over weeks.
+CAPACITY_CHECK_SECONDS = 3600.0
+# Who reported a stream near its limit (``event=nats_stream_consumer_capacity_high reporter=``).
+REPORTER_TEAM_LEAD = "team_lead"
 
 
 @dataclass(frozen=True)
@@ -121,6 +134,9 @@ class SweepResult:
     gone_with_start_record: int = 0
     gone_without_start_record: int = 0
     deleted: int = 0
+    # Kept owners of lasting consumers by the liveness evidence that kept them
+    # (``launch_active``, ``heartbeat_fresh``...); per-owner lines are DEBUG.
+    kept_evidence: dict[str, int] = field(default_factory=dict)
 
     @property
     def kept_owners(self) -> int:
@@ -156,9 +172,8 @@ async def remove_gone_worker_consumers(agent: Any) -> SweepResult:
     # Owners of process-owned consumers only when a start record can prove them gone.
     recorded_owners = {consumer.owner_agent_id for consumer in consumers} & started
     candidates = sorted((lasting_owners | recorded_owners) - configured - asking)
-    gone = set(
-        await gone_owner_ids(agent, candidates, purpose=LivenessPurpose.CONSUMER_CLEANUP, launches=launches)
-    )
+    decisions = owner_decisions(agent, candidates, purpose=LivenessPurpose.CONSUMER_CLEANUP, launches=launches)
+    gone = {decision.owner_agent_id for decision in decisions if decision.gone}
     removable = [
         consumer
         for consumer in consumers
@@ -176,7 +191,19 @@ async def remove_gone_worker_consumers(agent: Any) -> SweepResult:
         gone_with_start_record=len(gone & started),
         gone_without_start_record=len(gone - started),
         deleted=deleted,
+        kept_evidence=_kept_evidence(decisions, lasting_owners),
     )
+
+
+def _kept_evidence(decisions: list[OwnerLiveness], lasting_owners: set[str]) -> dict[str, int]:
+    """Kept owners of lasting consumers, counted by the evidence that kept them."""
+
+    kept = Counter(
+        decision.evidence.value
+        for decision in decisions
+        if not decision.gone and decision.owner_agent_id in lasting_owners
+    )
+    return dict(sorted(kept.items()))
 
 
 async def sweep_worker_consumers_at_start(agent: Any) -> SweepResult | None:
@@ -186,12 +213,42 @@ async def sweep_worker_consumers_at_start(agent: Any) -> SweepResult | None:
 
 
 async def sweep_worker_consumers_if_due(agent: Any) -> SweepResult | None:
-    """Sweep again when the last sweep asked for it and its time has come; else nothing, not even NATS."""
+    """Sweep again, or read the stream's capacity again, when its time has come; else nothing, not even NATS.
 
+    The capacity read is independent of the re-sweep: every
+    ``CAPACITY_CHECK_SECONDS`` from the start sweep on, also when no sweep is
+    needed any more.
+    """
+
+    result = None
     due = getattr(agent, "_worker_consumer_sweep_at", None)
-    if due is None or time.monotonic() < due:
+    if due is not None and time.monotonic() >= due:
+        result = await _sweep(agent, SWEEP_AGAIN)
+    check_at = getattr(agent, "_stream_capacity_check_at", None)
+    if check_at is not None and time.monotonic() >= check_at:
+        await _read_capacity(agent)
+    return result
+
+
+async def _read_capacity(agent: Any) -> StreamConsumerCapacity | None:
+    """The work stream's count and limit, warned about near the limit; schedules the next read.
+
+    Never raises: a failed read is logged and leaves the sweep's outcome alone.
+    """
+
+    agent._stream_capacity_check_at = time.monotonic() + CAPACITY_CHECK_SECONDS
+    try:
+        capacity: StreamConsumerCapacity | None = await agent._ensure_nats_transport_adapter().stream_consumer_capacity()
+    except Exception as exc:
+        logger.warning(
+            "Could not read the work stream's consumer capacity. "
+            "event=nats_consumer_capacity_unavailable team_id=%s error=%s",
+            agent.team_id,
+            exc,
+        )
         return None
-    return await _sweep(agent, SWEEP_AGAIN)
+    log_capacity_if_high(logger, capacity, reporter=REPORTER_TEAM_LEAD)
+    return capacity
 
 
 async def _sweep(agent: Any, sweep: str) -> SweepResult | None:
@@ -211,11 +268,14 @@ async def _sweep(agent: Any, sweep: str) -> SweepResult | None:
         return None
     again = RESWEEP_SECONDS if result.kept_owners else None
     agent._worker_consumer_sweep_at = None if again is None else time.monotonic() + again
+    # After the deletions, outside the sweep's own failure handling.
+    capacity = await _read_capacity(agent)
     logger.info(
         "Removed the NATS consumers of gone agents. "
         "event=worker_consumer_cleanup_done team_id=%s sweep=%s agent_consumers=%s lasting_consumers=%s "
-        "push_era_consumers=%s configured_agents=%s kept_listening=%s kept_not_gone=%s "
-        "gone_with_start_record=%s gone_without_start_record=%s deleted=%s next_sweep_in_seconds=%s",
+        "push_era_consumers=%s configured_agents=%s kept_listening=%s kept_not_gone=%s kept_evidence=%s "
+        "gone_with_start_record=%s gone_without_start_record=%s deleted=%s next_sweep_in_seconds=%s "
+        "stream_consumers=%s stream_consumer_limit=%s nats_server_version=%s",
         agent.team_id,
         sweep,
         result.agent_consumers,
@@ -224,16 +284,21 @@ async def _sweep(agent: Any, sweep: str) -> SweepResult | None:
         result.configured_agents,
         result.kept_listening,
         result.kept_not_gone,
+        result.kept_evidence,
         result.gone_with_start_record,
         result.gone_without_start_record,
         result.deleted,
         again,
+        None if capacity is None else capacity.consumer_count,
+        None if capacity is None else capacity.consumer_limit,
+        version_label(None if capacity is None else capacity.server_version),
     )
     return result
 
 
 __all__ = [
     "GONE_WORKER_REASON",
+    "CAPACITY_CHECK_SECONDS",
     "RESWEEP_SECONDS",
     "RETRY_SECONDS",
     "SWEEP_AGAIN",

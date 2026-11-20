@@ -1807,7 +1807,7 @@ def test_the_consumer_check_runs_its_compiled_program_in_a_source_stripped_image
     ]
     assert kwargs["cwd"] == app_root
     # A check that finished reports what it found in its own log (for example
-    # event=nats_consumer_capacity_high) and start-up continues; the launcher
+    # event=nats_stream_consumer_capacity_high) and start-up continues; the launcher
     # adds only the report-only warning when the lock is unproven.
     warnings = [record.getMessage() for record in caplog.records if record.levelno >= 30]
     assert len(warnings) == (0 if proven else 1)

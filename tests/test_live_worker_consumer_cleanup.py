@@ -207,6 +207,14 @@ async def test_live_a_lead_starts_on_a_work_stream_full_of_leftovers(tmp_path, m
         # NATS 2.10 has no default limit and accepts every leftover.
         assert refused is None or "10026" in str(refused), refused
         before = await inspector.agent_consumers()
+        # What the server reports: on 2.15 its default of 1,000 applies (no limit is
+        # configured); a server without the default (2.10) reports no limit.
+        capacity = await inspector.stream_consumer_capacity()
+        if refused is not None:
+            assert (capacity.consumer_limit, capacity.limit_source) == (1000, "nats_default")
+            assert capacity.server_version >= (2, 15) and capacity.near_limit
+        else:
+            assert capacity.consumer_limit is None
         assert len(before) > 3 * 256  # more than three listing pages
         await inspector._nc.publish(mapper.agent_work_subject(MAIL_OWNER), b"left in the mailbox")  # noqa: SLF001
         await inspector._nc.flush()  # noqa: SLF001
@@ -231,8 +239,13 @@ async def test_live_a_lead_starts_on_a_work_stream_full_of_leftovers(tmp_path, m
         deleted = sum(c.owner_agent_id in gone for c in before)
         assert (
             f"agent_consumers={len(before)} lasting_consumers={len(before) - 2} push_era_consumers=2 "
-            f"configured_agents=1 kept_listening=1 kept_not_gone=1 gone_with_start_record=3 "
+            f"configured_agents=1 kept_listening=1 kept_not_gone=1 kept_evidence={{'launch_active': 1}} "
+            f"gone_with_start_record=3 "
             f"gone_without_start_record={len(pruned) + 1} deleted={deleted} next_sweep_in_seconds=3600.0"
+        ) in done[0]
+        # The lead reads the stream again after its deletions, before its own consumers exist.
+        assert (
+            f"stream_consumers={capacity.consumer_count - deleted} stream_consumer_limit={capacity.consumer_limit} "
         ) in done[0]
         assert _events(caplog.records)[:3] == ["deleted", "sweep_done", "lead_mailbox_ready"]
         remaining = {consumer.owner_agent_id for consumer in await inspector.agent_consumers()}

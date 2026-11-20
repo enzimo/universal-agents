@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from custom_transport.base import AGENT_CONSUMER_ROLES, AGENT_CONTROL_ROLE, AGENT_DIRECT_ROLE
-from custom_transport.nats_consumer_state import consumer_has_open_request, consumer_listening_state
+from custom_transport.nats_consumer_state import (
+    StreamConsumerCapacity,
+    consumer_has_open_request,
+    consumer_listening_state,
+    stream_consumer_capacity,
+)
 from custom_transport.nats_pull import CONSUMER_METADATA_SCHEMA, PUSH_CONSUMER_METADATA_SCHEMA
 from custom_transport.subjects import NatsSubjectMapper
 
@@ -98,6 +103,8 @@ class ConsumerReconciliationResult:
     account_consumer_count: int | None = None
     account_max_consumers: int | None = None
     deleted_consumer_count: int = 0
+    # The work stream's count and enforced limit, read after the deletions.
+    stream_capacity: StreamConsumerCapacity | None = None
 
     @property
     def scanned_count(self) -> int:
@@ -129,9 +136,12 @@ class NatsConsumerReconciler:
         mapper: NatsSubjectMapper,
         stable_agent_ids: Iterable[str] = (),
         logger: logging.Logger | None = None,
+        server_version: tuple[int, int] | None = None,
     ) -> None:
         self._js = jetstream
         self._mapper = mapper
+        # (major, minor) of the NATS server, which decides its default stream limit.
+        self._server_version = server_version
         self._stable_agent_ids = {
             str(agent_id).strip()
             for agent_id in stable_agent_ids
@@ -165,14 +175,16 @@ class NatsConsumerReconciler:
             )
             for stream_name, info in infos
         )
-        account_consumer_count, account_max_consumers = await self._account_capacity()
         deleted_count = await self._apply_decisions(decisions, delete_kinds) if apply else 0
+        # Capacity after the deletions: the state this pass leaves behind.
+        account_consumer_count, account_max_consumers = await self._account_capacity()
         return ConsumerReconciliationResult(
             decisions=decisions,
             applied=apply,
             account_consumer_count=account_consumer_count,
             account_max_consumers=account_max_consumers,
             deleted_consumer_count=deleted_count,
+            stream_capacity=await self.stream_capacity(),
         )
 
     async def _consumer_infos(self) -> list[tuple[str, Any]]:
@@ -220,18 +232,45 @@ class NatsConsumerReconciler:
             decision.reason,
         )
 
-    async def _account_capacity(self) -> tuple[int | None, int | None]:
+    async def stream_capacity(self) -> StreamConsumerCapacity | None:
+        """The team work stream's consumer count and the limit NATS enforces on it.
+
+        None when the stream does not exist yet (a new team: nothing to
+        report) or the count cannot be read (logged).
+        """
+
+        stream_name = self._mapper.work_stream_name()
+        read_stream = getattr(self._js, "stream_info", None)
+        if read_stream is None:
+            return None
+        try:
+            stream_info = await read_stream(stream_name)
+        except Exception as exc:
+            if not self._is_stream_not_found(exc):
+                self._capacity_unavailable(exc)
+            return None
+        return stream_consumer_capacity(stream_name, stream_info, await self._account_info(), self._server_version)
+
+    def _capacity_unavailable(self, exc: Exception) -> None:
+        self._logger.warning(
+            "Could not read JetStream consumer capacity. "
+            "event=nats_consumer_capacity_unavailable error=%s",
+            exc,
+        )
+
+    async def _account_info(self) -> Any:
         account_info = getattr(self._js, "account_info", None)
         if account_info is None:
-            return None, None
+            return None
         try:
-            info = await account_info()
+            return await account_info()
         except Exception as exc:
-            self._logger.warning(
-                "Could not read JetStream consumer capacity. "
-                "event=nats_consumer_capacity_unavailable error=%s",
-                exc,
-            )
+            self._capacity_unavailable(exc)
+            return None
+
+    async def _account_capacity(self) -> tuple[int | None, int | None]:
+        info = await self._account_info()
+        if info is None:
             return None, None
         limits = getattr(info, "limits", None)
         count = self._optional_int(getattr(info, "consumers", None))

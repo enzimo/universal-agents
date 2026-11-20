@@ -252,9 +252,22 @@ The container images and native installer include NATS Server 2.15.3. NATS
 consumers per agent, and object-store watchers use consumers too. Existing
 stream configuration may still report `max_consumers: -1` while the server
 enforces its default, so check capacity before upgrading a large team. Raise
-the limit in the NATS stream, account or server configuration when needed.
-The startup consumer report checks account usage; it does not report this
-per-stream limit.
+the limit in the NATS stream or account configuration when needed; a limit set
+on the stream or the account replaces the default (the smaller one applies
+when both are set), and the default applies only when neither is set.
+
+The team's work stream is checked against the limit NATS enforces on it: by
+the start-up consumer report at each start, after its own cleanup, and by the
+team lead when it starts and then every hour while it runs. Both log the
+stream's count, its limit and the server version
+(`stream_consumer_count`/`stream_consumers`, `stream_consumer_limit`,
+`nats_server_version`), and warn with
+`event=nats_stream_consumer_capacity_high` once the stream holds 90 percent of
+its limit (`limit_source` says whether the limit came from the stream, the
+account or NATS's default). On NATS before 2.15, which has no default, only a
+limit set on the stream or the account is checked. A limit raised only in the
+server's own configuration is not visible to these checks, so they may warn
+early there.
 
 For an external NATS cluster, follow the
 [NATS 2.15 upgrade guide](https://docs.nats.io/release-notes/upgrade-to-2.15).
@@ -431,11 +444,10 @@ file system where the lock cannot prove that, it only reports
 (`event=nats_consumer_preflight_report_only`); the team lead then removes the
 leftovers whose owner it can judge as gone when it starts, and the rest need
 the reconciler above, run with the runtime stopped. What else it finds stays in
-its own lines, for
-example the warning
-`event=nats_consumer_capacity_high` when the team uses 90 percent or more of
-the account's consumer limit, and the agents start. When the report cannot run
-at all, the log shows one error,
+its own lines, for example the warning
+`event=nats_stream_consumer_capacity_high` when the work stream holds 90
+percent of its consumer limit (see NATS 2.15 upgrades above), and the agents
+start. When the report cannot run at all, the log shows one error,
 `event=nats_consumer_preflight_not_run`, with a `reason`:
 
 | `reason` | Meaning |

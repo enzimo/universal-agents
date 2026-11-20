@@ -218,7 +218,13 @@ each. They run in parallel on as many workers as the team allows:
   own `--agent-id` (outside the supervisor, not supported) is not recognised:
   if it is stopped during a sweep it loses its consumers, not its messages.
   Messages still in a deleted mailbox stay in the work stream, and a consumer
-  created again with the same name and filter delivers them.
+  created again with the same name and filter delivers them. After each sweep,
+  and every hour while it runs, the lead also reads the work stream's consumer
+  count against the limit NATS enforces on it (a limit set on the stream or the
+  account, else NATS 2.15's default of 1,000, which its configuration fields do
+  not show; `custom_transport/nats_consumer_state.py`) and warns near it
+  (`event=nats_stream_consumer_capacity_high`); the launcher's check does the
+  same at each start, after its own deletions.
 - **One message never stops a receiver.** A message the receiving release cannot
   read (malformed, or a message type or value another release added or removed)
   is logged without its content (`event=nats_message_undecodable`, with its id,
@@ -4281,8 +4287,8 @@ start-up, and nobody noticed it for several releases.
 Before any agent creates a JetStream consumer, the launcher runs the
 consumer report (`run_nats_consumer_preflight`,
 `scripts/reconcile_nats_consumers.py --remove-lasting-agent-leftovers`). A
-report that finishes exits 0 and logs its own findings, such as consumer usage
-near the account's limit; a report that cannot run is one error,
+report that finishes exits 0 and logs its own findings, such as the work
+stream nearing its consumer limit; a report that cannot run is one error,
 `event=nats_consumer_preflight_not_run`, with a `reason`, so the two never look
 alike. It changes one thing: it deletes the lasting agent mailbox and control
 consumers that releases before 2026-11-19 left for started workers (owner id

@@ -53,6 +53,7 @@ from custom_transport.nats_pull import (
     return_or_end,
 )
 from custom_transport.nats_consumer_reconciler import AgentConsumer, NatsConsumerReconciler
+from custom_transport.nats_consumer_state import StreamConsumerCapacity, server_version_of
 from custom_transport.nats_topology import NatsStreamTopology
 from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
@@ -589,7 +590,12 @@ class NatsTransportAdapter:
     # -- agents' own consumers ----------------------------------------------
 
     def _consumer_reconciler(self) -> NatsConsumerReconciler:
-        return NatsConsumerReconciler(jetstream=self._js, mapper=self.mapper, logger=self._logger)
+        return NatsConsumerReconciler(
+            jetstream=self._js,
+            mapper=self.mapper,
+            logger=self._logger,
+            server_version=server_version_of(self._nc),
+        )
 
     async def agent_consumers(self) -> tuple[AgentConsumer, ...]:
         """Every agent's mailbox and control consumer of this team on the work stream.
@@ -602,6 +608,13 @@ class NatsTransportAdapter:
         if self._js is None:
             return ()
         return await self._consumer_reconciler().agent_consumers()
+
+    async def stream_consumer_capacity(self) -> StreamConsumerCapacity | None:
+        """The team work stream's consumer count and enforced limit (``NatsConsumerReconciler.stream_capacity``)."""
+
+        if self._js is None:
+            return None
+        return await self._consumer_reconciler().stream_capacity()
 
     async def delete_agent_consumers(self, consumers: Iterable[AgentConsumer], *, reason: str) -> int:
         """Delete these agent consumers (``NatsConsumerReconciler.delete_agent_consumers``)."""

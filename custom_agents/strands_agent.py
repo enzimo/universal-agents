@@ -1283,6 +1283,8 @@ class UniversalAgent(BaseModel):
     # When the team lead removes gone workers' NATS consumers again (monotonic
     # time), or None when no further sweep is needed (custom_agents.worker_consumer_cleanup).
     _worker_consumer_sweep_at: Optional[float] = PrivateAttr(default=None)
+    # When the lead next reads its work stream's consumer count (same module).
+    _stream_capacity_check_at: Optional[float] = PrivateAttr(default=None)
     _worker_pool_snapshot: Dict[str, Any] = PrivateAttr(default_factory=dict)
     # While a model provider refuses calls, the worker holds its task, takes no
     # new work and retries after this monotonic time (custom_agents.provider_limits).

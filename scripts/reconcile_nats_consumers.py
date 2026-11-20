@@ -49,6 +49,11 @@ from custom_transport.nats_consumer_reconciler import (  # noqa: E402
     NatsConsumerReconciler,
     configured_agent_ids,
 )
+from custom_transport.nats_consumer_state import (  # noqa: E402
+    log_capacity_if_high,
+    server_version_of,
+    version_label,
+)
 from custom_transport.subjects import NatsSubjectMapper  # noqa: E402
 from default_values import TRANSPORT_DEFAULTS  # noqa: E402
 from docker.nats_service import (  # noqa: E402
@@ -62,6 +67,8 @@ from docker.nats_service import (  # noqa: E402
 
 
 LOGGER = logging.getLogger("reconcile_nats_consumers")
+# Who reported a stream near its limit (``event=nats_stream_consumer_capacity_high reporter=``).
+REPORTER_CONSUMER_CHECK = "consumer_check"
 DEFAULT_CONFIG_PATH = Path("/data/instance_config.yaml")
 
 # This is a one-shot report, and the launcher waits for it before agents
@@ -198,6 +205,7 @@ async def reconcile_nats_consumers(
         )
         reconciler = NatsConsumerReconciler(
             jetstream=connection.jetstream(),
+            server_version=server_version_of(connection),
             mapper=mapper,
             stable_agent_ids=protected_ids,
             logger=LOGGER,
@@ -296,11 +304,13 @@ def _report(
     """Log what one pass found and did."""
 
     reason_counts = Counter(decision.reason for decision in result.decisions)
+    stream = result.stream_capacity
     LOGGER.info(
         "NATS consumer reconciliation complete. "
         "event=nats_consumer_reconciliation_complete apply=%s delete_kinds=%s scanned_count=%s "
         "candidate_count=%s deleted_count=%s account_consumer_count=%s "
-        "account_max_consumers=%s reasons=%s",
+        "account_max_consumers=%s stream_consumer_count=%s stream_consumer_limit=%s "
+        "stream_limit_source=%s nats_server_version=%s reasons=%s",
         result.applied,
         sorted(delete_kinds) if delete_kinds is not None else ("all" if apply else None),
         result.scanned_count,
@@ -308,6 +318,10 @@ def _report(
         result.deleted_count,
         result.account_consumer_count,
         result.account_max_consumers,
+        None if stream is None else stream.consumer_count,
+        None if stream is None else stream.consumer_limit,
+        None if stream is None else stream.limit_source,
+        version_label(None if stream is None else stream.server_version),
         dict(sorted(reason_counts.items())),
     )
     if (
@@ -323,19 +337,10 @@ def _report(
             "account_consumer_count=%s",
             result.account_consumer_count,
         )
-    if (
-        result.account_consumer_count is not None
-        and result.account_max_consumers is not None
-        and result.account_max_consumers > 0
-        and result.account_consumer_count >= result.account_max_consumers * 0.9
-    ):
-        LOGGER.warning(
-            "JetStream consumer usage is at or above 90 percent. "
-            "event=nats_consumer_capacity_high account_consumer_count=%s "
-            "account_max_consumers=%s",
-            result.account_consumer_count,
-            result.account_max_consumers,
-        )
+    # NATS applies a consumer limit to each stream, the account's included, so
+    # the warning compares the work stream's count with its enforced limit
+    # (read after this pass's deletions), not the whole account's count.
+    log_capacity_if_high(LOGGER, result.stream_capacity, reporter=REPORTER_CONSUMER_CHECK)
     if verbose:
         for decision in result.decisions:
             LOGGER.info(

@@ -397,6 +397,29 @@ def owner_liveness(
     return decision
 
 
+def owner_decisions(
+    agent: Any,
+    owner_agent_ids: Iterable[str],
+    *,
+    purpose: LivenessPurpose,
+    scope: str = "",
+    launches: Optional[Sequence[AgentLaunchV1]] = None,
+) -> list[OwnerLiveness]:
+    """One decision per owner, never this agent; ``scope`` and ``launches`` as in ``owner_liveness``.
+
+    For callers that report why owners were kept (the consumer cleanup counts
+    them by evidence); others ask ``gone_owner_ids``.
+    """
+    moment = datetime.now(timezone.utc)
+    decided = [owner for owner in dict.fromkeys(owner_agent_ids) if owner and owner != agent.id]
+    decisions = [
+        owner_liveness(agent, owner, purpose=purpose, scope=scope, now=moment, launches=launches)
+        for owner in decided
+    ]
+    retain_decisions(agent, purpose, decided, scope=scope)
+    return decisions
+
+
 async def gone_owner_ids(
     agent: Any,
     owner_agent_ids: Iterable[str],
@@ -406,17 +429,8 @@ async def gone_owner_ids(
     launches: Optional[Sequence[AgentLaunchV1]] = None,
 ) -> list[str]:
     """The owners among these that are gone, never this agent; ``scope`` and ``launches`` as in ``owner_liveness``."""
-    moment = datetime.now(timezone.utc)
-    decided = [owner for owner in dict.fromkeys(owner_agent_ids) if owner and owner != agent.id]
-    gone = [
-        owner
-        for owner in decided
-        if owner_liveness(
-            agent, owner, purpose=purpose, scope=scope, now=moment, launches=launches
-        ).gone
-    ]
-    retain_decisions(agent, purpose, decided, scope=scope)
-    return gone
+    decisions = owner_decisions(agent, owner_agent_ids, purpose=purpose, scope=scope, launches=launches)
+    return [decision.owner_agent_id for decision in decisions if decision.gone]
 
 
 def prune_departed_agent_rows(agent: Any, now: datetime | None = None) -> int:
