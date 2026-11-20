@@ -467,8 +467,17 @@ def test_the_room_warning_says_what_fails_what_keeps_working_and_how_much_to_fre
     assert store_disk.measured == [STORE]
 
 
-@pytest.mark.parametrize("running", [4 * GB, RESERVED + TEAM_SET_ASIDE], ids=["between", "exactly-with-a-team"])
-def test_the_room_warning_says_when_the_running_server_refuses_another_team(tmp_path: Path, running: int) -> None:
+@pytest.mark.parametrize(
+    ("running", "shown", "gap"),
+    [(4 * GB, "4 GB", "they would bring what its streams set aside to 5.3 GB"),
+     # 40 MB below the total: both round to 5.3 GB, so it says what is missing instead of two equal figures.
+     (RESERVED + TEAM_SET_ASIDE - 40_000_000, "5.3 GB", "it is 40 MB short of the 5.3 GB its streams would then set aside"),
+     (RESERVED + TEAM_SET_ASIDE, "5.3 GB", "its streams would then set aside all of it")],
+    ids=["between", "same-figure-40-mb-short", "exactly-with-a-team"],
+)
+def test_the_room_warning_says_when_the_running_server_refuses_another_team(
+    tmp_path: Path, running: int, shown: str, gap: str
+) -> None:
     # Above the line it refuses nothing it has, but a new team's streams set aside 2.3 GB more, and NATS
     # refuses a stream whose limit does not fit beside what is set aside (measured on 2.15.1). A team that
     # fits exactly would leave it refusing everything new, so that counts as not fitting.
@@ -476,10 +485,9 @@ def test_the_room_warning_says_when_the_running_server_refuses_another_team(tmp_
 
     assert finding is not None
     assert finding.summary.endswith(
-        f"Running now, it has {running / GB:g} GB of room, taken when it last started: enough for the streams it "
-        "has, but not for another team's too (they would bring what its streams set aside to 5.3 GB), so adding a "
-        "team is refused until the whole instance (the container, or ua start) starts with at least 7.1 GB free on "
-        "that disk."
+        f"Running now, it has {shown} of room, taken when it last started: enough for the streams it has, but not "
+        f"for another team's too ({gap}), so adding a team is refused until the whole instance (the container, or "
+        "ua start) starts with at least 7.1 GB free on that disk."
     )
 
 
@@ -724,13 +732,20 @@ def test_the_problem_stays_after_space_is_freed_until_the_server_runs_with_more_
 
 
 @pytest.mark.parametrize(
-    ("capacity", "free", "where_it_ends"),
-    [(STORE_DISK, NEED + 100_000_000, " (the room warning on this page ends once 4.4 GB is free)"),
-     (4_100_000_000, 4_050_000_000, "")],  # the warning could not end on this disk
+    ("capacity", "free", "first"),
+    [(STORE_DISK, NEED + 100_000_000,
+      "The disk has enough free space again, but only just. Free more first, so the message server does not start "
+      f"short again as the disk's use moves (the room warning on this page ends once 4.4 GB is free), then {WHOLE_RESTART}"),
+     # The warning could not end on this disk (4 GB and 3% of 4.1 GB, rounded up), so freeing more first cannot
+     # be done: restart while there is enough.
+     (4_100_000_000, 4_050_000_000,
+      "The disk has enough free space again, but only just, and it is too small to keep a margin: the room warning "
+      "on this page ends only once 4.2 GB is free, more than the 4.1 GB it holds. Restart the whole instance (the "
+      "container, or ua start) now, while it has enough, then give the disk more space.")],
     ids=["margin-reachable", "disk-too-small-for-the-margin"],
 )
 def test_the_problem_asks_for_more_space_when_the_disk_has_only_just_enough(
-    tmp_path: Path, capacity: int, free: int, where_it_ends: str
+    tmp_path: Path, capacity: int, free: int, first: str
 ) -> None:
     store_disk, clock = _StoreDisk(free=GB, capacity=capacity), _Clock()
     capacity_check = _bundled(tmp_path, store_disk, clock, running=_RunningRoom(RESERVED))
@@ -741,10 +756,7 @@ def test_the_problem_asks_for_more_space_when_the_disk_has_only_just_enough(
 
     now, warning = _rooms(capacity_check)
 
-    assert now is not None and now.action == (
-        "The disk has enough free space again, but only just. Free more first, so the message server does not start "
-        f"short again as the disk's use moves{where_it_ends}, then {WHOLE_RESTART} {NOW_ENDS}"
-    )
+    assert now is not None and now.action == f"{first} {NOW_ENDS}"
     # The warning's band wording, while the server refuses: a start would give it room, it has none now.
     assert warning is not None
     assert "So a start now would give it enough room again for the streams it has" in warning.summary
@@ -1112,6 +1124,9 @@ def test_the_gateway_checks_the_room_only_where_the_launcher_named_the_bundled_s
     with caplog.at_level("INFO", logger="assistant_gateway.storage_capacity"):
         bundled = build_storage_capacity(config, env=bundled_env)
         other = build_storage_capacity(config, env={})
+        # Beside another server's address the folder is ignored with a warning, and no contradicting
+        # "not told" line follows it.
+        ignored = build_storage_capacity(config, env={**bundled_env, "NATS_URL": "nats://other.invalid:4222"})
     queues = config.transport.queues
     queues.max_bytes.partition += 1_000_000
     raised = build_storage_capacity(config, env=bundled_env)
@@ -1121,8 +1136,9 @@ def test_the_gateway_checks_the_room_only_where_the_launcher_named_the_bundled_s
     assert readable_bytes(bundled.message_store.team_set_aside) == "2.3 GB"
     assert raised.message_store is not None
     assert raised.message_store.team_set_aside == bundled.message_store.team_set_aside + queues.partitions * 1_000_000
-    assert other.message_store is None
+    assert other.message_store is None and ignored.message_store is None
     assert caplog.text.count("event=storage_room_not_checked") == 1  # once at start, not at every check
+    assert caplog.text.count("event=bundled_nats_marker_ignored") == 1
     # A team id the message contract does not accept: the room is not checked, and the gateway still starts.
     config.manager.team_id = "not one token"
     with caplog.at_level("WARNING", logger="assistant_gateway.storage_capacity"):

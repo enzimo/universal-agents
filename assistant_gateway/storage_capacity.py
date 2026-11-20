@@ -907,7 +907,9 @@ def running_room_finding(
     Freeing space does not end it: the server took its room when it last started, so only a
     start of the whole instance with enough free space (or streams removed) does. Its id stays
     the same while the level lasts. ``room`` is the store's disk now, None when it could not be
-    measured; the action names what to free first when the disk is still short.
+    measured; the action names what to free first when the disk is still short or only just
+    enough, and asks for a restart now when the disk is too small to keep the room warning's
+    margin, because freeing more first cannot be done there.
     """
 
     need = _free_needed(reserved)
@@ -930,15 +932,19 @@ def running_room_finding(
         )
     elif not room.short:  # above the line by less than the room warning's margin: a restart could start short
         ends_at = _rounded_up(room.release_at)
-        where_it_ends = (
-            f" (the room warning on this page ends once {readable_bytes(ends_at)} is free)"
-            if ends_at <= room.disk.capacity
-            else ""
-        )
-        first = (
-            "The disk has enough free space again, but only just. Free more first, so the message server does not "
-            f"start short again as the disk's use moves{where_it_ends}, then restart {_WHOLE_INSTANCE}."
-        )
+        if ends_at <= room.disk.capacity:
+            first = (
+                "The disk has enough free space again, but only just. Free more first, so the message server does "
+                "not start short again as the disk's use moves (the room warning on this page ends once "
+                f"{readable_bytes(ends_at)} is free), then restart {_WHOLE_INSTANCE}."
+            )
+        else:  # freeing all the disk holds would not reach the margin, so freeing first cannot be done
+            first = (
+                "The disk has enough free space again, but only just, and it is too small to keep a margin: the room "
+                f"warning on this page ends only once {readable_bytes(ends_at)} is free, more than the "
+                f"{readable_bytes(room.disk.capacity)} it holds. Restart {_WHOLE_INSTANCE} now, while it has enough, "
+                "then give the disk more space."
+            )
     elif (to_free := _to_free(room)) is not None:
         first = f"Free {readable_bytes(to_free)} on that disk, then restart {_WHOLE_INSTANCE}."
     else:
@@ -980,6 +986,8 @@ def _running_state(running: int | None, *, refusing: bool, with_team: int, team_
     streams fit: ``with_team`` is what the streams would set aside with them, and ``team_free``
     the free space a start of the whole instance needs for them (rounded up). Equality counts as
     not fitting: a team added at exactly the room would leave the server refusing everything new.
+    When the room and that total round to the same figure, it says how much is missing instead,
+    so the sentence never shows one figure as both enough and not enough.
     """
 
     if running is None:
@@ -995,10 +1003,18 @@ def _running_state(running: int | None, *, refusing: bool, with_team: int, team_
     taken = f"Running now, it has {readable_bytes(running)} of room, taken when it last started"
     if running > with_team:
         return f"{taken}: enough for the streams it has and for another team's, so it needs no restart."
+    if readable_bytes(running) != readable_bytes(with_team):
+        gap = f"they would bring what its streams set aside to {readable_bytes(with_team)}"
+    elif running < with_team:  # both round to the same figure: say what is missing instead of two equal figures
+        gap = (
+            f"it is {readable_bytes(with_team - running)} short of the {readable_bytes(with_team)} its streams would "
+            "then set aside"
+        )
+    else:
+        gap = "its streams would then set aside all of it"
     return (
-        f"{taken}: enough for the streams it has, but not for another team's too (they would bring what its streams "
-        f"set aside to {readable_bytes(with_team)}), so adding a team is refused until {_WHOLE_INSTANCE} starts with "
-        f"at least {readable_bytes(team_free)} free on that disk."
+        f"{taken}: enough for the streams it has, but not for another team's too ({gap}), so adding a team is "
+        f"refused until {_WHOLE_INSTANCE} starts with at least {readable_bytes(team_free)} free on that disk."
     )
 
 
@@ -1085,14 +1101,15 @@ def _bundled_message_store(config: Any, env: Mapping[str, str]) -> BundledMessag
     """
 
     # Imported here: the launcher's module is needed only to read its hand-off.
-    from docker.nats_service import bundled_nats_store_dir
+    from docker.nats_service import BUNDLED_NATS_STORE_DIR_ENV, bundled_nats_store_dir
 
     folder = bundled_nats_store_dir(env, logger=logger)
     if folder is None:
-        logger.info(
-            "The Status page does not check the message server's room: this gateway was not told where a bundled "
-            "NATS server keeps its store, so it uses another server. event=storage_room_not_checked"
-        )
+        if not str(env.get(BUNDLED_NATS_STORE_DIR_ENV) or "").strip():  # an ignored folder was warned about already
+            logger.info(
+                "The Status page does not check the message server's room: this gateway was not told where a "
+                "bundled NATS server keeps its store, so it uses another server. event=storage_room_not_checked"
+            )
         return None
     # Imported only now: the stream list comes from the contract's generated models, which cost
     # about half a second to import (queue_capacity imports them at its first check for the same reason).
