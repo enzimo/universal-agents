@@ -173,22 +173,26 @@ supported, because it may not read what a newer one saved.
     the upgrade, which only those records name, is listed too. The warning then says not to delete
     them if the folder was at another path under 0.9, before it gives the
     command.
-  - **`upload_dir` names a folder without the files.** When nothing is
-    left to list but gateway records or held guidance name files the
-    adapter host received in another folder (for example `upload_dir` was
-    changed to a new or empty folder while the files stayed where 0.9 kept
-    them), the upgrade logs one error with the same event
+  - **`upload_dir` names a folder without the files.** When gateway
+    records or held guidance name files the adapter host received in
+    another folder, and none of those files is left where `upload_dir`
+    points (for example `upload_dir` was changed during 0.9, or to a new or
+    empty folder, while the files stayed where 0.9 kept them), the upgrade
+    logs one error with the same event
     (`event=adapter_host_files_folder_moved`, with `recorded_elsewhere=`
     and the folders it may show) and keeps the count in the marker
-    (`recorded_elsewhere`). Those files were not moved, so the team cannot
-    open them. With the folder that holds them at the path the error names
-    (move or mount it there if it is not; a link does not work), set
-    `upload_dir` to that path, delete
+    (`recorded_elsewhere`). This also happens when the folder `upload_dir`
+    names holds other files no record names: those get the usual warning
+    and list beside this error, and the error is about other files. Those
+    files were not moved, so the team cannot open them. With the folder
+    that holds them at the path the error names (move or mount it there if
+    it is not; a link does not work), set `upload_dir` to that path, delete
     `state/upgrades/adapter-host-files.json` and restart. Moving the folder
     to where `upload_dir` points does not work: the upgrade finds files by
     the path their records name. If those files are gone, nothing more is
-    needed. Conversation records and copies sent to people do not count
-    here, so a normal instance gets no such error.
+    needed. Conversation records, copies sent to people and records of
+    files already inside `state/uploads` (where agents open files) do not
+    count here, so a normal instance gets no such error.
   - **The files could not be counted**: the warning
     `event=adapter_host_files_without_records_uncounted` gives the reason
     (a folder that cannot be listed, or one replaced during the upgrade).
@@ -197,9 +201,10 @@ supported, because it may not read what a newer one saved.
     not finish (`reason=other_folders_unchecked`), nothing is listed and
     no command is given: do not delete any of them; delete
     `state/upgrades/adapter-host-files.json` and restart to check again.
-    When nothing was left to list and that check did not finish, the
-    warning is `event=adapter_host_files_other_folders_unchecked`; delete
-    the marker and restart to check again.
+    When the listed files were checked (or nothing was left to list) and
+    only the check for other files recorded in another folder did not
+    finish, the warning is `event=adapter_host_files_other_folders_unchecked`
+    and any list stands; delete the marker and restart to check again.
   - **The transfer folder is not here.** It belongs to the gateway: 0.9
     wrote it on the gateway's machine, also when the adapter host ran
     elsewhere. It is missing when it was not copied or mounted with the

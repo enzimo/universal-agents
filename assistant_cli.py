@@ -2643,12 +2643,15 @@ def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
     When records in another folder name files left in the transfer folder,
     that folder was most likely at another path under 0.9.13: the step gives
     no list and no delete command, and this says so with how to still move
-    the files a gateway record names (``_print_folder_moved``). When nothing
-    is left to list but records of receiving name files in another folder,
-    this says so with the same steps (DI-1 of PR #168's review). When the
-    check for such records did not finish, this says the files were
-    counted, that none may be deleted and how to check again, rather than
-    that they could not be counted (GEN-1 of that review). A
+    the files a gateway record names (``_print_folder_moved``). When no
+    listed file is named there but records of receiving name other files
+    in another folder, this says so with the same steps, beside the line
+    for the listed files when there are any (DI-1 of PR #168's review, C12
+    of its fix round). When the check of the listed files did not finish,
+    this says the files were counted, that none may be deleted and how to
+    check again, rather than that they could not be counted (GEN-1 of that
+    review); when only the later count did not finish, it says how to check
+    again. A
     ``--files-gone`` run reports them the same way; it never changes records
     that name another folder.
     """
@@ -2711,8 +2714,11 @@ def _print_folder_moved(elsewhere: NamedElsewhere, *, left: int | None = None) -
     """The operator's line for files records name in another folder (``NamedElsewhere``); the log has the folder.
 
     ``left`` is the count of files left in the transfer folder when listed
-    ones are named elsewhere; None when nothing was listed and records of
-    receiving name files in another folder (DI-1 of PR #168's review). Only
+    ones are named elsewhere; None when no listed file is named there and
+    gateway records or held guidance name other files in another folder
+    (DI-1 of PR #168's review). That line starts as the log's error does,
+    naming both kinds of record, because a held copy alone is no gateway
+    record of receiving (C14 of its fix round). Only
     a file a gateway record of receiving it names can move, so the steps are
     given for those alone (C05 of F7 of PR #154's review); a gateway record
     of a copy sent to a person is not one (SEC-1 of PR #168's review), and
@@ -2727,9 +2733,9 @@ def _print_folder_moved(elsewhere: NamedElsewhere, *, left: int | None = None) -
     nothing = "Nothing is listed and no delete command is given: do not delete any of them; the team cannot open them."
     if left is None:
         text = (
-            f"Records of receiving name {elsewhere.names} file(s) of the adapter host's chat apps in another folder, "
-            "and none of them is left in the transfer folder, so it was most likely at another path under 0.9.13: "
-            "they were not moved, and the team cannot open them."
+            f"Gateway records or held guidance name {elsewhere.names} file(s) of the adapter host's chat apps in "
+            "another folder, and none of them is left in the transfer folder, so the transfer folder was most likely "
+            "at another path when 0.9 received them: they were not moved, and the team cannot open them."
         )
         put = "with the folder that holds them at"
     elif elsewhere.received_elsewhere:

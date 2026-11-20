@@ -5004,17 +5004,23 @@ the desktop app never offers an older version.
   record. Only the run that writes the marker reports, so the count is said
   once; a run that stops part way never counts, and the run that finishes
   it does.
-  When nothing is listed, `upload_dir` may name a folder holding none of
-  the files (empty, new or missing) while 0.9.13's records name the folder
-  they are in; nothing waits and nothing is listed, so the step used to
-  finish silently and the files never moved (DI-1 of the review of
-  PR #168). The run that writes the marker therefore runs the same gateway
-  scan for any name of the gateway's form and counts gateway records of
-  receiving and held guidance copies in another folder. It reads no
-  conversation turns, because with nothing to protect an agent-written turn
-  must not raise an upgrade error, and counts no copy sent to a person,
+  `upload_dir` may name a folder holding none of the files (empty, new,
+  missing, or holding only files no record names, for example after
+  `upload_dir` was changed during 0.9) while 0.9's records name the folder
+  they are in; nothing waits there, so the step used to finish without a
+  word about them, or with only a list of an unrelated file, and they never
+  moved (DI-1 of the review of PR #168, and C12 of its fix round). So when
+  no listed name is named in another folder (nothing is listed, or the
+  listed names matched nothing), the run that writes the marker runs the
+  same gateway scan for any name of the gateway's form and counts gateway
+  records of receiving and held guidance copies in another folder; no
+  listed name is among them then, so this report and the usual warning are
+  both true. It reads no conversation turns, because an agent-written turn
+  must not raise an upgrade error, counts no copy sent to a person,
   because an agent may send a file back under its generated name on any
-  instance. A normal instance has none: the default `upload_dir` was the
+  instance, and counts no record inside `state/uploads`, whose file is
+  already where agents open it (an operator may have kept the transfer
+  folder there under 0.9; C13 of that fix round). A normal instance has none: the default `upload_dir` was the
   same in every 0.9 version, no 0.9 clean-up deletes a transfer file and
   keeps its record (upload retention deletes only records under
   `state/uploads`, a person's removal deletes records), and moved files get
@@ -5027,7 +5033,8 @@ the desktop app never offers an older version.
   block on a dead mount, so a record whose folder was deleted under 0.9
   counts too. The count goes to the marker's own field
   (`recorded_elsewhere`), because `named_elsewhere` counts listed names. A
-  database error there keeps the count, since nothing is listed, and logs
+  database error there keeps the count and any list, since the listed names
+  were already checked, and logs
   `event=adapter_host_files_other_folders_unchecked`; the operator command
   tells both failed checks apart from an uncounted folder
   (`UpgradeResult.other_folders_unchecked`).

@@ -664,9 +664,9 @@ class InstanceLayout:
         (``instance_upgrades.adapter_host_files``) writes this file, with its
         finish time, its counts, the id of the list its run wrote
         (``adapter_host_files_without_records_path``), how many listed files
-        records name in another folder (``named_elsewhere``) and, when
-        nothing was listed, how many files records of receiving name there
-        (``recorded_elsewhere``), once every file was handled, and the
+        records name in another folder (``named_elsewhere``) and, when no
+        listed file was named there, how many other files records of
+        receiving name there (``recorded_elsewhere``), once every file was handled, and the
         launcher runs the step only while it is missing.
         Under ``state/``, so no agent tool or sandboxed code can reach it."""
 
