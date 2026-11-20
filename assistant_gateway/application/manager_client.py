@@ -117,6 +117,9 @@ class GatewayManagerClient:
         self._write_manager_route = write_manager_route
         self._trace_enabled = trace_enabled or (lambda: False)
         self._manager_id = settings.initial_manager_id
+        # Whether team records the lead follower read named the routed lead (``lead_from_records``); a saved
+        # route from the previous run is not, until the records are read.
+        self._lead_from_records = False
         self._lifecycle_connected = False
         self._manager_status_lock = asyncio.Lock()
         # A schedule action keeps its originating request's correlation.
@@ -143,6 +146,18 @@ class GatewayManagerClient:
         """Return the current live manager route, if one is known."""
 
         return self._manager_id
+
+    @property
+    def lead_from_records(self) -> bool:
+        """Whether team records the lead follower read named the lead chats go to now.
+
+        Set by ``set_lead``, ``confirm_lead`` and ``note_lead_from_records``; cleared by
+        ``mark_manager_unavailable`` and ``forget_lead_from_records`` (records unread, or a refused join). With a
+        team view, setup results kept for the team lead go only while it holds
+        (``tool_setup.GatewayToolSetups``): a route saved by the previous run may name a lead that is gone.
+        """
+
+        return self._lead_from_records
 
     @property
     def connected(self) -> bool:
@@ -585,6 +600,8 @@ class GatewayManagerClient:
 
         async with self._manager_status_lock:
             previous = self._manager_id
+            # The follower names a lead only from records it read; set before the transition sends kept results.
+            self._lead_from_records = True
             if previous == lead_id:
                 return
             await self._set_manager_id_locked(lead_id)
@@ -622,6 +639,8 @@ class GatewayManagerClient:
 
         async with self._manager_status_lock:
             routed = self._manager_id
+            if routed == lead_id:
+                self._lead_from_records = True
         if routed != lead_id:
             self._logger.info(
                 "The team's records confirmed a lead the gateway no longer routes to; nothing to do. "
@@ -648,6 +667,24 @@ class GatewayManagerClient:
                 reason="the team's records confirm the routed team lead",
             ),
         )
+
+    async def note_lead_from_records(self, lead_id: str) -> None:
+        """The follower's start decision: records it read name ``lead_id``, the lead chats already go to.
+
+        Only ``lead_from_records`` is set, with no handler: the gateway's transitions do not run yet, and the
+        follower's first regular check confirms the lead and sends the kept results (``confirm_lead``).
+        """
+
+        async with self._manager_status_lock:
+            if self._manager_id == lead_id:
+                self._lead_from_records = True
+
+    async def forget_lead_from_records(self) -> None:
+        """The team's records are not read, or the gateway's join was refused: the route keeps its lead (chats may
+        still reach it), but no record names it now, so kept setup results wait (``lead_from_records``)."""
+
+        async with self._manager_status_lock:
+            self._lead_from_records = False
 
     async def mark_manager_unavailable(
         self,
@@ -679,6 +716,7 @@ class GatewayManagerClient:
                 return
             if current_manager_id is None:
                 return
+            self._lead_from_records = False
             await self._set_manager_id_locked(None)
 
         self._logger.warning(

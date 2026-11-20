@@ -31,6 +31,7 @@ from custom_messages.contracts.control_v1 import AgentStatus
 from custom_transport.protocol1.host_runtime import MessageHost
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
+from tests.test_gateway_team_view import _bound_handlers
 from tests.test_live_agent_controls import stand_in
 from tests.test_live_team_services import TEAM, broker, connect, installation  # noqa: F401 - broker is a fixture
 
@@ -297,18 +298,21 @@ async def _running_gateway(stack: AsyncExitStack, config, transitions: list):
                           manager_runtime=NatsGatewayManagerRuntime.for_gateway_service(config))
     assert gateway._team_view is not None  # the gateway service's runtime has the message host
 
+    # The recorders call the handlers the gateway itself bound (_bind_manager_client), so a wrong binding fails
+    # these tests (review finding F2).
+    bound = _bound_handlers(gateway)
+
     async def available(transition) -> None:
         transitions.append(("available", transition.manager_id, transition.became_available))
-        await gateway.manager_transitions.handle_available(transition)
+        await bound.on_manager_available(transition)
 
     async def unavailable(transition) -> None:
         transitions.append(("unavailable", transition.manager_id))
-        await gateway.manager_transitions.handle_unavailable(transition)
+        await bound.on_manager_unavailable(transition)
 
     gateway._manager_client.bind_inbound_handlers(
-        on_unsolicited=gateway.inbound_messages.handle, on_manager_available=available,
-        on_manager_unavailable=unavailable, on_lead_confirmed=gateway.manager_transitions.handle_lead_confirmed,
-        on_leftover_lost=gateway._response_coordinator.fail_lost_credential_request)
+        on_unsolicited=bound.on_unsolicited, on_manager_available=available, on_manager_unavailable=unavailable,
+        on_lead_confirmed=bound.on_lead_confirmed, on_leftover_lost=bound.on_leftover_lost)
     stack.push_async_callback(gateway.close)
     await gateway.connect(start_services=False)
     return gateway

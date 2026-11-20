@@ -280,6 +280,40 @@ async def test_an_unavailable_lead_that_finishes_its_tasks_keeps_the_waiting_rep
 
 
 @pytest.mark.asyncio
+async def test_a_saved_route_is_named_by_the_records_only_when_the_follower_says_so() -> None:
+    """Review finding F1: kept setup results go only to a lead the team's records named (``lead_from_records``). A
+    route saved by the previous run is not one; set_lead, confirm_lead and the start note set it, before any handler
+    runs; an unavailable route and unread records clear it."""
+
+    seen_by_handlers: list[tuple[str, bool]] = []
+    client: GatewayManagerClient
+
+    def recorder(kind: str):
+        return lambda transition: seen_by_handlers.append((kind, client.lead_from_records))
+
+    client = GatewayManagerClient(
+        settings=_settings(manager_id="lead_saved"), id_generator=_FixedIds(),
+        logger=logging.getLogger("test.gateway.manager_client"), runtime=_FakeManagerRuntime(),
+        on_manager_available=recorder("available"), on_manager_unavailable=recorder("unavailable"),
+        on_lead_confirmed=recorder("confirmed"))
+    assert not client.lead_from_records
+
+    await client.note_lead_from_records("lead_other")  # Not the routed lead.
+    assert not client.lead_from_records
+    await client.note_lead_from_records("lead_saved")
+    assert client.lead_from_records and seen_by_handlers == []  # The start note sends nothing.
+
+    await client.forget_lead_from_records()  # Records unread: the route stays, unnamed.
+    assert not client.lead_from_records and client.manager_id == "lead_saved"
+    await client.confirm_lead("lead_saved", source="agent_records")
+    await client.mark_manager_unavailable(expected_manager_id="lead_saved", reason="it left", source="agent_records")
+    assert not client.lead_from_records
+    await client.set_lead("lead_new", source="agent_records")
+    assert client.lead_from_records
+    assert seen_by_handlers == [("confirmed", True), ("unavailable", False), ("available", True)]
+
+
+@pytest.mark.asyncio
 async def test_a_route_that_cannot_be_saved_still_changes_and_its_transition_runs(caplog) -> None:
     """Critique C03: the route in memory rules while the gateway runs; a failed save must not skip the transition,
     or the lead follower would see nothing left to repair."""

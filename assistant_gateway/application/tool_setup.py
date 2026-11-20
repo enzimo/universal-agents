@@ -48,7 +48,11 @@ results are sent on every team-lead-available transition and whenever the
 team's records confirm the lead chats already go to (``manager_transitions``,
 from the lead follower, ``team_view.TeamLeadFollower``), at start by a
 gateway without a team view, and, after a failed publish while a lead is known,
-by a retry with backoff; one pass at a time sends them, oldest first. A
+by a retry with backoff; one pass at a time sends them, oldest first. With a
+team view they go only to a lead that team records the follower read named
+(``lead_from_records``): until then a pass, a page's ending included, keeps
+them and stops with no retry, because a route saved by the previous run may
+name a lead that is gone. A
 result that can never be sent (its chat no longer exists, or the kept copy
 cannot be read) is marked ``unsendable`` and logged once. Rationale (review
 of the 2026-11-14 incident fixes): the record was marked finished before the
@@ -416,9 +420,14 @@ class GatewayToolSetups:
         states: ToolSetupStates | None = None,
         team_id: str = "",
         event_output: GatewayEventOutput | None = None,
+        lead_from_records: Callable[[], bool] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._assistant = assistant_display_name
+        # With a team view: whether team records the lead follower read name the routed lead
+        # (GatewayManagerClient.lead_from_records). Kept results are sent only then, because a route saved by the
+        # previous run may name a lead that is gone. None without a team view: the saved route is used as it is.
+        self._lead_from_records = lead_from_records
         # People's last known tool setup states; a finished setup makes the tool ready.
         self._states = states
         self._team_id = team_id
@@ -1275,6 +1284,16 @@ class GatewayToolSetups:
     async def _send_kept(self, record: ToolSetupRecord) -> SendOutcome | None:
         """Send one kept result; None when it can never be sent (marked, logged once)."""
 
+        if self._lead_from_records is not None and not self._lead_from_records():
+            # Stops the pass with no retry: the lead follower's transition or confirmation sends the kept results
+            # once read records name the lead (team_view.TeamLeadFollower).
+            self._logger.info(
+                "Kept setup page results wait until the team's records name the team lead. "
+                "event=gateway_tool_setup_resend_waits_for_records setup_request_id=%s task_id=%s",
+                record.setup_request_id,
+                record.parent_task_id,
+            )
+            return SendOutcome.LEAD_NOT_FROM_RECORDS
         try:
             result = ToolSetupResultV1.model_validate_json(record.result_json or "")
         except ValidationError:

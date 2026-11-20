@@ -3162,11 +3162,23 @@ person which command to run or asking whether to start:
    the lead follower sends what is still kept. The start decision itself
    sends nothing: the gateway starts its transitions after it, so the
    follower's first regular check (within 5 seconds) confirms the lead it
-   set or kept at start and sends them. While the team's records are not
-   read yet the follower keeps the saved route and nothing confirms it
-   (`event=gateway_tool_setup_resend_deferred` at start); a gateway without
-   a team view, which uses its saved route as it is, sends them at start
-   instead. One pass at a time sends them, oldest first, and
+   set or kept at start and sends them. With a team view, kept results go
+   only to a lead that records the follower read named
+   (`GatewayManagerClient.lead_from_records`, set by `set_lead`,
+   `confirm_lead` and the start decision's `note_lead_from_records`,
+   cleared while the records are not read, on a refused join and when the
+   route is cleared). While the team's records are not read yet the follower
+   keeps the saved route, which chats may still reach
+   (`event=gateway_tool_setup_resend_deferred` at start), but no kept result
+   goes to it, not even when a page ends, including start-up page recovery:
+   the previous run's lead may be gone. Such a pass stops with no retry
+   (`event=gateway_tool_setup_resend_waits_for_records`,
+   `reason=lead_not_from_records`), and the follower's transition or
+   confirmation sends the results once the records name the lead. A start
+   decision from read records notes that they name the lead without
+   sending, so a page that ends at start sends its result at once. A
+   gateway without a team view, which uses its saved route as it is, sends
+   them at start instead. One pass at a time sends them, oldest first, and
    reads them afresh, so a result is never sent from two places at once; a
    missing lead or a failed publish stops the pass, while an error on one
    result is logged (`event=gateway_tool_setup_resend_failed`) and the pass
@@ -3175,12 +3187,11 @@ person which command to run or asking whether to start:
    (`event=gateway_tool_setup_result_unsendable`). The stored result leaves out
    the broker session id, which for an account link is the form's bearer. A
    result is "sent" once it is accepted into the queue of the lead known
-   then, and nothing sends it again. Three cases can still lose it, as they
+   then, and nothing sends it again. Two cases can still lose it, as they
    can lose any message the gateway sends then: a lead that stops before the
-   gateway sees it leave the team's records (at most about 35 seconds); a
-   page that ends while the records are not read yet at start, whose result
-   goes to the saved route of the previous run; and, while a lead on another
-   message contract drains, a result for a task it still holds, which goes
+   gateway sees it leave the team's records (at most about 35 seconds); and,
+   while a lead on another message contract drains, a result for a task it
+   still holds, which goes
    to the new lead the chats go to: that lead does not hold the task, so it
    tells the person to send a new message, while the draining lead's own
    setup-run recovery continues the task (`resume_ended_setup_runs`). Moving

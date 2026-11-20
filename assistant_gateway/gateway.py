@@ -1170,6 +1170,8 @@ class UserGateway:
             request_service=self._request_service,
             clock=self._clock,
             event_output=self._event_output,
+            # With a team view the route is the lead follower's (TeamLeadFollower); without one, the saved route.
+            kept_results_wait_for_records=self._team_view is not None,
             logger=logger,
         )
         # An approved access proposal opens its account link forms for the
