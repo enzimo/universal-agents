@@ -191,8 +191,14 @@ each. They run in parallel on as many workers as the team allows:
 - **The team lead removes what earlier releases left**
   (`custom_agents/worker_consumer_cleanup.py`): once when it starts, before it
   creates its own consumers and before its schedule loop, scheduler loop (with
-  the takeover of dead workers' work) or any message can start a worker, then
-  hourly while the last sweep kept leftovers whose owner may still run. It
+  the takeover of dead workers' work) or any message can start a worker. A full
+  stream refuses the lead's own mailbox too, so without that sweep the lead
+  could not start. Then hourly while the last sweep kept leftovers whose owner
+  may still run: one that still had a request open or a fresh heartbeat is
+  removed once that ends. Leftovers whose start record names a run that cannot
+  be checked (no proven run, so the record stays active) are never judged gone;
+  the launcher's removal step or the offline script removes them with the
+  runtime stopped, and until then the hourly sweep keeps finding them. It
   removes lasting mailbox and control consumers, push-era ones
   (`consumer-lifecycle-v1`, 2026-09-13 to 2026-10-05) included, whose owner is
   not configured (the lead itself and `agent.agent_id`), has no request open

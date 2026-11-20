@@ -18,13 +18,21 @@ the ones earlier versions left.
 When: once when the team lead starts, before it creates its own consumers and
 before its schedule loop, scheduler loop (with the takeover of a dead worker's
 work) or any message can start a worker (``UniversalAgent._connect_nats``,
-``sweep_worker_consumers_at_start``). A full stream would otherwise refuse
-those first starts. Then again every ``RESWEEP_SECONDS`` from the lead's
-schedule loop, before that pass starts workers, for as long as the last sweep
-kept lasting consumers of owners that are neither configured nor gone (whose
-records settle later), and ``RETRY_SECONDS`` after a sweep failed
-(``sweep_worker_consumers_if_due``). Nothing creates lasting consumers for
-such owners any more, so the repeats end.
+``sweep_worker_consumers_at_start``). A full stream refuses the lead's own
+mailbox as well as every worker's, so without this sweep the lead could not
+start at all. Then again every ``RESWEEP_SECONDS`` from the lead's schedule
+loop, before that pass starts workers, while the last sweep kept lasting
+consumers of owners that are neither configured nor gone, and
+``RETRY_SECONDS`` after a sweep failed (``sweep_worker_consumers_if_due``).
+
+A later sweep removes what an earlier one kept because its owner still had a
+request open, reported a fresh heartbeat without a start record, or was judged
+while heartbeat checks were paused; each clears within minutes. It never
+removes leftovers whose start record names a run that cannot be checked from
+here (``inspect_launch`` answers ``unknown`` when the run is not proven, and
+that record stays active until it is removed): those stay, and the sweep keeps
+repeating hourly, until the launcher's removal step or the offline script
+(``scripts/reconcile_nats_consumers.py``) deletes them with the runtime stopped.
 
 Which lasting (route) mailbox and control consumers it removes
 (``NatsTransportAdapter.agent_consumers``): those whose owner
@@ -85,9 +93,10 @@ logger = logging.getLogger(__name__)
 # How long a failed sweep waits before the team lead tries again.
 RETRY_SECONDS = 300.0
 # How long the team lead waits before sweeping again while the last sweep kept
-# lasting consumers of owners that are neither configured nor gone. Fixed:
-# they are mostly the workers that ran when the previous process stopped, whose
-# start records settle within minutes, and a sweep costs a few NATS requests.
+# lasting consumers of owners that are neither configured nor gone. Fixed: what
+# a later sweep can still remove clears within minutes (a request that ended,
+# a heartbeat that went stale), and owners it can never judge would otherwise
+# cost a listing more often; an hourly sweep is a few NATS requests.
 RESWEEP_SECONDS = 3600.0
 # Why the consumers were deleted (``event=nats_agent_consumer_deleted reason=``).
 GONE_WORKER_REASON = "started_worker_gone"
