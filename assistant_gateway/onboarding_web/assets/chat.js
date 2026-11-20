@@ -33,6 +33,7 @@ import {
 } from "./chat_thread_list.mjs";
 import { THREAD_MENU_ACTION, attachThreadMenuTriggers, createThreadMenu } from "./chat_thread_menu.mjs";
 import { createThreadPreview } from "./chat_thread_preview.mjs";
+import { THREAD_CHANGE_DONE, TRY_AGAIN, createThreadListStatus } from "./chat_thread_status.mjs";
 
 function mountPage() {
 "use strict";
@@ -244,6 +245,17 @@ shellState.threadMenu = createThreadMenu({
     if (button) button.focus();
   },
 });
+// What happened to a change made from a thread's menu (chat_thread_status.mjs).
+shellState.threadListStatus = createThreadListStatus({
+  document, lifecycle,
+  element: document.getElementById("thread-list-status"),
+  // Close and Retry vanish with the message; focus goes to the open chat's row.
+  restoreFocus: () => {
+    var thread = activeThread();
+    var button = thread ? threadRowButton(thread.sessionKey) : null;
+    (button && !button.closest("[hidden]") ? button : sharedState.newThreadButton).focus();
+  },
+});
 // A mouse resting on a row previews the thread's last turns (chat_thread_preview.mjs).
 shellState.threadPreview = createThreadPreview({
   document, window, lifecycle, requestClient,
@@ -336,13 +348,11 @@ sharedState.asyncEventCursor = "";
 sharedState.threadsRevision = "";
 
 shellState.SYSTEM_ERROR_SOURCE = Object.freeze({
-    ARCHIVE_THREAD: "archive_thread",
     CREATE_THREAD: "create_thread",
     FETCH_SESSIONS: "fetch_sessions",
     HYDRATE_THREAD: "hydrate_thread",
     OPEN_SETTINGS: "open_settings",
     RENAME_THREAD: "rename_thread",
-    THREAD_PLACEMENT: "thread_placement",
   });
 
 sharedState.historyHydrationError = null;
@@ -912,24 +922,27 @@ function archiveThread(threadId) {
         throw new Error("Chat sign-in changed while deleting the chat.");
       }
     };
+    var named = quotedThreadTitle(archivedThread);
+    var refused = false;
     requestClient.fetch(
       "/api/web-chat/sessions/" + encodeURIComponent(archivedThread.sessionKey) + "/archive",
       { method: "POST", credentials: "same-origin" }
     ).then(function (response) {
-      return parseApiResponse(response, "Archive failed.", current);
+      // 4xx: the gateway looked at the delete and turned it down.
+      refused = response.status >= 400 && response.status < 500;
+      return parseApiResponse(response, TRY_AGAIN, current);
     }).then(function () {
-      clearSystemError(archivedThread, shellState.SYSTEM_ERROR_SOURCE.ARCHIVE_THREAD);
       removeArchivedThread(threadId);
+      shellState.threadListStatus.announce(THREAD_CHANGE_DONE[THREAD_MENU_ACTION.DELETE] + " " + named + ".");
     }).catch(function (error) {
       if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) {
         return;
       }
-      appendSystemError(
-        archivedThread,
-        shellState.SYSTEM_ERROR_SOURCE.ARCHIVE_THREAD,
-        error.message || "Archive failed."
+      // Shown beside the list, in view, with Retry only when it can help (review F5).
+      shellState.threadListStatus.fail(
+        named + " was not deleted. " + (refused ? error.message : TRY_AGAIN),
+        { retry: refused ? null : function () { archiveThread(threadId); } },
       );
-      renderMessages();
     });
   }
 
@@ -2062,8 +2075,10 @@ function clearThreadListOverlays() {
     shellState.threadMenu.close({ restoreFocus: false });
     shellState.threadPreview.clear();
     sharedState.renameDraft = null;
-    // Changes still waiting belong to the person who signed out.
+    // Changes still waiting, and what the status line says, belong to the
+    // person who signed out (review F3).
     shellState.placementChains = new Map();
+    shellState.threadListStatus.clear();
   }
 
 function cancelThreadRename() {
@@ -2239,7 +2254,7 @@ function runThreadPlacement(thread, action, extra, authGeneration) {
     var current = function () {
       return sharedState.authSessionActive && sharedState.authSessionGeneration === authGeneration;
     };
-    var named = thread.id === sharedState.activeThreadId ? "This chat" : "\u201c" + fullThreadTitle(thread) + "\u201d";
+    var named = quotedThreadTitle(thread);
     var needsSeen = action === THREAD_MENU_ACTION.SNOOZE || action === THREAD_MENU_ACTION.DISMISS;
     var listed = threadForSession(sessionKey);
     var ready = needsSeen && listed && !listed.hasServerRow ? fetchSessions() : Promise.resolve();
@@ -2255,7 +2270,7 @@ function runThreadPlacement(thread, action, extra, authGeneration) {
         if (!current()) {
           return false;
         }
-        clearSystemError(null, shellState.SYSTEM_ERROR_SOURCE.THREAD_PLACEMENT);
+        shellState.threadListStatus.announce(THREAD_CHANGE_DONE[action] + " " + named + ".");
         return fetchSessions({ fresh: true }).then(function () { return true; });
       });
     }).catch(function (error) {
@@ -2264,13 +2279,18 @@ function runThreadPlacement(thread, action, extra, authGeneration) {
       }
       // The gateway's refusal says why, and repeating it cannot help; a
       // request that did not get through gets Retry for the same change.
+      // Shown beside the list, in view and announced (review F5).
       var refused = Boolean(error.refused);
-      appendSystemError(null, shellState.SYSTEM_ERROR_SOURCE.THREAD_PLACEMENT,
-        named + " was not moved. " + (refused ? error.message : "Try again."),
-        refused ? null : function () { return changeThreadPlacement(threadForSession(sessionKey) || thread, action, extra); });
-      renderMessages();
+      shellState.threadListStatus.fail(named + " was not moved. " + (refused ? error.message : TRY_AGAIN), {
+        retry: refused ? null : function () { return changeThreadPlacement(threadForSession(sessionKey) || thread, action, extra); },
+      });
       return false;
     });
+  }
+
+// A chat's full name in quotes, as the status line names it.
+function quotedThreadTitle(thread) {
+    return "\u201c" + fullThreadTitle(thread) + "\u201d";
   }
 
 // One placement request; rejects with the gateway's reason when refused.
@@ -2308,7 +2328,7 @@ function placementRefusal(text) {
         reason = "";
       }
     }
-    return reason || "Try again.";
+    return reason || TRY_AGAIN;
   }
 
 // The unsaved "New Chat" row: selected, with no rename or archive, since

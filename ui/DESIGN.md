@@ -1862,6 +1862,15 @@ its history. Steps with linked requests cannot use this correction.
   the archive behaviour: it hides the thread without deleting its messages.
   While renaming, the row shows the name field with Save and Cancel icons;
   Enter saves and Escape cancels.
+- What happened to a change from the menu shows in one line above the list,
+  outside the part that scrolls (`chat_thread_status.mjs`, review F5): a
+  polite live region present from page load. A failure names the chat in
+  quotes and says why, in the danger colour inside a thin rounded border,
+  with **Retry** only when the request did not get through (a refusal
+  cannot be fixed by repeating it) and **Close**; no timer clears it, and
+  signing out does. A change that worked is announced in visually hidden
+  text ("Dismissed “Check the backups”.") and takes no room. Failures are
+  never shown in the open chat: the person was working in the list.
 - A mouse resting on a row for about 400 ms shows a hover card beside it
   (`chat_thread_preview.mjs`): the title and "last message 1d ago", the last
   four turns with who and when, each cut to two lines, and the turn count.

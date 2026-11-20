@@ -382,7 +382,7 @@ If sending fails, the thread keeps its Run concurrently setting; change it
 first if you want, then use **Retry** beside the failed message to resend the
 same request without creating another one. You can send other messages first;
 each failed message keeps its own Retry. Retry retains the original files and
-destination until that message is accepted, you sign out, archive its chat,
+destination until that message is accepted, you sign out, delete its chat,
 or close the page.
 
 It loads the active thread's newest 50 messages; other threads load when selected. Scroll
@@ -396,7 +396,7 @@ seconds. User actions still use authenticated HTTP requests.
 Messages accepted on one device reappear on another device signed in as the same
 canonical user, and Website process restarts do not erase them. The thread list
 also stays in step across devices within about two seconds: a thread renamed,
-archived or started on one device updates on the others, and the pulsing dot
+deleted or started on one device updates on the others, and the pulsing dot
 shows on every device while the agent is working on a reply. Use a message
 bubble's copy icon to copy that message's raw markdown or text. Each
 canonical user sees only their own server sessions and durable
@@ -457,8 +457,8 @@ chat; with a keyboard, press the menu key or Shift+F10 on the chat. The menu
 has:
 
 - **Pin to top** or **Unpin**.
-- **Snooze**: hide the chat for 1 hour, until this evening, until tomorrow
-  morning, until next week, or until a time you pick. It comes back at that
+- **Snooze**: hide the chat for 1 hour, until this evening, until tomorrow,
+  until next week, or until a time you pick. It comes back at that
   time, or earlier if the team posts in it. A chat that comes back shows a
   **Woke** mark until you open it.
 - **Dismiss**: hide the chat until something new is posted in it, by the team
@@ -472,6 +472,10 @@ device you sign in on shows the same list. The list holds your 100 most recent
 chats, pinned ones first; snoozed and dismissed chats count toward the 100.
 Where you put a chat (pinned, snoozed or dismissed) is not carried to a new
 instance by `/upgrade`; see [Team transfer](team-transfer.md) for what is.
+
+If a change from the menu does not go through, a red line above the list says
+which chat was not moved or deleted and why. It offers **Retry** when trying
+again can help, and stays until you close it.
 
 With a mouse, rest the pointer on a chat for a moment to see its last four
 messages and how many messages it has, without opening it.

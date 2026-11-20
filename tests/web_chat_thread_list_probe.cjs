@@ -136,6 +136,47 @@ function inView(page) {
     assert.deepEqual(wide.errors, []);
     await wide.context.close();
 
+    // F5: a change that fails is shown in the live status line beside the
+    // list, in view while the open chat is scrolled to its end; Retry only
+    // when the request did not get through, none for a refusal.
+    const failing = await openChat(browser, baseUrl, { width: 1280, height: 880 });
+    const statusLine = () => failing.page.evaluate(() => {
+      const line = document.querySelector("#thread-list-status");
+      const box = line.getBoundingClientRect();
+      return {
+        role: line.getAttribute("role"),
+        live: line.getAttribute("aria-live"),
+        text: line.querySelector(".thread-list-status-text")?.textContent || "",
+        buttons: [...line.querySelectorAll("button")].map(button => button.textContent),
+        inView: box.height > 0 && box.top >= 0 && box.bottom <= innerHeight,
+        inChat: document.querySelector("#message-list").textContent.includes("was not moved"),
+      };
+    });
+    const pinOnboarding = async () => {
+      await failing.page.evaluate(() => { const list = document.querySelector("#message-list"); list.scrollTop = list.scrollHeight; });
+      await failing.page.click('.thread-row[data-session-key="website:web-chat:onboarding"] .thread-button', { button: "right" });
+      await failing.page.click('.thread-menu-item:has-text("Pin to top")');
+      await failing.page.waitForSelector("#thread-list-status.is-error");
+    };
+    await failing.page.route("**/api/web-chat/sessions/*", route => (
+      route.request().method() === "PATCH" ? route.abort("failed") : route.continue()));
+    await pinOnboarding();
+    const offline = await statusLine();
+    assert.deepEqual(offline, { role: "status", live: "polite", text: "\u201cDraft onboarding email for new hires\u201d was not moved. Try again.",
+      buttons: ["Retry", "Close"], inView: true, inChat: false }, JSON.stringify(offline));
+    await failing.page.click('#thread-list-status button:has-text("Close")');
+    await failing.page.unroute("**/api/web-chat/sessions/*");
+    await failing.page.route("**/api/web-chat/sessions/*", route => (
+      route.request().method() === "PATCH" ? route.fulfill({ status: 400, body: "Thread not found." }) : route.continue()));
+    await pinOnboarding();
+    const refused = await statusLine();
+    assert.deepEqual([refused.text, refused.buttons, refused.inView], [
+      "\u201cDraft onboarding email for new hires\u201d was not moved. Thread not found.", ["Close"], true]);
+    await failing.page.screenshot({ path: path.join(shots, "thread-status-failure.png") });
+    assert.deepEqual(failing.errors, []);
+    checked.push("status line: a failed pin shows in view beside the list, role status, Retry only when it did not get through");
+    await failing.context.close();
+
     // Narrow screens (C22) with touch: rows in view, a long press opens the
     // menu, and touch never shows the hover card.
     const narrow = await openChat(browser, baseUrl, { width: 390, height: 844 }, { hasTouch: true, isMobile: true });

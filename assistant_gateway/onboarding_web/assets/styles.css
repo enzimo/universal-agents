@@ -5502,6 +5502,37 @@ body.is-theme-customizing {
   overflow: auto;
 }
 
+/* The thread list's status line (chat_thread_status.mjs): a live region above
+   the scrolling list. Without a failure it holds at most a visually hidden
+   confirmation and takes no room (the negative margin cancels the column
+   gap); a failure shows in the danger colour with Retry and Close. */
+.thread-list-status {
+  position: relative;
+}
+
+.thread-list-status:not(.is-error) {
+  height: 0;
+  margin-bottom: -8px;
+}
+
+.thread-list-status.is-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  border: 1px solid currentColor;
+  border-radius: 10px;
+  color: var(--danger);
+  font-size: 0.8rem;
+  font-weight: 650;
+  line-height: 1.3;
+  padding: 6px 8px;
+}
+
+.thread-list-status-text {
+  flex: 1 1 100%;
+}
+
 /* Thread list sections (chat_thread_list.mjs): Needs you, Pinned, Recent,
    Snoozed, Dismissed. Each header is a button with the count that opens and
    closes its rows. */

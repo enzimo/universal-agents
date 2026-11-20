@@ -11,6 +11,8 @@ const source = fs.readFileSync(path.join(__dirname,
 // The thread list module chat.js imports (sections, snippets, default thread).
 const threadList = require("../assistant_gateway/onboarding_web/assets/chat_thread_list.mjs");
 const { THREAD_MENU_ACTION } = require("../assistant_gateway/onboarding_web/assets/chat_thread_menu.mjs");
+// The status line's wording (chat.js imports it from chat_thread_status.mjs).
+const threadStatus = require("../assistant_gateway/onboarding_web/assets/chat_thread_status.mjs");
 
 // The page's name for an unnamed thread, read from chat.js itself.
 const NEW_CHAT_TITLE = source.match(/const NEW_CHAT_TITLE = "([^"]+)";/)[1];
@@ -18,7 +20,7 @@ const NEW_CHAT_TITLE = source.match(/const NEW_CHAT_TITLE = "([^"]+)";/)[1];
 function loadFunctions(sandbox, names) {
   if (!("NEW_CHAT_TITLE" in sandbox)) sandbox.NEW_CHAT_TITLE = NEW_CHAT_TITLE;
   if (!("THREAD_MENU_ACTION" in sandbox)) sandbox.THREAD_MENU_ACTION = THREAD_MENU_ACTION;
-  for (const [name, value] of Object.entries(threadList)) if (!(name in sandbox)) sandbox[name] = value;
+  for (const [name, value] of Object.entries({ ...threadList, ...threadStatus })) if (!(name in sandbox)) sandbox[name] = value;
   vm.createContext(sandbox);
   for (const name of names) {
     const start = source.indexOf(`function ${name}(`);
@@ -27,6 +29,9 @@ function loadFunctions(sandbox, names) {
     vm.runInContext(source.slice(start, end < 0 ? undefined : end), sandbox);
   }
 }
+
+// Where a failed thread change is shown: the status line beside the list (review F5).
+const STATUS_LINE = "thread_list_status";
 
 function harness() {
   const server = {
@@ -39,13 +44,22 @@ function harness() {
   const calls = [];
   const patches = [];
   const errors = [];
+  const announced = [];
   let renders = 0, switchRenders = 0;
   const sandbox = {
     AbortSignal,
     Set,
     sharedState: { authSessionActive: true, authSessionGeneration: 1, activeThreadId: "alpha",
       editingThreadId: "", threads: [], asyncEventCursor: "", threadsRevision: "" },
-    shellState: { SYSTEM_ERROR_SOURCE: { FETCH_SESSIONS: "sessions", THREAD_PLACEMENT: "thread_placement" } },
+    shellState: {
+      SYSTEM_ERROR_SOURCE: { FETCH_SESSIONS: "sessions" },
+      // The thread list's status line: failures join `errors`, confirmations `announced`.
+      threadListStatus: {
+        fail(message, { retry = null } = {}) { errors.push({ target: "status line", source: STATUS_LINE, message, retry }); },
+        announce(message) { announced.push(message); },
+        clear() {},
+      },
+    },
     authentication: { handleUnauthorizedResponse() {} },
     // The person is reading the selected thread.
     isReadingThread: item => item.id === sandbox.sharedState.activeThreadId,
@@ -77,14 +91,14 @@ function harness() {
   loadFunctions(sandbox, [
     "fetchSessions", "threadIsBusy", "applyThreadStates", "applyServerThreadRow", "applyEventToThreadRow",
     "restoreWokeThreadWhenRead", "changeThreadPlacement", "runThreadPlacement", "sendThreadPlacement",
-    "placementRefusal", "threadForSession",
+    "placementRefusal", "threadForSession", "quotedThreadTitle",
   ]);
   sandbox.fullThreadTitle = item => item.title;
   const thread = key => sandbox.sharedState.threads.find(item => item.sessionKey === key);
   const page = (busy = [], revision = server.revision, open = []) => ({
     threads_revision: revision, busy_session_keys: busy, open_request_session_keys: open });
   const settle = () => sandbox.fetchSessions();
-  return { sandbox, server, calls, patches, errors, thread, page, settle,
+  return { sandbox, server, calls, patches, errors, announced, thread, page, settle,
     renders: () => renders, switchRenders: () => switchRenders };
 }
 
@@ -398,6 +412,32 @@ test("a change still queued when the sign-in ends is dropped, even for the same 
   assert.equal(errors.length, 0);
 });
 
+test("Delete reports in the status line: Retry only when it did not get through, and a confirmation (F5, F13)", async () => {
+  const { sandbox, server, errors, announced, thread } = harness();
+  server.sessions = [{ ...SNOOZED, list_state: null }];
+  await sandbox.fetchSessions();
+  loadFunctions(sandbox, ["archiveThread", "parseApiResponse"]);
+  const removed = [];
+  sandbox.removeArchivedThread = threadId => removed.push(threadId);
+  const answers = [
+    { ok: false, status: 503, json: async () => ({}) },
+    { ok: false, status: 404, json: async () => ({ message: "Thread not found." }) },
+    { ok: true, status: 200, json: async () => ({ status: "ok" }) },
+  ];
+  sandbox.requestClient.fetch = async () => answers.shift();
+  sandbox.archiveThread(thread("gamma").id);
+  await flush();
+  assert.equal(errors[0].message, "\u201cRenew the certificate\u201d was not deleted. Try again.");
+  assert.equal(typeof errors[0].retry, "function");
+  errors[0].retry();
+  await flush();
+  assert.deepEqual([errors[1].message, errors[1].retry], ["\u201cRenew the certificate\u201d was not deleted. Thread not found.", null]);
+  sandbox.archiveThread(thread("gamma").id);
+  await flush();
+  assert.deepEqual(removed, ["gamma"]);
+  assert.deepEqual(announced, ["Deleted \u201cRenew the certificate\u201d."]);
+});
+
 test("Dismiss on a thread from the saved list fails with Retry when the list cannot be read (F2)", async () => {
   const { sandbox, server, patches, errors, thread } = harness();
   sandbox.sharedState.activeThreadId = "alpha";
@@ -405,7 +445,7 @@ test("Dismiss on a thread from the saved list fails with Retry when the list can
   server.failReads = true;
   assert.equal(await sandbox.changeThreadPlacement(thread("gamma"), "dismiss"), false);
   assert.equal(patches.length, 0);
-  const notice = errors.find(item => item.source === "thread_placement");
+  const notice = errors.find(item => item.source === STATUS_LINE);
   assert.equal(notice.message, "\u201cRenew the certificate\u201d was not moved. Try again.");
   assert.equal(typeof notice.retry, "function");
   server.failReads = false;
@@ -453,7 +493,7 @@ test("a change saved while a list read is in flight is followed by a fresh read 
 });
 
 test("snooze and dismiss send the last message this page showed", async () => {
-  const { sandbox, server, patches, thread } = harness();
+  const { sandbox, server, patches, announced, thread } = harness();
   server.sessions = [{ ...SNOOZED, list_state: null }];
   await sandbox.fetchSessions();
   // A live reply arrives after the list was read.
@@ -466,6 +506,7 @@ test("snooze and dismiss send the last message this page showed", async () => {
   assert.equal(thread("gamma").lastSequence, 6);
   assert.equal(await sandbox.changeThreadPlacement(thread("gamma"), "dismiss"), true);
   assert.deepEqual(patches[0].body, { thread_action: "dismiss", seen_sequence: 6 });
+  assert.deepEqual(announced, ["Dismissed \u201cRenew the certificate\u201d."], "the change is announced (F4, F5)");
   await sandbox.changeThreadPlacement(thread("gamma"), "snooze", { snooze_until: "2026-11-20T09:00:00+01:00" });
   assert.deepEqual(patches[1].body, { thread_action: "snooze", snooze_until: "2026-11-20T09:00:00+01:00", seen_sequence: 6 });
   await sandbox.changeThreadPlacement(thread("gamma"), "pin");
@@ -482,13 +523,14 @@ test("a refused change keeps the row where it was and tells the person why", asy
   assert.equal(await sandbox.changeThreadPlacement(thread("gamma"), "snooze", { snooze_until: "2020-01-01T00:00:00Z" }), false);
   assert.equal(thread("gamma").listState, "");
   assert.equal(calls.length, reads, "the list is not reloaded");
-  // Shown in the open chat, naming the chat that was not moved (C23).
-  assert.deepEqual(errors.map(item => [item.target, item.source, item.message]), [
-    [null, "thread_placement", "\u201cRenew the certificate\u201d was not moved. Choose a time in the future to snooze until."],
+  // Shown in the status line beside the list, naming the chat that was not moved, with no Retry (F5).
+  assert.deepEqual(errors.map(item => [item.source, item.message, item.retry]), [
+    [STATUS_LINE, "\u201cRenew the certificate\u201d was not moved. Choose a time in the future to snooze until.", null],
   ]);
+  // The open chat is named too: the line sits beside the list, not in the chat.
   sandbox.sharedState.activeThreadId = "gamma";
   await sandbox.changeThreadPlacement(thread("gamma"), "dismiss");
-  assert.equal(errors[1].message, "This chat was not moved. Choose a time in the future to snooze until.");
+  assert.equal(errors[1].message, "\u201cRenew the certificate\u201d was not moved. Choose a time in the future to snooze until.");
 });
 
 test("a failed automatic restore shows nothing and is tried again later, not on every draw (C23)", async () => {
