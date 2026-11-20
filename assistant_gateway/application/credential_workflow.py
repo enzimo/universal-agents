@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
-from typing import Any, Callable
+from typing import Any, Callable, get_args
 
 from assistant_gateway.application.account_links import GatewayAccountLinks
 from assistant_gateway.application.broker_session_watch import (
@@ -75,8 +75,10 @@ from assistant_gateway.domain.sessions import SessionRecord
 from assistant_gateway.domain.request_state import CredentialCollectionRecord
 from assistant_gateway.ports.repositories import CredentialCollectionRepository, SessionRepository, ToolSetupRepository
 from custom_messages.contracts.credentials_v1 import (
+    CREDENTIAL_DECLINED,
     SecureCredentialCollectionRequest,
     SecureCredentialCollectionResult,
+    SecureCredentialResultStatus,
     SignupAutomationRequest,
 )
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -92,27 +94,12 @@ REQUEST_KINDS_SECURE_CREDENTIAL_RESULTS = frozenset(
         REQUEST_KIND_TOOL_SETUP_RESULT,
     }
 )
-_TERMINAL_COLLECTION_STATUSES = frozenset(
-    {
-        "credential_stored",
-        "manual_signup_collected",
-        "signup_completed",
-        "credential_deleted",
-        "credential_unavailable",
-        "signup_failed",
-    }
-)
-_RESULT_STATUSES = frozenset(
-    {
-        "signup_completed",
-        "manual_signup_required",
-        "manual_signup_collected",
-        "signup_failed",
-        "credential_stored",
-        "credential_deleted",
-        "credential_unavailable",
-    }
-)
+# Every status the waiting task may receive, from the contract itself, so a new
+# status (credential_declined) is never mapped to credential_unavailable here.
+_RESULT_STATUSES: frozenset[str] = frozenset(get_args(SecureCredentialResultStatus))
+# A form's status that ends the watch: every result except the one that asks the
+# person for more (manual sign-up continues on the same form).
+_TERMINAL_COLLECTION_STATUSES = _RESULT_STATUSES - {"manual_signup_required"}
 
 TeamRolesResolver = Callable[[str], tuple[str, ...]]
 
@@ -123,6 +110,7 @@ _FORM_ENDINGS = {
     "credential_deleted": "is done: the credential was deleted.",
     "manual_signup_collected": "is done: the sign-up details were stored.",
     "signup_completed": "is done: the sign-up finished and the credential was stored.",
+    CREDENTIAL_DECLINED: "was declined: nothing was stored or deleted.",
 }
 _FORM_CHANGE_UNCONFIRMED = "The gateway cannot confirm whether anything was stored or changed."
 _FORM_FAILED = f"could not finish. {_FORM_CHANGE_UNCONFIRMED}"
@@ -407,6 +395,7 @@ class GatewayCredentialWorkflow:
                 expires_at_utc=broker_session.expires_at,
                 # The form's own id: its closing line closes exactly this card.
                 request_id=request_content.credential_request_id,
+                broker_page=True,
             ),
         )
 

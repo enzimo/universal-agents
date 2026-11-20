@@ -35,6 +35,10 @@ X_SIGN_IN_PROVIDER = "x"
 TEAM_CLIENT_PROVIDERS = frozenset({"google", X_SIGN_IN_PROVIDER})
 
 
+# The command that shows who is signed in to what (gateway messages and broker pages).
+SIGN_IN_STATUS_COMMAND = "/auth status"
+
+
 def team_client_command(provider: str) -> str:
     """The administrators' command that stores a provider's team sign-in app."""
 
@@ -93,6 +97,22 @@ def sign_in_command(provider: str) -> str:
     """The command that signs a person in to a provider (``/link cli:github``)."""
 
     return SIGN_IN_TOOL_BY_PROVIDER[provider].command
+
+
+def page_command(provider: str, method: str = "") -> str:
+    """The command that opens a broker sign-in page of this provider and method again.
+
+    The administrators' team sign-in app command for ``team_client``, the
+    person's sign-in command for a sign-in tool (``/link cli:github``), and
+    ``/auth <provider>`` for the others (Bitwarden and the other password
+    managers, ``/auth model``).
+    """
+
+    if method == TEAM_CLIENT_METHOD and provider in TEAM_CLIENT_PROVIDERS:
+        return team_client_command(provider)
+    if provider in SIGN_IN_TOOL_BY_PROVIDER:
+        return sign_in_command(provider)
+    return f"/auth {provider}"
 
 
 def sign_in_instead_text(sign_in: ToolSignIn, *, team: bool) -> str:

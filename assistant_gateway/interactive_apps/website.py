@@ -31,7 +31,7 @@ from assistant_gateway.interactive_apps.website_support import (
     ONBOARDING_ASSET_ROOT,
     _CONFIG_EDITOR_ASSETS,
     WEB_CHAT_MODULE_ASSETS,
-    _WEB_CHAT_CSP,
+    web_chat_csp,
     _WEB_CHAT_ROUTE,
     _render_operator_ui_shell,
     resolve_internal_website_published_sites,
@@ -89,6 +89,8 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
                 "Internal Website requires the explicit gateway-owned website host environment."
             )
         self.environment = environment
+        # The chat frames the broker's pages, so its policy names the broker's origin.
+        self._web_chat_csp = web_chat_csp(environment.broker_public_base_url)
         self.runtime = runtime
         self.application = application
         self.bridge = bridge or ChannelBridge(application)
@@ -747,7 +749,7 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
             content_type="text/html",
             headers={
                 "Cache-Control": "no-store",
-                "Content-Security-Policy": _WEB_CHAT_CSP,
+                "Content-Security-Policy": self._web_chat_csp,
                 "Referrer-Policy": "no-referrer",
                 "X-Content-Type-Options": "nosniff",
                 "X-Frame-Options": "DENY",

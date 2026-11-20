@@ -68,6 +68,12 @@ start none of them, and nothing runs on a schedule except the nightly check of
 `main`. The runner is shared and the full set takes over an hour, so it is spent
 on candidates that are published.
 
+The real-browser probes (`tests/test_*_browser.py`, such as
+`tests/test_broker_card_browser.py` for the broker cards in Web Chat) are
+opt-in and run in no workflow, because they need Node Playwright with Chromium
+on the machine. Run them by hand with `RUN_CHROMIUM_TESTS=1` before tagging a
+release that touches Web Chat or the broker's pages.
+
 Before pushing, run the tests the change affects and the static checks locally,
 as `AGENTS.md` asks; the git hooks in `.githooks` run the personal-details check
 before every commit and push. A release candidate's run compares it with `main`:

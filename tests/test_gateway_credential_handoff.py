@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from secure_tools.broker_pages import card_view_url
+
 import asyncio
 import json
 import logging
@@ -184,6 +186,8 @@ async def test_resumed_setup_page_delivered_through_authenticated_polling(
         assert action["kind"] == "tool_setup"
         assert action["action"]["label"] == "Choose your account for Hugging Face (hf)"
         assert "link_bearer_secret" in action["action"]["url"]
+        # A broker page also carries its card view, the same address with view=card (A2).
+        assert action["action"]["frame_url"] == card_view_url(action["action"]["url"])
         # The card shows the task's own sentence and what a link does, never the page address.
         assert action["content"] == (
             "To upload the weekly model, choose your Hugging Face account.\n"

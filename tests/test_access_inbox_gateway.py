@@ -607,3 +607,37 @@ def test_a_decided_card_for_someone_linked_to_it_is_shown_without_asking_the_acc
 
     assert asyncio.run(harness.inbox.review("member-1", request.request_id)) is None
     assert asked == ["member-1"], "someone with no link to it is checked, and does not see it"
+
+
+def test_an_approved_proposals_credential_forms_carry_their_card_view(harness: Harness) -> None:
+    """Web Chat shows each form as a broker card; the full page stays for "Open in its own tab" (finding F2)."""
+
+    from assistant_gateway.application.account_links import AccountLinkForm
+
+    request = ask(harness)
+    opened: list[dict[str, Any]] = []
+
+    class Setups:
+        async def open_proposal_link(self, **fields: Any) -> AccountLinkForm:
+            opened.append(fields)
+            return AccountLinkForm(
+                session_id="s1",
+                form_url="http://127.0.0.1:18600/account-link/v1.s1.sig",
+                status_url="http://127.0.0.1:18600/account-link/v1.s1.sig/status",
+                expires_at_utc="2026-11-20T10:15:00Z",
+                tool_display_name="Portainer",
+            )
+
+    harness.inbox.tool_setups = Setups()
+    harness.inbox.proposals.account_links[request.request_id] = [
+        SimpleNamespace(tool_id="http:portainer", owner="team", purpose="Read the stacks")
+    ]
+
+    links, forms = asyncio.run(harness.inbox._open_account_links("owner-1", request))
+
+    assert [fields["tool_id"] for fields in opened] == ["http:portainer"] and len(forms) == 1
+    assert len(links) == 1
+    assert links[0]["url"] == "http://127.0.0.1:18600/account-link/v1.s1.sig"
+    assert links[0]["frame_url"] == "http://127.0.0.1:18600/account-link/v1.s1.sig?view=card"
+    assert links[0]["expires_at_utc"] == "2026-11-20T10:15:00Z"
+    assert links[0]["label"].startswith("Choose the credential for ")

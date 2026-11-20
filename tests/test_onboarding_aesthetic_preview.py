@@ -1154,6 +1154,14 @@ def test_dev_preview_lists_threads_in_every_section_and_places_them_like_the_gat
         with opener.open(Request(f"{base_url}/api/web-chat/sessions/website%3Aweb-chat%3Aprinter/archive", method="POST"), timeout=5):
             pass
         assert "website:web-chat:printer" not in rows()
+
+        # New Chat adds an empty, unnamed thread to the same list (the broker card probe switches to it and back).
+        created = _json_post(f"{base_url}/api/web-chat/sessions", {}, opener=opener)["session"]
+        new_key = created["session_key"]
+        assert created["title"] is None and rows()[new_key]["title"] is None
+        assert rows()[new_key]["last_message"] is None
+        assert get(f"/api/web-chat/sessions/{quote(new_key, safe='')}/messages?limit=50")["messages"] == []
+        assert _json_post(f"{base_url}/api/web-chat/sessions", {}, opener=opener)["session"]["session_key"] != new_key
     finally:
         server.shutdown()
         thread.join(timeout=5)

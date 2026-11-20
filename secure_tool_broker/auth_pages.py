@@ -5,15 +5,51 @@ from __future__ import annotations
 import base64
 import html
 import json
+import logging
 import os
+from functools import cache
 from datetime import datetime, timezone
-from typing import Mapping
+from typing import Literal, Mapping
 from pathlib import Path
 
 from runtime_hosting.page_icon import favicon_link_tag
 from runtime_settings.appearance import dark_appearance_css_declarations
+from custom_messages.contracts.model_keys_v1 import MODEL_KEY_AUTH_PROVIDER
+from secure_tool_broker.defaults import DECLINE_FIELD, DECLINE_VALUE
+from secure_tools.auth_methods import X_SIGN_IN_PROVIDER
+from secure_tool_broker.page_view import current_view
 
+LOGGER = logging.getLogger(__name__)
 BROKER_APPEARANCE_ENV = "SECURE_TOOL_BROKER_APPEARANCE_JSON"
+# How broker pages name a sign-in provider.
+AUTH_PROVIDER_DISPLAY_NAMES = {
+    "github": "GitHub",
+    "google": "Google",
+    "bitwarden": "Bitwarden",
+    "onepassword": "1Password",
+    "keepass": "KeePass/KeePassXC",
+    "vault": "HashiCorp Vault",
+    "sealbox": "Sealbox",
+    X_SIGN_IN_PROVIDER: "X",
+    MODEL_KEY_AUTH_PROVIDER: "model provider",
+}
+
+
+def auth_display_name(provider: str) -> str:
+    """The provider's name on a broker page ("GitHub"), or its id title-cased."""
+
+    return AUTH_PROVIDER_DISPLAY_NAMES.get(provider, provider.title())
+
+# How a page shown as a card in Web Chat ended (page_assets/card_bridge.js tells
+# the chat, which then shrinks the card to one line). Only the handler that knows
+# the session reached that state sets it, and "finished" only when the person has
+# nothing left to do or read there: a refusal, a failure, an "already used" page
+# or one with a next step (Bitwarden's "restart the broker now") has none, so
+# the card stays up.
+CardOutcome = Literal["finished", "declined"]
+CARD_OUTCOME_FINISHED: CardOutcome = "finished"
+CARD_OUTCOME_DECLINED: CardOutcome = "declined"
+_CARD_BRIDGE_PATH = Path(__file__).resolve().parent / "page_assets" / "card_bridge.js"
 
 BROKER_AUTH_THEME = """
 <style>
@@ -40,7 +76,7 @@ BROKER_AUTH_THEME = """
     --danger: #b91c1c;
     --danger-text: #7f1d1d;
     --danger-low: rgba(185, 28, 28, 0.10);
-    --content-width: 50rem;
+    --content-width: 44rem;
   }
   :root[data-color-mode="dark"] {
     color-scheme: dark;
@@ -72,7 +108,7 @@ BROKER_AUTH_THEME = """
     font-family: Figtree, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: var(--bg);
     color: var(--text);
-    line-height: 1.75;
+    line-height: 1.6;
   }
   a { color: var(--accent-high); text-underline-offset: 3px; overflow-wrap: anywhere; }
   a:hover { color: var(--text-strong); }
@@ -112,13 +148,13 @@ BROKER_AUTH_THEME = """
     background: var(--broker-chip-bg, var(--surface));
     font-size: 0.875rem;
   }
-  main { max-width: var(--content-width); margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
-  .content-panel { padding: 1.5rem 0; }
+  main { max-width: var(--content-width); margin: 0 auto; padding: 1.5rem 1.5rem 2rem; }
+  .content-panel { padding: 1rem 0; }
   .content-panel + .content-panel { border-top: 1px solid var(--line); }
   .eyebrow {
-    margin: 0 0 0.75rem;
+    margin: 0 0 0.5rem;
     color: var(--accent-high);
-    font-size: 0.8125rem;
+    font-size: 0.75rem;
     font-weight: 700;
     letter-spacing: 0.05em;
     line-height: 1.4;
@@ -130,12 +166,12 @@ BROKER_AUTH_THEME = """
     letter-spacing: 0;
     line-height: 1.2;
   }
-  h1 { margin: 0; max-width: 16ch; font-size: 2.625rem; }
-  h2 { margin: 0 0 1rem; font-size: 2rem; }
-  h3 { margin: 1.2rem 0 0.5rem; font-size: 1.25rem; }
+  h1 { margin: 0; max-width: 16ch; font-size: 1.5rem; }
+  h2 { margin: 0 0 0.75rem; font-size: 1.2rem; }
+  h3 { margin: 1rem 0 0.5rem; font-size: 1.05rem; }
   p { margin: 0; }
   p + p { margin-top: 1rem; }
-  .lede { max-width: 46rem; color: var(--text); font-size: 1.125rem; }
+  .lede { max-width: 46rem; color: var(--text); font-size: 1rem; }
   .note, .status {
     border-left: 0.25rem solid var(--accent);
     background: var(--accent-low);
@@ -298,10 +334,10 @@ BROKER_AUTH_THEME = """
     align-items: center;
     justify-content: center;
     width: fit-content;
-    min-height: 2.5rem;
-    padding: 0.55rem 1.1rem;
+    min-height: 2.25rem;
+    padding: 0.45rem 1rem;
     border: 1px solid var(--accent-high);
-    border-radius: 999rem;
+    border-radius: 8px;
     background: var(--accent-high);
     color: var(--bg);
     font: inherit;
@@ -456,7 +492,7 @@ BROKER_AUTH_THEME = """
     -webkit-backdrop-filter: blur(24px) saturate(140%);
   }
   main {
-    margin-top: 2rem;
+    margin-top: 1.5rem;
     border: 1px solid var(--line);
     border-radius: 10px;
     background: var(--surface);
@@ -500,10 +536,34 @@ BROKER_AUTH_THEME = """
     .site-header { padding: 0.65rem 1rem; }
     .search-chip { display: none; }
     main { padding: 1.5rem 1rem 3rem; }
-    h1 { max-width: none; font-size: 2rem; }
-    h2 { font-size: 1.625rem; }
+    h1 { max-width: none; font-size: 1.35rem; }
+    h2 { font-size: 1.15rem; }
     .secret-input-row { align-items: stretch; }
   }
+  /* The footer of an open form, in a card and on a full page: where the values
+     go, and the page's Decline as a quiet text button. */
+  .page-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--line);
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+  }
+  .page-footer form { display: block; margin: 0; }
+  .page-footer button.decline-action {
+    min-height: 0;
+    padding: 0.2rem 0.4rem;
+    border: 0;
+    background: none;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  .page-footer button.decline-action:hover,
+  .page-footer button.decline-action:focus-visible { color: var(--text-strong); text-decoration: underline; }
 </style>
 """
 
@@ -657,6 +717,56 @@ BROKER_AUTH_MESH_SCRIPT = """
   else draw();
 })();
 </script>
+"""
+
+
+# The card view: the page inside a Web Chat card. No header and no background
+# mesh; one opaque surface the chat card's border sits around, compact type, and
+# a height that follows the content (the bridge reports it to the chat).
+BROKER_CARD_THEME = """
+<style>
+  :root { --card-bg: #ffffff; }
+  :root[data-color-mode="dark"] { --card-bg: #11171b; }
+  html, body.card-view {
+    min-height: 0;
+    height: auto;
+    background: var(--card-bg);
+  }
+  body.card-view { margin: 0; line-height: 1.5; font-size: 0.9375rem; }
+  body.card-view main {
+    max-width: none;
+    margin: 0;
+    /* The chat card around the frame has its own padding; a little room keeps focus rings visible. */
+    padding: 0.25rem 0.25rem 0.35rem;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  body.card-view .content-panel { padding: 0.5rem 0; }
+  body.card-view .content-panel:first-child { padding-top: 0; }
+  body.card-view .eyebrow { margin-bottom: 0.25rem; font-size: 0.6875rem; }
+  body.card-view h1 { font-size: 1.0625rem; font-weight: 650; }
+  body.card-view h2 { margin-bottom: 0.5rem; font-size: 0.9375rem; }
+  body.card-view h3 { margin-top: 0.75rem; font-size: 0.875rem; }
+  body.card-view .lede { font-size: 0.9375rem; }
+  body.card-view p + p { margin-top: 0.5rem; }
+  body.card-view form { gap: 0.65rem; margin-top: 0.65rem; }
+  body.card-view input,
+  body.card-view textarea,
+  body.card-view select { max-width: none; padding: 0.5rem 0.65rem; }
+  body.card-view textarea { min-height: 6rem; }
+  body.card-view .secret-input-row { max-width: none; }
+  body.card-view button,
+  body.card-view .button { min-height: 2.15rem; padding: 0.4rem 0.95rem; border-radius: 8px; }
+  body.card-view .step { padding-bottom: 0.6rem; }
+  body.card-view .note,
+  body.card-view .status { padding: 0.6rem 0.75rem; }
+  /* The card's footer says where the values go; the page's own sentence about it is left out. */
+  body.card-view .broker-note { display: none; }
+</style>
 """
 
 
@@ -834,6 +944,10 @@ def _broker_markdown_script() -> str:
 
 
 def render_close_page_button(label: str = "Close Page") -> str:
+    """A full page's button that closes its tab; nothing in a card, which the chat closes."""
+
+    if current_view().card:
+        return ""
     escaped_label = html.escape(label)
     return (
         "<div class=\"page-actions\">"
@@ -843,7 +957,17 @@ def render_close_page_button(label: str = "Close Page") -> str:
     )
 
 
+def close_page_script() -> str:
+    """Closes a full page's tab when the page ended; nothing in a card (its outcome tells the chat)."""
+
+    return "" if current_view().card else "<script>window.close();</script>"
+
+
 def render_session_countdown(expires_at: datetime, *, label: str = "Session expires in") -> str:
+    """The page's expiry countdown; a card has none, since the chat card shows it."""
+
+    if current_view().card:
+        return ""
     normalized_expires_at = expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=timezone.utc)
     expires_at_attr = html.escape(normalized_expires_at.isoformat(), quote=True)
     remaining_html = html.escape(session_remaining_text(normalized_expires_at))
@@ -965,7 +1089,88 @@ def render_credential_input(
     )
 
 
-def render_broker_auth_page(title: str, body: str, *, script: str = "") -> str:
+@cache
+def _card_bridge_script() -> str:
+    """The bridge, read once per broker process."""
+
+    try:
+        return f"<script>\n{_CARD_BRIDGE_PATH.read_text(encoding='utf-8')}\n</script>"
+    except OSError as exc:
+        # Without the bridge the chat hears nothing and offers each page in its own tab.
+        LOGGER.warning(
+            "The card bridge script could not be read; Web Chat cards will offer their page in its own tab. "
+            "event=broker_card_bridge_missing path=%s error=%s",
+            _CARD_BRIDGE_PATH,
+            type(exc).__name__,
+        )
+        return ""
+
+
+# Shown beside Decline in a card: where what the person types goes.
+CARD_BROKER_NOTE = "Goes straight to the secure broker, not to the chat or agents."
+
+
+def _decline_form(class_name: str) -> str:
+    """The page's Decline: its own form, so no typed value is sent, posting to the page's own address."""
+
+    return (
+        '<form method="post">'
+        f'<input type="hidden" name="{DECLINE_FIELD}" value="{DECLINE_VALUE}">'
+        f'<button type="submit" class="{class_name}">Decline</button></form>'
+    )
+
+
+def _page_footer() -> str:
+    """An open form's footer: where the values go, and Decline; the same in a card and on a full page."""
+
+    return f'<div class="page-footer"><span>{html.escape(CARD_BROKER_NOTE)}</span>{_decline_form("decline-action")}</div>'
+
+
+def _render_card_view(
+    title: str, body: str, *, script: str, card_outcome: CardOutcome | None, decline: bool
+) -> str:
+    """The page as a Web Chat card (secure_tool_broker.page_view): content, bridge, no header or mesh."""
+
+    view = current_view()
+    appearance = _broker_appearance_from_env()
+    color_mode = view.color_mode or (
+        "light" if str(appearance.get("color_mode") or "").strip().lower() == "light" else "dark"
+    )
+    outcome_attr = f' data-card-outcome="{card_outcome}"' if card_outcome else ""
+    footer = (
+        _page_footer() if decline else ""
+    )
+    return (
+        f'<!doctype html><html lang="en" data-color-mode="{color_mode}" '
+        f'data-card-parent-origin="{html.escape(view.parent_origin or "", quote=True)}"{outcome_attr}><head>'
+        '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{html.escape(title)}</title>{runtime_theme_css_from_appearance(appearance)}"
+        f"{BROKER_AUTH_THEME}{BROKER_CARD_THEME}</head>"
+        f'<body class="card-view"><main>{body}{footer}</main>'
+        f"{_broker_markdown_script()}{script}{_card_bridge_script()}</body></html>"
+    )
+
+
+def render_broker_auth_page(
+    title: str,
+    body: str,
+    *,
+    script: str = "",
+    card_outcome: CardOutcome | None = None,
+    decline: bool = False,
+) -> str:
+    """A broker page in the view of the current request (secure_tool_broker.page_view).
+
+    ``card_outcome`` is set only by a handler that knows the page reached that
+    end (stored, linked, signed in, declined); the card view then tells the chat.
+    ``decline`` adds the page's Decline button (an open form that someone is
+    waiting on); the page's POST handler ends the page when it is used.
+    """
+
+    if current_view().card:
+        return _render_card_view(title, body, script=script, card_outcome=card_outcome, decline=decline)
+    if decline:
+        body += _page_footer()
     countdown_script = SESSION_COUNTDOWN_SCRIPT if "data-session-countdown" in body else ""
     runtime_theme = runtime_theme_css_from_appearance(_broker_appearance_from_env())
     return (

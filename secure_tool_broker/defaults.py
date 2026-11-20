@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 DEFAULT_BIND_HOST = "0.0.0.0"
 DEFAULT_BIND_PORT = 18600
 DEFAULT_INTERNAL_HOST = "127.0.0.1"
@@ -61,3 +63,20 @@ MODEL_KEY_REPORT_ROUTE = f"{MODEL_KEY_ROUTE_PREFIX}report"
 # The team's saved endpoint addresses (never keys), for TeamLead's configuration view.
 MODEL_KEY_ENDPOINTS_ROUTE = f"{MODEL_KEY_ROUTE_PREFIX}endpoints"
 MODEL_KEY_STATUS_ROUTE = "/v1/auth/model-keys/status"
+
+# -- Broker pages people open in a browser ------------------------------------------
+#
+# Which paths are pages, the card view and the sign-in statuses are shared with
+# the gateway in secure_tools.broker_pages.
+# The status a sign-in page's own script polls (sign_in_pages.sign_in_wait_script).
+AUTH_PAGE_STATUS_ROUTE = "/auth/{provider}/{session_id}/status"
+# The hidden field of a page's Decline form (auth_pages.render_broker_auth_page).
+# Decline is its own small form, so no value typed into the page travels with it.
+DECLINE_FIELD = "ua_decline"
+DECLINE_VALUE = "yes"
+
+
+def is_decline(form: Mapping[str, object]) -> bool:
+    """Whether a submitted page form is its Decline button."""
+
+    return str(form.get(DECLINE_FIELD) or "").strip().lower() == DECLINE_VALUE

@@ -12,6 +12,7 @@ from assistant_gateway.interactive_apps.host_ports import (
     InteractiveAppRuntimeContext,
 )
 from id_generation import new_id
+from secure_tools.broker_pages import policy_origin
 from secure_tools.chat_commands import ACCOUNTS_COMMAND, LINK_COMMAND, SETUP_COMMAND, UPGRADE_COMMAND
 from user_docs.published_sites import PublishedSiteStore
 
@@ -57,6 +58,30 @@ _WEB_CHAT_CSP = "; ".join(
         "style-src 'self' 'unsafe-inline'",
     )
 )
+
+
+
+def web_chat_csp(broker_public_base_url: str | None) -> str:
+    """The Web Chat page's Content-Security-Policy: ``_WEB_CHAT_CSP`` plus the broker's origin in ``frame-src``.
+
+    Web Chat shows the broker's pages inside the conversation as sandboxed
+    frames (assets/broker_card.js), so the broker's public origin, and nothing
+    broader, may be framed. The origin is rebuilt from checked parts
+    (``secure_tools.broker_pages.policy_origin``); an address that could change
+    the policy is left out with a warning, and broker cards then cannot load,
+    so Web Chat offers their pages in their own tab.
+    """
+
+    origin = policy_origin(broker_public_base_url)
+    if origin is None:
+        if str(broker_public_base_url or "").strip():
+            LOGGER.warning(
+                "The broker's public address is not a plain http(s) address; Web Chat will not show broker pages "
+                "inside the chat. event=web_chat_broker_frame_origin_unusable",
+            )
+        return _WEB_CHAT_CSP
+    return _WEB_CHAT_CSP.replace("frame-src 'self'", f"frame-src 'self' {origin}", 1)
+
 
 _WORKSPACE_HTML_PREVIEW_CSP = "; ".join(
     (
@@ -149,6 +174,7 @@ WEB_CHAT_MODULE_ASSETS = (
     "knowledge_navigation.mjs",
     "activity_mesh.mjs",
     "team_activity.mjs",
+    "broker_card.mjs",
 )
 _CONFIG_EDITOR_ASSETS = {
     *WEB_CHAT_MODULE_ASSETS,

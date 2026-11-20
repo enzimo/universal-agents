@@ -179,3 +179,78 @@ test("the task's final answer still closes a credential form card", () => {
     message({ correlationId: "req_chat", messageType: "task", sessionSequence: 7 }),
   ]), []);
 });
+
+// A broker page's card view (frame_url) is kept only when it is the same page as its link.
+function brokerItem(frameUrl) {
+  return delivery.normalizeTransientItem(
+    {
+      kind: "tool_setup",
+      item_id: "tool_setup:req_page",
+      request_id: "req_page",
+      correlation_id: "corr_page",
+      session_sequence: 3,
+      created_at_utc: "2026-11-19T13:32:00Z",
+      content: "Choose your account for Portainer.",
+      action: {
+        label: "Choose your account for Portainer",
+        url: "https://broker.example.test/account-link/bearer",
+        expires_at_utc: "2026-11-19T13:47:00Z",
+        frame_url: frameUrl,
+      },
+    },
+    "https://agents.example.test",
+  );
+}
+
+test("a broker page's card view is kept only when it is the same page", () => {
+  assert.equal(
+    brokerItem("https://broker.example.test/account-link/bearer?view=card").frameUrl,
+    "https://broker.example.test/account-link/bearer?view=card",
+  );
+  for (const other of [
+    "https://evil.example.test/account-link/bearer?view=card",
+    "https://broker.example.test/account-link/other?view=card",
+    "javascript:alert(1)",
+    undefined,
+  ]) {
+    const item = brokerItem(other);
+    assert.ok(item, "the card itself stays");
+    assert.equal(item.frameUrl, undefined, `${other} must not be framed`);
+    assert.equal(item.url, "https://broker.example.test/account-link/bearer");
+  }
+});
+
+// An approved proposal's credential forms as broker cards (review finding F2).
+test("an approval's credential forms become account link cards right after the review, http included", () => {
+  const forms = [
+    { label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/a",
+      frameUrl: "http://127.0.0.1:18600/account-link/a?view=card", expiresAtUtc: "2026-11-20T10:15:00Z" },
+    // A frame address on another page is not shown as a card; neither is a page without one.
+    { label: "Choose the credential for Gitea", url: "https://broker.example.test/account-link/b",
+      frameUrl: "https://evil.example.test/account-link/b?view=card" },
+    { label: "Choose the credential for Jira", url: "https://broker.example.test/account-link/c" },
+    { label: "Not a page", url: "javascript:alert(1)", frameUrl: "javascript:alert(1)" },
+  ];
+  const pages = delivery.followUpPageItems("acc_req_1", 7, forms, "http://127.0.0.1:18090");
+
+  assert.equal(pages.length, 1);
+  const [{ item, link }] = pages;
+  assert.equal(link, forms[0]);
+  assert.equal(item.itemId, "account_link:acc_req_1:1");
+  assert.equal(item.kind, "account_link");
+  assert.equal(item.sessionSequence, 7);
+  assert.equal(item.correlationId, "acc_req_1");
+  assert.equal(item.url, forms[0].url);
+  assert.equal(item.frameUrl, forms[0].frameUrl);
+  assert.equal(item.expiresAtUtc, forms[0].expiresAtUtc);
+  assert.equal(item.content, "Choose the credential for Portainer");
+  // Placed after the review message (sequence 7) and before anything later.
+  const timeline = delivery.buildTimeline(
+    [message({ messageId: "m7", sessionSequence: 7 }), message({ messageId: "m8", sessionSequence: 8 })], [item],
+  );
+  assert.deepEqual(timeline.map(entry => entry.value.messageId || entry.value.itemId), ["m7", "account_link:acc_req_1:1", "m8"]);
+  assert.deepEqual(delivery.followUpPageItems("", 7, forms, "http://127.0.0.1:18090"), []);
+  // An Inbox approval while the open conversation has no messages yet (critique C13): the card starts it.
+  const [first] = delivery.followUpPageItems("acc_req_1", 0, forms, "http://127.0.0.1:18090");
+  assert.equal(first.item.sessionSequence, 1);
+});

@@ -232,6 +232,7 @@ class AccountLinkCommandHandler:
                 f"Account link form opened for {tool_id} "
                 f"({account_link_owner_label(owner)})."
             ),
+            broker_page=True,
         )
 
 

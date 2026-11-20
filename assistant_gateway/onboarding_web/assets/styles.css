@@ -6985,6 +6985,73 @@ body.is-theme-customizing {
   line-height: 1.4;
 }
 
+/* A broker page shown inside its chat card (broker_card.mjs, ui/DESIGN.md "Web
+   Chat"): a calm card around the broker's sandboxed frame, not the amber notice
+   of other memory-only items. The dark surface matches the card view's own
+   background (secure_tool_broker/auth_pages.py BROKER_CARD_THEME), so the frame
+   reads as part of the card. */
+.message-transient-notice.broker-card {
+  max-width: min(760px, 100%);
+  padding: 14px 16px 10px;
+  border-color: var(--inner-line);
+  background: #ffffff;
+}
+
+:root[data-color-mode="dark"] .message-transient-notice.broker-card {
+  border-color: rgba(222, 235, 229, 0.16);
+  background: #11171b;
+}
+
+.broker-card-reason {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.broker-card-frame-host {
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.broker-card-frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+}
+
+.message-transient-actions.broker-card-footer {
+  justify-content: flex-end;
+  gap: 6px 10px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.broker-card-open {
+  color: var(--muted);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.broker-card-open:hover,
+.broker-card-open:focus-visible {
+  color: var(--ink);
+}
+
+.message-transient-notice.broker-card.is-closed {
+  padding: 8px 14px;
+}
+
+.broker-card-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
 .history-load-earlier {
   align-self: center;
   margin: 0 auto 0.75rem;

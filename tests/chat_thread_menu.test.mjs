@@ -22,10 +22,6 @@ FakeElement.prototype.closest = function (selector) {
   }
   return null;
 };
-Object.defineProperty(FakeElement.prototype, "style", {
-  configurable: true,
-  get() { return (this._style ||= {}); },
-});
 
 const NOW = new Date(2026, 10, 19, 10, 30); // a Thursday morning
 const THREAD = { sessionKey: "alpha", title: "Plan the offsite", pinned: false, listState: "" };

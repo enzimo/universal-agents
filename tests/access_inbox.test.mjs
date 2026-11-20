@@ -5,8 +5,9 @@ import vm from "node:vm";
 import {
   ACCESS_REMOVED_LABEL, LACKS_ACCESS_NOTE, NEEDS_DECISION, WAITING_FOR_APPROVER,
   INBOX_COUNTS_PATH, NOTICES_READ_PATH, createAccessInbox, createInboxCounts, decidableReviewCount, decisionOutcome,
-  emptyNoticesText, followUpLinks, inboxBadgeLabel, inboxBadgeText, inboxCounts, inboxPath, localTimeFormatter,
-  markedText, parseAccessRequestLink, renderNoticeRow, renderReviewCard, reviewCardModel, unreadNoticeCount,
+  emptyNoticesText, followUpLinks, followUpPages, FOLLOW_UP_AFTER_LATEST, FOLLOW_UP_AFTER_REVIEW, FOLLOW_UP_PAGES_BELOW, FOLLOW_UP_PAGES_IN_CONVERSATION,
+  SHOW_CONVERSATION_LABEL, inboxBadgeLabel, inboxBadgeText, inboxCounts, inboxPath, localTimeFormatter,
+  markedText, parseAccessRequestLink, renderDecidedCard, renderNoticeRow, renderReviewCard, reviewCardModel, unreadNoticeCount,
 } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
 
 // A small DOM stand-in. innerHTML throws, so any HTML parsing path fails the tests.
@@ -284,7 +285,7 @@ test("unread notice counts prefer the server total", () => {
   assert.equal(unreadNoticeCount(undefined), 0);
 });
 
-function controllerFixture() {
+function controllerFixture(extra = {}) {
   const document = fakeDocument();
   const container = document.createElement("div");
   document.body.append(container);
@@ -309,6 +310,7 @@ function controllerFixture() {
     failureMessage: (error, fallback) => (error && error.message) || fallback,
     onCounts: value => counts.push(value),
     paginate: options => { pages.push(options); return document.createElement("nav"); },
+    ...extra,
   });
   const [status, requestsSection, noticesSection] = container.children;
   const requestList = requestsSection.lastChild;
@@ -705,12 +707,72 @@ test("ticking Keep sends keep true, and a proposal sends the rows it keeps", asy
   assert.deepEqual(f.posts[0].body, { choice: "approve", kept_item_ids: ["grant-2"] });
 });
 
-test("after approving a proposal, the credential forms it opened are offered as links", () => {
+test("after approving a proposal, the credential forms it opened keep their card view; only http(s) links count", () => {
   const links = followUpLinks({ follow_up_links: [
-    { label: "Choose the credential for Portainer", url: "https://broker.example/form/1" },
+    { label: "Choose the credential for Portainer", url: "https://broker.example/form/1",
+      frame_url: "https://broker.example/form/1?view=card", expires_at_utc: "2026-11-20T10:15:00Z" },
+    // The default deployment serves the broker on http (review finding F2, critique C03).
+    { label: "Choose the credential for Gitea", url: "http://127.0.0.1:18600/form/2" },
     { label: "Not safe", url: "javascript:alert(1)" },
+    { label: "Not safe either", url: "data:text/html,hi" },
   ] });
-  assert.deepEqual(links, [{ label: "Choose the credential for Portainer", url: "https://broker.example/form/1" }]);
+  assert.deepEqual(links, [
+    { label: "Choose the credential for Portainer", url: "https://broker.example/form/1",
+      frameUrl: "https://broker.example/form/1?view=card", expiresAtUtc: "2026-11-20T10:15:00Z" },
+    { label: "Choose the credential for Gitea", url: "http://127.0.0.1:18600/form/2", frameUrl: "", expiresAtUtc: "" },
+  ]);
+});
+
+test("forms handed to the conversation are named on the decided card; the rest stay links", () => {
+  const links = followUpLinks({ follow_up_links: [
+    { label: "Choose the credential for Portainer", url: "http://b.example/a", frame_url: "http://b.example/a?view=card" },
+    { label: "Choose the credential for Gitea", url: "http://b.example/b" },
+  ] });
+  const handed = [];
+  const result = followUpPages("req-9", links, (id, given, placement) => { handed.push([id, placement]); return [given[0]]; },
+    { note: FOLLOW_UP_PAGES_BELOW }, FOLLOW_UP_AFTER_REVIEW);
+  assert.deepEqual(handed, [["req-9", FOLLOW_UP_AFTER_REVIEW]]);
+  assert.deepEqual(result.links.map(link => link.label), ["Choose the credential for Gitea"]);
+  assert.equal(result.pages.note, FOLLOW_UP_PAGES_BELOW);
+  assert.deepEqual(followUpPages("req-9", links, undefined, { note: "x" }), { links, pages: null });
+
+  const document = fakeDocument();
+  let shown = 0;
+  const card = renderDecidedCard(document, {
+    id: "req-9", title: "Proposal", outcome: { tone: "approved", label: "Approved", explanation: "Approved." },
+    links: result.links, pages: { note: FOLLOW_UP_PAGES_IN_CONVERSATION, actionLabel: SHOW_CONVERSATION_LABEL, onAction: () => { shown += 1; } },
+  });
+  assert.equal(byClass(card, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_IN_CONVERSATION);
+  byTag(card, "button").find(button => button.textContent === SHOW_CONVERSATION_LABEL).click();
+  assert.equal(shown, 1);
+  assert.deepEqual(byTag(card, "a").map(anchor => anchor.textContent), ["Choose the credential for Gitea"]);
+});
+
+test("approving a proposal in the Inbox panel shows its forms in the conversation, not in a new tab", async () => {
+  const handed = [];
+  const shown = [];
+  const f = controllerFixture({
+    onFollowUpPages: (id, links, placement) => { handed.push({ id, links, placement }); return links; },
+    showConversation: id => { shown.push(id); },
+  });
+  await loaded(f, { reviews: [review()], notices: [] });
+  byTag(f.requestList.children[0], "button")[0].click();
+  await settle();
+  f.posts[0].resolve({ status: "ok", review: { ...review(), status: "granted", can_decide: false, choices: [],
+    follow_up_links: [{ label: "Choose the credential for Portainer", url: "http://b.example/a",
+      frame_url: "http://b.example/a?view=card", expires_at_utc: "2026-11-20T10:15:00Z" }] } });
+  await settle();
+
+  const decided = f.requestList.children[0];
+  assert.equal(handed.length, 1);
+  assert.equal(handed[0].id, "req-1");
+  assert.equal(handed[0].links[0].frameUrl, "http://b.example/a?view=card");
+  // Below the open conversation's latest message, where the person is (critique C14).
+  assert.equal(handed[0].placement, FOLLOW_UP_AFTER_LATEST);
+  assert.equal(byTag(decided, "a").length, 0, "no link opens the form in a new tab");
+  assert.equal(byClass(decided, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_IN_CONVERSATION);
+  byTag(decided, "button").find(button => button.textContent === SHOW_CONVERSATION_LABEL).click();
+  assert.deepEqual(shown, ["req-1"], "Show in the conversation names the request whose cards to show");
 });
 
 test("kept access can be limited in time, and TeamLead's own request can be handed on", async () => {

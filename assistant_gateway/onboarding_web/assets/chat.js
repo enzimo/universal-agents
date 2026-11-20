@@ -10,6 +10,7 @@ import { createLiveEvents } from "./chat_live_events.mjs";
 import { createChatAttention } from "./chat_attention.mjs";
 import { KNOWLEDGE_VIEW, readChatPageLink } from "./chat_links.mjs";
 import { isAccessReviewMessage } from "./chat_access_review.mjs";
+import { FOLLOW_UP_AFTER_REVIEW } from "./access_inbox.mjs";
 import { createSettingsControls } from "./settings_controls.mjs";
 import { createWorkspaceFileActions } from "./workspace_file_actions.mjs";
 import { createTranscriptView } from "./chat_transcript_view.mjs";
@@ -19,6 +20,7 @@ import { createActivityMesh } from "./activity_mesh.mjs";
 import { createTeamActivity } from "./team_activity.mjs";
 import { createSettingsClient } from "./settings_support.mjs";
 import { createChatSubmission } from "./chat_submission.mjs";
+import { brokerCardElement, createBrokerCards, replaceChildrenKeeping } from "./broker_card.mjs";
 import {
   LIST_STATE,
   THREAD_PLACEMENT_ACTION,
@@ -41,6 +43,16 @@ function mountPage() {
 "use strict";
 const lifecycle = createPageLifecycle(window);
 const requestClient = createRequestClient(window, lifecycle);
+// Broker pages shown inside their chat cards as sandboxed frames (broker_card.mjs).
+// A broker card that held focus and closed hands focus to the message box, which the
+// chat's re-renders never rebuild (broker_card.mjs).
+function focusMessageBox() {
+  var input = document.getElementById("message-input");
+  if (input) {
+    input.focus({ preventScroll: true });
+  }
+}
+const brokerCards = createBrokerCards({ browser: window, document, lifecycle, onFocusLost: focusMessageBox });
 // Read Inbox and Access links before anything checks the address: they only
 // choose a panel to open after sign-in, so the address goes back to plain chat
 // and a reload stays on the chat.
@@ -73,7 +85,7 @@ const attention = createChatAttention({
 });
 const appearance = createAppearance({ appearanceState, sharedState, lifecycle, requestClient, operations: { handleUnauthorizedResponse: (...args) => authentication.handleUnauthorizedResponse(...args) } });
 const diagnostics = createDiagnostics({ diagnosticsState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args) } });
-const authentication = createAuthentication({ authenticationState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args), clearOptimisticDeliveries: (...args) => clearOptimisticDeliveries(...args), clearPendingAttachments: (...args) => clearPendingAttachments(...args), clearThreadListOverlays: () => clearThreadListOverlays(), configurePrincipalState: (...args) => configurePrincipalState(...args), fetchSessions: (...args) => fetchSessions(...args), loadObjectives: (...args) => runtime_views.loadObjectives(...args), parseApiResponse: (...args) => parseApiResponse(...args), refreshContextDumpStatus: (...args) => diagnostics.refreshContextDumpStatus(...args), renderMessages: (...args) => renderMessages(...args), renderSettingsAppearance: (...args) => appearance.renderSettingsAppearance(...args), renderThreads: (...args) => renderThreads(...args), setAssistantName: (name) => setAssistantName(sharedState, document, name), showSignIn: () => signInGreeting.show(), stopSignIn: () => signInGreeting.stop(), startLiveEvents: () => { liveEvents.start(); activityMesh.start(); sharedState.settingsControls.startInboxCount(); }, stopLiveEvents: () => { liveEvents.stop(); attention.clear(); activityMesh.stop(); teamActivity.clear(); }, setObjectivesStatus: (...args) => runtime_views.setObjectivesStatus(...args) } });
+const authentication = createAuthentication({ authenticationState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args), clearOptimisticDeliveries: (...args) => clearOptimisticDeliveries(...args), clearPendingAttachments: (...args) => clearPendingAttachments(...args), clearThreadListOverlays: () => clearThreadListOverlays(), configurePrincipalState: (...args) => configurePrincipalState(...args), fetchSessions: (...args) => fetchSessions(...args), loadObjectives: (...args) => runtime_views.loadObjectives(...args), parseApiResponse: (...args) => parseApiResponse(...args), refreshContextDumpStatus: (...args) => diagnostics.refreshContextDumpStatus(...args), renderMessages: (...args) => renderMessages(...args), renderSettingsAppearance: (...args) => appearance.renderSettingsAppearance(...args), renderThreads: (...args) => renderThreads(...args), setAssistantName: (name) => setAssistantName(sharedState, document, name), showSignIn: () => signInGreeting.show(), stopSignIn: () => signInGreeting.stop(), startLiveEvents: () => { liveEvents.start(); activityMesh.start(); sharedState.settingsControls.startInboxCount(); }, stopLiveEvents: () => { liveEvents.stop(); attention.clear(); activityMesh.stop(); teamActivity.clear(); brokerCards.closeAll(); }, setObjectivesStatus: (...args) => runtime_views.setObjectivesStatus(...args) } });
 const runtime_views = createRuntimeViews({ runtime_viewsState, sharedState, lifecycle, requestClient, operations: { ensureRuntimeControlsSession: (...args) => authentication.ensureRuntimeControlsSession(...args), formatShortLocalTimestamp: (...args) => formatShortLocalTimestamp(...args), parseApiResponse: (...args) => parseApiResponse(...args), timestampElement: (...args) => timestampElement(...args), uiElement: (...args) => uiElement(...args) } });
 // The team's live status, carried by every live page and shown by the
 // activity mesh, Settings → Team and the Tasks view (team_activity.mjs).
@@ -527,6 +539,8 @@ const activityMesh = createActivityMesh({
 
 sharedState.settingsControls = createSettingsControls({
     teamActivity,
+    onFollowUpPages: function (requestId, links, placement) { return addFollowUpPages(requestId, links, placement); },
+    onShowFollowUpPages: function (requestId) { showFollowUpPages(requestId); },
     onClose: function () { renderThreads(); },
     returnFocus: sharedState.settingsButton,
     onUnauthorized: authentication.handleUnauthorizedResponse,
@@ -2895,6 +2909,14 @@ function stopTransientCountdown() {
 
 function replaceTransientActionWithExpiredState(countdown) {
     var notice = countdown.closest(".message-transient-notice");
+    if (notice && notice.hasAttribute("data-broker-card")) {
+      // An expired broker card closes its frame and keeps the expired line (no Dismiss).
+      var itemId = notice.getAttribute("data-item-id") || "";
+      setBrokerCardState(activeThread(), itemId, "expired");
+      brokerCards.close(itemId);
+      lifecycle.timeout(renderMessages, 0);
+      return;
+    }
     var actions = notice && notice.querySelector(".message-transient-actions");
     if (!actions) {
       return;
@@ -2941,7 +2963,84 @@ function updateTransientCountdown() {
     return shouldContinue;
   }
 
+// An approved access proposal's credential forms become broker cards
+// (access_inbox.mjs followUpPages). A decision on the card in the conversation
+// (FOLLOW_UP_AFTER_REVIEW) puts them right after that review message, in the
+// thread that holds it even if another thread is open by now. A decision in
+// the Inbox panel (FOLLOW_UP_AFTER_LATEST) puts them after the open
+// conversation's latest message, where the person is; an empty conversation
+// gets them at its start. Returns the links shown as cards; the decided card
+// keeps any other as a link.
+function isReviewOf(requestId) {
+    return function (message) {
+      return String(message.accessRequestId || "") === String(requestId || "");
+    };
+  }
+
+function addFollowUpPages(requestId, links, placement) {
+    var reviewThread = placement === FOLLOW_UP_AFTER_REVIEW
+      ? sharedState.threads.find(function (candidate) { return candidate.messages.some(isReviewOf(requestId)); })
+      : null;
+    var thread = reviewThread || activeThread();
+    if (!thread) {
+      return [];
+    }
+    var review = reviewThread ? reviewThread.messages.find(isReviewOf(requestId)) : null;
+    var position = review
+      ? Number(review.sessionSequence || 0)
+      : window.UAChatDelivery.latestDurableSessionSequence(thread.messages);
+    var pages = window.UAChatDelivery.followUpPageItems(requestId, position, links, window.location.origin);
+    if (!pages.length) {
+      console.warn("An approved request's credential forms could not be shown as cards; they stay links.", requestId);
+      return [];
+    }
+    pages.forEach(function (page) {
+      thread.transientItems = window.UAChatDelivery.upsertTransientItem(thread.transientItems, page.item);
+    });
+    thread.transientItems = window.UAChatDelivery.reconcileTransientItems(thread.transientItems, thread.messages);
+    // Drawn on the next tick: the caller first saves the decided card that says where the forms are.
+    lifecycle.timeout(renderMessages, 0);
+    return pages.map(function (page) { return page.link; });
+  }
+
+// "Show in the conversation" on the Inbox panel: after Settings closed, bring the
+// request's first form card into view (the person asked for it, so the
+// transcript may move).
+function showFollowUpPages(requestId) {
+    lifecycle.timeout(function () {
+      var prefix = "account_link:" + String(requestId || "") + ":";
+      var card = Array.from(sharedState.messageList.querySelectorAll("[data-broker-card]")).find(function (node) {
+        return String(node.getAttribute("data-item-id") || "").indexOf(prefix) === 0;
+      });
+      if (card) {
+        card.scrollIntoView({ block: "center" });
+      }
+    }, 0);
+  }
+
+function setBrokerCardState(thread, itemId, state) {
+    if (!thread || !itemId) {
+      return;
+    }
+    thread.brokerCardStates = thread.brokerCardStates || new Map();
+    thread.brokerCardStates.set(itemId, state);
+  }
+
 function createTransientItemCard(thread, item) {
+    if (item.frameUrl) {
+      // A broker page: shown inside the card (broker_card.mjs), never with Dismiss.
+      return brokerCardElement({
+        document: document,
+        cards: brokerCards,
+        item: item,
+        state: thread.brokerCardStates ? thread.brokerCardStates.get(item.itemId) || "" : "",
+        expiredMessage: shellState.expiredSecureFormMessage,
+        onState: function (state) {
+          setBrokerCardState(thread, item.itemId, state);
+          renderMessages();
+        },
+      });
+    }
     var transientNotice = document.createElement("div");
     transientNotice.className = "message-transient-notice";
     transientNotice.setAttribute("data-item-id", item.itemId);
@@ -3004,7 +3103,10 @@ function renderMessages(options) {
     var thread = activeThread();
     // The switch shows the selected thread's setting.
     renderParallelSwitch();
-    sharedState.messageList.innerHTML = "";
+    // Built first, then placed: a live broker card stays in the page while the
+    // rest is replaced around it, because a frame that leaves the page reloads
+    // and loses what was typed (broker_card.mjs replaceChildrenKeeping).
+    var nodes = [];
     var errorThread = thread && thread.transientError ? thread : null;
     var errorNotice = errorThread ? errorThread.transientError : sharedState.historyHydrationError;
     if (errorNotice) {
@@ -3030,9 +3132,9 @@ function renderMessages(options) {
         }
       });
       errorBanner.appendChild(retryButton);
-      sharedState.messageList.appendChild(errorBanner);
+      nodes.push(errorBanner);
     }
-    sharedState.messageList.appendChild(createWelcomeGuidance());
+    nodes.push(createWelcomeGuidance());
     if (thread && thread.hasMoreHistory && thread.historyBeforeCursor) {
       var earlierButton = document.createElement("button");
       earlierButton.type = "button";
@@ -3042,7 +3144,7 @@ function renderMessages(options) {
       lifecycle.listen(earlierButton, "click", function () {
         loadEarlierHistory();
       });
-      sharedState.messageList.appendChild(earlierButton);
+      nodes.push(earlierButton);
     }
     if (thread) {
       window.UAChatDelivery.buildTimeline(
@@ -3050,11 +3152,32 @@ function renderMessages(options) {
         thread.transientItems
       ).forEach(function (item) {
         if (item.kind === "transient_item") {
-          sharedState.messageList.appendChild(createTransientItemCard(thread, item.value));
+          nodes.push(createTransientItemCard(thread, item.value));
           return;
         }
-        sharedState.messageList.appendChild(createMessageBubble(item.value, thread));
+        nodes.push(createMessageBubble(item.value, thread));
       });
+    }
+    // Frames of cards no longer shown (the item left, another thread is open) close here.
+    brokerCards.retainOnly(nodes.filter(function (node) {
+      return node.hasAttribute && node.hasAttribute("data-broker-frame");
+    }).map(function (node) {
+      return node.getAttribute("data-item-id");
+    }));
+    var list = sharedState.messageList;
+    // Focus on a broker card's control (such as "Open in its own tab") that this
+    // render replaces goes to the message box, not to the page body.
+    var focused = document.activeElement;
+    var focusedInCard = Boolean(focused && focused.closest && list.contains(focused) && focused.closest("[data-broker-card]"));
+    var live = new Set(nodes.filter(function (node) { return node.parentNode === list; }));
+    if (!replaceChildrenKeeping(list, nodes, live)) {
+      console.warn(
+        "Web Chat rebuilt the conversation around open secure pages; their forms reloaded.",
+        Array.from(live).map(function (node) { return node.getAttribute("data-item-id"); })
+      );
+    }
+    if (focusedInCard && !focused.isConnected) {
+      focusMessageBox();
     }
     var shouldRunTransientCountdown = updateTransientCountdown();
     if (shouldRunTransientCountdown && shellState.transientCountdownTimer === 0) {

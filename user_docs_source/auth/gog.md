@@ -61,7 +61,9 @@ Use:
 This is the main way to sign in to Google.
 
 The authorization page keeps an inactive **Wait...** button until the Google
-URL is available, then enables **Open** to launch Google in a new tab. Status
+URL is available, then enables **Open** to launch Google in a new tab (also
+when the page is shown inside Web Chat: Google's own pages cannot be shown
+inside another page). Status
 checks update the existing page without replacing the button or redirect form.
 Redirect troubleshooting and raw CLI output are collapsed by default.
 

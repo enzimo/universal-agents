@@ -118,6 +118,8 @@ class InternalWebsiteHostEnvironment:
     config_path: Path
     base_url: str
     public_origin: str
+    # Where people's browsers reach the secure broker's pages; Web Chat frames them (website_support.web_chat_csp).
+    broker_public_base_url: str
     assistant_display_name: str
     appearance: dict[str, object]
     activity_collector_base_url: str

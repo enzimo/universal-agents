@@ -10,6 +10,8 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from secure_tools.broker_pages import SIGN_IN_MAY_REMAIN_FIELD, SIGN_IN_STATUS_DECLINED
+
 # How long a sign-in page (and the sign-in process behind it) stays open:
 # 15 minutes, because setting up a tool can take several steps, such as
 # creating a Google Cloud app before signing in (owner's decision 2026-09-29).
@@ -127,7 +129,7 @@ def sign_in_wait_script() -> str:
         deviceCode.textContent = payload.user_code;
         if (copyButton) copyButton.disabled = false;
       }
-      if (payload.status === "success" || payload.status === "error") {
+      if (payload.status === "success" || payload.status === "error" || payload.status === "declined") {
         stopPolling();
         // Navigate with GET once, including when this page was rendered by a form POST.
         window.location.replace(window.location.href);
@@ -145,7 +147,17 @@ def sign_in_wait_script() -> str:
 
 
 def session_status_payload(session: Any) -> dict[str, Any]:
+    """What a sign-in page's status route reports (the gateway's watchers and the page's own script read it).
+
+    A page whose Decline is still stopping its sign-in process (its one-time
+    claim is held) reads as pending: the Decline has not yet decided whether a
+    sign-in may remain (``page_decline``), and a watcher stops at the first
+    final status it reads.
+    """
+
     status = str(session.state.get("status") or "pending")
+    if status == SIGN_IN_STATUS_DECLINED and getattr(session, "submission_in_progress", False):
+        status = "pending"
     message = (
         str(session.state.get("error") or session.state.get("message") or "")
         if status == "error"
@@ -164,6 +176,7 @@ def session_status_payload(session: Any) -> dict[str, Any]:
         "auth_stage": session.state.get("auth_stage"),
         # The account a finished sign-in used, when the flow knows it (X); no secret.
         "username": session.state.get("username"),
+        SIGN_IN_MAY_REMAIN_FIELD: bool(session.state.get(SIGN_IN_MAY_REMAIN_FIELD)),
         "expires_at": session.expires_at.isoformat(),
     }
 

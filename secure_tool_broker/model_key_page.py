@@ -78,6 +78,8 @@ from runtime_settings.model_request_options import (
 )
 from secure_tool_broker.auth_pages import (
     SECRET_INPUT_TOGGLE_SCRIPT,
+    CARD_OUTCOME_FINISHED,
+    close_page_script,
     render_broker_auth_page,
     render_credential_input,
 )
@@ -220,6 +222,8 @@ class _ModelKeyPage:
     kind = "form"
     page_seconds = MODEL_KEY_PAGE_SECONDS
     administrators_only = False
+    # Ends with its own Close; the service's Decline is refused here (page_decline.decline_refusal).
+    declinable = False
 
     def start(self, session: Any, payload: Mapping[str, Any], logger: logging.Logger) -> None:
         session.state["endpoint_uses"] = [use.model_dump(mode="json") for use in _endpoint_uses(payload, logger)]
@@ -230,7 +234,8 @@ class _ModelKeyPage:
         action = str(form.get("action") or "")
         session.state[_FORM_KEY] = _form_id(form)
         if action == _CLOSE:
-            # A closed page answers "already used" from now on; the browser tab closes itself.
+            # From now on any GET or POST shows the closed page and applies nothing
+            # (ended_pages.ended_sign_in_page); the browser tab closes itself.
             session.used = True
             session.state[_STATUS_KEY] = _CLOSED_STATUS
             return
@@ -668,7 +673,8 @@ def _closed_page(title: str) -> str:
         "<p>Nothing more can be changed with it. If this tab stays open, close it yourself. Open a new page "
         f"with {_e(MODEL_KEY_COMMAND)} when you need one.</p></section>"
     )
-    return render_broker_auth_page(title, body, script="<script>window.close();</script>")
+    # Close is how a person ends this long-lived page, so in a card it reads as finished.
+    return render_broker_auth_page(title, body, script=close_page_script(), card_outcome=CARD_OUTCOME_FINISHED)
 
 
 def _intro_panel(session: Any, store_problem: str, *, personal: bool = False) -> str:

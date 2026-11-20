@@ -10,7 +10,7 @@ import pytest
 from secure_tool_broker.sign_in_pages import sign_in_wait_script
 
 
-@pytest.mark.parametrize("terminal", ["success", "error", "gone"])
+@pytest.mark.parametrize("terminal", ["success", "error", "declined", "gone"])
 @pytest.mark.parametrize("provider", ["google", "github"])
 def test_broker_auth_polling_preserves_controls_and_stops_at_completion(terminal, provider):
     node = shutil.which("node")

@@ -137,6 +137,7 @@ class InteractiveAppManager:
                 config_path=config.config_path.resolve(),
                 base_url=config.internal_website_base_url,
                 public_origin=config.network.public_origin,
+                broker_public_base_url=config.secure_tool_broker_public_base_url,
                 assistant_display_name=config.assistant.display_name,
                 appearance=config.ui.onboarding.appearance.model_dump(mode="json"),
                 activity_collector_base_url=(

@@ -64,9 +64,9 @@ An owner exports the whole team from a chat:
 
 1. **Type `/upgrade`** in a private chat with the assistant: Web Chat, or a
    direct message in Telegram, Discord, Signal, iMessage (Photon) or WhatsApp.
-   The reply holds a link to a private page, and anyone who sees the link can
-   open the page, so `/upgrade` in a group chat is refused and asks you to
-   send it in a direct message. Only owners can export the team;
+   In Web Chat the private page appears inside the chat; other chats get a
+   link to it. Anyone who sees the link can open the page, so `/upgrade` in a
+   group chat is refused and asks you to send it in a direct message. Only owners can export the team;
    administrators who are not owners are refused.
 2. **Open the page and choose a passphrase.** Type it twice, at least 12
    characters and at most 1,024. It goes to the secure broker, is never sent to the agent and is

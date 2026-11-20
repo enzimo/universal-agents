@@ -29,6 +29,7 @@ from runtime_settings.appearance import (  # noqa: E402
 from assistant_gateway.application.website_application import WebAppearanceV1  # noqa: E402
 from custom_messages.contracts.status_v1 import StatusSeverity  # noqa: E402
 from runtime_settings.network import compose_public_base_url  # noqa: E402
+from secure_tools.broker_pages import card_view_url  # noqa: E402
 from assistant_gateway.application.command_help import (  # noqa: E402
     build_web_chat_command_guide_payload,
     build_web_chat_help,
@@ -56,6 +57,44 @@ PUBLIC_VERSION = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 # The real live updates stream sends a page every 2 seconds; Web Chat
 # reconnects when nothing arrives for 15 (chat_live_events.mjs).
 PREVIEW_STREAM_HEARTBEAT_SECONDS = 2
+# Cards --broker-page adds to the preview conversation (running broker pages).
+PREVIEW_BROKER_PAGE_ID = "preview-broker-page"
+
+
+def preview_broker_page(url: str, index: int, *, seconds: int = 15 * 60) -> dict[str, str]:
+    """One running broker page for the preview conversation, open for ``seconds``."""
+
+    now = datetime.now(timezone.utc)
+    return {
+        "id": f"{PREVIEW_BROKER_PAGE_ID}-{index}",
+        "url": url,
+        "created_at_utc": now.isoformat(),
+        "expires_at_utc": datetime.fromtimestamp(now.timestamp() + seconds, timezone.utc).isoformat(),
+    }
+
+
+def _preview_broker_card(page: dict[str, str]) -> dict[str, object]:
+    """The transient action Web Chat gets for a broker page, as the gateway sends it (conversation.py)."""
+
+    return {
+        "session_key": WEB_CHAT_PREVIEW_SESSION_KEY,
+        "kind": "tool_setup",
+        "item_id": f"tool_setup:{page['id']}",
+        "request_id": page["id"],
+        "correlation_id": page["id"],
+        "session_sequence": 1,
+        "created_at_utc": page["created_at_utc"],
+        "content": (
+            "To list your stacks, I need your Portainer API token.\n"
+            "What you enter goes straight to the secure broker, never to the agent."
+        ),
+        "action": {
+            "label": "Store your Portainer API token",
+            "url": page["url"],
+            "expires_at_utc": page["expires_at_utc"],
+            "frame_url": card_view_url(page["url"]),
+        },
+    }
 
 
 class PreviewRequestHandler(SimpleHTTPRequestHandler):
@@ -337,10 +376,11 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.UNAUTHORIZED, "Web Chat session is invalid or expired."
                 )
                 return
+            # An empty thread in the preview's thread list (preview_web_chat_threads).
             self._write_json(
                 {
                     "status": "ok",
-                    "session": self._preview_session_payload(),
+                    "session": self._preview_threads().new_thread(datetime.now(timezone.utc)),
                     "event_cursor": self._preview_event_cursor(),
                 },
                 status=HTTPStatus.CREATED,
@@ -1063,8 +1103,14 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             # The thread states the gateway sends: revision, busy marks and who works now (agent trail).
             **self._preview_threads().live_states(datetime.now(timezone.utc)),
             "team_activity": {"members": self._preview_members()},
-            "transient_actions": [],
+            "transient_actions": self._preview_transient_actions(),
         }
+
+    def _preview_transient_actions(self) -> list[dict[str, object]]:
+        """A card per running broker page the preview was given (--broker-page, preview_broker_pages)."""
+
+        pages = getattr(self.server, "preview_broker_pages", None)
+        return [_preview_broker_card(page) for page in pages] if isinstance(pages, list) else []
 
     def _write_preview_event_stream(self) -> None:
         """Server-sent events like the gateway's stream, until the browser closes it.
@@ -1440,6 +1486,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Open the preview URL in the default browser.",
     )
     parser.add_argument(
+        "--broker-page",
+        action="append",
+        default=[],
+        help=(
+            "Address of a running broker's page (for example a credential collection form) to show "
+            "as a card in the Web Chat preview (repeat for several); the broker must allow this "
+            "preview's address to frame it."
+        ),
+    )
+    parser.add_argument(
         "--export-dir",
         default=str(Path.home() / "Downloads"),
         help="Directory for one-time appearance exports.",
@@ -1460,6 +1516,7 @@ def serve(
     asset_root: Path,
     export_dir: Path,
     open_browser: bool = False,
+    broker_pages: tuple[str, ...] = (),
 ) -> int:
     if not asset_root.is_dir():
         raise SystemExit(f"Preview asset directory does not exist: {asset_root}")
@@ -1472,6 +1529,12 @@ def serve(
             f"Unable to bind onboarding aesthetic preview on {host}:{port}: {exc}"
         ) from exc
 
+    if broker_pages:
+        setattr(
+            httpd,
+            "preview_broker_pages",
+            [preview_broker_page(url, index) for index, url in enumerate(broker_pages)],
+        )
     actual_host, actual_port = httpd.server_address[:2]
     url = f"http://{_display_host(str(actual_host))}:{actual_port}/"
     print(f"Onboarding aesthetic preview listening on {url}")
@@ -1503,6 +1566,7 @@ def main() -> int:
         asset_root=Path(args.asset_root).expanduser().resolve(),
         export_dir=Path(args.export_dir).expanduser().resolve(),
         open_browser=bool(args.open),
+        broker_pages=tuple(str(url).strip() for url in args.broker_page if str(url).strip()),
     )
 
 

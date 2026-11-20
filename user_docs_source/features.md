@@ -716,24 +716,28 @@ sensitive values only through those broker forms or through configured env /
 secret files, not in normal chat. GitHub, Google and X sign-ins belong to the
 person who made them: agents use them only for that person's work.
 
-When an agent asks you to store or delete a credential, Web Chat shows a
-dismissible **Open secure credential form** action with a live expiry countdown.
-A setup page an agent asks for (see
-[When an agent needs a tool set up](#when-an-agent-needs-a-tool-set-up)) shows
-its own **Open** action the same way; the pages that open after the first one
-come back after a refresh until each ends (a gateway restart removes them).
-A credential form's action is available only in the browser response that
-starts the workflow; it stays at its original position in the chat timeline
-and disappears as soon as the form ends: the chat then shows one line saying
-how it ended, such as
+When an agent asks you to store or delete a credential, the secure form appears
+inside the chat, in its card: the reason on top, the broker's form, and a line
+with the time left and **Open in its own tab**. **Decline** at the bottom of the
+form ends it without storing or deleting anything. The keyboard works too: Tab
+moves into the form and on to **Open in its own tab**, and when the form ends
+the cursor returns to the message box. A setup page an agent asks
+for (see [When an agent needs a tool set up](#when-an-agent-needs-a-tool-set-up))
+appears the same way; the pages that open after the first one come back after a
+refresh until each ends (a gateway restart removes them). A credential form's
+card is available only in the browser response that starts the workflow; it
+stays at its original position in the chat timeline. When the form ends, the
+card shrinks to one line ("Done." or "Declined."; a form already finished in
+its own tab shows that when the card is opened again), and the chat then shows one
+line saying how it ended, such as
 "The secure form for `bifrost_virtual_key` is done: the credential was
 stored.", while the agent goes on with its task.
 If the gateway loses the form's status, it closes the card and says it cannot
 confirm whether anything was stored or changed. A delayed or failed send to
-the agent does not keep the card open. The action is intentionally absent after
-refresh and from saved transcript history. At expiry, Web Chat replaces the Open action
-and countdown with an inert expiry notice while it waits for the matching result.
-Dismiss remains available. If the form expired before submission, start the
+the agent does not keep the card open. The card is intentionally absent after
+refresh and from saved transcript history. At expiry, the form closes and the
+card keeps one line saying the link expired while it waits for the matching
+result. If the form expired before submission, start the
 credential request again. If its result is unknown, check the stored credential
 before trying again. Manual account-signup forms include
 a separate validated link to create the account before returning to store its
@@ -779,8 +783,14 @@ it lacks, and opens every page in your chat at once:
 > I need you to sign in to GitHub so I can list the repos you can access in
 > GitHub. **Sign in to GitHub**
 
-The page opens in a new tab; what you enter goes straight to the secure broker,
-never to the agent. When everything is done, the task carries on by itself,
+In Web Chat the page appears inside the chat, in its card: you fill it in
+there, and what you enter goes straight to the secure broker, never to the chat
+or the agent. **Open in its own tab** opens the same page in a new tab, which
+helps for long forms (switching to another chat thread reloads a page shown in
+the chat, so anything typed but not sent is cleared). **Decline** at the bottom
+of the page ends it without saving anything and tells the waiting task. In
+other chats (Telegram, Signal and the rest) the message holds a link that opens
+the page in a new tab. When everything is done, the task carries on by itself,
 for example "Signed in to GitHub as exampleuser. Checking your repositories now."
 You can also finish the same step yourself with `/link <tool_id>` (or
 `/auth google team_client`) while the task waits; the task hears about it the
@@ -860,7 +870,8 @@ credentials such a tool uses. Send:
 
 `/link <tool_id>` (or `/link <tool_id> me`) links your own account;
 `/link <tool_id> team` links the team's account and needs a team owner or
-administrator. Chat shows **Open account link form**. The broker's form shows
+administrator. Web Chat shows the broker's form inside a card in the
+conversation (other chats get a link to it). The form shows
 whose account it is, which agents use it, where the credential goes, and how it
 is sent. Pick one of the stored credentials that fit, or type a new one under
 **Add a new credential**; the broker saves it and links it in the same step.
@@ -898,8 +909,9 @@ message saying how it ended, in Web Chat, Telegram, Discord and the other chats:
   Check **Settings → Access → By Tool** (its **Accounts** row names who owns
   each linked account and who linked it) or `/auth status` for sign-ins.
 
-In Web Chat the **Open account link form** or **Open** card disappears when
-that message arrives. While the page is open, chat history keeps only a line
+In Web Chat the page itself shows inside its card, and the card disappears
+when that message arrives (it shrinks to "Done." or "Declined." as soon as the
+page ends). While the page is open, chat history keeps only a line
 such as "Account link form opened for mcp:crawl4ai (the team's account)."; the
 page's address is never saved. The card lives only in the browser tab that ran
 `/link`, so refreshing the page removes it, and the result message still

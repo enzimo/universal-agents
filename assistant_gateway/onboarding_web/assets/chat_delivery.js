@@ -13,7 +13,10 @@
   // ("account_link", or "broker_authentication" for a sign-in) and an /auth
   // team sign-in app card disappear once the gateway posts how the page ended.
   // Other /auth cards (password managers) share the "broker_authentication"
-  // kind but get no result, so they stay until dismissed.
+  // kind but get no result message: in Web Chat their card closes on the
+  // broker page's own ending (broker_card.mjs; a page opened again after it
+  // ended shows that ending, secure_tool_broker/ended_pages.py), and a plain
+  // link card stays until dismissed.
   var FINISHING_MESSAGE_TYPES = Object.freeze({
     secure_credential_collection: "task",
     tool_setup: "task",
@@ -164,6 +167,25 @@
       : "";
   }
 
+  // A broker page's card view (``frame_url``, broker_card.mjs) is shown in the
+  // chat only when it is the same page as ``url``: same origin and path, an
+  // http(s) address. Anything else stays a link.
+  function brokerCardFrameUrl(rawFrameUrl, pageUrl) {
+    var text = String(rawFrameUrl || "").trim();
+    if (!text) {
+      return "";
+    }
+    try {
+      var frameUrl = new URL(text, pageUrl.href);
+      if (frameUrl.origin !== pageUrl.origin || frameUrl.pathname !== pageUrl.pathname) {
+        return "";
+      }
+      return frameUrl.href;
+    } catch (error) {
+      return "";
+    }
+  }
+
   function normalizeTransientItem(value, origin) {
     if (!value || typeof value !== "object") {
       return null;
@@ -210,6 +232,10 @@
       item.label = label;
       item.url = parsedUrl.href;
       item.expiresAtUtc = String(action.expires_at_utc || "");
+      var frameUrl = brokerCardFrameUrl(action.frame_url, parsedUrl);
+      if (frameUrl) {
+        item.frameUrl = frameUrl;
+      }
       item.correlationId = correlationId;
       var pageId = String(value.request_id || "").trim();
       if (pageId && FINISHING_PAGE_MESSAGE_TYPES[kind]) {
@@ -219,6 +245,39 @@
     } catch (error) {
       return null;
     }
+  }
+
+  // An approved access proposal's credential forms (access_inbox.mjs
+  // followUpLinks) as broker card items placed after ``sessionSequence``:
+  // one "account_link" item per form, built through normalizeTransientItem so
+  // the same address checks apply (http or https, the frame address on the
+  // page's own origin and path). Only forms that get a card view are returned,
+  // each with the link it came from, so the caller keeps any other as a link.
+  // A conversation without messages yet places them at its start (1).
+  function followUpPageItems(requestId, sessionSequence, links, origin) {
+    var id = String(requestId || "").trim();
+    if (!id) {
+      return [];
+    }
+    var position = Math.max(1, nonNegativeInteger(sessionSequence));
+    return (Array.isArray(links) ? links : []).flatMap(function (link, index) {
+      var pageId = id + ":" + String(index + 1);
+      var item = normalizeTransientItem({
+        kind: "account_link",
+        item_id: "account_link:" + pageId,
+        request_id: pageId,
+        correlation_id: id,
+        session_sequence: position,
+        content: String(link && link.label || ""),
+        action: {
+          label: String(link && link.label || ""),
+          url: String(link && link.url || ""),
+          frame_url: String(link && link.frameUrl || ""),
+          expires_at_utc: String(link && link.expiresAtUtc || ""),
+        },
+      }, origin);
+      return item && item.frameUrl ? [{ item: item, link: link }] : [];
+    });
   }
 
   function reconcileTransientItems(currentItems, messages) {
@@ -375,6 +434,7 @@
     clearErrorNotice: clearErrorNotice,
     create: create,
     createErrorNotice: createErrorNotice,
+    followUpPageItems: followUpPageItems,
     latestDurableSessionSequence: latestDurableSessionSequence,
     normalizeTransientItem: normalizeTransientItem,
     reconcileMessages: reconcileMessages,

@@ -788,6 +788,30 @@ async def test_handle_local_session_auth_command_uses_live_broker_signed_github_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("switched_off", ["enabled", "web_chat_enabled"])
+async def test_broker_gets_no_web_chat_origin_when_web_chat_is_off(tmp_path, monkeypatch, switched_off):
+    """Without Web Chat nothing legitimate frames a card, so the broker allows no framing."""
+
+    config = GatewayInstanceConfig.create(
+        instance_name="test_instance",
+        instance_root=str(tmp_path / "instance"),
+        team_id="team_test",
+        timezone="UTC",
+    )
+    setattr(config.interactive_apps.internal_website, switched_off, False)
+    config_path = config.save()
+    monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", "test-token")
+    observed: dict[str, object] = {}
+
+    async def fake_run_secure_tool_broker(*, host, port, token, **authorization):
+        observed["web_chat_origin"] = authorization["web_chat_origin"]
+
+    monkeypatch.setattr("assistant_cli.run_secure_tool_broker", fake_run_secure_tool_broker)
+    await _run_secure_tool_broker_service(str(config_path))
+    assert observed == {"web_chat_origin": None}
+
+
+@pytest.mark.asyncio
 async def test_run_secure_tool_broker_service_uses_config_bind_settings(
     tmp_path, monkeypatch
 ):
@@ -833,6 +857,7 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
                 "authorization_keys": tuple(sorted(authorization)),
                 "mcp_config": authorization["mcp_config"],
                 "access_gate": authorization["access_gate"],
+                "web_chat_origin": authorization["web_chat_origin"],
             }
         )
 
@@ -841,6 +866,12 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
     )
 
     await _run_secure_tool_broker_service(str(config_path))
+
+    # Web Chat may frame the broker's card view only from its own address,
+    # derived from the existing public-address settings.
+    assert config.interactive_apps.internal_website.enabled
+    assert config.interactive_apps.internal_website.web_chat_enabled
+    assert observed.pop("web_chat_origin") == config.internal_website_base_url.rstrip("/")
 
     mcp_config = observed.pop("mcp_config")
     assert isinstance(mcp_config, BrokerMCPConfig)
@@ -866,7 +897,7 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
         "host": "0.0.0.0",
         "port": 8767,
         "token": "test-token",
-        "authorization_keys": ("access_gate", "mcp_config", "tool_setup_recheck_days"),
+        "authorization_keys": ("access_gate", "mcp_config", "tool_setup_recheck_days", "web_chat_origin"),
     }
 
 

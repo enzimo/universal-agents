@@ -20,7 +20,6 @@ FakeElement.prototype.querySelectorAll = function (selector) {
   const all = node => node.children.flatMap(child => [child, ...all(child)]);
   return all(this).filter(node => node.classList.contains(selector.slice(1)));
 };
-Object.defineProperty(FakeElement.prototype, "style", { configurable: true, get() { return (this._style ||= {}); } });
 
 const NOW = Date.UTC(2026, 10, 19, 12);
 const at = minutes => new Date(NOW - minutes * 60000).toISOString();

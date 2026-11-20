@@ -308,7 +308,7 @@ async def test_close_ends_a_page_that_is_not_exporting(broker: TestClient) -> No
     closed = await (await broker.post(page, data={"action": "close"})).text()
 
     assert "This page is closed." in closed and "window.close()" in closed
-    assert (await broker.get(page)).status == 410
+    assert "This page is closed." in await (await broker.get(page)).text()
     assert (await (await broker.get(f"{page}/status")).json())["status"] == "closed"
 
 
@@ -329,7 +329,7 @@ async def test_a_page_rebuilt_after_a_broker_restart_never_starts_an_export(laun
     await first.start_server()
     closed_page, open_page = await _page_path(first), await _page_path(first)
     await first.post(closed_page, data={"action": "close"})
-    assert (await first.get(closed_page)).status == 410
+    assert "This page is closed." in await (await first.get(closed_page)).text()
     await first.close()
 
     # The broker restarts with the same root secret: the signed links open again.
@@ -589,3 +589,34 @@ def test_a_success_whose_size_and_parts_were_unreadable_shows_neither() -> None:
     assert "could not be read afterwards" in panel
     assert "0 bytes" not in panel and "It holds" not in panel
     assert "Next steps" in panel
+
+
+# -- Close after a result (review finding F5) -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("result", "outcome"),
+    [
+        (None, "declined"),  # closed before any export ran
+        (_result("exp_aaaaaaaaaaaaaaaaaaaaaa", ok=True), "finished"),
+        (_result("exp_aaaaaaaaaaaaaaaaaaaaaa", ok=False), "declined"),  # nothing was exported
+        # The export process took the passphrase and ended without reporting: a file may exist.
+        ({"ok": False, "error": "ended", team_export_page.RESULT_UNCONFIRMED: True}, "finished"),
+    ],
+)
+def test_a_closed_page_tells_the_card_how_it_ended(result: dict | None, outcome: str) -> None:
+    session = _session()
+    session.state = {"status": team_export_page.STATUS_CLOSED}
+    if result is not None:
+        session.state[team_export_page._RESULT] = result
+
+    from secure_tool_broker import page_view
+
+    token = page_view._CURRENT_VIEW.set(page_view.PageView(card=True, parent_origin="http://chat.example.test"))
+    try:
+        page = team_export_page.TeamExportFlow().render(session)
+    finally:
+        page_view._CURRENT_VIEW.reset(token)
+
+    assert "This page is closed." in page
+    assert f'data-card-outcome="{outcome}"' in page

@@ -41,8 +41,8 @@ from secure_tool_broker.service import (
     CredentialCollectionSession,
     SecureToolBrokerService,
     _render_manual_signup_action,
-    _run_claimed_form_thread,
 )
+from secure_tool_broker.form_claims import run_claimed_form_thread
 from tests.broker_access_support import BROKER_ROOT, gateway_headers, open_gate
 from secure_tools.providers import ToolContext, ToolResult, ValidatedAction
 
@@ -2157,7 +2157,7 @@ async def test_cancelled_form_request_keeps_claim_until_worker_exits() -> None:
         release_operation.wait()
 
     submission = asyncio.create_task(
-        _run_claimed_form_thread(session, blocked_operation)
+        run_claimed_form_thread(session, blocked_operation)
     )
     try:
         async with asyncio.timeout(60):

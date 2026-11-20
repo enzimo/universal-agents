@@ -8,7 +8,8 @@ builds each row through the gateway's own code (``WebChatThreadRecord`` ->
 so a change to the row format fails ``tests/test_onboarding_aesthetic_preview.py``
 instead of leaving the preview page broken. Pin, snooze, dismiss, restore,
 clearing a Woke mark and delete change the samples in memory, like the store
-would; nothing is saved.
+would; nothing is saved. New Chat adds an empty, unnamed thread the same way
+(``new_thread``), so the page can switch to it and back.
 
 Each sample also has the agents that worked on its requests, built into the
 row's agent trail by the gateway's own rule (``assistant_gateway.domain.
@@ -176,6 +177,7 @@ class PreviewThreads:
 
     def __init__(self, now: datetime) -> None:
         self._started = now
+        self._new_threads = 0
         self._samples = {sample.record.session_key: sample for sample in _samples(now)}
         for sample in self._samples.values():
             sample.record = replace(sample.record, agent_trail_json=_trail_json(sample.requests))
@@ -239,6 +241,27 @@ class PreviewThreads:
 
     def owns(self, session_key: str) -> bool:
         return session_key in self._samples
+
+    def new_thread(self, now: datetime) -> dict[str, object]:
+        """Add a thread made with New Chat and return it as the gateway's new-session route does.
+
+        The thread is empty and unnamed until its first message; it joins the
+        list through the gateway's own row code like every sample, and its
+        history is empty.
+        """
+
+        self._new_threads += 1
+        session_key = f"website:web-chat:new-{self._new_threads}"
+        record = _record(session_key, "", first_message_text=None, has_messages=False, updated_at=now.isoformat())
+        self._samples[session_key] = _Sample(record)
+        return {
+            "session_key": session_key,
+            "session_alias": record.session_alias,
+            "conversation_id": record.conversation_id,
+            "title": None,
+            "updated_at": record.updated_at,
+            "parallel_thread": record.parallel_thread,
+        }
 
     def archive(self, session_key: str) -> bool:
         return self._samples.pop(session_key, None) is not None

@@ -49,6 +49,8 @@ from secure_tool_broker.auth_models import AuthStatus
 from secure_tool_broker.auth_pages import (
     SECRET_INPUT_TOGGLE_SCRIPT,
     render_broker_auth_page,
+    CARD_OUTCOME_FINISHED,
+    CardOutcome,
     render_close_page_button,
     render_credential_input,
     render_markdown_text,
@@ -380,9 +382,15 @@ def _callback_params(address: str) -> dict[str, str]:
     return {key: values[key][0] for key in ("code", "state", "error", "error_description") if values.get(key)}
 
 
-def _page(heading: str, body: str, *, script: str = "") -> str:
+def _page(
+    heading: str, body: str, *, script: str = "", card_outcome: CardOutcome | None = None, decline: bool = False
+) -> str:
     return render_broker_auth_page(
-        "X sign-in", f'<section class="content-panel"><p class="eyebrow">X</p><h1>{heading}</h1>{body}</section>', script=script
+        "X sign-in",
+        f'<section class="content-panel"><p class="eyebrow">X</p><h1>{heading}</h1>{body}</section>',
+        script=script,
+        card_outcome=card_outcome,
+        decline=decline,
     )
 
 
@@ -500,6 +508,7 @@ class XWebSignInFlow:
                 "You are signed in to X.",
                 f"<p>Agents now use your X account @{html.escape(str(session.state.get('username') or ''))} "
                 "only for work they do for you. You can close this page.</p>" + render_close_page_button(),
+                card_outcome=CARD_OUTCOME_FINISHED,
             )
         if status != STATUS_PENDING:
             message = str(session.state.get("error") or "The X sign-in could not start.")
@@ -531,7 +540,7 @@ class XWebSignInFlow:
             '<textarea id="redirect_url" name="redirect_url" required rows="4" autocomplete="off"></textarea></p>'
             '<button type="submit">Finish sign-in</button></form>'
         )
-        return _page("Sign in to X", body, script=sign_in_wait_script())
+        return _page("Sign in to X", body, script=sign_in_wait_script(), decline=True)
 
     def status_payload(self, session: Any) -> dict[str, Any]:
 
@@ -584,10 +593,16 @@ class XTeamClientFlow:
                 "The team's X sign-in app is stored.",
                 f"<p>People sign in with their own X accounts with <code>{SIGN_IN_COMMAND}</code>. "
                 "Sign-ins made through a different app must be made again.</p>" + render_close_page_button(),
+                card_outcome=CARD_OUTCOME_FINISHED,
             )
         if status == STATUS_ERROR:
             return _page("The X sign-in app was not stored.", render_markdown_text(str(session.state.get("error") or "")))
-        return _page("Set the team's X sign-in app.", self._form_body(session), script=SECRET_INPUT_TOGGLE_SCRIPT + _CALLBACK_PREFILL_SCRIPT)
+        return _page(
+            "Set the team's X sign-in app.",
+            self._form_body(session),
+            script=SECRET_INPUT_TOGGLE_SCRIPT + _CALLBACK_PREFILL_SCRIPT,
+            decline=True,
+        )
 
     @staticmethod
     def _form_body(session: Any) -> str:

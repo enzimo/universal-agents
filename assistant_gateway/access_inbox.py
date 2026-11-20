@@ -100,6 +100,7 @@ from custom_messages.contracts.access_v2 import (
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.enums import RequesterType
+from secure_tools.broker_pages import card_view_url
 from access_control.data_folders import DataFolderRegistry, protected_locations
 from assistant_gateway.file_sharing import FILE_DELIVERY_KIND, GatewayFileSharing
 from access_control.proposals import ACCESS_PROPOSAL_KIND, ProposalApplier
@@ -842,7 +843,16 @@ class GatewayAccessInbox:
                 )
                 lines.append(f"{name}: the form could not open ({exc}); use /link {item.tool_id}.")
                 continue
-            links.append({"label": f"Choose the credential for {name}", "url": form.form_url})
+            # Web Chat shows the form as a broker card (frame_url, its sandboxed card view);
+            # url stays the full page for "Open in its own tab" and the other pages.
+            links.append(
+                {
+                    "label": f"Choose the credential for {name}",
+                    "url": form.form_url,
+                    "frame_url": card_view_url(form.form_url),
+                    "expires_at_utc": form.expires_at_utc,
+                }
+            )
             forms.append((form, item.tool_id, item.owner))
             lines.append(f"{name}: {form.form_url}")
         await asyncio.to_thread(

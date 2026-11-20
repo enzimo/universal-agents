@@ -215,6 +215,7 @@ class GatewayBrokerSignIns:
                 url=login_url,
                 expires_at_utc=expires_at or None,
                 receipt=receipt,
+                broker_page=True,
             ),
             status_url=f"{broker_login_url.rstrip('/')}/status",
             expires_at_utc=expires_at,
