@@ -1269,3 +1269,38 @@ async def test_records_that_come_back_with_the_same_lead_send_only_what_is_still
         assert recorded.seen == [] and recorded.confirmed == ["lead_1", "lead_1"]
     finally:
         await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_a_lead_change_after_the_start_sends_a_kept_result_once_to_the_new_lead(tmp_path, monkeypatch) -> None:
+    """Critique C06, A3: the records replace lead_1 with lead_2 after the start. The real follower marks lead_1
+    unavailable and sets lead_2; that available transition sends the kept result once, under a message id naming
+    lead_2, and lead_2 is not confirmed on top of it. A third lead sends nothing more."""
+
+    reader = Reader()
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader, saved="lead_1")
+    _quick_checks(gateway)
+    _keep_setup_results(gateway, KEPT)
+    arriving = asyncio.create_task(_publish_when_read(reader, member("lead_1", lead=True)))
+    await gateway.connect(start_services=False)
+    try:
+        await arriving
+        await until(lambda: _sent_setup_results(gateway) == _sent_once_to("lead_1", KEPT))
+
+        _keep_setup_results(gateway, "tool_setup_req_kept_later")
+        reader.publish(member("lead_2", lead=True), reasons={"lead_1": "exiting"})
+        await until(lambda: gateway._manager_client.manager_id == "lead_2")
+        await asyncio.sleep(0.3)  # Several more regular checks.
+        assert _sent_setup_results(gateway) == (
+            _sent_once_to("lead_1", KEPT) + _sent_once_to("lead_2", "tool_setup_req_kept_later")
+        )
+        assert recorded.seen == [("unavailable", "lead_1"), ("available", "lead_2", True)]
+        assert recorded.confirmed == ["lead_1"]
+
+        reader.publish(member("lead_3", lead=True), reasons={"lead_2": "exiting"})
+        await until(lambda: gateway._manager_client.manager_id == "lead_3")
+        await asyncio.sleep(0.3)
+        assert len(_sent_setup_results(gateway)) == 2, "each kept result is sent once"
+        assert recorded.confirmed == ["lead_1"]
+    finally:
+        await gateway.close()
