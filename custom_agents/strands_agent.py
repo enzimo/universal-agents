@@ -1253,9 +1253,11 @@ class UniversalAgent(BaseModel):
     # Next time to look for decided access requests whose notice never arrived
     # (access_request_runtime.resume_decided_access_waits).
     _decided_access_check_after: float = PrivateAttr(default=0.0)
-    # Next time the lead looks for dead agents holding unfinished work
+    # Next time the lead looks for dead agents holding unfinished work, and what
+    # it remembers per dead owner: refusals and lines already logged
     # (orphaned_work_takeover.take_over_orphaned_work).
     _orphaned_work_check_after: float = PrivateAttr(default=0.0)
+    _orphaned_work_takeovers: Dict[str, Any] = PrivateAttr(default_factory=dict)
     # Next time the lead removes status rows of agents that are gone
     # (agent_liveness.prune_departed_agent_rows).
     _agent_row_prune_after: float = PrivateAttr(default=0.0)

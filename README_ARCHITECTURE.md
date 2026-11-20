@@ -780,7 +780,16 @@ Four repairs keep work from getting stuck in the first place:
 
 - The team lead starts a replacement worker for a dead agent that still holds
   unfinished work (`custom_agents.orphaned_work_takeover`); the replacement's
-  startup takeover adopts it in one transaction. One rule
+  startup takeover adopts it in one transaction. A replacement that fails
+  before it is ready, or retires while the work is still held, is followed by
+  another after 1, 5, 15 and 60 minutes; after the fifth the lead gives up and
+  logs `event=orphaned_work_takeover_gave_up` with the task ids. Each attempt
+  has its own start id (`takeover:<owner>:<attempt>`): with one fixed id, a
+  replacement that crashed on a full work stream (2026-11-19) was found again
+  on every pass, and its work stayed stuck until the record was pruned about
+  30 days later. A refusal that leaves no start record (the type was removed)
+  is paced and bounded the same way, and a start that joins another
+  replacement still starting uses no attempt. One rule
   (`custom_agents.agent_liveness`) decides whether an agent is gone, for
   takeover, replacements, schedule coalescing and stuck-task notices alike. A
   worker started inside another process is gone when its start record ended or
