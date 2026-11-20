@@ -228,6 +228,77 @@ class _LocalRuntime:
         return True
 
 
+async def test_live_a_started_worker_leaves_no_consumers_and_a_configured_agent_keeps_its_mailbox(tmp_path) -> None:
+    """A started worker's mailbox and control consumer end with its process.
+
+    2026-11-19: a worker started from a start record arrives with its id set
+    (``spawn_agent``), and that alone made its consumers lasting, so every
+    start left two on the work stream until NATS refused new ones at 1,000.
+    An agent whose id comes from configuration keeps its lasting mailbox.
+    """
+
+    from custom_agents.agent_instantiation_service import PROCESS_HOST_ID
+    from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
+    from custom_transport.base import AGENT_CONTROL_ROLE, AGENT_DIRECT_ROLE
+    from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity
+    from test_schedule_worker_transactions import make_launch
+
+    team_id = new_id("team_wcons")
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    inspector = NatsTransportAdapter(
+        config=nats_transport_config_from_env(), mapper=NatsSubjectMapper(team_id=team_id)
+    )
+    with (
+        patch("custom_agents.strands_agent.Agent", side_effect=[FakeStrandsAgent(), FakeStrandsAgent()]),
+        patch("custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()),
+        # Marking the start ready checks the definition with the team's launcher,
+        # which this test does not run; the consumers are made before that.
+        patch("custom_agents.agent_instantiation_service.update_runtime_launch", lambda agent, *, state: None),
+    ):
+        started = _agent(
+            agent_id=new_id("agent"), name="started", team_id=team_id, named_agent_type=WORKER_TYPE,
+            db_path=tmp_path / "started.db", workspace_dir=workspace_dir,
+        )
+        repository = AgentLaunchRepository(started.task_manager.storage_settings)
+        record, _ = repository.reserve(
+            make_launch(agent_id=started.id, team_id=team_id, named_agent_type=WORKER_TYPE,
+                        source="pool", host_id=PROCESS_HOST_ID),
+            LaunchCapacity.defaults(),
+            join=False,
+        )
+        # What spawn_agent attaches before the worker connects.
+        started._worker_launch = repository.update(record, state=AgentLaunchState.STARTING)
+        configured = _agent(
+            agent_id=new_id("agent"), name="configured", team_id=team_id, named_agent_type=WORKER_TYPE,
+            db_path=tmp_path / "configured.db", workspace_dir=workspace_dir,
+        )
+        agent_tasks = []
+        try:
+            await inspector.connect(reconcile_topology=True)  # the team lead creates the streams
+            agent_tasks = [(agent, await _start_agent(agent)) for agent in (started, configured)]
+            scopes = {
+                (consumer.owner_agent_id, consumer.consumer_role): consumer.consumer_scope
+                for consumer in await inspector.agent_consumers()
+            }
+            assert scopes == {
+                (started.id, AGENT_DIRECT_ROLE): "process",
+                (started.id, AGENT_CONTROL_ROLE): "process",
+                (configured.id, AGENT_DIRECT_ROLE): "route",
+                (configured.id, AGENT_CONTROL_ROLE): "route",
+            }
+            await _stop_agents(agent_tasks)
+            agent_tasks = []
+            remaining = {
+                (consumer.owner_agent_id, consumer.consumer_role)
+                for consumer in await inspector.agent_consumers()
+            }
+            assert remaining == {(configured.id, AGENT_DIRECT_ROLE), (configured.id, AGENT_CONTROL_ROLE)}
+        finally:
+            await _stop_agents(agent_tasks)
+            await inspector.close()
+
+
 @pytest.fixture()
 def controller_world(tmp_path, monkeypatch):
     team_id = new_id("team_poolctl")

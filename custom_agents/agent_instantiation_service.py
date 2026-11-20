@@ -173,10 +173,7 @@ class AgentInstantiationService:
             ttl = idle_ttl_seconds
             if ttl is not None and (ttl <= 0 or ttl > limits.max_idle_ttl_seconds):
                 raise ValueError("idle_ttl_outside_operator_limits")
-            launch_id = (
-                "launch_"
-                + worker_digest([self.agent.team_id, owner_id, request_id])[:32]
-            )
+            launch_id = launch_id_for(self.agent.team_id, owner_id, request_id)
             now = utc_now()
             launch = AgentLaunchV1(
                 launch_id=launch_id,
@@ -358,6 +355,16 @@ class AgentInstantiationService:
                 for index in range(request.agent_quantity)
             ),
         )
+
+
+def launch_id_for(team_id: str, owner_id: str, request_id: str) -> str:
+    """The start record id of one request: a repeated request finds the same start.
+
+    The takeover of a dead worker's work derives its attempts' ids with it
+    (``custom_agents.orphaned_work_takeover``).
+    """
+
+    return "launch_" + worker_digest([team_id, owner_id, request_id])[:32]
 
 
 def launch_result(record: AgentLaunchV1) -> AgentLaunchResultV1:

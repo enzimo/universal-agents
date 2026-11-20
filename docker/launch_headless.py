@@ -138,7 +138,7 @@ from secure_tool_broker.sealbox_runtime import (
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.sqlite_connection import prepare_sqlite_database
 from runtime_hosting.manifest_rendering import write_runtime_manifests
-from runtime_hosting.process_run import ProcessRunBusy, acquire_process_run
+from runtime_hosting.process_run import ProcessRunBusy, ProcessRunLock, acquire_process_run
 from custom_tools import openshell_sandboxes
 from runtime_settings.code_sandbox_contract import (
     ENV_CODE_SANDBOX_EXTRA_READ_PATHS,
@@ -792,19 +792,44 @@ class ConsumerCheckNotRunReason(StrEnum):
     EXITED_WITH_ERROR = "exited_with_error"
 
 
+# Arguments that let the consumer check delete lasting agent leftovers; only
+# under a proven run lock (run_nats_consumer_preflight).
+REMOVE_LASTING_LEFTOVERS_ARGS = ("--remove-lasting-agent-leftovers", "--confirm-runtime-stopped")
+
+
 def run_nats_consumer_preflight(
     *,
     config_path: Path,
     env: Mapping[str, str],
+    process_run: ProcessRunLock,
 ) -> None:
-    """Run the read-only consumer check before any agent creates a consumer.
+    """Run the consumer check before any agent creates a consumer.
 
     The check (``scripts/reconcile_nats_consumers.py``) exits 0 whenever it
-    finishes its scan. What it finds, such as consumer usage near the account's
-    limit, it logs itself, and start-up continues. Any other result means the
+    finishes its scan. What it finds, such as the work stream nearing its
+    consumer limit, it logs itself, and start-up continues. Any other result means the
     check could not run: that is logged once at error level with its reason,
-    separately from the check's own findings. Start-up continues then too,
-    because the check only reports; it never changes or protects anything.
+    separately from the check's own findings. Start-up continues then too:
+    the check is not a gate.
+
+    It changes one thing (``--remove-lasting-agent-leftovers``): it deletes the
+    lasting mailbox and control consumers that releases before 2026-11-19 left
+    for every started worker, those of agents whose id is not configured, that
+    no process is asking and that are older than an hour. It takes the run lock
+    the launcher already holds (``process_run``) and has started no agent
+    process, so none of them can be in use; hence ``--confirm-runtime-stopped``.
+    Only a proven lock proves that: on a file system without locking
+    (``proven=False``) an earlier run may still be alive, so the check then only
+    reports and logs that once. The team lead's sweep removes the leftovers whose
+    owner it can judge as gone by the liveness rule; those of starts an earlier
+    run left active stay (their records are not cleared without a proven lock)
+    until the offline cleanup runs with the runtime stopped.
+    Doing it here, before the lead, the startup agents and the gateway start
+    together, means a stream those leftovers filled to NATS's consumer limit
+    cannot refuse a startup agent's first consumer (which would stop the whole
+    runtime) while the lead is still removing them. The lead removes younger
+    leftovers itself when it starts (``custom_agents.worker_consumer_cleanup``).
+    Everything else the check finds it only reports.
 
     Images keep only compiled files, so the program is found through
     ``resolve_python_entrypoint`` like every other program the launcher starts.
@@ -812,6 +837,14 @@ def run_nats_consumer_preflight(
     (docker/secret_env_vars.yaml, process ``consumer_check``).
     """
 
+    if not process_run.proven:
+        LOGGER.warning(
+            "The run lock could not prove that no earlier run is alive, so the consumer check only reports; "
+            "the team lead removes the leftover consumers whose owner it can judge as gone, and the rest need "
+            "scripts/reconcile_nats_consumers.py run with the runtime stopped. "
+            "event=nats_consumer_preflight_report_only run_id=%s",
+            process_run.run_id,
+        )
     try:
         program = resolve_python_entrypoint(
             REPO_ROOT / "scripts" / "reconcile_nats_consumers.py"
@@ -821,7 +854,13 @@ def run_nats_consumer_preflight(
         return
     try:
         result = subprocess.run(
-            [sys.executable, str(program), "--config", str(config_path)],
+            [
+                sys.executable,
+                str(program),
+                "--config",
+                str(config_path),
+                *(REMOVE_LASTING_LEFTOVERS_ARGS if process_run.proven else ()),
+            ],
             cwd=REPO_ROOT,
             env=environment_for(PROCESS_CONSUMER_CHECK, env),
             check=False,
@@ -2811,7 +2850,7 @@ def main() -> int:
             LOCAL_NATS_ENABLED_ENV,
             inherited_env.get("NATS_SERVERS") or inherited_env.get("NATS_URL"),
         )
-    run_nats_consumer_preflight(config_path=config_path, env=inherited_env)
+    run_nats_consumer_preflight(config_path=config_path, env=inherited_env, process_run=process_run)
     managed_sealbox_service: ManagedSealboxService | None = None
     managed_openshell_gateway: ManagedOpenShellGateway | None = None
     managed_openshell_sandbox: ManagedOpenShellSandbox | None = None

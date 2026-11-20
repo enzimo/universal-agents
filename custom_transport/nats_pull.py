@@ -42,14 +42,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from typing import Any, Awaitable, Callable, Optional
 
 from custom_transport.base import FetchPolicy
 from custom_transport.dead_letters import REASON_HANDLER_FAILED
 
-# The metadata schema of consumers this release creates. Consumers of the
-# push-delivery release carried "consumer-lifecycle-v1".
+# The metadata schema of consumers this release creates.
 CONSUMER_METADATA_SCHEMA = "consumer-lifecycle-v2"
+# The schema of consumers the push-delivery releases created (until 2026-10-05):
+# push consumers with the same ownership metadata, names and subjects.
+PUSH_CONSUMER_METADATA_SCHEMA = "consumer-lifecycle-v1"
 
 # Worker queues are acknowledged at admission, seconds after a worker takes a
 # task, so a worker that dies before admitting it returns the task to the queue
@@ -211,6 +214,10 @@ class PullRunner:
         self._set_aside = set_aside
         # Told when the loop ends without being asked to (subscription name, error).
         self._on_stopped = on_stopped
+        # When the last request ended (monotonic clock). How long the receiver
+        # then asked for nothing tells whether NATS removed a process-owned
+        # consumer for inactivity (_recover_from_fetch_error).
+        self._last_request_ended_at: Optional[float] = None
 
     @property
     def durable_name(self) -> str:
@@ -225,6 +232,9 @@ class PullRunner:
         self._subscription = await self._js.pull_subscribe_bind(
             durable=self.durable_name, stream=self._stream_name
         )
+        # NATS counts a new consumer as idle from its creation, so a receiver
+        # that may not ask from the start (a full inbox) is quiet from now.
+        self._last_request_ended_at = time.monotonic()
         self._task = asyncio.create_task(self._run(), name=f"nats-pull:{self.name}")
         self._task.add_done_callback(self._loop_done)
 
@@ -283,6 +293,7 @@ class PullRunner:
                 await self._return_buffered_messages()
                 await asyncio.sleep(NOT_READY_POLL_SECONDS)
                 continue
+            quiet = self._seconds_since_last_request()
             try:
                 messages = await self._subscription.fetch(1, timeout=self._fetch_seconds())
             except asyncio.CancelledError:
@@ -293,8 +304,10 @@ class PullRunner:
                 continue
             except Exception as exc:
                 failures += 1
-                await self._recover_from_fetch_error(exc, failures)
+                await self._recover_from_fetch_error(exc, failures, quiet)
                 continue
+            finally:
+                self._last_request_ended_at = time.monotonic()
             failures = 0
             for message in messages:
                 await self._deliver(message)
@@ -366,28 +379,49 @@ class PullRunner:
             for message in await subscription.fetch(1, timeout=0.05):
                 await self._nak(message)
 
-    async def _recover_from_fetch_error(self, exc: Exception, failures: int) -> None:
+    def _seconds_since_last_request(self) -> Optional[float]:
+        if self._last_request_ended_at is None:
+            return None
+        return time.monotonic() - self._last_request_ended_at
+
+    def _expired_while_quiet(self, consumer_gone: bool, quiet: Optional[float]) -> bool:
+        """Whether NATS removed this process-owned consumer because it asked for nothing for its limit.
+
+        A process-owned consumer carries ``inactive_threshold``
+        (``transport.process_consumer_inactive_threshold_seconds``). NATS removes
+        it once its receiver asks for nothing that long, for example a mailbox
+        whose deferred inbox stays full; that is expected and loses nothing. A
+        consumer that vanished while its receiver was asking, or a lasting one,
+        was removed by something else (an operator, a script, lost NATS state).
+        """
+
+        threshold = getattr(self._config, "inactive_threshold", None)
+        return bool(consumer_gone and threshold and quiet is not None and quiet >= float(threshold))
+
+    async def _recover_from_fetch_error(self, exc: Exception, failures: int, quiet: Optional[float] = None) -> None:
         delay = _ERROR_BACKOFF_SECONDS[min(failures, len(_ERROR_BACKOFF_SECONDS)) - 1]
         if self._stopping or self._is_closing():
             return
         name = type(exc).__name__
         consumer_gone = name in {"NotFoundError", "ServiceUnavailableError", "NoRespondersError"}
-        self._logger.warning(
+        expected = self._expired_while_quiet(consumer_gone, quiet)
+        (self._logger.info if expected else self._logger.warning)(
             "Asking NATS for the next message failed; retrying. event=nats_pull_fetch_failed "
             "subscription=%s consumer_name=%s error_type=%s retry_in_seconds=%s "
-            "rebinding=%s error=%s",
+            "rebinding=%s expected=%s seconds_since_last_request=%s error=%s",
             self.name,
             self.durable_name,
             name,
             delay,
             consumer_gone,
+            str(expected).lower(),
+            None if quiet is None else round(quiet, 1),
             exc,
         )
         await asyncio.sleep(delay)
         if not consumer_gone:
             return
-        # Someone deleted the consumer (an operator, or an older runtime during
-        # an upgrade): recreate it and bind again; its stored messages remain.
+        # Recreate the consumer and bind again; its stored messages remain.
         try:
             await ensure_pull_consumer(
                 self._js, stream_name=self._stream_name, config=self._config, logger=self._logger
@@ -398,12 +432,26 @@ class PullRunner:
             )
             with contextlib.suppress(Exception):
                 await old.unsubscribe()
-            self._logger.warning(
-                "Recreated a NATS consumer that had disappeared. "
-                "event=nats_pull_consumer_recreated subscription=%s consumer_name=%s",
-                self.name,
-                self.durable_name,
-            )
+            if expected:
+                self._logger.info(
+                    "Recreated this process's NATS consumer, which NATS removed after it asked for nothing "
+                    "for its inactivity limit; expected while a receiver is full or idle, and its messages "
+                    "stayed in the stream. event=nats_pull_consumer_recreated subscription=%s consumer_name=%s "
+                    "expected=true inactive_threshold_seconds=%s seconds_since_last_request=%s",
+                    self.name,
+                    self.durable_name,
+                    getattr(self._config, "inactive_threshold", None),
+                    None if quiet is None else round(quiet, 1),
+                )
+            else:
+                self._logger.warning(
+                    "Recreated a NATS consumer that was removed while this receiver was asking for messages, "
+                    "or that is lasting; its messages stayed in the stream. event=nats_pull_consumer_recreated "
+                    "subscription=%s consumer_name=%s expected=false seconds_since_last_request=%s",
+                    self.name,
+                    self.durable_name,
+                    None if quiet is None else round(quiet, 1),
+                )
         except Exception:
             self._logger.exception(
                 "Could not recreate a NATS consumer; retrying. "

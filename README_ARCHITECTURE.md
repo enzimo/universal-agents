@@ -173,6 +173,58 @@ each. They run in parallel on as many workers as the team allows:
   (`custom_transport/nats_pull.py`). Before this, NATS pushed each task to a worker
   of its choice, a busy worker kept it in its private inbox, and the lead's pickup
   check failed tasks that were only waiting.
+- **An agent's consumers last as long as its id.** Each agent reads its
+  mailbox and its control queue through two consumers on the work stream. An id
+  set in configuration (`agent.agent_id`, or `--agent-id` for an agent run by
+  hand) is a lasting route, so its consumers survive the process. Every other
+  agent's consumers belong to its process: deleted when it exits, and removed
+  by NATS once nothing has asked for
+  `transport.process_consumer_inactive_threshold_seconds` (after the ack wait
+  of a message a dead receiver held). That happens while an agent lives too: a
+  mailbox stops asking while its deferred inbox is full. The pull loop then
+  creates it again with the same name and filter, its messages still in the
+  stream, and logs it as expected (`event=nats_pull_consumer_recreated
+  expected=true`) only when the receiver had asked for nothing for that long; a
+  consumer that vanished while it was asking, or a lasting one, is a warning
+  (`expected=false`). That includes workers started from a
+  start record (pool, scheduled, replacement and manual starts), whose id
+  `spawn_agent` sets but which is drawn for that one start
+  (`custom_agents/strands_agent.py`, `_direct_consumer_scope`). Until
+  2026-11-19 a set id alone made the consumers lasting. Every worker start left
+  two behind until the stream reached NATS 2.15's default of 1,000 consumers.
+  After that, every new worker crashed while creating its mailbox, and the pool
+  controller restarted it until the hourly start limit refused it.
+- **The team lead removes what earlier releases left**
+  (`custom_agents/worker_consumer_cleanup.py`): once when it starts, before it
+  creates its own consumers and before its schedule loop, scheduler loop (with
+  the takeover of dead workers' work) or any message can start a worker. A full
+  stream refuses the lead's own mailbox too, so without that sweep the lead
+  could not start. Then hourly while the last sweep kept leftovers whose owner
+  may still run: one that still had a request open or a fresh heartbeat is
+  removed once that ends. Leftovers whose start record names a run that cannot
+  be checked (no proven run, so the record stays active) are never judged gone;
+  the launcher's removal step or the offline script removes them with the
+  runtime stopped, and until then the hourly sweep keeps finding them. It
+  removes lasting mailbox and control consumers, push-era ones
+  (`consumer-lifecycle-v1`, 2026-09-13 to 2026-10-05) included, whose owner is
+  not configured (the lead itself and `agent.agent_id`), has no request open
+  (only a live process holds one; a busy worker asks for nothing, so silence
+  proves nothing) and is gone by the one liveness rule
+  (`custom_agents/agent_liveness.py`), with or without a start record. Records
+  are pruned after `retention_days`; the first version kept those owners'
+  leftovers as configured agents for good. Process-owned consumers are removed
+  only when the owner's start record proves it gone, since an agent without one
+  may not have written its first status row yet. An agent run by hand with its
+  own `--agent-id` (outside the supervisor, not supported) is not recognised:
+  if it is stopped during a sweep it loses its consumers, not its messages.
+  Messages still in a deleted mailbox stay in the work stream, and a consumer
+  created again with the same name and filter delivers them. After each sweep,
+  and every hour while it runs, the lead also reads the work stream's consumer
+  count against the limit NATS enforces on it (a limit set on the stream or the
+  account, else NATS 2.15's default of 1,000, which its configuration fields do
+  not show; `custom_transport/nats_consumer_state.py`) and warns near it
+  (`event=nats_stream_consumer_capacity_high`); the launcher's check does the
+  same at each start, after its own deletions.
 - **One message never stops a receiver.** A message the receiving release cannot
   read (malformed, or a message type or value another release added or removed)
   is logged without its content (`event=nats_message_undecodable`, with its id,
@@ -747,7 +799,36 @@ Five repairs keep work from getting stuck in the first place:
 
 - The team lead starts a replacement worker for a dead agent that still holds
   unfinished work (`custom_agents.orphaned_work_takeover`); the replacement's
-  startup takeover adopts it in one transaction. One rule
+  startup takeover adopts it in one transaction. A replacement that fails
+  before it is ready, or retires while the work is still held, is followed by
+  another 1, 5, 15 and 60 minutes after the previous one ended; after the
+  fifth the lead gives up and logs `event=orphaned_work_takeover_gave_up` with
+  the task ids. The give-up is not lasting: the lead starts no further
+  replacement for that work until the attempt records are pruned
+  (`agent.schedule_workers.retention_days` after the last attempt ended, 30
+  days by default) and then begins a new series of five; an agent of the type
+  that starts before then for another reason still adopts the work. A dead
+  owner whose person is not known is logged once
+  (`event=orphaned_work_takeover_skipped`). Each attempt has its own start id
+  (`takeover:<owner>:<attempt>`): with one fixed id, a replacement that
+  crashed on a full work stream (2026-11-19) was found again on every pass,
+  and its work stayed stuck until the record was pruned about 30 days later.
+  One replacement adopts the work of every dead agent of its type, and starts
+  for one type and person join, so the series runs once per type and person:
+  one dead owner leads it and the others wait. A give-up covers the owners
+  with no proof of life after the series' last attempt ended, each logged with
+  its own task ids. The proof is the latest of the owner's last save and its
+  last heartbeat (a worker waiting on an approval saves nothing for days but
+  heartbeats every 20 seconds); a start record's end is not proof, since the
+  lead ends earlier runs' records after the fact. A worker alive after the
+  series ended leads a new series, whose replacement adopts the given-up work
+  too, and keeps leading it once its status row is pruned, since its own
+  attempts began after the give-up and the lead remembers the heartbeat it read
+  (until it restarts) for one whose first tries were refused; an owner whose
+  own series gave up never leads again. A refusal that leaves no start
+  record (the type was removed, a worker or start limit is reached) is paced
+  with the same delays and then tried hourly, never given up, since a limit
+  frees again. One rule
   (`custom_agents.agent_liveness`) decides whether an agent is gone, for
   takeover, replacements, schedule coalescing and stuck-task notices alike. A
   worker started inside another process is gone when its start record ended or
@@ -4401,15 +4482,29 @@ and that each one is listed. The build is where a packaging mistake has to
 fail: one launcher call that named its `.py` file only logged a warning at
 start-up, and nobody noticed it for several releases.
 
-Before any agent creates a JetStream consumer, the launcher runs the read-only
+Before any agent creates a JetStream consumer, the launcher runs the
 consumer report (`run_nats_consumer_preflight`,
-`scripts/reconcile_nats_consumers.py`). A report that finishes exits 0 and logs
-its own findings, such as consumer usage near the account's limit; a report
-that cannot run is one error, `event=nats_consumer_preflight_not_run`, with a
-`reason`, so the two never look alike. Neither stops start-up: the report only
-informs, it neither changes nor protects anything, and agents report their own
-NATS errors. Making it a start-up gate would let a slow or briefly unreachable
-NATS server, or an external server that refuses consumer listing, stop the
+`scripts/reconcile_nats_consumers.py --remove-lasting-agent-leftovers`). A
+report that finishes exits 0 and logs its own findings, such as the work
+stream nearing its consumer limit; a report that cannot run is one error,
+`event=nats_consumer_preflight_not_run`, with a `reason`, so the two never look
+alike. It changes one thing: it deletes the lasting agent mailbox and control
+consumers that releases before 2026-11-19 left for started workers (owner id
+not configured, no request open, older than an hour). The launcher holds the
+instance's run lock and has started no agent, so none can be in use, and the
+lead, the startup agents and the gateway, which start together, find room for
+their first consumers. It deletes only when the lock is proven: on a file
+system without locking an earlier run may still be alive, so it only reports
+(`event=nats_consumer_preflight_report_only`). The lead's sweep then removes
+those whose owner it can judge as gone by the liveness rule; the leftovers of
+starts an earlier run left active it cannot judge there (those records are not
+cleared without a proven lock), and they need the offline cleanup with the
+runtime stopped. The check takes the lock as
+an argument, so it cannot run before the lock is taken. Everything else it
+only reports. Neither outcome stops
+start-up, and agents report their own NATS errors. Making it a start-up gate
+would let a slow or briefly unreachable NATS server, or an external server
+that refuses consumer listing, stop the
 whole team. Because start-up waits for it, the report's first connection fails
 fast: nats-py retries a failed first connection about 60 times, two seconds
 apart, even with `allow_reconnect=False`, so the report sets
