@@ -250,5 +250,7 @@ test("an approval's credential forms become account link cards right after the r
   );
   assert.deepEqual(timeline.map(entry => entry.value.messageId || entry.value.itemId), ["m7", "account_link:acc_req_1:1", "m8"]);
   assert.deepEqual(delivery.followUpPageItems("", 7, forms, "http://127.0.0.1:18090"), []);
-  assert.deepEqual(delivery.followUpPageItems("acc_req_1", 0, forms, "http://127.0.0.1:18090"), [], "no position, no card");
+  // An Inbox approval while the open conversation has no messages yet (critique C13): the card starts it.
+  const [first] = delivery.followUpPageItems("acc_req_1", 0, forms, "http://127.0.0.1:18090");
+  assert.equal(first.item.sessionSequence, 1);
 });

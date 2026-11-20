@@ -58,12 +58,14 @@ const ACCESS_WRITE_FALLBACK = "The change was not saved because the gateway retu
  * - `returnFocus`: the element that gets focus back when Settings closes.
  * - `teamActivity`: the page's copy of the team's live status (team_activity.mjs) for Team and Tasks.
  * - `onClose()`, `onUnauthorized(response)`, `onAppearanceOpen()`: page callbacks.
- * - `onFollowUpPages(requestId, links)`: shows an approved proposal's credential
- *   forms as broker cards in the conversation; returns the links it took.
+ * - `onFollowUpPages(requestId, links, placement)`: shows an approved proposal's
+ *   credential forms as broker cards in the conversation; returns the links it
+ *   took. `onShowFollowUpPages(requestId)` brings those cards into view.
  * - `createInbox`, `createCounts`, `createMap`, `createTasks`, `createChatReviews`: replaceable in tests.
  */
 export function createSettingsControls({
   browser = globalThis, returnFocus, onClose, onUnauthorized, onAppearanceOpen, teamActivity, onFollowUpPages,
+  onShowFollowUpPages,
   createInbox = createAccessInbox, createCounts = createInboxCounts, createMap = createAccessMap,
   createChatReviews = createChatAccessReviews,
   createTasks = options => browser.UATaskControls.createTeam(options),
@@ -116,7 +118,10 @@ export function createSettingsControls({
     paginate: client.paginate,
     // An approval's credential forms become broker cards in the conversation; this shows them.
     onFollowUpPages,
-    showConversation: () => close(),
+    showConversation: requestId => {
+      close();
+      if (typeof onShowFollowUpPages === "function") onShowFollowUpPages(requestId);
+    },
     browser,
   });
   const accessMap = createMap({

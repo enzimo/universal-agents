@@ -253,11 +253,13 @@
   // the same address checks apply (http or https, the frame address on the
   // page's own origin and path). Only forms that get a card view are returned,
   // each with the link it came from, so the caller keeps any other as a link.
+  // A conversation without messages yet places them at its start (1).
   function followUpPageItems(requestId, sessionSequence, links, origin) {
     var id = String(requestId || "").trim();
     if (!id) {
       return [];
     }
+    var position = Math.max(1, nonNegativeInteger(sessionSequence));
     return (Array.isArray(links) ? links : []).flatMap(function (link, index) {
       var pageId = id + ":" + String(index + 1);
       var item = normalizeTransientItem({
@@ -265,7 +267,7 @@
         item_id: "account_link:" + pageId,
         request_id: pageId,
         correlation_id: id,
-        session_sequence: sessionSequence,
+        session_sequence: position,
         content: String(link && link.label || ""),
         action: {
           label: String(link && link.label || ""),

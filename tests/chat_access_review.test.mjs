@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  DETAILS_LABEL, FOLLOW_UP_PAGES_BELOW, NEEDS_DECISION, WAITING_FOR_ADMINISTRATOR, decisionRequestBody, localTimeFormatter,
+  DETAILS_LABEL, FOLLOW_UP_AFTER_REVIEW, FOLLOW_UP_PAGES_BELOW, NEEDS_DECISION, WAITING_FOR_ADMINISTRATOR, decisionRequestBody, localTimeFormatter,
   storedDecisionOutcome,
 } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
 import {
@@ -250,7 +250,8 @@ const approveWithForms = () => Promise.resolve({ status: "ok", review: { ...chan
 test("an approval's credential forms become broker cards in the conversation, not new-tab links", async () => {
   const handed = [];
   const { reviewer, bubble } = harness({
-    decide: approveWithForms, onFollowUpPages: (id, links) => { handed.push({ id, links }); return links; },
+    decide: approveWithForms,
+    onFollowUpPages: (id, links, placement) => { handed.push({ id, links, placement }); return links; },
   });
   const slot = reviewer.mount(bubble, message());
   await settle();
@@ -260,6 +261,7 @@ test("an approval's credential forms become broker cards in the conversation, no
   assert.equal(handed.length, 1);
   assert.equal(handed[0].id, "req-1");
   assert.equal(handed[0].links[0].frameUrl, FORMS[0].frame_url);
+  assert.equal(handed[0].placement, FOLLOW_UP_AFTER_REVIEW, "right below the review card");
   const decided = byClass(slot, "access-review-card")[0];
   assert.equal(byTag(decided, "a").length, 0);
   assert.equal(byClass(decided, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_BELOW);

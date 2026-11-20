@@ -630,13 +630,17 @@ export function renderReviewRows(document, model, { canDecide, keepBoxes, handOn
 /**
  * Hand an approved proposal's credential forms to the conversation as broker cards.
  *
- * ``onFollowUpPages(requestId, links)`` returns the links the chat now shows as
- * cards; the decided card says where they are (``pages``) and keeps any other
- * link as a button. Without the hand-off every link stays a button.
+ * ``onFollowUpPages(requestId, links, placement)`` returns the links the chat
+ * now shows as cards; the decided card says where they are (``pages``) and
+ * keeps any other link as a button. Without the hand-off every link stays a
+ * button. ``placement`` is FOLLOW_UP_AFTER_REVIEW for a decision on the card in
+ * the conversation (the forms go right below it) and FOLLOW_UP_AFTER_LATEST
+ * for one in the Inbox panel (below the open conversation's latest message,
+ * where the person is).
  */
-export function followUpPages(requestId, links, onFollowUpPages, pages) {
+export function followUpPages(requestId, links, onFollowUpPages, pages, placement) {
   if (!links.length || typeof onFollowUpPages !== "function") return { links, pages: null };
-  const shown = onFollowUpPages(requestId, links) || [];
+  const shown = onFollowUpPages(requestId, links, placement) || [];
   return {
     links: links.filter(link => !shown.includes(link)),
     pages: shown.length ? pages : null,
@@ -666,6 +670,8 @@ export function followUpLinks(review) {
 export const FOLLOW_UP_PAGES_BELOW = "Choose the credentials in the secure pages below.";
 export const FOLLOW_UP_PAGES_IN_CONVERSATION = "The secure pages to choose the credentials are in the conversation.";
 export const SHOW_CONVERSATION_LABEL = "Show in the conversation";
+export const FOLLOW_UP_AFTER_REVIEW = "after_review";
+export const FOLLOW_UP_AFTER_LATEST = "after_latest";
 
 /**
  * The card that replaces a request after a decision was saved in this page.
@@ -1124,8 +1130,9 @@ export function createAccessInbox({
         const outcome = { id, title: text(review.title) || "Access request",
           outcome: decisionOutcome(choice.choice, payload && payload.review, kept),
           ...followUpPages(id, followUpLinks(payload && payload.review), onFollowUpPages, {
-            note: FOLLOW_UP_PAGES_IN_CONVERSATION, actionLabel: SHOW_CONVERSATION_LABEL, onAction: showConversation,
-          }) };
+            note: FOLLOW_UP_PAGES_IN_CONVERSATION, actionLabel: SHOW_CONVERSATION_LABEL,
+            onAction: () => { if (typeof showConversation === "function") showConversation(id); },
+          }, FOLLOW_UP_AFTER_LATEST) };
         state.outcomes.set(id, outcome);
         const decided = renderDecidedCard(document, outcome);
         card.replaceWith(decided);

@@ -10,6 +10,7 @@ import { createLiveEvents } from "./chat_live_events.mjs";
 import { createChatAttention } from "./chat_attention.mjs";
 import { KNOWLEDGE_VIEW, readChatPageLink } from "./chat_links.mjs";
 import { isAccessReviewMessage } from "./chat_access_review.mjs";
+import { FOLLOW_UP_AFTER_REVIEW } from "./access_inbox.mjs";
 import { createSettingsControls } from "./settings_controls.mjs";
 import { createWorkspaceFileActions } from "./workspace_file_actions.mjs";
 import { createTranscriptView } from "./chat_transcript_view.mjs";
@@ -469,7 +470,8 @@ const activityMesh = createActivityMesh({
 
 sharedState.settingsControls = createSettingsControls({
     teamActivity,
-    onFollowUpPages: function (requestId, links) { return addFollowUpPages(requestId, links); },
+    onFollowUpPages: function (requestId, links, placement) { return addFollowUpPages(requestId, links, placement); },
+    onShowFollowUpPages: function (requestId) { showFollowUpPages(requestId); },
     onClose: function () { renderThreads(); },
     returnFocus: sharedState.settingsButton,
     onUnauthorized: authentication.handleUnauthorizedResponse,
@@ -2290,19 +2292,29 @@ function updateTransientCountdown() {
     return shouldContinue;
   }
 
-// An approved access proposal's credential forms become broker cards in the
-// open conversation, right after its access review message when that is in
-// the thread (a decision in the chat), otherwise after its latest message (a
-// decision in the Inbox panel). Returns the links shown as cards; the decided
-// card keeps any other as a link (access_inbox.mjs followUpPages).
-function addFollowUpPages(requestId, links) {
-    var thread = activeThread();
+// An approved access proposal's credential forms become broker cards
+// (access_inbox.mjs followUpPages). A decision on the card in the conversation
+// (FOLLOW_UP_AFTER_REVIEW) puts them right after that review message, in the
+// thread that holds it even if another thread is open by now. A decision in
+// the Inbox panel (FOLLOW_UP_AFTER_LATEST) puts them after the open
+// conversation's latest message, where the person is; an empty conversation
+// gets them at its start. Returns the links shown as cards; the decided card
+// keeps any other as a link.
+function isReviewOf(requestId) {
+    return function (message) {
+      return String(message.accessRequestId || "") === String(requestId || "");
+    };
+  }
+
+function addFollowUpPages(requestId, links, placement) {
+    var reviewThread = placement === FOLLOW_UP_AFTER_REVIEW
+      ? sharedState.threads.find(function (candidate) { return candidate.messages.some(isReviewOf(requestId)); })
+      : null;
+    var thread = reviewThread || activeThread();
     if (!thread) {
       return [];
     }
-    var review = thread.messages.find(function (message) {
-      return String(message.accessRequestId || "") === String(requestId || "");
-    });
+    var review = reviewThread ? reviewThread.messages.find(isReviewOf(requestId)) : null;
     var position = review
       ? Number(review.sessionSequence || 0)
       : window.UAChatDelivery.latestDurableSessionSequence(thread.messages);
@@ -2318,6 +2330,21 @@ function addFollowUpPages(requestId, links) {
     // Drawn on the next tick: the caller first saves the decided card that says where the forms are.
     lifecycle.timeout(renderMessages, 0);
     return pages.map(function (page) { return page.link; });
+  }
+
+// "Show in the conversation" on the Inbox panel: after Settings closed, bring the
+// request's first form card into view (the person asked for it, so the
+// transcript may move).
+function showFollowUpPages(requestId) {
+    lifecycle.timeout(function () {
+      var prefix = "account_link:" + String(requestId || "") + ":";
+      var card = Array.from(sharedState.messageList.querySelectorAll("[data-broker-card]")).find(function (node) {
+        return String(node.getAttribute("data-item-id") || "").indexOf(prefix) === 0;
+      });
+      if (card) {
+        card.scrollIntoView({ block: "center" });
+      }
+    }, 0);
   }
 
 function setBrokerCardState(thread, itemId, state) {

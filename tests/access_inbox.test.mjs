@@ -5,7 +5,7 @@ import vm from "node:vm";
 import {
   ACCESS_REMOVED_LABEL, LACKS_ACCESS_NOTE, NEEDS_DECISION, WAITING_FOR_APPROVER,
   INBOX_COUNTS_PATH, NOTICES_READ_PATH, createAccessInbox, createInboxCounts, decidableReviewCount, decisionOutcome,
-  emptyNoticesText, followUpLinks, followUpPages, FOLLOW_UP_PAGES_BELOW, FOLLOW_UP_PAGES_IN_CONVERSATION,
+  emptyNoticesText, followUpLinks, followUpPages, FOLLOW_UP_AFTER_LATEST, FOLLOW_UP_AFTER_REVIEW, FOLLOW_UP_PAGES_BELOW, FOLLOW_UP_PAGES_IN_CONVERSATION,
   SHOW_CONVERSATION_LABEL, inboxBadgeLabel, inboxBadgeText, inboxCounts, inboxPath, localTimeFormatter,
   markedText, parseAccessRequestLink, renderDecidedCard, renderNoticeRow, renderReviewCard, reviewCardModel, unreadNoticeCount,
 } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
@@ -729,9 +729,9 @@ test("forms handed to the conversation are named on the decided card; the rest s
     { label: "Choose the credential for Gitea", url: "http://b.example/b" },
   ] });
   const handed = [];
-  const result = followUpPages("req-9", links, (id, given) => { handed.push(id); return [given[0]]; },
-    { note: FOLLOW_UP_PAGES_BELOW });
-  assert.deepEqual(handed, ["req-9"]);
+  const result = followUpPages("req-9", links, (id, given, placement) => { handed.push([id, placement]); return [given[0]]; },
+    { note: FOLLOW_UP_PAGES_BELOW }, FOLLOW_UP_AFTER_REVIEW);
+  assert.deepEqual(handed, [["req-9", FOLLOW_UP_AFTER_REVIEW]]);
   assert.deepEqual(result.links.map(link => link.label), ["Choose the credential for Gitea"]);
   assert.equal(result.pages.note, FOLLOW_UP_PAGES_BELOW);
   assert.deepEqual(followUpPages("req-9", links, undefined, { note: "x" }), { links, pages: null });
@@ -750,10 +750,10 @@ test("forms handed to the conversation are named on the decided card; the rest s
 
 test("approving a proposal in the Inbox panel shows its forms in the conversation, not in a new tab", async () => {
   const handed = [];
-  let shown = 0;
+  const shown = [];
   const f = controllerFixture({
-    onFollowUpPages: (id, links) => { handed.push({ id, links }); return links; },
-    showConversation: () => { shown += 1; },
+    onFollowUpPages: (id, links, placement) => { handed.push({ id, links, placement }); return links; },
+    showConversation: id => { shown.push(id); },
   });
   await loaded(f, { reviews: [review()], notices: [] });
   byTag(f.requestList.children[0], "button")[0].click();
@@ -767,10 +767,12 @@ test("approving a proposal in the Inbox panel shows its forms in the conversatio
   assert.equal(handed.length, 1);
   assert.equal(handed[0].id, "req-1");
   assert.equal(handed[0].links[0].frameUrl, "http://b.example/a?view=card");
+  // Below the open conversation's latest message, where the person is (critique C14).
+  assert.equal(handed[0].placement, FOLLOW_UP_AFTER_LATEST);
   assert.equal(byTag(decided, "a").length, 0, "no link opens the form in a new tab");
   assert.equal(byClass(decided, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_IN_CONVERSATION);
   byTag(decided, "button").find(button => button.textContent === SHOW_CONVERSATION_LABEL).click();
-  assert.equal(shown, 1);
+  assert.deepEqual(shown, ["req-1"], "Show in the conversation names the request whose cards to show");
 });
 
 test("kept access can be limited in time, and TeamLead's own request can be handed on", async () => {

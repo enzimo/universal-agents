@@ -24,7 +24,7 @@
  */
 
 import {
-  ACCESS_INBOX_API, ACCESS_REVIEW_MESSAGE_TYPE, FOLLOW_UP_PAGES_BELOW, decisionOutcome, decisionPath, decisionRequestBody,
+  ACCESS_INBOX_API, ACCESS_REVIEW_MESSAGE_TYPE, FOLLOW_UP_AFTER_REVIEW, FOLLOW_UP_PAGES_BELOW, decisionOutcome, decisionPath, decisionRequestBody,
   followUpLinks, followUpPages, renderDecidedCard, renderReviewCard, setCardMessage, storedDecisionOutcome,
 } from "./access_inbox.mjs";
 
@@ -165,7 +165,7 @@ export function createChatAccessReviews({
         entry.review = saved;
         entry.fetchedAt = now();
         entry.outcome = { id, title: summaryOf(entry, id), outcome: decisionOutcome(choice.choice, saved, kept),
-          ...followUpPages(id, followUpLinks(saved), onFollowUpPages, { note: FOLLOW_UP_PAGES_BELOW }) };
+          ...followUpPages(id, followUpLinks(saved), onFollowUpPages, { note: FOLLOW_UP_PAGES_BELOW }, FOLLOW_UP_AFTER_REVIEW) };
         if (card.isConnected) card.replaceWith(renderDecidedCard(document, entry.outcome));
         if (typeof onDecided === "function") onDecided(id);
       }, error => {
