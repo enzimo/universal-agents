@@ -396,8 +396,9 @@ seconds. User actions still use authenticated HTTP requests.
 Messages accepted on one device reappear on another device signed in as the same
 canonical user, and Website process restarts do not erase them. The thread list
 also stays in step across devices within about two seconds: a thread renamed,
-deleted or started on one device updates on the others, and the pulsing dot
-shows on every device while the agent is working on a reply. Use a message
+deleted or started on one device updates on the others, and while the team
+works on a request, its chat's triangles pulse and the chat names who is
+working on every device. Use a message
 bubble's copy icon to copy that message's raw markdown or text. Each
 canonical user sees only their own server sessions and durable
 transcript. Use Log out, at the bottom of Settings' left column, before

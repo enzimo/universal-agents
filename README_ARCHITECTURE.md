@@ -6373,6 +6373,25 @@ waiting for an agent to change state; failed watches reopen and expiry checks co
 A reopened watch is no departure: the records already held stay until the new watch has
 caught up, and only those it did not deliver are removed then, as deletions; clearing them
 at once had made the gateway mark a healthy lead unavailable and available again.
+`ready` clears when the reader stops, `running` reports its state, and listeners can read
+`departure_reason` to distinguish exit from host unavailability. Duplicate names or lead
+roles produce no selected agent, since sorting attacker-chosen ids proves no authority.
+The view is replaced as a whole on
+each change, so agents on other threads read it without locks. The team lead's process and
+the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
+A record the reader cannot verify yet for a reason that can pass (the writer's certificate
+is not readable yet while hosts join, revocations not current, a record dated just ahead
+of its clock) is kept and verified again at each check, since placements and an idle
+agent's record are written only once (`event=team_agents_record_refused retrying=true`).
+A host record that names another contract digest is authentic but its body is not read, so
+the host's certificate epoch comes from the record's signer. The signed key still names
+that signer and the record still expires within 30 seconds; neither check depends on the
+other contract's body schema. Its agents stay in the view,
+so control messages about the tasks they hold still reach them, marked with that digest
+(`TeamAgent.other_contract`): they take no new work (`TeamAgent.takes_work`), the host is
+logged once with both digests (`event=team_agents_host_other_contract`), and
+`other_contract_hosts` lists such hosts for the Status page. A draining agent's own record
+says it takes no work too.
 
 **The requests an agent works for** (Web Chat's agent trail, 2026-11-20): an agent record
 may also carry `requests`, the root task ids of the people's requests the agent's model
@@ -6396,25 +6415,6 @@ would make the whole record unwritable and drop the agent from the team. The rec
 no person; any host of the installation can read these opaque task ids, as it can the
 task ids in work frames. This changed the contract digest, so every host of an
 installation must run this build (the pre-release rule); the ua-rust hosts follow later.
-`ready` clears when the reader stops, `running` reports its state, and listeners can read
-`departure_reason` to distinguish exit from host unavailability. Duplicate names or lead
-roles produce no selected agent, since sorting attacker-chosen ids proves no authority.
-The view is replaced as a whole on
-each change, so agents on other threads read it without locks. The team lead's process and
-the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
-A record the reader cannot verify yet for a reason that can pass (the writer's certificate
-is not readable yet while hosts join, revocations not current, a record dated just ahead
-of its clock) is kept and verified again at each check, since placements and an idle
-agent's record are written only once (`event=team_agents_record_refused retrying=true`).
-A host record that names another contract digest is authentic but its body is not read, so
-the host's certificate epoch comes from the record's signer. The signed key still names
-that signer and the record still expires within 30 seconds; neither check depends on the
-other contract's body schema. Its agents stay in the view,
-so control messages about the tasks they hold still reach them, marked with that digest
-(`TeamAgent.other_contract`): they take no new work (`TeamAgent.takes_work`), the host is
-logged once with both digests (`event=team_agents_host_other_contract`), and
-`other_contract_hosts` lists such hosts for the Status page. A draining agent's own record
-says it takes no work too.
 
 **An agent process on another contract drains** (`custom_agents.agent_host`,
 `custom_agents.contract_drain`). When its host learns that the process runs another

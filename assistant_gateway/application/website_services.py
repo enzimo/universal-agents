@@ -393,7 +393,7 @@ class WebsiteSessionApplication:
         self._manager_agent_id = manager_agent_id
         self._team_id = team_id
         # Sessions with a request whose agent reply the gateway still awaits
-        # (in memory, so every open page sees the same busy dot the sender does).
+        # (in memory, so every open page sees the same work the sender does).
         self._awaiting_reply_session_keys = awaiting_reply_session_keys
         # The configured key of the team's proactive session (heartbeat.
         # session_key): its threads are listed as "Updates" (web_chat_threads).
