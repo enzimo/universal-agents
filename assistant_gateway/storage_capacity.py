@@ -19,8 +19,9 @@ is reached (owner's decision of 2026-10-27). The Status page
   (``custom_transport.nats_topology``), so the finding says so. How full each of
   those streams is against its own limit is ``assistant_gateway.queue_capacity``'s. The bundled server
   runs without one (``docker/nats_service.py`` sets no ``max_file_store``), so
-  then a note says so plainly instead of inventing a limit. A server that does
-  not answer is listed as unavailable on the page.
+  then a note says so plainly instead of inventing a limit, and its room is
+  checked instead (below). A server that does not answer is listed as
+  unavailable on the page.
 - **Database sizes** (SQLite files with their write-ahead log, and
   PostgreSQL's ``pg_database_size``) have no limit of their own; they fill the
   disk. They are listed in each finding's details, so an administrator sees
@@ -41,6 +42,54 @@ below its threshold, so use that moves around a threshold does not announce
 the level again on every crossing. After a level ended, entering it again is
 new and is announced again: a disk that fills up a second time months later is
 not missed.
+
+**The bundled server's room.** nats-server without ``max_file_store`` takes
+three quarters of the free space on the disk holding its store as its room
+(``BUNDLED_STORAGE_SHARE``), once, each time it starts, and refuses every new or
+changed stream (error 10047) while its streams set aside as much as that room
+or more. The streams it has keep working, but the attachment store
+(``ua_attachments``, created the first time Web Chat copies an attachment), a
+new team's streams and a start after a change to the stream settings fail. Each
+team's streams set aside about 2.1 GiB at the defaults, so a disk can reach
+this well before the percentages above notice. For the bundled server only,
+two more findings:
+
+- **The room warning** (key ``message_room``, a warning that administrators
+  are told about once, as nearing the limit is, ``tells_administrators``):
+  three quarters of the store disk's free space now is at or below what the
+  streams set aside, so the server would refuse new streams after its next
+  start. It says how much to free, rounded up to the 100 MB step shown, and
+  ends only once the disk has more free than it needs by ``RELEASE_POINTS``
+  percent of the disk (``MessageRoom.release_at``): the percentage levels'
+  margin, applied to this comparison, so use that moves around the line does
+  not announce it again. A disk too small for that margin is told so. Its last
+  sentence says what adding a team needs, which is more: a new team's streams
+  set their whole limits aside on top.
+- **The problem** (key ``message_room_now``): the room the server runs with
+  now, read from its loopback monitoring endpoint (``/varz``,
+  ``docker.nats_service.bundled_running_room``), is at or below what its
+  streams set aside, so it refuses new streams already. Freeing space does not
+  end it, only a start of the whole instance with enough free space does, so
+  it ends only once the server runs with more room.
+
+Both use ``StorageLevels`` like the percentage levels (their reading is 100 at
+the line, ``MESSAGE_ROOM_LINE``), so a restart neither repeats a notice nor
+forgets one. Neither has a setting: the line is NATS's own rule, and a setting
+would need a change to the team transfer's settings section.
+
+Only the bundled server gets them. The launchers name it by handing the gateway
+its store folder (``docker.nats_service.bundled_nats_store_dir``, accepted only
+beside the bundled server's own address); without that the gateway logs once
+that the room is not checked. An external server's store is on a disk the
+gateway cannot measure, so an external server without an account limit gets no
+room findings, and one with a limit keeps the percentage finding, whose details
+show what its streams set aside. A memory-storage server takes no room on disk,
+so it gets none either. A server that does not report what its streams set
+aside (``reserved_storage``) gets none, logged once. A store disk that cannot be
+read shows the unmeasured-disk problem instead of the warning. While the
+monitoring endpoint does not give the room, the problem's level is kept and the
+endpoint is listed as an unavailable source (``MONITORING_ENDPOINT_SOURCE``), so
+the Status page keeps the problem it found before instead of announcing it again.
 """
 
 from __future__ import annotations

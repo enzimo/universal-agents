@@ -4434,6 +4434,44 @@ authority checks before it creates any, `installation_authority/queues.py`). Peo
 stored-data totals that the manager stopped measuring are a warning on the
 page too (`StorageUsageNotices.stale_finding`).
 
+The bundled server's room has two findings of its own, because the
+percentages miss it (FA-2 of pull request 152's review). The server takes
+three quarters of the free space (`f_bavail`) on the disk holding its store as
+its room, once, each time it starts, and refuses every new or changed stream
+(10047) while its streams set aside as much or more (measured on 2.15.1,
+equality included); the streams it has keep working. Since each team's
+streams set aside about 2.1 GiB, the attachment object store (`ua_attachments`,
+created on first use), a new team and a start after a change to the stream
+settings can fail on a disk the percentage findings call healthy. The
+warning (`storage_message_room:<entered at>`) compares three quarters of the
+store disk's free space now with the account's `reserved_storage`
+(`MessageRoom`): at or below it, the next start would leave the server short.
+It is announced like nearing the limit (`storage_capacity.tells_administrators`),
+says how much to free, and ends only once the disk has 3% of its size more
+free than needed: the percentage levels' margin applied to this comparison,
+expressed as a reading of 100 at the line so `StorageLevels.track_one` applies
+unchanged. The problem (`storage_message_room_now:<entered at>`) reads the room
+the server runs with from its loopback monitoring endpoint (`/varz`
+`jetstream.config.max_storage`, `docker.nats_service.bundled_running_room`),
+because only a start of the whole instance changes that room: freeing space
+does not end the problem, and a team-wide restart keeps the server running.
+While the endpoint does not answer, the problem's level is kept and the check
+lists the endpoint as an unavailable source, so `notify_new_problems` keeps
+the problem instead of announcing it again. The check runs only where a
+launcher started the bundled server: `start_local_nats` puts the store folder
+in `TEAM_BUNDLED_NATS_STORE_DIR` for the processes it starts, the bundle drops
+a value the container supplied and `build_process_env` one from `team.env`,
+and `bundled_nats_store_dir` accepts it only beside the bundled server's own
+address in both `NATS_URL` and `NATS_SERVERS` (otherwise it is ignored with a
+warning). This is a hand-off to child processes, not a setting: the launcher's
+start of the server is the one place that knows the server is the bundled one
+and where its store is. An external server's store is on a disk the gateway
+cannot measure and a memory store takes no room on disk, so neither gets these
+findings; an external server with an account limit keeps the percentage
+finding, whose details show what the streams set aside. Neither finding has a
+setting: the line is NATS's rule, and a setting would need a change to the
+team transfer's settings section.
+
 Queue stream findings (`assistant_gateway/queue_capacity.py`) exist because a
 full work or dead-letter stream refuses new messages (`discard: new`):
 senders keep refused work and send it again until it expires, and receivers
@@ -5599,7 +5637,9 @@ renamed secrets included). The authority:
   match is not sent to NATS, so a restart with the same settings asks for no change: a
   server whose storage is now smaller than what its streams set aside (the bundled server
   measures it from the disk's free space at every start) keeps serving the streams it has
-  but refuses every new or changed one. Per-team buckets use
+  but refuses every new or changed one. The Status page warns before the bundled server
+  would start that short and shows a problem once it runs that short (the storage findings
+  above). Per-team buckets use
   `custom_messages.wire.buckets.bucket_name` and every bucket's stream `bucket_stream`.
   The contract disables rollup, stream deletion and purge, so writing one key cannot
   erase the bucket. Repeated setup reconciles those settings without discarding records;
