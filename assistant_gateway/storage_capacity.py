@@ -580,9 +580,7 @@ class StorageCapacity:
 
         disks = self._disks()
         spaces = [disk for disk in disks if isinstance(disk, SpaceUse)]
-        message_storage = MessageStorage.of(messages, kind=self._message_storage_kind) if messages else None
-        if message_storage is not None and message_storage.reserved is None:
-            self._log_reserved_unknown(message_storage)
+        message_storage = self._message_storage(messages)
         if message_storage is not None and message_storage.limit:
             spaces.append(
                 SpaceUse(
@@ -614,6 +612,20 @@ class StorageCapacity:
         findings.extend(self._room_findings(message_storage, unavailable))
         return findings
 
+    def _message_storage(self, messages: JetStreamAccountUsage | None) -> MessageStorage | None:
+        """The message server's storage as this check reads it, None when it did not answer.
+
+        A server that does not report what its streams set aside is logged once, not at every
+        check: the figure shows as unknown, never 0, and the room is not checked against it.
+        """
+
+        if not messages:
+            return None
+        storage = MessageStorage.of(messages, kind=self._message_storage_kind)
+        if storage.reserved is None:
+            self._log_reserved_unknown(storage)
+        return storage
+
     def _room_findings(self, storage: MessageStorage | None, unavailable: list[str]) -> list[StatusFindingV1]:
         """The bundled server's room findings, or the problem that its store's disk cannot be measured.
 
@@ -640,12 +652,9 @@ class StorageCapacity:
         if storage is None or storage.reserved is None:
             return []
         reserved = storage.reserved
-        running = self._running_room()
+        running = self._running_room(unavailable)
         readings: list[tuple[str, float]] = []
-        if running is None:
-            if MONITORING_ENDPOINT_SOURCE not in unavailable:
-                unavailable.append(MONITORING_ENDPOINT_SOURCE)
-        else:
+        if running is not None:
             refusing = refuses_now(running=running, reserved=reserved)
             readings.append((MESSAGE_ROOM_NOW_KEY, float(MESSAGE_ROOM_LINE) if refusing else 0.0))
         findings: list[StatusFindingV1] = []
@@ -676,15 +685,19 @@ class StorageCapacity:
             return {}
         return self.levels.track_one(readings, threshold=MESSAGE_ROOM_LINE, now=self._now())
 
-    def _running_room(self) -> int | None:
+    def _running_room(self, unavailable: list[str]) -> int | None:
         """The room the bundled server runs with, or None when its monitoring endpoint does not give it.
 
-        Logged when the endpoint stops giving it, and when it gives it again, not at every check.
+        Then the endpoint is added to the page's ``unavailable`` sources at every such check
+        (``MONITORING_ENDPOINT_SOURCE``), so the page keeps the problem it found before. Logged
+        when the endpoint stops giving it, and when it gives it again, not at every check.
         """
 
         try:
             room = self._read_running_room()
         except (OSError, ValueError) as exc:
+            if MONITORING_ENDPOINT_SOURCE not in unavailable:
+                unavailable.append(MONITORING_ENDPOINT_SOURCE)
             if self._running_room_answering is not False:
                 logger.warning(
                     "The bundled message server's monitoring endpoint did not give the room it runs with, so the "
