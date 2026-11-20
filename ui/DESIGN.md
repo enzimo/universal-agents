@@ -1100,9 +1100,17 @@ that leads to it (owner's request 2026-10-12).
   use the amber warning treatment and always include their text.
 - The decision area has the optional note, **Approve all** (primary), and
   **Deny** (danger).
-- After approval, the collapsed card keeps a **Choose the credential** link
-  button for each account link in the proposal. It opens the broker's account
-  link form in a new tab; the credential is chosen only there.
+- After approval, each account link form the proposal opened is a broker card
+  in the conversation (see "Broker pages appear inside the chat"): right under
+  the review card when it was approved there, with the line "Choose the
+  credentials in the secure pages below."; after the open conversation's
+  latest message when it was approved in the Inbox panel, whose decided card
+  says "The secure pages to choose the credentials are in the conversation."
+  with a secondary **Show in the conversation** button that closes Settings
+  and brings the first card into view. The credential is chosen only on the
+  broker's page. A form the chat cannot show as a card, and the standalone
+  workflow page, keep a **Choose the credential** link button that opens the
+  form in a new tab.
 
 ### Delivery Request Cards
 
@@ -1983,14 +1991,21 @@ its history. Steps with linked requests cannot use this correction.
   frame's own background), not the amber notice of other memory-only items,
   and it has no Dismiss: Decline inside the frame ends the page. When the page
   finishes or is declined the card shrinks to one line ("Done. This secure
-  page is closed." or "Declined. Nothing was saved."). At expiry the frame
+  page is closed." or "Declined. Nothing was saved."; a declined sign-in that
+  may have signed in just before reads "Done.", which claims nothing about
+  saving). A page that ended in its other view, or is opened again after a
+  thread switch, shows how it ended and the card shrinks the same way. At expiry the frame
   closes and the existing expired line stays. A frame that never reports
   becomes "This secure page could not be shown here. Open it in its own tab."
   with the link and countdown. The frame follows the page's height up to 70%
   of the window; a longer page scrolls inside. The card follows the chat's
   light or dark mode when it opens and keeps it until opened again. A thread
   switch reloads a half-filled form (say so in user docs; long forms can use
-  **Open in its own tab**). Other channels keep the plain link.
+  **Open in its own tab**). Keyboard: the frame is in the tab order (Tab goes
+  into the broker page, through its fields, its button and **Decline**, then
+  to **Open in its own tab**); when a card whose frame has focus closes, focus
+  moves to the message box, never to the page body, and the closed line is a
+  status. Other channels keep the plain link.
   Authentication status remains available through `/auth status`.
 - Credential collection, deletion, manual-signup collection, and tool setup
   pages a task asks for (kind `tool_setup`: a sign-in, an account link form,

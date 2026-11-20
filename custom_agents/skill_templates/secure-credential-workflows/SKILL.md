@@ -197,7 +197,9 @@ Every broker form a person answers has a **Decline** button (the `/auth model`
 and `/upgrade` pages end with **Close** instead). A form that comes back
 `credential_declined`, or a setup page that ends `declined`, means the person
 chose not to give it: do not ask for the same form or page again in this task;
-say what could not be done without it.
+say what could not be done without it. When a declined sign-in's message says a
+sign-in may remain, the person may already be signed in: say so, and suggest
+`/auth status` rather than a new sign-in.
 
 People can also set tools up themselves with one command for every tool's
 account: `/link <tool id>` for their own sign-in or account, `/link <tool id>

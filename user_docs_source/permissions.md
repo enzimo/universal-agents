@@ -441,10 +441,12 @@ step. If any part fails, nothing is applied and the reason is shown. TeamLead's
 waiting task then continues and learns what was applied.
 
 When the proposal asked for an account link, the administrator who approved it
-chooses the credential straight away: the approved card shows a link such as
-**Choose the credential for Portainer**, and a notice with the same link waits
-in the Inbox, so
-a decision made with a chat button can be finished there. The broker's form
+chooses the credential straight away. In Web Chat the broker's form, such as
+**Choose the credential for Portainer**, appears as a secure card in the
+conversation: under the request's card when you approved it there, or after
+the latest message when you approved it in the Inbox (its **Show in the
+conversation** button takes you there). A notice with the same link waits in
+the Inbox, so the form can also be opened from there. The broker's form
 can also take a new credential in the same step
 ([Account links](#account-links)). TeamLead's task keeps waiting until those
 forms are used, closed or expired, and then learns which accounts were linked,
@@ -1261,9 +1263,9 @@ open it:
   form in the chat of the person the task works for (see
   [Setup pages in chat](#setup-pages-in-chat)).
 - When an administrator approves an [access proposal](#access-proposals) that
-  asks for an account link, the form opens for that administrator: a link such
-  as **Choose the credential for Portainer** on the approved Inbox card, and
-  in an Inbox notice.
+  asks for an account link, the form opens for that administrator: in Web Chat
+  as a secure card in the conversation (**Choose the credential for
+  Portainer**), and as a link in an Inbox notice.
 
 The form shows whose account it is, which agents use it (**Used by**: the agent
 types holding access to the tool for your work, or for anyone's work for a team

@@ -3342,7 +3342,10 @@ page, the gateway, agents and models still never see what is typed.
   origin from the existing public-address settings
   (`network.public_origin` with the internal website's public port), only when
   the internal website and Web Chat are on, and rebuilds it from checked parts
-  (`policy_origin`) so a setting can never add a directive. Without it every
+  (`policy_origin`) so a setting can never add a directive: a host of letters,
+  digits, dots and hyphens or a plain IPv6 address and a numeric port; a scoped
+  IPv6 address (`[fe80::1%eth0]`, where Python accepts any text after the `%`)
+  and an unparsable address are refused. Without it every
   request gets the full page. Diagnosis: `event=broker_card_view_origin` or
   `event=broker_card_view_off` at broker start, `broker_card_view_origin_unusable`
   and the gateway's `web_chat_broker_frame_origin_unusable` for an address that
@@ -3369,9 +3372,8 @@ page, the gateway, agents and models still never see what is typed.
   `secure_tool_broker/page_assets/card_bridge.js`. It posts to the Web Chat
   origin only `{type, height}` and, when the handler marked a confirmed end,
   `{type, outcome: finished|declined}`. It reads no field and listens to no
-  message. Refusals, failures, "already used" pages and pages with a next step
-  (Bitwarden's "restart the broker now") carry no outcome, so the card stays
-  readable. Web Chat (`assets/broker_card.mjs`) builds the iframe with the same
+  message. Refusals, failures and pages with a next step (Bitwarden's "restart
+  the broker now") carry no outcome, so the card stays readable. Web Chat (`assets/broker_card.mjs`) builds the iframe with the same
   sandbox, accepts a message only from that card's own frame and only in those
   two shapes, clamps the height (at most 70% of the window; a longer page
   scrolls inside), and falls back to "Open in its own tab" when a loaded frame
@@ -3388,6 +3390,43 @@ page, the gateway, agents and models still never see what is typed.
   thread switch therefore reloads a half-filled form; long forms can use "Open
   in its own tab" (accepted trade-off: keeping hidden frames per thread would
   need one live message list per thread).
+- **A page that already ended.** The card and "Open in its own tab" are two
+  views of one page, and a thread switch rebuilds the card. Once the page ended
+  in one view, every later GET or POST shows how it ended and applies nothing
+  (`secure_tool_broker/ended_pages.py`, `event=broker_auth_form_already_ended`):
+  declined, the closed `/auth model` or `/upgrade` page, or a token form's own
+  success page, built by the same functions as the submission's answer, so the
+  card shrinks to its note instead of showing an error until it expires. A
+  failed token form opened again says the page did not finish and names the
+  command that opens a new one (`secure_tools.auth_methods.page_command`). A
+  form whose body was still arriving when the other view finished gets that
+  ending too. Closing `/upgrade` after a plain failed export reads as declined;
+  after a success, or an outcome the broker does not know, as finished.
+- **Recording before the claim ends.** A form's worker stores or deletes the
+  credential in a thread; its result (`used`, status, what a later view shows)
+  is recorded in the worker's done callback before the one-time claim is
+  released (`run_claimed_form_thread(on_result=...)`), so a Decline cannot be
+  accepted after the credential was stored, and the result is recorded even
+  when the browser disconnected. A recording that fails ends the page
+  (`event=broker_form_result_record_failed`) rather than leaving it answerable.
+- **Credential forms after an approval.** When an administrator approves an
+  access proposal that needs account links, the gateway opens the forms for
+  that administrator and returns each one's card view and expiry with the
+  decision. Web Chat puts them into the open conversation as account link
+  cards (`chat_delivery.js followUpPageItems`, the same address checks as every
+  card): right under the review card for a decision made there, after the
+  latest message for a decision in the Inbox panel, whose decided card says
+  where they are and has **Show in the conversation**. The Inbox list is
+  redrawn after every decision, so a frame inside it would reload at once. The
+  cards live only in that browser tab, like every broker card; the Inbox
+  notice keeps the forms' links. The standalone workflow page is not Web Chat
+  and keeps plain links.
+- **Keyboard.** The frame is in the tab order with the page's title: Tab moves
+  into the broker page (its fields, its button, Decline) and on to "Open in
+  its own tab". When a card whose frame has focus closes (an outcome, expiry,
+  its item leaving), focus moves to the message box, which re-renders never
+  rebuild, and the closed line is a status so it is announced
+  (`broker_card.mjs onFocusLost`).
 - **Decline.** Every open form a person or task waits on has a Decline button
   of its own (a separate form with only `ua_decline`, so no typed value travels
   with it, `secure_tool_broker/page_decline.py`) and goes through the same
@@ -3396,7 +3435,19 @@ page, the gateway, agents and models still never see what is typed.
   try again), account links as `account_link_declined`, sign-ins as `declined`
   with their `gh`/`gog` process stopped; the process monitor then stores
   nothing. A Decline from a stale second view is ignored once the page ended or
-  its process already finished signing in. `/auth model` and `/upgrade` keep
+  its process already finished signing in. `gh` keeps its own sign-in in
+  `hosts.yml` in the person's `GH_CONFIG_DIR`; if it finished signing in, or
+  wrote that file, just before Decline stopped it, a sign-in may remain. The
+  Decline compares a fingerprint of the file taken before `gh` started, once
+  `gh` is gone (`auth_flows.sign_in_may_remain_after_decline`, also used by the
+  process monitor for its log line), and then the page says a sign-in may
+  remain and to check `/auth status`, the card reads "Done." instead of
+  "Declined. Nothing was saved.", the status route carries
+  `sign_in_may_remain` and the gateway's messages say so; until that decision
+  is made the status route reports the page as pending. The file is not
+  removed: it may hold an earlier sign-in of the person's, or one another of
+  their pages finished at the same moment (partial decline of review finding
+  F9, recorded with the lead). `/auth model` and `/upgrade` keep
   their own Close. A declined sign-in or account link ends the task's wait as
   `TOOL_SETUP_DECLINED`, so the same page is not offered again in that task. A
   declined credential form in a task that continues (`continue_task`) relies
@@ -3404,9 +3455,14 @@ page, the gateway, agents and models still never see what is typed.
   refuses a second form for the same key in that task yet (follow-up proposed
   to the lead).
 - **What is left.** A script running in the chat page (an injected script) can
-  still show a fake form of its own or open the full page in a new window; it
-  cannot read what the person types into the genuine broker frame, however it
-  frames the card view.
+  still show a fake form of its own; it cannot read what the person types into
+  the genuine broker frame, however it frames the card view. Behind a
+  path-routed reverse proxy the full page shares the chat's address, has no
+  sandbox and no response sends `Cross-Origin-Opener-Policy`, so such a script
+  can open the full page with `window.open` and read what is typed there. This
+  existed before the cards; the chat's own links use `noopener`, and sending
+  the sandbox on the full page as well (with the status route's `null` answer
+  there) is a possible follow-up.
 
 ## Deterministic execution and managed processes
 

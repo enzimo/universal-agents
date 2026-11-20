@@ -176,6 +176,10 @@ async function cards(browser, {base, typed, follow_up: followUp}) {
   );
   check(true, "submission with Enter from the frame reached the broker and the card shrank to Done");
   check(await isActive(page, MESSAGE_BOX), "focus moved to the message box when the card shrank");
+  // The update checked below is the 30 second card expiring; it must still be open now.
+  if (!(await page.$(`${CARD(2)} ${FRAME}`))) {
+    throw new Error("too slow: the card meant to expire after the keyboard checks had already expired; raise EXPIRING_SECONDS");
+  }
 
   const messages = await page.evaluate(() => window.__cardMessages);
   check(
@@ -197,6 +201,9 @@ async function cards(browser, {base, typed, follow_up: followUp}) {
   check(true, "an expired card lost its frame");
   check(await isActive(page, MESSAGE_BOX), "focus stayed on the message box through that chat update");
 
+  if (!(await page.$(`${CARD(3)} ${FRAME}`))) {
+    throw new Error("too slow: the card meant to expire with focus had already expired; raise FOCUSED_EXPIRING_SECONDS");
+  }
   await page.frameLocator(`${CARD(3)} ${FRAME}`).locator("input[type=password]").focus();
   await page.waitForFunction(expired, [CARD(3), FRAME], {timeout: 60000});
   check(await isActive(page, MESSAGE_BOX), "a card that expired while its frame had focus handed focus to the message box");

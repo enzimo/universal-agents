@@ -66,10 +66,12 @@ from tests.browser_probe import requires_chromium
 
 RUNNER = Path(__file__).with_name("broker_card_browser_runner.cjs")
 TYPED = "ptr_probe_value_7731"
-# The cards that expire during the run: long enough to load and to go through the
-# keyboard checks, short enough to wait for. The second expires while its frame has focus.
-EXPIRING_SECONDS = 25
-FOCUSED_EXPIRING_SECONDS = 40
+# The cards that expire during the run, counted from setup: long enough to load and
+# to go through the keyboard checks, short enough to wait for. The second expires
+# while its frame has focus. The runner fails with a plain message if either has
+# already expired when it gets there, so a slow machine cannot turn a check empty.
+EXPIRING_SECONDS = 30
+FOCUSED_EXPIRING_SECONDS = 55
 
 
 def _serve_in_thread(app: web.Application, port: int) -> Callable[[], None]:

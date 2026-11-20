@@ -19,7 +19,9 @@ link your own token with `/link http:github`; `/link http:github team` replies
 In Web Chat, the secure broker's page appears inside the chat, in the
 sign-in card; **Open in its own tab** opens it in a new tab instead. The long
 authentication URL stays hidden; credentials entered in the page are not sent
-to the chat or the agent. **Decline** ends the page without signing in. The
+to the chat or the agent. **Decline** ends the page without signing in. If
+GitHub had already finished signing you in at that moment, the page and the
+chat say a sign-in may remain; check with `/auth status`. The
 card disappears when the page ends or when you refresh Web Chat. Run the
 command again if you need a new page. Other chats and the CLI give you a link
 to open instead.

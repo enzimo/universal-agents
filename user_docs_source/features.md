@@ -655,13 +655,16 @@ person who made them: agents use them only for that person's work.
 When an agent asks you to store or delete a credential, the secure form appears
 inside the chat, in its card: the reason on top, the broker's form, and a line
 with the time left and **Open in its own tab**. **Decline** at the bottom of the
-form ends it without storing or deleting anything. A setup page an agent asks
+form ends it without storing or deleting anything. The keyboard works too: Tab
+moves into the form and on to **Open in its own tab**, and when the form ends
+the cursor returns to the message box. A setup page an agent asks
 for (see [When an agent needs a tool set up](#when-an-agent-needs-a-tool-set-up))
 appears the same way; the pages that open after the first one come back after a
 refresh until each ends (a gateway restart removes them). A credential form's
 card is available only in the browser response that starts the workflow; it
 stays at its original position in the chat timeline. When the form ends, the
-card shrinks to one line ("Done." or "Declined."), and the chat then shows one
+card shrinks to one line ("Done." or "Declined."; a form already finished in
+its own tab shows that when the card is opened again), and the chat then shows one
 line saying how it ended, such as
 "The secure form for `bifrost_virtual_key` is done: the credential was
 stored.", while the agent goes on with its task.
