@@ -25,11 +25,15 @@ from assistant_gateway.application.transient_presentation import (
 from assistant_gateway.domain.message_types import (
     ACCESS_REVIEW_MESSAGE_TYPE,
     ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
+    AUTH_COMMAND_MESSAGE_TYPE,
+    COMMAND_REPLY_MESSAGE_TYPES,
+    SENSITIVE_USER_COMMAND_MESSAGE_TYPE,
     TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
     LINK_RESULT_MESSAGE_TYPE,
     TOOL_SETUP_RESULT_MESSAGE_TYPE,
     SECURE_CREDENTIAL_RESULT_MESSAGE_TYPE,
     SYSTEM_NOTIFICATION_MESSAGE_TYPE,
+    TASK_PROGRESS_STATUS_MESSAGE_TYPE,
     TOOL_SETUP_MESSAGE_TYPE,
     TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE,
 )
@@ -43,6 +47,8 @@ from assistant_gateway.domain.transcript import (
     TRANSCRIPT_ROLE_USER,
     TRANSCRIPT_SOURCE_ACCESS_REVIEW,
     TRANSCRIPT_SOURCE_CLIENT_REQUEST,
+    TRANSCRIPT_SOURCE_GATEWAY_COMMAND,
+    TRANSCRIPT_SOURCE_GATEWAY_RESPONSE,
     TRANSCRIPT_SOURCE_DELIVERY_EVENT,
     GatewayTranscriptMessage,
     TranscriptAppendRequest,
@@ -121,7 +127,7 @@ _CURSOR_VERSION = 1
 _SENSITIVE_RESPONSE_TEXT = {
     "secure_credential_collection": (SECURE_CREDENTIAL_COLLECTION_READY_TEXT),
     TOOL_SETUP_MESSAGE_TYPE: (TOOL_SETUP_READY_TEXT),
-    "command_auth": (
+    AUTH_COMMAND_MESSAGE_TYPE: (
         "Authentication workflow status was returned through trusted Web Chat controls."
     ),
     # A /link reply that opened a page keeps its card's own line instead
@@ -129,7 +135,7 @@ _SENSITIVE_RESPONSE_TEXT = {
     ACCOUNT_LINK_COMMAND_MESSAGE_TYPE: (
         "The /link reply was shown when it ran and is not kept in chat history."
     ),
-    "command_user_sensitive": (
+    SENSITIVE_USER_COMMAND_MESSAGE_TYPE: (
         "The requested Web Chat access operation was processed. One-time material is not "
         "stored in transcript history."
     ),
@@ -369,7 +375,7 @@ class GatewayTranscriptService:
         route: GatewayRequestRoute,
         response: GatewayResponse | GatewayApplicationResponse,
         reply_to: GatewayTranscriptMessage,
-        source_kind: str = "gateway_response",
+        source_kind: str = TRANSCRIPT_SOURCE_GATEWAY_RESPONSE,
     ) -> GatewayTranscriptMessage | None:
         if not self.is_web_chat_route(session, route):
             return None
@@ -463,7 +469,7 @@ class GatewayTranscriptService:
             route=route,
             response=response,
             reply_to=user_message,
-            source_kind="gateway_command",
+            source_kind=TRANSCRIPT_SOURCE_GATEWAY_COMMAND,
         )
         if reply is None:
             raise RuntimeError("Web Chat command response was not persisted.")
@@ -623,6 +629,13 @@ class GatewayTranscriptService:
             raise ValueError("Gateway delivery events require a stable source id.")
         return TRANSCRIPT_SOURCE_DELIVERY_EVENT, source_id
 
+    def count_turns(self, *, owner_canonical_user_id: str, session_key: str) -> int:
+        """Ordinary messages (no system cards, no slash commands) in one person's thread."""
+
+        return self._repository.count_transcript_turns(
+            owner_canonical_user_id=owner_canonical_user_id, session_key=session_key
+        )
+
     def history_page(
         self,
         *,
@@ -730,19 +743,15 @@ class GatewayTranscriptService:
             SYSTEM_NOTIFICATION_MESSAGE_TYPE,
             "system_status",
             "status",
-            "task_progress_status",
+            TASK_PROGRESS_STATUS_MESSAGE_TYPE,
             ACCESS_REVIEW_MESSAGE_TYPE,
             "secure_credential_collection",
             TOOL_SETUP_MESSAGE_TYPE,
             TOOL_SETUP_UNAVAILABLE_MESSAGE_TYPE,
-            "command",
-            "command_auth",
-            ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
-            TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
+            *COMMAND_REPLY_MESSAGE_TYPES,
             LINK_RESULT_MESSAGE_TYPE,
             TOOL_SETUP_RESULT_MESSAGE_TYPE,
             SECURE_CREDENTIAL_RESULT_MESSAGE_TYPE,
-            "command_user_sensitive",
         }:
             return TRANSCRIPT_ROLE_SYSTEM
         return TRANSCRIPT_ROLE_ASSISTANT

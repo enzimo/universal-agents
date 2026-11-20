@@ -8,19 +8,39 @@ and the session application's listing.
 
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+
+import pytest
 
 from assistant_gateway.application.person_maintenance import person_maintenance_session_key
 from assistant_gateway.application.proactive_delivery import proactive_session_key
 from assistant_gateway.application.web_chat_threads import (
     TITLE_MAX_CHARACTERS,
+    InvalidThreadPlacement,
+    NeedsYouReason,
+    ThreadListState,
     WebChatThreadKind,
+    last_message,
+    needs_you_reason,
+    snooze_wake_time,
     thread_kind,
+    thread_list_state,
 )
-from assistant_gateway.application.website_application import web_chat_threads_revision
+from assistant_gateway.application.website_application import (
+    WebChatThreadAction,
+    WebChatThreadPlacementResult,
+    web_chat_threads_revision,
+)
 from assistant_gateway.application.website_services import WebsiteSessionApplication
+from assistant_gateway.domain.request_state import (
+    REQUEST_STATUS_WAITING_FOR_CREDENTIAL,
+    REQUEST_STATUS_WAITING_FOR_STEERING,
+)
+from assistant_gateway.domain.sessions import WebChatThreadRecord
 from assistant_gateway.domain.transcript import TranscriptAppendRequest, TranscriptAttachmentReference
 from assistant_gateway.runtime_ports import OwnershipPrivateResourceAuthorizer
 from assistant_gateway.store import GatewayStateStore
@@ -29,6 +49,18 @@ OWNER = "user_alpha"
 OTHER_OWNER = "user_beta"
 HEARTBEAT = "heartbeat"
 THREAD = "website:web-chat:alpha"
+NOW = datetime(2026, 11, 19, 15, 0, tzinfo=timezone.utc)
+LATER = (NOW + timedelta(hours=1)).isoformat()
+
+
+class _Clock:
+    """A clock the test moves."""
+
+    def __init__(self) -> None:
+        self.now = NOW
+
+    def now_utc(self) -> datetime:
+        return self.now
 
 
 class _Threads:
@@ -37,6 +69,7 @@ class _Threads:
     def __init__(self, tmp_path: Path) -> None:
         self.store = GatewayStateStore(str(tmp_path / "gateway.db"))
         self._messages = 0
+        self.clock = _Clock()
         unused = cast(Any, SimpleNamespace())
         self.application = WebsiteSessionApplication(
             sessions=unused,
@@ -48,6 +81,7 @@ class _Threads:
             team_id="team_1",
             awaiting_reply_session_keys=frozenset,
             proactive_session_key=HEARTBEAT,
+            clock=self.clock,
         )
 
     def session(self, session_key: str, *, owner: str = OWNER, channel: str = "website", chat: str = "web-chat") -> None:
@@ -95,6 +129,19 @@ class _Threads:
 
     def revision(self) -> str:
         return web_chat_threads_revision(self.application.list_web_chat_threads(owner_canonical_user_id=OWNER))
+
+    def thread(self, session_key: str = THREAD):
+        (listed,) = [
+            thread
+            for thread in self.application.list_web_chat_threads(owner_canonical_user_id=OWNER, include_last_message=True)
+            if thread.session_key == session_key
+        ]
+        return listed
+
+    def place(self, action: WebChatThreadAction, *, owner: str = OWNER, **options: Any) -> WebChatThreadPlacementResult:
+        return self.application.set_web_chat_thread_placement(
+            session_key=THREAD, action=action, owner_canonical_user_id=owner, **options
+        )
 
 
 def test_delivery_threads_stay_hidden_until_something_arrives(tmp_path: Path) -> None:
@@ -187,3 +234,223 @@ def test_delivery_threads_are_recognized_by_the_keys_their_own_code_makes() -> N
     assert thread_kind(person_maintenance_session_key(OWNER), proactive_session_key=HEARTBEAT) is WebChatThreadKind.MEMORY_REVIEW
     assert thread_kind("heartbeats_and_more", proactive_session_key=HEARTBEAT) is WebChatThreadKind.CONVERSATION
     assert thread_kind(THREAD, proactive_session_key=HEARTBEAT) is WebChatThreadKind.CONVERSATION
+
+
+# Where a thread sits: derived from the stored baseline at read time.
+
+
+def _record(**fields: Any) -> WebChatThreadRecord:
+    values: dict[str, Any] = {
+        "session_key": THREAD,
+        "session_alias": None,
+        "conversation_id": "conversation",
+        "owner_canonical_user_id": OWNER,
+        "updated_at": NOW.isoformat(),
+        "first_message_text": "Plan my week",
+        "first_message_attachments_json": "[]",
+        "has_messages": True,
+    }
+    values.update(fields)
+    return WebChatThreadRecord(**values)
+
+
+def test_a_snooze_wakes_at_its_time() -> None:
+    snoozed = _record(hidden_as="snoozed", hidden_until=LATER, hidden_at_sequence=3, last_sequence=3)
+    assert thread_list_state(snoozed, now=NOW) is ThreadListState.SNOOZED
+    assert thread_list_state(snoozed, now=NOW + timedelta(hours=1)) is ThreadListState.WOKE
+
+
+def test_a_snooze_wakes_early_when_the_team_posts_but_not_for_the_persons_own_post() -> None:
+    person_posted = _record(hidden_as="snoozed", hidden_until=LATER, hidden_at_sequence=3, last_sequence=4)
+    assert thread_list_state(person_posted, now=NOW) is ThreadListState.SNOOZED
+    team_posted = _record(
+        hidden_as="snoozed", hidden_until=LATER, hidden_at_sequence=3, last_sequence=5, team_posted_after_hiding=True
+    )
+    assert thread_list_state(team_posted, now=NOW) is ThreadListState.WOKE
+
+
+def test_a_dismissed_thread_returns_when_anything_new_is_posted() -> None:
+    dismissed = _record(hidden_as="dismissed", hidden_at_sequence=3, last_sequence=3)
+    assert thread_list_state(dismissed, now=NOW) is ThreadListState.DISMISSED
+    assert thread_list_state(_record(hidden_as="dismissed", hidden_at_sequence=3, last_sequence=4), now=NOW) is None
+
+
+def test_an_unreadable_wake_time_shows_the_thread_and_says_why(caplog: pytest.LogCaptureFixture) -> None:
+    for stored in ("tomorrow", "2026-11-20T09:00:00", None):
+        record = _record(hidden_as="snoozed", hidden_until=stored, hidden_at_sequence=0)
+        with caplog.at_level(logging.WARNING):
+            assert thread_list_state(record, now=NOW) is ThreadListState.WOKE
+    assert caplog.text.count("event=web_chat_thread_snooze_unreadable") == 3
+
+
+def test_what_a_thread_waits_on_is_checked_in_order() -> None:
+    assert needs_you_reason(_record(), now=NOW) is None
+    everything = _record(
+        has_open_question=True,
+        running_request_status=REQUEST_STATUS_WAITING_FOR_STEERING,
+        has_waiting_setup=True,
+        credential_form_expiries=(LATER,),
+    )
+    assert needs_you_reason(everything, now=NOW) is NeedsYouReason.QUESTION
+    assert needs_you_reason(_record(running_request_status=REQUEST_STATUS_WAITING_FOR_STEERING), now=NOW) is NeedsYouReason.REPLY
+    own_task_setup = _record(running_request_status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL, has_waiting_setup=True)
+    assert needs_you_reason(own_task_setup, now=NOW) is NeedsYouReason.SETUP, "a setup page is labelled as one (C05)"
+    assert needs_you_reason(_record(running_request_status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL), now=NOW) is NeedsYouReason.CREDENTIAL
+    assert needs_you_reason(_record(credential_form_expiries=(LATER,)), now=NOW) is NeedsYouReason.CREDENTIAL
+    assert needs_you_reason(_record(running_request_status="running"), now=NOW) is None
+
+
+def test_a_credential_form_counts_only_until_it_expires(caplog) -> None:
+    """F10: a form that ended while its result could not be delivered no longer keeps the thread in Needs you."""
+
+    earlier = (NOW - timedelta(minutes=1)).isoformat()
+    assert needs_you_reason(_record(credential_form_expiries=(earlier,)), now=NOW) is None
+    assert needs_you_reason(_record(credential_form_expiries=(NOW.isoformat(),)), now=NOW) is None
+    # One form expired and another still open in the same thread.
+    assert needs_you_reason(_record(credential_form_expiries=(earlier, LATER)), now=NOW) is NeedsYouReason.CREDENTIAL
+    # The broker's "Z" form is read as UTC.
+    zulu = (NOW + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert needs_you_reason(_record(credential_form_expiries=(zulu,)), now=NOW) is NeedsYouReason.CREDENTIAL
+    # A running request still waiting for a credential keeps the label.
+    expired_but_waiting = _record(credential_form_expiries=(earlier,), running_request_status=REQUEST_STATUS_WAITING_FOR_CREDENTIAL)
+    assert needs_you_reason(expired_but_waiting, now=NOW) is NeedsYouReason.CREDENTIAL
+    with caplog.at_level(logging.WARNING):
+        assert needs_you_reason(_record(credential_form_expiries=("soon",)), now=NOW) is NeedsYouReason.CREDENTIAL
+    assert "event=web_chat_credential_form_expiry_unreadable" in caplog.text
+
+
+def test_the_latest_message_is_sent_as_stored_or_named_by_its_file() -> None:
+    """The page makes the plain one-line snippet (chat_thread_list.mjs plainSnippet, C15)."""
+
+    assert last_message(_record()) is None
+    message = last_message(_record(last_message_role="assistant", last_message_text="**All**\n\n- done", last_message_at=LATER))
+    assert message is not None and (message.role, message.text, message.created_at) == ("assistant", "**All**\n\n- done", LATER)
+    files = last_message(
+        _record(last_message_role="user", last_message_text=" ", last_message_attachments_json='[{"filename": "budget.xlsx"}]')
+    )
+    assert files is not None and files.text == "budget.xlsx"
+
+
+def test_a_snooze_time_must_be_a_future_moment_within_a_year() -> None:
+    assert snooze_wake_time("2026-11-19T18:00:00+01:00", now=NOW) == "2026-11-19T17:00:00+00:00"
+    for refused in ("2026-11-19T18:00:00", "tonight", None, 7, NOW.isoformat(), (NOW + timedelta(days=400)).isoformat()):
+        with pytest.raises(InvalidThreadPlacement):
+            snooze_wake_time(refused, now=NOW)
+
+
+# Placement through the session application
+
+
+def test_pin_snooze_dismiss_and_restore_change_the_list_and_its_revision(tmp_path: Path) -> None:
+    threads = _Threads(tmp_path)
+    threads.session(THREAD)
+    threads.message(THREAD, "Plan my week")
+    revisions = [threads.revision()]
+
+    assert threads.place(WebChatThreadAction.PIN) is WebChatThreadPlacementResult.SAVED
+    assert threads.thread().pinned is True
+    revisions.append(threads.revision())
+
+    assert threads.place(WebChatThreadAction.SNOOZE, snooze_until=LATER, seen_sequence=1) is WebChatThreadPlacementResult.SAVED
+    snoozed = threads.thread()
+    assert (snoozed.list_state, snoozed.snoozed_until, snoozed.pinned) == (ThreadListState.SNOOZED, LATER, True)
+    revisions.append(threads.revision())
+
+    # Moving the snooze to another time is shown on other open pages too (C09).
+    tomorrow = (NOW + timedelta(days=1)).isoformat()
+    threads.place(WebChatThreadAction.SNOOZE, snooze_until=tomorrow, seen_sequence=1)
+    revisions.append(threads.revision())
+
+    threads.clock.now = NOW + timedelta(days=2)
+    assert threads.thread().list_state is ThreadListState.WOKE
+    revisions.append(threads.revision())
+
+    assert threads.place(WebChatThreadAction.RESTORE) is WebChatThreadPlacementResult.SAVED
+    assert threads.thread().list_state is None
+    revisions.append(threads.revision())
+
+    threads.place(WebChatThreadAction.DISMISS, seen_sequence=1)
+    assert threads.thread().list_state is ThreadListState.DISMISSED
+    revisions.append(threads.revision())
+    threads.message(THREAD, "One more thing", role="assistant")
+    assert threads.thread().list_state is None, "a new message brings a dismissed thread back"
+    revisions.append(threads.revision())
+    changed = [before != after for before, after in zip(revisions, revisions[1:])]
+    assert all(changed), "every change of place reaches other open pages"
+
+
+def test_new_messages_change_the_row_but_not_the_revision(tmp_path: Path) -> None:
+    threads = _Threads(tmp_path)
+    threads.session(THREAD)
+    threads.message(THREAD, "Plan my week")
+    before = threads.revision()
+    threads.message(THREAD, "Here is your week.", role="assistant")
+    thread = threads.thread()
+    assert thread.last_message is not None and thread.last_message.text == "Here is your week."
+    assert thread.last_sequence == 2 and thread.last_activity_at is not None
+    assert threads.revision() == before, "pages update the line from transcript events, not by reloading the list"
+
+
+def test_a_question_changes_the_revision(tmp_path: Path) -> None:
+    threads = _Threads(tmp_path)
+    threads.session(THREAD)
+    before = threads.revision()
+    threads.store.request_repository.add_pending_query(
+        session_key=THREAD,
+        correlation_id="request_1",
+        task_query_id="query_1",
+        parent_task_id="task_1",
+        conversation_id=f"conversation_{THREAD}",
+        query_text="Which folder?",
+        owner_canonical_user_id=OWNER,
+    )
+    assert threads.thread().needs_you is NeedsYouReason.QUESTION
+    assert threads.revision() != before
+
+
+def test_one_person_cannot_place_another_persons_thread(tmp_path: Path) -> None:
+    threads = _Threads(tmp_path)
+    threads.session(THREAD)
+    for action, options in (
+        (WebChatThreadAction.PIN, {}),
+        (WebChatThreadAction.SNOOZE, {"snooze_until": LATER, "seen_sequence": 0}),
+        (WebChatThreadAction.DISMISS, {"seen_sequence": 0}),
+        (WebChatThreadAction.RESTORE, {}),
+    ):
+        assert threads.place(action, owner=OTHER_OWNER, **options) is WebChatThreadPlacementResult.NOT_FOUND
+    thread = threads.thread()
+    assert (thread.pinned, thread.list_state) == (False, None)
+
+
+def test_threads_on_other_chats_and_archived_threads_cannot_be_placed(tmp_path: Path) -> None:
+    threads = _Threads(tmp_path)
+    threads.session(THREAD, channel="telegram", chat="tg-chat")
+    assert threads.place(WebChatThreadAction.PIN) is WebChatThreadPlacementResult.NOT_FOUND
+    other = _Threads(tmp_path / "archived")
+    other.session(THREAD)
+    other.store.session_repository.set_session_status(THREAD, "archived")
+    assert other.place(WebChatThreadAction.PIN) is WebChatThreadPlacementResult.NOT_FOUND
+
+
+def test_hiding_needs_the_last_message_the_page_showed_and_a_valid_time(tmp_path: Path) -> None:
+    threads = _Threads(tmp_path)
+    threads.session(THREAD)
+    with pytest.raises(InvalidThreadPlacement):
+        threads.place(WebChatThreadAction.DISMISS)
+    with pytest.raises(InvalidThreadPlacement):
+        threads.place(WebChatThreadAction.SNOOZE, snooze_until=NOW.isoformat(), seen_sequence=0)
+    assert threads.thread().list_state is None
+
+
+def test_a_sequence_the_store_cannot_keep_is_refused_and_every_refusal_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    threads = _Threads(tmp_path)
+    threads.session(THREAD)
+    with caplog.at_level(logging.INFO):
+        for refused in (2**63, -1, True):
+            with pytest.raises(InvalidThreadPlacement):
+                threads.place(WebChatThreadAction.DISMISS, seen_sequence=refused)
+    assert threads.thread().list_state is None
+    refusals = [line for line in caplog.text.splitlines() if "event=web_chat_thread_placement outcome=refused" in line]
+    assert len(refusals) == 3 and all(THREAD in line and "action=dismiss" in line for line in refusals)

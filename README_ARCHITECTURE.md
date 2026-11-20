@@ -378,6 +378,46 @@ acknowledged, and handled by the execution lane of the task it concerns
 (`deferred_message_runtime.may_resume_a_turn`). The mailbox waits for each
 callback, so a turn there held back every other message.
 
+**Web Chat's thread list.** The sidebar lists a person's threads in sections
+(Needs you, Pinned, Recent, Snoozed, Dismissed; owner, 2026-11-19). Where a
+thread sits is stored on its gateway session, like `parallel_thread`:
+`gateway_sessions.pinned`, `hidden_as` (snoozed or dismissed), `hidden_until`
+(the snooze's wake time) and `hidden_at_sequence` (the last message the
+person's page showed when they set it aside; the store keeps the smaller of
+that and the thread's last sequence, so a message the person never saw brings
+it back). Waking and coming back are derived when the list is read
+(`assistant_gateway.application.web_chat_threads.thread_list_state`), never
+written by the code that posts messages: a snoozed thread wakes at its time
+or when the team posts after it was snoozed and stays marked woke until the
+person opens it; a dismissed thread comes back with any new message. Every
+message the team writes wakes it (owner's rule); only the person's own rows
+and the gateway's automatic answers to something the person did stay silent,
+each told by what produced it and marked when it is written: a slash
+command's reply (its own message types), a /link result, the answer to "?",
+and the answer to a message sent while a request runs (source kind
+`gateway_guidance_answer`, because the team's own pause that asks for a reply
+shares its message type). They are listed once in
+`assistant_gateway.domain.sessions` (`SNOOZE_SILENT_SOURCE_KINDS`,
+`SNOOZE_SILENT_MESSAGE_TYPES`); anything not listed wakes the thread, the
+safe side when a new kind of message appears. Opening a woke thread sends
+`clear_woke`, not `restore`: the gateway judges the stored placement by the
+list's own rule and clears it only while it is unchanged (compare-and-set),
+because the page's copy of the list can be older than a snooze or dismiss
+saved on another device; the menu's Restore stays unconditional. Why: no
+background job or hook on the transcript path has to remember to clear anything, and live pages read the list every two
+seconds, so a wake shows within seconds. "Needs you" comes from what is
+already stored: an open question, the running request waiting for the
+person's reply or a credential, a credential form that has not expired yet
+(its row stays until the result reaches the task, which can be later when the
+manager is unreachable, so the expiry time decides) or a waiting setup page. The list query reads only primary-key and index lookups per thread on
+that two-second read; the latest message (for the row's second line) is read
+only for the sessions route. The thread list revision follows names, the
+Run concurrently setting, placement, snooze time and waiting reason, not
+messages; pages update a row's time and snippet from the transcript events
+they already receive. Pin, snooze, dismiss and restore use the thread update
+route with `thread_action`, with the same checks as rename. This state is not
+carried by the team transfer, like `parallel_thread`.
+
 **Parallel threads.** Web Chat's **Run concurrently** switch is a setting of
 each thread (owner, 2026-10-29), stored on its gateway session
 (`gateway_sessions.parallel_thread`; internally such a thread is a parallel

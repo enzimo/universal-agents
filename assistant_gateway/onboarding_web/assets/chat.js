@@ -19,6 +19,22 @@ import { createActivityMesh } from "./activity_mesh.mjs";
 import { createTeamActivity } from "./team_activity.mjs";
 import { createSettingsClient } from "./settings_support.mjs";
 import { createChatSubmission } from "./chat_submission.mjs";
+import {
+  LIST_STATE,
+  THREAD_PLACEMENT_ACTION,
+  createSectionCollapse,
+  defaultThread,
+  formatThreadAge,
+  formatThreadAgeWords,
+  groupThreadSections,
+  messageSnippet,
+  plainSnippet,
+  renderThreadSections,
+  threadDetail,
+} from "./chat_thread_list.mjs";
+import { THREAD_MENU_ACTION, attachThreadMenuTriggers, createThreadMenu } from "./chat_thread_menu.mjs";
+import { createThreadPreview } from "./chat_thread_preview.mjs";
+import { THREAD_CHANGE_DONE, TRY_AGAIN, createThreadListStatus } from "./chat_thread_status.mjs";
 
 function mountPage() {
 "use strict";
@@ -40,6 +56,8 @@ const shellState = {};
 // What the page calls a thread that nothing has named yet (the server sends
 // no title until the thread's first ordinary message, web_chat_threads.py).
 const NEW_CHAT_TITLE = "New Chat";
+// The hidden sentence (chat.html) each thread row points to: the row has a menu.
+const THREAD_ROW_MENU_HINT_ID = "thread-row-menu-hint";
 const attention = createChatAttention({
   browser: window, document, lifecycle,
   isChatView: !new URLSearchParams(window.location.search).has("view"),
@@ -54,7 +72,7 @@ const attention = createChatAttention({
 });
 const appearance = createAppearance({ appearanceState, sharedState, lifecycle, requestClient, operations: { handleUnauthorizedResponse: (...args) => authentication.handleUnauthorizedResponse(...args) } });
 const diagnostics = createDiagnostics({ diagnosticsState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args) } });
-const authentication = createAuthentication({ authenticationState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args), clearOptimisticDeliveries: (...args) => clearOptimisticDeliveries(...args), clearPendingAttachments: (...args) => clearPendingAttachments(...args), configurePrincipalState: (...args) => configurePrincipalState(...args), fetchSessions: (...args) => fetchSessions(...args), loadObjectives: (...args) => runtime_views.loadObjectives(...args), parseApiResponse: (...args) => parseApiResponse(...args), refreshContextDumpStatus: (...args) => diagnostics.refreshContextDumpStatus(...args), renderMessages: (...args) => renderMessages(...args), renderSettingsAppearance: (...args) => appearance.renderSettingsAppearance(...args), renderThreads: (...args) => renderThreads(...args), setAssistantName: (name) => setAssistantName(sharedState, document, name), showSignIn: () => signInGreeting.show(), stopSignIn: () => signInGreeting.stop(), startLiveEvents: () => { liveEvents.start(); activityMesh.start(); sharedState.settingsControls.startInboxCount(); }, stopLiveEvents: () => { liveEvents.stop(); attention.clear(); activityMesh.stop(); teamActivity.clear(); }, setObjectivesStatus: (...args) => runtime_views.setObjectivesStatus(...args) } });
+const authentication = createAuthentication({ authenticationState, sharedState, lifecycle, requestClient, operations: { activeThread: (...args) => activeThread(...args), clearOptimisticDeliveries: (...args) => clearOptimisticDeliveries(...args), clearPendingAttachments: (...args) => clearPendingAttachments(...args), clearThreadListOverlays: () => clearThreadListOverlays(), configurePrincipalState: (...args) => configurePrincipalState(...args), fetchSessions: (...args) => fetchSessions(...args), loadObjectives: (...args) => runtime_views.loadObjectives(...args), parseApiResponse: (...args) => parseApiResponse(...args), refreshContextDumpStatus: (...args) => diagnostics.refreshContextDumpStatus(...args), renderMessages: (...args) => renderMessages(...args), renderSettingsAppearance: (...args) => appearance.renderSettingsAppearance(...args), renderThreads: (...args) => renderThreads(...args), setAssistantName: (name) => setAssistantName(sharedState, document, name), showSignIn: () => signInGreeting.show(), stopSignIn: () => signInGreeting.stop(), startLiveEvents: () => { liveEvents.start(); activityMesh.start(); sharedState.settingsControls.startInboxCount(); }, stopLiveEvents: () => { liveEvents.stop(); attention.clear(); activityMesh.stop(); teamActivity.clear(); }, setObjectivesStatus: (...args) => runtime_views.setObjectivesStatus(...args) } });
 const runtime_views = createRuntimeViews({ runtime_viewsState, sharedState, lifecycle, requestClient, operations: { ensureRuntimeControlsSession: (...args) => authentication.ensureRuntimeControlsSession(...args), formatShortLocalTimestamp: (...args) => formatShortLocalTimestamp(...args), parseApiResponse: (...args) => parseApiResponse(...args), timestampElement: (...args) => timestampElement(...args), uiElement: (...args) => uiElement(...args) } });
 // The team's live status, carried by every live page and shown by the
 // activity mesh, Settings → Team and the Tasks view (team_activity.mjs).
@@ -218,6 +236,47 @@ sharedState.settingsAppearanceReset = document.getElementById("settings-appearan
 appearanceState.settingsAppearanceStatus = document.getElementById("settings-appearance-status");
 
 sharedState.threadList = document.getElementById("thread-list");
+// Each row's time since its last message moves on once a minute.
+lifecycle.interval(refreshThreadAges, 60 * 1000);
+// One menu for every row, keyed by the thread's session key (chat_thread_menu.mjs).
+shellState.threadMenu = createThreadMenu({
+  document, window, lifecycle,
+  threadList: sharedState.threadList,
+  onAction: (...args) => threadMenuAction(...args),
+  focusRow: sessionKey => {
+    var button = threadRowButton(sessionKey);
+    if (button) button.focus();
+  },
+});
+// What happened to a change made from a thread's menu (chat_thread_status.mjs).
+shellState.threadListStatus = createThreadListStatus({
+  document, lifecycle,
+  element: document.getElementById("thread-list-status"),
+  // Close and Retry vanish with the message; focus goes to the open chat's row.
+  restoreFocus: () => {
+    var thread = activeThread();
+    var button = thread ? threadRowButton(thread.sessionKey) : null;
+    (button && !button.closest("[hidden]") ? button : sharedState.newThreadButton).focus();
+  },
+});
+// A mouse resting on a row previews the thread's last turns (chat_thread_preview.mjs).
+shellState.threadPreview = createThreadPreview({
+  document, window, lifecycle, requestClient,
+  list: sharedState.threadList,
+  threadFor: sessionKey => threadForSession(sessionKey),
+  assistantName: () => sharedState.assistantName,
+  // Not for the chat already open beside it, nor under an open menu (C30).
+  canPreview: sessionKey => {
+    var thread = threadForSession(sessionKey);
+    return Boolean(thread) && thread.id !== sharedState.activeThreadId && !shellState.threadMenu.isOpen();
+  },
+});
+// Right-click, long press, the context-menu key or Shift+F10 on a row open its
+// menu; tracked once for the whole list so a redraw cannot orphan a press.
+attachThreadMenuTriggers(sharedState.threadList, (sessionKey, point) => {
+  var thread = threadForSession(sessionKey);
+  if (thread) openThreadMenu(thread, point);
+}, { lifecycle, window });
 
 diagnosticsState.debugContextControls = document.getElementById("debug-context-controls");
 
@@ -292,7 +351,6 @@ sharedState.asyncEventCursor = "";
 sharedState.threadsRevision = "";
 
 shellState.SYSTEM_ERROR_SOURCE = Object.freeze({
-    ARCHIVE_THREAD: "archive_thread",
     CREATE_THREAD: "create_thread",
     FETCH_SESSIONS: "fetch_sessions",
     HYDRATE_THREAD: "hydrate_thread",
@@ -678,9 +736,12 @@ function configurePrincipalState(authPayload) {
       || shellState.operationalIds.newId("browser");
     window.localStorage.setItem(sharedState.clientIdKey, sharedState.clientId);
     sharedState.threads = loadThreads();
+    // Which sections the person collapsed, in this browser (chat_thread_list.mjs).
+    sharedState.sectionCollapse = createSectionCollapse(window.localStorage, sharedState.storageKey + ".sections");
+    var firstThread = defaultThread(sharedState.threads);
     sharedState.activeThreadId = String(
       window.localStorage.getItem(sharedState.storageKey + ".selected")
-      || (sharedState.threads[0] && sharedState.threads[0].id)
+      || (firstThread && firstThread.id)
       || ""
     );
     signInGreeting.remember(authPayload);
@@ -746,6 +807,13 @@ function loadThreads() {
           unreadReplyLevel: String(thread.unreadReplyLevel || thread.unread_reply_level || "normal"),
           messages: [],
           updatedAt: Number(thread.updatedAt || Date.now()),
+          // Where the thread sat, so the cached list draws it in its section
+          // before the server answers (plan review C09). No message text is kept.
+          pinned: Boolean(thread.pinned),
+          listState: String(thread.listState || ""),
+          needsYou: String(thread.needsYou || ""),
+          snoozedUntil: String(thread.snoozedUntil || ""),
+          lastActivityAt: Number(thread.lastActivityAt || 0),
         });
       });
     } catch (error) {
@@ -769,6 +837,11 @@ function saveThreads() {
         hasUnreadReply: thread.hasUnreadReply,
         unreadReplyLevel: thread.unreadReplyLevel,
         updatedAt: thread.updatedAt,
+        pinned: thread.pinned,
+        listState: thread.listState,
+        needsYou: thread.needsYou,
+        snoozedUntil: thread.snoozedUntil,
+        lastActivityAt: thread.lastActivityAt,
       };
     });
     window.localStorage.setItem(sharedState.storageKey, JSON.stringify(uiThreads));
@@ -818,6 +891,23 @@ function threadFromSeed(seed) {
       parallelError: "",
       serverRequestOpen: false,
       updatedAt: Number(seed.updatedAt || Date.now()),
+      // The thread list's row (chat_thread_list.mjs): where the thread sits,
+      // what it waits on, its latest message and when anything was posted.
+      pinned: Boolean(seed.pinned),
+      listState: String(seed.listState || ""),
+      needsYou: String(seed.needsYou || ""),
+      snoozedUntil: String(seed.snoozedUntil || ""),
+      lastMessage: seed.lastMessage || null,
+      lastActivityAt: Number(seed.lastActivityAt || 0),
+      lastSequence: Number(seed.lastSequence || 0),
+      // A clear_woke for its Woke mark was sent and the list has not caught up.
+      restoreRequested: false,
+      // Whether this page has the server's row for the thread in this sign-in.
+      // A thread drawn from the browser's saved list has none yet: its place
+      // may be out of date and its last message number is unknown, so
+      // Snooze, Dismiss and clearing a Woke mark wait for the server's list
+      // (review F1, F2).
+      hasServerRow: false,
     };
   }
 
@@ -828,21 +918,29 @@ function archiveThread(threadId) {
     if (!archivedThread || !archivedThread.sessionKey || !sharedState.authSessionActive) {
       return;
     }
-    requestClient.fetch(
+    // An answer after sign-out, or for someone who signed in since, is dropped (review F3).
+    var authGeneration = sharedState.authSessionGeneration;
+    var current = function () {
+      if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) {
+        throw new Error("Chat sign-in changed while deleting the chat.");
+      }
+    };
+    var named = quotedThreadTitle(archivedThread);
+    threadChangeRequest(
       "/api/web-chat/sessions/" + encodeURIComponent(archivedThread.sessionKey) + "/archive",
       { method: "POST", credentials: "same-origin" }
-    ).then(function (response) {
-      return parseApiResponse(response, "Archive failed.");
-    }).then(function () {
-      clearSystemError(archivedThread, shellState.SYSTEM_ERROR_SOURCE.ARCHIVE_THREAD);
+    ).then(function () {
+      current();
       removeArchivedThread(threadId);
+      shellState.threadListStatus.announce(THREAD_CHANGE_DONE[THREAD_MENU_ACTION.DELETE] + " " + named + ".");
     }).catch(function (error) {
-      appendSystemError(
-        archivedThread,
-        shellState.SYSTEM_ERROR_SOURCE.ARCHIVE_THREAD,
-        error.message || "Archive failed."
-      );
-      renderMessages();
+      if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) {
+        return;
+      }
+      // Shown beside the list, in view, with Retry only when it can help (review F5).
+      shellState.threadListStatus.fail(threadChangeFailure(named, "deleted", error), {
+        retry: error.refused ? null : function () { archiveThread(threadId); },
+      });
     });
   }
 
@@ -857,7 +955,7 @@ function removeArchivedThread(threadId) {
     if (sharedState.threads.length === 0) {
       sharedState.activeThreadId = "";
     } else if (sharedState.activeThreadId === threadId) {
-      sharedState.activeThreadId = sharedState.threads[0].id;
+      sharedState.activeThreadId = defaultThread(sharedState.threads).id;
     }
     saveThreads();
     renderThreads();
@@ -1195,6 +1293,7 @@ function applyTranscriptEvent(event) {
     if (thread.historyLoaded || isFocusedThread || thread.historyRequest) {
       mergeTranscriptMessages(thread, [event]);
     }
+    applyEventToThreadRow(thread, event);
     thread.updatedAt = Date.now();
     sharedState.threads.sort(function (left, right) {
       return right.updatedAt - left.updatedAt;
@@ -1208,14 +1307,6 @@ function applyTranscriptEvent(event) {
 
 function revealPassword(input, button) {
     shellState.credentialControls.toggleReveal(input, button);
-  }
-
-function trashIconMarkup() {
-    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="m19 6-1 14H6L5 6"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>';
-  }
-
-function pencilIconMarkup() {
-    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m18 2 4 4-12 12-5 1 1-5L18 2Z"></path><path d="m14 6 4 4"></path></svg>';
   }
 
 function checkIconMarkup() {
@@ -1500,6 +1591,16 @@ function fetchSessions(options) {
           }
         });
       }
+      if (options.fresh) {
+        // The read in flight may have left before the change this caller
+        // just saved, so read again after it; a read started meanwhile, after
+        // that change, is reused (review F16).
+        return shellState.sessionsRequest.then(function () {
+          if (sharedState.authSessionActive && authGeneration === sharedState.authSessionGeneration) {
+            return fetchSessions();
+          }
+        });
+      }
       return shellState.sessionsRequest;
     }
     shellState.sessionsRequestGeneration = authGeneration;
@@ -1559,9 +1660,10 @@ function fetchSessions(options) {
           existing.persisted = true;
           // A save in flight owns the switch until the server answers it.
           if (!existing.parallelSaving) existing.parallelThread = Boolean(session.parallel_thread);
+          applyServerThreadRow(existing, session);
           return existing;
         }
-        return threadFromSeed({
+        var created = threadFromSeed({
           id: sessionKey.replace(/[^A-Za-z0-9_-]+/g, "_"),
           sessionKey: sessionKey,
           conversationId: String(session.conversation_id || ""),
@@ -1572,12 +1674,15 @@ function fetchSessions(options) {
           parallelThread: Boolean(session.parallel_thread),
           updatedAt: Date.parse(session.updated_at || "") || Date.now(),
         });
+        applyServerThreadRow(created, session);
+        return created;
       }).filter(Boolean);
       sharedState.threads.sort(function (left, right) {
         return right.updatedAt - left.updatedAt;
       });
       if (!sharedState.activeThreadId || !sharedState.threads.find(function (thread) { return thread.id === sharedState.activeThreadId; })) {
-        sharedState.activeThreadId = sharedState.threads[0] ? sharedState.threads[0].id : "";
+        var firstThread = defaultThread(sharedState.threads);
+        sharedState.activeThreadId = firstThread ? firstThread.id : "";
       }
       saveThreads();
       // Opening Chat is a read. Create a conversation only for an explicit
@@ -1742,124 +1847,606 @@ function loadEarlierHistory() {
 
 function renderThreads() {
     hideThreadTitleTooltip();
-    sharedState.threadList.innerHTML = "";
+    // The list is drawn again on many events; keyboard focus stays on the
+    // same thread's row or section header (plan review C03, C25).
+    var focusTarget = focusedThreadListTarget();
     var unreadStateChanged = false;
     sharedState.threads.forEach(function (thread) {
       if (isReadingThread(thread) && thread.hasUnreadReply) {
         setThreadUnread(thread, false);
         unreadStateChanged = true;
       }
-      var row = document.createElement("div");
-      row.className = "thread-row"
-        + (thread.id === sharedState.activeThreadId ? " is-active" : "")
-        + (thread.id === sharedState.editingThreadId ? " is-renaming" : "")
-        + (threadIsBusy(thread) ? " is-pending" : "")
-        + (thread.hasUnreadReply ? " has-unread" : "")
-        + (thread.hasUnreadReply && thread.unreadReplyLevel === "attention" ? " has-attention" : "");
-      if (thread.id === sharedState.editingThreadId) {
-        var form = document.createElement("form");
-        form.className = "thread-rename-form";
-        var input = document.createElement("input");
-        input.className = "thread-rename-input";
-        input.type = "text";
-        input.maxLength = 80;
-        input.value = fullThreadTitle(thread);
-        input.setAttribute("aria-label", "Thread name");
-        form.appendChild(input);
-        lifecycle.listen(form, "submit", function (event) {
-          event.preventDefault();
-          renameThread(thread.id, input.value);
-        });
-        row.appendChild(form);
-        lifecycle.timeout(function () {
-          input.focus();
-          input.select();
-        }, 0);
-      } else {
-        var button = document.createElement("button");
-        button.type = "button";
-        button.className = "thread-button";
-        button.textContent = fullThreadTitle(thread);
-        lifecycle.listen(button, "mouseenter", function () {
-          scheduleThreadTitleTooltip(button, fullThreadTitle(thread));
-        });
-        lifecycle.listen(button, "mouseleave", hideThreadTitleTooltip);
-        lifecycle.listen(button, "focus", function () {
-          scheduleThreadTitleTooltip(button, fullThreadTitle(thread));
-        });
-        lifecycle.listen(button, "blur", hideThreadTitleTooltip);
-        lifecycle.listen(button, "click", function () {
-          sharedState.activeThreadId = thread.id;
-          sharedState.editingThreadId = "";
-          setThreadUnread(thread, false);
-          hideThreadTitleTooltip();
-          saveThreads();
-          renderThreads();
-          renderMessages();
-          ensureActiveThreadHistory();
-        });
-        row.appendChild(button);
-      }
-      var pendingIndicator = document.createElement("span");
-      pendingIndicator.className = "thread-active-indicator";
-      if (threadIsBusy(thread)) {
-        pendingIndicator.setAttribute("aria-label", "Agent is replying in this thread");
-      } else if (thread.hasUnreadReply && thread.unreadReplyLevel === "attention") {
-        pendingIndicator.setAttribute("aria-label", "Reply needs attention in this thread");
-      } else if (thread.hasUnreadReply) {
-        pendingIndicator.setAttribute("aria-label", "New reply in this thread");
-      } else {
-        pendingIndicator.setAttribute("aria-hidden", "true");
-      }
-      row.appendChild(pendingIndicator);
-      var renameButton = document.createElement("button");
-      renameButton.type = thread.id === sharedState.editingThreadId ? "submit" : "button";
-      renameButton.className = "thread-action-button thread-rename-button";
-      renameButton.innerHTML = thread.id === sharedState.editingThreadId ? checkIconMarkup() : pencilIconMarkup();
-      renameButton.title = thread.id === sharedState.editingThreadId ? "Save thread name" : "Rename thread";
-      renameButton.setAttribute("aria-label", (thread.id === sharedState.editingThreadId ? "Save thread name for " : "Rename ") + fullThreadTitle(thread));
-      lifecycle.listen(renameButton, "click", function (event) {
-        event.stopPropagation();
-        if (thread.id === sharedState.editingThreadId) {
-          var form = row.querySelector(".thread-rename-form");
-          if (form) {
-            form.requestSubmit();
-          }
-          return;
-        }
-        sharedState.editingThreadId = thread.id;
-        hideThreadTitleTooltip();
-        renderThreads();
-      });
-      var archiveButton = document.createElement("button");
-      archiveButton.type = "button";
-      archiveButton.className = "thread-action-button thread-delete-button";
-      archiveButton.innerHTML = thread.id === sharedState.editingThreadId ? closeIconMarkup() : trashIconMarkup();
-      archiveButton.title = thread.id === sharedState.editingThreadId ? "Cancel rename" : "Archive thread";
-      archiveButton.setAttribute("aria-label", (thread.id === sharedState.editingThreadId ? "Cancel rename for " : "Archive ") + fullThreadTitle(thread));
-      lifecycle.listen(archiveButton, "click", function (event) {
-        event.stopPropagation();
-        if (thread.id === sharedState.editingThreadId) {
-          sharedState.editingThreadId = "";
-          renderThreads();
-          return;
-        }
-        archiveThread(thread.id);
-      });
-      row.appendChild(renameButton);
-      row.appendChild(archiveButton);
-      sharedState.threadList.appendChild(row);
+      restoreWokeThreadWhenRead(thread);
     });
-    // Once the server says there is no thread yet, one unsaved row stands
-    // for the chat the first message will start (owner's request,
-    // 2026-10-09). Opening Web Chat still creates nothing.
-    if (!sharedState.threads.length && sharedState.threadsRevision) {
-      sharedState.threadList.appendChild(unsavedThreadRow());
+    if (!sharedState.threads.length) {
+      sharedState.threadList.innerHTML = "";
+      // Once the server says there is no thread yet, one unsaved row stands
+      // for the chat the first message will start (owner's request,
+      // 2026-10-09). Opening Web Chat still creates nothing.
+      if (sharedState.threadsRevision) {
+        sharedState.threadList.appendChild(unsavedThreadRow());
+      }
+      restoreThreadListFocus(focusTarget);
+    } else {
+      renderThreadSections({
+        document: document,
+        container: sharedState.threadList,
+        groups: groupThreadSections(sharedState.threads),
+        collapse: threadSectionCollapse(),
+        renderRow: threadRow,
+      });
+      restoreThreadListFocus(focusTarget);
     }
+    // The preview stays beside the same thread's row, or closes when it is gone.
+    shellState.threadPreview.refresh();
     if (unreadStateChanged) {
       saveThreads();
     }
     attention.refresh();
+  }
+
+// One two-line row: the title, a Woke mark and the time since anything was
+// last posted, then what the thread waits on or its latest message. Rename
+// and Delete live in the row's menu; while renaming, the row shows the name
+// field with Save and Cancel. Its name for screen readers says the same in
+// words, with the reply marks the dot shows, and that the row has a menu
+// (review F9, F12, F18).
+function threadRow(thread) {
+    var renaming = thread.id === sharedState.editingThreadId;
+    var row = document.createElement("div");
+    row.className = "thread-row"
+      + (thread.id === sharedState.activeThreadId ? " is-active" : "")
+      + (renaming ? " is-renaming" : "")
+      + (threadIsBusy(thread) ? " is-pending" : "")
+      + (thread.hasUnreadReply ? " has-unread" : "")
+      + (thread.hasUnreadReply && thread.unreadReplyLevel === "attention" ? " has-attention" : "")
+      + (thread.listState === LIST_STATE.WOKE ? " is-woke" : "");
+    row.dataset.sessionKey = thread.sessionKey;
+    row.appendChild(threadActivityIndicator(thread));
+    if (renaming) {
+      appendRenameControls(row, thread);
+      return row;
+    }
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "thread-button";
+    if (thread.id === sharedState.activeThreadId) button.setAttribute("aria-current", "true");
+    // The menu is the only way to rename or delete; Enter opens the chat, so
+    // no aria-haspopup (review F9).
+    button.setAttribute("aria-keyshortcuts", "Shift+F10 ContextMenu");
+    button.setAttribute("aria-describedby", THREAD_ROW_MENU_HINT_ID);
+    var titleLine = uiElement("span", "thread-line thread-title-line");
+    var title = uiElement("span", "thread-title", fullThreadTitle(thread));
+    titleLine.appendChild(title);
+    var mark = threadReplyMark(thread);
+    if (mark) {
+      titleLine.appendChild(uiElement("span", "sr-only", mark));
+    }
+    if (thread.listState === LIST_STATE.WOKE) {
+      titleLine.appendChild(uiElement("span", "thread-woke-badge", "Woke"));
+    }
+    var at = lastActivityTimestamp(thread);
+    if (at) {
+      var age = uiElement("time", "thread-age", formatThreadAge(at, Date.now()));
+      age.dataset.at = String(at);
+      age.dateTime = new Date(at).toISOString();
+      age.setAttribute("aria-hidden", "true");
+      titleLine.appendChild(age);
+      var ageWords = uiElement("span", "sr-only thread-age-words", threadAgeWords(at, Date.now()));
+      ageWords.dataset.at = String(at);
+      titleLine.appendChild(ageWords);
+    }
+    button.appendChild(titleLine);
+    var detail = threadDetail(thread, sharedState.assistantName);
+    if (detail) {
+      var detailLine = uiElement("span", "thread-line thread-detail" + (detail.kind === "waiting" ? " is-waiting" : ""), detail.text);
+      if (detail.description) detailLine.title = detail.description;
+      button.appendChild(detailLine);
+    }
+    // The full title shows on keyboard focus; mouse users get the hover
+    // card, which shows it in full (plan review C03). Focus the list moves
+    // after a mouse Dismiss or Delete is not keyboard focus, so no tooltip
+    // pops up over the next row then (review C16).
+    lifecycle.listen(button, "focus", function () {
+      if (typeof button.matches === "function" && !button.matches(":focus-visible")) {
+        return;
+      }
+      scheduleThreadTitleTooltip(title, fullThreadTitle(thread));
+    });
+    lifecycle.listen(button, "blur", hideThreadTitleTooltip);
+    // The open chat's row gets no hover card, and Web Chat has no chat
+    // header, so a mouse resting on that row shows its full title (review F6).
+    // Not right after a click opened it, while the person reads: like the
+    // hover card, a row just pressed waits until the pointer leaves it (C18).
+    lifecycle.listen(button, "pointerdown", function (event) {
+      if (event.pointerType === "mouse") shellState.threadTitlePressedKey = thread.sessionKey;
+    });
+    lifecycle.listen(button, "mouseenter", function () {
+      if (thread.id === sharedState.activeThreadId && shellState.threadTitlePressedKey !== thread.sessionKey) {
+        scheduleThreadTitleTooltip(title, fullThreadTitle(thread));
+      }
+    });
+    lifecycle.listen(button, "mouseleave", function () {
+      if (shellState.threadTitlePressedKey === thread.sessionKey) {
+        shellState.threadTitlePressedKey = "";
+      }
+      if (shellState.threadTitleTooltipOwner === title) {
+        hideThreadTitleTooltip();
+      }
+    });
+    lifecycle.listen(button, "click", function () {
+      sharedState.activeThreadId = thread.id;
+      sharedState.editingThreadId = "";
+      setThreadUnread(thread, false);
+      hideThreadTitleTooltip();
+      saveThreads();
+      renderThreads();
+      renderMessages();
+      ensureActiveThreadHistory();
+    });
+    row.appendChild(button);
+    return row;
+  }
+
+function openThreadMenu(thread, point) {
+    if (!thread.persisted || !thread.sessionKey) {
+      return;
+    }
+    hideThreadTitleTooltip();
+    shellState.threadPreview.hide();
+    shellState.threadMenu.open({
+      sessionKey: thread.sessionKey,
+      title: fullThreadTitle(thread),
+      pinned: thread.pinned,
+      listState: thread.listState,
+    }, point);
+  }
+
+// What a menu choice does. The thread is looked up again by its session key:
+// the list may have been drawn again, or the thread archived elsewhere.
+function threadMenuAction(sessionKey, action, detail) {
+    var thread = threadForSession(sessionKey);
+    if (!thread) {
+      return;
+    }
+    if (action === THREAD_MENU_ACTION.RENAME) {
+      sharedState.editingThreadId = thread.id;
+      sharedState.renameDraft = null;
+      renderThreads();
+    } else if (action === THREAD_MENU_ACTION.DELETE) {
+      archiveThread(thread.id);
+    } else if (action === THREAD_MENU_ACTION.SNOOZE) {
+      changeThreadPlacement(thread, action, { snooze_until: detail.until.toISOString() });
+    } else {
+      changeThreadPlacement(thread, action);
+    }
+  }
+
+// The dot beside a row. What it means is read inside the row's button
+// (threadReplyMark), where a screen reader announces it with the row.
+function threadActivityIndicator() {
+    var indicator = document.createElement("span");
+    indicator.className = "thread-active-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    return indicator;
+  }
+
+// The reply dot in words, or "" when the row shows none.
+function threadReplyMark(thread) {
+    if (threadIsBusy(thread)) {
+      return "Replying";
+    }
+    if (thread.hasUnreadReply && thread.unreadReplyLevel === "attention") {
+      return "Reply needs attention";
+    }
+    return thread.hasUnreadReply ? "New reply" : "";
+  }
+
+// "active 5 minutes ago": the row's age as part of its name (review F12, F18).
+function threadAgeWords(at, now) {
+    return "active " + formatThreadAgeWords(at, now);
+  }
+
+// The name field with Save and Cancel; Enter saves and Escape cancels. What
+// the person typed and the caret live in sharedState.renameDraft, so a list
+// drawn again while they type keeps both (plan review C25).
+function appendRenameControls(row, thread) {
+    var draft = sharedState.renameDraft;
+    if (!draft || draft.threadId !== thread.id) {
+      draft = sharedState.renameDraft = { threadId: thread.id, value: fullThreadTitle(thread), start: -1, end: -1 };
+    }
+    var form = document.createElement("form");
+    form.className = "thread-rename-form";
+    var input = document.createElement("input");
+    input.className = "thread-rename-input";
+    input.type = "text";
+    input.maxLength = 80;
+    input.value = draft.value;
+    input.setAttribute("aria-label", "Thread name");
+    form.appendChild(input);
+    var keepDraft = function () {
+      draft.value = input.value;
+      draft.start = input.selectionStart;
+      draft.end = input.selectionEnd;
+    };
+    lifecycle.listen(input, "input", keepDraft);
+    lifecycle.listen(input, "keyup", keepDraft);
+    lifecycle.listen(input, "select", keepDraft);
+    lifecycle.listen(form, "submit", function (event) {
+      event.preventDefault();
+      renameThread(thread.id, input.value);
+    });
+    lifecycle.listen(input, "keydown", function (event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelThreadRename();
+      }
+    });
+    row.appendChild(form);
+    var save = document.createElement("button");
+    save.type = "submit";
+    save.className = "thread-action-button thread-rename-button";
+    save.innerHTML = checkIconMarkup();
+    save.title = "Save thread name";
+    save.setAttribute("aria-label", "Save thread name for " + fullThreadTitle(thread));
+    lifecycle.listen(save, "click", function (event) {
+      event.stopPropagation();
+      form.requestSubmit();
+    });
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "thread-action-button thread-delete-button";
+    cancel.innerHTML = closeIconMarkup();
+    cancel.title = "Cancel rename";
+    cancel.setAttribute("aria-label", "Cancel rename for " + fullThreadTitle(thread));
+    lifecycle.listen(cancel, "click", function (event) {
+      event.stopPropagation();
+      cancelThreadRename();
+    });
+    row.appendChild(save);
+    row.appendChild(cancel);
+    lifecycle.timeout(function () {
+      input.focus();
+      if (draft.start < 0) {
+        input.select();
+      } else {
+        input.setSelectionRange(draft.start, draft.end);
+      }
+    }, 0);
+  }
+
+// At sign-out: close the thread menu and the hover card (they live in the
+// page body, outside the list lockChat empties) and forget the preview's
+// message text and a half-typed name (plan review C29).
+function clearThreadListOverlays() {
+    shellState.threadMenu.close({ restoreFocus: false });
+    shellState.threadPreview.clear();
+    sharedState.renameDraft = null;
+    // Changes still waiting, and what the status line says, belong to the
+    // person who signed out (review F3).
+    shellState.placementChains = new Map();
+    shellState.threadListStatus.clear();
+  }
+
+function cancelThreadRename() {
+    sharedState.editingThreadId = "";
+    sharedState.renameDraft = null;
+    renderThreads();
+  }
+
+function threadSectionCollapse() {
+    if (!sharedState.sectionCollapse) {
+      sharedState.sectionCollapse = createSectionCollapse(window.localStorage, (sharedState.storageKey || "ua.webchat.ui") + ".sections");
+    }
+    return sharedState.sectionCollapse;
+  }
+
+// What has keyboard focus in the list, read before the list is drawn again:
+// a section header (by section), or a thread's row or rename field (by
+// session key) with the rows shown just after and before it and its section,
+// so focus has somewhere to go when the row moves into a collapsed section
+// or goes away (review F4).
+function focusedThreadListTarget() {
+    var active = document.activeElement;
+    if (!active || typeof active.closest !== "function" || !sharedState.threadList.contains(active)) {
+      return null;
+    }
+    var header = active.closest(".thread-section-header");
+    if (header) {
+      var section = header.closest(".thread-section");
+      return section ? { section: String(section.dataset.section || "") } : null;
+    }
+    var row = active.closest(".thread-row");
+    if (!row || !row.dataset.sessionKey) {
+      return null;
+    }
+    var shown = visibleThreadRows();
+    var index = shown.indexOf(row);
+    var rowSection = row.closest(".thread-section");
+    return {
+      sessionKey: String(row.dataset.sessionKey),
+      next: index >= 0 && shown[index + 1] ? String(shown[index + 1].dataset.sessionKey || "") : "",
+      previous: index > 0 ? String(shown[index - 1].dataset.sessionKey || "") : "",
+      rowSection: rowSection ? String(rowSection.dataset.section || "") : "",
+    };
+  }
+
+// Focus what `target` named, once the list is drawn again. A row still being
+// renamed is left alone: its field takes focus itself. A row that moved out
+// of view or went away hands focus to the row that took its place, else the
+// one before it, else its section's header, else New Chat, never the page.
+function restoreThreadListFocus(target) {
+    if (!target) {
+      return;
+    }
+    if (target.section) {
+      // A section that is no longer drawn (its last chat moved) hands focus to New Chat.
+      (sectionHeader(target.section) || sharedState.newThreadButton).focus();
+      return;
+    }
+    var row = threadRowElement(target.sessionKey);
+    if (row && row.classList.contains("is-renaming")) {
+      return;
+    }
+    var candidates = [target.sessionKey, target.next, target.previous];
+    for (var index = 0; index < candidates.length; index += 1) {
+      var button = candidates[index] ? threadRowButton(candidates[index]) : null;
+      if (button && !button.closest("[hidden]")) {
+        button.focus();
+        return;
+      }
+    }
+    var fallback = target.rowSection ? sectionHeader(target.rowSection) : null;
+    (fallback || sharedState.newThreadButton).focus();
+  }
+
+// Rows a person can see now: not inside a collapsed section.
+function visibleThreadRows() {
+    return Array.prototype.filter.call(sharedState.threadList.querySelectorAll(".thread-row"), function (row) {
+      return Boolean(row.dataset.sessionKey) && !row.closest("[hidden]");
+    });
+  }
+
+function sectionHeader(sectionId) {
+    var sections = sharedState.threadList.querySelectorAll(".thread-section");
+    for (var index = 0; index < sections.length; index += 1) {
+      if (sections[index].dataset.section === sectionId) {
+        return sections[index].querySelector(".thread-section-header");
+      }
+    }
+    return null;
+  }
+
+function threadRowElement(sessionKey) {
+    var rows = sharedState.threadList.querySelectorAll(".thread-row");
+    for (var index = 0; index < rows.length; index += 1) {
+      if (rows[index].dataset.sessionKey === sessionKey) {
+        return rows[index];
+      }
+    }
+    return null;
+  }
+
+function threadRowButton(sessionKey) {
+    var row = threadRowElement(sessionKey);
+    return row ? row.querySelector(".thread-button") : null;
+  }
+
+function lastActivityTimestamp(thread) {
+    return Number(thread.lastActivityAt || 0);
+  }
+
+// Ages ("5m", and "active 5 minutes ago" for screen readers) move on once a
+// minute, in place, without drawing the list again.
+function refreshThreadAges() {
+    var now = Date.now();
+    var ages = sharedState.threadList.querySelectorAll(".thread-age");
+    for (var index = 0; index < ages.length; index += 1) {
+      ages[index].textContent = formatThreadAge(Number(ages[index].dataset.at), now);
+    }
+    var words = sharedState.threadList.querySelectorAll(".thread-age-words");
+    for (var wordIndex = 0; wordIndex < words.length; wordIndex += 1) {
+      words[wordIndex].textContent = threadAgeWords(Number(words[wordIndex].dataset.at), now);
+    }
+  }
+
+// The server's row for a thread: where it sits and, when the server's copy
+// is at least as new as what live events showed, its latest message.
+function applyServerThreadRow(thread, session) {
+    thread.hasServerRow = true;
+    thread.pinned = Boolean(session.pinned);
+    thread.listState = String(session.list_state || "");
+    thread.needsYou = String(session.needs_you || "");
+    thread.snoozedUntil = String(session.snoozed_until || "");
+    if (thread.listState !== LIST_STATE.WOKE) {
+      thread.restoreRequested = false;
+    }
+    var serverSequence = Number(session.last_sequence || 0);
+    if (serverSequence >= Number(thread.lastSequence || 0)) {
+      thread.lastSequence = serverSequence;
+      thread.lastActivityAt = Date.parse(session.last_activity_at || "") || Date.parse(session.updated_at || "") || 0;
+      var message = session.last_message;
+      thread.lastMessage = message && message.text
+        ? { role: String(message.role || ""), text: plainSnippet(message.text) }
+        : null;
+    }
+  }
+
+// A live message moves the row's time and, when ordinary, its second line.
+function applyEventToThreadRow(thread, event) {
+    var sequence = Number(event.session_sequence || 0);
+    if (sequence < Number(thread.lastSequence || 0)) {
+      return;
+    }
+    thread.lastSequence = sequence;
+    thread.lastActivityAt = Date.parse(event.created_at_utc || "") || Date.now();
+    var snippet = messageSnippet({ role: event.role, content: event.content, attachments: event.attachments });
+    if (snippet) {
+      thread.lastMessage = snippet;
+    }
+  }
+
+// A woke thread loses its mark once the person reads it (the rule the
+// unread dot uses), with one clear_woke until the list shows it cleared.
+// Only for a thread the server's list has shown in this sign-in: a mark drawn
+// from the saved list may be older than a snooze made on another device
+// (review F1). The person did not ask for it, so a failure shows nothing and
+// is tried again after half a minute, never on every draw (plan review C23);
+// so is a clear the gateway answered but left woke (review C05).
+function restoreWokeThreadWhenRead(thread) {
+    var retryAfterMs = 30 * 1000;
+    if (thread.listState !== LIST_STATE.WOKE || !thread.hasServerRow || thread.restoreRequested
+      || !isReadingThread(thread) || Date.now() < Number(thread.restoreRetryAt || 0)) {
+      return;
+    }
+    thread.restoreRequested = true;
+    var tryLater = function () {
+      thread.restoreRequested = false;
+      thread.restoreRetryAt = Date.now() + retryAfterMs;
+    };
+    sendThreadPlacement(thread, THREAD_PLACEMENT_ACTION.CLEAR_WOKE).then(function () {
+      return fetchSessions({ fresh: true });
+    }).then(function () {
+      if (thread.listState === LIST_STATE.WOKE) tryLater();
+    }).catch(tryLater);
+  }
+
+// Pin, unpin, snooze, dismiss or restore a thread on the server, then read
+// the list again; every open page follows through the list's revision.
+// Changes for one thread go out one after another, in the order the person
+// chose them, so a change that waits for the list (below) is never sent after
+// a later one (review C06). Resolves true when the change was saved.
+function changeThreadPlacement(thread, action, extra) {
+    if (!thread || !thread.persisted || !thread.sessionKey || !sharedState.authSessionActive) {
+      return Promise.resolve(false);
+    }
+    var sessionKey = thread.sessionKey;
+    // The sign-in the person chose this in: a change still queued when it
+    // ends is dropped, even if the same person signs in again (review C13).
+    var authGeneration = sharedState.authSessionGeneration;
+    var chains = shellState.placementChains || (shellState.placementChains = new Map());
+    var previous = chains.get(sessionKey) || Promise.resolve();
+    var start = function () {
+      return runThreadPlacement(thread, action, extra, authGeneration);
+    };
+    // A rejection before this one (not expected: each change resolves) never
+    // stops the changes queued after it.
+    var run = previous.then(start, start);
+    chains.set(sessionKey, run);
+    run.then(function () {
+      if (chains.get(sessionKey) === run) chains.delete(sessionKey);
+    });
+    return run;
+  }
+
+// One placement change for the thread with `thread`'s session key, made
+// while sign-in `authGeneration` lasts. Snooze and dismiss send the last
+// message this page showed, so a message it never showed brings the thread
+// back; a thread only known from the saved list waits for the server's list
+// first, since its saved number could be 0 (review F2). A thread gone from
+// the list by then is left alone. A refusal keeps the row and shows why.
+// Nothing is shown once the person signed out or someone else signed in
+// (review F3). A failure is shown in the status line beside the list, naming
+// the chat that was not moved, with Retry only when the request did not get
+// through (review F5).
+function runThreadPlacement(thread, action, extra, authGeneration) {
+    var sessionKey = thread.sessionKey;
+    var current = function () {
+      return sharedState.authSessionActive && sharedState.authSessionGeneration === authGeneration;
+    };
+    var named = quotedThreadTitle(thread);
+    var needsSeen = action === THREAD_MENU_ACTION.SNOOZE || action === THREAD_MENU_ACTION.DISMISS;
+    var listed = threadForSession(sessionKey);
+    var ready = needsSeen && listed && !listed.hasServerRow ? fetchSessions() : Promise.resolve();
+    return ready.then(function () {
+      var target = current() ? threadForSession(sessionKey) : null;
+      if (!target) {
+        return false;
+      }
+      if (needsSeen && !target.hasServerRow) {
+        throw new Error("The chat list has not loaded yet.");
+      }
+      return sendThreadPlacement(target, action, extra).then(function () {
+        if (!current()) {
+          return false;
+        }
+        shellState.threadListStatus.announce(THREAD_CHANGE_DONE[action] + " " + named + ".");
+        return fetchSessions({ fresh: true }).then(function () { return true; });
+      });
+    }).catch(function (error) {
+      if (!current()) {
+        return false;
+      }
+      // The gateway's refusal says why, and repeating it cannot help; a
+      // request that did not get through gets Retry for the same change.
+      // Shown beside the list, in view and announced (review F5).
+      shellState.threadListStatus.fail(threadChangeFailure(named, "moved", error), {
+        retry: error.refused ? null : function () { return changeThreadPlacement(threadForSession(sessionKey) || thread, action, extra); },
+      });
+      return false;
+    });
+  }
+
+// A chat's full name in quotes, as the status line names it.
+function quotedThreadTitle(thread) {
+    return "\u201c" + fullThreadTitle(thread) + "\u201d";
+  }
+
+// One placement request; rejects with the gateway's reason when refused.
+function sendThreadPlacement(thread, action, extra) {
+    var body = Object.assign({ thread_action: action }, extra || {});
+    if (action === THREAD_MENU_ACTION.SNOOZE || action === THREAD_MENU_ACTION.DISMISS) {
+      body.seen_sequence = Number(thread.lastSequence || 0);
+    }
+    return threadChangeRequest("/api/web-chat/sessions/" + encodeURIComponent(thread.sessionKey), {
+      method: "PATCH",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+// One thread change from the menu (a placement or a delete). On failure it
+// rejects with `refused` set when the gateway looked at the change and turned
+// it down (4xx), and `reason` holding what it said, which may be empty.
+function threadChangeRequest(url, init) {
+    return requestClient.fetch(url, init).then(function (response) {
+      return response.text().then(function (text) {
+        if (!response.ok) {
+          authentication.handleUnauthorizedResponse(response);
+          var failure = new Error("Thread change failed.");
+          failure.refused = response.status >= 400 && response.status < 500;
+          failure.reason = refusalReason(text);
+          throw failure;
+        }
+      });
+    });
+  }
+
+// The gateway answers a refused change with its reason as plain text (some
+// routes as JSON); "" when it gave none.
+function refusalReason(text) {
+    var reason = String(text || "").trim();
+    if (reason.charAt(0) === "{") {
+      try {
+        var payload = JSON.parse(reason);
+        reason = String(payload.message || payload.error || "");
+      } catch (error) {
+        reason = "";
+      }
+    }
+    return reason;
+  }
+
+// The status line's sentence for a failed change: the gateway's reason for a
+// refusal (or nothing more when it gave none, since repeating cannot help),
+// otherwise "Try again." beside the Retry button (review C14).
+function threadChangeFailure(named, verb, error) {
+    var sentence = named + " was not " + verb + ".";
+    if (error && error.refused) {
+      return error.reason ? sentence + " " + error.reason : sentence;
+    }
+    return sentence + " " + TRY_AGAIN;
   }
 
 // The unsaved "New Chat" row: selected, with no rename or archive, since
@@ -1928,6 +2515,7 @@ function renameThread(threadId, value) {
     thread.sessionAlias = title;
     thread.updatedAt = Date.now();
     sharedState.editingThreadId = "";
+    sharedState.renameDraft = null;
     saveThreads();
     renderThreads();
     if (!thread.persisted) {

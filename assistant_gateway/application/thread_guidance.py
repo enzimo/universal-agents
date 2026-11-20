@@ -55,6 +55,7 @@ from assistant_gateway.application.request_context import (
 )
 from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.application.response_models import GatewayResponse
+from assistant_gateway.domain.message_types import TASK_STEERING_MESSAGE_TYPE
 from assistant_gateway.domain.request_state import (
     GUIDANCE_STATUS_REQUEST_FINISHED,
     REQUEST_KIND_TASK_STEERING,
@@ -78,7 +79,7 @@ from custom_messages.enums import (
     TaskSteeringType,
 )
 
-GUIDANCE_MESSAGE_TYPE = "task_steering"
+GUIDANCE_MESSAGE_TYPE = TASK_STEERING_MESSAGE_TYPE
 
 NOT_STARTED_TEXT = (
     "Your request in this thread has not started yet. "

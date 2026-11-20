@@ -41,13 +41,13 @@ from typing import Any
 
 from assistant_gateway.application.manager_client import GatewayManagerClient
 from assistant_gateway.application.request_service import GatewayRequestService
+# The chat request waits for a page the person is filling in.
+from assistant_gateway.domain.request_state import REQUEST_STATUS_WAITING_FOR_CREDENTIAL
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, GatewayContext, MessageHeader, MessageMeta
 from custom_messages.enums import RequesterType
 
-# The chat request waits for a page the person is filling in.
-REQUEST_STATUS_WAITING_FOR_CREDENTIAL = "waiting_for_credential"
 # The page ended; the chat request waits for the resumed task's reply.
 REQUEST_STATUS_WAITING_FOR_CREDENTIAL_RESULT = "waiting_for_credential_result"
 # How long to wait before sending a result again after a failed send, doubling

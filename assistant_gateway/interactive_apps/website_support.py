@@ -113,6 +113,10 @@ DOCKER_COMPOSE_SETUP_PATH = REPO_ROOT / "docker-compose-setup.html"
 
 WEB_CHAT_MODULE_ASSETS = (
     "chat_submission.mjs",
+    "chat_thread_list.mjs",
+    "chat_thread_menu.mjs",
+    "chat_thread_preview.mjs",
+    "chat_thread_status.mjs",
     "workflow.mjs",
     "workflow_graph.mjs",
     "workflow_card.mjs",

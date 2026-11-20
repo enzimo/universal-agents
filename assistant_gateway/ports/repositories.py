@@ -35,6 +35,8 @@ from assistant_gateway.domain.sessions import (
     SessionListRecord,
     WebChatThreadRecord,
     SessionRecord,
+    ThreadHiddenAs,
+    ThreadPlacementRecord,
     SessionSearchRecord,
 )
 from assistant_gateway.domain.transcript import (
@@ -103,10 +105,11 @@ class SessionRepository(Protocol):
     def list_web_chat_threads(
         self,
         *,
-        owner_canonical_user_id: str | None,
+        owner_canonical_user_id: str,
         channel_name: str,
         chat_id: str,
         limit: int,
+        include_last_message: bool = False,
     ) -> list[WebChatThreadRecord]: ...
 
     def search_sessions(
@@ -191,6 +194,32 @@ class SessionRepository(Protocol):
         self, session_key: str, *, conversation_id: str, parallel_thread: bool
     ) -> ParallelSettingOutcome:
         """Save the Run concurrently setting unless a request is open in the conversation."""
+        ...
+
+    def set_session_pinned(self, session_key: str, *, pinned: bool) -> bool:
+        """Pin or unpin an active thread; pinning also brings it back from snooze or dismiss."""
+        ...
+
+    def set_session_hidden(
+        self,
+        session_key: str,
+        *,
+        hidden_as: ThreadHiddenAs,
+        hidden_until: str | None,
+        seen_sequence: int,
+    ) -> bool:
+        """Snooze or dismiss an active thread as of the last message the person saw."""
+        ...
+
+    def get_session_placement(self, session_key: str) -> ThreadPlacementRecord | None:
+        """Where an active thread sits now, with what the woke rule needs; ``None`` when not active."""
+        ...
+
+    def clear_session_hidden(self, session_key: str, *, only_if: ThreadPlacementRecord | None = None) -> bool:
+        """Bring an active thread back from snooze or dismiss and clear its Woke mark.
+
+        With ``only_if``, only while its stored placement still equals that read.
+        """
         ...
 
     def set_active_session_for_channel(
@@ -473,6 +502,10 @@ class TranscriptRepository(Protocol):
         before_session_sequence: int | None,
         limit: int,
     ) -> list[GatewayTranscriptMessage]: ...
+
+    def count_transcript_turns(self, *, owner_canonical_user_id: str, session_key: str) -> int:
+        """Ordinary messages (no system cards, no slash commands) in one person's thread."""
+        ...
 
     def list_transcript_events(
         self,

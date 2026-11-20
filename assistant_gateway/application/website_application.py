@@ -603,8 +603,10 @@ class WebChatThreadStatesV1(WebsiteContractV1):
     would otherwise reach other open pages only on reload.
     """
 
-    # Changes whenever a listed thread appears, disappears, or changes name
-    # (a rename, or its first ordinary message naming it); later messages do
+    # Changes whenever a listed thread appears, disappears, changes name (a
+    # rename, or its first ordinary message naming it), changes its Run
+    # concurrently setting, or moves (pinned, snoozed, woke, dismissed, or
+    # waiting on the person; web_chat_threads_revision). Later messages do
     # not change it, so the page reloads the thread list only when it shows
     # something new.
     threads_revision: str = Field(min_length=1, max_length=64)
@@ -617,12 +619,32 @@ class WebChatThreadStatesV1(WebsiteContractV1):
     open_request_session_keys: tuple[str, ...] = ()
 
 
+# How many threads the sidebar lists. The sessions route and every live read
+# use this one value, so the revision covers exactly the threads a page shows.
+# Snoozed and dismissed threads count toward it (there is no paging yet).
+WEB_CHAT_THREAD_LIST_LIMIT = 100
+
+
 def web_chat_threads_revision(threads: list[WebChatThread]) -> str:
     """Digest of what the thread list shows, so pages refetch only on change."""
 
-    # The Run concurrently setting is shown too (the switch below Send).
+    # The Run concurrently setting is shown too (the switch below Send), and
+    # so is where each thread sits: pinned, snoozed until when, woke,
+    # dismissed, or waiting on the person. A wake or return is derived when
+    # the list is read, so it changes the revision on the next live page.
+    # Message snippets and times are left out: pages update them from the
+    # transcript events they already receive, without refetching the list.
     shown = sorted(
-        (thread.session_key, thread.session_alias or "", thread.title or "", thread.parallel_thread)
+        (
+            thread.session_key,
+            thread.session_alias or "",
+            thread.title or "",
+            thread.parallel_thread,
+            thread.pinned,
+            thread.list_state.value if thread.list_state else "",
+            thread.snoozed_until or "",
+            thread.needs_you.value if thread.needs_you else "",
+        )
         for thread in threads
     )
     encoded = json.dumps(shown, separators=(",", ":")).encode()
@@ -730,6 +752,37 @@ class GatewaySessionAliasConflict(ValueError):
     """Raised when a requested session alias is owned by another session."""
 
 
+class WebChatThreadAction(StrEnum):
+    """A change to where a Web Chat thread sits in the person's list (``thread_action``)."""
+
+    PIN = "pin"
+    UNPIN = "unpin"
+    SNOOZE = "snooze"
+    DISMISS = "dismiss"
+    # Back from snooze or dismiss right away (the menu's Restore).
+    RESTORE = "restore"
+    # Sent by the page when the person opens a woke thread: clears the Woke
+    # mark only if the thread is still woke by the gateway's own rule, so a
+    # page with an old copy of the list cannot undo a newer snooze or dismiss.
+    CLEAR_WOKE = "clear_woke"
+
+
+# The refusal for an unknown ``thread_action``, built from the actions so a new
+# one is never missing from it (the gateway route and the aesthetic preview).
+WEB_CHAT_THREAD_ACTION_REFUSAL = "thread_action must be one of: " + ", ".join(
+    action.value for action in WebChatThreadAction
+) + "."
+
+
+class WebChatThreadPlacementResult(StrEnum):
+    """What a thread placement change did; someone else's or a missing thread is not found."""
+
+    SAVED = "saved"
+    # ``clear_woke`` on a thread that is not woke (any more): nothing to change.
+    UNCHANGED = "unchanged"
+    NOT_FOUND = "not_found"
+
+
 class WebChatParallelSettingResult(StrEnum):
     """What a change to a thread's Run concurrently switch did.
 
@@ -809,10 +862,26 @@ class WebSessionApplication(Protocol):
     def list_web_chat_threads(
         self,
         *,
-        owner_canonical_user_id: str | None,
-        limit: int = 50,
+        owner_canonical_user_id: str,
+        limit: int = WEB_CHAT_THREAD_LIST_LIMIT,
+        include_last_message: bool = False,
     ) -> list[WebChatThread]:
         """List the Web Chat threads an authenticated identity sees, named (web_chat_threads)."""
+
+    def set_web_chat_thread_placement(
+        self,
+        *,
+        session_key: str,
+        action: WebChatThreadAction,
+        owner_canonical_user_id: str | None,
+        snooze_until: str | None = None,
+        seen_sequence: int | None = None,
+    ) -> WebChatThreadPlacementResult:
+        """Pin, unpin, snooze, dismiss or restore one of the person's threads.
+
+        Raises ``InvalidThreadPlacement`` for a snooze time or seen sequence
+        the gateway refuses.
+        """
 
     def can_access_web_chat_session(
         self,
@@ -854,7 +923,7 @@ class WebSessionApplication(Protocol):
     def web_chat_thread_states(
         self,
         *,
-        owner_canonical_user_id: str | None,
+        owner_canonical_user_id: str,
     ) -> WebChatThreadStatesV1:
         """Return the live thread-list revision, busy threads and open requests for one owner."""
 
@@ -915,6 +984,9 @@ class WebTranscriptApplication(Protocol):
         limit: int,
     ) -> WebTranscriptHistoryPageV1 | None:
         """Return one visible session page or ``None`` when inaccessible."""
+
+    def count_turns(self, *, owner_canonical_user_id: str, session_key: str) -> int | None:
+        """Ordinary messages in one visible thread (the hover preview), or ``None`` when inaccessible."""
 
     def list_events(
         self,

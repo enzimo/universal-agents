@@ -382,7 +382,7 @@ If sending fails, the thread keeps its Run concurrently setting; change it
 first if you want, then use **Retry** beside the failed message to resend the
 same request without creating another one. You can send other messages first;
 each failed message keeps its own Retry. Retry retains the original files and
-destination until that message is accepted, you sign out, archive its chat,
+destination until that message is accepted, you sign out, delete its chat,
 or close the page.
 
 It loads the active thread's newest 50 messages; other threads load when selected. Scroll
@@ -396,11 +396,10 @@ seconds. User actions still use authenticated HTTP requests.
 Messages accepted on one device reappear on another device signed in as the same
 canonical user, and Website process restarts do not erase them. The thread list
 also stays in step across devices within about two seconds: a thread renamed,
-archived or started on one device updates on the others, and the pulsing dot
-shows on every device while the agent is working on a reply. Use the thread
-row edit icon to rename a saved thread, the archive icon to hide it from the
-active list, and a message bubble copy icon to copy that message's raw markdown
-or text. Each canonical user sees only their own server sessions and durable
+deleted or started on one device updates on the others, and the pulsing dot
+shows on every device while the agent is working on a reply. Use a message
+bubble's copy icon to copy that message's raw markdown or text. Each
+canonical user sees only their own server sessions and durable
 transcript. Use Log out, at the bottom of Settings' left column, before
 another user signs in from the same browser profile. The small triangle mesh
 above your name shows the team at work: the middle triangle glows gold while
@@ -436,6 +435,53 @@ that announcement as a card with a one-line summary, the decision buttons and
 the full details under **Details**; Telegram and Discord add decision buttons. See
 [Access requests and reviews](#access-requests-and-reviews).
 
+#### The thread list
+
+Web Chat fills the browser window, and the thread list on the left groups your
+chats into sections:
+
+- **Needs you**: chats waiting on you, such as a question, a sign-in or key
+  you enter, or a setup page to finish. These always show here, even if you
+  snoozed or dismissed the chat.
+- **Pinned**: chats you pinned. They stay at the top until you unpin them.
+- **Recent**: everything else, newest first.
+- **Snoozed** and **Dismissed**: chats you set aside. Both start collapsed;
+  select a header to open or close it. The page remembers this in your browser.
+
+Each row shows the chat's name and how long ago anything was last posted in it
+(now, 5m, 3h, 2d), and below it the latest message (**You:** or the
+assistant's name) or what the chat is waiting on.
+
+Right-click a chat to open its menu. On a touch screen, press and hold the
+chat; with a keyboard, press the menu key or Shift+F10 on the chat. The menu
+has:
+
+- **Pin to top** or **Unpin**.
+- **Snooze**: hide the chat for 1 hour, until this evening, until tomorrow,
+  until next week, or until a time you pick. It comes back at that
+  time, or earlier if the team posts in it. A chat that comes back shows a
+  **Woke** mark until you open it.
+- **Dismiss**: hide the chat until something new is posted in it, by the team
+  or by you on another device. **Restore** brings a snoozed or dismissed chat
+  back right away.
+- **Rename** and **Delete**. Delete hides the chat from your list; it does
+  not erase its messages.
+
+Pinned, snoozed and dismissed chats are saved with your account, so every
+device you sign in on shows the same list. The list holds your 100 most recent
+chats, pinned ones first; snoozed and dismissed chats count toward the 100.
+Where you put a chat (pinned, snoozed or dismissed) is not carried to a new
+instance by `/upgrade`; see [Team transfer](team-transfer.md) for what is.
+
+If a change from the menu does not go through, a red line above the list says
+which chat was not moved or deleted and why. It offers **Retry** when trying
+again can help, and stays until you close it.
+
+With a mouse, rest the pointer on a chat for a moment to see its full name,
+its last four messages and how many messages it has, without opening it.
+Press Escape to close that preview. The chat you have open shows no preview;
+rest the pointer on it to see its full name.
+
 ### Web Chat Commands
 
 The guide above the Web Chat transcript is a short reference. It links each
@@ -460,8 +506,9 @@ Use `/help` for the same compact list in the transcript.
 | `/mcp ...` | Review MCP connections and hosted servers; see [MCP Connections and Hosted Tools](#mcp-connections-and-hosted-tools) |
 | `/stop ...` | List or cancel active work; see [Stopping Active Work](#stopping-active-work) |
 
-Use the thread-history controls in browser Web Chat to open, rename, or archive
-saved threads. Archive does not permanently delete transcript messages. Direct
+Use the thread list in browser Web Chat to open saved threads, and its menu
+(right-click, press and hold, or Shift+F10) to pin, snooze, dismiss, rename or
+delete them. Delete does not permanently delete transcript messages. Direct
 external-platform registration and `/user link` must
 be run on the platform whose identity is being linked. Broader session, memory,
 and topic commands are kept out of the browser command list.

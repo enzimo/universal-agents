@@ -3640,10 +3640,11 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
         '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" '
         'stroke="currentColor"' in markup
     )
-    assert 'class="chat-thread-history"' in markup
-    assert markup.index('id="chat-thread-history-label"') < markup.index(
-        'id="thread-list"'
-    )
+    # Section headers (Needs you, Pinned, Recent, Snoozed, Dismissed) replaced
+    # the single "Thread history" label (chat_thread_list.mjs).
+    assert '<section class="chat-thread-history" aria-label="Chats">' in markup
+    assert 'id="chat-thread-history-label"' not in markup
+    assert markup.index('class="chat-thread-history"') < markup.index('id="thread-list"')
     assert 'id="permission-center-button"' not in markup
     assert 'id="settings-inbox-tab"' in markup
     assert 'id="settings-inbox-panel"' in markup
@@ -3785,10 +3786,8 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
         "setThreadUnread(thread, !isReadingThread(thread), "
         "messageLevelFromPayload(lastMessage));" in script
     )
-    assert (
-        'pendingIndicator.setAttribute("aria-label", "New reply in this thread");'
-        in script
-    )
+    # The unread dot is read in words inside the row's button (review F18).
+    assert 'return thread.hasUnreadReply ? "New reply" : "";' in script
     assert ".thread-row.is-pending .thread-active-indicator {" in styles
     unfocused_pending_indicator_style = styles.split(
         ".thread-row.is-pending:not(.is-active) .thread-active-indicator::before {",

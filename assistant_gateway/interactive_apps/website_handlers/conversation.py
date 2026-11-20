@@ -11,15 +11,26 @@ from assistant_gateway.application.command_help import (
 from assistant_gateway.application.transient_presentation import GatewayTransientAction
 from assistant_gateway.application.commands.account_link import ACCOUNT_LINK_COMMAND
 from secure_tools.chat_commands import UPGRADE_COMMAND
-from assistant_gateway.domain.message_types import ACCOUNT_LINK_COMMAND_MESSAGE_TYPE, TEAM_EXPORT_COMMAND_MESSAGE_TYPE
+from assistant_gateway.domain.message_types import (
+    ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
+    AUTH_COMMAND_MESSAGE_TYPE,
+    COMMAND_REPLY_MESSAGE_TYPE,
+    SENSITIVE_USER_COMMAND_MESSAGE_TYPE,
+    TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
+)
 from assistant_gateway.application.gateway_application import (
     GatewayApplicationResponse,
     GatewaySession,
 )
 from assistant_gateway.application.transcript_service import TranscriptCursorError
+from assistant_gateway.application.web_chat_threads import InvalidThreadPlacement, thread_list_payload
 from assistant_gateway.application.website_application import (
+    WEB_CHAT_THREAD_ACTION_REFUSAL,
+    WEB_CHAT_THREAD_LIST_LIMIT,
     GatewaySessionAliasConflict,
     WebChatParallelSettingResult,
+    WebChatThreadAction,
+    WebChatThreadPlacementResult,
     WebTranscriptMessageV1,
     WebsiteGatewayApplication,
     web_chat_threads_revision,
@@ -70,25 +81,14 @@ class WebsiteConversationHandlers:
         web_session = self.operations._require_web_chat_session(request)
         owner = self.operations._required_web_chat_owner(web_session)
         event_cursor = self.application.transcripts.snapshot_cursor()
+        # The live read lists the same number of threads (one constant), so
+        # both give the same revision.
         listed = self.application.sessions.list_web_chat_threads(
             owner_canonical_user_id=owner,
-            limit=50,
+            limit=WEB_CHAT_THREAD_LIST_LIMIT,
+            include_last_message=True,
         )
-        # `title` is the thread's fixed name (web_chat_threads); null until
-        # its first ordinary message, and the page shows "New Chat" then.
-        # `parallel_thread` is its Run concurrently setting; whether a request
-        # is open, which locks that switch, rides on every event page.
-        sessions = [
-            {
-                "session_key": thread.session_key,
-                "session_alias": thread.session_alias,
-                "conversation_id": thread.conversation_id,
-                "title": thread.title,
-                "updated_at": thread.updated_at,
-                "parallel_thread": thread.parallel_thread,
-            }
-            for thread in listed
-        ]
+        sessions = [thread_list_payload(thread) for thread in listed]
         return web.json_response(
             {
                 "status": "ok",
@@ -151,10 +151,18 @@ class WebsiteConversationHandlers:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         if page is None:
             raise web.HTTPNotFound(text="Thread not found.")
+        extra: dict[str, Any] = {}
+        # Only the thread list's hover preview asks for the thread's turn
+        # count: it reads every row, so ordinary history pages skip it.
+        if str(request.query.get("turn_count") or "") == "1":
+            extra["turn_count"] = self.application.transcripts.count_turns(
+                owner_canonical_user_id=owner, session_key=session_key
+            )
         return web.json_response(
             {
                 "status": "ok",
                 **page.model_dump(mode="json"),
+                **extra,
                 "event_cursor": self.application.transcripts.snapshot_cursor(),
             }
         )
@@ -310,16 +318,51 @@ class WebsiteConversationHandlers:
     async def _handle_web_chat_update_session(
         self, request: web.Request
     ) -> web.Response:
-        """Change one thing about a thread: its name or its Run concurrently setting."""
+        """Change one thing about a thread: its name, its Run concurrently setting, or its place in the list."""
 
         web_session = self.operations._require_web_chat_session(request)
         session_key = str(request.match_info.get("session_key") or "").strip()
         payload = await self.operations._json_payload(request)
+        changes: list[str] = [key for key in ("thread_action", "parallel_thread") if key in payload]
+        if "session_alias" in payload or "title" in payload:
+            changes.append("name")
+        if len(changes) > 1:
+            raise web.HTTPBadRequest(text="Change one thing about a thread at a time.")
+        if "thread_action" in payload:
+            return self._set_web_chat_thread_placement(web_session, session_key, payload)
         if "parallel_thread" in payload:
-            if "session_alias" in payload or "title" in payload:
-                raise web.HTTPBadRequest(text="Change a thread's name and Run concurrently separately.")
             return self._set_web_chat_session_parallel(web_session, session_key, payload)
         return self._rename_web_chat_session(web_session, session_key, payload)
+
+    def _set_web_chat_thread_placement(
+        self, web_session: Any, session_key: str, payload: dict[str, Any]
+    ) -> web.Response:
+        """Pin, unpin, snooze, dismiss or restore a thread (the thread list's menu), or clear its Woke mark.
+
+        The same route and checks as a rename; the service checks the owner
+        before the snooze time or sequence, so another person's thread reads
+        as not found whatever the payload holds.
+        """
+
+        try:
+            action = WebChatThreadAction(str(payload.get("thread_action") or ""))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=WEB_CHAT_THREAD_ACTION_REFUSAL) from exc
+        snooze_until = payload.get("snooze_until")
+        seen_sequence = payload.get("seen_sequence")
+        try:
+            outcome = self.application.sessions.set_web_chat_thread_placement(
+                session_key=session_key,
+                action=action,
+                owner_canonical_user_id=self.operations._web_session_owner_scope(web_session),
+                snooze_until=snooze_until if isinstance(snooze_until, str) else None,
+                seen_sequence=seen_sequence if isinstance(seen_sequence, int) else None,
+            )
+        except InvalidThreadPlacement as refused:
+            raise web.HTTPBadRequest(text=str(refused)) from refused
+        if outcome is WebChatThreadPlacementResult.NOT_FOUND:
+            raise web.HTTPNotFound(text="Thread not found.")
+        return web.json_response({"status": "ok", "session_key": session_key, "thread_action": action.value})
 
     def _set_web_chat_session_parallel(
         self, web_session: Any, session_key: str, payload: dict[str, Any]
@@ -655,7 +698,7 @@ class WebsiteConversationHandlers:
                 client_request_id=client_request_id,
                 user_text=text,
                 response_text="The /reply command is available only in the local CLI.",
-                response_message_type="command",
+                response_message_type=COMMAND_REPLY_MESSAGE_TYPE,
             )
         if command_name not in _WEB_CHAT_ALLOWED_COMMANDS:
             return self._local_exchange_response(
@@ -665,7 +708,7 @@ class WebsiteConversationHandlers:
                 client_request_id=client_request_id,
                 user_text=text,
                 response_text=_WEB_CHAT_COMMAND_NOT_AVAILABLE,
-                response_message_type="command",
+                response_message_type=COMMAND_REPLY_MESSAGE_TYPE,
             )
         acceptance = self.application.transcripts.record_local_user_message(
             owner_canonical_user_id=owner,
@@ -812,10 +855,10 @@ class WebsiteConversationHandlers:
             "event_cursor": self.application.transcripts.snapshot_cursor(),
         }
         if response_message_type in {
-            "command_auth",
+            AUTH_COMMAND_MESSAGE_TYPE,
             ACCOUNT_LINK_COMMAND_MESSAGE_TYPE,
             TEAM_EXPORT_COMMAND_MESSAGE_TYPE,
-            "command_user_sensitive",
+            SENSITIVE_USER_COMMAND_MESSAGE_TYPE,
         }:
             response_message = exchange[-1]
             payload["transient"] = {
@@ -847,7 +890,7 @@ class WebsiteConversationHandlers:
     def _command_message_type(command: str) -> str:
         tokens = str(command or "").strip().lower().split()
         if tokens and tokens[0] == "/auth":
-            return "command_auth"
+            return AUTH_COMMAND_MESSAGE_TYPE
         if tokens and tokens[0] == ACCOUNT_LINK_COMMAND:
             # The reply holds a one-time form link; keep it out of history.
             return ACCOUNT_LINK_COMMAND_MESSAGE_TYPE
@@ -859,8 +902,8 @@ class WebsiteConversationHandlers:
             and tokens[0] == "/user"
             and any(token in {"token", "invite", "code"} for token in tokens[1:])
         ):
-            return "command_user_sensitive"
-        return "command"
+            return SENSITIVE_USER_COMMAND_MESSAGE_TYPE
+        return COMMAND_REPLY_MESSAGE_TYPE
 
     @staticmethod
     def _safe_command_transcript_text(command: str) -> str:

@@ -36,6 +36,7 @@ from assistant_gateway.domain.identity import (
 from assistant_gateway.domain.request_state import (
     RUN_STATE_FINISHED,
     RUN_STATE_RUNNING,
+    TOOL_SETUP_STATUS_WAITING,
     CredentialCollectionRecord,
     HeldGuidanceRecord,
     PendingQueryAdded,
@@ -53,7 +54,11 @@ from assistant_gateway.domain.sessions import (
     SessionListRecord,
     WebChatThreadRecord,
     SessionRecord,
+    SNOOZE_SILENT_MESSAGE_TYPES,
+    SNOOZE_SILENT_SOURCE_KINDS,
     SessionSearchRecord,
+    ThreadHiddenAs,
+    ThreadPlacementRecord,
 )
 from assistant_gateway.domain.transcript import (
     TRANSCRIPT_SCHEMA_VERSION,
@@ -94,6 +99,67 @@ from .turn_attachments import relocate_steering_attachment
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# The columns of a SessionRecord. Readers name them instead of SELECT *, so
+# list-only columns such as the thread placement never reach SessionRecord.
+_SESSION_COLUMNS = (
+    "session_key, session_alias, conversation_id, last_task_id, manager_agent_id, "
+    "channel_name, user_id, chat_id, thread_id, status, created_at, updated_at, "
+    "owner_canonical_user_id, parallel_thread"
+)
+
+def _ordinary_message_sql(alias: str, bind: str) -> str:
+    """The SQL condition for an ordinary transcript row: what the thread list counts as a turn.
+
+    Not a system row (cards, command replies, status lines), not a slash
+    command the person typed, and with text or an attachment. The thread
+    list's latest message, the hover preview's turn count and (with an
+    extra ``role = 'user'``) the thread's naming message share it, so one
+    rule decides what a turn is; the page applies the same rule
+    (``chat_thread_list.mjs`` ``isOrdinaryMessage``). Its three binds are
+    ``_ORDINARY_MESSAGE_PARAMS``: the characters trimmed (the page's, not
+    only spaces as plain LTRIM would) and the command prefix (bound because
+    PostgreSQL drivers read a literal percent sign as a placeholder).
+    """
+
+    return f"""{alias}.role <> 'system'
+              AND NOT ({alias}.role = 'user' AND LTRIM({alias}.content, {bind}) LIKE {bind})
+              AND (LTRIM({alias}.content, {bind}) <> '' OR {alias}.attachment_references_json <> '[]')"""
+
+
+# What _ordinary_message_sql trims, as the page does: space, tab, newline, return.
+_MESSAGE_WHITESPACE = " \t\n\r"
+# The bound values of one _ordinary_message_sql condition, in order.
+_ORDINARY_MESSAGE_PARAMS = (_MESSAGE_WHITESPACE, "/%", _MESSAGE_WHITESPACE)
+
+def _team_posted_after_hiding_sql(bind: str) -> str:
+    """Whether the team posted in session ``s`` after its ``hidden_at_sequence``.
+
+    One rule for the thread list and for clearing a Woke mark: a row that is
+    not the person's own and not one of the gateway's answers to them
+    (``SNOOZE_SILENT_SOURCE_KINDS``, ``SNOOZE_SILENT_MESSAGE_TYPES``). Its
+    binds are ``_TEAM_POSTED_PARAMS``. The scan reads the thread's rows after
+    the baseline through the ``(session_key, session_sequence)`` key.
+    """
+
+    sources = ", ".join([bind] * len(SNOOZE_SILENT_SOURCE_KINDS))
+    types = ", ".join([bind] * len(SNOOZE_SILENT_MESSAGE_TYPES))
+    return f"""EXISTS (
+                    SELECT 1 FROM gateway_transcript_messages tp
+                    WHERE tp.session_key = s.session_key
+                      AND tp.session_sequence > COALESCE(s.hidden_at_sequence, 0)
+                      AND tp.role <> 'user'
+                      AND tp.source_kind NOT IN ({sources})
+                      AND tp.message_type NOT IN ({types})
+                )"""
+
+
+_TEAM_POSTED_PARAMS = (*SNOOZE_SILENT_SOURCE_KINDS, *SNOOZE_SILENT_MESSAGE_TYPES)
+
+# How much of a thread's latest message the thread list reads: transcript
+# content can be a megabyte, and the page shows one shortened line of it.
+LAST_MESSAGE_SQL_CHARACTERS = 400
 
 
 # Ids per IN (...) list when deleting a person's history (delete_history_records).
@@ -253,10 +319,11 @@ class GatewayStateRepository(
     def list_web_chat_threads(
         self,
         *,
-        owner_canonical_user_id: str | None,
+        owner_canonical_user_id: str,
         channel_name: str,
         chat_id: str,
         limit: int,
+        include_last_message: bool = False,
     ) -> list[WebChatThreadRecord]: ...
 
     def search_sessions(
@@ -333,6 +400,23 @@ class GatewayStateRepository(
     def set_session_parallel(
         self, session_key: str, *, conversation_id: str, parallel_thread: bool
     ) -> ParallelSettingOutcome: ...
+
+    def set_session_pinned(self, session_key: str, *, pinned: bool) -> bool: ...
+
+    def set_session_hidden(
+        self,
+        session_key: str,
+        *,
+        hidden_as: ThreadHiddenAs,
+        hidden_until: Optional[str],
+        seen_sequence: int,
+    ) -> bool: ...
+
+    def get_session_placement(self, session_key: str) -> Optional[ThreadPlacementRecord]: ...
+
+    def clear_session_hidden(
+        self, session_key: str, *, only_if: Optional[ThreadPlacementRecord] = None
+    ) -> bool: ...
 
     def set_active_session_for_channel(
         self,
@@ -1059,7 +1143,11 @@ class _RelationalGatewayStateRepository:
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    parallel_thread INTEGER NOT NULL DEFAULT 0
+                    parallel_thread INTEGER NOT NULL DEFAULT 0,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    hidden_as TEXT,
+                    hidden_until TEXT,
+                    hidden_at_sequence INTEGER
                 )
                 """
             )
@@ -1071,6 +1159,19 @@ class _RelationalGatewayStateRepository:
             ensure_column(
                 conn, "gateway_sessions", "parallel_thread", "INTEGER NOT NULL DEFAULT 0",
                 logger=self._logger,
+            )
+            # Web Chat's thread placement (WebChatThreadRecord): pinned, and
+            # snoozed or dismissed (ThreadHiddenAs) with the snooze's wake time
+            # and the last message the person had seen. Not carried by the
+            # team transfer, like parallel_thread.
+            ensure_column(
+                conn, "gateway_sessions", "pinned", "INTEGER NOT NULL DEFAULT 0",
+                logger=self._logger,
+            )
+            ensure_column(conn, "gateway_sessions", "hidden_as", "TEXT", logger=self._logger)
+            ensure_column(conn, "gateway_sessions", "hidden_until", "TEXT", logger=self._logger)
+            ensure_column(
+                conn, "gateway_sessions", "hidden_at_sequence", "INTEGER", logger=self._logger
             )
             conn.execute(
                 """
@@ -1603,9 +1704,7 @@ class _RelationalGatewayStateRepository:
         with self._connect() as conn:
             row = conn.execute(
                 f"""
-                SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
-                       channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                       owner_canonical_user_id, parallel_thread
+                SELECT {_SESSION_COLUMNS}
                 FROM gateway_sessions
                 WHERE session_key = {self._dialect.bind}
                 """,
@@ -1631,9 +1730,7 @@ class _RelationalGatewayStateRepository:
             if mapped:
                 row = conn.execute(
                     f"""
-                    SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
-                           channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                           owner_canonical_user_id, parallel_thread
+                    SELECT {_SESSION_COLUMNS}
                     FROM gateway_sessions
                     WHERE session_key = {self._dialect.bind}
                     LIMIT 1
@@ -1644,9 +1741,7 @@ class _RelationalGatewayStateRepository:
                     return SessionRecord(**dict(row))
             row = conn.execute(
                 f"""
-                SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
-                       channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                       owner_canonical_user_id, parallel_thread
+                SELECT {_SESSION_COLUMNS}
                 FROM gateway_sessions
                 WHERE conversation_id = {self._dialect.bind}
                 ORDER BY updated_at DESC
@@ -1747,10 +1842,8 @@ class _RelationalGatewayStateRepository:
         status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
     ) -> list[SessionRecord]:
-        query = """
-            SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
-                   channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                   owner_canonical_user_id, parallel_thread
+        query = f"""
+            SELECT {_SESSION_COLUMNS}
             FROM gateway_sessions
         """
         params: list[Any] = []
@@ -1841,12 +1934,13 @@ class _RelationalGatewayStateRepository:
     def list_web_chat_threads(
         self,
         *,
-        owner_canonical_user_id: str | None,
+        owner_canonical_user_id: str,
         channel_name: str,
         chat_id: str,
         limit: int,
+        include_last_message: bool = False,
     ) -> list[WebChatThreadRecord]:
-        """A person's active threads on one chat, newest first, with what names them.
+        """A person's active threads on one chat, pinned first, then by last activity.
 
         Filters by channel and chat in SQL, so threads on other channels
         never crowd Web Chat threads out of the limit. A thread is named by
@@ -1855,9 +1949,24 @@ class _RelationalGatewayStateRepository:
         never rename it. The command prefix is bound, not written into the
         SQL, because PostgreSQL drivers read a literal percent sign as a
         placeholder. Each row also carries the thread's Run concurrently
-        setting and whether a request is open in its current conversation
-        (the unique running-request index makes that lookup cheap); open
-        pages read both on every event page to show and lock the switch.
+        setting and the status of the request running in its current
+        conversation (the unique running-request index makes that lookup
+        cheap); open pages read both on every event page to show and lock
+        the switch.
+
+        Pinned threads come first so they never fall past the limit; the
+        rest follow the later of the session's own update time and its last
+        transcript row (both ``utc_now_iso`` text, so they compare as text),
+        then the session key, so the sessions route and the live read (two
+        differently shaped queries) always cut at the same threads and give
+        the same revision.
+        Every lookup added for the thread list is a primary-key or index
+        read, because live pages run this query every two seconds per open
+        tab (``web_chat_thread_states``). The latest ordinary message is the
+        exception: it can walk back past cards and commands, so only the
+        sessions route asks for it (``include_last_message``). Setup pages
+        and credential forms are read once per query for the person, not
+        once per thread.
         """
 
         bind = self._dialect.bind
@@ -1865,11 +1974,33 @@ class _RelationalGatewayStateRepository:
             FROM gateway_transcript_messages t
             WHERE t.session_key = s.session_key
               AND t.role = 'user'
-              AND LTRIM(t.content) NOT LIKE {bind}
-              AND (TRIM(t.content) <> '' OR t.attachment_references_json <> '[]')
+              AND {_ordinary_message_sql("t", bind)}
             ORDER BY t.session_sequence
             LIMIT 1
         """
+        if include_last_message:
+            last_message_columns = f"""
+                lm.role AS last_message_role,
+                SUBSTR(lm.content, 1, {LAST_MESSAGE_SQL_CHARACTERS}) AS last_message_text,
+                lm.attachment_references_json AS last_message_attachments_json,
+                lm.created_at_utc AS last_message_at,"""
+            # System rows are cards; a slash command's reply is one, so the
+            # command alone is left out too.
+            last_message_join = f"""
+            LEFT JOIN gateway_transcript_messages lm ON lm.message_id = (
+                SELECT t.message_id FROM gateway_transcript_messages t
+                WHERE t.session_key = s.session_key
+                  AND {_ordinary_message_sql("t", bind)}
+                ORDER BY t.session_sequence DESC
+                LIMIT 1
+            )"""
+        else:
+            last_message_columns = """
+                NULL AS last_message_role,
+                NULL AS last_message_text,
+                NULL AS last_message_attachments_json,
+                NULL AS last_message_at,"""
+            last_message_join = ""
         query = f"""
             SELECT
                 s.session_key,
@@ -1883,32 +2014,78 @@ class _RelationalGatewayStateRepository:
                     SELECT 1 FROM gateway_transcript_messages m WHERE m.session_key = s.session_key
                 ) AS has_messages,
                 s.parallel_thread,
-                EXISTS (
-                    SELECT 1 FROM gateway_requests r
+                (
+                    SELECT r.status FROM gateway_requests r
                     WHERE r.session_key = s.session_key
                       AND COALESCE(r.conversation_id, '') = COALESCE(s.conversation_id, '')
                       AND r.run_state = {bind}
-                ) AS has_open_request
+                    LIMIT 1
+                ) AS running_request_status,{last_message_columns}
+                q.updated_at_utc AS last_activity_at,
+                COALESCE(q.last_session_sequence, 0) AS last_sequence,
+                EXISTS (
+                    SELECT 1 FROM gateway_questions qn
+                    WHERE qn.session_key = s.session_key AND qn.status = {bind}
+                ) AS has_open_question,
+                s.session_key IN (
+                    SELECT ts.session_key FROM gateway_tool_setups ts
+                    WHERE ts.status = {bind} AND ts.person_id = {bind}
+                ) AS has_waiting_setup,
+                s.pinned,
+                s.hidden_as,
+                s.hidden_until,
+                s.hidden_at_sequence,
+                CASE WHEN s.hidden_as = {bind} THEN {_team_posted_after_hiding_sql(bind)}
+                ELSE FALSE END AS team_posted_after_hiding
             FROM gateway_sessions s
+            LEFT JOIN gateway_transcript_session_sequences q ON q.session_key = s.session_key{last_message_join}
             WHERE s.status = 'active'
               AND s.channel_name = {bind}
               AND s.chat_id = {bind}
-              {"AND s.owner_canonical_user_id = " + bind if owner_canonical_user_id is not None else ""}
-            ORDER BY s.updated_at DESC
+              AND s.owner_canonical_user_id = {bind}
+            ORDER BY
+                s.pinned DESC,
+                CASE WHEN q.updated_at_utc > s.updated_at THEN q.updated_at_utc ELSE s.updated_at END DESC,
+                s.session_key
             LIMIT {bind}
         """
-        command = "/%"
-        params: list[Any] = [command, command, RUN_STATE_RUNNING, channel_name, chat_id]
-        if owner_canonical_user_id is not None:
-            params.append(owner_canonical_user_id)
-        params.append(limit)
+        ordinary = _ORDINARY_MESSAGE_PARAMS
+        owner = owner_canonical_user_id
+        # The naming message's condition is read twice (its text and files).
+        params: list[Any] = [*ordinary, *ordinary, RUN_STATE_RUNNING, PendingQueryStatus.OPEN.value]
+        # The setup pages' person, bound so that subquery runs once per query
+        # (credential forms are read separately below).
+        params.extend([TOOL_SETUP_STATUS_WAITING, owner, ThreadHiddenAs.SNOOZED.value, *_TEAM_POSTED_PARAMS])
+        if include_last_message:
+            params.extend(ordinary)
+        params.extend([channel_name, chat_id, owner, limit])
         with self._connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
+            # The person's credential forms, once per query (a few at most):
+            # a form counts only until it expires, which the application
+            # decides from the parsed time (``needs_you_reason``).
+            form_rows = conn.execute(
+                f"SELECT session_key, expires_at_utc FROM gateway_credential_collections WHERE person_id = {bind}",
+                (owner,),
+            ).fetchall()
+        form_expiries: dict[str, list[str]] = {}
+        for form in form_rows:
+            form_expiries.setdefault(str(form["session_key"]), []).append(str(form["expires_at_utc"]))
         records = []
         for row in rows:
             values = dict(row)
-            for flag in ("has_messages", "parallel_thread", "has_open_request"):
+            values["credential_form_expiries"] = tuple(form_expiries.get(str(values["session_key"]), ()))
+            for flag in (
+                "has_messages",
+                "parallel_thread",
+                "has_open_question",
+                "has_waiting_setup",
+                "pinned",
+                "team_posted_after_hiding",
+            ):
                 values[flag] = bool(values[flag])
+            values["last_sequence"] = int(values["last_sequence"] or 0)
+            values["has_open_request"] = values["running_request_status"] is not None
             records.append(WebChatThreadRecord(**values))
         return records
 
@@ -1987,9 +2164,7 @@ class _RelationalGatewayStateRepository:
         with self._connect() as conn:
             row = conn.execute(
                 f"""
-                SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
-                       channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                       owner_canonical_user_id, parallel_thread
+                SELECT {_SESSION_COLUMNS}
                 FROM gateway_sessions
                 WHERE lower(session_alias) = lower({self._dialect.bind})
                 LIMIT 1
@@ -2400,6 +2575,141 @@ class _RelationalGatewayStateRepository:
             return ParallelSettingOutcome.CONVERSATION_CHANGED
         return ParallelSettingOutcome.REQUEST_OPEN
 
+    # Thread placement (Web Chat's Pin, Snooze, Dismiss and Restore). Each is
+    # one UPDATE of an active thread that leaves ``updated_at`` alone: the
+    # list orders threads by activity, and placing one is not activity.
+    # Pin and the snooze/dismiss columns are separate, so a pinned thread that
+    # is snoozed goes back to Pinned when it wakes, and two devices changing
+    # different things do not overwrite each other.
+
+    def set_session_pinned(self, session_key: str, *, pinned: bool) -> bool:
+        """Pin or unpin an active thread; pinning also brings it back from snooze or dismiss."""
+
+        bind = self._dialect.bind
+        clear_hidden = ", hidden_as = NULL, hidden_until = NULL, hidden_at_sequence = NULL" if pinned else ""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE gateway_sessions SET pinned = {bind}{clear_hidden}
+                WHERE session_key = {bind} AND status = 'active'
+                """,
+                (1 if pinned else 0, session_key),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def set_session_hidden(
+        self,
+        session_key: str,
+        *,
+        hidden_as: ThreadHiddenAs,
+        hidden_until: Optional[str],
+        seen_sequence: int,
+    ) -> bool:
+        """Snooze or dismiss an active thread as of the last message the person saw.
+
+        ``seen_sequence`` is the thread's last session sequence the person's
+        page showed. The store keeps the smaller of it and the thread's
+        current last sequence, in the same statement, so a message that
+        arrived while the person was choosing brings the thread straight
+        back instead of being hidden with it.
+        """
+
+        hidden_as = ThreadHiddenAs(hidden_as)
+        if hidden_as is ThreadHiddenAs.SNOOZED and not hidden_until:
+            raise ValueError("A snoozed thread needs the time it wakes.")
+        if hidden_as is ThreadHiddenAs.DISMISSED:
+            # A dismissed thread comes back on a new message, never at a time.
+            hidden_until = None
+        bind = self._dialect.bind
+        current = """COALESCE((
+            SELECT q.last_session_sequence FROM gateway_transcript_session_sequences q
+            WHERE q.session_key = gateway_sessions.session_key
+        ), 0)"""
+        seen = max(0, int(seen_sequence))
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE gateway_sessions
+                SET hidden_as = {bind},
+                    hidden_until = {bind},
+                    hidden_at_sequence = CASE WHEN {bind} < {current} THEN {bind} ELSE {current} END
+                WHERE session_key = {bind} AND status = 'active'
+                """,
+                (hidden_as.value, hidden_until, seen, seen, session_key),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_session_placement(self, session_key: str) -> Optional[ThreadPlacementRecord]:
+        """Where an active thread sits now, with the values the woke rule needs; ``None`` when not active."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT
+                    s.session_key,
+                    s.hidden_as,
+                    s.hidden_until,
+                    s.hidden_at_sequence,
+                    COALESCE(q.last_session_sequence, 0) AS last_sequence,
+                    CASE WHEN s.hidden_as = {bind} THEN {_team_posted_after_hiding_sql(bind)}
+                    ELSE FALSE END AS team_posted_after_hiding
+                FROM gateway_sessions s
+                LEFT JOIN gateway_transcript_session_sequences q ON q.session_key = s.session_key
+                WHERE s.session_key = {bind} AND s.status = 'active'
+                """,
+                (ThreadHiddenAs.SNOOZED.value, *_TEAM_POSTED_PARAMS, session_key),
+            ).fetchone()
+        if row is None:
+            return None
+        values = dict(row)
+        return ThreadPlacementRecord(
+            session_key=str(values["session_key"]),
+            hidden_as=values["hidden_as"],
+            hidden_until=values["hidden_until"],
+            hidden_at_sequence=values["hidden_at_sequence"],
+            last_sequence=int(values["last_sequence"] or 0),
+            team_posted_after_hiding=bool(values["team_posted_after_hiding"]),
+        )
+
+    def clear_session_hidden(self, session_key: str, *, only_if: Optional[ThreadPlacementRecord] = None) -> bool:
+        """Bring an active thread back from snooze or dismiss, which also clears its Woke mark.
+
+        With ``only_if`` it clears only while the thread's stored placement
+        still equals that read (a compare-and-set): a snooze or dismiss saved
+        since, from another device, is kept. A missing value is compared as
+        ``IS NULL`` rather than bound, so the statement is the same on SQLite
+        and PostgreSQL and a row with an empty value can still be cleared.
+        """
+
+        bind = self._dialect.bind
+        conditions = ""
+        params: list[Any] = [session_key]
+        if only_if is not None:
+            for column, value in (
+                ("hidden_as", only_if.hidden_as),
+                ("hidden_until", only_if.hidden_until),
+                ("hidden_at_sequence", only_if.hidden_at_sequence),
+            ):
+                if value is None:
+                    conditions += f" AND {column} IS NULL"
+                else:
+                    conditions += f" AND {column} = {bind}"
+                    params.append(value)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE gateway_sessions
+                SET hidden_as = NULL, hidden_until = NULL, hidden_at_sequence = NULL
+                WHERE session_key = {bind} AND status = 'active'{conditions}
+                """,
+                tuple(params),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
     def set_active_session_for_channel(
         self,
         *,
@@ -2739,9 +3049,9 @@ class _RelationalGatewayStateRepository:
                 f"""
                 UPDATE gateway_tool_setups
                    SET status = {bind}, finished_at = {bind}, result_json = {bind}, result_state = {bind}
-                 WHERE setup_request_id = {bind} AND status = 'waiting'
+                 WHERE setup_request_id = {bind} AND status = {bind}
                 """,
-                (status, utc_now_iso(), result_json, TOOL_SETUP_RESULT_UNSENT, setup_request_id),
+                (status, utc_now_iso(), result_json, TOOL_SETUP_RESULT_UNSENT, setup_request_id, TOOL_SETUP_STATUS_WAITING),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -3739,6 +4049,26 @@ class _RelationalGatewayStateRepository:
         with self._connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [_transcript_message_from_row(row) for row in reversed(rows)]
+
+    def count_transcript_turns(self, *, owner_canonical_user_id: str, session_key: str) -> int:
+        """How many ordinary messages one person's thread holds (Web Chat's hover preview).
+
+        Ordinary is ``_ordinary_message_sql``, the rule the thread list's
+        snippet uses. Counted only when a page asks for it, since it reads
+        every row of the thread.
+        """
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) FROM gateway_transcript_messages t
+                WHERE t.owner_canonical_user_id = {bind} AND t.session_key = {bind}
+                  AND {_ordinary_message_sql("t", bind)}
+                """,
+                (owner_canonical_user_id, session_key, *_ORDINARY_MESSAGE_PARAMS),
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def list_transcript_events(
         self,
@@ -5130,7 +5460,8 @@ class _RelationalGatewayStateRepository:
         for batch in _history_batches(whole):
             marks = ", ".join(bind for _ in batch)
             rows = conn.execute(
-                f"SELECT * FROM gateway_sessions WHERE owner_canonical_user_id = {bind} AND conversation_id IN ({marks})",
+                f"SELECT {_SESSION_COLUMNS} FROM gateway_sessions "
+                f"WHERE owner_canonical_user_id = {bind} AND conversation_id IN ({marks})",
                 (scope.person_id, *batch),
             ).fetchall()
             for row in rows:
