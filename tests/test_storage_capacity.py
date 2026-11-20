@@ -19,11 +19,16 @@ freeable, its release margin, a disk too small for that margin, lowered limits
 offered only while the running server is known to accept them, its level kept
 while it cannot be measured and ended when it no longer applies, memory
 storage keeping the check on the file streams, an unreported figure logged
-once, and whether the running server has room for another team); the store's
+once, whether the running server has room for another team, and its wordings
+when streams without a byte limit store more than the room although less is
+set aside); the store's
 free space counted in the block size NATS uses; the problem that the running
 server already refuses new streams (from its room as it runs, at the line,
 saying when messages stop, leading with messages refused now under its own
-title once its streams store more than its room, kept after space is freed
+title once its streams store more than its room, saying then that messages
+flow again once the streams store less and asking for the restart first when a
+start has room, not calling a start enough that would refuse every message,
+kept after space is freed
 until it runs with more room, asking for more space when the disk has only
 just enough, kept while its monitoring endpoint does not answer and that
 endpoint listed as unavailable, beside the warning and with a disk that cannot
@@ -37,7 +42,8 @@ restarted server's room matching the prediction with its stored bytes counted
 back in, a server running with no more room than its streams set aside shown
 as a problem on the Status page through its real monitoring endpoint, and one
 whose streams store more than its room refusing messages (10023) with the
-problem saying so first.
+problem saying so first and that messages flow again once the streams store
+less.
 """
 
 from __future__ import annotations
