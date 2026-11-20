@@ -81,7 +81,9 @@ async function main() {
     assert.equal(await list.evaluate(el => el.scrollTop), beforeEvent);
     assert.equal(requests.length, 2);
 
-    await page.getByRole("button", { name: "Thread 3", exact: true }).click();
+    // The row's name also reads its reply mark and age ("Thread 3 New reply active just now ..."),
+    // so the row is found by its thread.
+    await page.locator('.thread-row[data-session-key="session_3"] .thread-button').click();
     await page.waitForFunction(() => document.querySelector('[data-message-id="session_3_5000"]'));
     assert.equal(requests.length, 3);
     assert.equal(await page.locator("[data-message-id]").count(), 50);
