@@ -95,6 +95,22 @@ def sign_in_command(provider: str) -> str:
     return SIGN_IN_TOOL_BY_PROVIDER[provider].command
 
 
+def page_command(provider: str, method: str = "") -> str:
+    """The command that opens a broker sign-in page of this provider and method again.
+
+    The administrators' team sign-in app command for ``team_client``, the
+    person's sign-in command for a sign-in tool (``/link cli:github``), and
+    ``/auth <provider>`` for the others (Bitwarden and the other password
+    managers, ``/auth model``).
+    """
+
+    if method == TEAM_CLIENT_METHOD and provider in TEAM_CLIENT_PROVIDERS:
+        return team_client_command(provider)
+    if provider in SIGN_IN_TOOL_BY_PROVIDER:
+        return sign_in_command(provider)
+    return f"/auth {provider}"
+
+
 def sign_in_instead_text(sign_in: ToolSignIn, *, team: bool) -> str:
     """Why a link was refused for a sign-in tool, and what to do instead (gateway and broker)."""
 

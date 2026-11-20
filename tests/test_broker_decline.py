@@ -643,19 +643,68 @@ async def test_a_token_sign_in_declined_in_its_own_tab_shows_declined_in_the_car
 
 
 @pytest.mark.asyncio
-async def test_a_token_sign_in_that_failed_says_so_when_opened_again(broker, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("provider", "method", "roles", "patched", "fields", "command"),
+    [
+        ("github", "token", None, "login_github_with_token", {"token": "ghp_x"}, "/link cli:github"),
+        # A wrong master password: the ordinary Bitwarden failure (critique C09).
+        ("bitwarden", "form", None, "login_bitwarden_with_api_key", {"master_password": "wrong"}, "/auth bitwarden"),
+        ("google", "team_client", ["admin"], "store_team_client", {"credentials_json": "{}"}, "/auth google team_client"),
+    ],
+)
+async def test_a_token_form_that_failed_says_so_when_opened_again(
+    broker, monkeypatch, provider, method, roles, patched, fields, command
+) -> None:
     client, _service = broker
     monkeypatch.setattr(
-        "secure_tool_broker.service.login_github_with_token",
-        lambda *a, **k: ToolResult(status="error", content={}, error="bad token"),
+        f"secure_tool_broker.service.{patched}", lambda *a, **k: ToolResult(status="error", content={}, error="refused")
     )
-    path = await _sign_in(client, "github", "token")
-    await client.post(path, data={"token": "ghp_x"})
+    created = await client.post(
+        f"/v1/auth/{provider}/sessions", headers=gateway_headers(), json={"context": _context(roles), "method": method}
+    )
+    assert created.status == 200, await created.text()
+    path = _path((await created.json())["login_url"])
+    assert (await client.post(path, data=fields)).status == 400
 
-    page = await (await client.get(card_view_url(path))).text()
+    for answer in (
+        await client.get(card_view_url(path)),
+        await client.post(card_view_url(path), data=DECLINE, headers=FROM_CARD),
+    ):
+        page = await answer.text()
+        assert answer.status == 200
+        assert "This page did not finish." in page and f"<code>{command}</code>" in page
+        assert "Nothing was stored" not in page
+        assert _outcome(page) is None and "<form method=\"post\">" not in page
 
-    assert "This sign-in did not work." in page and "/link cli:github" in page
-    assert _outcome(page) is None and 'name="token"' not in page
+
+@pytest.mark.asyncio
+async def test_a_saved_bitwarden_restart_unlock_is_recorded_before_the_claim_ends(broker, monkeypatch) -> None:
+    """What a later view shows is part of the result (critique C10)."""
+
+    from secure_tool_broker import form_claims
+    from secure_tool_broker.ended_pages import BITWARDEN_RESTART_UNLOCK_STATE
+
+    client, service = broker
+    monkeypatch.setattr(
+        "secure_tool_broker.service.save_bitwarden_restart_unlock_request",
+        lambda **_k: ToolResult(
+            status="success",
+            content={"action": "pending_restart_unlock.saved", "pending_file": "pending-unlock.json", "expires_at_epoch": 0},
+        ),
+    )
+    at_release: list[object] = []
+    release = form_claims.finish_form_submission
+
+    def watch_release(session) -> None:
+        at_release.append(session.state.get(BITWARDEN_RESTART_UNLOCK_STATE))
+        release(session)
+
+    monkeypatch.setattr(form_claims, "finish_form_submission", watch_release)
+    path = await _sign_in(client, "bitwarden", "form")
+    answer = await (await client.post(path, data={"master_password": "pw", "submit_mode": "defer_restart"})).text()
+
+    assert at_release and isinstance(at_release[0], dict) and at_release[0]["pending_file"] == "pending-unlock.json"
+    assert "Bitwarden restart unlock saved." in answer and "pending-unlock.json" in answer
 
 
 @pytest.mark.asyncio

@@ -43,7 +43,6 @@ from secure_tool_broker.auth_pages import (
 from secure_tool_broker.sign_in_pages import SESSION_RESTORED_AFTER_RESTART, SIGN_IN_PAGE_SECONDS
 from secure_tool_broker.ended_pages import (
     BITWARDEN_RESTART_UNLOCK_STATE,
-    bitwarden_restart_unlock_saved_page,
     ended_sign_in_page,
     google_team_client_stored_page,
     token_sign_in_success_page,
@@ -117,6 +116,7 @@ from secure_tool_broker.credential_state import credential_owner_context
 from secure_tool_broker.credential_templates import save_approved_template_variant
 from secure_tool_broker.defaults import DEFAULT_BIND_HOST, DEFAULT_BIND_PORT
 from secure_tool_broker.executors import (
+    BITWARDEN_RESTART_UNLOCK_ACTION,
     execute_validated_action,
     get_auth_status,
     login_bitwarden_with_api_key,
@@ -140,10 +140,10 @@ from secure_tools.auth_methods import (
     DEFAULT_AUTH_METHODS,
     GOOGLE_AUTH_METHODS,
     GOOGLE_TEAM_CLIENT_METHOD,
-    SIGN_IN_TOOL_BY_PROVIDER,
     TEAM_CLIENT_METHOD,
     X_SIGN_IN_PROVIDER,
     normalize_auth_method,
+    page_command,
     sign_in_command,
 )
 from custom_messages.contracts.model_keys_v1 import MODEL_KEY_AUTH_PROVIDER, TEAM_MODEL_KEY_METHOD
@@ -937,7 +937,7 @@ class SecureToolBrokerService:
 
     @staticmethod
     def _auth_session_lookup_failure_text(provider: str, reason: str) -> str:
-        command = sign_in_command(provider) if provider in SIGN_IN_TOOL_BY_PROVIDER else f"/auth {provider}"
+        command = page_command(provider)
         if reason == "legacy_unsigned_session_id":
             return (
                 "Auth session not found or expired. This looks like an older in-memory broker auth URL. "
@@ -2798,6 +2798,19 @@ class SecureToolBrokerService:
                 bitwarden_form_diagnostics["env_bw_session_present"],
             )
             if submit_mode == "defer_restart":
+
+                def record_restart_unlock(done: ToolResult) -> None:
+                    # What a later view shows is part of the result: recorded before the claim ends.
+                    record_token_form_result(session, done)
+                    content = dict(done.content or {})
+                    if done.status == "success" and content.get("action") == BITWARDEN_RESTART_UNLOCK_ACTION:
+                        session.state[BITWARDEN_RESTART_UNLOCK_STATE] = {
+                            "pending_file": str(content.get("pending_file") or ""),
+                            "expires_at": _format_epoch_seconds_for_display(
+                                content.get("expires_at_epoch"), user_timezone=user_timezone
+                            ),
+                        }
+
                 result = await run_claimed_form_thread(
                     session,
                     self._run_as_owner,
@@ -2807,8 +2820,8 @@ class SecureToolBrokerService:
                     client_id=client_id,
                     client_secret=client_secret,
                     server_url=server_url,
-                    on_result=record,
-                log_ref=log_ref,
+                    on_result=record_restart_unlock,
+                    log_ref=log_ref,
                 )
                 if result.status == "success":
                     content = dict(result.content or {})
@@ -2832,7 +2845,7 @@ class SecureToolBrokerService:
                     client_secret=client_secret,
                     server_url=server_url,
                     on_result=record,
-                log_ref=log_ref,
+                    log_ref=log_ref,
                 )
             if result.status != "success":
                 content = dict(result.content or {})
@@ -2868,21 +2881,9 @@ class SecureToolBrokerService:
                 content_type="text/html",
                 status=400,
             )
-        if (
-            provider == "bitwarden"
-            and str((result.content or {}).get("action") or "") == "pending_restart_unlock.saved"
-        ):
-            content = dict(result.content or {})
-            saved = {
-                "pending_file": str(content.get("pending_file") or ""),
-                "expires_at": _format_epoch_seconds_for_display(content.get("expires_at_epoch"), user_timezone=user_timezone),
-            }
-            # Shown again when the page is opened later (ended_pages).
-            session.state[BITWARDEN_RESTART_UNLOCK_STATE] = saved
-            return web.Response(
-                text=bitwarden_restart_unlock_saved_page(saved["pending_file"], saved["expires_at"]),
-                content_type="text/html",
-            )
+        if provider == "bitwarden" and str((result.content or {}).get("action") or "") == BITWARDEN_RESTART_UNLOCK_ACTION:
+            # The same page every later view shows (ended_pages), from what record_restart_unlock kept.
+            return web.Response(text=ended_sign_in_page(session, flow), content_type="text/html")
         if provider == "google" and session.method == GOOGLE_TEAM_CLIENT_METHOD:
             return web.Response(text=google_team_client_stored_page(), content_type="text/html")
         self._logger.info("%s broker auth form completed successfully.", provider)

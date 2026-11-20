@@ -102,6 +102,8 @@ GOOGLE_SIGN_IN_AGAIN_MESSAGE = f"Google says you need to sign in again. Run {SIG
 
 BITWARDEN_PENDING_RESTART_UNLOCK_FILENAME = "pending_api_key_unlock.json"
 BITWARDEN_PENDING_RESTART_UNLOCK_TTL_SECONDS = 900
+# The action of a Bitwarden "Save for Restart Unlock" result (read by ended_pages and the service).
+BITWARDEN_RESTART_UNLOCK_ACTION = "pending_restart_unlock.saved"
 
 
 def _string(params: Mapping[str, Any], key: str, *, required: bool = True, default: str = "") -> str:
@@ -893,7 +895,7 @@ def save_bitwarden_restart_unlock_request(
             status="error",
             content={
                 "provider": "bitwarden",
-                "action": "pending_restart_unlock.saved",
+                "action": BITWARDEN_RESTART_UNLOCK_ACTION,
                 "error_code": "bitwarden_pending_restart_unlock_missing_api_key",
                 "client_id_present": bool(client_id_value or env_client_id_present),
                 "client_secret_present": bool(client_secret_value or env_client_secret_present),
@@ -921,7 +923,7 @@ def save_bitwarden_restart_unlock_request(
         status="success",
         content={
             "provider": "bitwarden",
-            "action": "pending_restart_unlock.saved",
+            "action": BITWARDEN_RESTART_UNLOCK_ACTION,
             "pending_file": str(pending_path),
             "expires_at_epoch": payload["expires_at_epoch"],
             "ttl_seconds": BITWARDEN_PENDING_RESTART_UNLOCK_TTL_SECONDS,

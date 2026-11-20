@@ -31,11 +31,12 @@ from secure_tool_broker.auth_pages import (
     render_close_page_button,
 )
 from secure_tool_broker.page_decline import declined_page
-from secure_tools.auth_methods import GOOGLE_TEAM_CLIENT_METHOD, sign_in_command
+from secure_tools.auth_methods import GOOGLE_TEAM_CLIENT_METHOD, page_command, sign_in_command
 from secure_tools.broker_pages import SIGN_IN_STATUS_DECLINED, SIGN_IN_STATUS_SUCCESS
 
-# What a Bitwarden "Save for Restart Unlock" submission saved, kept in the
-# session's state for the page shown again later: {"pending_file", "expires_at"}.
+# What a Bitwarden "Save for Restart Unlock" submission (result action
+# executors.BITWARDEN_RESTART_UNLOCK_ACTION) saved, kept in the session's state with the
+# result for every later view: {"pending_file", "expires_at"}.
 BITWARDEN_RESTART_UNLOCK_STATE = "restart_unlock_saved"
 
 
@@ -88,20 +89,28 @@ def bitwarden_restart_unlock_saved_page(pending_file: str, expires_at: str) -> s
     return render_broker_auth_page("Bitwarden restart unlock saved", body)
 
 
-def token_sign_in_failed_page(provider: str) -> str:
-    """A token form whose submission failed, seen again later (the submission's own answer showed why)."""
+def token_form_failed_page(provider: str, method: str) -> str:
+    """A token form whose submission did not finish, seen again later.
+
+    The submission's own answer showed why. This page says only what is known:
+    the page is used up, and which command opens a new one (``page_command``:
+    the team's sign-in app, a person's sign-in or ``/auth <provider>``). It
+    does not say nothing was stored: a Bitwarden attempt may have logged in
+    before its unlock failed, and a result that could not be recorded
+    (``form_claims``) ends here too.
+    """
 
     display_name = auth_display_name(provider)
     body = (
         '<section class="content-panel">'
         f'<p class="eyebrow">{html.escape(display_name)}</p>'
-        "<h1>This sign-in did not work.</h1>"
-        f"<p>Nothing was stored. Start again with <code>{html.escape(sign_in_command(provider))}</code>.</p>"
+        "<h1>This page did not finish.</h1>"
+        f"<p>It cannot be used again. Open a new one with <code>{html.escape(page_command(provider, method))}</code>.</p>"
         f"{render_close_page_button()}"
         "</section>"
     )
     # No outcome, like the failed submission's own page; the gateway reports the error.
-    return render_broker_auth_page(f"{display_name} sign-in did not work", body)
+    return render_broker_auth_page(f"{display_name} page did not finish", body)
 
 
 def ended_sign_in_page(session: BrokerAuthSession, flow: BrokerAuthFlow | None) -> str:
@@ -114,7 +123,7 @@ def ended_sign_in_page(session: BrokerAuthSession, flow: BrokerAuthFlow | None) 
         # /auth model and /upgrade draw their own closed page; browser sign-ins their ending.
         return flow.render(session)
     if state.get("status") != SIGN_IN_STATUS_SUCCESS:
-        return token_sign_in_failed_page(session.provider)
+        return token_form_failed_page(session.provider, session.method)
     if session.provider == "google" and session.method == GOOGLE_TEAM_CLIENT_METHOD:
         return google_team_client_stored_page()
     saved = state.get(BITWARDEN_RESTART_UNLOCK_STATE)
@@ -128,6 +137,6 @@ __all__ = [
     "bitwarden_restart_unlock_saved_page",
     "ended_sign_in_page",
     "google_team_client_stored_page",
-    "token_sign_in_failed_page",
+    "token_form_failed_page",
     "token_sign_in_success_page",
 ]

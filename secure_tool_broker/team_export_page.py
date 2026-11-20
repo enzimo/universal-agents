@@ -367,7 +367,8 @@ class TeamExportFlow:
             # export ended. The page offers no Close then.
             if session.state.get(_STATUS) == STATUS_EXPORTING:
                 return
-            # A closed page answers "already used" from now on; the browser tab closes itself.
+            # From now on any GET or POST shows the closed page and applies nothing
+            # (ended_pages.ended_sign_in_page); the browser tab closes itself.
             _EXPORTS.discard(session)
             session.used = True
             session.state[_STATUS] = STATUS_CLOSED

@@ -3202,7 +3202,7 @@ async def test_used_one_time_sign_in_form_still_reports_how_it_ended(
     assert "ghp_secret_token" not in json.dumps(after_payload)
     # The one-time form is not offered again; the page shows how it ended.
     assert reopened.status == 200 and 'name="token"' not in reopened_text
-    ending = "GitHub authentication complete." if expected == "success" else "This sign-in did not work."
+    ending = "GitHub authentication complete." if expected == "success" else "This page did not finish."
     assert ending in reopened_text and "ghp_secret_token" not in reopened_text
 
 
