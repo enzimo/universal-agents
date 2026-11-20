@@ -121,12 +121,12 @@ def test_failures_older_than_the_start_limit_window_no_longer_count() -> None:
 
 
 def test_failed_starts_count_by_when_they_ended() -> None:
-    """Critique C17: two 30-minute startup timeouts are two failures in a row, though made over an hour apart."""
+    """Critique C17: two starts made over an hour ago that ended within it are two failures in a row."""
 
     first = make_launch(named_agent_type=TYPE, state=AgentLaunchState.FAILED, reason=STARTUP_TIMED_OUT,
                         created_at_utc=NOW - timedelta(minutes=95), updated_at_utc=NOW - timedelta(minutes=35))
     second = make_launch(named_agent_type=TYPE, state=AgentLaunchState.FAILED, reason=CRASH,
-                         created_at_utc=NOW - timedelta(minutes=34), updated_at_utc=NOW - timedelta(minutes=50))
+                         created_at_utc=NOW - timedelta(minutes=90), updated_at_utc=NOW - timedelta(minutes=50))
     history = start_history([first, second], TYPE, since=NOW - timedelta(hours=1))
     assert history.failures_in_row == 2
     # The newest failure is the one that ended last, which is the older start here.

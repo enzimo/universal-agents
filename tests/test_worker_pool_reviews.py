@@ -271,7 +271,49 @@ def test_the_administrators_notice_names_the_failure_not_pool_sizes(world):
     text = _notice_text(world, FAILED_DETAILS)
     assert f"Latest failure: {CRASH}." in text
     assert "Neither a larger pool nor a higher start limit fixes this" in text
+    assert "already waits longer before each next start" in text
+    assert "event=agent_thread_crash" in text and "event=worker_start_failed" in text
     assert "pool sizes" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_with_no_start_record_says_the_launcher_refuses_not_that_it_waits(monkeypatch, world):
+    """Critique C21: no start was made, so there is no wait and no event=worker_start_failed line."""
+
+    details = {"pool": {"failed_starts_in_row": 0}, "start_refused_because": "launcher_refused: ValueError"}
+    for shown in (await _review_instructions(monkeypatch, details), _notice_text(world, details)):
+        assert "The launcher refuses to start workers of this type: launcher_refused: ValueError." in shown
+        assert "refuses every start of this type until the cause is fixed" in shown
+        assert "waits longer" not in shown
+        assert "event=worker_launch_refused" in shown
+
+
+@pytest.mark.asyncio
+async def test_the_evidence_the_controller_writes_reaches_both_texts(world):
+    """Critique C22: the real writers (the controller's hourly-limit refusal, the pool view) feed the texts."""
+
+    from custom_agents.worker_pool_controller import PoolDecision, WorkerPoolController
+    from custom_messages.contracts.schedule_worker_v1 import WORKER_LAUNCH_RATE_LIMIT, AgentLaunchResultV1
+    from storage.worker_pool_repository import WorkerPoolIncidentV1
+
+    world.agent._pool_rate_limited_types = set()
+    controller = WorkerPoolController(world.agent)
+    controller._launch = lambda _agent_type: AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT)
+    incidents = reviews.WorkerPoolIncidents(world.agent, _settings())
+    observation = _observation(uncounted_start_ends=5, last_uncounted_start_end=UNCOUNTED)
+    await controller._start(observation, PoolDecision(1, "start"), incidents)
+    await incidents.settle()
+    ((opened),) = world.opened
+    now = datetime.now(timezone.utc)
+    incident = WorkerPoolIncidentV1(
+        incident_id="i", team_id="team", agent_type=WORKER_TYPE, kind=INCIDENT_START_FAILED,
+        opened_at_utc=now, last_seen_at_utc=now, details=opened["details"],
+    )
+    instructions = reviews._instructions(incident, recurring=False, recurrences=1, settings=_settings())
+    (finding,) = world.told[-1]
+    for shown in (instructions, finding.message.text):
+        assert "no start failed since a worker of this type was last ready" in shown
+        assert f"5 start(s) ended for a reason that does not count as a failure; the latest: {UNCOUNTED}." in shown
 
 
 @pytest.mark.asyncio
@@ -281,10 +323,12 @@ async def test_the_hourly_limit_with_no_failed_start_points_at_how_often_workers
     instructions = await _review_instructions(monkeypatch, LIMIT_DETAILS)
     text = _notice_text(world, LIMIT_DETAILS)
     for shown in (instructions, text):
-        assert "refused new workers of this type although no start failed" in shown
+        assert "no start failed since a worker of this type was last ready" in shown
         assert "max_launches_per_type_per_hour, 60" in shown
         assert f"4 start(s) ended for a reason that does not count as a failure; the latest: {UNCOUNTED}." in shown
         assert "started so often" in shown
+        # Critique C20: workers that crash right after they become ready are retired, not failed.
+        assert "workers that stop soon after they become ready" in shown and "event=agent_thread_crash" in shown
         assert "Neither a larger pool nor a higher start limit fixes this" not in shown
 
 
@@ -294,7 +338,7 @@ async def test_failed_starts_decide_the_text_when_the_hourly_limit_also_refused(
                "start_refused_because": f"worker_launch_rate_limit; the last 2 start(s) failed: {CRASH}"}
     instructions = await _review_instructions(monkeypatch, details)
     assert f"the last 2 start(s) failed: {CRASH}" in instructions
-    assert "although no start failed" not in instructions
+    assert "no start failed since" not in instructions
 
 
 @pytest.mark.asyncio

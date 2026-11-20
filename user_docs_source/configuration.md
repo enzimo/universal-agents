@@ -889,7 +889,7 @@ agent:
     default_max_workers_per_type: 4   # Pool size until TeamArchitect sets another.
     max_workers_per_type_ceiling: 16  # Most workers of one type; TeamArchitect cannot go above it.
     max_total_workers_per_team: 32    # Most workers of the team, however they were started.
-    max_launches_per_type_per_hour: 60
+    max_launches_per_type_per_hour: 60 # Most starts of one worker type in an hour.
     scale_up_wait_seconds: 20         # A task waiting this long with no free worker starts another.
 ```
 
@@ -903,12 +903,16 @@ that becomes ready resets the wait. A type whose workers keep crashing is
 tried about 11 times in its first hour instead of reaching
 `max_launches_per_type_per_hour`. When two starts in a row fail while tasks
 wait, TeamArchitect gets a review and administrators get an Inbox notice; both
-name the failure. A single failure only delays the next start.
+name the failure. A single failure only delays the next start. A start refused
+by `max_launches_per_type_per_hour` opens that review and notice at once; when
+no start failed, they point at why workers of the type start so often, for
+example workers that stop soon after they become ready.
 
 TeamArchitect sets pool sizes itself inside the ceilings, for a while or for
-good, when it reviews a pool at its limit, a model provider that keeps refusing
-calls, or workers that cannot start. Administrators get an Inbox notice of each
-change and of problems that keep coming back. Only an operator changes the
+good, when it reviews a pool at its limit or a model provider that keeps
+refusing calls. For workers that cannot start, a pool size does not help:
+TeamArchitect reports the failure to administrators. Administrators get an
+Inbox notice of each change and of problems that keep coming back. Only an operator changes the
 ceilings. The full list of settings, with comments, is in `config.example.yaml`.
 
 Upgrading moves `agent.schedule_workers.max_total_workers_per_team` and

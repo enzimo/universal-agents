@@ -45,6 +45,11 @@ from functools import partial
 from typing import Any, Optional
 
 from custom_agents.stuck_work import Recovery, StuckFinding, StuckMessage, report_stuck_work
+from custom_agents.worker_pool_controller import (
+    POOL_FAILED_STARTS,
+    POOL_LAST_UNCOUNTED_END,
+    POOL_UNCOUNTED_ENDS,
+)
 from custom_agents.worker_pool_limits import worker_pool_repository
 from custom_messages.contracts.routing_v1 import (
     GatewayContext,
@@ -68,6 +73,11 @@ from storage.worker_pool_repository import (
 logger = logging.getLogger(__name__)
 
 WORKER_POOL_REVIEW_TASK_PREFIX = "worker_pool_review_"
+# A start_failed incident's evidence: the controller's pool view, why the start
+# was refused, and, when the hourly start limit refused it, that mark.
+EVIDENCE_POOL = "pool"
+EVIDENCE_REFUSED_BECAUSE = "start_refused_because"
+EVIDENCE_HOURLY_LIMIT = "hourly_start_limit_reached"
 WORKER_POOL_SUBJECT: StuckSubjectKind = "worker_pool"
 
 _TITLES = {
@@ -91,6 +101,16 @@ def _shown(value: Any) -> str:
     return text[:_REASON_MAX_CHARS] if text else "no reason recorded"
 
 
+# Where the runtime log holds the full error of a failed or refused start; the
+# stored reason keeps only a code or an error type.
+_LOG_POINTERS = (
+    "The runtime log has the details: event=worker_start_failed names each start "
+    "that ended before its worker was ready, event=agent_thread_crash holds a "
+    "crash's full error, and event=worker_launch_refused or "
+    "event=worker_pool_start_failed a refusal's."
+)
+
+
 def _start_failure_text(details: dict[str, Any], settings: WorkerPoolsConfig) -> tuple[str, str]:
     """What a ``start_failed`` incident's evidence says: (what happened, what to do), as sentences.
 
@@ -103,32 +123,53 @@ def _start_failure_text(details: dict[str, Any], settings: WorkerPoolsConfig) ->
     at the crash behind it.
     """
 
-    pool = details.get("pool") or {}
-    if pool.get("failed_starts_in_row") or not details.get("hourly_start_limit_reached"):
+    pool = details.get(EVIDENCE_POOL) or {}
+    if pool.get(POOL_FAILED_STARTS) or not details.get(EVIDENCE_HOURLY_LIMIT):
+        return _failed_start_text(details, pool)
+    return _hourly_limit_text(pool, settings)
+
+
+def _failed_start_text(details: dict[str, Any], pool: dict[str, Any]) -> tuple[str, str]:
+    """Failed starts in a row, or a launcher refusal made before any start record existed."""
+
+    reason = _shown(details.get(EVIDENCE_REFUSED_BECAUSE))
+    if pool.get(POOL_FAILED_STARTS):
         happened = (
             "Workers of this type failed to start or stopped before they were ready. "
-            f"Latest failure: {_shown(details.get('start_refused_because'))}."
+            f"Latest failure: {reason}."
         )
-        advice = (
-            "Neither a larger pool nor a higher start limit fixes this: the runtime "
-            "already waits longer before each next start, and more starts only fail "
-            "more often. Fix the failure: check the agent type's definition, the "
-            "operator's denied types and the runtime log (event=worker_start_failed)."
-        )
-        return happened, advice
+        why = "the runtime already waits longer before each next start, and more starts only fail more often"
+    else:
+        # Refused before a start record was reserved (worker_pool_controller._refused):
+        # nothing to wait on, it is tried again every pass.
+        happened = f"The launcher refuses to start workers of this type: {reason}."
+        why = "the launcher refuses every start of this type until the cause is fixed"
+    advice = (
+        f"Neither a larger pool nor a higher start limit fixes this: {why}. Fix the "
+        "failure: check the agent type's definition and the operator's denied types. "
+        + _LOG_POINTERS
+    )
+    return happened, advice
+
+
+def _hourly_limit_text(pool: dict[str, Any], settings: WorkerPoolsConfig) -> tuple[str, str]:
+    """The hourly start limit refused starts, and no start failed since a worker of the type was last ready."""
+
     happened = (
         "The hourly start limit (agent.worker_pools.max_launches_per_type_per_hour, "
-        f"{settings.max_launches_per_type_per_hour}) refused new workers of this type "
-        "although no start failed."
+        f"{settings.max_launches_per_type_per_hour}) refused new workers of this type, "
+        "and no start failed since a worker of this type was last ready."
     )
-    if pool.get("starts_ended_not_counted"):
+    if pool.get(POOL_UNCOUNTED_ENDS):
         happened += (
-            f" {pool['starts_ended_not_counted']} start(s) ended for a reason that does "
-            f"not count as a failure; the latest: {_shown(pool.get('last_start_end_not_counted'))}."
+            f" {pool[POOL_UNCOUNTED_ENDS]} start(s) ended for a reason that does "
+            f"not count as a failure; the latest: {_shown(pool.get(POOL_LAST_UNCOUNTED_END))}."
         )
     advice = (
-        "Check why workers of this type are started so often (a short idle time with "
-        "a steady flow of tasks, or starts the runtime ended) before raising the limit."
+        "Check why workers of this type are started so often before raising the "
+        "limit: workers that stop soon after they become ready (for example on "
+        "their first task; event=agent_thread_crash in the runtime log), a short "
+        "idle time with a steady flow of tasks, or starts the runtime ended."
     )
     return happened, advice
 
@@ -180,11 +221,11 @@ class WorkerPoolIncidents:
         self._started_types.add(agent_type)
 
     def start_failed(self, observation: Any, reason: str, *, hourly_start_limit: bool = False) -> None:
-        evidence: dict[str, Any] = {"pool": observation.as_dict(), "start_refused_because": reason}
+        evidence: dict[str, Any] = {EVIDENCE_POOL: observation.as_dict(), EVIDENCE_REFUSED_BECAUSE: reason}
         if hourly_start_limit:
             # The hourly start limit refused it (custom_agents.worker_pool_controller):
             # with no failed start, the limit itself is what to look at.
-            evidence["hourly_start_limit_reached"] = True
+            evidence[EVIDENCE_HOURLY_LIMIT] = True
         self._see(observation.agent_type, INCIDENT_START_FAILED, evidence)
 
     async def observe_team(self, observations: list[Any], *, team_active: int, team: Any) -> None:

@@ -88,6 +88,13 @@ from storage.worker_pool_repository import (
 logger = logging.getLogger(__name__)
 
 POOL_LAUNCH_OWNER_PREFIX = "worker_pool:"
+# Keys of the pool view (``PoolObservation.as_dict``) that the start_failed
+# review and notice read from an incident's evidence
+# (custom_agents.worker_pool_reviews); named once so both sides agree.
+POOL_FAILED_STARTS = "failed_starts_in_row"
+POOL_LAST_START_FAILURE = "last_start_failure"
+POOL_UNCOUNTED_ENDS = "starts_ended_not_counted"
+POOL_LAST_UNCOUNTED_END = "last_start_end_not_counted"
 # Start refusals that only mean "the limit was reached meanwhile", not a fault.
 _CAPACITY_REFUSALS = frozenset({AUTOMATIC_WORKER_CAPACITY_LIMIT, TEAM_WORKER_CAPACITY_LIMIT})
 
@@ -262,11 +269,11 @@ class PoolObservation:
             "workers_draining": self.draining,
             "workers_waiting_out_provider_limit": self.cooling_down,
             "pool_size": self.limit.as_dict(),
-            "failed_starts_in_row": self.failed_starts_in_row,
-            "last_start_failure": self.last_start_failure,
+            POOL_FAILED_STARTS: self.failed_starts_in_row,
+            POOL_LAST_START_FAILURE: self.last_start_failure,
             "next_start_waits_seconds": round(self.start_retry_in_seconds, 1),
-            "starts_ended_not_counted": self.uncounted_start_ends,
-            "last_start_end_not_counted": self.last_uncounted_start_end,
+            POOL_UNCOUNTED_ENDS: self.uncounted_start_ends,
+            POOL_LAST_UNCOUNTED_END: self.last_uncounted_start_end,
             "observed_at": self.observed_at.isoformat(),
         }
 

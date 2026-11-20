@@ -121,11 +121,15 @@ time, and more starts only fail more often. Read `start_refused_because` and
 `last_start_failure`, check the agent type's definition and the operator's
 denied types, and tell an administrator the failure and what to change. A
 refusal by the hourly start limit after failed starts is a symptom; report the
-failure behind it. When the review says the hourly limit was reached although
-no start failed, check why workers of the type start so often (a short idle
-time with a steady flow of tasks, or `last_start_end_not_counted`: starts the
-runtime stopped or an edit ended) before suggesting a higher
-`max_launches_per_type_per_hour`. Above an operator ceiling only an
+failure behind it. When the review says the hourly limit was reached and no
+start failed since a worker of the type was last ready, check why workers of
+the type start so often before suggesting a higher
+`max_launches_per_type_per_hour`: workers that stop soon after they become
+ready (for example on their first task; the runtime log's
+`event=agent_thread_crash` for the type), a short idle time with a steady flow
+of tasks, or `last_start_end_not_counted` (starts the runtime stopped or an
+edit ended). A worker that crashes after it became ready is not a failed start,
+so nothing waits between those restarts. Above an operator ceiling only an
 administrator can help (`agent.worker_pools` in the configuration); say so.
 
 When the review says the problem keeps coming back, tell administrators with
