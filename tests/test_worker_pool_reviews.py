@@ -7,12 +7,14 @@ stuck-work notice engine are captured.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from custom_agents import worker_pool_reviews as reviews
+from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_agents.worker_pool_controller import PoolObservation, _report_start_history
 from custom_agents.worker_pool_limits import PoolLimit, worker_pool_repository
 from runtime_settings.worker_pools import WorkerPoolsConfig
@@ -30,20 +32,19 @@ REAL_OPEN_REVIEW = reviews.open_review
 CRASH = "crashed_before_ready: BadRequestError (NATS 10026: maximum consumers limit reached)"
 
 
-class _Runtime:
-    async def run(self, fn, *args, **kwargs):
-        return fn(*args, **kwargs)
-
-
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     storage = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "pools.db")}})
     agent = SimpleNamespace(
         id="lead",
         team_id="team",
-        task_manager=SimpleNamespace(storage_settings=storage, operations_runtime=_Runtime()),
+        # The real lane: it copies every argument and result, so a call that hands it
+        # the agent itself fails here as in the runtime (2026-11-20: every pool pass).
+        task_manager=SimpleNamespace(storage_settings=storage, operations_runtime=TaskOperationRuntime()),
         _pool_rate_limited_types=set(),
         _pool_refusals_in_row={},
+        # Like the real agent's locks and running tasks: cannot be copied.
+        _uncopyable=threading.Lock(),
     )
     opened: list[dict] = []
 
