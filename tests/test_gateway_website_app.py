@@ -3526,6 +3526,7 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
     assert ".message-transient-badge {" in styles
     assert ".message-transient-badge.is-expired {" in styles
     assert ".button.small {" in styles
+    assert ".access-review-card .button.permission-choice-button {" in styles
     assert ".access-review-status-row {" in styles
     assert ".access-review-more-toggle {" in styles
     assert ".access-review-follow-up-outcome {" in styles

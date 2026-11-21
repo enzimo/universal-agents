@@ -312,6 +312,8 @@ export async function verifyCompactChatUi() {
       for (const btn of choiceButtons) {
         const h = btn.getBoundingClientRect().height;
         check(h >= 30 && h <= 38, `${mode} choice button '${btn.textContent}' height ${h.toFixed(1)}px not in [30, 38]`);
+        check(getComputedStyle(btn).boxShadow === "none",
+          `${mode} choice button '${btn.textContent}' kept shadow: ${getComputedStyle(btn).boxShadow}`);
         const descId = btn.getAttribute("aria-describedby");
         check(Boolean(descId), `${mode} choice button '${btn.textContent}' missing aria-describedby`);
         const descNode = document.getElementById(descId);
@@ -362,6 +364,8 @@ export async function verifyCompactChatUi() {
       const followUpHeight = followUpAnchor.getBoundingClientRect().height;
       check(followUpHeight >= 30 && followUpHeight <= 38,
         `${mode} decided follow-up button height ${followUpHeight.toFixed(1)}px not in [30, 38]`);
+      check(getComputedStyle(followUpAnchor).boxShadow === "none",
+        `${mode} decided follow-up button kept shadow: ${getComputedStyle(followUpAnchor).boxShadow}`);
       checkTextContrast(decidedCard.querySelector(".permission-operation"), canvas, `${mode} decided heading`);
       checkTextContrast(decidedCard.querySelector(".access-inbox-status"), canvas, `${mode} decided badge`);
       checkTextContrast(decidedCard.querySelector(".permission-effect-summary"), canvas, `${mode} decided summary`);
@@ -416,6 +420,8 @@ export async function verifyCompactChatUi() {
       for (const btn of inboxChoices) {
         const h = btn.getBoundingClientRect().height;
         check(h >= 30 && h <= 38, `${mode} Inbox choice button height ${h.toFixed(1)}px not in [30, 38]`);
+        check(getComputedStyle(btn).boxShadow === "none",
+          `${mode} Inbox choice button '${btn.textContent}' kept shadow: ${getComputedStyle(btn).boxShadow}`);
       }
       const inboxKeepBox = inboxCard.querySelector(".access-review-keep-box").getBoundingClientRect();
       const inboxKeepSelect = inboxCard.querySelector(".access-review-keep-for").getBoundingClientRect();
@@ -429,7 +435,61 @@ export async function verifyCompactChatUi() {
       checkTextContrast(inboxChoiceHelp, canvas, `${mode} Inbox choice help text`);
       checkTextContrast(inboxCard.querySelector(".access-review-keep-help"), canvas, `${mode} Inbox keep help text`);
 
-      results.push(`${mode}: compact pending, waiting, decided, transient active/expired, inline workflow, and Settings Inbox verified`);
+      // --- Checks for 7: Buttons outside .access-review-card keep 40px size ---
+      const outsideBtn = document.createElement("button");
+      outsideBtn.type = "button";
+      outsideBtn.className = "button primary permission-choice-button";
+      outsideBtn.textContent = "Save";
+      stage.append(outsideBtn);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const outsideHeight = outsideBtn.getBoundingClientRect().height;
+      check(outsideHeight >= 40,
+        `${mode} outside-scope .permission-choice-button shrunk to ${outsideHeight.toFixed(1)}px (expected >= 40px)`);
+      outsideBtn.remove();
+
+      // --- Checks for 8: Narrow viewport (340..520px) Keep / Hand-on checkbox alignment ---
+      for (const narrowWidth of [340, 360, 420, 520]) {
+        const narrowHost = document.createElement("div");
+        Object.assign(narrowHost.style, { width: `${narrowWidth}px`, display: "grid", gap: "12px" });
+        const narrowInbox = renderReviewCard(document, sampleReview(true), { compact: false });
+        const narrowBubble = document.createElement("div");
+        narrowBubble.className = "message-bubble is-system";
+        const narrowSlot = document.createElement("div");
+        narrowSlot.className = "chat-access-review";
+        const narrowCompact = renderReviewCard(document, sampleReview(true), { compact: true });
+        narrowCompact.querySelector(".access-review-more").open = true;
+        narrowSlot.append(narrowCompact);
+        narrowBubble.append(narrowSlot);
+        narrowHost.append(narrowInbox, narrowBubble);
+        stage.append(narrowHost);
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        for (const [label, cardEl] of [["Inbox", narrowInbox], ["compact chat", narrowCompact]]) {
+          const cardRect = cardEl.getBoundingClientRect();
+          const keepRows = [...cardEl.querySelectorAll(".access-review-keep")];
+          check(keepRows.length === 2, `${mode} ${narrowWidth}px ${label}: expected 2 .access-review-keep rows`);
+          for (const keepRow of keepRows) {
+            const boxEl = keepRow.querySelector(".access-review-keep-box");
+            const lblEl = keepRow.querySelector(".access-review-keep-label");
+            const boxRect = boxEl.getBoundingClientRect();
+            const lblRect = lblEl.getBoundingClientRect();
+            check(Math.abs(boxRect.top - lblRect.top) < 8,
+              `${mode} ${narrowWidth}px ${label}: checkbox separated vertically from label '${lblEl.textContent}' (box.top=${boxRect.top.toFixed(1)}, label.top=${lblRect.top.toFixed(1)})`);
+            check(lblRect.left >= boxRect.right,
+              `${mode} ${narrowWidth}px ${label}: label '${lblEl.textContent}' dropped below checkbox (box.right=${boxRect.right.toFixed(1)}, label.left=${lblRect.left.toFixed(1)})`);
+            check(lblRect.right <= cardRect.right + 1,
+              `${mode} ${narrowWidth}px ${label}: label '${lblEl.textContent}' overflowed card (${lblRect.right.toFixed(1)} > ${cardRect.right.toFixed(1)})`);
+            const selectEl = keepRow.querySelector(".access-review-keep-for");
+            if (selectEl) {
+              const selRect = selectEl.getBoundingClientRect();
+              check(selRect.right <= cardRect.right + 1,
+                `${mode} ${narrowWidth}px ${label}: duration select overflowed card (${selRect.right.toFixed(1)} > ${cardRect.right.toFixed(1)})`);
+            }
+          }
+        }
+        narrowHost.remove();
+      }
+
+      results.push(`${mode}: compact pending, waiting, decided, transient active/expired, inline workflow, Settings Inbox, scoped buttons, and narrow checkbox alignment verified`);
     }
     return results;
   } finally {

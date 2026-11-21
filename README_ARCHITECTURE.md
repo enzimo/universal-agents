@@ -2504,13 +2504,22 @@ works; if the first stalls past its limit and the second takes over, the
 first keeps the programs the second may rely on (see "Each request is decided
 once"). A tool with no
 grants gives nobody anything, which is why writing its file first is safe. Afterwards the gateway opens the broker's
-account link form for the approver, watches it with the tool setup watcher
-(`GatewayToolSetups.after_proposal_links`), and holds the decision message to
+account link form for the approver, tracks each opened form in memory by
+`request_id` scoped strictly to that approver (`assistant_gateway/proposal_follow_ups.py`,
+`ProposalFollowUpTracker`), watches it with the tool setup watcher
+(`GatewayToolSetups.after_proposal_links`, which reports each form's ending via
+`on_form_ended`), and holds the decision message to
 the waiting task until every form ended; the resumed `propose_access_change`
-then reports which links exist. Rationale: the task resumed before the link
-existed and called a tool still refused for a missing account. The hold lives
-in gateway memory; after a restart the Inbox loop sends the message and the
-tool reports the links as they are.
+then reports which links exist. While any form is open and unexpired,
+`GatewayAccessInbox.review_view` returns only those active `follow_up_links`
+for the approving person (never for other viewers) so reloading mid-flow keeps
+the button, and replaces each finished or expired form with plain-language
+`follow_up_outcomes` text so Web Chat and Settings Inbox automatically dismiss
+completed credential buttons. Rationale: the task resumed before the link
+existed and called a tool still refused for a missing account, and finished
+broker links otherwise stayed visible on decided cards. The hold and follow-up
+tracker live in gateway memory; after a restart the Inbox loop sends the
+message and the tool reports the links as they are.
 
 People hold one team role each (`owner`, `admin` or `member`) in the gateway's
 membership records, read again at every decision, so a role change applies at
