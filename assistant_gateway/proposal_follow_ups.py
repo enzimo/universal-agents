@@ -10,11 +10,14 @@ to the approving person:
 - ``register`` records the opened forms in proposal order for ``approver_person_id``.
 - ``record_ended`` removes one form as soon as its broker watch ends and stores
   its plain-language outcome line (never URLs, tokens or session IDs).
-- ``snapshot`` returns ``(follow_up_links, follow_up_outcomes)`` for a viewer:
-  only the approving person ever sees their links or outcomes, expired links are
-  dropped immediately with a plain expiry line, and each pending link includes
-  ``expires_at_utc`` when known so the browser stops polling and hides the
-  button once the form expires.
+- ``snapshot`` returns a ``FollowUpSnapshot`` (``links``, ``outcomes``,
+  ``settling``, ``settling_until_utc``) for a viewer: only the approving person
+  ever sees their links, settling state or outcomes. Each active link includes
+  ``expires_at_utc`` when known so the browser hides the button as soon as the
+  form expires. Between ``expires_at_utc`` and ``expires_at_utc + WATCH_GRACE``
+  the link is omitted from ``links`` while ``settling`` stays ``True`` so the
+  browser keeps polling until ``record_ended`` reports a late completion or the
+  watch grace window passes and the plain expiry line is recorded.
 - ``prune`` clears finished entries older than ``FINISHED_RETENTION`` and caps
   total tracked requests at ``MAX_TRACKED_REQUESTS``.
 
@@ -31,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 import threading
 from typing import Any
 
+from assistant_gateway.application.broker_session_watch import WATCH_GRACE
 from assistant_gateway.application.tool_setup import account_link_form_expired
 
 
@@ -91,6 +95,16 @@ class PendingFollowUpLink:
         return view
 
 
+@dataclass(frozen=True)
+class FollowUpSnapshot:
+    """Viewer-scoped snapshot of a proposal's follow-up credential forms."""
+
+    links: list[dict[str, str]] = field(default_factory=list)
+    outcomes: list[str] = field(default_factory=list)
+    settling: bool = False
+    settling_until_utc: str | None = None
+
+
 @dataclass
 class _TrackedProposal:
     approver_person_id: str
@@ -107,11 +121,13 @@ class ProposalFollowUpTracker:
         *,
         finished_retention: timedelta = FINISHED_RETENTION,
         max_tracked_requests: int = MAX_TRACKED_REQUESTS,
+        watch_grace: timedelta = WATCH_GRACE,
     ) -> None:
         self._lock = threading.Lock()
         self._entries: dict[str, _TrackedProposal] = {}
         self._finished_retention = finished_retention
         self._max_tracked = max(1, int(max_tracked_requests))
+        self._watch_grace = max(timedelta(0), watch_grace)
 
     def register(
         self,
@@ -158,20 +174,35 @@ class ProposalFollowUpTracker:
         *,
         viewer_id: str,
         now: datetime,
-    ) -> tuple[list[dict[str, str]], list[str]]:
-        """Return ``(follow_up_links, follow_up_outcomes)`` visible to ``viewer_id``."""
+    ) -> FollowUpSnapshot:
+        """Return the ``FollowUpSnapshot`` visible to ``viewer_id``."""
 
         if not request_id or not viewer_id:
-            return [], []
+            return FollowUpSnapshot()
         at = _to_utc(now)
         with self._lock:
             entry = self._entries.get(request_id)
             if entry is None or entry.approver_person_id != viewer_id:
-                return [], []
+                return FollowUpSnapshot()
             self._expire_entry_locked(entry, at)
-            links = [item.to_view() for item in entry.pending]
+            links: list[dict[str, str]] = []
+            latest_settling_deadline: datetime | None = None
+            for item in entry.pending:
+                if item.expires_at_utc is not None and item.expires_at_utc <= at:
+                    deadline = item.expires_at_utc + self._watch_grace
+                    if latest_settling_deadline is None or deadline > latest_settling_deadline:
+                        latest_settling_deadline = deadline
+                else:
+                    links.append(item.to_view())
             outcomes = list(entry.outcomes_by_key.values())
-            return links, outcomes
+            return FollowUpSnapshot(
+                links=links,
+                outcomes=outcomes,
+                settling=latest_settling_deadline is not None,
+                settling_until_utc=(
+                    latest_settling_deadline.isoformat() if latest_settling_deadline is not None else None
+                ),
+            )
 
     def prune(self, now: datetime) -> None:
         """Expire elapsed pending forms and evict stale or excess tracked entries."""
@@ -180,20 +211,21 @@ class ProposalFollowUpTracker:
         with self._lock:
             self._prune_locked(at)
 
-    @staticmethod
-    def _expire_entry_locked(entry: _TrackedProposal, at: datetime) -> None:
+    def _expire_entry_locked(self, entry: _TrackedProposal, at: datetime) -> None:
         still_pending: list[PendingFollowUpLink] = []
-        latest_expiry: datetime | None = None
+        latest_deadline: datetime | None = None
         for item in entry.pending:
-            if item.expires_at_utc is not None and item.expires_at_utc <= at:
-                entry.outcomes_by_key.setdefault(item.key, account_link_form_expired(item.tool_name))
-                if latest_expiry is None or item.expires_at_utc > latest_expiry:
-                    latest_expiry = item.expires_at_utc
-            else:
-                still_pending.append(item)
-        if latest_expiry is not None:
+            if item.expires_at_utc is not None:
+                deadline = item.expires_at_utc + self._watch_grace
+                if deadline <= at:
+                    entry.outcomes_by_key.setdefault(item.key, account_link_form_expired(item.tool_name))
+                    if latest_deadline is None or deadline > latest_deadline:
+                        latest_deadline = deadline
+                    continue
+            still_pending.append(item)
+        if latest_deadline is not None:
             entry.pending = still_pending
-            entry.updated_at_utc = max(entry.updated_at_utc, latest_expiry)
+            entry.updated_at_utc = max(entry.updated_at_utc, latest_deadline)
 
     def _prune_locked(self, at: datetime) -> None:
         for entry in self._entries.values():
@@ -221,6 +253,7 @@ class ProposalFollowUpTracker:
 
 __all__ = [
     "FINISHED_RETENTION",
+    "FollowUpSnapshot",
     "MAX_TRACKED_REQUESTS",
     "PendingFollowUpLink",
     "ProposalFollowUpTracker",

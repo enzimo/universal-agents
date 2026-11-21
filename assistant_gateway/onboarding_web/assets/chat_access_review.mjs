@@ -25,8 +25,8 @@
 
 import {
   ACCESS_INBOX_API, ACCESS_REVIEW_MESSAGE_TYPE, activeFollowUpLinks, createFollowUpWatcher, decisionOutcome,
-  decisionPath, decisionRequestBody, followUpLinks, followUpOutcomes, followUpSignature, renderDecidedCard,
-  renderReviewCard, setCardMessage, storedDecisionOutcome,
+  decisionPath, decisionRequestBody, followUpOutcomes, followUpSignature, followUpWatchTargets, hasPendingFollowUp,
+  isFollowUpSettling, renderDecidedCard, renderReviewCard, setCardMessage, storedDecisionOutcome,
 } from "./access_inbox.mjs";
 
 export const REFRESH_WAITING_AFTER_MS = 15000;
@@ -111,7 +111,7 @@ export function createChatAccessReviews({
   }
 
   function hasPendingFollowUps(entry) {
-    return Boolean(!entry.followUpStop && entry.review && followUpLinks(entry.review).length > 0);
+    return Boolean(!entry.followUpStop && entry.review && hasPendingFollowUp(entry.review));
   }
 
   function needsRead(entry) {
@@ -125,7 +125,6 @@ export function createChatAccessReviews({
     const entry = entryFor(id);
     if (entry.pending) return entry.pending;
     const readGeneration = generation;
-    const beforeSignature = followUpSignature(entry.review, now());
     entry.pending = Promise.resolve()
       .then(() => get(reviewPath(id)))
       .then(payload => {
@@ -134,7 +133,7 @@ export function createChatAccessReviews({
         if (refreshFollowUp) {
           if (!nextReview) return;
           entry.review = nextReview;
-          if (followUpSignature(entry.review, now()) !== beforeSignature) drawAll(id);
+          if (followUpSignature(entry.review, now()) !== entry.lastFollowUpSignature) drawAll(id);
           return;
         }
         entry.review = nextReview;
@@ -172,6 +171,7 @@ export function createChatAccessReviews({
       outcome,
       links: activeFollowUpLinks(entry.review, now()),
       outcomes: followUpOutcomes(entry.review),
+      settling: isFollowUpSettling(entry.review),
       compact: true,
     };
   }
@@ -228,7 +228,7 @@ export function createChatAccessReviews({
       const links = [];
       entries.forEach((entry, id) => {
         if (hasPendingFollowUps(entry) && findReviewSlots(document, id).length) {
-          links.push(...followUpLinks(entry.review));
+          links.push(...followUpWatchTargets(entry.review, id));
         }
       });
       return links;

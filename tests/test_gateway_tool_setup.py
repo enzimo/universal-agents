@@ -698,7 +698,7 @@ async def test_inbox_follow_up_links_dismiss_through_real_tool_setups_watch(setu
     # Broker opened two real sessions; complete the first and check review() drops only that link.
     broker.complete("link_session_1")
     await _until(
-        lambda: len(inbox._follow_ups.snapshot(request.request_id, viewer_id=owner, now=requests.service.clock())[0])
+        lambda: len(inbox._follow_ups.snapshot(request.request_id, viewer_id=owner, now=requests.service.clock()).links)
         == 1
     )
     after_first = await inbox.review(owner, request.request_id)
@@ -706,6 +706,7 @@ async def test_inbox_follow_up_links_dismiss_through_real_tool_setups_watch(setu
     assert len(after_first["follow_up_links"]) == 1
     assert "X" in after_first["follow_up_links"][0]["label"]
     assert after_first["follow_up_outcomes"] == ["The account link for Portainer is done."]
+    assert after_first["follow_up_settling"] is False
 
     # Decline the second form and check both links clear with both plain outcomes kept.
     broker.decline("link_session_2")
@@ -713,6 +714,7 @@ async def test_inbox_follow_up_links_dismiss_through_real_tool_setups_watch(setu
     after_second = await inbox.review(owner, request.request_id)
     assert after_second is not None
     assert after_second["follow_up_links"] == []
+    assert after_second["follow_up_settling"] is False
     assert after_second["follow_up_outcomes"] == [
         "The account link for Portainer is done.",
         "The form for the account link for X (xurl) was closed without linking anything.",

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  DETAILS_LABEL, FOLLOW_UP_EXPIRY_GRACE_MS, FOLLOW_UP_POLL_MS, NEEDS_DECISION, WAITING_FOR_ADMINISTRATOR,
-  decisionRequestBody, localTimeFormatter, storedDecisionOutcome,
+  DETAILS_LABEL, FOLLOW_UP_EXPIRY_GRACE_MS, FOLLOW_UP_POLL_MS, FOLLOW_UP_SETTLING_TEXT, NEEDS_DECISION,
+  WAITING_FOR_ADMINISTRATOR, decisionRequestBody, localTimeFormatter, storedDecisionOutcome,
 } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
 import {
   LOADING_TEXT, OPEN_INBOX_LABEL, REFRESH_WAITING_AFTER_MS, createChatAccessReviews, isAccessReviewMessage, reviewPath,
@@ -432,4 +432,73 @@ test("reloaded decided card hides expired follow-up link client-side, stops afte
   assert.equal(hSignOut.intervals.size, 1);
   hSignOut.reviewer.clear();
   assert.equal(hSignOut.intervals.size, 0);
+});
+
+test("Web Chat card keeps polling while a form is settling in watch grace and replaces settling with completion (F3)", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const settlingUntil = "2026-11-21T12:16:00+00:00";
+  const withLink = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [{ label: "Choose the credential for Portainer", url: "https://broker.example/link/1", expires_at_utc: expires }],
+    follow_up_outcomes: [],
+    follow_up_settling: false,
+    follow_up_settling_until_utc: null,
+  });
+  const h = harness({ startClock: start, reviews: { "req-1": withLink } });
+  const slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+  assert.equal(byTag(slot, "a").length, 1);
+  assert.equal(h.intervals.size, 1);
+
+  // Clock crosses expires_at_utc; server reports settling during WATCH_GRACE instead of premature expiry.
+  h.advance(15 * 60 * 1000 + 2000);
+  h.reviews["req-1"] = {
+    ...withLink,
+    follow_up_links: [],
+    follow_up_outcomes: [],
+    follow_up_settling: true,
+    follow_up_settling_until_utc: settlingUntil,
+  };
+  [...h.intervals.values()][0].callback();
+  await settle();
+
+  assert.equal(byTag(slot, "a").length, 0, "expired link button is hidden while settling");
+  assert.equal(byClass(slot, "access-review-follow-up-outcomes")[0].textContent, FOLLOW_UP_SETTLING_TEXT);
+  assert.equal(h.intervals.size, 1, "watcher keeps polling while follow_up_settling is true");
+
+  // Late submission finishes during WATCH_GRACE: next poll replaces settling text with completion and stops polling.
+  h.advance(4000);
+  h.reviews["req-1"] = {
+    ...withLink,
+    follow_up_links: [],
+    follow_up_outcomes: ["The account link for Portainer is done."],
+    follow_up_settling: false,
+    follow_up_settling_until_utc: null,
+  };
+  [...h.intervals.values()][0].callback();
+  await settle();
+
+  assert.equal(byTag(slot, "a").length, 0);
+  assert.equal(byClass(slot, "access-review-follow-up-outcomes")[0].textContent,
+    "The account link for Portainer is done.");
+  assert.equal(h.intervals.size, 0, "watcher stops once settling finishes");
+
+  // Reloading directly into the settling window also renders the settling state and polls until completion.
+  const hReload = harness({
+    startClock: Date.parse("2026-11-21T12:15:10Z"),
+    reviews: {
+      "req-1": {
+        ...withLink,
+        follow_up_links: [],
+        follow_up_outcomes: [],
+        follow_up_settling: true,
+        follow_up_settling_until_utc: settlingUntil,
+      },
+    },
+  });
+  const reloadSlot = hReload.reviewer.mount(hReload.bubble, message());
+  await settle();
+  assert.equal(byClass(reloadSlot, "access-review-follow-up-outcomes")[0].textContent, FOLLOW_UP_SETTLING_TEXT);
+  assert.equal(hReload.intervals.size, 1, "reloaded settling card starts follow-up watcher");
 });

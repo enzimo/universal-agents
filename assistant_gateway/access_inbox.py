@@ -586,7 +586,7 @@ class GatewayAccessInbox:
         choices = self.review_choices(request, web=True)
         labels = self._web_labels(request)
         rows = self.review_rows(requests, request)
-        follow_up_links, follow_up_outcomes = self._follow_ups.snapshot(
+        follow_ups = self._follow_ups.snapshot(
             request.request_id,
             viewer_id=viewer_id,
             now=requests.service.clock(),
@@ -632,8 +632,10 @@ class GatewayAccessInbox:
             "decided_at_utc": request.decided_at_utc.isoformat() if request.decided_at_utc else None,
             "can_decide": can_decide,
             "choices": [{"choice": c.value, "label": labels[c.value]} for c in choices] if can_decide else [],
-            "follow_up_links": follow_up_links,
-            "follow_up_outcomes": follow_up_outcomes,
+            "follow_up_links": follow_ups.links,
+            "follow_up_outcomes": follow_ups.outcomes,
+            "follow_up_settling": follow_ups.settling,
+            "follow_up_settling_until_utc": follow_ups.settling_until_utc,
         }
 
     @staticmethod

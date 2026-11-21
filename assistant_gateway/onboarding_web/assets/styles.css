@@ -3238,7 +3238,8 @@ body.is-theme-customizing {
   color: var(--ink);
 }
 
-.button.small {
+.message-transient-notice .button.small,
+.workflow-inline-card .button.small {
   min-width: 0;
   min-height: 30px;
   padding: 4px 12px;
@@ -3247,7 +3248,8 @@ body.is-theme-customizing {
   box-shadow: none;
 }
 
-:root[data-color-mode="dark"] .button.small,
+:root[data-color-mode="dark"] .message-transient-notice .button.small,
+:root[data-color-mode="dark"] .workflow-inline-card .button.small,
 :root[data-color-mode="dark"] .access-review-card .button.permission-choice-button {
   box-shadow: none;
 }
@@ -6644,20 +6646,25 @@ body.is-theme-customizing {
 }
 
 .access-review-details {
+  display: grid;
+  gap: 6px;
+}
+
+.access-review-card .access-review-details {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 4px 16px;
 }
 
-.access-review-details .permission-detail-row {
+.access-review-card .access-review-details .permission-detail-row {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 4px 6px;
 }
 
-.access-review-details .permission-detail-label::after {
+.access-review-card .access-review-details .permission-detail-label::after {
   content: ":";
 }
 
@@ -8310,7 +8317,8 @@ body.is-theme-customizing {
     width: 100%;
   }
 
-  .button.small {
+  .message-transient-notice .button.small,
+  .workflow-inline-card .button.small {
     width: auto;
   }
 

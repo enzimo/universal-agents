@@ -655,10 +655,87 @@ def test_proposal_follow_up_links_persist_across_reads_and_dismiss_as_each_form_
     after_second = asyncio.run(harness.inbox.review("owner-1", request.request_id))
     assert after_second is not None
     assert after_second["follow_up_links"] == []
+    assert after_second["follow_up_settling"] is False
+    assert after_second["follow_up_settling_until_utc"] is None
     assert after_second["follow_up_outcomes"] == [
         "The account link for Portainer is done.",
         "The form for the account link for Gitea was closed without linking anything.",
     ]
+
+
+def test_proposal_follow_up_review_reports_settling_during_watch_grace_until_late_completion(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A form submitted right before expiry stays settling during WATCH_GRACE until record_ended arrives (F3)."""
+
+    from datetime import timedelta
+    from assistant_gateway.application.account_links import AccountLinkForm
+    from assistant_gateway.application.broker_session_watch import WATCH_GRACE
+    from assistant_gateway.application.tool_setup import PageEnding
+    from assistant_gateway.proposal_follow_ups import PendingFollowUpLink, form_key, parse_utc
+
+    now_box = [harness.agents.service.clock()]
+    harness.inbox.requests().service.clock = lambda: now_box[0]
+    expires = now_box[0] + timedelta(minutes=15)
+
+    request = ask(harness)
+    watched: dict[str, Any] = {}
+
+    class Setups:
+        def after_proposal_links(
+            self, *, request_id: str, forms: list[Any], then: Any, on_form_ended: Any = None
+        ) -> None:
+            watched.update(request_id=request_id, forms=forms, then=then, on_form_ended=on_form_ended)
+
+    form_one = AccountLinkForm(
+        session_id="sess-grace",
+        form_url="https://broker.example/account-link/grace",
+        status_url="https://broker.example/status/grace",
+        expires_at_utc=expires.isoformat(),
+        tool_display_name="Portainer",
+    )
+
+    async def open_links(person_id: str, finished: Any) -> tuple[list[PendingFollowUpLink], list[Any]]:
+        entry = PendingFollowUpLink(
+            key=form_key(form_one, "http:portainer", "team"),
+            tool_id="http:portainer",
+            tool_name="Portainer",
+            label="Choose the credential for Portainer",
+            url=form_one.form_url,
+            expires_at_utc=parse_utc(form_one.expires_at_utc),
+        )
+        return [entry], [(form_one, "http:portainer", "team")]
+
+    harness.inbox.tool_setups = Setups()
+    monkeypatch.setattr(harness.inbox, "_open_account_links", open_links)
+
+    decided = asyncio.run(harness.inbox.decide("owner-1", request.request_id, "approve"))
+    assert len(decided["follow_up_links"]) == 1
+    assert decided["follow_up_settling"] is False
+
+    # Move clock 10s past expires_at_utc (inside WATCH_GRACE): link is hidden, settling=True, no premature expiry.
+    now_box[0] = expires + timedelta(seconds=10)
+    settling_view = asyncio.run(harness.inbox.review("owner-1", request.request_id))
+    assert settling_view is not None
+    assert settling_view["follow_up_links"] == []
+    assert settling_view["follow_up_outcomes"] == []
+    assert settling_view["follow_up_settling"] is True
+    assert settling_view["follow_up_settling_until_utc"] == (expires + WATCH_GRACE).isoformat()
+
+    # Watch confirms completion during grace: settling clears and completion outcome replaces it.
+    now_box[0] = expires + timedelta(seconds=20)
+    watched["on_form_ended"](
+        form_one,
+        "http:portainer",
+        "team",
+        PageEnding("completed", "The account link for Portainer is done."),
+    )
+    done_view = asyncio.run(harness.inbox.review("owner-1", request.request_id))
+    assert done_view is not None
+    assert done_view["follow_up_links"] == []
+    assert done_view["follow_up_settling"] is False
+    assert done_view["follow_up_settling_until_utc"] is None
+    assert done_view["follow_up_outcomes"] == ["The account link for Portainer is done."]
 
 
 def test_proposal_with_no_waiting_task_sends_resolution_once_and_still_watches_forms(

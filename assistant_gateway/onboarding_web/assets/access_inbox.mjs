@@ -71,6 +71,7 @@ export const INBOX_COUNTS_SOON_MS = ATTENTION_COUNT_SOON_MS;
 export const FOLLOW_UP_POLL_MS = 4000;
 export const FOLLOW_UP_EXPIRY_GRACE_MS = 90000;
 export const FOLLOW_UP_MAX_POLLS = 300;
+export const FOLLOW_UP_SETTLING_TEXT = "Checking whether the credential form finished…";
 export const MARK_READ_LABEL = "Mark as read";
 export const SELECT_PAGE_LABEL = "Select all on this page";
 export const MARK_SELECTED_LABEL = "Mark selected as read";
@@ -671,11 +672,32 @@ export function followUpOutcomes(review) {
   return outcomes.map(text).filter(Boolean);
 }
 
-/** Stable render signature for the currently visible follow-up links and outcomes of a review. */
+/** Whether an expired proposal follow-up form is still settling within its broker watch grace window. */
+export function isFollowUpSettling(review) {
+  return Boolean(review && review.follow_up_settling === true);
+}
+
+/** Whether a review still has open or settling proposal follow-up forms that need polling. */
+export function hasPendingFollowUp(review) {
+  return followUpLinks(review).length > 0 || isFollowUpSettling(review);
+}
+
+/** Watch targets for `createFollowUpWatcher`: active links plus a settling entry while in grace. */
+export function followUpWatchTargets(review, id = "") {
+  const targets = followUpLinks(review);
+  if (isFollowUpSettling(review)) {
+    const until = text(review && review.follow_up_settling_until_utc);
+    targets.push(until ? { key: `settling:${text(id)}`, expires_at_utc: until } : { key: `settling:${text(id)}` });
+  }
+  return targets;
+}
+
+/** Stable render signature for the currently visible follow-up links, outcomes, and settling state. */
 export function followUpSignature(review, nowMs = Date.now()) {
   const links = activeFollowUpLinks(review, nowMs).map(link => `${link.label}|${link.url}`).join("\n");
   const outcomes = followUpOutcomes(review).join("\n");
-  return `${links}::${outcomes}`;
+  const settling = isFollowUpSettling(review) ? "1" : "0";
+  return `${links}::${outcomes}::${settling}`;
 }
 
 /** Latest valid `expires_at_utc` timestamp (epoch ms) across `links`, or null when none have one. */
@@ -714,7 +736,7 @@ export function createFollowUpWatcher({
   const visible = () => (!document || !document.hidden) && (typeof isVisible !== "function" || isVisible());
 
   function pendingLinkSetKey(links) {
-    return links.map(link => `${link.url}|${link.expires_at_utc || ""}`).sort().join("\n");
+    return links.map(link => `${link.key || link.url || ""}|${link.expires_at_utc || ""}`).sort().join("\n");
   }
 
   function updateLinkSet(links) {
@@ -803,7 +825,9 @@ export function createFollowUpWatcher({
 }
 
 /** The card that replaces a request after a decision was saved in this page or loaded from storage. */
-export function renderDecidedCard(document, { id, title, outcome, links = [], outcomes = [], compact = false }) {
+export function renderDecidedCard(document, {
+  id, title, outcome, links = [], outcomes = [], settling = false, compact = false,
+}) {
   const card = element(document, "article",
     `permission-request-card access-review-card is-decided is-${outcome.tone}${compact ? " is-compact" : ""}`);
   card.setAttribute("data-request-id", id);
@@ -820,10 +844,11 @@ export function renderDecidedCard(document, { id, title, outcome, links = [], ou
     });
     card.append(group);
   }
-  if (outcomes.length) {
+  const statusLines = settling ? [...outcomes, FOLLOW_UP_SETTLING_TEXT] : outcomes;
+  if (statusLines.length) {
     const statusList = element(document, "div", "access-review-follow-up-outcomes");
     statusList.setAttribute("role", "status");
-    outcomes.forEach(line => statusList.append(element(document, "p", "access-review-follow-up-outcome", line)));
+    statusLines.forEach(line => statusList.append(element(document, "p", "access-review-follow-up-outcome", line)));
     card.append(statusList);
   }
   return card;
@@ -995,13 +1020,14 @@ export function createAccessInbox({
       outcome: entry.outcome,
       links: activeFollowUpLinks(entry.review, now()),
       outcomes: followUpOutcomes(entry.review),
+      settling: isFollowUpSettling(entry.review),
     };
   }
 
   function pendingOutcomeLinks() {
     const links = [];
-    state.outcomes.forEach(entry => {
-      if (!entry.followUpStop) links.push(...followUpLinks(entry.review));
+    state.outcomes.forEach((entry, id) => {
+      if (!entry.followUpStop) links.push(...followUpWatchTargets(entry.review, id));
     });
     return links;
   }
@@ -1021,7 +1047,7 @@ export function createAccessInbox({
     const version = state.version;
     const reads = [];
     state.outcomes.forEach((entry, id) => {
-      if (entry.followUpStop || !followUpLinks(entry.review).length || followUpReads.has(id)) return;
+      if (entry.followUpStop || !hasPendingFollowUp(entry.review) || followUpReads.has(id)) return;
       const pending = Promise.resolve()
         .then(() => get(`${ACCESS_INBOX_API}/requests/${encodeURIComponent(id)}`))
         .then(payload => {

@@ -395,9 +395,10 @@ When the proposal asked for an account link, the administrator who approved it
 chooses the credential straight away: the approved card shows a link such as
 **Choose the credential for Portainer**, and a notice with the same link waits
 in the Inbox, so a decision made with a chat button can be finished there. Only
-the administrator who approved sees that button; it stays on the card (also
-after a reload) until the form is used, closed or expires, and is then replaced
-by a short line saying what happened. The broker's form
+the administrator who approved sees that button; it stays on the Web Chat card
+across reloads (and the Inbox notice keeps the link in Settings) until the form
+is used, closed or expires, and is then replaced on the card by a short line
+saying what happened. The broker's form
 can also take a new credential in the same step
 ([Account links](#account-links)). TeamLead's task keeps waiting until those
 forms are used, closed or expired, and then learns which accounts were linked,
@@ -1214,9 +1215,10 @@ open it:
   asks for an account link, the form opens for that administrator: a link such
   as **Choose the credential for Portainer** on the approved card in chat and
   the Inbox, and in an Inbox notice. Only the administrator who approved sees
-  that button; it stays across reloads while the form is open and is replaced
-  by a short line saying what happened once the form is used, closed or
-  expires.
+  that button; it stays on the Web Chat card across reloads while the form is
+  open (while the Inbox notice keeps the link in Settings), and is replaced on
+  the card by a short line saying what happened once the form is used, closed
+  or expires.
 
 The form shows whose account it is, which agents use it (**Used by**: the agent
 types holding access to the tool for your work, or for anyone's work for a team

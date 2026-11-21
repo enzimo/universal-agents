@@ -3,11 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import {
-  ACCESS_REMOVED_LABEL, FOLLOW_UP_EXPIRY_GRACE_MS, LACKS_ACCESS_NOTE, NEEDS_DECISION, WAITING_FOR_APPROVER,
-  INBOX_COUNTS_PATH, NOTICES_READ_PATH, activeFollowUpLinks, createAccessInbox, createFollowUpWatcher, createInboxCounts,
-  decidableReviewCount, decisionOutcome, emptyNoticesText, followUpLinks, followUpOutcomes, inboxBadgeLabel,
-  inboxBadgeText, inboxCounts, inboxPath, localTimeFormatter, markedText, parseAccessRequestLink,
-  renderDecidedCard, renderNoticeRow, renderReviewCard, reviewCardModel, unreadNoticeCount,
+  ACCESS_REMOVED_LABEL, FOLLOW_UP_EXPIRY_GRACE_MS, FOLLOW_UP_SETTLING_TEXT, LACKS_ACCESS_NOTE, NEEDS_DECISION,
+  WAITING_FOR_APPROVER, INBOX_COUNTS_PATH, NOTICES_READ_PATH, activeFollowUpLinks, createAccessInbox,
+  createFollowUpWatcher, createInboxCounts, decidableReviewCount, decisionOutcome, emptyNoticesText, followUpLinks,
+  followUpOutcomes, inboxBadgeLabel, inboxBadgeText, inboxCounts, inboxPath, localTimeFormatter, markedText,
+  parseAccessRequestLink, renderDecidedCard, renderNoticeRow, renderReviewCard, reviewCardModel, unreadNoticeCount,
 } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
 
 // A small DOM stand-in. innerHTML throws, so any HTML parsing path fails the tests.
@@ -1076,4 +1076,105 @@ test("createFollowUpWatcher caps only the timer, keeps focus/visibilitychange re
   winListeners.get("focus").forEach(fn => fn());
   assert.equal(refreshes, beforeFocus + 1, "focus still reads after expiry + grace while links are listed");
   assert.equal(intervals.size, 0);
+});
+
+test("Settings Inbox keeps polling while a kept decided card is settling and shows final completion (F3)", async () => {
+  const document = fakeDocument();
+  const container = document.createElement("div");
+  document.body.append(container);
+  const window = {};
+  vm.runInNewContext(
+    readFileSync(new URL("../assistant_gateway/onboarding_web/assets/action_feedback.js", import.meta.url), "utf8"),
+    { window },
+  );
+  const gets = [], posts = [], intervals = new Map();
+  let timerId = 0;
+  let clock = Date.parse("2026-11-21T12:00:00Z");
+  const browser = {
+    document,
+    console: { warn() {} },
+    requestAnimationFrame: cb => cb(),
+    setTimeout: () => 0,
+    setInterval(cb, delay) { timerId += 1; intervals.set(timerId, { cb, delay }); return timerId; },
+    clearInterval(id) { intervals.delete(id); },
+  };
+  const inbox = createAccessInbox({
+    container, browser, formatTime,
+    now: () => clock,
+    isVisible: () => true,
+    get: path => new Promise((resolve, reject) => gets.push({ path, resolve, reject })),
+    post: (path, body) => new Promise((resolve, reject) => posts.push({ path, body, resolve, reject })),
+    beginAction: (button, busyLabel, group) => window.UAActionFeedback.begin(button, { busyLabel, group }),
+    failureMessage: (error, fallback) => (error && error.message) || fallback,
+  });
+  const requestList = container.children[1].lastChild;
+  const loadPromise = inbox.load();
+  await settle();
+  gets.at(-1).resolve({ status: "ok", reviews: [review()], notices: [] });
+  await loadPromise;
+  await settle();
+
+  byTag(requestList.children[0], "button")[0].click();
+  await settle();
+  posts[0].resolve({
+    status: "ok",
+    review: {
+      ...review(),
+      status: "granted",
+      can_decide: false,
+      choices: [],
+      follow_up_links: [{ label: "Choose the credential for Portainer", url: "https://broker.example/link/1", expires_at_utc: "2026-11-21T12:15:00+00:00" }],
+      follow_up_outcomes: [],
+      follow_up_settling: false,
+      follow_up_settling_until_utc: null,
+    },
+  });
+  await settle();
+  gets.at(-1).resolve({ status: "ok", reviews: [], notices: [] });
+  await settle();
+  assert.equal(intervals.size, 1);
+
+  // Expiry passes; server returns follow_up_settling: true inside WATCH_GRACE.
+  clock = Date.parse("2026-11-21T12:15:05Z");
+  [...intervals.values()][0].cb();
+  await settle();
+  gets.at(-1).resolve({
+    status: "ok",
+    review: {
+      ...review(),
+      status: "granted",
+      can_decide: false,
+      choices: [],
+      follow_up_links: [],
+      follow_up_outcomes: [],
+      follow_up_settling: true,
+      follow_up_settling_until_utc: "2026-11-21T12:16:00+00:00",
+    },
+  });
+  await settle();
+  assert.equal(byTag(requestList.children[0], "a").length, 0);
+  assert.match(requestList.children[0].textContent, new RegExp(FOLLOW_UP_SETTLING_TEXT.replace(".", "\\.")));
+  assert.equal(intervals.size, 1, "Inbox keeps polling while settling");
+
+  // Completion arrives during WATCH_GRACE.
+  clock = Date.parse("2026-11-21T12:15:10Z");
+  [...intervals.values()][0].cb();
+  await settle();
+  gets.at(-1).resolve({
+    status: "ok",
+    review: {
+      ...review(),
+      status: "granted",
+      can_decide: false,
+      choices: [],
+      follow_up_links: [],
+      follow_up_outcomes: ["The account link for Portainer is done."],
+      follow_up_settling: false,
+      follow_up_settling_until_utc: null,
+    },
+  });
+  await settle();
+  assert.match(requestList.children[0].textContent, /The account link for Portainer is done\./);
+  assert.doesNotMatch(requestList.children[0].textContent, new RegExp(FOLLOW_UP_SETTLING_TEXT.replace(".", "\\.")));
+  assert.equal(intervals.size, 0, "Inbox stops polling once final outcome arrives");
 });

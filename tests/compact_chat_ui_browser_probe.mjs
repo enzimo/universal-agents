@@ -76,6 +76,7 @@ export async function verifyCompactChatUi() {
   };
 
   const { renderReviewCard, renderDecidedCard } = await import("/access_inbox.mjs");
+  const { renderAgentCard, renderToolCard } = await import("/access_map.mjs");
   const { mountWorkflowCard } = await import("/workflow_card.mjs");
 
   const sampleReview = (canDecide) => ({
@@ -435,17 +436,102 @@ export async function verifyCompactChatUi() {
       checkTextContrast(inboxChoiceHelp, canvas, `${mode} Inbox choice help text`);
       checkTextContrast(inboxCard.querySelector(".access-review-keep-help"), canvas, `${mode} Inbox keep help text`);
 
-      // --- Checks for 7: Buttons outside .access-review-card keep 40px size ---
+      // --- Checks for 7: Buttons outside scope & Access map grid layout (F1 & F2) ---
       const outsideBtn = document.createElement("button");
       outsideBtn.type = "button";
       outsideBtn.className = "button primary permission-choice-button";
       outsideBtn.textContent = "Save";
-      stage.append(outsideBtn);
+      const outsideRetry = document.createElement("button");
+      outsideRetry.type = "button";
+      outsideRetry.className = "button secondary small";
+      outsideRetry.textContent = "Retry";
+      const outsideLoadEarlier = document.createElement("button");
+      outsideLoadEarlier.type = "button";
+      outsideLoadEarlier.className = "button secondary small history-load-earlier";
+      outsideLoadEarlier.textContent = "Load earlier messages";
+      const accessMapHost = document.createElement("section");
+      accessMapHost.className = "access-map-list";
+      Object.assign(accessMapHost.style, { width: "760px", display: "grid", gap: "12px" });
+      const accessMapAgent = renderAgentCard(document, {
+        key: "agent_type:TeamLead",
+        title: "TeamLead",
+        role_words: "Lead",
+        standard: [],
+        grants: [{
+          grant_id: "g-1",
+          target: "http:portainer",
+          target_name: "Portainer",
+          target_kind_words: "Web API",
+          level_words: "Read and change",
+          lifetime_words: "Until removed",
+          hand_on_words: "May hand on",
+          chain: ["You", "TeamLead"],
+          for_your_work: true,
+          can_revoke: false,
+        }],
+        blocks: [],
+        can_block: false,
+      });
+      const accessMapTool = renderToolCard(document, {
+        tool_id: "http:portainer",
+        display_name: "Portainer",
+        kind_words: "Web API",
+        account_words: "Team account",
+        tool_sets: ["docker"],
+        operations_words: "3 operations",
+        uses_accounts: false,
+        operation_count: 0,
+      });
+      accessMapHost.append(accessMapAgent, accessMapTool);
+      stage.append(outsideBtn, outsideRetry, outsideLoadEarlier, accessMapHost);
       await new Promise(resolve => requestAnimationFrame(resolve));
       const outsideHeight = outsideBtn.getBoundingClientRect().height;
       check(outsideHeight >= 40,
         `${mode} outside-scope .permission-choice-button shrunk to ${outsideHeight.toFixed(1)}px (expected >= 40px)`);
+      for (const [label, btn] of [["Retry", outsideRetry], ["Load earlier", outsideLoadEarlier]]) {
+        const h = btn.getBoundingClientRect().height;
+        check(h >= 40,
+          `${mode} outside-scope .button.small (${label}) shrunk to ${h.toFixed(1)}px (expected >= 40px)`);
+      }
+      // Verify CSS rules never use an unscoped .button.small selector (including @media (max-width: 620px)).
+      const visitRules = (rules) => {
+        for (const rule of [...rules]) {
+          if (rule.selectorText) {
+            for (const part of rule.selectorText.split(",").map(s => s.trim())) {
+              if (part.includes(".button.small")) {
+                check(part.includes(".message-transient-notice") || part.includes(".workflow-inline-card"),
+                  `${mode} found unscoped .button.small CSS selector: ${part}`);
+              }
+            }
+          }
+          if (rule.cssRules) visitRules(rule.cssRules);
+        }
+      };
+      for (const sheet of [...document.styleSheets]) {
+        try { if (sheet.cssRules) visitRules(sheet.cssRules); } catch { /* cross-origin */ }
+      }
+      // Verify Access map keeps its vertical two-column grid layout without inline colons (F1).
+      for (const [label, cardEl] of [["Access map agent card", accessMapAgent], ["Access map tool card", accessMapTool]]) {
+        const detailsEl = cardEl.querySelector(".access-review-details");
+        check(getComputedStyle(detailsEl).display === "grid",
+          `${mode} ${label} .access-review-details display is ${getComputedStyle(detailsEl).display} (expected grid)`);
+        const rows = [...detailsEl.querySelectorAll(".permission-detail-row")];
+        check(rows.length >= 2, `${mode} ${label} expected >= 2 detail rows`);
+        check(getComputedStyle(rows[0]).display === "grid",
+          `${mode} ${label} .permission-detail-row display is ${getComputedStyle(rows[0]).display} (expected grid)`);
+        check(rows[1].getBoundingClientRect().top >= rows[0].getBoundingClientRect().bottom - 1,
+          `${mode} ${label} detail rows laid out inline instead of stacked grid`);
+        const firstLabel = rows[0].querySelector(".permission-detail-label");
+        check(getComputedStyle(firstLabel, "::after").content === "none",
+          `${mode} ${label} detail label gained unexpected ::after colon (${getComputedStyle(firstLabel, "::after").content})`);
+      }
+      const inboxFirstLabel = inboxCard.querySelector(".access-review-details .permission-detail-label");
+      check(getComputedStyle(inboxFirstLabel, "::after").content === '":"',
+        `${mode} Settings Inbox .access-review-card detail label missing inline colon`);
       outsideBtn.remove();
+      outsideRetry.remove();
+      outsideLoadEarlier.remove();
+      accessMapHost.remove();
 
       // --- Checks for 8: Narrow viewport (340..520px) Keep / Hand-on checkbox alignment ---
       for (const narrowWidth of [340, 360, 420, 520]) {
