@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from custom_agents.delegated_work_runtime import delegated_tasks
+from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_agents.structured_llm_messages import (
     DelegateTaskAction,
     StructuredAgentTurnDecision,
@@ -205,11 +207,6 @@ async def test_live_tasks_spread_over_free_workers() -> None:
 # -- the controller against a real queue -------------------------------------------
 
 
-class _Runtime:
-    async def run(self, fn, *args, **kwargs):
-        return fn(*args, **kwargs)
-
-
 class _LocalRuntime:
     def __init__(self, agent_types):
         # A list, so a test can add a type while the team runs.
@@ -310,7 +307,9 @@ def controller_world(tmp_path, monkeypatch):
         name="lead",
         team_id=team_id,
         is_team_lead=True,
-        task_manager=SimpleNamespace(storage_settings=storage, operations_runtime=_Runtime()),
+        # The real lane: it copies every argument and result, so a call that hands it
+        # the agent itself fails here as in the runtime (2026-11-20: every pool pass).
+        task_manager=SimpleNamespace(storage_settings=storage, operations_runtime=TaskOperationRuntime()),
         _local_team_runtime=_LocalRuntime([WORKER_TYPE, "TeamArchitect"]),
         _ensured_worker_queues=set(),
         _pool_rate_limited_types=set(),
@@ -318,6 +317,8 @@ def controller_world(tmp_path, monkeypatch):
         _worker_pool_snapshot={},
         _logger=logging.getLogger("controller-test"),
         _ensure_nats_transport_adapter=lambda: adapter,
+        # Like the real agent's locks and running tasks: cannot be copied.
+        _uncopyable=threading.Lock(),
     )
     settings = WorkerPoolsConfig(scale_up_wait_seconds=0)
     monkeypatch.setattr(

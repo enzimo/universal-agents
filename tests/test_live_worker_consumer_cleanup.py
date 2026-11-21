@@ -232,6 +232,9 @@ async def test_live_a_lead_starts_on_a_work_stream_full_of_leftovers(tmp_path, m
                 await asyncio.sleep(0.2)
         assert not task.done() and lead._worker_ready, task.exception() if task.done() else "not ready"
         assert lead._local_schedule_task is not None and lead._scheduler_task is not None
+        # The real lead's pool passes run on its real operations lane, which copies
+        # arguments; a pass that handed it the agent failed every time (2026-11-20).
+        assert not _logged(caplog, "event=worker_pool_pass_failed")
 
         done = [r.getMessage() for r in caplog.records if "event=worker_consumer_cleanup_done" in r.getMessage()]
         assert len(done) == 1 and "sweep=start" in done[0], done

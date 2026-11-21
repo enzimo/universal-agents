@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -50,6 +51,7 @@ from custom_agents.agent_instantiation_service import (
 )
 from custom_agents.schedule_repair_guidance import SCHEDULE_LAUNCH_INTENT_CHANGED
 from custom_agents.schedule_worker_controller import ScheduleWorkerController
+from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_agents.worker_pool_controller import (
     HUNG_START_MARGIN,
     START_FAILURES_BEFORE_REVIEW,
@@ -523,12 +525,9 @@ def test_no_review_while_no_tasks_wait() -> None:
 
 
 def _controller(results: list) -> WorkerPoolController:
-    class _Runtime:
-        async def run(self, fn, *args, **kwargs):
-            return fn(*args, **kwargs)
-
-    agent = SimpleNamespace(team_id="team", task_manager=SimpleNamespace(operations_runtime=_Runtime()),
-                            _pool_rate_limited_types=set(), _pool_refusals_in_row={})
+    # The real lane, which copies arguments and results, and an agent that cannot be copied.
+    agent = SimpleNamespace(team_id="team", task_manager=SimpleNamespace(operations_runtime=TaskOperationRuntime()),
+                            _pool_rate_limited_types=set(), _pool_refusals_in_row={}, _uncopyable=threading.Lock())
     controller = WorkerPoolController(agent)
     controller._launch = lambda _agent_type: results.pop(0)
     return controller

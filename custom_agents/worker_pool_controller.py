@@ -629,7 +629,9 @@ class WorkerPoolController:
         from custom_agents.agent_instantiation_service import current_worker_limits
 
         now = datetime.now(timezone.utc)
-        limits = await self.runtime.run(current_worker_limits, self.agent)
+        # The agent goes inside the operation (partial), never as an argument: the
+        # lane copies arguments, and the agent holds locks and running tasks.
+        limits = await self.runtime.run(partial(current_worker_limits, self.agent))
         hung_before = hung_cutoff(now, limits.lease_seconds)
         launches = await self.runtime.run(AgentLaunchRepository(self.agent.task_manager.storage_settings).list, self.team_id)
         local = self.agent._local_team_runtime.local_workers(self.team_id)
