@@ -31,6 +31,8 @@ from datetime import datetime, timedelta, timezone
 import threading
 from typing import Any
 
+from assistant_gateway.application.tool_setup import account_link_form_expired
+
 
 FINISHED_RETENTION = timedelta(hours=1)
 MAX_TRACKED_REQUESTS = 500
@@ -69,11 +71,6 @@ def form_key(form: Any, tool_id: str, owner: str) -> str:
         return f"session:{session_id}"
     form_url = str(getattr(form, "form_url", "") or "").strip()
     return f"tool:{tool_id}:{owner}:{form_url}"
-
-
-def _expired_line(tool_name: str) -> str:
-    name = " ".join(str(tool_name or "").split()) or "this tool"
-    return f"The form for the account link for {name} expired before it was used."
 
 
 @dataclass(frozen=True)
@@ -186,18 +183,21 @@ class ProposalFollowUpTracker:
     @staticmethod
     def _expire_entry_locked(entry: _TrackedProposal, at: datetime) -> None:
         still_pending: list[PendingFollowUpLink] = []
-        changed = False
+        latest_expiry: datetime | None = None
         for item in entry.pending:
             if item.expires_at_utc is not None and item.expires_at_utc <= at:
-                entry.outcomes_by_key.setdefault(item.key, _expired_line(item.tool_name))
-                changed = True
+                entry.outcomes_by_key.setdefault(item.key, account_link_form_expired(item.tool_name))
+                if latest_expiry is None or item.expires_at_utc > latest_expiry:
+                    latest_expiry = item.expires_at_utc
             else:
                 still_pending.append(item)
-        if changed:
+        if latest_expiry is not None:
             entry.pending = still_pending
-            entry.updated_at_utc = at
+            entry.updated_at_utc = max(entry.updated_at_utc, latest_expiry)
 
     def _prune_locked(self, at: datetime) -> None:
+        for entry in self._entries.values():
+            self._expire_entry_locked(entry, at)
         cutoff = at - self._finished_retention
         stale_ids = [
             req_id
@@ -208,8 +208,6 @@ class ProposalFollowUpTracker:
             self._entries.pop(req_id, None)
         if len(self._entries) <= self._max_tracked:
             return
-        for entry in self._entries.values():
-            self._expire_entry_locked(entry, at)
         while len(self._entries) > self._max_tracked:
             finished = [
                 (entry.updated_at_utc, req_id)

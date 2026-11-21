@@ -50,7 +50,6 @@ team memberships in the gateway's identity store at each call.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 import functools
 import logging
 from pathlib import Path
@@ -91,7 +90,9 @@ from assistant_gateway.application.access_reviews import (
     WEB_REVIEW_CHOICE_LABELS,
 )
 from assistant_gateway.application.access_inbox_ports import NoticeQuery
+from assistant_gateway.application.account_links import AccountLinkForm
 from assistant_gateway.application.gateway_application import GatewayDeliveryEvent
+from assistant_gateway.application.tool_setup import PageEnding
 from assistant_gateway.domain.message_types import ACCESS_REVIEW_MESSAGE_TYPE
 from custom_messages.contracts.access_v2 import (
     AccessRequestKind,
@@ -788,13 +789,12 @@ class GatewayAccessInbox:
         requests, finished = await asyncio.to_thread(
             self._decide, person_id, request_id, choice, note, keep, tuple(kept_item_ids), keep_hours, hand_on
         )
-        links, forms = await self._open_account_links(person_id, finished)
-        if links:
-            self._register_follow_ups(
+        pending_links, forms = await self._open_account_links(person_id, finished)
+        if pending_links:
+            self._follow_ups.register(
                 finished.request_id,
-                person_id=person_id,
-                links=links,
-                forms=forms,
+                approver_person_id=person_id,
+                links=pending_links,
                 now=requests.service.clock(),
             )
         if forms and self.tool_setups is not None:
@@ -806,43 +806,12 @@ class GatewayAccessInbox:
             await self.send_resolution(finished)
         return self.review_view(requests, finished, can_decide=False, viewer_id=person_id)
 
-    @staticmethod
-    def _pending_follow_up_link(index: int, link: dict[str, str], form_entry: Any) -> PendingFollowUpLink:
-        prefix = "Choose the credential for "
-        has_form = isinstance(form_entry, tuple) and len(form_entry) >= 3
-        form = form_entry[0] if has_form else None
-        tool_id = str(form_entry[1]) if has_form else f"link-{index}"
-        owner = str(form_entry[2]) if has_form else ""
-        label = str(link.get("label") or "")
-        fallback_name = label[len(prefix) :] if label.startswith(prefix) else tool_id
-        tool_name = str(getattr(form, "tool_display_name", "") or "").strip() or fallback_name
-        expires_raw = link.get("expires_at_utc") or getattr(form, "expires_at_utc", None)
-        return PendingFollowUpLink(
-            key=form_key(form, tool_id, owner),
-            tool_id=tool_id,
-            tool_name=tool_name,
-            label=label,
-            url=str(link.get("url") or ""),
-            expires_at_utc=parse_utc(expires_raw),
-        )
-
-    def _register_follow_ups(
-        self,
-        request_id: str,
-        *,
-        person_id: str,
-        links: list[dict[str, str]],
-        forms: list[Any],
-        now: datetime,
-    ) -> None:
-        entries = [
-            self._pending_follow_up_link(index, link, forms[index] if index < len(forms) else None)
-            for index, link in enumerate(links)
-        ]
-        self._follow_ups.register(request_id, approver_person_id=person_id, links=entries, now=now)
-
     def _watch_proposal_links(
-        self, request: AccessRequestV1, forms: list[Any], *, hold_resolution: bool
+        self,
+        request: AccessRequestV1,
+        forms: list[tuple[AccountLinkForm, str, str]],
+        *,
+        hold_resolution: bool,
     ) -> None:
         """Watch an approved proposal's account link forms, dismissing each link as it ends.
 
@@ -854,8 +823,8 @@ class GatewayAccessInbox:
         if hold_resolution:
             self._held_resolutions.add(request.request_id)
 
-        def on_form_ended(form: Any, tool_id: str, owner: str, ending: Any) -> None:
-            message = str(getattr(ending, "closing", None) or getattr(ending, "message", "") or "").strip()
+        def on_form_ended(form: AccountLinkForm, tool_id: str, owner: str, ending: PageEnding) -> None:
+            message = (ending.closing or ending.message).strip()
             self._follow_ups.record_ended(
                 request.request_id,
                 key=form_key(form, tool_id, owner),
@@ -879,23 +848,23 @@ class GatewayAccessInbox:
 
     async def _open_account_links(
         self, person_id: str, request: AccessRequestV1
-    ) -> tuple[list[dict[str, str]], list[Any]]:
+    ) -> tuple[list[PendingFollowUpLink], list[tuple[AccountLinkForm, str, str]]]:
         """Credential forms an approved proposal asked for, opened for the approver.
 
-        Returns the links for the card and the opened forms, which the
-        gateway watches (``_hold_resolution``). The links are also left as a
-        notice, so a decision made in chat can be finished from the Inbox. A
-        form that cannot open is reported, never hidden: the tool is refused
-        with account_link_missing until someone links it (``/link`` opens the
-        form again).
+        Returns the tracked follow-up entries for the card and the opened forms,
+        which the gateway watches (``_watch_proposal_links``). The links are
+        also left as a notice, so a decision made in chat can be finished from
+        the Inbox. A form that cannot open is reported, never hidden: the tool
+        is refused with account_link_missing until someone links it (``/link``
+        opens the form again).
         """
 
         pending = self.proposals.account_links.pop(request.request_id, [])
         if not pending:
             return [], []
         person = self.person(person_id)
-        links: list[dict[str, str]] = []
-        forms: list[Any] = []
+        pending_links: list[PendingFollowUpLink] = []
+        forms: list[tuple[AccountLinkForm, str, str]] = []
         lines: list[str] = []
         for item in pending:
             tool = self.requests().service.catalog.tools.get(item.tool_id)
@@ -921,10 +890,16 @@ class GatewayAccessInbox:
                 )
                 lines.append(f"{name}: the form could not open ({exc}); use /link {item.tool_id}.")
                 continue
-            link: dict[str, str] = {"label": f"Choose the credential for {name}", "url": form.form_url}
-            if getattr(form, "expires_at_utc", None):
-                link["expires_at_utc"] = str(form.expires_at_utc)
-            links.append(link)
+            pending_links.append(
+                PendingFollowUpLink(
+                    key=form_key(form, item.tool_id, item.owner),
+                    tool_id=item.tool_id,
+                    tool_name=name,
+                    label=f"Choose the credential for {name}",
+                    url=form.form_url,
+                    expires_at_utc=parse_utc(form.expires_at_utc),
+                )
+            )
             forms.append((form, item.tool_id, item.owner))
             lines.append(f"{name}: {form.form_url}")
         await asyncio.to_thread(
@@ -939,7 +914,7 @@ class GatewayAccessInbox:
                 created_at_utc=self.requests().service.clock(),
             ),
         )
-        return links, forms
+        return pending_links, forms
 
     async def decide_review(self, person_id: str, request_id: str, choice: str) -> str:
         """Decide from a chat button (``AccessReviewDecider``); the new status."""

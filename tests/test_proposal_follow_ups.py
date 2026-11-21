@@ -146,6 +146,29 @@ def test_prune_drops_old_finished_entries_and_caps_total_entries() -> None:
     assert len(tracker.snapshot("req-live-2", viewer_id="admin-1", now=_ts(43))[0]) == 1
 
 
+def test_prune_expires_elapsed_never_viewed_links_even_under_capacity() -> None:
+    from assistant_gateway.application.tool_setup import account_link_form_expired
+
+    tracker = ProposalFollowUpTracker(finished_retention=timedelta(hours=1), max_tracked_requests=10)
+    tracker.register(
+        "req-never-viewed",
+        approver_person_id="admin-1",
+        links=[_link("session:s1", tool_name="Portainer", expires_at_utc=_ts(15))],
+        now=_ts(0),
+    )
+
+    # Just after expiry (before retention elapses): prune transitions the link to expired outcome.
+    tracker.prune(_ts(20))
+    assert tracker.snapshot("req-never-viewed", viewer_id="admin-1", now=_ts(20)) == (
+        [],
+        [account_link_form_expired("Portainer")],
+    )
+
+    # Hours after expiry (past retention): prune drops the entry completely.
+    tracker.prune(_ts(300))
+    assert tracker.snapshot("req-never-viewed", viewer_id="admin-1", now=_ts(300)) == ([], [])
+
+
 def test_parse_utc_and_form_key() -> None:
     assert parse_utc("2026-11-21T12:00:00Z") == _ts(0)
     assert parse_utc("not-a-timestamp") is None

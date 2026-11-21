@@ -275,6 +275,13 @@ def _form_expired(what: str) -> str:
     return f"The form for {what} expired before it was used."
 
 
+def account_link_form_expired(tool_name: str) -> str:
+    """Plain expiry sentence for one account-link form (shared with proposal follow-up tracking)."""
+
+    name = " ".join(str(tool_name or "").split()) or "this tool"
+    return _form_expired(_what(TOOL_SETUP_ACCOUNT_LINK, name))
+
+
 @dataclass(frozen=True)
 class ResendPass:
     """What one pass over the kept results did (``GatewayToolSetups.resend_kept_results``).
@@ -1517,6 +1524,7 @@ __all__ = [
     "REASON_OFFER_LIMIT",
     "REASON_PAGE_NOT_WATCHED",
     "SETUP_STATUS_WAITING",
+    "account_link_form_expired",
     "account_link_page_ending",
     "sign_in_page_ending",
 ]

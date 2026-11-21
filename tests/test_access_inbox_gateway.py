@@ -500,6 +500,9 @@ def test_a_decision_with_account_link_forms_wakes_the_agent_after_the_forms_end(
     not send the held message meanwhile.
     """
 
+    from assistant_gateway.application.account_links import AccountLinkForm
+    from assistant_gateway.proposal_follow_ups import PendingFollowUpLink, form_key, parse_utc
+
     request = ask(harness)
     watched: dict[str, Any] = {}
 
@@ -509,9 +512,24 @@ def test_a_decision_with_account_link_forms_wakes_the_agent_after_the_forms_end(
         ) -> None:
             watched.update(request_id=request_id, forms=forms, then=then, on_form_ended=on_form_ended)
 
-    async def open_links(person_id: str, finished: Any) -> tuple[list[dict[str, str]], list[Any]]:
-        link = {"label": "Choose the credential for Portainer", "url": "https://broker.example/account-link/s1"}
-        return [link], [("form", "http:portainer", "team")]
+    form = AccountLinkForm(
+        session_id="sess-portainer-1",
+        form_url="https://broker.example/account-link/s1",
+        status_url="https://broker.example/status/s1",
+        expires_at_utc="2099-01-01T00:15:00+00:00",
+        tool_display_name="Portainer",
+    )
+
+    async def open_links(person_id: str, finished: Any) -> tuple[list[PendingFollowUpLink], list[Any]]:
+        entry = PendingFollowUpLink(
+            key=form_key(form, "http:portainer", "team"),
+            tool_id="http:portainer",
+            tool_name="Portainer",
+            label="Choose the credential for Portainer",
+            url=form.form_url,
+            expires_at_utc=parse_utc(form.expires_at_utc),
+        )
+        return [entry], [(form, "http:portainer", "team")]
 
     harness.inbox.tool_setups = Setups()
     monkeypatch.setattr(harness.inbox, "_open_account_links", open_links)
@@ -539,6 +557,7 @@ def test_proposal_follow_up_links_persist_across_reads_and_dismiss_as_each_form_
 
     from assistant_gateway.application.account_links import AccountLinkForm
     from assistant_gateway.application.tool_setup import PageEnding
+    from assistant_gateway.proposal_follow_ups import PendingFollowUpLink, form_key, parse_utc
 
     member = PersonPrincipal("member-1", TEAM, ("member",))
     request = harness.agents.submit(
@@ -573,20 +592,26 @@ def test_proposal_follow_up_links_persist_across_reads_and_dismiss_as_each_form_
         tool_display_name="Gitea",
     )
 
-    async def open_links(person_id: str, finished: Any) -> tuple[list[dict[str, str]], list[Any]]:
-        links = [
-            {
-                "label": "Choose the credential for Portainer",
-                "url": form_one.form_url,
-                "expires_at_utc": form_one.expires_at_utc,
-            },
-            {
-                "label": "Choose the credential for Gitea",
-                "url": form_two.form_url,
-                "expires_at_utc": form_two.expires_at_utc,
-            },
+    async def open_links(person_id: str, finished: Any) -> tuple[list[PendingFollowUpLink], list[Any]]:
+        entries = [
+            PendingFollowUpLink(
+                key=form_key(form_one, "http:portainer", "team"),
+                tool_id="http:portainer",
+                tool_name="Portainer",
+                label="Choose the credential for Portainer",
+                url=form_one.form_url,
+                expires_at_utc=parse_utc(form_one.expires_at_utc),
+            ),
+            PendingFollowUpLink(
+                key=form_key(form_two, "http:gitea", "team"),
+                tool_id="http:gitea",
+                tool_name="Gitea",
+                label="Choose the credential for Gitea",
+                url=form_two.form_url,
+                expires_at_utc=parse_utc(form_two.expires_at_utc),
+            ),
         ]
-        return links, [(form_one, "http:portainer", "team"), (form_two, "http:gitea", "team")]
+        return entries, [(form_one, "http:portainer", "team"), (form_two, "http:gitea", "team")]
 
     harness.inbox.tool_setups = Setups()
     monkeypatch.setattr(harness.inbox, "_open_account_links", open_links)
@@ -634,6 +659,104 @@ def test_proposal_follow_up_links_persist_across_reads_and_dismiss_as_each_form_
         "The account link for Portainer is done.",
         "The form for the account link for Gitea was closed without linking anything.",
     ]
+
+
+def test_proposal_with_no_waiting_task_sends_resolution_once_and_still_watches_forms(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When requester_agent_id is None, decide sends resolution once immediately and still watches forms (C07)."""
+
+    from assistant_gateway.application.account_links import AccountLinkForm
+    from assistant_gateway.application.tool_setup import PageEnding
+    from assistant_gateway.proposal_follow_ups import PendingFollowUpLink, form_key, parse_utc
+    from custom_messages.contracts.access_v2 import AccessRequestKind, AccessRequestV1, SubjectKind, SubjectRefV1
+
+    request = AccessRequestV1(
+        request_id="access_req_no_agent",
+        team_id=TEAM,
+        kind=AccessRequestKind.ACCESS,
+        requester_agent_id=None,
+        person_id="owner-1",
+        requested_by_person_id="owner-1",
+        subject=SubjectRefV1(kind=SubjectKind.USER, id="owner-1"),
+        target=X_POSTS,
+        level=AccessLevel.WRITE,
+        reason="Approve account links without a waiting agent",
+        created_at_utc=harness.agents.service.clock(),
+    )
+    harness.agents.service.store.create_request(request)
+
+    watched: dict[str, Any] = {}
+    resolutions_sent: list[str] = []
+    real_send = harness.inbox.send_resolution
+
+    async def counted_send(req: AccessRequestV1) -> bool:
+        resolutions_sent.append(req.request_id)
+        return await real_send(req)
+
+    class Setups:
+        def after_proposal_links(
+            self, *, request_id: str, forms: list[Any], then: Any, on_form_ended: Any = None
+        ) -> None:
+            watched.update(request_id=request_id, forms=forms, then=then, on_form_ended=on_form_ended)
+
+    form_one = AccountLinkForm(
+        session_id="sess-no-agent-1",
+        form_url="https://broker.example/account-link/na1",
+        status_url="https://broker.example/status/na1",
+        expires_at_utc="2099-01-01T00:15:00+00:00",
+        tool_display_name="Portainer",
+    )
+    form_two = AccountLinkForm(
+        session_id="sess-no-agent-2",
+        form_url="https://broker.example/account-link/na2",
+        status_url="https://broker.example/status/na2",
+        expires_at_utc="2099-01-01T00:15:00+00:00",
+        tool_display_name="Gitea",
+    )
+
+    async def open_links(person_id: str, finished: Any) -> tuple[list[PendingFollowUpLink], list[Any]]:
+        entries = [
+            PendingFollowUpLink(
+                key=form_key(form_one, "http:portainer", "team"),
+                tool_id="http:portainer",
+                tool_name="Portainer",
+                label="Choose the credential for Portainer",
+                url=form_one.form_url,
+                expires_at_utc=parse_utc(form_one.expires_at_utc),
+            ),
+            PendingFollowUpLink(
+                key=form_key(form_two, "http:gitea", "team"),
+                tool_id="http:gitea",
+                tool_name="Gitea",
+                label="Choose the credential for Gitea",
+                url=form_two.form_url,
+                expires_at_utc=parse_utc(form_two.expires_at_utc),
+            ),
+        ]
+        return entries, [(form_one, "http:portainer", "team"), (form_two, "http:gitea", "team")]
+
+    harness.inbox.tool_setups = Setups()
+    monkeypatch.setattr(harness.inbox, "_open_account_links", open_links)
+    monkeypatch.setattr(harness.inbox, "send_resolution", counted_send)
+
+    decided = asyncio.run(harness.inbox.decide("owner-1", request.request_id, "approve"))
+    assert len(decided["follow_up_links"]) == 2
+    assert resolutions_sent == [request.request_id], "resolution sent once immediately when no task waits"
+    assert watched["request_id"] == request.request_id and callable(watched["on_form_ended"])
+
+    # Releasing after all forms end must not send a second resolution.
+    asyncio.run(watched["then"]())
+    assert resolutions_sent == [request.request_id]
+
+    # Per-form endings still dismiss links on review().
+    watched["on_form_ended"](
+        form_one, "http:portainer", "team", PageEnding("completed", "The account link for Portainer is done.")
+    )
+    mid = asyncio.run(harness.inbox.review("owner-1", request.request_id))
+    assert mid is not None
+    assert [link["label"] for link in mid["follow_up_links"]] == ["Choose the credential for Gitea"]
+    assert mid["follow_up_outcomes"] == ["The account link for Portainer is done."]
 
 
 def _as_saved_before_work_ids(tmp_path: Path, request_id: str, *, status: str) -> None:

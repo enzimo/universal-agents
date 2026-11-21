@@ -653,6 +653,72 @@ async def test_after_proposal_links_watch_failure_clears_link_and_waits_for_sibl
     assert [entry[0] for entry in recorded] == ["http:portainer", "cli:x"]
 
 
+@pytest.mark.asyncio
+async def test_inbox_follow_up_links_dismiss_through_real_tool_setups_watch(setup_gateway) -> None:
+    """End-to-end: GatewayAccessInbox + real GatewayToolSetups.after_proposal_links + FakeBroker (C07)."""
+
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        AccessRequestKind,
+        AccessRequestV1,
+        ProposedAccountLinkV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
+
+    gateway, broker, _transport = setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    inbox = gateway.access_inbox
+    requests = inbox.requests()
+    request = AccessRequestV1(
+        request_id="access_req_e2e_follow_ups",
+        team_id=gateway.config.manager.team_id,
+        kind=AccessRequestKind.ACCESS,
+        requester_agent_id=None,
+        person_id=owner,
+        requested_by_person_id=owner,
+        subject=SubjectRefV1(kind=SubjectKind.USER, id=owner),
+        target=TargetRefV1(kind=TargetKind.TOOL, id="cli:x"),
+        level=AccessLevel.WRITE,
+        reason="Approve account links end-to-end",
+        created_at_utc=requests.service.clock(),
+    )
+    requests.service.store.create_request(request)
+    inbox.proposals.account_links[request.request_id] = [
+        ProposedAccountLinkV1(tool_id="http:portainer", owner="team", purpose="Restart the stack"),
+        ProposedAccountLinkV1(tool_id="cli:x", owner="team", purpose="Post updates"),
+    ]
+
+    decided = await inbox.decide(owner, request.request_id, "approve")
+    assert len(decided["follow_up_links"]) == 2
+    assert decided["follow_up_outcomes"] == []
+
+    # Broker opened two real sessions; complete the first and check review() drops only that link.
+    broker.complete("link_session_1")
+    await _until(
+        lambda: len(inbox._follow_ups.snapshot(request.request_id, viewer_id=owner, now=requests.service.clock())[0])
+        == 1
+    )
+    after_first = await inbox.review(owner, request.request_id)
+    assert after_first is not None
+    assert len(after_first["follow_up_links"]) == 1
+    assert "X" in after_first["follow_up_links"][0]["label"]
+    assert after_first["follow_up_outcomes"] == ["The account link for Portainer is done."]
+
+    # Decline the second form and check both links clear with both plain outcomes kept.
+    broker.decline("link_session_2")
+    await _settle(gateway)
+    after_second = await inbox.review(owner, request.request_id)
+    assert after_second is not None
+    assert after_second["follow_up_links"] == []
+    assert after_second["follow_up_outcomes"] == [
+        "The account link for Portainer is done.",
+        "The form for the account link for X (xurl) was closed without linking anything.",
+    ]
+
+
 # Steps done outside Universal Agents (set_up_tools external steps) ----------------------
 
 
