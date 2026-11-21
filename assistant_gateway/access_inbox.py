@@ -50,6 +50,7 @@ team memberships in the gateway's identity store at each call.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import functools
 import logging
 from pathlib import Path
@@ -77,6 +78,12 @@ from assistant_gateway.access_choice_effects import ChoiceWords, chat_effect_lin
 from assistant_gateway.access_map import LIFETIME_WORDS as MAP_LIFETIME_WORDS, GatewayAccessMap
 from assistant_gateway.access_setup import MembershipRoles
 from assistant_gateway.personal_setup import GatewayPersonalSetup, PersonalSetupSteps
+from assistant_gateway.proposal_follow_ups import (
+    PendingFollowUpLink,
+    ProposalFollowUpTracker,
+    form_key,
+    parse_utc,
+)
 from assistant_gateway.application.access_reviews import (
     ACCESS_REVIEW_CHOICE_LABELS,
     WEB_CHANGE_CHOICE_LABELS,
@@ -258,6 +265,9 @@ class GatewayAccessInbox:
         # link forms end, so the waiting task resumes with the links made.
         # Memory only: after a restart the maintenance loop sends the notice.
         self._held_resolutions: set[str] = set()
+        # Live proposal follow-up account-link forms and recent outcomes,
+        # scoped strictly to the approving person.
+        self._follow_ups = ProposalFollowUpTracker()
         self.access_map = GatewayAccessMap(
             requests=self.requests,
             person=self.person,
@@ -575,6 +585,11 @@ class GatewayAccessInbox:
         choices = self.review_choices(request, web=True)
         labels = self._web_labels(request)
         rows = self.review_rows(requests, request)
+        follow_up_links, follow_up_outcomes = self._follow_ups.snapshot(
+            request.request_id,
+            viewer_id=viewer_id,
+            now=requests.service.clock(),
+        )
         return {
             "request_id": request.request_id,
             "kind": request.kind.value,
@@ -616,6 +631,8 @@ class GatewayAccessInbox:
             "decided_at_utc": request.decided_at_utc.isoformat() if request.decided_at_utc else None,
             "can_decide": can_decide,
             "choices": [{"choice": c.value, "label": labels[c.value]} for c in choices] if can_decide else [],
+            "follow_up_links": follow_up_links,
+            "follow_up_outcomes": follow_up_outcomes,
         }
 
     @staticmethod
@@ -772,31 +789,93 @@ class GatewayAccessInbox:
             self._decide, person_id, request_id, choice, note, keep, tuple(kept_item_ids), keep_hours, hand_on
         )
         links, forms = await self._open_account_links(person_id, finished)
-        if forms and finished.requester_agent_id is not None:
-            self._hold_resolution(finished, forms)
+        if links:
+            self._register_follow_ups(
+                finished.request_id,
+                person_id=person_id,
+                links=links,
+                forms=forms,
+                now=requests.service.clock(),
+            )
+        if forms and self.tool_setups is not None:
+            hold_resolution = finished.requester_agent_id is not None
+            self._watch_proposal_links(finished, forms, hold_resolution=hold_resolution)
+            if not hold_resolution:
+                await self.send_resolution(finished)
         else:
             await self.send_resolution(finished)
-        view = self.review_view(requests, finished, can_decide=False, viewer_id=person_id)
-        view["follow_up_links"] = links
-        return view
+        return self.review_view(requests, finished, can_decide=False, viewer_id=person_id)
 
-    def _hold_resolution(self, request: AccessRequestV1, forms: list[Any]) -> None:
-        """Tell the waiting agent only after the proposal's account link forms end.
+    @staticmethod
+    def _pending_follow_up_link(index: int, link: dict[str, str], form_entry: Any) -> PendingFollowUpLink:
+        prefix = "Choose the credential for "
+        has_form = isinstance(form_entry, tuple) and len(form_entry) >= 3
+        form = form_entry[0] if has_form else None
+        tool_id = str(form_entry[1]) if has_form else f"link-{index}"
+        owner = str(form_entry[2]) if has_form else ""
+        label = str(link.get("label") or "")
+        fallback_name = label[len(prefix) :] if label.startswith(prefix) else tool_id
+        tool_name = str(getattr(form, "tool_display_name", "") or "").strip() or fallback_name
+        expires_raw = link.get("expires_at_utc") or getattr(form, "expires_at_utc", None)
+        return PendingFollowUpLink(
+            key=form_key(form, tool_id, owner),
+            tool_id=tool_id,
+            tool_name=tool_name,
+            label=label,
+            url=str(link.get("url") or ""),
+            expires_at_utc=parse_utc(expires_raw),
+        )
 
-        The task paused inside ``propose_access_change``; resuming it once the
-        approver used (or closed, or let expire) each form lets the tool
-        report which links exist, so TeamLead does not call a tool that is
-        still refused for a missing account link.
+    def _register_follow_ups(
+        self,
+        request_id: str,
+        *,
+        person_id: str,
+        links: list[dict[str, str]],
+        forms: list[Any],
+        now: datetime,
+    ) -> None:
+        entries = [
+            self._pending_follow_up_link(index, link, forms[index] if index < len(forms) else None)
+            for index, link in enumerate(links)
+        ]
+        self._follow_ups.register(request_id, approver_person_id=person_id, links=entries, now=now)
+
+    def _watch_proposal_links(
+        self, request: AccessRequestV1, forms: list[Any], *, hold_resolution: bool
+    ) -> None:
+        """Watch an approved proposal's account link forms, dismissing each link as it ends.
+
+        When ``hold_resolution`` is true (a task waits inside
+        ``propose_access_change``), the decision notice is also held until
+        every form ends so TeamLead resumes with the links already made.
         """
 
-        self._held_resolutions.add(request.request_id)
+        if hold_resolution:
+            self._held_resolutions.add(request.request_id)
+
+        def on_form_ended(form: Any, tool_id: str, owner: str, ending: Any) -> None:
+            message = str(getattr(ending, "closing", None) or getattr(ending, "message", "") or "").strip()
+            self._follow_ups.record_ended(
+                request.request_id,
+                key=form_key(form, tool_id, owner),
+                message=message,
+                now=self.requests().service.clock(),
+            )
 
         async def release() -> None:
+            if not hold_resolution:
+                return
             self._held_resolutions.discard(request.request_id)
             current = await asyncio.to_thread(self.requests().service.store.get_request, request.request_id)
             await self.send_resolution(current or request)
 
-        self.tool_setups.after_proposal_links(request_id=request.request_id, forms=forms, then=release)
+        self.tool_setups.after_proposal_links(
+            request_id=request.request_id,
+            forms=forms,
+            then=release,
+            on_form_ended=on_form_ended,
+        )
 
     async def _open_account_links(
         self, person_id: str, request: AccessRequestV1
@@ -842,7 +921,10 @@ class GatewayAccessInbox:
                 )
                 lines.append(f"{name}: the form could not open ({exc}); use /link {item.tool_id}.")
                 continue
-            links.append({"label": f"Choose the credential for {name}", "url": form.form_url})
+            link: dict[str, str] = {"label": f"Choose the credential for {name}", "url": form.form_url}
+            if getattr(form, "expires_at_utc", None):
+                link["expires_at_utc"] = str(form.expires_at_utc)
+            links.append(link)
             forms.append((form, item.tool_id, item.owner))
             lines.append(f"{name}: {form.form_url}")
         await asyncio.to_thread(
@@ -1031,6 +1113,7 @@ class GatewayAccessInbox:
     async def run_once(self) -> None:
         requests = self.requests()
         store = requests.service.store
+        self._follow_ups.prune(requests.service.clock())
         try:
             await asyncio.to_thread(requests.recover_decisions)
         except Exception:  # noqa: BLE001 - an unavailable store must not skip other Inbox work

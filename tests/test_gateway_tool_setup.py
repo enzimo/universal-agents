@@ -520,6 +520,139 @@ async def test_an_approved_proposals_forms_are_watched_until_they_end(setup_gate
     await asyncio.wait_for(released.wait(), timeout=5)
 
 
+@pytest.mark.asyncio
+async def test_after_proposal_links_reports_each_form_ending_as_it_finishes(setup_gateway) -> None:
+    gateway, broker, _transport = setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    roles = gateway._request_context_service.team_roles(owner)
+    setups = gateway._credential_workflow.tool_setups
+    released = asyncio.Event()
+    first_ended = asyncio.Event()
+    recorded: list[tuple[str, str, str]] = []
+
+    async def release() -> None:
+        released.set()
+
+    async def on_form_ended(form, tool_id: str, owner_kind: str, ending) -> None:
+        recorded.append((form.session_id, tool_id, ending.status))
+        if form.session_id == form_one.session_id:
+            first_ended.set()
+
+    form_one = await setups.open_proposal_link(
+        request_id="access_req_2:http:portainer",
+        person_id=owner,
+        person_roles=roles,
+        tool_id="http:portainer",
+        owner="team",
+        reason="Restart the stack",
+    )
+    form_two = await setups.open_proposal_link(
+        request_id="access_req_2:cli:x",
+        person_id=owner,
+        person_roles=roles,
+        tool_id="cli:x",
+        owner="team",
+        reason="Post updates",
+    )
+    setups.after_proposal_links(
+        request_id="access_req_2",
+        forms=[(form_one, "http:portainer", "team"), (form_two, "cli:x", "team")],
+        then=release,
+        on_form_ended=on_form_ended,
+    )
+
+    broker.complete(form_one.session_id)
+    await asyncio.wait_for(first_ended.wait(), timeout=5)
+    assert recorded == [(form_one.session_id, "http:portainer", "completed")]
+    assert not released.is_set(), "the agent still waits for the second form"
+
+    broker.complete(form_two.session_id)
+    await asyncio.wait_for(released.wait(), timeout=5)
+    assert len(recorded) == 2
+
+
+@pytest.mark.asyncio
+async def test_after_proposal_links_watch_failure_clears_link_and_waits_for_siblings(
+    setup_gateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A watch that raises still reports an unconfirmed ending and does not wake the agent early."""
+
+    from assistant_gateway.application.tool_setup import REASON_PAGE_UNCONFIRMED, _OpenedPage
+
+    gateway, broker, _transport = setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    roles = gateway._request_context_service.team_roles(owner)
+    setups = gateway._credential_workflow.tool_setups
+    released = asyncio.Event()
+    failed_recorded = asyncio.Event()
+    recorded: list[tuple[str, str, str | None, str]] = []
+
+    async def release() -> None:
+        released.set()
+
+    def on_form_ended(form, tool_id: str, owner_kind: str, ending) -> None:
+        recorded.append((tool_id, ending.status, ending.reason_code, ending.message))
+        if tool_id == "http:portainer":
+            failed_recorded.set()
+
+    form_one = await setups.open_proposal_link(
+        request_id="access_req_3:http:portainer",
+        person_id=owner,
+        person_roles=roles,
+        tool_id="http:portainer",
+        owner="team",
+        reason="Restart the stack",
+    )
+    form_two = await setups.open_proposal_link(
+        request_id="access_req_3:cli:x",
+        person_id=owner,
+        person_roles=roles,
+        tool_id="cli:x",
+        owner="team",
+        reason="Post updates",
+    )
+
+    real_page = setups._account_link_page
+
+    def patched_page(tool_id: str, owner_kind: str, form):
+        if tool_id == "http:portainer":
+            async def boom():
+                raise ValueError("malformed expires_at_utc")
+
+            return _OpenedPage(
+                label="Choose the team's account for Portainer",
+                receipt="opened",
+                url=form.form_url,
+                expires_at_utc=form.expires_at_utc,
+                watch=boom,
+            )
+        return real_page(tool_id, owner_kind, form)
+
+    monkeypatch.setattr(setups, "_account_link_page", patched_page)
+    setups.after_proposal_links(
+        request_id="access_req_3",
+        forms=[(form_one, "http:portainer", "team"), (form_two, "cli:x", "team")],
+        then=release,
+        on_form_ended=on_form_ended,
+    )
+
+    await asyncio.wait_for(failed_recorded.wait(), timeout=5)
+    assert recorded == [
+        (
+            "http:portainer",
+            "unavailable",
+            REASON_PAGE_UNCONFIRMED,
+            "Nobody could confirm whether the account link for Portainer finished.",
+        )
+    ]
+    await asyncio.sleep(0.05)
+    assert not released.is_set(), "then() must wait until the sibling form finishes"
+
+    broker.complete(form_two.session_id)
+    await asyncio.wait_for(released.wait(), timeout=5)
+    assert [entry[0] for entry in recorded] == ["http:portainer", "cli:x"]
+
+
 # Steps done outside Universal Agents (set_up_tools external steps) ----------------------
 
 

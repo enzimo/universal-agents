@@ -504,8 +504,10 @@ def test_a_decision_with_account_link_forms_wakes_the_agent_after_the_forms_end(
     watched: dict[str, Any] = {}
 
     class Setups:
-        def after_proposal_links(self, *, request_id: str, forms: list[Any], then: Any) -> None:
-            watched.update(request_id=request_id, forms=forms, then=then)
+        def after_proposal_links(
+            self, *, request_id: str, forms: list[Any], then: Any, on_form_ended: Any = None
+        ) -> None:
+            watched.update(request_id=request_id, forms=forms, then=then, on_form_ended=on_form_ended)
 
     async def open_links(person_id: str, finished: Any) -> tuple[list[dict[str, str]], list[Any]]:
         link = {"label": "Choose the credential for Portainer", "url": "https://broker.example/account-link/s1"}
@@ -528,6 +530,110 @@ def test_a_decision_with_account_link_forms_wakes_the_agent_after_the_forms_end(
         (route, env) for route, env in harness.manager.published if isinstance(env.msg_content, AccessRequestResolvedV1)
     ]
     assert route == WORKER.agent_id and envelope.msg_content.request_id == request.request_id
+
+
+def test_proposal_follow_up_links_persist_across_reads_and_dismiss_as_each_form_ends(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up links survive reloads for the approver only and clear as each broker form ends."""
+
+    from assistant_gateway.application.account_links import AccountLinkForm
+    from assistant_gateway.application.tool_setup import PageEnding
+
+    member = PersonPrincipal("member-1", TEAM, ("member",))
+    request = harness.agents.submit(
+        requester=WORKER,
+        person=member,
+        target=X_POSTS,
+        level=AccessLevel.WRITE,
+        reason="Post the release update",
+        task_id="task-1",
+        conversation_id="conv-2",
+    ).request
+    watched: dict[str, Any] = {}
+
+    class Setups:
+        def after_proposal_links(
+            self, *, request_id: str, forms: list[Any], then: Any, on_form_ended: Any = None
+        ) -> None:
+            watched.update(request_id=request_id, forms=forms, then=then, on_form_ended=on_form_ended)
+
+    form_one = AccountLinkForm(
+        session_id="sess-portainer",
+        form_url="https://broker.example/account-link/s1",
+        status_url="https://broker.example/status/s1",
+        expires_at_utc="2099-01-01T00:15:00+00:00",
+        tool_display_name="Portainer",
+    )
+    form_two = AccountLinkForm(
+        session_id="sess-gitea",
+        form_url="https://broker.example/account-link/s2",
+        status_url="https://broker.example/status/s2",
+        expires_at_utc="2099-01-01T00:15:00+00:00",
+        tool_display_name="Gitea",
+    )
+
+    async def open_links(person_id: str, finished: Any) -> tuple[list[dict[str, str]], list[Any]]:
+        links = [
+            {
+                "label": "Choose the credential for Portainer",
+                "url": form_one.form_url,
+                "expires_at_utc": form_one.expires_at_utc,
+            },
+            {
+                "label": "Choose the credential for Gitea",
+                "url": form_two.form_url,
+                "expires_at_utc": form_two.expires_at_utc,
+            },
+        ]
+        return links, [(form_one, "http:portainer", "team"), (form_two, "http:gitea", "team")]
+
+    harness.inbox.tool_setups = Setups()
+    monkeypatch.setattr(harness.inbox, "_open_account_links", open_links)
+
+    decided = asyncio.run(harness.inbox.decide("owner-1", request.request_id, "approve"))
+    assert [link["label"] for link in decided["follow_up_links"]] == [
+        "Choose the credential for Portainer",
+        "Choose the credential for Gitea",
+    ]
+    assert decided["follow_up_links"][0]["expires_at_utc"] == "2099-01-01T00:15:00+00:00"
+    assert decided["follow_up_outcomes"] == []
+
+    # Reloading review_view keeps both links for the approver, and hides them from everyone else.
+    approver_view = asyncio.run(harness.inbox.review("owner-1", request.request_id))
+    assert approver_view is not None
+    assert len(approver_view["follow_up_links"]) == 2
+    other_view = asyncio.run(harness.inbox.review("member-1", request.request_id))
+    assert other_view is not None
+    assert other_view["follow_up_links"] == []
+    assert other_view["follow_up_outcomes"] == []
+
+    # First form finishes: its link disappears immediately while the second remains active.
+    watched["on_form_ended"](
+        form_one,
+        "http:portainer",
+        "team",
+        PageEnding("completed", "The account link for Portainer is done."),
+    )
+    after_first = asyncio.run(harness.inbox.review("owner-1", request.request_id))
+    assert after_first is not None
+    assert [link["label"] for link in after_first["follow_up_links"]] == ["Choose the credential for Gitea"]
+    assert after_first["follow_up_outcomes"] == ["The account link for Portainer is done."]
+
+    # Second form finishes: all links are cleared and both plain outcomes remain visible to the approver.
+    watched["on_form_ended"](
+        form_two,
+        "http:gitea",
+        "team",
+        PageEnding("declined", "The form for the account link for Gitea was closed without linking anything."),
+    )
+    after_second = asyncio.run(harness.inbox.review("owner-1", request.request_id))
+    assert after_second is not None
+    assert after_second["follow_up_links"] == []
+    assert after_second["follow_up_outcomes"] == [
+        "The account link for Portainer is done.",
+        "The form for the account link for Gitea was closed without linking anything.",
+    ]
 
 
 def _as_saved_before_work_ids(tmp_path: Path, request_id: str, *, status: str) -> None:
