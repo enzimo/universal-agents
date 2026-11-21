@@ -3948,6 +3948,11 @@
     },
     "SecurityLayerSettings": {
       "properties": {
+        "api_request_user_agent": {
+          "default": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
+          "title": "Api Request User Agent",
+          "type": "string"
+        },
         "bitwarden_server_url": {
           "anyOf": [
             {

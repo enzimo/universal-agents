@@ -1602,6 +1602,215 @@ def test_api_request_uses_the_catalog_of_the_links_owner(
     assert dict(sent[0].header_items())["X-api-key"] == expected
 
 
+def test_api_request_sends_default_browser_user_agent_when_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from secure_tool_broker.defaults import DEFAULT_API_REQUEST_USER_AGENT
+
+    expected_default = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+    )
+    assert DEFAULT_API_REQUEST_USER_AGENT == expected_default
+    _save_linked_credential(tmp_path, monkeypatch)
+    sent = _capture_requests(monkeypatch)
+
+    result = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(_link(_header("X-API-Key"))),
+    )
+    assert result.status == "success"
+    headers = {key.lower(): value for key, value in sent[0].header_items()}
+    assert headers["user-agent"] == expected_default
+
+    # Also applies when no ToolContext is passed at all.
+    result_no_ctx = credential_catalog.api_request({"url": "https://api.example.test/public"})
+    assert result_no_ctx.status == "success"
+    headers_no_ctx = {key.lower(): value for key, value in sent[1].header_items()}
+    assert headers_no_ctx["user-agent"] == expected_default
+
+
+def test_api_request_sends_configured_user_agent_from_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _save_linked_credential(tmp_path, monkeypatch)
+    sent = _capture_requests(monkeypatch)
+    context = ToolContext(
+        canonical_user_id="usr_alice",
+        team_id="team_ua",
+        principal_type="user",
+        account_link=_link(_header("X-API-Key")),
+        api_request_user_agent="TeamBrowser/2.0",
+    )
+
+    result = credential_catalog.api_request({"url": "https://api.example.test/items"}, context=context)
+
+    assert result.status == "success"
+    headers = {key.lower(): value for key, value in sent[0].header_items()}
+    assert headers["user-agent"] == "TeamBrowser/2.0"
+
+
+@pytest.mark.parametrize(
+    ("header_name", "header_value"),
+    [("User-Agent", "ExplicitAgent/1.0"), ("user-agent", "LowerAgent/1.0")],
+)
+def test_api_request_keeps_agent_supplied_user_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    header_name: str,
+    header_value: str,
+) -> None:
+    _save_linked_credential(tmp_path, monkeypatch)
+    sent = _capture_requests(monkeypatch)
+    context = ToolContext(
+        canonical_user_id="usr_alice",
+        team_id="team_ua",
+        principal_type="user",
+        account_link=_link(_header("X-API-Key")),
+        api_request_user_agent="TeamBrowser/2.0",
+    )
+
+    result = credential_catalog.api_request(
+        {"url": "https://api.example.test/items", "headers": {header_name: header_value}},
+        context=context,
+    )
+
+    assert result.status == "success"
+    headers = {key.lower(): value for key, value in sent[0].header_items()}
+    assert headers["user-agent"] == header_value
+
+
+def test_api_request_user_agent_setting_in_schemas_example_and_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yaml
+
+    from assistant_gateway.config import (
+        GatewayInstanceConfig,
+        _INSTANCE_CONFIG_COMMENTS,
+        dump_instance_config_yaml,
+    )
+    from config_loader import CONFIG_SCHEMA_VERSION, load_config, resolve_agent_type_settings
+    from default_values import DEFAULT_API_REQUEST_USER_AGENT
+    from runtime_settings.security import MAX_API_REQUEST_USER_AGENT_LENGTH, SecurityLayerSettings
+
+    # Both config schemas accept and default the setting; empty/None falls back to default.
+    assert SecurityLayerSettings().api_request_user_agent == DEFAULT_API_REQUEST_USER_AGENT
+    assert SecurityLayerSettings(api_request_user_agent="").api_request_user_agent == DEFAULT_API_REQUEST_USER_AGENT
+    assert SecurityLayerSettings(api_request_user_agent=None).api_request_user_agent == DEFAULT_API_REQUEST_USER_AGENT
+    assert SecurityLayerSettings(api_request_user_agent=" Custom/1.0 ").api_request_user_agent == "Custom/1.0"
+    assert "security_layer.api_request_user_agent" in _INSTANCE_CONFIG_COMMENTS
+
+    for bad in ("Bad\r\nHeader", "Bad\nHeader", "Bad\x00Header", "x" * (MAX_API_REQUEST_USER_AGENT_LENGTH + 1), 123):
+        with pytest.raises(ValueError):
+            SecurityLayerSettings(api_request_user_agent=bad)  # type: ignore[arg-type]
+
+    # config.example.yaml documents the setting with the default value.
+    example_path = Path(__file__).resolve().parents[1] / "config.example.yaml"
+    example_data = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+    assert example_data["security_layer"]["api_request_user_agent"] == DEFAULT_API_REQUEST_USER_AGENT
+
+    # config.yaml loader projects the default, configured value, and env override.
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump({"schema_version": CONFIG_SCHEMA_VERSION, "security_layer": {"mode": "broker"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SECURE_TOOL_BROKER_API_REQUEST_USER_AGENT", raising=False)
+    assert (
+        resolve_agent_type_settings(load_config(str(cfg_path)), "TeamArchitect")[
+            "secure_tool_broker_api_request_user_agent"
+        ]
+        == DEFAULT_API_REQUEST_USER_AGENT
+    )
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": CONFIG_SCHEMA_VERSION,
+                "security_layer": {"mode": "broker", "api_request_user_agent": "ConfigUA/1.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        resolve_agent_type_settings(load_config(str(cfg_path)), "TeamArchitect")[
+            "secure_tool_broker_api_request_user_agent"
+        ]
+        == "ConfigUA/1.0"
+    )
+    monkeypatch.setenv("SECURE_TOOL_BROKER_API_REQUEST_USER_AGENT", "EnvUA/2.0")
+    assert (
+        resolve_agent_type_settings(load_config(str(cfg_path)), "TeamArchitect")[
+            "secure_tool_broker_api_request_user_agent"
+        ]
+        == "EnvUA/2.0"
+    )
+
+    # instance_config.yaml persists the setting and honors deployment env override.
+    inst = GatewayInstanceConfig.create(
+        instance_name="ua_test",
+        instance_root=str(tmp_path / "inst"),
+        team_id="team_ua",
+        timezone="UTC",
+    )
+    assert inst.security_layer.api_request_user_agent == DEFAULT_API_REQUEST_USER_AGENT
+    assert "# Default User-Agent header" in dump_instance_config_yaml(inst.to_yaml_dict())
+    inst.security_layer.api_request_user_agent = "InstanceUA/1.0"
+    inst_path = inst.save(tmp_path / "inst" / "instance_config.yaml")
+    assert GatewayInstanceConfig.load(inst_path).security_layer.api_request_user_agent == "InstanceUA/1.0"
+    assert (
+        GatewayInstanceConfig.load_for_process(
+            inst_path, env={"SECURE_TOOL_BROKER_API_REQUEST_USER_AGENT": "DeployUA/3.0"}
+        ).security_layer.api_request_user_agent
+        == "DeployUA/3.0"
+    )
+
+
+def test_broker_service_injects_configured_user_agent_into_tool_context() -> None:
+    from types import SimpleNamespace
+
+    from access_control.caller_tokens import CALLER_GATEWAY, CALLER_MANAGER, BrokerCaller
+    from secure_tool_broker.access_gate import GateResult
+    from secure_tool_broker.service import SecureToolBrokerService
+
+    class FakeGate:
+        team_id = "team_ua"
+        links = None
+        catalog = None
+
+        def check_broker_action(self, *_args, **_kwargs) -> GateResult:
+            return GateResult(allowed=True)
+
+    service = SecureToolBrokerService(
+        token="stb_test_token",
+        access_gate=FakeGate(),  # type: ignore[arg-type]
+        api_request_user_agent="BrokerConfiguredUA/1.0",
+    )
+    base = ToolContext(canonical_user_id="usr_alice", team_id="team_ua", principal_type="user")
+    validated = SimpleNamespace(provider="credential_catalog", action="credential.api_request", params={})
+    admitted = service._admitted_context(
+        BrokerCaller(label=CALLER_MANAGER),
+        validated,
+        base,
+        {},
+    )
+    assert admitted.api_request_user_agent == "BrokerConfiguredUA/1.0"
+
+    gateway_validated = SimpleNamespace(
+        provider="credential_catalog", action="signup.execute_approved", params={}
+    )
+    admitted_gw = service._admitted_context(
+        BrokerCaller(label=CALLER_GATEWAY),
+        gateway_validated,
+        base,
+        {},
+    )
+    assert admitted_gw.api_request_user_agent == "BrokerConfiguredUA/1.0"
+
+
 def _fake_openshell(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict[str, str]]]:
     """Record OpenShell CLI calls (command and environment) instead of running them."""
 

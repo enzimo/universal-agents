@@ -8,6 +8,7 @@ from runtime_settings.security import (
     CredentialCatalogSettings,
     CredentialStateBackendSettings,
     SealboxSecuritySettings,
+    normalize_api_request_user_agent,
     normalize_security_layer_mode,
     reject_removed_security_layer_settings,
 )
@@ -1233,6 +1234,9 @@ def resolve_agent_type_settings(
             SECURITY_LAYER_DEFAULTS.broker_credentials_dir.value,
         )
     )
+    secure_tool_broker_api_request_user_agent = normalize_api_request_user_agent(
+        security_layer_cfg.get("api_request_user_agent")
+    )
     internal_website_public_port = _normalize_optional_port(
         internal_website_cfg.get(
             "public_port",
@@ -1439,6 +1443,7 @@ def resolve_agent_type_settings(
             secure_tool_broker_bind_host=secure_tool_broker_bind_host,
             secure_tool_broker_bind_port=secure_tool_broker_bind_port,
             secure_tool_broker_credentials_dir=secure_tool_broker_credentials_dir,
+            secure_tool_broker_api_request_user_agent=secure_tool_broker_api_request_user_agent,
             secure_tool_broker_internal_base_url=secure_tool_broker_internal_base_url,
             secure_tool_broker_public_base_url=secure_tool_broker_public_base_url,
             secure_tool_broker_public_port=secure_tool_broker_public_port,

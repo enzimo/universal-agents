@@ -686,6 +686,7 @@ security_layer:
   broker_bind_port: 18600                       # Broker listener port.
   broker_credentials_dir: "broker_credentials"  # Broker-owned credential-state directory. Relative paths resolve under instance_root.
   tool_setup_recheck_days: 30                   # Days after which the broker re-checks a person's tool that is set up (signed in or linked) but was not used since, and tells the person in the Inbox when it needs setting up again; 0 turns it off.
+  api_request_user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36" # Default User-Agent header sent on brokered web API requests (credential.api_request) when the request sets none (Helium on Linux / Chrome reduced User-Agent). A User-Agent header set on the request keeps winning.
   credential_state_backend:                     # Where broker auth payloads are persisted. credential_source is default; files remains available for explicit local-only deployments.
     mode: "credential_source"                   # "files" or "credential_source".
     source: sealbox                             # Credential source when mode is credential_source, e.g. "sealbox", "vault", or "bitwarden".

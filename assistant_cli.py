@@ -4317,6 +4317,7 @@ async def _run_secure_tool_broker_service(
             access_gate=access_gate,
             mcp_config=mcp_config,
             tool_setup_recheck_days=config.security_layer.tool_setup_recheck_days,
+            api_request_user_agent=config.security_layer.api_request_user_agent,
             # Web Chat may show the broker's pages as cards only from its own address.
             web_chat_origin=(
                 web_chat_origin(config.internal_website_base_url)

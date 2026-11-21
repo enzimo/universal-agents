@@ -548,6 +548,30 @@ def reject_removed_secure_cli_env_var(env: Mapping[str, str] | None = None) -> N
         )
 
 
+MAX_API_REQUEST_USER_AGENT_LENGTH = 512
+
+
+def normalize_api_request_user_agent(value: Any) -> str:
+    """Default User-Agent for credential.api_request; empty uses the default, control characters are refused."""
+
+    if value is None:
+        return SECURITY_LAYER_DEFAULTS.api_request_user_agent.value
+    if not isinstance(value, str):
+        raise ValueError("security_layer.api_request_user_agent must be a string.")
+    if "\r" in value or "\n" in value or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        raise ValueError(
+            "security_layer.api_request_user_agent must be a single line with no control characters."
+        )
+    normalized = value.strip()
+    if not normalized:
+        return SECURITY_LAYER_DEFAULTS.api_request_user_agent.value
+    if len(normalized) > MAX_API_REQUEST_USER_AGENT_LENGTH:
+        raise ValueError(
+            f"security_layer.api_request_user_agent must be at most {MAX_API_REQUEST_USER_AGENT_LENGTH} characters."
+        )
+    return normalized
+
+
 class SecurityLayerSettings(BaseModel):
     mode: str = SECURITY_LAYER_DEFAULTS.mode.value
     broker_internal_base_url: Optional[str] = (
@@ -580,6 +604,7 @@ class SecurityLayerSettings(BaseModel):
     tool_setup_recheck_days: int = Field(
         default=SECURITY_LAYER_DEFAULTS.tool_setup_recheck_days.value, ge=0
     )
+    api_request_user_agent: str = SECURITY_LAYER_DEFAULTS.api_request_user_agent.value
 
     @model_validator(mode="before")
     @classmethod
@@ -652,6 +677,11 @@ class SecurityLayerSettings(BaseModel):
     @classmethod
     def _normalize_broker_credentials_dir(cls, value: Any) -> Optional[str]:
         return _normalized_optional_string(value)
+
+    @field_validator("api_request_user_agent", mode="before")
+    @classmethod
+    def _normalize_api_request_user_agent(cls, value: Any) -> str:
+        return normalize_api_request_user_agent(value)
 
     @field_validator("bitwarden_server_url", mode="before")
     @classmethod

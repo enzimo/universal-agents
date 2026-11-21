@@ -57,6 +57,7 @@ from secure_tool_broker.credential_templates import (
     render_credential_template_request,
     save_approved_template_variant,
 )
+from secure_tool_broker.defaults import DEFAULT_API_REQUEST_USER_AGENT
 from secure_tool_broker.redaction import redact_json, redact_text
 from secure_tool_broker.sealbox_cli import (
     first_json_value,
@@ -2149,6 +2150,13 @@ def api_request(
                     content={"error_code": "api_request_header_reserved", "headers": sorted(reserved)},
                 )
             headers.update(injected_headers)
+        if not any(name.lower() == "user-agent" for name in headers):
+            user_agent = (
+                context.api_request_user_agent
+                if context is not None and context.api_request_user_agent
+                else DEFAULT_API_REQUEST_USER_AGENT
+            )
+            headers["User-Agent"] = user_agent
         body_bytes: bytes | None = None
         if json_payload is not None:
             body_bytes = json.dumps(json_payload).encode("utf-8")

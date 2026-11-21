@@ -76,6 +76,7 @@ from secure_tool_broker.credential_transfer_api import add_transfer_routes
 from secure_tool_broker.team_export_page import add_team_export_routes
 from secure_tool_broker.defaults import (
     AUTH_PAGE_STATUS_ROUTE,
+    DEFAULT_API_REQUEST_USER_AGENT,
     is_decline,
     ONBOARDING_ACCOUNT_KEYS_ROUTE,
     PERSON_CREDENTIAL_DELETION_ROUTE,
@@ -619,6 +620,7 @@ class SecureToolBrokerService:
         logger: logging.Logger | None = None,
         mcp_config: BrokerMCPConfig | None = None,
         web_chat_origin: str | None = None,
+        api_request_user_agent: str = DEFAULT_API_REQUEST_USER_AGENT,
     ) -> None:
         if not token:
             raise ValueError(
@@ -645,6 +647,7 @@ class SecureToolBrokerService:
         # The only address that may show these pages inside the chat (secure_tool_broker.page_view);
         # None turns the card view off.
         self._web_chat_origin = web_chat_origin
+        self._api_request_user_agent = api_request_user_agent or DEFAULT_API_REQUEST_USER_AGENT
 
     def build_app(self) -> web.Application:
         app = web.Application(
@@ -1025,13 +1028,18 @@ class SecureToolBrokerService:
         if caller.is_gateway:
             if (validated.provider, validated.action) not in GATEWAY_DIRECT_ACTIONS:
                 raise web.HTTPForbidden(text="The gateway runs only actions a person approved directly.")
-            return context
+            return dataclasses.replace(context, api_request_user_agent=self._api_request_user_agent)
         gate = self._access_gate.check_broker_action(
             caller, validated.provider, validated.action, validated.params, trusted_context
         )
         if not gate.allowed:
             raise web.HTTPForbidden(text=json.dumps(gate.as_error()))
-        return dataclasses.replace(context, team_id=self._access_gate.team_id, account_link=gate.account_link)
+        return dataclasses.replace(
+            context,
+            team_id=self._access_gate.team_id,
+            account_link=gate.account_link,
+            api_request_user_agent=self._api_request_user_agent,
+        )
 
     async def _handle_execute(self, request: web.Request) -> web.Response:
         payload = await request.json()
@@ -2943,6 +2951,7 @@ async def run_secure_tool_broker(
     mcp_config: BrokerMCPConfig | None = None,
     tool_setup_recheck_days: int = 0,
     web_chat_origin: str | None = None,
+    api_request_user_agent: str = DEFAULT_API_REQUEST_USER_AGENT,
 ) -> None:
     # A token left in the environment would be a team-wide credential for a
     # per-person tool; refuse to start and name the sign-in that replaces it.
@@ -3006,6 +3015,7 @@ async def run_secure_tool_broker(
         access_gate=access_gate,
         mcp_config=mcp_config,
         web_chat_origin=web_chat_origin,
+        api_request_user_agent=api_request_user_agent,
     )
     if web_chat_origin:
         LOGGER.info(

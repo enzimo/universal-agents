@@ -121,7 +121,8 @@ class SettingsSection:
     # 11: agent.max_concurrent_top_level_tasks left it (earlier loaders kept the ignored key in saved files).
     # 12: transport.queues (protocol 1 stream sizes, the size warning's level, the per-subject cap and the
     #     partition count) joined it; the partition count is not carried (_INSTALLATION_SETTINGS).
-    schema_version: ClassVar[int] = 12
+    # 13: security_layer.api_request_user_agent (default User-Agent for brokered web API requests) joined it.
+    schema_version: ClassVar[int] = 13
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -804,10 +805,12 @@ __all__ = [
 # and the same step reads version 11. Version 12 also takes only a whole number from 1 to 5
 # for transport.replicas, so the same step writes what earlier versions read as their count
 # (0, which they read as one copy, "3", 1.0, true; runtime_settings.transport.upgraded_replicas).
+# V13 added security_layer.api_request_user_agent; an older export omits it, so the new instance
+# takes the browser-like default and the same step reads version 12.
 
 
 def _upgraded_settings(records: SectionRecords) -> SectionRecords:
-    """An older export's records as version 12 reads them: retired settings dropped, a replica count as a whole number."""
+    """An older export's records as version 13 reads them: retired settings dropped, a replica count as a whole number."""
 
     retired = {RETIRED_PRESENCE_SETTING, RETIRED_CONCURRENCY_SETTING}
     upgraded: SectionRecords = []
@@ -821,6 +824,6 @@ def _upgraded_settings(records: SectionRecords) -> SectionRecords:
     return upgraded
 
 
-for _source in (5, 6, 7, 8, 9, 10, 11):
+for _source in (5, 6, 7, 8, 9, 10, 11, 12):
     SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _upgraded_settings
 TEAM_ID_RENAMES[SettingsSection.name] = _renamed_team_settings
