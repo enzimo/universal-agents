@@ -43,6 +43,14 @@ export class FakeElement extends EventTarget {
     this.children.push(node);
     return node;
   }
+  insertBefore(node, reference) {
+    node.remove();
+    node.parentNode = this;
+    const index = reference ? this.children.indexOf(reference) : -1;
+    if (index >= 0) this.children.splice(index, 0, node);
+    else this.children.push(node);
+    return node;
+  }
   replaceChildren(...nodes) {
     this.children.forEach(child => { child.parentNode = null; });
     this.children = [];
@@ -70,6 +78,10 @@ export class FakeElement extends EventTarget {
     if (selector.startsWith(".")) return this.classList.contains(selector.slice(1));
     if (selector.startsWith("#")) return this.id === selector.slice(1);
     return this.tagName === selector.toUpperCase();
+  }
+  closest(selector) {
+    for (let node = this; node; node = node.parentNode) if (node.matches && node.matches(selector)) return node;
+    return null;
   }
   querySelectorAll(selector) { return descendants(this).filter(node => node.matches(selector)); }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }

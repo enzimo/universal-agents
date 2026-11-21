@@ -3516,6 +3516,8 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
     assert "openAction.remove();" in countdown_source
     assert "countdown.remove();" in countdown_source
     assert 'expiredStatus.setAttribute("role", "status");' in countdown_source
+    assert 'badge.textContent = "Expired";' in countdown_source
+    assert 'notice.classList.add("is-expired");' in countdown_source
     assert "This secure form link has expired." in script
     assert "A submitted request may still be finishing." in script
     assert 'actions.querySelector(".message-transient-dismiss")' in countdown_source
@@ -3548,6 +3550,11 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
     assert 'transientOpen.target = "_blank";' in transient_item_source
     assert 'transientOpen.rel = "noopener noreferrer";' in transient_item_source
     assert "transientOpen.textContent = item.label;" in transient_item_source
+    assert "message-transient-header" in transient_item_source
+    assert "message-transient-badge" in transient_item_source
+    assert '"Action needed"' in transient_item_source
+    assert "is-link-card" in transient_item_source
+    assert "button ghost small message-transient-dismiss" in transient_item_source
     assert "message-transient-dismiss" in transient_item_source
     assert "reconcileTransientItems(" in script
     # Only access Inbox (#access_request=) and Access (#agent=) links remain;

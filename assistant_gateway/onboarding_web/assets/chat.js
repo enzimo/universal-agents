@@ -2236,6 +2236,12 @@ function replaceTransientActionWithExpiredState(countdown) {
     if (!actions) {
       return;
     }
+    var badge = notice.querySelector(".message-transient-badge");
+    if (badge) {
+      badge.textContent = "Expired";
+      badge.classList.add("is-expired");
+    }
+    notice.classList.add("is-expired");
     var openAction = actions.querySelector(".message-transient-open");
     if (openAction) {
       openAction.remove();
@@ -2280,7 +2286,9 @@ function updateTransientCountdown() {
 
 function createTransientItemCard(thread, item) {
     var transientNotice = document.createElement("div");
-    transientNotice.className = "message-transient-notice";
+    transientNotice.className = item.url
+      ? "message-transient-notice is-link-card"
+      : "message-transient-notice";
     transientNotice.setAttribute("data-item-id", item.itemId);
     if (item.createdAt) {
       transientNotice.setAttribute("data-created-at", item.createdAt);
@@ -2290,6 +2298,20 @@ function createTransientItemCard(thread, item) {
     var transientActions = document.createElement("div");
     transientActions.className = "message-transient-actions";
     if (item.url) {
+      var transientHeader = document.createElement("div");
+      transientHeader.className = "message-transient-header";
+      var transientBadge = document.createElement("span");
+      transientBadge.className = "message-transient-badge";
+      transientBadge.textContent = "Action needed";
+      transientHeader.appendChild(transientBadge);
+      if (item.expiresAtUtc) {
+        var transientCountdown = document.createElement("span");
+        transientCountdown.className = "message-transient-countdown";
+        transientCountdown.setAttribute("data-expires-at", item.expiresAtUtc);
+        transientCountdown.setAttribute("role", "status");
+        transientHeader.appendChild(transientCountdown);
+      }
+      transientNotice.appendChild(transientHeader);
       var transientOpen = document.createElement("a");
       transientOpen.className = "button primary small message-transient-open";
       transientOpen.textContent = item.label;
@@ -2297,13 +2319,6 @@ function createTransientItemCard(thread, item) {
       transientOpen.target = "_blank";
       transientOpen.rel = "noopener noreferrer";
       transientActions.appendChild(transientOpen);
-      if (item.expiresAtUtc) {
-        var transientCountdown = document.createElement("span");
-        transientCountdown.className = "message-transient-countdown";
-        transientCountdown.setAttribute("data-expires-at", item.expiresAtUtc);
-        transientCountdown.setAttribute("role", "status");
-        transientActions.appendChild(transientCountdown);
-      }
     } else {
       var transientCopy = document.createElement("button");
       transientCopy.type = "button";
@@ -2318,7 +2333,9 @@ function createTransientItemCard(thread, item) {
     }
     var transientDismiss = document.createElement("button");
     transientDismiss.type = "button";
-    transientDismiss.className = "button secondary small message-transient-dismiss";
+    transientDismiss.className = item.url
+      ? "button ghost small message-transient-dismiss"
+      : "button secondary small message-transient-dismiss";
     transientDismiss.textContent = "Dismiss";
     lifecycle.listen(transientDismiss, "click", function () {
       thread.dismissedTransientItems = thread.dismissedTransientItems || new Set();
