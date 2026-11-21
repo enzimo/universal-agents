@@ -136,6 +136,20 @@ export function createActivityMesh({ browser, lifecycle, host, teamActivity }) {
     return glyph;
   }
 
+  /**
+   * Lays the mesh out again for the canvas's current box. Only a shown canvas
+   * is measured: a hidden one (signed out) measures 0 by 0, and laying that
+   * out left a 1x1 drawing that the page stretched over the box as one solid
+   * block (incident 2026-11-19: the window changed size behind the sign-in
+   * form). start() calls this, so a box that changed while hidden is fitted.
+   */
+  function fit() {
+    if (!glyph || !running) return;
+    const box = canvas.getBoundingClientRect();
+    if (!box.width || !box.height) return;
+    glyph.layout();
+  }
+
   function intensity(light, time) {
     const progress = Math.min(1, (time - light.changedAt) / FADE_MS);
     return light.on ? progress : 1 - progress;
@@ -253,8 +267,8 @@ export function createActivityMesh({ browser, lifecycle, host, teamActivity }) {
     if (!document.hidden) schedule();
   });
   lifecycle.listen(browser, "resize", () => {
-    if (!glyph) return;
-    glyph.layout();
+    if (!running) return;
+    fit();
     draw(now());
   });
   browser.UAMotion.onChange(() => {
@@ -270,6 +284,7 @@ export function createActivityMesh({ browser, lifecycle, host, teamActivity }) {
       running = true;
       host.hidden = false;
       describe();
+      fit();
       draw(now());
       unsubscribe = teamActivity.subscribe(receive);
       schedule();

@@ -20,6 +20,12 @@ and decides (``decide``):
   ``scale_up_wait_seconds``: start up to the pool size, the team limit and
   ``max_starts_per_pass``;
 - a worker of the type is waiting out a provider limit: start none;
+- the type's latest starts failed (``start_history``): wait
+  ``FAILED_START_RETRY_SECONDS`` after the last failure, twice as long for each
+  further failure in a row, up to ``FAILED_START_MAX_RETRY_SECONDS``; then
+  start exactly one, and none while that one is still starting
+  (``_held_after_failed_starts``; a hung start, ``HUNG_START_MARGIN``, no
+  longer holds);
 - more workers than the pool size (TeamArchitect lowered it): idle ones leave
   now, busy ones stop asking for work and leave when they hold none.
 
@@ -27,8 +33,32 @@ Problems become incidents (``storage.worker_pool_repository``) that
 ``custom_agents.worker_pool_reviews`` turns into reviews for TeamArchitect and,
 when they keep coming back, notices for administrators: a pool or the team at
 ``capacity_warning_ratio`` of its limit while tasks wait (``capacity``), a type
-whose provider keeps refusing calls (``provider_limited``), and a worker that
-could not be started (``start_failed``).
+whose provider keeps refusing calls (``provider_limited``), and workers that
+could not be started (``start_failed``: ``START_FAILURES_BEFORE_REVIEW`` starts
+in a row failed while tasks wait, or as many refusals in a row before a start
+was recorded, ``_note_refusal_before_record``; at once when the hourly start
+limit refused a start).
+
+A type whose shared queue NATS refuses to create (a refusal code, not a
+timeout or a 503 answer) is left out of the pass's observations; it is shown
+in the pool view (``pool_views``) and reported from the second pass in a row
+(``_report_unavailable_queues``).
+
+A start counts as failed when the worker never became ready for a reason that
+says something about its type: it crashed, its startup timed out, or the
+launcher refused it (its start record ends ``failed`` with the reason,
+``custom_agents.agent_instantiation_service``). Starts the runtime ended (a
+stop, restart cleanup), starts ended by an edit made while they started (a
+schedule's policy, the definition, a limit, a schedule's own startup timeout)
+and records an older release wrote without a reason or with its free error
+text do not count (``counts_as_failed_start``). A start counts as
+successful only once its worker is ready. Until 2026-11-19 an accepted start
+counted as success at once, and the controller started a new worker every pass
+while each one crashed at start (the work stream had reached its NATS consumer
+limit). It made 60 starts in six minutes, and the hourly start limit then
+refused every start. TeamArchitect saw only that refusal, not the crash. The
+hourly-limit refusal is now logged when it begins and when it ends (a worker
+started, or no tasks wait), and the review and the notice name the failure.
 
 Pool workers serve every person's tasks; their starts are recorded for the
 team's pool service identity (``pool_launch_owner``), and access stays decided
@@ -42,15 +72,24 @@ import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import partial
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
+from custom_agents.agent_instantiation_service import (
+    LAUNCHER_REJECTED_START,
+    counts_as_failed_start,
+    nats_refusal_in,
+    queue_failure_reason,
+    shown_reason,
+)
 from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.worker_pool_limits import PoolLimit, team_limit, type_limit, worker_pool_repository
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_worker_v1 import (
     AUTOMATIC_WORKER_CAPACITY_LIMIT,
     TEAM_WORKER_CAPACITY_LIMIT,
+    WORKER_LAUNCH_RATE_LIMIT,
     AgentLaunchState,
+    AgentLaunchV1,
 )
 from id_generation import new_id
 from runtime_settings.worker_pools import WorkerPoolsConfig
@@ -59,6 +98,12 @@ from storage.worker_pool_repository import (
     INCIDENT_CAPACITY,
     INCIDENT_PROVIDER_LIMITED,
     INCIDENT_START_FAILED,
+    POOL_FAILED_STARTS,
+    POOL_HUNG_STARTS,
+    POOL_LAST_START_FAILURE,
+    POOL_LAST_UNCOUNTED_END,
+    POOL_QUEUE_UNAVAILABLE,
+    POOL_UNCOUNTED_ENDS,
     TEAM_SCOPE,
 )
 
@@ -67,6 +112,197 @@ logger = logging.getLogger(__name__)
 POOL_LAUNCH_OWNER_PREFIX = "worker_pool:"
 # Start refusals that only mean "the limit was reached meanwhile", not a fault.
 _CAPACITY_REFUSALS = frozenset({AUTOMATIC_WORKER_CAPACITY_LIMIT, TEAM_WORKER_CAPACITY_LIMIT})
+
+
+@dataclass(frozen=True)
+class StartHistory:
+    """How a worker type's latest starts ended, newest first, up to its last ready worker."""
+
+    failures_in_row: int = 0
+    last_failure_at: Optional[datetime] = None
+    last_failure_reason: Optional[str] = None
+    # A worker of the type became ready after the last failure.
+    recovered: bool = False
+    # Starts since the last ready worker that ended for a reason that does not
+    # count (``counts_as_failed_start``), and the newest such reason (None for
+    # a record an older release wrote without one or with its free error
+    # text). Shown, so that an end which repeats is still visible although it
+    # holds nothing back.
+    uncounted_ends: int = 0
+    last_uncounted_reason: Optional[str] = None
+    # Starts of the type that never became ready and have not ended yet
+    # (reserved, starting, or unknown without ready_at_utc), and among the
+    # unknown ones those that have stayed so past ``hung_before``: hung, they
+    # no longer hold the next start (``_unfinished_starts``).
+    starts_in_progress: int = 0
+    hung_starts: int = 0
+
+
+# Failed starts older than this no longer count: the hourly start limit's
+# window. A type that failed last week starts again at once, without a review.
+START_FAILURE_MEMORY = timedelta(hours=1)
+
+
+def start_history(
+    launches: Iterable[AgentLaunchV1],
+    agent_type: str,
+    *,
+    since: Optional[datetime] = None,
+    hung_before: Optional[datetime] = None,
+) -> StartHistory:
+    """Failed starts of ``agent_type`` since its last worker that became ready.
+
+    Starts from every source count (pool, scheduled, manual): a type whose
+    workers crash at start fails for all of them. Starts still in progress are
+    skipped, and so are ends that say nothing about the type (restart cleanup,
+    the runtime stopping, an edit during the start, a record without a reason
+    or with an older release's free error text); a start that became ready
+    ends the count.
+
+    Starts whose record last changed before ``since`` are not read: for a
+    failed start that is when it ended, not when it was made, so two starts
+    that each hang for 30 minutes until their startup timeout still count as
+    two in a row (review finding C17). The newest failure is the one that
+    ended last. A worker of the type that became ready clears the failures
+    before it (``_ended_since_ready``).
+    """
+
+    of_type = [
+        record
+        for record in launches
+        if record.named_agent_type == agent_type and (since is None or record.updated_at_utc >= since)
+    ]
+    # Starts in progress and hung ones are read from the window too: a start
+    # that became unknown over an hour ago is no longer named as hung (it
+    # still takes its slot, shown as workers_unknown; review finding RC-4).
+    in_progress, hung = _unfinished_starts(of_type, hung_before)
+    ready = [record for record in of_type if record.ready_at_utc is not None]
+    ended = _ended_since_ready(of_type, ready)
+    failed = [record for record in ended if counts_as_failed_start(record.reason)]
+    uncounted = [record for record in ended if not counts_as_failed_start(record.reason)]
+    newest_failure = max(failed, key=lambda record: record.updated_at_utc, default=None)
+    newest_uncounted = max(uncounted, key=lambda record: record.updated_at_utc, default=None)
+    return StartHistory(
+        failures_in_row=len(failed),
+        last_failure_at=newest_failure.updated_at_utc if newest_failure else None,
+        last_failure_reason=newest_failure.reason if newest_failure else None,
+        recovered=bool(ready) and not failed,
+        uncounted_ends=len(uncounted),
+        # An older release's free error text is never shown (shown_reason).
+        last_uncounted_reason=shown_reason(newest_uncounted.reason) if newest_uncounted else None,
+        starts_in_progress=in_progress,
+        hung_starts=hung,
+    )
+
+
+def _ended_since_ready(
+    records: list[AgentLaunchV1], ready: list[AgentLaunchV1]
+) -> list[AgentLaunchV1]:
+    """Starts that failed after the type's last success: the ones a ready worker has not cleared.
+
+    A failed start counts only when it ended after the latest readiness and
+    its start was made after the newest start that became ready. The first
+    keeps a newer start's crash from outliving older workers that became
+    ready after it (review finding GEN-1, round 3). The second keeps a start
+    that hung before a newer worker became ready, and was settled later
+    (after its thread ended, or at a restart), from counting as a new failure.
+    """
+
+    latest_ready_at = max((record.ready_at_utc for record in ready if record.ready_at_utc), default=None)
+    newest_ready_start = max((record.created_at_utc for record in ready), default=None)
+    return [
+        record
+        for record in records
+        if record.state == AgentLaunchState.FAILED
+        and record.ready_at_utc is None
+        and (latest_ready_at is None or record.updated_at_utc > latest_ready_at)
+        and (newest_ready_start is None or record.created_at_utc > newest_ready_start)
+    ]
+
+
+# A start the launcher stopped (its startup timeout passed, or its start was
+# revoked) or cannot check is "unknown". Unknown and never ready for longer
+# than this, it is hung: it no longer holds the next start of its type, and the
+# pool view and the start_failed and capacity texts name it. Longer than the default start
+# lease (120 s), so a stopped start whose thread already ended settles before it
+# is called hung; the saved lease is used when it is longer
+# (WorkerPoolController.observe). An unknown record is never renewed, so its
+# last change is when it became unknown. Before 2026-11-20 such a start held
+# the type's starts for up to an hour without saying so (review finding RC-1).
+# A hung start is named until an hour after it became unknown (start_history
+# reads the hour's records), so a start lease close to an hour shortens or
+# removes the time it is named; it still shows in workers_unknown.
+# A fixed value, not a setting (see FAILED_START_RETRY_SECONDS).
+HUNG_START_MARGIN = timedelta(minutes=5)
+
+
+def hung_cutoff(now: datetime, lease_seconds: float) -> datetime:
+    """Unknown starts unchanged since before this are hung: ``HUNG_START_MARGIN``, or the lease when longer."""
+
+    return now - max(HUNG_START_MARGIN, timedelta(seconds=lease_seconds))
+
+
+def _unfinished_starts(
+    records: Iterable[AgentLaunchV1], hung_before: Optional[datetime]
+) -> tuple[int, int]:
+    """(starts in progress, hung starts) among records that never became ready and have not ended.
+
+    A start still reserved or starting always counts as in progress: the
+    launcher stops it at its own startup timeout (a schedule's may be longer
+    than its type's). Only an unknown one unchanged since before
+    ``hung_before`` is hung.
+    """
+
+    in_progress = hung = 0
+    for record in records:
+        if record.state not in ACTIVE_LAUNCH_STATES or record.ready_at_utc is not None:
+            continue
+        if (
+            hung_before is not None
+            and record.state == AgentLaunchState.UNKNOWN
+            and record.updated_at_utc < hung_before
+        ):
+            hung += 1
+        else:
+            in_progress += 1
+    return in_progress, hung
+
+
+# The wait after a failed start, doubled for each further failure in a row up
+# to the maximum: 11 tries in a type's first hour of failures instead of the
+# hourly start limit's 60. Fixed values: they bound a fault, nobody tunes them.
+# They are not settings because a new setting changes the team transfer's
+# settings section, whose next version numbers release 0.10 already uses.
+FAILED_START_RETRY_SECONDS = 10.0
+FAILED_START_MAX_RETRY_SECONDS = 600.0
+
+
+def start_retry_seconds(failures_in_row: int) -> float:
+    """How long after the last failed start the next start of the type waits."""
+
+    if failures_in_row <= 0:
+        return 0.0
+    # Bounded exponent: the wait reaches its maximum long before this.
+    doubled = FAILED_START_RETRY_SECONDS * 2 ** min(failures_in_row - 1, 30)
+    return float(min(doubled, FAILED_START_MAX_RETRY_SECONDS))
+
+
+def start_retry_in(history: StartHistory, now: datetime) -> float:
+    """Seconds until the next start of the type may begin after its failed starts (0 when it may now)."""
+
+    if history.last_failure_at is None:
+        return 0.0
+    since_failure = (now - history.last_failure_at).total_seconds()
+    return max(0.0, start_retry_seconds(history.failures_in_row) - since_failure)
+
+
+# A start_failed incident (TeamArchitect's review and administrators' notice)
+# opens once this many starts of a type failed in a row while tasks wait; the
+# hourly start limit's refusal opens it at once. One failure only holds the
+# next start for the wait and is logged (event=worker_start_failed): until
+# 2026-11-20 one passing failure opened a review and an immediate notice, then
+# a recovery notice (the lead's decision on review finding CRIT-2).
+START_FAILURES_BEFORE_REVIEW = 2
 
 
 def pool_launch_owner(team_id: str) -> str:
@@ -91,6 +327,21 @@ class PoolObservation:
     cooling_down: int
     limit: PoolLimit
     observed_at: datetime
+    # Failed starts of the type since its last ready worker (``start_history``),
+    # and how long the next start still waits.
+    failed_starts_in_row: int = 0
+    last_start_failure: Optional[str] = None
+    start_retry_in_seconds: float = 0.0
+    # A worker of the type became ready after its last failed start.
+    start_recovered: bool = False
+    # Starts of the type that never became ready and have not ended yet; after
+    # failures, the next start waits for them (``_held_after_failed_starts``).
+    starts_in_progress: int = 0
+    # Starts that ended for a reason that does not count, and the newest one.
+    uncounted_start_ends: int = 0
+    last_uncounted_start_end: Optional[str] = None
+    # Starts that are hung (``HUNG_START_MARGIN``); they still take a slot.
+    hung_starts: int = 0
 
     @property
     def active(self) -> int:
@@ -111,6 +362,12 @@ class PoolObservation:
             "workers_draining": self.draining,
             "workers_waiting_out_provider_limit": self.cooling_down,
             "pool_size": self.limit.as_dict(),
+            POOL_FAILED_STARTS: self.failed_starts_in_row,
+            POOL_LAST_START_FAILURE: self.last_start_failure,
+            "next_start_waits_seconds": round(self.start_retry_in_seconds, 1),
+            POOL_UNCOUNTED_ENDS: self.uncounted_start_ends,
+            POOL_LAST_UNCOUNTED_END: self.last_uncounted_start_end,
+            POOL_HUNG_STARTS: self.hung_starts,
             "observed_at": self.observed_at.isoformat(),
         }
 
@@ -159,6 +416,9 @@ def decide(
         )
     if not settings.enabled:
         return PoolDecision(0, "worker pools are turned off", at_capacity=at_capacity, surplus=surplus)
+    held = _held_after_failed_starts(observation)
+    if held is not None:
+        return PoolDecision(0, held, at_capacity=at_capacity, surplus=surplus)
     room = min(limit - observation.active, team_limit_value - team_active)
     if room <= 0:
         reason = (
@@ -171,14 +431,108 @@ def decide(
         return PoolDecision(1, "tasks wait and no worker of this type runs", at_capacity=at_capacity)
     if observation.asking == 0 and long_wait:
         wanted = max(0, observation.waiting - observation.starting)
-        starts = min(wanted, room, settings.max_starts_per_pass)
+        # After failed starts, one try at a time (review finding CONC-3).
+        per_pass = 1 if observation.failed_starts_in_row else settings.max_starts_per_pass
+        starts = min(wanted, room, per_pass)
         return PoolDecision(
             starts,
-            "tasks waited with no free worker",
+            "tasks waited with no free worker" + _hung_note(observation),
             at_capacity=at_capacity,
             surplus=surplus,
         )
     return PoolDecision(0, "workers are free or starting", at_capacity=at_capacity, surplus=surplus)
+
+
+def _hung_note(observation: PoolObservation) -> str:
+    """Names hung starts in a decision that starts workers past them, or "" (review finding RC-5).
+
+    Only appended to the reason that starts workers: the at-size reasons are
+    compared by value elsewhere (custom_agents.delegation_wake).
+    """
+
+    if not observation.hung_starts:
+        return ""
+    return f"; {observation.hung_starts} hung start(s) no longer hold the next one"
+
+
+def _held_after_failed_starts(observation: PoolObservation) -> Optional[str]:
+    """Why no start of a type is made after its failed starts, or None when one may be.
+
+    While the wait after the last failure runs, none; once it ended, exactly
+    one, and none while that one (or any start of the type that never became
+    ready) is still in progress. Before 2026-11-20 the controller started up
+    to ``max_starts_per_pass`` workers when the wait ended while a retry was
+    still starting (review finding CONC-3).
+    """
+
+    if not observation.failed_starts_in_row:
+        return None
+    failed = (
+        f"the last {observation.failed_starts_in_row} start(s) of this type failed "
+        f"({observation.last_start_failure or 'no reason recorded'})"
+    )
+    if observation.start_retry_in_seconds > 0:
+        return f"{failed}; the next start waits {math.ceil(observation.start_retry_in_seconds)} s"
+    if observation.starts_in_progress:
+        return f"{failed}; one more start is in progress, and the next waits until it is ready or fails"
+    return None
+
+
+def _report_start_history(observation: PoolObservation, incidents: Any) -> None:
+    """Failed starts in a row while workers are needed keep a review open; a ready worker ends it.
+
+    Seen on every pass while the count holds, the passes that retry included,
+    so an accepted start never closes the incident: only a worker that became
+    ready does (``start_recovered``).
+    """
+
+    if observation.start_recovered:
+        incidents.start_succeeded(observation.agent_type)
+    if observation.waiting and observation.failed_starts_in_row >= START_FAILURES_BEFORE_REVIEW:
+        incidents.start_failed(
+            observation, observation.last_start_failure or "a worker ended before it was ready"
+        )
+
+
+def _rate_limit_reason(observation: PoolObservation) -> str:
+    """What a refusal by the hourly start limit says: the code and what ended the type's latest starts."""
+
+    reason = WORKER_LAUNCH_RATE_LIMIT
+    if observation.failed_starts_in_row:
+        return (
+            f"{reason}; the last {observation.failed_starts_in_row} start(s) failed: "
+            f"{observation.last_start_failure or 'no reason recorded'}"
+        )
+    if observation.uncounted_start_ends:
+        # Not failures of the type, but they used up the hourly limit too.
+        return (
+            f"{reason}; no start failed, {observation.uncounted_start_ends} start(s) ended "
+            f"for a reason that does not count, the latest: "
+            f"{observation.last_uncounted_start_end or 'no reason recorded'}"
+        )
+    return reason
+
+
+# A NATS answer with status 503 ("JetStream system temporarily unavailable",
+# code 10008, for example while a cluster elects a leader) is temporary like a
+# timeout although it carries a code, so a queue it refuses is not reported
+# (critique C10, round 3).
+_NATS_TEMPORARILY_UNAVAILABLE = 503
+
+
+def _lasting_queue_refusal(error: BaseException) -> bool:
+    """Whether NATS refused a queue for a lasting reason: a NATS refusal code, and not a 503 answer."""
+
+    return nats_refusal_in(error) is not None and getattr(error, "code", None) != _NATS_TEMPORARILY_UNAVAILABLE
+
+
+def pool_views(observations: Iterable[PoolObservation], queue_failures: dict[str, str]) -> dict[str, Any]:
+    """The pool view's entries: each observed type, and each type whose queue NATS refused to create."""
+
+    views: dict[str, Any] = {observation.agent_type: observation.as_dict() for observation in observations}
+    for agent_type, reason in queue_failures.items():
+        views[agent_type] = {"agent_type": agent_type, POOL_QUEUE_UNAVAILABLE: reason}
+    return views
 
 
 @dataclass
@@ -217,17 +571,19 @@ def _workers_by_type(launches: Any, local: Any) -> dict[str, _Workers]:
 class WorkerPoolController:
     def __init__(self, agent: Any) -> None:
         self.agent = agent
+        # The worker types of the current pass (set by observe), and those among
+        # them whose shared queue NATS refused to create (``_ensure_queue``).
+        self.registered_types: set[str] = set()
+        self.queue_failures: dict[str, str] = {}
         self.runtime = agent.task_manager.operations_runtime
         self.team_id = str(agent.team_id)
 
     def _adapter(self) -> Any:
         return self.agent._ensure_nats_transport_adapter()
 
-    def _worker_types(self) -> list[str]:
-        from custom_agents.agent_instantiation_service import current_worker_limits
-
+    def _worker_types(self, limits: Any) -> list[str]:
         local_runtime = self.agent._local_team_runtime
-        denied = set(current_worker_limits(self.agent).denied_agent_types)
+        denied = set(limits.denied_agent_types)
         return sorted(
             agent_type
             for agent_type in local_runtime.agent_types()
@@ -240,7 +596,7 @@ class WorkerPoolController:
             return True
         try:
             await self._adapter().ensure_worker_queue(agent_type)
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "Could not create a worker type's queue; retrying next pass. "
                 "event=worker_pool_queue_create_failed team_id=%s agent_type=%s",
@@ -248,14 +604,36 @@ class WorkerPoolController:
                 agent_type,
                 exc_info=True,
             )
+            # Only a lasting refusal by NATS (an error code, such as 10026 at the
+            # work stream's consumer limit) is this type's problem and is
+            # reported (_report_unavailable_queues). An error without a code (a
+            # timeout, a lost connection) or a 503 answer is a connection
+            # problem: logged here every pass, not reported, so a stall right
+            # after a restart, when every type's queue is created again, opens
+            # nothing for every type.
+            if _lasting_queue_refusal(exc):
+                self.queue_failures[agent_type] = queue_failure_reason(exc)
             return False
         ensured.add(agent_type)
         return True
 
     async def observe(self, settings: WorkerPoolsConfig) -> tuple[list[PoolObservation], int, PoolLimit]:
-        """Every registered worker type's queue and workers, plus the team's totals."""
+        """Every registered worker type's queue and workers, plus the team's totals.
+
+        Also sets ``registered_types``: the pass's worker types, observed or
+        not (a queue that cannot be read this pass leaves its type out of the
+        observations only).
+        """
+
+        # Read at call time, like the launcher does: the saved settings change
+        # while the runtime runs.
+        from custom_agents.agent_instantiation_service import current_worker_limits
 
         now = datetime.now(timezone.utc)
+        # The agent goes inside the operation (partial), never as an argument: the
+        # lane copies arguments, and the agent holds locks and running tasks.
+        limits = await self.runtime.run(partial(current_worker_limits, self.agent))
+        hung_before = hung_cutoff(now, limits.lease_seconds)
         launches = await self.runtime.run(AgentLaunchRepository(self.agent.task_manager.storage_settings).list, self.team_id)
         local = self.agent._local_team_runtime.local_workers(self.team_id)
         workers = _workers_by_type(launches, local)
@@ -265,7 +643,8 @@ class WorkerPoolController:
         team = await self.runtime.run(partial(team_limit, self.agent, settings, now=now))
         observations = []
         adapter = self._adapter()
-        for agent_type in self._worker_types():
+        self.registered_types = set(self._worker_types(limits))
+        for agent_type in sorted(self.registered_types):
             if not await self._ensure_queue(agent_type):
                 continue
             state = await adapter.worker_queue_state(agent_type)
@@ -278,6 +657,9 @@ class WorkerPoolController:
                 else None
             )
             bucket = workers.get(agent_type, _Workers())
+            history = start_history(
+                launches, agent_type, since=now - START_FAILURE_MEMORY, hung_before=hung_before
+            )
             observations.append(
                 PoolObservation(
                     agent_type=agent_type,
@@ -294,6 +676,14 @@ class WorkerPoolController:
                         partial(type_limit, self.agent, agent_type, settings, now=now)
                     ),
                     observed_at=now,
+                    failed_starts_in_row=history.failures_in_row,
+                    last_start_failure=history.last_failure_reason,
+                    start_retry_in_seconds=start_retry_in(history, now),
+                    start_recovered=history.recovered,
+                    starts_in_progress=history.starts_in_progress,
+                    uncounted_start_ends=history.uncounted_ends,
+                    last_uncounted_start_end=history.last_uncounted_reason,
+                    hung_starts=history.hung_starts,
                 )
             )
         return observations, team_active, team
@@ -316,7 +706,7 @@ class WorkerPoolController:
         self.agent._worker_pool_snapshot = {
             "observed_at": datetime.now(timezone.utc).isoformat(),
             "team": {"workers_active": team_active, "limit": team.as_dict()},
-            "pools": {observation.agent_type: observation.as_dict() for observation in observations},
+            "pools": pool_views(observations, self.queue_failures),
         }
         for observation in observations:
             decision = decide(
@@ -326,11 +716,14 @@ class WorkerPoolController:
                 settings=settings,
             )
             self.agent._worker_pool_snapshot["pools"][observation.agent_type]["decision"] = asdict(decision)
+            _report_start_history(observation, incidents)
             started = await self._start(observation, decision, incidents)
             team_active += started
             if decision.surplus:
                 await self._drain(observation.agent_type, decision.surplus)
             await incidents.observe_type(observation, decision)
+        self._report_unavailable_queues(incidents)
+        self._forget_unregistered()
         await incidents.observe_team(observations, team_active=team_active, team=team)
         await incidents.observe_provider_limits(observations)
         await incidents.settle()
@@ -344,12 +737,18 @@ class WorkerPoolController:
         )
 
     async def _start(self, observation: PoolObservation, decision: PoolDecision, incidents: Any) -> int:
+        if not observation.waiting:
+            # No longer needed: a refusal episode of the type, if any, is over.
+            self._rate_limit_ended(observation.agent_type, because="no tasks wait")
         started = 0
+        refused_before_record: Optional[str] = None
         for _ in range(decision.starts):
             result = await self.runtime.run(partial(self._launch, observation.agent_type))
             if result.accepted:
+                # Success is counted once the worker is ready (start_history),
+                # not here: an accepted worker may still crash at start.
                 started += 1
-                incidents.start_succeeded(observation.agent_type)
+                self._rate_limit_ended(observation.agent_type, because="a worker started")
                 logger.info(
                     "Started a worker for waiting delegated tasks. event=worker_pool_start "
                     "team_id=%s agent_type=%s launch_id=%s agent_id=%s waiting=%s reason=%s",
@@ -361,6 +760,9 @@ class WorkerPoolController:
                     decision.reason,
                 )
                 continue
+            if result.reason == WORKER_LAUNCH_RATE_LIMIT:
+                self._rate_limited(observation, incidents)
+                break
             if result.reason in _CAPACITY_REFUSALS:
                 logger.info(
                     "A pool start found its limit reached. event=worker_pool_start_at_limit "
@@ -370,18 +772,125 @@ class WorkerPoolController:
                     result.reason,
                 )
                 break
-            logger.error(
-                "Could not start a worker for waiting delegated tasks. "
-                "event=worker_pool_start_failed team_id=%s agent_type=%s status=%s reason=%s waiting=%s",
+            refused_before_record = self._refused(observation, result)
+            break
+        self._note_refusal_before_record(observation, refused_before_record, incidents)
+        return started
+
+    def _refused(self, observation: PoolObservation, result: Any) -> Optional[str]:
+        """Log a launcher refusal of a pool start; its reason when it left no start record and counts, else None.
+
+        A refusal that left a start record failed that record, which the next
+        pass counts (``start_history``), so the two-in-a-row rule applies to it
+        like to a crash. One refused before a record was reserved (for example
+        the type's definition cannot be read) leaves nothing to count, so the
+        controller counts it in memory (``_note_refusal_before_record``),
+        unless its reason does not count (pools turned off meanwhile). A
+        refusal without a reason is ``launcher_rejected_start``.
+        """
+
+        reason = str(result.reason or LAUNCHER_REJECTED_START)
+        logger.error(
+            "Could not start a worker for waiting delegated tasks. "
+            "event=worker_pool_start_failed team_id=%s agent_type=%s status=%s reason=%s "
+            "waiting=%s start_recorded=%s",
+            self.team_id,
+            observation.agent_type,
+            result.status,
+            reason,
+            observation.waiting,
+            result.created,
+        )
+        if not result.created and counts_as_failed_start(reason):
+            return reason
+        return None
+
+    def _note_refusal_before_record(
+        self, observation: PoolObservation, reason: Optional[str], incidents: Any
+    ) -> None:
+        """Count a type's refusals before a start record in a row; from the second on, report the problem.
+
+        Nothing is recorded for such a refusal, so the count lives in memory
+        (``_pool_refusals_in_row``). Any pass of the type without one (an
+        accepted start, another refusal, or no start tried) ends the row. One
+        refusal alone only logs: until 2026-11-20 it opened the review and an
+        administrators' notice at once (review finding GEN-3, the lead's
+        decision). Every refusal from the second on reports it again, so a
+        lasting refusal keeps its problem open.
+        """
+
+        counts: dict[str, int] = self.agent._pool_refusals_in_row
+        if reason is None:
+            counts.pop(observation.agent_type, None)
+            return
+        counts[observation.agent_type] = counts.get(observation.agent_type, 0) + 1
+        if counts[observation.agent_type] >= START_FAILURES_BEFORE_REVIEW:
+            incidents.start_failed(observation, reason)
+
+    def _report_unavailable_queues(self, incidents: Any) -> None:
+        """Report registered types whose queue NATS refused to create, from the second pass in a row.
+
+        Such a type is left out of the pass's observations, so no start is
+        tried and nothing else would tell anyone (review finding GEN-3, round
+        3). The row count is the one refusals before a start record use
+        (``_note_refusal_before_record``); it resets once the type is observed
+        again or is no longer registered.
+        """
+
+        counts: dict[str, int] = self.agent._pool_refusals_in_row
+        for agent_type, reason in sorted(self.queue_failures.items()):
+            counts[agent_type] = counts.get(agent_type, 0) + 1
+            if counts[agent_type] >= START_FAILURES_BEFORE_REVIEW:
+                incidents.queue_unavailable(agent_type, reason)
+
+    def _forget_unregistered(self) -> None:
+        """End the refusal episode, and drop the refusal count, of types no longer registered.
+
+        A type removed or denied while the hourly limit refused it would keep
+        its mark for good, so its next episode's beginning was never logged
+        (review finding RC-2). A registered type whose queue could not be read
+        this pass keeps its mark and count: its episode has not ended.
+        """
+
+        registered = self.registered_types
+        for agent_type in sorted(self.agent._pool_rate_limited_types - registered):
+            self._rate_limit_ended(agent_type, because="no longer a worker type")
+        for agent_type in set(self.agent._pool_refusals_in_row) - registered:
+            del self.agent._pool_refusals_in_row[agent_type]
+
+    def _rate_limited(self, observation: PoolObservation, incidents: Any) -> None:
+        """The hourly start limit refused a start: logged when it begins, reviewed at once with what ended the starts."""
+
+        refused: set[str] = self.agent._pool_rate_limited_types
+        if observation.agent_type not in refused:
+            refused.add(observation.agent_type)
+            logger.warning(
+                "The hourly start limit refuses new workers of this type; the controller "
+                "tries again each pass and logs when starts are allowed again. "
+                "event=worker_pool_start_rate_limited team_id=%s agent_type=%s waiting=%s "
+                "failed_starts_in_row=%s last_start_failure=%s starts_ended_not_counted=%s "
+                "last_start_end_not_counted=%s",
                 self.team_id,
                 observation.agent_type,
-                result.status,
-                result.reason,
                 observation.waiting,
+                observation.failed_starts_in_row,
+                observation.last_start_failure,
+                observation.uncounted_start_ends,
+                observation.last_uncounted_start_end,
             )
-            incidents.start_failed(observation, str(result.reason or result.status))
-            break
-        return started
+        incidents.start_failed(observation, _rate_limit_reason(observation), hourly_start_limit=True)
+
+    def _rate_limit_ended(self, agent_type: str, *, because: str) -> None:
+        refused: set[str] = self.agent._pool_rate_limited_types
+        if agent_type in refused:
+            refused.discard(agent_type)
+            logger.info(
+                "The hourly start limit no longer holds back workers of this type. "
+                "event=worker_pool_start_rate_limit_ended team_id=%s agent_type=%s because=%s",
+                self.team_id,
+                agent_type,
+                because,
+            )
 
     def _launch(self, agent_type: str) -> Any:
         from custom_agents.agent_instantiation_service import AgentInstantiationService

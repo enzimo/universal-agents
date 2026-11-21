@@ -168,7 +168,7 @@ def lead(tmp_path, monkeypatch):
             resolve_definition=definitions.get,
             spawn_agent=spawn,
             inspect_launch=lambda record: "starting",
-            stop_launch=lambda record: False,
+            stop_launch=lambda record, *, reason: False,
         ),
         starts=starts,
         definitions=definitions,

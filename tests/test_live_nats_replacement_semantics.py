@@ -29,6 +29,8 @@ from custom_messages.contracts.task_v1 import Task, TaskSteering
 from custom_messages.enums import ControlType, MessageMetaType, RoutingType
 from custom_messages.enums import TaskSteeringStatus, TaskSteeringType
 from custom_transport.base import (
+    AGENT_CONTROL_ROLE,
+    AGENT_DIRECT_ROLE,
     ConsumerScope,
     FetchPolicy,
     InboundDelivery,
@@ -825,6 +827,78 @@ async def test_live_process_consumer_expires_after_connection_loss() -> None:
         await inspector.close()
         with contextlib.suppress(Exception):
             await crashed._nc.close()
+
+
+async def test_live_a_gone_workers_lasting_consumers_are_removed_and_its_mail_kept() -> None:
+    """Consumers an earlier version left for a started worker are found and deleted.
+
+    Before 2026-11-19 a started worker's mailbox and control consumer were
+    lasting (route) consumers and stayed after it exited. The team lead now
+    lists agents' consumers and deletes those of gone workers
+    (``custom_agents.worker_consumer_cleanup``). A message still in the deleted
+    mailbox stays in the work stream, and a consumer created again with the
+    same name and filter delivers it.
+    """
+
+    team_id = _team("nats_wclean")
+    mapper = NatsSubjectMapper(team_id=team_id)
+    worker_id = new_id("agent")
+    configured_id = new_id("agent")
+    earlier = _adapter(team_id, mapper=mapper)
+    inspector = _adapter(team_id, mapper=mapper)
+    again = _adapter(team_id, mapper=mapper)
+    try:
+        await earlier.connect(reconcile_topology=True)
+        for owner in (worker_id, configured_id):
+            await _subscribe_queue(
+                earlier,
+                name=f"{owner}:direct",
+                routing_key=owner,
+                durable_name=mapper.durable_name(f"agent_{owner}"),
+                consumer_scope=ConsumerScope.ROUTE,
+                consumer_role=AGENT_DIRECT_ROLE,
+                owner_agent_id=owner,
+            )
+        await _subscribe_queue(
+            earlier,
+            name=f"{worker_id}:control",
+            subject=mapper.agent_control_subject(worker_id),
+            durable_name=mapper.durable_name(f"agent_{worker_id}_control"),
+            consumer_scope=ConsumerScope.ROUTE,
+            consumer_role=AGENT_CONTROL_ROLE,
+            owner_agent_id=worker_id,
+        )
+        await earlier.close()
+
+        await inspector.connect()
+        await _publish(inspector, worker_id, _task(worker_id, "left in the mailbox"))
+        await flush_adapter_fully(inspector)
+        listed = await inspector.agent_consumers()
+        assert {(c.owner_agent_id, c.consumer_role) for c in listed} == {
+            (worker_id, AGENT_DIRECT_ROLE),
+            (worker_id, AGENT_CONTROL_ROLE),
+            (configured_id, AGENT_DIRECT_ROLE),
+        }
+        gone = [c for c in listed if c.owner_agent_id == worker_id]
+        assert await inspector.delete_agent_consumers(gone, reason="live_test") == 2
+        assert {c.owner_agent_id for c in await inspector.agent_consumers()} == {configured_id}
+
+        await again.connect()
+        queue = await _subscribe_queue(
+            again,
+            name=f"{worker_id}:direct-again",
+            routing_key=worker_id,
+            durable_name=mapper.durable_name(f"agent_{worker_id}"),
+            consumer_scope=ConsumerScope.PROCESS,
+            consumer_role=AGENT_DIRECT_ROLE,
+            owner_agent_id=worker_id,
+        )
+        delivery = await asyncio.wait_for(queue.get(), timeout=10)
+        assert delivery.envelope.msg_content.problem_statement == "left in the mailbox"
+    finally:
+        await again.close()
+        await inspector.close()
+        await earlier.close()
 
 
 async def test_live_reconciler_uses_normalized_default_team_id(monkeypatch, tmp_path) -> None:

@@ -226,6 +226,37 @@ test("the activity mesh shows the shared team status and describes who is workin
   lifecycle.dispose();
 });
 
+test("a window resize while signed out does not shrink the activity mesh to one pixel", () => {
+  // Incident 2026-11-19: the session expired, the window changed size while
+  // the sign-in form hid the sidebar, and after signing in the mesh showed
+  // as one solid block (a 1x1 drawing stretched over its box).
+  const env = page();
+  const host = env.document.createElement("div");
+  env.document.body.append(host);
+  const teamActivity = createTeamActivity();
+  const lifecycle = createPageLifecycle(env.window);
+  const mesh = createActivityMesh({ browser: env.window, lifecycle, host, teamActivity });
+  const canvas = host.children[0];
+  let box = { width: 240, height: 52 };
+  // A hidden element measures 0 by 0, as in a browser.
+  canvas.getBoundingClientRect = () => (host.hidden ? { left: 0, top: 0, width: 0, height: 0 } : { left: 0, top: 0, ...box });
+  mesh.start();
+  assert.deepEqual([canvas.width, canvas.height], [240, 52]);
+
+  mesh.stop();
+  box = { width: 200, height: 48 };
+  env.resize();
+  mesh.start();
+  assert.deepEqual([canvas.width, canvas.height], [200, 48], "signing in again fits the mesh to its current box");
+
+  // While shown, a resize still fits the mesh to its new box.
+  box = { width: 260, height: 50 };
+  env.resize();
+  assert.deepEqual([canvas.width, canvas.height], [260, 50]);
+  mesh.stop();
+  lifecycle.dispose();
+});
+
 test("the calm activity mesh takes the theme's glass edge instead of a fixed grey", async () => {
   const env = page();
   env.window.UAGlass = { colors: () => ({ edge: [200, 40, 40] }) };

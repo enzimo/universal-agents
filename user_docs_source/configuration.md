@@ -980,9 +980,23 @@ transport:
   process_consumer_inactive_threshold_seconds: 300
 ```
 
-Generated agent mailboxes are deleted during clean shutdown and expire after
-this delay when a process crashes. Explicit `agent.agent_id` mailboxes, team
-lead routes, named-worker queues, and gateway routes remain persistent. The
+Agent mailboxes and control queues are deleted during clean shutdown and
+expire after this delay once nothing asks for messages: after a process
+crashes, and also while a live agent's mailbox waits for room in its deferred
+inbox. The agent then creates the mailbox again with its messages still in the
+stream; the log line `event=nats_pull_consumer_recreated expected=true` marks
+that case as expected. This includes every worker the
+runtime starts (pool, scheduled and manual starts). Explicit `agent.agent_id`
+mailboxes, team lead routes, named-worker queues, and gateway routes remain
+persistent. Releases before this fix kept started workers' consumers. The
+launcher's consumer check deletes those older than an hour before any agent
+starts, and the team lead deletes the rest when it starts, before any worker
+starts, and again hourly while some may still belong to a running worker.
+Both keep the consumers of configured agents and of any agent still asking for
+messages. The launcher deletes only while its run lock proves no earlier run
+is alive; otherwise it only reports (`event=nats_consumer_preflight_report_only`),
+and leftovers the team lead cannot judge as gone need the offline cleanup
+described in the Docker guide, run with the runtime stopped. The
 runtime requires NATS Server 2.15.1 or newer (see "Surviving a power loss");
 the bundled image pins that release.
 
@@ -991,7 +1005,9 @@ when it can act on it. Workers of one type share one queue and ask for a task
 only while they are free, so a busy worker never holds tasks another worker
 could run. Upgrading from a release that used push consumers replaces them on
 the first start (each replacement is logged as `nats_consumer_replaced`);
-messages still in the stream are kept and delivered by the new consumers.
+messages still in the stream are kept and delivered by the new consumers. The
+push consumers of workers those releases started are never created again;
+they are deleted with the other leftovers above.
 
 ### Surviving a power loss
 
@@ -1054,14 +1070,42 @@ agent:
     default_max_workers_per_type: 4   # Pool size until TeamArchitect sets another.
     max_workers_per_type_ceiling: 16  # Most workers of one type; TeamArchitect cannot go above it.
     max_total_workers_per_team: 32    # Most workers of the team, however they were started.
-    max_launches_per_type_per_hour: 60
+    max_launches_per_type_per_hour: 60 # Most starts of one worker type in an hour.
     scale_up_wait_seconds: 20         # A task waiting this long with no free worker starts another.
 ```
 
+A worker that fails to start, or stops before it is ready, counts as a failed
+start of its type. Starts the runtime stopped itself, for example during a
+restart, starts ended because someone changed a schedule or the agent
+definition at that moment, starts stopped by a schedule's own startup timeout
+when it is shorter than the type's (`schedule_startup_timed_out`: the
+schedule's setting is the cause), and failures an older release recorded
+without a reason or with its error text do not count. The next start of a type
+waits 10 seconds after a failure, twice as long after each further failure in
+a row, up to 10 minutes, and only one start is tried at a time; a start that
+stopped responding for several minutes no longer holds the next one, but still
+takes a pool slot (it is named as hung for an hour, then counted only among the
+workers whose state cannot be checked). A worker of the type that becomes
+ready resets the wait. A type whose workers keep crashing is
+tried about 11 times in its first hour instead of reaching
+`max_launches_per_type_per_hour`. When two starts in a row fail while tasks
+wait, TeamArchitect gets a review and administrators get an Inbox notice; both
+name the failure. A single failure only delays the next start. A start refused
+by `max_launches_per_type_per_hour` opens that review and notice at once; when
+no start failed, they point at why workers of the type start so often, for
+example workers that stop soon after they become ready. A start the runtime
+refuses before it begins, for example because the agent definition cannot be
+read, opens them on the second refusal in a row, and is tried again on every
+pass until the cause is fixed. So does a worker type whose queue the NATS
+server refuses to create, for example because the work stream has reached its
+consumer limit; a timeout or a temporarily unavailable NATS server is only
+logged. The review and the notice say where to look for each kind of failure.
+
 TeamArchitect sets pool sizes itself inside the ceilings, for a while or for
-good, when it reviews a pool at its limit, a model provider that keeps refusing
-calls, or workers that cannot start. Administrators get an Inbox notice of each
-change and of problems that keep coming back. Only an operator changes the
+good, when it reviews a pool at its limit or a model provider that keeps
+refusing calls. For workers that cannot start, a pool size does not help:
+TeamArchitect reports the failure to administrators. Administrators get an
+Inbox notice of each change and of problems that keep coming back. Only an operator changes the
 ceilings. The full list of settings, with comments, is in `config.example.yaml`.
 
 Upgrading moves `agent.schedule_workers.max_total_workers_per_team` and

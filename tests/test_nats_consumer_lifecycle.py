@@ -26,8 +26,10 @@ from scripts.reconcile_nats_consumers import reconcile_nats_consumers, resolve_r
 
 
 def test_direct_consumer_scope_follows_agent_identity_lifetime() -> None:
-    assert _direct_consumer_scope(configured_fields={"id"}) == ConsumerScope.ROUTE
-    assert _direct_consumer_scope(configured_fields=set()) == ConsumerScope.PROCESS
+    assert _direct_consumer_scope(configured_fields={"id"}, started_worker=False) == ConsumerScope.ROUTE
+    assert _direct_consumer_scope(configured_fields=set(), started_worker=False) == ConsumerScope.PROCESS
+    # A started worker's id is set by spawn_agent but drawn for that one start.
+    assert _direct_consumer_scope(configured_fields={"id"}, started_worker=True) == ConsumerScope.PROCESS
 
 
 def test_reconciler_resolves_normalized_instance_config_team_id() -> None:

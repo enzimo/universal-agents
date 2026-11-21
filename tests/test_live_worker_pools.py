@@ -13,6 +13,7 @@ import asyncio
 from contextlib import AsyncExitStack
 import logging
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ import pytest
 
 from custom_agents.delegated_work_runtime import delegated_tasks
 from custom_agents.team_directory import NAMED_AGENT_START_SECONDS, live_agent_status
+from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_agents.structured_llm_messages import (
     DelegateTaskAction,
     StructuredAgentTurnDecision,
@@ -208,11 +210,6 @@ async def test_live_tasks_spread_over_free_workers() -> None:
 # -- the controller against a real queue -------------------------------------------
 
 
-class _Runtime:
-    async def run(self, fn, *args, **kwargs):
-        return fn(*args, **kwargs)
-
-
 class _LocalRuntime:
     def __init__(self, agent_types):
         # A list, so a test can add a type while the team runs.
@@ -231,6 +228,77 @@ class _LocalRuntime:
         return True
 
 
+async def test_live_a_started_worker_leaves_no_consumers_and_a_configured_agent_keeps_its_mailbox(tmp_path) -> None:
+    """A started worker's mailbox and control consumer end with its process.
+
+    2026-11-19: a worker started from a start record arrives with its id set
+    (``spawn_agent``), and that alone made its consumers lasting, so every
+    start left two on the work stream until NATS refused new ones at 1,000.
+    An agent whose id comes from configuration keeps its lasting mailbox.
+    """
+
+    from custom_agents.agent_instantiation_service import PROCESS_HOST_ID
+    from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
+    from custom_transport.base import AGENT_CONTROL_ROLE, AGENT_DIRECT_ROLE
+    from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity
+    from test_schedule_worker_transactions import make_launch
+
+    team_id = new_id("team_wcons")
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    inspector = NatsTransportAdapter(
+        config=nats_transport_config_from_env(), mapper=NatsSubjectMapper(team_id=team_id)
+    )
+    with (
+        patch("custom_agents.strands_agent.Agent", side_effect=[FakeStrandsAgent(), FakeStrandsAgent()]),
+        patch("custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()),
+        # Marking the start ready checks the definition with the team's launcher,
+        # which this test does not run; the consumers are made before that.
+        patch("custom_agents.agent_instantiation_service.update_runtime_launch", lambda agent, *, state: None),
+    ):
+        started = _agent(
+            agent_id=new_id("agent"), name="started", team_id=team_id, named_agent_type=WORKER_TYPE,
+            db_path=tmp_path / "started.db", workspace_dir=workspace_dir,
+        )
+        repository = AgentLaunchRepository(started.task_manager.storage_settings)
+        record, _ = repository.reserve(
+            make_launch(agent_id=started.id, team_id=team_id, named_agent_type=WORKER_TYPE,
+                        source="pool", host_id=PROCESS_HOST_ID),
+            LaunchCapacity.defaults(),
+            join=False,
+        )
+        # What spawn_agent attaches before the worker connects.
+        started._worker_launch = repository.update(record, state=AgentLaunchState.STARTING)
+        configured = _agent(
+            agent_id=new_id("agent"), name="configured", team_id=team_id, named_agent_type=WORKER_TYPE,
+            db_path=tmp_path / "configured.db", workspace_dir=workspace_dir,
+        )
+        agent_tasks = []
+        try:
+            await inspector.connect(reconcile_topology=True)  # the team lead creates the streams
+            agent_tasks = [(agent, await _start_agent(agent)) for agent in (started, configured)]
+            scopes = {
+                (consumer.owner_agent_id, consumer.consumer_role): consumer.consumer_scope
+                for consumer in await inspector.agent_consumers()
+            }
+            assert scopes == {
+                (started.id, AGENT_DIRECT_ROLE): "process",
+                (started.id, AGENT_CONTROL_ROLE): "process",
+                (configured.id, AGENT_DIRECT_ROLE): "route",
+                (configured.id, AGENT_CONTROL_ROLE): "route",
+            }
+            await _stop_agents(agent_tasks)
+            agent_tasks = []
+            remaining = {
+                (consumer.owner_agent_id, consumer.consumer_role)
+                for consumer in await inspector.agent_consumers()
+            }
+            assert remaining == {(configured.id, AGENT_DIRECT_ROLE), (configured.id, AGENT_CONTROL_ROLE)}
+        finally:
+            await _stop_agents(agent_tasks)
+            await inspector.close()
+
+
 @pytest.fixture()
 def controller_world(tmp_path, monkeypatch):
     team_id = new_id("team_poolctl")
@@ -242,12 +310,18 @@ def controller_world(tmp_path, monkeypatch):
         name="lead",
         team_id=team_id,
         is_team_lead=True,
-        task_manager=SimpleNamespace(storage_settings=storage, operations_runtime=_Runtime()),
+        # The real lane: it copies every argument and result, so a call that hands it
+        # the agent itself fails here as in the runtime (2026-11-20: every pool pass).
+        task_manager=SimpleNamespace(storage_settings=storage, operations_runtime=TaskOperationRuntime()),
         _local_team_runtime=_LocalRuntime([WORKER_TYPE, "TeamArchitect"]),
         _ensured_worker_queues=set(),
+        _pool_rate_limited_types=set(),
+        _pool_refusals_in_row={},
         _worker_pool_snapshot={},
         _logger=logging.getLogger("controller-test"),
         _ensure_nats_transport_adapter=lambda: adapter,
+        # Like the real agent's locks and running tasks: cannot be copied.
+        _uncopyable=threading.Lock(),
     )
     settings = WorkerPoolsConfig(scale_up_wait_seconds=0)
     monkeypatch.setattr(
@@ -258,13 +332,18 @@ def controller_world(tmp_path, monkeypatch):
         lambda _agent: ScheduleWorkersConfig(),
     )
     reviews: list = []
+    review_details: list = []
 
     async def record_review(_agent, incident, **kwargs):
         reviews.append((incident.agent_type, incident.kind, kwargs.get("recurring")))
+        review_details.append(incident.details)
         return f"review_{len(reviews)}"
 
     monkeypatch.setattr("custom_agents.worker_pool_reviews.open_review", record_review)
-    return SimpleNamespace(agent=agent, adapter=adapter, mapper=mapper, reviews=reviews, settings=settings)
+    return SimpleNamespace(
+        agent=agent, adapter=adapter, mapper=mapper, reviews=reviews, review_details=review_details,
+        settings=settings, storage=storage,
+    )
 
 
 async def _publish_tasks(adapter, mapper, count, agent_type=WORKER_TYPE):
@@ -323,6 +402,114 @@ async def test_live_controller_starts_workers_from_the_real_queue(controller_wor
             assert [review for review in world.reviews if review[1] == "capacity" and review[0] == WORKER_TYPE] == [
                 (WORKER_TYPE, "capacity", False)
             ]
+    finally:
+        await world.adapter.close()
+
+
+async def test_live_workers_that_crash_at_start_are_retried_ever_later_and_reviewed(
+    controller_world, monkeypatch, caplog
+) -> None:
+    """2026-11-19: every worker crashed at start and the controller started one every pass.
+
+    A start counts as successful only once its worker is ready. Each worker
+    here ends before that, so its record fails with the reason, and the next
+    start waits the retry time, doubling with each failure. One failure opens
+    nothing; the second in a row gives TeamArchitect one "cannot start
+    workers" review naming the failure, which stays open, reviewed once,
+    across the retries. An hourly-limit refusal is logged once and names the
+    last failure; a worker that becomes ready ends the problem.
+    """
+
+    from custom_agents.agent_instantiation_service import PROCESS_HOST_ID
+    from custom_agents.worker_pool_controller import WorkerPoolController
+    from custom_agents.worker_pool_limits import worker_pool_repository
+    from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState, WORKER_LAUNCH_RATE_LIMIT
+    from storage.agent_launch_repository import AgentLaunchRepository, LaunchCapacity
+    from test_schedule_worker_transactions import make_launch
+
+    world = controller_world
+    # Short waits for the test: 1 s after one failure, 2 s after two or more.
+    monkeypatch.setattr("custom_agents.worker_pool_controller.FAILED_START_RETRY_SECONDS", 1.0)
+    monkeypatch.setattr("custom_agents.worker_pool_controller.FAILED_START_MAX_RETRY_SECONDS", 2.0)
+    repository = AgentLaunchRepository(world.storage)
+    crash = "crashed_before_ready: BadRequestError (NATS 10026: maximum consumers limit reached)"
+    outcome = {"next": "crash"}
+    launches: list[str] = []
+
+    def launch(self, agent_type):
+        if outcome["next"] == "rate_limited":
+            return AgentLaunchResultV1(status="denied", reason=WORKER_LAUNCH_RATE_LIMIT)
+        record, _ = repository.reserve(
+            make_launch(team_id=world.mapper.team_id, named_agent_type=agent_type, source="pool",
+                        host_id=PROCESS_HOST_ID, agent_id=new_id("agent")),
+            LaunchCapacity.defaults(), join=False,
+        )
+        record = repository.update(record, state=AgentLaunchState.STARTING)
+        if outcome["next"] == "crash":
+            repository.update(record, state=AgentLaunchState.FAILED, reason=crash)
+        else:
+            repository.update(record, state=AgentLaunchState.READY, ready_at_utc=datetime.now(timezone.utc))
+        launches.append(record.agent_id)
+        return AgentLaunchResultV1(status="starting", agent_id=record.agent_id, launch_id=record.launch_id, created=True)
+
+    async def pass_and_count() -> int:
+        before = len(launches)
+        await controller.reconcile()
+        return len(launches) - before
+
+    def start_failed_reviews() -> list:
+        return [review for review in world.reviews if review[:2] == (WORKER_TYPE, "start_failed")]
+
+    def start_failed_open() -> bool:
+        return (WORKER_TYPE, "start_failed") in {
+            (incident.agent_type, incident.kind)
+            for incident in worker_pool_repository(world.agent).list_open_incidents(world.mapper.team_id)
+        }
+
+    await world.adapter.connect(reconcile_topology=True)
+    try:
+        with patch("custom_agents.worker_pool_controller.WorkerPoolController._launch", launch):
+            controller = WorkerPoolController(world.agent)
+            await _publish_tasks(world.adapter, world.mapper, 1)
+            assert await pass_and_count() == 1  # no worker: one at once; it crashes
+            assert await pass_and_count() == 0  # waits 1 s after one failure
+            pool = world.agent._worker_pool_snapshot["pools"][WORKER_TYPE]
+            assert pool["failed_starts_in_row"] == 1 and pool["last_start_failure"] == crash
+            assert "the next start waits" in pool["decision"]["reason"]
+            # One failure only holds the next start: no review, no incident.
+            assert start_failed_reviews() == [] and not start_failed_open()
+
+            await asyncio.sleep(1.1)
+            assert await pass_and_count() == 1  # tried again; crashes again
+            assert await pass_and_count() == 0  # two failures: waits 2 s, and a review opens
+            assert start_failed_reviews() == [(WORKER_TYPE, "start_failed", False)]
+            assert world.review_details[-1]["start_refused_because"] == crash
+
+            await asyncio.sleep(2.1)
+            assert await pass_and_count() == 1  # the retry is accepted, then crashes
+            # An accepted start is not a success: the problem stays open, reviewed once.
+            assert start_failed_open() and len(start_failed_reviews()) == 1
+            await asyncio.sleep(2.1)
+
+            outcome["next"] = "rate_limited"
+            with caplog.at_level(logging.INFO):
+                assert await pass_and_count() == 0
+                assert await pass_and_count() == 0  # still refused, waits ran out: not logged again
+            limited = [r for r in caplog.records if "event=worker_pool_start_rate_limited" in r.getMessage()]
+            assert len(limited) == 1
+            assert "failed_starts_in_row=3" in limited[0].getMessage()
+            assert len(start_failed_reviews()) == 1
+
+            outcome["next"] = "ready"
+            caplog.clear()
+            with caplog.at_level(logging.INFO):
+                assert await pass_and_count() == 1
+            assert "event=worker_pool_start_rate_limit_ended" in caplog.text
+            assert "because=a worker started" in caplog.text
+            await controller.reconcile()
+            pool = world.agent._worker_pool_snapshot["pools"][WORKER_TYPE]
+            assert pool["failed_starts_in_row"] == 0
+            assert not start_failed_open()
     finally:
         await world.adapter.close()
 

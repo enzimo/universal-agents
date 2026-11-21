@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from functools import partial
 from typing import Any
 
 from custom_agents.agent_instantiation_service import (
+    LAUNCH_POLICY_REVOKED,
+    LAUNCHER_RECONCILIATION,
+    SCHEDULE_STARTUP_TIMED_OUT,
+    STARTUP_TIMED_OUT,
     AgentInstantiationService,
     current_worker_limits,
     effective_worker_rules,
+    is_current_reason,
+    launcher_refusal_reason,
+    log_failed_start,
+    refusal_code,
 )
 from custom_agents.schedule_definition_identity import (
     definition_changes,
@@ -29,8 +38,10 @@ from custom_agents.schedule_repair_guidance import (
     WORKER_POLICY_EXPIRED,
     WORKER_READY_BUT_UNCLAIMED,
     WORKER_RECONCILIATION_FAILED,
+    SCHEDULE_BLOCK_REASONS,
 )
 from custom_agents.schedule_readiness import (
+    RESOURCE_CONSTRAINTS_UNSUPPORTED,
     effective_requirements,
     prepare_schedule_access,
 )
@@ -40,6 +51,60 @@ from custom_messages.contracts.schedule_worker_v1 import (
     utc_now,
 )
 from storage.agent_launch_repository import ACTIVE_LAUNCH_STATES, LaunchConflict
+
+
+logger = logging.getLogger(__name__)
+
+# The codes a schedule's blocked reason may hold: the scheduler's own block
+# reasons, plus the readiness check's fixed code for a requirement no adapter
+# enforces (caught inside that check today, but a code all the same).
+_BLOCK_CODES = SCHEDULE_BLOCK_REASONS | {RESOURCE_CONSTRAINTS_UNSUPPORTED}
+
+
+def _is_block_code(text: str) -> bool:
+    return text in _BLOCK_CODES or is_current_reason(text)
+
+
+def block_reason(error: BaseException, *, schedule_id: str, current: str | None = None) -> str:
+    """The blocked reason a refused check stores: a known code, or ``WORKER_RECONCILIATION_FAILED``.
+
+    The reason reaches the schedule inspection and the owner's notice, so
+    free error text (a host path in a file error, a validation error's input)
+    is not stored; it is logged instead. A known code is a block reason
+    (``SCHEDULE_BLOCK_REASONS``) or a start reason this release writes
+    (``is_current_reason``), as the launcher's results carry (review finding
+    RC-6, round 3). The warning is written when the stored reason changes;
+    while ``current`` already says ``WORKER_RECONCILIATION_FAILED`` (the same
+    fault on every pass), it is a debug line. A reason an older release
+    stored is read through ``shown_block_reason``.
+    """
+
+    text = str(error)
+    if _is_block_code(text):
+        return text
+    logger.log(
+        logging.DEBUG if current == WORKER_RECONCILIATION_FAILED else logging.WARNING,
+        "A scheduled worker check failed with an error that is not a known code; the "
+        "schedule is blocked as worker_reconciliation_failed. "
+        "event=schedule_worker_block_reason_replaced schedule_id=%s error_type=%s error=%s",
+        schedule_id,
+        type(error).__name__,
+        error,
+    )
+    return WORKER_RECONCILIATION_FAILED
+
+
+def shown_block_reason(text: str | None) -> str | None:
+    """A stored blocked reason as people and agents may see it: ``block_reason``'s rule applied on reading.
+
+    The previous release stored ``str(exc)`` on both block paths; such a
+    reason shows as ``WORKER_RECONCILIATION_FAILED`` until the schedule's
+    next check stores a known one (critique C06, round 3).
+    """
+
+    if not text or _is_block_code(text):
+        return text
+    return WORKER_RECONCILIATION_FAILED
 
 
 def _date(value: str | None) -> datetime | None:
@@ -86,7 +151,13 @@ def schedule_ready_for_admission(agent: Any, schedule: Any) -> bool:
         return True
     except (ValueError, PermissionError) as exc:
         agent._schedule_store.worker_records.mark_blocked(
-            schedule.schedule_id, agent.team_id, str(exc)
+            schedule.schedule_id,
+            agent.team_id,
+            block_reason(
+                exc,
+                schedule_id=schedule.schedule_id,
+                current=binding.blocked_reason if binding is not None else None,
+            ),
         )
         return False
 
@@ -132,7 +203,10 @@ class ScheduleWorkerController:
                 ):
                     await self._cover(binding, row, now, limits)
             except (PermissionError, ValueError, LaunchConflict) as exc:
-                await self._block(binding, str(exc))
+                await self._block(
+                    binding,
+                    block_reason(exc, schedule_id=binding.schedule_id, current=binding.blocked_reason),
+                )
             except Exception:
                 self.agent._logger.exception(
                     "Schedule worker reconciliation failed",
@@ -170,6 +244,7 @@ class ScheduleWorkerController:
                 self.agent._local_team_runtime.inspect_launch, record
             )
             target = None
+            stop_reason = None
             if evidence == "absent":
                 if record.ready_at_utc or record.lease_expires_at_utc <= now:
                     target = (
@@ -182,48 +257,12 @@ class ScheduleWorkerController:
             elif evidence == "ready" and record.lease_expires_at_utc <= now:
                 target = AgentLaunchState.UNKNOWN
             elif evidence == "starting":
-                binding = (
-                    self.store.worker_records.get_binding(
-                        record.schedule_id, team_id=self.agent.team_id
-                    )
-                    if record.schedule_id
-                    else None
-                )
-                revoked = False
-                startup_timeout = limits.defaults.startup_timeout_seconds
-                try:
-                    startup_timeout = effective_worker_rules(
-                        self.agent,
-                        record.named_agent_type,
-                        binding.policy.rules if binding else {},
-                    ).startup_timeout_seconds
-                except (ValueError, PermissionError):
-                    revoked = True
-                if record.source == "schedule":
-                    try:
-                        definition, _ = self.launcher.validate_type(
-                            record.named_agent_type, automatic=True
-                        )
-                        revoked = revoked or (
-                            binding is None
-                            or not binding.policy.enabled
-                            or (binding.authority_mode == "runtime_default" and not limits.default_startup_policy_enabled)
-                            or launch_definition_digest(definition)
-                            != record.definition_digest
-                            or not definition_is_current(binding, definition)
-                            or (
-                                binding.policy.expires_at_utc is not None
-                                and binding.policy.expires_at_utc <= now
-                            )
-                        )
-                    except (ValueError, PermissionError):
-                        revoked = True
-                if (
-                    revoked
-                    or record.created_at_utc + timedelta(seconds=startup_timeout) <= now
-                ):
+                stop_reason = self._why_stop_starting(record, now, limits)
+                if stop_reason is not None:
                     stopped = await self.runtime.run(
-                        self.agent._local_team_runtime.stop_launch, record
+                        self.agent._local_team_runtime.stop_launch,
+                        record,
+                        reason=stop_reason,
                     )
                     target = (
                         AgentLaunchState.FAILED if stopped else AgentLaunchState.UNKNOWN
@@ -238,12 +277,19 @@ class ScheduleWorkerController:
                     except LaunchConflict:
                         pass  # Readiness or exit won the same fence.
             if target is not None and target != record.state:
+                # The first reason stays, as on the worker's handle: a start
+                # that timed out and outlived the join is "unknown" with
+                # startup_timed_out, and keeps it when it later fails, even if
+                # another check (a schedule edit) stops it again meanwhile. A
+                # start still starting has no reason yet; one found gone with
+                # none gets this generic one.
+                reason = record.reason or stop_reason or LAUNCHER_RECONCILIATION
                 try:
                     await self.runtime.run(
                         self.launcher.repository.update,
                         record,
                         state=target,
-                        reason="launcher_reconciliation",
+                        reason=reason,
                     )
                 except LaunchConflict:
                     # The child can publish readiness or exit while inspected.
@@ -252,33 +298,169 @@ class ScheduleWorkerController:
                         extra={"launch_id": record.launch_id},
                     )
                     continue
-                self._log_launch_transition(record, target, evidence)
+                self._log_launch_transition(record, target, evidence, reason)
+
+    def _why_stop_starting(
+        self, record: Any, now: datetime, limits: Any
+    ) -> str | None:
+        """Why a worker of this process that is still starting must stop, or None.
+
+        Checked in this order, and the reason becomes its start record's:
+
+        - the rules it started with are refused: the type's rules with a
+          scheduled start's own overrides on top, as the launcher checked
+          them (a pool start is not checked against them before it starts).
+          ``_rules_refusal`` decides whose rule it is: the type's own (its
+          code, for example ``schedule_worker_rule_exceeds_operator_limit:<field>``,
+          which lasts until the configuration is fixed and counts as a failed
+          start of the type) or only the schedule's (``LAUNCH_POLICY_REVOKED``,
+          which does not count);
+        - a scheduled start's type is refused now: its code. A denied type
+          counts; automatic starts switched off, or the type taken off the
+          eligible list, does not (``UNCOUNTED_START_ENDS``);
+        - a scheduled start's policy or definition changed:
+          ``LAUNCH_POLICY_REVOKED`` (does not count);
+        - the start took longer than its startup timeout (a schedule's own
+          value when it sets one); ``_timeout_reason`` says whose ran out.
+        """
+
+        binding = (
+            self.store.worker_records.get_binding(
+                record.schedule_id, team_id=self.agent.team_id
+            )
+            if record.schedule_id
+            else None
+        )
+        try:
+            rules = effective_worker_rules(
+                self.agent, record.named_agent_type, binding.policy.rules if binding else {}
+            )
+        except (ValueError, PermissionError) as exc:
+            return self._rules_refusal(record, binding, exc)
+        if record.source == "schedule":
+            refused = self._scheduled_start_refusal(record, binding, now, limits)
+            if refused is not None:
+                return refused
+        if record.created_at_utc + timedelta(seconds=rules.startup_timeout_seconds) <= now:
+            return self._timeout_reason(record, binding, now)
+        return None
+
+    def _timeout_reason(self, record: Any, binding: Any, now: datetime) -> str:
+        """Whose startup timeout ran out: the type's own (``STARTUP_TIMED_OUT``, counts) or only a schedule's.
+
+        A schedule may set its own startup timeout. When only that shorter
+        value ran out, the type may be fine and the schedule's setting is the
+        cause: ``SCHEDULE_STARTUP_TIMED_OUT``, which does not count against the
+        type (review finding GEN-1, 2026-11-20); the schedule's own start
+        attempts and its owner's notice still report it. When the type's own
+        rules are refused (a schedule's override is what made the start
+        allowed), the type has no valid timeout to compare with, and the
+        timeout counts.
+        """
+
+        if binding is None:
+            return STARTUP_TIMED_OUT
+        try:
+            own = effective_worker_rules(self.agent, record.named_agent_type, {})
+        except (ValueError, PermissionError):
+            return STARTUP_TIMED_OUT
+        if record.created_at_utc + timedelta(seconds=own.startup_timeout_seconds) <= now:
+            return STARTUP_TIMED_OUT
+        return SCHEDULE_STARTUP_TIMED_OUT
+
+    def _rules_refusal(self, record: Any, binding: Any, error: BaseException) -> str:
+        """Whose worker rules were refused: the type's own (counted code) or only a schedule's overrides.
+
+        A schedule's own rule above an operator maximum (one lowered while its
+        worker started) is about that schedule, so it does not count against
+        the type; the type's rules alone decide that.
+        """
+
+        if binding is None:
+            return self._stop_refusal_reason(record, error)
+        try:
+            effective_worker_rules(self.agent, record.named_agent_type, {})
+        except (ValueError, PermissionError) as type_error:
+            return self._stop_refusal_reason(record, type_error)
+        return LAUNCH_POLICY_REVOKED
+
+    def _scheduled_start_refusal(
+        self, record: Any, binding: Any, now: datetime, limits: Any
+    ) -> str | None:
+        """Why a scheduled start may no longer become ready: its type is refused (its code), or its policy or definition changed."""
+
+        try:
+            definition, _ = self.launcher.validate_type(
+                record.named_agent_type, automatic=True
+            )
+        except (ValueError, PermissionError) as exc:
+            return self._stop_refusal_reason(record, exc)
+        if (
+            binding is None
+            or not binding.policy.enabled
+            or (binding.authority_mode == "runtime_default" and not limits.default_startup_policy_enabled)
+            or launch_definition_digest(definition) != record.definition_digest
+            or not definition_is_current(binding, definition)
+            or (
+                binding.policy.expires_at_utc is not None
+                and binding.policy.expires_at_utc <= now
+            )
+        ):
+            return LAUNCH_POLICY_REVOKED
+        return None
+
+    def _stop_refusal_reason(self, record: Any, error: BaseException) -> str:
+        """The stop reason for a refused check (``launcher_refusal_reason``); the full error is logged when only its type is kept."""
+
+        reason = launcher_refusal_reason(error)
+        if refusal_code(error) is None:
+            self.agent._logger.warning(
+                "A starting worker is stopped because a check refused it with an error "
+                "that is not a refusal code; only its type is kept as the reason. "
+                "event=worker_launch_refused team_id=%s agent_type=%s launch_id=%s "
+                "reason=%s error=%s",
+                record.team_id,
+                record.named_agent_type,
+                record.launch_id,
+                reason,
+                error,
+            )
+        return reason
 
     def _log_launch_transition(
-        self, record: Any, target: AgentLaunchState, evidence: str
+        self, record: Any, target: AgentLaunchState, evidence: str, reason: str
     ) -> None:
-        """One log line per state change, so an unknown start is never silent."""
+        """One log line per state change, so an unknown start is never silent.
+
+        A start failed here also gets the one ``event=worker_start_failed``
+        line every failed start gets (``log_failed_start``).
+        """
+        if target == AgentLaunchState.FAILED:
+            log_failed_start(record, reason)
         if target == AgentLaunchState.UNKNOWN:
             self.agent._logger.warning(
-                "A worker start's process cannot be checked, so its slot stays taken "
-                "until its process is proven gone. event=worker_launch_liveness_unknown "
-                "launch_id=%s agent_type=%s schedule_id=%s host_id=%s evidence=%s",
+                "A worker start's process cannot be checked, or the worker was asked to "
+                "stop and has not ended yet, so its slot stays taken until it is proven "
+                "gone. event=worker_launch_liveness_unknown launch_id=%s agent_type=%s "
+                "schedule_id=%s host_id=%s evidence=%s reason=%s",
                 record.launch_id,
                 record.named_agent_type,
                 record.schedule_id,
                 record.host_id,
                 evidence,
+                reason,
             )
         elif record.state == AgentLaunchState.UNKNOWN:
             self.agent._logger.warning(
                 "A worker start whose process could not be checked is now settled. "
                 "event=worker_launch_unknown_settled launch_id=%s agent_type=%s "
-                "schedule_id=%s host_id=%s state=%s",
+                "schedule_id=%s host_id=%s state=%s reason=%s",
                 record.launch_id,
                 record.named_agent_type,
                 record.schedule_id,
                 record.host_id,
                 target.value,
+                reason,
             )
 
     async def _cover(
@@ -527,6 +709,7 @@ async def local_schedule_runtime_loop(agent: Any) -> None:
     from custom_agents.local_schedule_policy import install_schedule_default
     from custom_agents.memory_review_cleanup_runtime import ReviewCleanupController
 
+    from custom_agents.worker_consumer_cleanup import sweep_worker_consumers_if_due
     from custom_agents.worker_pool_controller import reconcile_worker_pools
 
     review_cleanup = ReviewCleanupController(agent)
@@ -546,6 +729,9 @@ async def local_schedule_runtime_loop(agent: Any) -> None:
             )
     while not agent.get_exit_event().is_set():
         try:
+            # Before this pass starts workers: remove gone workers' consumers
+            # again while the lead's last sweep kept some (worker_consumer_cleanup).
+            await sweep_worker_consumers_if_due(agent)
             rows = await agent.task_manager.operations_runtime.run(agent._schedule_store.get_all)
             for row in rows:
                 try:

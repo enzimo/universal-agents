@@ -39,6 +39,10 @@ AGENT_DEFINITION_UNAVAILABLE = "agent_definition_unavailable"
 # standing worker took it (custom_agents.stuck_schedules).
 SCHEDULE_OVERDUE_UNCLAIMED = "schedule_overdue_unclaimed"
 
+# A running worker's authorization mode differs from the saved configuration
+# (custom_agents.schedule_readiness); it needs a restart.
+WORKER_AUTHORIZATION_MODE_CHANGED = "worker_authorization_mode_changed_restart_required"
+
 # Reasons whose repair is re-saving the policy with configure_scheduled_worker.
 RESAVE_REPAIR_REASONS = frozenset(
     {AGENT_DEFINITION_CHANGED, SCHEDULE_EXECUTION_CHANGED, WORKER_POLICY_EXPIRED}
@@ -119,7 +123,10 @@ _REPAIR_BY_REASON = {
     ),
     WORKER_LAUNCH_RATE_LIMIT: (
         "Too many workers of this type started in the last hour. The start is "
-        "retried once the hourly limit allows."
+        "retried once the hourly limit allows. Many starts in a short time "
+        "usually mean each worker stopped before it was ready: read the type's "
+        "start failures (inspect_worker_pools: last_start_failure) and fix that "
+        "cause; raising the limit only allows more failed starts."
     ),
     WORKER_READY_BUT_UNCLAIMED: (
         "A worker started but did not take the occurrence within the admission "
@@ -222,7 +229,8 @@ _PERSON_EXPLANATION_BY_REASON = {
     ),
     WORKER_LAUNCH_RATE_LIMIT: (
         "Too many workers of this kind started in the last hour. The schedule "
-        "starts again once the hourly limit allows."
+        "starts again once the hourly limit allows. This usually means the "
+        "workers stop right after they start. " + _ADMIN_LOG
     ),
     SCHEDULE_OVERDUE_UNCLAIMED: (
         "The schedule is overdue and no worker has picked it up. " + _ADMIN_LOG
@@ -243,6 +251,14 @@ _ADMINISTRATOR_REASONS = frozenset(
         SCHEDULE_OVERDUE_UNCLAIMED,
     }
 )
+
+
+
+# Every fixed reason a schedule's worker binding can be blocked with: the repair
+# table's reasons and the readiness check's restart code. The scheduled-worker
+# controller stores only these, or a start reason this release writes
+# (custom_agents.schedule_worker_controller.block_reason).
+SCHEDULE_BLOCK_REASONS = frozenset(_REPAIR_BY_REASON) | {WORKER_AUTHORIZATION_MODE_CHANGED}
 
 
 def repair_instructions(reason: str | None) -> str:

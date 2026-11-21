@@ -42,6 +42,7 @@ from custom_agents.schedule_access import (
     requirement_resolution,
 )
 from custom_agents.schedule_definition_identity import schedule_definition_digest
+from custom_agents.schedule_repair_guidance import WORKER_AUTHORIZATION_MODE_CHANGED
 from custom_agents.schedule_execution_identity import execution_digest
 from custom_messages.contracts.access_v2 import AccountMode, ToolKind
 from custom_messages.contracts.schedule_worker_v1 import (
@@ -242,7 +243,7 @@ def prepare_schedule_access(
         if authorization_enabled(config.get("authorization_config")) != authorization_enabled(
             agent.authorization_config
         ):
-            raise ValueError("worker_authorization_mode_changed_restart_required")
+            raise ValueError(WORKER_AUTHORIZATION_MODE_CHANGED)
         config["tools"] = agent.tools
     catalog = access.service.catalog if access is not None else runtime_access(agent).catalog
     # Every agent of an instance runs in the same authorization mode as the lead.
