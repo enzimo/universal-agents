@@ -75,9 +75,13 @@ export class FakeElement extends EventTarget {
     return false;
   }
   matches(selector) {
-    if (selector.startsWith(".")) return this.classList.contains(selector.slice(1));
-    if (selector.startsWith("#")) return this.id === selector.slice(1);
-    return this.tagName === selector.toUpperCase();
+    if (typeof selector !== "string" || !selector) {
+      throw new Error(`Unsupported selector in fake_dom: ${String(selector)}`);
+    }
+    if (/^\.[A-Za-z0-9_-]+$/.test(selector)) return this.classList.contains(selector.slice(1));
+    if (/^#[A-Za-z0-9_-]+$/.test(selector)) return this.id === selector.slice(1);
+    if (/^[A-Za-z][A-Za-z0-9-]*$/.test(selector)) return this.tagName === selector.toUpperCase();
+    throw new Error(`Unsupported selector in fake_dom: ${selector}`);
   }
   closest(selector) {
     for (let node = this; node; node = node.parentNode) if (node.matches && node.matches(selector)) return node;

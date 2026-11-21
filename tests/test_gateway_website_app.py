@@ -3522,6 +3522,15 @@ def test_web_chat_browser_state_is_principal_scoped_and_credentials_are_not_pers
     assert "A submitted request may still be finishing." in script
     assert 'actions.querySelector(".message-transient-dismiss")' in countdown_source
     assert ".message-transient-expired {" in styles
+    assert ".message-transient-header {" in styles
+    assert ".message-transient-badge {" in styles
+    assert ".message-transient-badge.is-expired {" in styles
+    assert ".button.small {" in styles
+    assert ".access-review-status-row {" in styles
+    assert ".access-review-more-toggle {" in styles
+    assert ".access-review-follow-up-outcome {" in styles
+    button_rule = styles.split(".button {", 1)[1].split("}", 1)[0]
+    assert "text-decoration: none;" in button_rule
     assert '.message-transient-open[aria-disabled="true"]' not in styles
     render_messages_source = script.split("function renderMessages(options)", 1)[1].split(
         "function appendSystemError", 1

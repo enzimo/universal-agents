@@ -104,3 +104,16 @@ test("copy-only transient card keeps compact copy/dismiss actions without link h
   assert.equal(copy.textContent, "Copy");
   assert.ok(dismiss.classList.contains("secondary") && dismiss.classList.contains("small"));
 });
+
+test("fake_dom matches throws on unsupported selectors instead of returning false", () => {
+  const document = fakeDocument();
+  const link = document.createElement("a");
+  link.className = "alpha beta";
+  link.id = "only";
+  assert.equal(link.matches(".alpha"), true);
+  assert.equal(link.matches("#only"), true);
+  assert.equal(link.matches("a"), true);
+  assert.throws(() => link.matches("a[href]"), /Unsupported selector/);
+  assert.throws(() => link.matches(".alpha.beta"), /Unsupported selector/);
+  assert.throws(() => link.matches(".alpha .beta"), /Unsupported selector/);
+});

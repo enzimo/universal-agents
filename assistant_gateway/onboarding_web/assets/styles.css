@@ -2237,9 +2237,29 @@ h1 {
 }
 
 :root[data-color-mode="dark"] .message-transient-notice {
-  border-color: rgba(208, 168, 95, 0.32);
-  background: linear-gradient(135deg, rgba(86, 64, 27, 0.42), rgba(24, 20, 13, 0.70));
+  border-color: rgba(208, 168, 95, 0.36);
+  background: linear-gradient(135deg, rgba(86, 64, 27, 0.42), rgba(24, 20, 13, 0.78));
   color: var(--ink);
+}
+
+:root[data-color-mode="dark"] .message-transient-notice.is-expired {
+  border-color: var(--dark-border-subtle);
+  background: rgba(16, 35, 45, 0.78);
+}
+
+:root[data-color-mode="dark"] .message-transient-notice.is-link-card .message-transient-dismiss.button.ghost {
+  border-color: rgba(173, 193, 200, 0.56);
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+:root[data-color-mode="dark"] .message-transient-notice.is-link-card .message-transient-dismiss.button.ghost:hover,
+:root[data-color-mode="dark"] .message-transient-notice.is-link-card .message-transient-dismiss.button.ghost:focus-visible {
+  border-color: var(--dark-ember);
+  background: rgba(23, 52, 64, 0.62);
+  color: var(--ink);
+  outline: none;
 }
 
 :root[data-color-mode="dark"] .message-bubble.is-system .message-role,
@@ -3186,6 +3206,7 @@ body.is-theme-customizing {
   cursor: pointer;
   font-weight: 820;
   padding: 0 18px;
+  text-decoration: none;
 }
 
 .button.primary {
@@ -3199,7 +3220,6 @@ body.is-theme-customizing {
   background: rgba(255, 255, 255, 0.40);
   color: var(--ink);
   box-shadow: 0 10px 22px rgba(3, 28, 42, 0.10);
-  text-decoration: none;
 }
 
 .button.launch {
@@ -3216,6 +3236,20 @@ body.is-theme-customizing {
   border-color: rgba(16, 32, 28, 0.46);
   background: rgba(255, 255, 255, 0.36);
   color: var(--ink);
+}
+
+.button.small {
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 12px;
+  font-size: 0.84rem;
+  line-height: 1.25;
+  box-shadow: none;
+}
+
+:root[data-color-mode="dark"] .button.small,
+:root[data-color-mode="dark"] .permission-choice-button {
+  box-shadow: none;
 }
 
 .button:disabled {
@@ -3876,7 +3910,11 @@ body.is-theme-customizing {
 
 .permission-choice-button {
   min-width: 0;
-  min-height: 40px;
+  min-height: 30px;
+  padding: 4px 12px;
+  font-size: 0.84rem;
+  line-height: 1.25;
+  box-shadow: none;
 }
 
 .permission-grants-table-wrap {
@@ -6380,16 +6418,59 @@ body.is-theme-customizing {
 .message-transient-notice {
   align-self: stretch;
   border: 1px solid rgba(183, 121, 31, 0.42);
-  border-radius: 12px;
-  background: rgba(255, 247, 229, 0.9);
-  padding: 12px;
+  border-radius: 10px;
+  background: rgba(255, 247, 229, 0.92);
+  padding: 10px 12px;
+}
+
+.message-transient-notice.is-link-card {
+  display: grid;
+  gap: 8px;
+  border-left: 3px solid var(--status-paused-border);
+}
+
+.message-transient-notice.is-expired {
+  border-color: var(--status-disabled-border);
+  background: rgba(241, 245, 249, 0.94);
+}
+
+.message-transient-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.message-transient-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--status-paused-border);
+  border-radius: 999px;
+  background: var(--status-paused-bg);
+  color: var(--status-paused-ink);
+  font-size: 0.74rem;
+  font-weight: 820;
+  line-height: 1.25;
+  padding: 2px 9px;
+}
+
+.message-transient-badge.is-expired {
+  border-color: var(--status-disabled-border);
+  background: var(--status-disabled-bg);
+  color: var(--status-disabled-ink);
 }
 
 .message-transient-notice pre {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: inherit;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.message-transient-notice.is-link-card pre {
+  margin: 0;
 }
 
 .message-transient-actions {
@@ -6399,15 +6480,30 @@ body.is-theme-customizing {
   gap: 8px;
 }
 
+.message-transient-notice.is-link-card .message-transient-dismiss.button.ghost {
+  border-color: rgba(16, 32, 28, 0.50);
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.message-transient-notice.is-link-card .message-transient-dismiss.button.ghost:hover,
+.message-transient-notice.is-link-card .message-transient-dismiss.button.ghost:focus-visible {
+  border-color: var(--ocean);
+  background: rgba(255, 255, 255, 0.52);
+  color: var(--ink);
+}
+
 .message-transient-countdown {
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.8rem;
+  font-weight: 700;
 }
 
 .message-transient-expired {
-  flex: 1 1 260px;
+  flex: 1 1 240px;
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.84rem;
   font-weight: 700;
   line-height: 1.4;
 }
@@ -6463,14 +6559,26 @@ body.is-theme-customizing {
   gap: 10px;
 }
 
+.access-review-card {
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.access-review-card + .access-review-card {
+  margin-top: 10px;
+}
+
 .access-review-card .permission-request-heading,
 .access-notice-row .permission-request-heading {
   flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
 }
 
 .access-review-card .permission-operation {
   margin-top: 0;
-  font-size: 1.05rem;
+  font-size: 0.98rem;
+  line-height: 1.35;
 }
 
 .access-inbox-status {
@@ -6528,8 +6636,21 @@ body.is-theme-customizing {
 }
 
 .access-review-details {
-  display: grid;
-  gap: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+}
+
+.access-review-details .permission-detail-row {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 6px;
+}
+
+.access-review-details .permission-detail-label::after {
+  content: ":";
 }
 
 /* Warning chip on review rows that broaden access (New host, Full access, ...). */
@@ -6540,8 +6661,8 @@ body.is-theme-customizing {
 }
 
 .access-review-row-section {
-  margin: 6px 0 0;
-  font-size: 0.8rem;
+  margin: 4px 0 0;
+  font-size: 0.78rem;
   font-weight: 850;
   letter-spacing: 0.02em;
 }
@@ -6550,65 +6671,85 @@ body.is-theme-customizing {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 8px;
+  gap: 4px 8px;
   overflow-wrap: anywhere;
 }
 
 .access-review-row-text {
-  flex: 1 1 260px;
+  flex: 1 1 240px;
+  font-size: 0.88rem;
 }
 
 .access-review-keep {
-  display: grid;
-  grid-template-columns: auto 1fr;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 2px 8px;
+  gap: 4px 8px;
   flex: 1 1 100%;
   margin-top: 2px;
 }
 
 .access-review-keep-box {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   margin: 0;
   accent-color: var(--ocean);
 }
 
 .access-review-keep-label {
-  font-weight: 800;
+  font-size: 0.86rem;
+  font-weight: 760;
+}
+
+.access-review-keep-for {
+  width: auto;
+  min-width: 0;
+  min-height: 28px;
+  padding: 2px 8px;
+  font-size: 0.82rem;
+  border-radius: 6px;
 }
 
 .access-review-keep-help {
-  grid-column: 2;
+  flex: 1 0 100%;
   margin: 0;
-  font-size: 0.82rem;
-  opacity: 0.82;
+  padding-left: 24px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.35;
 }
 
 .access-review-warning {
   display: flex;
   align-items: flex-start;
-  gap: 9px;
+  gap: 8px;
   margin: 0;
   border: 1px solid var(--status-paused-border);
   border-radius: 7px;
   background: var(--status-paused-bg);
   color: var(--status-paused-ink);
+  font-size: 0.86rem;
   font-weight: 760;
-  padding: 10px 12px;
+  padding: 8px 10px;
 }
 
 .access-review-warning-icon {
   display: inline-grid;
   flex: 0 0 auto;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   border: 1.5px solid currentColor;
   border-radius: 999px;
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   font-weight: 900;
   line-height: 1;
+}
+
+.access-review-reason {
+  gap: 4px;
+  padding: 8px 10px;
+  font-size: 0.86rem;
 }
 
 .access-review-reason p {
@@ -6619,37 +6760,65 @@ body.is-theme-customizing {
 
 .access-review-decision {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
-/* What each choice does (ui/DESIGN.md, Access Request Cards): always visible;
+/* What each choice does (ui/DESIGN.md, Access Request Cards): always visible
+   on Settings Inbox cards, folded inside Details on compact Web Chat cards;
    hovering or focusing a button marks its line with the ember edge. */
 .access-review-choice-help {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   margin: 0;
   padding: 0;
   list-style: none;
-  font-size: 0.82rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.38;
 }
 
 .access-review-choice-help-item {
-  padding: 4px 8px;
-  border-radius: 6px;
-  opacity: 0.82;
+  padding: 3px 8px;
+  border-radius: 5px;
 }
 
 .access-review-choice-help-item.is-active {
-  opacity: 1;
+  color: var(--ink);
+  background: rgba(183, 121, 31, 0.10);
   box-shadow: inset 3px 0 0 var(--dark-ember, var(--amber));
 }
 
+:root[data-color-mode="dark"] .access-review-choice-help-item.is-active {
+  background: rgba(240, 163, 90, 0.14);
+}
+
 .access-review-choice-help-label {
-  font-weight: 800;
+  color: var(--ink);
+  font-weight: 780;
 }
 
 .access-review-note {
-  min-height: 64px;
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 0.86rem;
+  line-height: 1.35;
+  resize: vertical;
+}
+
+.access-review-follow-up {
+  margin-top: 2px;
+}
+
+.access-review-follow-up-outcomes {
+  display: grid;
+  gap: 2px;
+}
+
+.access-review-follow-up-outcome {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
 }
 
 .access-review-card.is-decided .permission-effect-summary,
@@ -6763,53 +6932,129 @@ body.is-theme-customizing {
 
 /* Web Chat access review card (chat_access_review.mjs, ui/DESIGN.md "Access
    Review Cards in Web Chat"). It sits inside the System message bubble, so it
-   drops its own card surface: cards never nest. The summary, warning chips
-   and buttons stay visible; the rest folds under Details. */
-:root .chat-access-review .access-review-card.is-compact {
-  gap: 10px;
-  border: 0;
+   drops its own card surface and borders: cards never nest. The summary, status
+   and warning chips, Details toggle and decision buttons stay visible; the rest
+   folds under Details above the action buttons. */
+.chat-access-review {
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid rgba(146, 91, 17, 0.24);
+}
+
+.chat-access-review:empty {
+  display: none;
+}
+
+:root[data-color-mode="dark"] .chat-access-review {
+  border-top-color: var(--dark-border-subtle);
+}
+
+:root .chat-access-review .access-review-card.is-compact {
+  gap: 8px;
+  border: 0;
   border-radius: 0;
   background: none;
-  padding: 10px 0 0;
+  padding: 0;
 }
 
 .chat-access-review .access-review-card.is-compact .permission-operation {
-  font-size: 0.98rem;
+  font-size: 0.94rem;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
-.access-review-flags {
+.chat-access-review .access-review-card.is-compact .access-inbox-status {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+}
+
+.chat-access-review .access-review-card.is-compact.is-decided {
+  gap: 6px;
+}
+
+.chat-access-review .access-review-card.is-compact.is-decided .permission-effect-summary {
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.access-review-status-row {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.access-review-flags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
   margin: 0;
 }
 
 .access-review-more {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .access-review-more[open] {
-  padding-bottom: 4px;
+  padding-bottom: 2px;
 }
 
 .access-review-more-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   width: fit-content;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid rgba(7, 89, 133, 0.72);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.64);
   color: var(--ocean);
   cursor: pointer;
-  font-weight: 800;
+  font-size: 0.84rem;
+  font-weight: 780;
+  line-height: 1.25;
+  list-style: none;
+  user-select: none;
+}
+
+.access-review-more-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.access-review-more-toggle::before {
+  content: "▸";
+  display: inline-block;
+  font-size: 0.78rem;
+  transition: transform 140ms ease;
+}
+
+.access-review-more[open] > .access-review-more-toggle::before {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .access-review-more-toggle::before {
+    transition: none;
+  }
+}
+
+.access-review-more-toggle:hover {
+  border-color: var(--ocean);
+  background: rgba(255, 255, 255, 0.88);
 }
 
 .access-review-more-toggle:focus-visible {
   outline: 2px solid var(--ocean);
-  outline-offset: 3px;
-  border-radius: 4px;
+  outline-offset: 2px;
 }
 
 .access-review-full-title {
   margin: 0;
+  font-size: 0.88rem;
   font-weight: 760;
   overflow-wrap: anywhere;
 }
@@ -6822,12 +7067,19 @@ body.is-theme-customizing {
 }
 
 :root[data-color-mode="dark"] .chat-access-review .access-review-card.is-compact {
-  border-top-color: var(--dark-border-subtle);
+  border: 0;
   background: none;
 }
 
 :root[data-color-mode="dark"] .access-review-more-toggle {
+  border-color: var(--dark-border);
+  background: var(--dark-control);
   color: var(--dark-focus);
+}
+
+:root[data-color-mode="dark"] .access-review-more-toggle:hover {
+  border-color: var(--dark-focus);
+  background: var(--dark-raised);
 }
 
 :root[data-color-mode="dark"] .access-review-more-toggle:focus-visible {
@@ -7395,6 +7647,14 @@ body.is-theme-customizing {
     rgba(255, 252, 235, 0.58),
     rgba(246, 200, 76, 0.24)
   );
+}
+
+.message-bubble.is-system:has(.chat-access-review) {
+  padding: 10px 12px;
+}
+
+.message-bubble.is-system:has(.chat-access-review) .message-header {
+  margin-bottom: 4px;
 }
 
 .message-header {
@@ -8030,6 +8290,10 @@ body.is-theme-customizing {
 
   .button {
     width: 100%;
+  }
+
+  .button.small {
+    width: auto;
   }
 
   .chat-enrollment-actions {
