@@ -1106,13 +1106,20 @@ that leads to it (owner's request 2026-10-12).
   scoped strictly to the approving person (`approver_person_id`): reloading
   mid-flow keeps only still-pending non-expired `follow_up_links` for that
   approver (never for other viewers). As soon as each broker form finishes (via
-  `GatewayToolSetups.after_proposal_links`) or expires, the gateway removes
-  that link and returns a plain-language `follow_up_outcomes` line in its
-  place. Both Web Chat and Settings Inbox refresh decided cards that have
-  pending follow-up links on focus/visibility change, incoming agent messages,
-  and a bounded short poll—stopping immediately once all forms finish, on
-  sign-out, or when Settings Inbox is hidden—replacing the dismissed button
-  with the compact completion status (`role="status"`).
+  `GatewayToolSetups.after_proposal_links`), the gateway removes that link and
+  returns a plain-language `follow_up_outcomes` line in its place. If a form's
+  `expires_at_utc` passes before the broker watch reports an ending, the link
+  button is hidden immediately, the card shows **"Checking whether the
+  credential form finished…"** in the status list (`role="status"`), and the
+  gateway reports `follow_up_settling: true` with `follow_up_settling_until_utc`
+  (`expires_at_utc` plus the 60 s broker watch grace and a 15 s backup buffer)
+  so a submission started just before expiry can still settle to its real
+  outcome. Both Web Chat and Settings Inbox refresh decided cards that have
+  pending or settling follow-up forms on focus/visibility change, incoming agent
+  messages, and a bounded short poll—stopping immediately once every form
+  reports its ending or the settling deadline passes (or on sign-out, or when
+  Settings Inbox is hidden)—replacing the button or settling text with the final
+  plain-language `follow_up_outcomes` line (`role="status"`).
 
 ### Delivery Request Cards
 
@@ -2524,11 +2531,15 @@ Keep keyboard activation, nested panes, rapid toggles, and deep links usable.
   decision made elsewhere it shows the stored outcome and who decided, such as
   **Approved for this task** with "Decided by Dana on <local time>.". A request
   still waiting is read again at most every 15 seconds when the transcript
-  redraws. A decided card with no pending follow-up links is never read again;
-  one with active `follow_up_links` refreshes on tab focus/visibility change,
-  incoming agent messages, and a bounded short poll until every link finishes
-  or expires (or on sign-out), then removes the link button and shows the
-  compact completion status.
+  redraws. A decided card with no pending or settling follow-up forms is never
+  read again; one with active `follow_up_links` or `follow_up_settling`
+  refreshes on tab focus/visibility change, incoming agent messages, and a
+  bounded short poll. When a link reaches `expires_at_utc` before the broker
+  watch finishes, the button is hidden and the card shows **"Checking whether
+  the credential form finished…"** (`role="status"`) while polling continues
+  until the form's ending arrives or `follow_up_settling_until_utc` (expiry plus
+  the 60 s watch grace and 15 s backup buffer) passes (or on sign-out), then
+  replaces it with the final compact completion or expiry line.
 - While the request loads, the card says "Loading this request…". When it
   cannot be read, it says why in plain words and offers **Open Inbox**
   (secondary), which opens Settings at that request.

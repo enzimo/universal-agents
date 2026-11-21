@@ -398,7 +398,9 @@ in the Inbox, so a decision made with a chat button can be finished there. Only
 the administrator who approved sees that button; it stays on the Web Chat card
 across reloads (and the Inbox notice keeps the link in Settings) until the form
 is used, closed or expires, and is then replaced on the card by a short line
-saying what happened. The broker's form
+saying what happened (if the form's time runs out while the gateway is still
+checking with the broker, the card briefly says it is checking whether the form
+finished for up to about a minute first). The broker's form
 can also take a new credential in the same step
 ([Account links](#account-links)). TeamLead's task keeps waiting until those
 forms are used, closed or expired, and then learns which accounts were linked,
@@ -1218,7 +1220,9 @@ open it:
   that button; it stays on the Web Chat card across reloads while the form is
   open (while the Inbox notice keeps the link in Settings), and is replaced on
   the card by a short line saying what happened once the form is used, closed
-  or expires.
+  or expires (if its time runs out while the gateway is still checking with the
+  broker, the card briefly says it is checking whether the form finished for up
+  to about a minute first).
 
 The form shows whose account it is, which agents use it (**Used by**: the agent
 types holding access to the tool for your work, or for anyone's work for a team

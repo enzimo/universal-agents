@@ -14,10 +14,13 @@ to the approving person:
   ``settling``, ``settling_until_utc``) for a viewer: only the approving person
   ever sees their links, settling state or outcomes. Each active link includes
   ``expires_at_utc`` when known so the browser hides the button as soon as the
-  form expires. Between ``expires_at_utc`` and ``expires_at_utc + WATCH_GRACE``
-  the link is omitted from ``links`` while ``settling`` stays ``True`` so the
-  browser keeps polling until ``record_ended`` reports a late completion or the
-  watch grace window passes and the plain expiry line is recorded.
+  form expires. Between ``expires_at_utc`` and
+  ``expires_at_utc + WATCH_GRACE + SETTLING_BACKUP_BUFFER`` the link is omitted
+  from ``links`` while ``settling`` stays ``True`` so the browser keeps polling
+  until ``record_ended`` reports a late completion (including from the broker
+  watch's final poll right after ``WATCH_GRACE``). Only if the backup deadline
+  passes without ``record_ended`` does the tracker record the plain expiry line
+  and log a warning.
 - ``prune`` clears finished entries older than ``FINISHED_RETENTION`` and caps
   total tracked requests at ``MAX_TRACKED_REQUESTS``.
 
@@ -31,6 +34,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import logging
 import threading
 from typing import Any
 
@@ -38,8 +42,16 @@ from assistant_gateway.application.broker_session_watch import WATCH_GRACE
 from assistant_gateway.application.tool_setup import account_link_form_expired
 
 
+_LOGGER = logging.getLogger(__name__)
 FINISHED_RETENTION = timedelta(hours=1)
 MAX_TRACKED_REQUESTS = 500
+# Margin beyond ``WATCH_GRACE`` before the tracker's own expiry fires as a backup.
+# ``watch_broker_session`` checks ``now < deadline`` and then sleeps one poll
+# interval (2 s by default) before its final status read, so its last report can
+# arrive a few seconds after ``expires_at_utc + WATCH_GRACE``. Waiting an extra
+# 15 s lets ``record_ended`` always win in normal operation while keeping a
+# bounded fallback if a watch ever vanishes without reporting.
+SETTLING_BACKUP_BUFFER = timedelta(seconds=15)
 
 
 def _to_utc(value: datetime) -> datetime:
@@ -122,12 +134,17 @@ class ProposalFollowUpTracker:
         finished_retention: timedelta = FINISHED_RETENTION,
         max_tracked_requests: int = MAX_TRACKED_REQUESTS,
         watch_grace: timedelta = WATCH_GRACE,
+        backup_buffer: timedelta = SETTLING_BACKUP_BUFFER,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._lock = threading.Lock()
         self._entries: dict[str, _TrackedProposal] = {}
         self._finished_retention = finished_retention
         self._max_tracked = max(1, int(max_tracked_requests))
         self._watch_grace = max(timedelta(0), watch_grace)
+        self._backup_buffer = max(timedelta(0), backup_buffer)
+        self._settling_window = self._watch_grace + self._backup_buffer
+        self._logger = logger or _LOGGER
 
     def register(
         self,
@@ -184,12 +201,12 @@ class ProposalFollowUpTracker:
             entry = self._entries.get(request_id)
             if entry is None or entry.approver_person_id != viewer_id:
                 return FollowUpSnapshot()
-            self._expire_entry_locked(entry, at)
+            self._expire_entry_locked(request_id, entry, at)
             links: list[dict[str, str]] = []
             latest_settling_deadline: datetime | None = None
             for item in entry.pending:
                 if item.expires_at_utc is not None and item.expires_at_utc <= at:
-                    deadline = item.expires_at_utc + self._watch_grace
+                    deadline = item.expires_at_utc + self._settling_window
                     if latest_settling_deadline is None or deadline > latest_settling_deadline:
                         latest_settling_deadline = deadline
                 else:
@@ -211,13 +228,20 @@ class ProposalFollowUpTracker:
         with self._lock:
             self._prune_locked(at)
 
-    def _expire_entry_locked(self, entry: _TrackedProposal, at: datetime) -> None:
+    def _expire_entry_locked(self, request_id: str, entry: _TrackedProposal, at: datetime) -> None:
         still_pending: list[PendingFollowUpLink] = []
         latest_deadline: datetime | None = None
         for item in entry.pending:
             if item.expires_at_utc is not None:
-                deadline = item.expires_at_utc + self._watch_grace
+                deadline = item.expires_at_utc + self._settling_window
                 if deadline <= at:
+                    self._logger.warning(
+                        "Proposal follow-up form expired via tracker backup before the broker watch reported an ending. "
+                        "event=gateway_proposal_follow_up_backup_expired request_id=%s form_key=%s tool_id=%s",
+                        request_id,
+                        item.key,
+                        item.tool_id,
+                    )
                     entry.outcomes_by_key.setdefault(item.key, account_link_form_expired(item.tool_name))
                     if latest_deadline is None or deadline > latest_deadline:
                         latest_deadline = deadline
@@ -228,8 +252,8 @@ class ProposalFollowUpTracker:
             entry.updated_at_utc = max(entry.updated_at_utc, latest_deadline)
 
     def _prune_locked(self, at: datetime) -> None:
-        for entry in self._entries.values():
-            self._expire_entry_locked(entry, at)
+        for req_id, entry in self._entries.items():
+            self._expire_entry_locked(req_id, entry, at)
         cutoff = at - self._finished_retention
         stale_ids = [
             req_id
@@ -257,6 +281,7 @@ __all__ = [
     "MAX_TRACKED_REQUESTS",
     "PendingFollowUpLink",
     "ProposalFollowUpTracker",
+    "SETTLING_BACKUP_BUFFER",
     "form_key",
     "parse_utc",
 ]

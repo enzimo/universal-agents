@@ -672,7 +672,12 @@ def test_proposal_follow_up_review_reports_settling_during_watch_grace_until_lat
     from assistant_gateway.application.account_links import AccountLinkForm
     from assistant_gateway.application.broker_session_watch import WATCH_GRACE
     from assistant_gateway.application.tool_setup import PageEnding
-    from assistant_gateway.proposal_follow_ups import PendingFollowUpLink, form_key, parse_utc
+    from assistant_gateway.proposal_follow_ups import (
+        SETTLING_BACKUP_BUFFER,
+        PendingFollowUpLink,
+        form_key,
+        parse_utc,
+    )
 
     now_box = [harness.agents.service.clock()]
     harness.inbox.requests().service.clock = lambda: now_box[0]
@@ -720,7 +725,9 @@ def test_proposal_follow_up_review_reports_settling_during_watch_grace_until_lat
     assert settling_view["follow_up_links"] == []
     assert settling_view["follow_up_outcomes"] == []
     assert settling_view["follow_up_settling"] is True
-    assert settling_view["follow_up_settling_until_utc"] == (expires + WATCH_GRACE).isoformat()
+    assert settling_view["follow_up_settling_until_utc"] == (
+        expires + WATCH_GRACE + SETTLING_BACKUP_BUFFER
+    ).isoformat()
 
     # Watch confirms completion during grace: settling clears and completion outcome replaces it.
     now_box[0] = expires + timedelta(seconds=20)

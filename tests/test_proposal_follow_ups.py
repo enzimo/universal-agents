@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
+
+import pytest
 
 from assistant_gateway.application.account_links import AccountLinkForm
 from assistant_gateway.application.broker_session_watch import WATCH_GRACE
@@ -11,6 +14,7 @@ from assistant_gateway.proposal_follow_ups import (
     FollowUpSnapshot,
     PendingFollowUpLink,
     ProposalFollowUpTracker,
+    SETTLING_BACKUP_BUFFER,
     form_key,
     parse_utc,
 )
@@ -122,11 +126,12 @@ def test_form_stays_settling_during_watch_grace_and_resolves_to_completion_when_
 
     # Just after expires_at_utc (inside WATCH_GRACE): link is hidden, no premature expired line, settling=True.
     in_grace = expires_1 + timedelta(seconds=15)
+    expected_settling_until = (expires_1 + WATCH_GRACE + SETTLING_BACKUP_BUFFER).isoformat()
     snap = tracker.snapshot("req-3", viewer_id="admin-1", now=in_grace)
     assert [link["label"] for link in snap.links] == ["Choose the credential for Gitea"]
     assert snap.outcomes == []
     assert snap.settling is True
-    assert snap.settling_until_utc == (expires_1 + WATCH_GRACE).isoformat()
+    assert snap.settling_until_utc == expected_settling_until
     # Non-approver still sees nothing during settling.
     assert tracker.snapshot("req-3", viewer_id="admin-2", now=in_grace) == FollowUpSnapshot()
 
@@ -151,9 +156,51 @@ def test_form_stays_settling_during_watch_grace_and_resolves_to_completion_when_
     assert snap.settling_until_utc is None
 
 
-def test_form_marks_expired_only_after_watch_grace_passes_and_still_upgrades_if_watch_reports_late() -> None:
+def test_final_watch_poll_just_after_watch_grace_wins_without_backup_expiry_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """watch_broker_session can finish its final poll a few seconds after WATCH_GRACE (C19)."""
     tracker = ProposalFollowUpTracker()
     expires = _ts(10)
+    tracker.register(
+        "req-late-poll",
+        approver_person_id="admin-1",
+        links=[_link("session:s1", tool_name="Portainer", expires_at_utc=expires)],
+        now=_ts(0),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="assistant_gateway.proposal_follow_ups"):
+        # 3 s past WATCH_GRACE: watch's final read can still be in flight, so tracker stays settling.
+        during_final_poll = expires + WATCH_GRACE + timedelta(seconds=3)
+        snap = tracker.snapshot("req-late-poll", viewer_id="admin-1", now=during_final_poll)
+        assert snap.links == []
+        assert snap.outcomes == []
+        assert snap.settling is True
+        assert snap.settling_until_utc == (expires + WATCH_GRACE + SETTLING_BACKUP_BUFFER).isoformat()
+
+        # The final watch poll reports completion: no backup expiry warning is logged.
+        tracker.record_ended(
+            "req-late-poll",
+            key="session:s1",
+            message="The account link for Portainer is done.",
+            now=during_final_poll + timedelta(seconds=1),
+        )
+        done = tracker.snapshot("req-late-poll", viewer_id="admin-1", now=during_final_poll + timedelta(seconds=1))
+        assert done == FollowUpSnapshot(
+            links=[],
+            outcomes=["The account link for Portainer is done."],
+            settling=False,
+            settling_until_utc=None,
+        )
+    assert not caplog.records
+
+
+def test_form_marks_expired_only_after_settling_backup_passes_with_warning_and_still_upgrades_if_watch_reports_late(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tracker = ProposalFollowUpTracker()
+    expires = _ts(10)
+    backup_deadline = expires + WATCH_GRACE + SETTLING_BACKUP_BUFFER
     tracker.register(
         "req-grace-expire",
         approver_person_id="admin-1",
@@ -161,32 +208,38 @@ def test_form_marks_expired_only_after_watch_grace_passes_and_still_upgrades_if_
         now=_ts(0),
     )
 
-    # At expires_at_utc + WATCH_GRACE - 1s: still settling.
-    just_before_grace_end = expires + WATCH_GRACE - timedelta(seconds=1)
-    snap = tracker.snapshot("req-grace-expire", viewer_id="admin-1", now=just_before_grace_end)
-    assert snap.links == []
-    assert snap.outcomes == []
-    assert snap.settling is True
-    assert snap.settling_until_utc == (expires + WATCH_GRACE).isoformat()
+    with caplog.at_level(logging.WARNING, logger="assistant_gateway.proposal_follow_ups"):
+        # At backup_deadline - 1s: still settling, no warning yet.
+        snap = tracker.snapshot("req-grace-expire", viewer_id="admin-1", now=backup_deadline - timedelta(seconds=1))
+        assert snap.links == []
+        assert snap.outcomes == []
+        assert snap.settling is True
+        assert snap.settling_until_utc == backup_deadline.isoformat()
+        assert not caplog.records
 
-    # At expires_at_utc + WATCH_GRACE: settling ends and expiry outcome is recorded.
-    at_grace_end = expires + WATCH_GRACE
-    snap = tracker.snapshot("req-grace-expire", viewer_id="admin-1", now=at_grace_end)
-    assert snap == FollowUpSnapshot(
-        links=[],
-        outcomes=[account_link_form_expired("Portainer")],
-        settling=False,
-        settling_until_utc=None,
-    )
+        # At backup_deadline: backup expiry fires, logs a warning with request_id and form_key, and records expired.
+        snap = tracker.snapshot("req-grace-expire", viewer_id="admin-1", now=backup_deadline)
+        assert snap == FollowUpSnapshot(
+            links=[],
+            outcomes=[account_link_form_expired("Portainer")],
+            settling=False,
+            settling_until_utc=None,
+        )
 
-    # Even if record_ended arrives after grace ended, it replaces the expiry line cleanly without duplicating.
+    assert len(caplog.records) == 1
+    warning_text = caplog.records[0].getMessage()
+    assert "event=gateway_proposal_follow_up_backup_expired" in warning_text
+    assert "request_id=req-grace-expire" in warning_text
+    assert "form_key=session:s1" in warning_text
+
+    # Even if record_ended arrives after the backup fired, it replaces the expiry line cleanly without duplicating.
     tracker.record_ended(
         "req-grace-expire",
         key="session:s1",
         message="The account link for Portainer is done.",
-        now=at_grace_end + timedelta(seconds=5),
+        now=backup_deadline + timedelta(seconds=5),
     )
-    snap = tracker.snapshot("req-grace-expire", viewer_id="admin-1", now=at_grace_end + timedelta(seconds=5))
+    snap = tracker.snapshot("req-grace-expire", viewer_id="admin-1", now=backup_deadline + timedelta(seconds=5))
     assert snap == FollowUpSnapshot(
         links=[],
         outcomes=["The account link for Portainer is done."],
