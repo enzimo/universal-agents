@@ -47,10 +47,12 @@ FINISHED_RETENTION = timedelta(hours=1)
 MAX_TRACKED_REQUESTS = 500
 # Margin beyond ``WATCH_GRACE`` before the tracker's own expiry fires as a backup.
 # ``watch_broker_session`` checks ``now < deadline`` and then sleeps one poll
-# interval (2 s by default) before its final status read, so its last report can
-# arrive a few seconds after ``expires_at_utc + WATCH_GRACE``. Waiting an extra
-# 15 s lets ``record_ended`` always win in normal operation while keeping a
-# bounded fallback if a watch ever vanishes without reporting.
+# interval (2 s by default in ``GatewayCredentialWorkflowSettings``) before its
+# final status read (up to the 10 s read timeout in
+# ``HttpSecureBroker.get_account_link_status``), so its last report can arrive
+# up to about 12 s after ``expires_at_utc + WATCH_GRACE``. Keep this buffer
+# above their sum so ``record_ended`` always wins in normal operation while
+# keeping a bounded fallback if a watch ever vanishes without reporting.
 SETTLING_BACKUP_BUFFER = timedelta(seconds=15)
 
 

@@ -2519,9 +2519,10 @@ completed credential buttons. When a form passes `expires_at_utc` before the
 broker watch reports an ending, `ProposalFollowUpTracker` hides the link from
 `follow_up_links` and returns `follow_up_settling: true` with
 `follow_up_settling_until_utc` (`expires_at_utc + WATCH_GRACE + SETTLING_BACKUP_BUFFER`,
-sharing `broker_session_watch.WATCH_GRACE` (60 s) plus a 15 s backup buffer so
-`watch_broker_session`'s final poll finishes before the tracker's backup expiry
-runs). Rationale: a submission claimed just before expiry may still finish while
+sharing `broker_session_watch.WATCH_GRACE` (60 s) plus a 15 s backup buffer covering
+`watch_broker_session`'s 2 s default poll interval and
+`HttpSecureBroker.get_account_link_status`'s 10 s read timeout so the final poll
+finishes before the tracker's backup expiry runs). Rationale: a submission claimed just before expiry may still finish while
 the broker watch is still checking, so both pages show "Checking whether the
 credential form finished…" and keep polling until `on_form_ended` records the
 real outcome; only if the backup deadline passes without a watch report does the
