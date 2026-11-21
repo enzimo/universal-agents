@@ -233,12 +233,25 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
 
 
 def test_api_request_user_agent_moves_with_the_team(tmp_path: Path) -> None:
+    import yaml
+
     from assistant_gateway.config import GatewayInstanceConfig
 
+    # Default (unset) instances do not write api_request_user_agent or export it as a team choice.
+    default_root = tmp_path / "default_inst"
+    default_path, _default_cfg = _old_instance(default_root)
+    raw_default = yaml.safe_load(default_path.read_text(encoding="utf-8"))
+    assert "api_request_user_agent" not in raw_default["security_layer"]
+    default_out = _export(default_root, default_path)
+    assert "security_layer.api_request_user_agent" not in {record.dotted for record in _records(default_out)}
+
+    # An explicit override is saved and carried by the transfer.
     def custom_ua(config: Any) -> None:
         config.security_layer.api_request_user_agent = "CustomTeamUA/1.0"
 
     path, _config = _old_instance(tmp_path, custom_ua)
+    raw_custom = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw_custom["security_layer"]["api_request_user_agent"] == "CustomTeamUA/1.0"
     out = _export(tmp_path, path)
     assert {record.dotted: record.value for record in _records(out)} == {
         "security_layer.api_request_user_agent": "CustomTeamUA/1.0",

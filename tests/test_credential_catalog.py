@@ -1704,14 +1704,35 @@ def test_api_request_user_agent_setting_in_schemas_example_and_env(
     assert SecurityLayerSettings(api_request_user_agent=" Custom/1.0 ").api_request_user_agent == "Custom/1.0"
     assert "security_layer.api_request_user_agent" in _INSTANCE_CONFIG_COMMENTS
 
-    for bad in ("Bad\r\nHeader", "Bad\nHeader", "Bad\x00Header", "x" * (MAX_API_REQUEST_USER_AGENT_LENGTH + 1), 123):
-        with pytest.raises(ValueError):
+    for bad in (
+        "Bad\r\nHeader",
+        "Bad\nHeader",
+        "Bad\x00Header",
+        "Bad\tHeader",
+        "Bad\x7fHeader",
+        "TeamBrowser/1.0 (Zürich ✓)",
+        "TeamBrowser/1.0 (Zürich)",
+        "x" * (MAX_API_REQUEST_USER_AGENT_LENGTH + 1),
+        123,
+    ):
+        with pytest.raises(ValueError, match="security_layer\\.api_request_user_agent"):
             SecurityLayerSettings(api_request_user_agent=bad)  # type: ignore[arg-type]
 
-    # config.example.yaml documents the setting with the default value.
+    # config.example.yaml leaves the value empty so copies follow release updates,
+    # and documents the built-in browser-like default inline.
+    monkeypatch.delenv("SECURE_TOOL_BROKER_API_REQUEST_USER_AGENT", raising=False)
     example_path = Path(__file__).resolve().parents[1] / "config.example.yaml"
-    example_data = yaml.safe_load(example_path.read_text(encoding="utf-8"))
-    assert example_data["security_layer"]["api_request_user_agent"] == DEFAULT_API_REQUEST_USER_AGENT
+    example_text = example_path.read_text(encoding="utf-8")
+    example_data = yaml.safe_load(example_text)
+    assert example_data["security_layer"]["api_request_user_agent"] == ""
+    ua_lines = [line for line in example_text.splitlines() if "api_request_user_agent:" in line]
+    assert len(ua_lines) == 1 and DEFAULT_API_REQUEST_USER_AGENT in ua_lines[0]
+    assert (
+        resolve_agent_type_settings(load_config(str(example_path)), "TeamArchitect")[
+            "secure_tool_broker_api_request_user_agent"
+        ]
+        == DEFAULT_API_REQUEST_USER_AGENT
+    )
 
     # config.yaml loader projects the default, configured value, and env override.
     cfg_path = tmp_path / "config.yaml"
@@ -1719,7 +1740,6 @@ def test_api_request_user_agent_setting_in_schemas_example_and_env(
         yaml.safe_dump({"schema_version": CONFIG_SCHEMA_VERSION, "security_layer": {"mode": "broker"}}),
         encoding="utf-8",
     )
-    monkeypatch.delenv("SECURE_TOOL_BROKER_API_REQUEST_USER_AGENT", raising=False)
     assert (
         resolve_agent_type_settings(load_config(str(cfg_path)), "TeamArchitect")[
             "secure_tool_broker_api_request_user_agent"
@@ -1749,7 +1769,9 @@ def test_api_request_user_agent_setting_in_schemas_example_and_env(
         == "EnvUA/2.0"
     )
 
-    # instance_config.yaml persists the setting and honors deployment env override.
+    # A newly created instance omits api_request_user_agent from its saved file so
+    # future releases can advance the default; an explicit value is persisted and
+    # still yields to deployment env overrides.
     inst = GatewayInstanceConfig.create(
         instance_name="ua_test",
         instance_root=str(tmp_path / "inst"),
@@ -1757,9 +1779,17 @@ def test_api_request_user_agent_setting_in_schemas_example_and_env(
         timezone="UTC",
     )
     assert inst.security_layer.api_request_user_agent == DEFAULT_API_REQUEST_USER_AGENT
-    assert "# Default User-Agent header" in dump_instance_config_yaml(inst.to_yaml_dict())
+    assert "api_request_user_agent" not in inst.to_yaml_dict()["security_layer"]
+    default_path = inst.save(tmp_path / "inst" / "instance_config.yaml")
+    raw_default = yaml.safe_load(default_path.read_text(encoding="utf-8"))
+    assert "api_request_user_agent" not in raw_default["security_layer"]
+    assert GatewayInstanceConfig.load(default_path).security_layer.api_request_user_agent == DEFAULT_API_REQUEST_USER_AGENT
+
     inst.security_layer.api_request_user_agent = "InstanceUA/1.0"
+    assert "# Default User-Agent header" in dump_instance_config_yaml(inst.to_yaml_dict())
     inst_path = inst.save(tmp_path / "inst" / "instance_config.yaml")
+    raw_explicit = yaml.safe_load(inst_path.read_text(encoding="utf-8"))
+    assert raw_explicit["security_layer"]["api_request_user_agent"] == "InstanceUA/1.0"
     assert GatewayInstanceConfig.load(inst_path).security_layer.api_request_user_agent == "InstanceUA/1.0"
     assert (
         GatewayInstanceConfig.load_for_process(

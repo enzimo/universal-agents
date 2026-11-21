@@ -552,15 +552,15 @@ MAX_API_REQUEST_USER_AGENT_LENGTH = 512
 
 
 def normalize_api_request_user_agent(value: Any) -> str:
-    """Default User-Agent for credential.api_request; empty uses the default, control characters are refused."""
+    """Default User-Agent for credential.api_request; empty uses the default, only printable ASCII is allowed."""
 
     if value is None:
         return SECURITY_LAYER_DEFAULTS.api_request_user_agent.value
     if not isinstance(value, str):
         raise ValueError("security_layer.api_request_user_agent must be a string.")
-    if "\r" in value or "\n" in value or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+    if any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in value):
         raise ValueError(
-            "security_layer.api_request_user_agent must be a single line with no control characters."
+            "security_layer.api_request_user_agent must contain only printable ASCII characters (0x20-0x7E)."
         )
     normalized = value.strip()
     if not normalized:
