@@ -277,7 +277,7 @@ def test_two_links_stored_at_once_leave_one_active_link(settings) -> None:
         lambda: second.create_link(link("link_b")),
     )
 
-    links = first.list_links(TEAM, include_revoked=True)
+    links = first.list_links(TEAM, purpose=None, include_revoked=True)
     assert sorted(item.status for item in links) == [AccountLinkStatus.ACTIVE, AccountLinkStatus.REVOKED]
 
 
@@ -399,7 +399,7 @@ def test_an_older_store_with_two_active_links_keeps_the_newest_on_postgres(setti
     with caplog.at_level(logging.WARNING, logger="storage.access_repository"):
         reopened = AccessRepository(settings)
 
-    assert sorted(item.link_id for item in reopened.list_links(TEAM)) == ["link_new", "link_team"]
+    assert sorted(item.link_id for item in reopened.list_links(TEAM, purpose=None)) == ["link_new", "link_team"]
     revoked = [(e.grant_id, e.detail.get("reason"), e.detail.get("replaced_by")) for e in reopened.events(TEAM)
                if e.kind == "account_link_revoked"]
     assert revoked == [("link_old", "duplicate_active_link", "link_new")]

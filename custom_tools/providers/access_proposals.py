@@ -128,7 +128,13 @@ def _link_states(store: AccessRepository | None, request: AccessRequestV1) -> li
     for item in proposal.account_links:
         owner_kind = LinkOwnerKind(item.owner)
         owner_id = request.team_id if owner_kind is LinkOwnerKind.TEAM else approver
-        linked = bool(owner_id) and store.active_link(request.team_id, item.tool_id, owner_kind, owner_id) is not None
+        linked = (
+            bool(owner_id)
+            and store.active_link(
+                request.team_id, item.tool_id, owner_kind, owner_id, purpose=item.link_purpose
+            )
+            is not None
+        )
         states.append({"tool_id": item.tool_id, "owner": item.owner, "linked": linked})
     return states
 

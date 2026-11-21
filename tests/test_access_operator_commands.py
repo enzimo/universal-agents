@@ -167,7 +167,7 @@ def test_a_person_removes_their_own_link_and_administrators_remove_any(service) 
         unlink(service.store, person_for(MEMBERS, "bob", TEAM), teams.link_id, now=NOW)
     assert unlink(service.store, person_for(MEMBERS, "bob", TEAM), bobs.link_id, now=NOW).status is AccountLinkStatus.REVOKED
     assert unlink(service.store, person_for(MEMBERS, "alice", TEAM), teams.link_id, now=NOW).status is AccountLinkStatus.REVOKED
-    assert service.store.list_links(TEAM) == []
+    assert service.store.list_links(TEAM, purpose=None) == []
 
 
 BINARY = Path(__file__).resolve().parents[1] / "target" / "debug" / "ua-cedar-authorizer"

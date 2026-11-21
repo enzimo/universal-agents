@@ -4692,7 +4692,7 @@ def _access_list(args: argparse.Namespace, config: Any, service: Any) -> None:
 def _access_links(args: argparse.Namespace, config: Any, service: Any) -> None:
     from access_control.operator_commands import describe_link
 
-    links = service.store.list_links(service.team_id, include_revoked=args.all)
+    links = service.store.list_links(service.team_id, purpose=None, include_revoked=args.all)
     for link in links:
         print(describe_link(link))
     if not links:

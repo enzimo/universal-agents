@@ -37,7 +37,7 @@ from assistant_gateway.gateway import UserGateway
 from assistant_gateway.http_secure_broker import HttpGatewaySecureBroker
 from assistant_gateway.runtime_ports import SystemGatewayClock
 from assistant_gateway.store import GatewayStateStore
-from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkOwnerKind
+from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkOwnerKind, LinkPurpose
 from access_control.caller_tokens import CALLER_GATEWAY
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 from secure_tool_broker.service import SecureToolBrokerService
@@ -386,6 +386,7 @@ async def test_link_command_opens_the_persons_own_form(linked_gateway) -> None:
             "team_id": gateway.config.manager.team_id,
             "tool_id": "http:portainer",
             "owner_kind": "person",
+            "purpose": "account",
             "person_id": owner,
             "person_roles": list(gateway._request_context_service.team_roles(owner)),
             "reason": "You asked for this with /link.",
@@ -702,7 +703,9 @@ async def test_gateway_opener_links_an_account_through_the_real_broker(
     finally:
         await server.close()
 
-    stored = store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1")
+    stored = store.active_link(
+        TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1", purpose=LinkPurpose.ACCOUNT
+    )
     assert stored is not None
     assert status["status"] == "account_link_created"
     assert status["result"]["link_id"] == stored.link_id

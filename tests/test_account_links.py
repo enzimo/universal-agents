@@ -31,6 +31,7 @@ from custom_messages.contracts.access_v2 import (
     GrantV1,
     InjectionPlacement,
     LinkOwnerKind,
+    LinkPurpose,
     SubjectKind,
     SubjectRefV1,
     TargetKind,
@@ -183,13 +184,16 @@ def test_a_new_link_replaces_the_owners_previous_link_and_is_recorded(world) -> 
     first = link(store, LinkOwnerKind.PERSON, "user-1", "old_key")
     second = link(store, LinkOwnerKind.PERSON, "user-1", "new_key")
 
-    assert store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1") == second
+    assert (
+        store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1", purpose=LinkPurpose.ACCOUNT)
+        == second
+    )
     assert store.get_link(first.link_id).status is AccountLinkStatus.REVOKED
     kinds = [event.kind for event in store.events(TEST_TEAM)]
     assert kinds.count("account_link_created") == 2 and "account_link_revoked" in kinds
     revoked = store.revoke_link(second.link_id, actor=SubjectRefV1(kind=SubjectKind.USER, id="user-1"), at=NOW)
     assert revoked.status is AccountLinkStatus.REVOKED
-    assert store.list_links(TEST_TEAM) == []
+    assert store.list_links(TEST_TEAM, purpose=None) == []
 
 
 def test_the_persons_own_link_wins_over_the_teams(world) -> None:
@@ -261,7 +265,9 @@ async def test_a_person_links_their_own_credential_through_the_labeled_form(worl
     assert "portainer_token" in page and "no_api_token" not in page, "only credentials with the needed field"
     assert submitted.status == 200
     assert status["status"] == "account_link_created"
-    stored = store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1")
+    stored = store.active_link(
+        TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1", purpose=LinkPurpose.ACCOUNT
+    )
     assert stored is not None and stored.credential_key == "portainer_token"
     assert stored.link_id == status["result"]["link_id"]
     assert "portainer-secret" not in page
@@ -332,7 +338,7 @@ async def test_an_unconfirmed_form_creates_nothing(world, monkeypatch) -> None:
         )
 
     assert second.status == 409, "a form is used once"
-    assert store.list_links(TEST_TEAM) == []
+    assert store.list_links(TEST_TEAM, purpose=None) == []
 
 
 # -- adding a new credential in the form ------------------------------------------------
@@ -392,7 +398,9 @@ async def test_a_person_adds_a_new_credential_in_the_form_and_a_later_request_ca
     assert 'name="field__api_token" type="password"' in page and "data-secret-toggle" in page
     assert "<strong>Used by:</strong> Any agent that uses Portainer, because access checks are off" in page
     assert submitted.status == 200 and status["status"] == "account_link_created"
-    stored = store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1")
+    stored = store.active_link(
+        TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1", purpose=LinkPurpose.ACCOUNT
+    )
     assert stored is not None and stored.credential_key == "http-portainer-personal"
     assert set(load_catalog(scope=CredentialOwnerScope.user("user-1")).credentials) == {"http-portainer-personal"}
     assert load_catalog(scope=CredentialOwnerScope.team(TEST_TEAM)).credentials == {}, "a person's link stays theirs"
@@ -431,7 +439,9 @@ async def test_an_administrator_adds_the_teams_credential_without_replacing_a_st
     older = credentials["http-portainer-team"].fields["api_token"].resolution_order[0]
     assert older.source == "env" and older.env_var == "PORTAINER_TOKEN", "the stored credential is untouched"
     assert set(credentials) == {"http-portainer-team", "http-portainer-team-2"}
-    link = store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.TEAM, TEST_TEAM)
+    link = store.active_link(
+        TEST_TEAM, "http:portainer", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT
+    )
     assert link is not None and link.credential_key == "http-portainer-team-2"
     assert list(sealbox.values()) == ["fresh-team-secret"]
     assert "http-portainer-team-2" in result_page and "fresh-team-secret" not in result_page
@@ -449,7 +459,7 @@ def test_a_member_cannot_store_or_link_a_credential_for_the_team(world, sealbox)
         link_account(store, gate.catalog, member, LinkChoice(new_values={"api_token": "member-secret"}), now=NOW)
 
     assert refused.value.reason_code == "account_link_team_admin_required"
-    assert sealbox == {} and store.list_links(TEST_TEAM) == []
+    assert sealbox == {} and store.list_links(TEST_TEAM, purpose=None) == []
     assert load_catalog(scope=CredentialOwnerScope.team(TEST_TEAM)).credentials == {}
 
 
@@ -473,7 +483,7 @@ def test_a_new_credential_needs_every_field_and_a_store_failure_links_nothing(
     assert failed.value.reason_code == REASON_NOT_STORED and "nothing was linked" in str(failed.value)
     assert "leaky-secret" not in str(failed.value) and "leaky-secret" not in caplog.text
     assert "event=account_link_credential_not_stored" in caplog.text
-    assert store.list_links(TEST_TEAM) == []
+    assert store.list_links(TEST_TEAM, purpose=None) == []
 
 
 def agent_type_grant(grant_id: str, agent_type: str, target: TargetRefV1, **extra) -> GrantV1:
@@ -590,3 +600,163 @@ def test_every_linked_account_tool_says_where_the_credential_goes() -> None:
     assert linked, "the built-in catalog has tools that use linked accounts"
     for tool in linked:
         assert tool.credential_injections or tool.tool_id in FIXED_CLI_FIELDS, tool.tool_id
+
+
+def test_team_account_and_gate_links_coexist_and_replace_independently(world) -> None:
+    import sqlite3
+
+    _gate, store = world
+    team_account = link(store, LinkOwnerKind.TEAM, TEST_TEAM, "team_account_key")
+    team_gate = store.create_link(
+        AccountLinkV1(
+            link_id="account_link_team_gate_1",
+            team_id=TEST_TEAM,
+            tool_id="http:portainer",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEST_TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="gate_key_1",
+            injections=(
+                CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate-Secret", field="gate_secret"),
+            ),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+            created_at_utc=NOW,
+        )
+    )
+
+    assert (
+        store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT)
+        == team_account
+    )
+    assert (
+        store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.GATE)
+        == team_gate
+    )
+    assert [item.link_id for item in store.list_links(TEST_TEAM, purpose=LinkPurpose.ACCOUNT)] == [team_account.link_id]
+    assert [item.link_id for item in store.list_links(TEST_TEAM, purpose=LinkPurpose.GATE)] == [team_gate.link_id]
+    assert len(store.list_links(TEST_TEAM, purpose=None)) == 2
+
+    # Replacing the gate link revokes only the old gate link; the account link stays active.
+    team_gate_2 = store.create_link(
+        team_gate.model_copy(update={"link_id": "account_link_team_gate_2", "credential_key": "gate_key_2"})
+    )
+    assert store.get_link(team_gate.link_id).status is AccountLinkStatus.REVOKED
+    assert store.get_link(team_account.link_id).status is AccountLinkStatus.ACTIVE
+    assert (
+        store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.GATE)
+        == team_gate_2
+    )
+    assert any(
+        event.kind == "account_link_created" and event.detail.get("purpose") == "gate"
+        for event in store.events(TEST_TEAM)
+    )
+
+    # The partial unique index still refuses a second active gate link for the same tool.
+    with sqlite3.connect(str(store.settings.sqlite_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM access_account_links WHERE link_id = ?", (team_gate_2.link_id,)
+        ).fetchone()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO access_account_links VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("account_link_team_gate_dup", *row[1:]),
+            )
+
+
+@pytest.mark.own_database
+def test_pre_purpose_access_store_upgrades_in_place_and_reads_existing_links_as_account(
+    tmp_path: Path, caplog
+) -> None:
+    import sqlite3
+
+    from storage.access_repository import ONE_ACTIVE_LINK_INDEX
+    from storage.config import resolve_storage_settings
+
+    db_path = tmp_path / "pre_purpose.db"
+    legacy_payload = json.dumps(
+        {
+            "schema_version": 1,
+            "link_id": "link_legacy_team",
+            "team_id": TEST_TEAM,
+            "tool_id": "http:portainer",
+            "owner_kind": "team",
+            "owner_id": TEST_TEAM,
+            "credential_key": "portainer_team",
+            "injections": [{"placement": "header", "name": "X-API-Key", "field": "api_token"}],
+            "status": "active",
+            "created_by": {"kind": "user", "id": "user-1"},
+            "created_at_utc": NOW.isoformat(),
+            "revoked_at_utc": None,
+            "revoked_by": None,
+        }
+    )
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            """CREATE TABLE access_account_links (
+                link_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, tool_id TEXT NOT NULL,
+                owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, status TEXT NOT NULL,
+                revoked_at TEXT, revoked_by_json TEXT,
+                payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX access_account_links_one_active "
+            "ON access_account_links(team_id, tool_id, owner_kind, owner_id) "
+            "WHERE status = 'active'"
+        )
+        conn.execute(
+            "INSERT INTO access_account_links "
+            "(link_id, team_id, tool_id, owner_kind, owner_id, status, payload_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("link_legacy_team", TEST_TEAM, "http:portainer", "team", TEST_TEAM, "active", legacy_payload, NOW.isoformat()),
+        )
+
+    settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(db_path)}})
+    with caplog.at_level(logging.INFO, logger="storage.access_repository"):
+        store = AccessRepository(settings)
+
+    upgraded = store.active_link(
+        TEST_TEAM, "http:portainer", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT
+    )
+    assert upgraded is not None
+    assert upgraded.link_id == "link_legacy_team"
+    assert upgraded.purpose is LinkPurpose.ACCOUNT
+    assert "event=access_account_links_purpose_added links=1" in caplog.text
+
+    with sqlite3.connect(str(db_path)) as conn:
+        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        stored_json = json.loads(
+            conn.execute("SELECT payload_json FROM access_account_links WHERE link_id='link_legacy_team'").fetchone()[0]
+        )
+    assert ONE_ACTIVE_LINK_INDEX in indexes
+    assert "access_account_links_one_active" not in indexes
+    assert stored_json["purpose"] == "account"
+
+    # With the old index dropped and the purpose-scoped index in place, a team gate link coexists with the account link.
+    gate_link = store.create_link(
+        AccountLinkV1(
+            link_id="link_gate_team",
+            team_id=TEST_TEAM,
+            tool_id="http:portainer",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEST_TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="portainer_gate",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="secret"),),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+            created_at_utc=NOW,
+        )
+    )
+    assert (
+        store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.GATE)
+        == gate_link
+    )
+    assert (
+        store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT)
+        == upgraded
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="storage.access_repository"):
+        AccessRepository(settings)
+    assert "access_account_links_purpose_added" not in caplog.text

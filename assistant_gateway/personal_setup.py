@@ -54,6 +54,7 @@ from custom_messages.contracts.access_v2 import (
     AccountMode,
     AccountSharing,
     LinkOwnerKind,
+    LinkPurpose,
     ToolDefinitionV1,
     ToolSetupState,
 )
@@ -123,7 +124,7 @@ class PersonalSetupSteps:
     def _services_in_use(self, store: AccessRepository, states: ToolSetupStates) -> set[str]:
         """The tools someone in the team has an account for: a linked one (any owner) or a sign-in (module docstring)."""
 
-        linked = {link.tool_id for link in store.list_links(self._team_id)}
+        linked = {link.tool_id for link in store.list_links(self._team_id, purpose=LinkPurpose.ACCOUNT)}
         signed_in = {
             state.tool_id
             for state in states.for_team(self._team_id)
@@ -141,7 +142,12 @@ class PersonalSetupSteps:
         if tool_sign_in(tool.tool_id) is not None or tool.account is AccountMode.PERSONAL_LOGIN:
             state = states.get(self._team_id, person_id, tool.tool_id)
             return state is not None and state.state is ToolSetupState.READY and state.how == HOW_SIGNED_IN
-        return store.active_link(self._team_id, tool.tool_id, LinkOwnerKind.PERSON, person_id) is not None
+        return (
+            store.active_link(
+                self._team_id, tool.tool_id, LinkOwnerKind.PERSON, person_id, purpose=LinkPurpose.ACCOUNT
+            )
+            is not None
+        )
 
     def text(self, person_id: str, *, first_time: bool = False, held: bool = False) -> str:
         return setup_text(self.steps(person_id), first_time=first_time, held=held)
