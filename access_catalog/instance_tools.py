@@ -26,12 +26,25 @@ from typing import Any
 import yaml
 
 from access_catalog.catalog import CatalogError, ToolCatalog, _http_operations, _tool_fields
-from custom_messages.contracts.access_v2 import ProposedCliToolV1, ProposedHttpToolV1, ToolDefinitionV1
+from custom_messages.contracts.access_v2 import (
+    ProposedCliToolV1,
+    ProposedHttpToolChangeV1,
+    ProposedHttpToolV1,
+    ToolDefinitionV1,
+    ToolKind,
+)
 from runtime_settings.instance_layout import InstanceLayout
 
 logger = logging.getLogger(__name__)
 
 PROPOSED_FILE_PREFIX = "proposed-"
+
+
+def proposed_tool_path(instance_root: str | Path, tool_id: str) -> Path:
+    """Canonical path of a proposal-written tool file under ``control/access/tools``."""
+
+    directory = InstanceLayout.at(instance_root).instance_tools_dir
+    return directory / f"{PROPOSED_FILE_PREFIX}{tool_id.replace(':', '-')}.yaml"
 
 
 def tool_document(tool: ProposedHttpToolV1) -> dict[str, Any]:
@@ -48,6 +61,8 @@ def tool_document(tool: ProposedHttpToolV1) -> dict[str, Any]:
         entry["routes"] = [route.model_dump(mode="json") for route in tool.routes]
     if tool.credential_injections:
         entry["credential_injections"] = [item.model_dump(mode="json") for item in tool.credential_injections]
+    if tool.gate_injections:
+        entry["gate_injections"] = [item.model_dump(mode="json") for item in tool.gate_injections]
     if tool.setup is not None:
         # Typed and checked (custom_messages.contracts.tool_setup_spec_v1); set_up_tools reads it.
         entry["setup"] = tool.setup.model_dump(mode="json", exclude_defaults=True)
@@ -78,11 +93,32 @@ def cli_document(tool: ProposedCliToolV1) -> dict[str, Any]:
 
 
 def with_proposed_tools(
-    catalog: ToolCatalog, tools: tuple[ProposedHttpToolV1, ...], clis: tuple[ProposedCliToolV1, ...] = ()
+    catalog: ToolCatalog,
+    tools: tuple[ProposedHttpToolV1, ...],
+    clis: tuple[ProposedCliToolV1, ...] = (),
+    tool_changes: tuple[ProposedHttpToolChangeV1, ...] = (),
 ) -> ToolCatalog:
-    """A copy of ``catalog`` with the proposed tools added; raises ``CatalogError`` on a clash."""
+    """A copy of ``catalog`` with proposed tools added and changed web API tools replaced; raises ``CatalogError`` on a clash."""
 
     candidate = copy.deepcopy(catalog)
+    seen_changes: set[str] = set()
+    for changed in tool_changes:
+        if changed.tool_id in seen_changes:
+            raise CatalogError(f"Tool {changed.tool_id!r} is listed more than once in tool_changes.")
+        seen_changes.add(changed.tool_id)
+        existing = candidate.tools.get(changed.tool_id)
+        if existing is None or existing.kind is not ToolKind.HTTP:
+            raise CatalogError(f"Tool {changed.tool_id!r} is not an existing web API tool.")
+        if changed.tool_id in candidate.reached_through or any(
+            owner == changed.tool_id for owner in candidate.http_origins.values()
+        ):
+            raise CatalogError(f"Tool {changed.tool_id!r} cannot be replaced through a web API tool change.")
+        for host in existing.hosts:
+            if candidate.http_hosts.get(host) == changed.tool_id:
+                del candidate.http_hosts[host]
+        del candidate.tools[changed.tool_id]
+    for changed in tool_changes:
+        candidate.add_tool(tool_definition(changed))
     for tool in tools:
         candidate.add_tool(tool_definition(tool))
     for cli in clis:
@@ -127,7 +163,7 @@ def write_instance_tool(
 
     directory = InstanceLayout.at(instance_root).instance_tools_dir
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{PROPOSED_FILE_PREFIX}{tool.tool_id.replace(':', '-')}.yaml"
+    path = proposed_tool_path(instance_root, tool.tool_id)
     document = cli_document(tool) if isinstance(tool, ProposedCliToolV1) else tool_document(tool)
     text = yaml.safe_dump({"tools": [document]}, sort_keys=False)
     descriptor, temporary_name = tempfile.mkstemp(prefix=".proposed-", suffix=".tmp", dir=directory)
@@ -172,6 +208,7 @@ __all__ = [
     "cli_document",
     "private_host_names",
     "private_hosts",
+    "proposed_tool_path",
     "remove_instance_tool",
     "tool_definition",
     "tool_document",

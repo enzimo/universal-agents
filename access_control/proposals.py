@@ -86,6 +86,7 @@ from custom_messages.contracts.access_v2 import (
     GrantStatus,
     GrantV1,
     LinkOwnerKind,
+    LinkPurpose,
     ProposedAccountLinkV1,
     ProposedGrantV1,
     ReviewItemV1,
@@ -118,7 +119,18 @@ class ProposalRefused(ValueError):
 
 
 def proposal_digest(proposal: AccessProposalV1) -> str:
-    return contract_digest(proposal.model_dump(mode="json"))
+    """SHA-256 of the proposal; omits newly added fields at defaults so pre-upgrade digests stay stable."""
+
+    payload = proposal.model_dump(mode="json")
+    if not payload.get("tool_changes"):
+        payload.pop("tool_changes", None)
+    for tool in payload.get("tools") or ():
+        if not tool.get("gate_injections"):
+            tool.pop("gate_injections", None)
+    for link in payload.get("account_links") or ():
+        if link.get("link_purpose") == LinkPurpose.ACCOUNT.value:
+            link.pop("link_purpose", None)
+    return contract_digest(payload)
 
 
 def _no_mcp_records(_connection_id: str) -> MCPConnectionRecordV1 | None:

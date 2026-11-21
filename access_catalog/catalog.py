@@ -250,6 +250,9 @@ def _tool_fields(raw: Mapping[str, Any], operations: Iterable[OperationDefinitio
         "credential_injections": tuple(
             CredentialInjectionV1(**injection) for injection in raw.get("credential_injections") or ()
         ),
+        "gate_injections": tuple(
+            CredentialInjectionV1(**injection) for injection in raw.get("gate_injections") or ()
+        ),
         "setup": ToolSetupSpecV1(**raw["setup"]) if raw.get("setup") else None,
         "link_owners": tuple(raw.get("link_owners") or ("person", "team")),
         "default_sharing": AccountSharing(raw["default_sharing"]) if raw.get("default_sharing") else None,

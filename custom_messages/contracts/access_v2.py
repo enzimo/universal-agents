@@ -20,6 +20,7 @@ import hashlib
 import json
 import re
 import secrets
+from collections.abc import Iterable
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -229,6 +230,75 @@ class CredentialInjectionV1(AccessContractModel):
         return self.template.replace("{value}", value)
 
 
+def _injection_slot_key(item: CredentialInjectionV1) -> tuple[InjectionPlacement, str]:
+    """Normalized destination key for duplicate and overlap checks."""
+
+    return (
+        item.placement,
+        item.name.lower() if item.placement is InjectionPlacement.HEADER else item.name,
+    )
+
+
+def canonical_injections(
+    injections: Iterable[CredentialInjectionV1],
+) -> frozenset[tuple[InjectionPlacement, str, str, str]]:
+    """Order- and header-case-insensitive canonical representation of credential injections.
+
+    Used across all tool kinds (http, mcp, installed CLIs) to check whether a
+    stored link's injections still match the tool's current definition without
+    false mismatches from ordering, HTTP header case, or explicit default
+    ``"{value}"`` templates.
+    """
+
+    return frozenset(
+        (
+            item.placement,
+            item.name.lower() if item.placement is InjectionPlacement.HEADER else item.name,
+            item.field,
+            item.template,
+        )
+        for item in injections
+    )
+
+
+def injections_match(
+    stored: Iterable[CredentialInjectionV1],
+    expected: Iterable[CredentialInjectionV1],
+) -> bool:
+    """Whether a link's stored injections match the tool's current definition."""
+
+    return canonical_injections(stored) == canonical_injections(expected)
+
+
+def _validate_gate_injections(
+    tool_id: str,
+    kind: ToolKind,
+    gate_injections: tuple[CredentialInjectionV1, ...],
+    credential_injections: tuple[CredentialInjectionV1, ...],
+) -> None:
+    if not gate_injections:
+        return
+    if kind is not ToolKind.HTTP:
+        raise ValueError(f"Only web API tools (http:*) declare gate_injections: {tool_id!r}.")
+    seen: set[tuple[InjectionPlacement, str]] = set()
+    for item in gate_injections:
+        if item.placement not in {InjectionPlacement.HEADER, InjectionPlacement.QUERY}:
+            raise ValueError(
+                f"Gate injections for {tool_id!r} may use only header or query placement, not {item.placement.value!r}."
+            )
+        slot = _injection_slot_key(item)
+        if slot in seen:
+            raise ValueError(f"Tool {tool_id!r} declares duplicate gate injection {item.placement.value}:{item.name!r}.")
+        seen.add(slot)
+    account_slots = {_injection_slot_key(item) for item in credential_injections}
+    overlap = seen & account_slots
+    if overlap:
+        placement, name = sorted(overlap, key=lambda pair: (pair[0].value, pair[1]))[0]
+        raise ValueError(
+            f"Tool {tool_id!r} cannot use {placement.value}:{name!r} for both account and gate injections."
+        )
+
+
 class ToolDefinitionV1(AccessContractModel):
     """A registered capability people grant access to."""
 
@@ -246,6 +316,10 @@ class ToolDefinitionV1(AccessContractModel):
     # Where a linked credential goes by default; the account link form shows
     # it and the link records what the person confirmed.
     credential_injections: tuple[CredentialInjectionV1, ...] = ()
+    # Team infrastructure gate credential (header or query only, web API tools
+    # only), added to every request to the tool's hosts alongside any account
+    # credential, regardless of account sharing.
+    gate_injections: tuple[CredentialInjectionV1, ...] = ()
     # Steps outside Universal Agents and tools to set up first (set_up_tools).
     setup: ToolSetupSpecV1 | None = None
     # Whose account link the broker may use, in order: the person's own, then
@@ -291,6 +365,7 @@ class ToolDefinitionV1(AccessContractModel):
         self._check_routes()
         if self.credential_injections and self.account is not AccountMode.LINKED_CREDENTIAL:
             raise ValueError(f"Only tools that use a linked credential declare injections: {self.tool_id!r}.")
+        _validate_gate_injections(self.tool_id, self.kind, self.gate_injections, self.credential_injections)
         self._check_setup()
         self._check_installed_cli()
         if self.default_sharing is not None and not self.sharing_choice:
@@ -315,12 +390,12 @@ class ToolDefinitionV1(AccessContractModel):
             raise ValueError(f"link_owners lists person and/or team once each: {self.tool_id!r}.")
 
     def _check_setup(self) -> None:
-        """External steps prepare an account, so only tools with one have them; no tool needs itself."""
+        """External steps prepare an account or team gate, so only tools with one have them; no tool needs itself."""
 
         if self.setup is None:
             return
-        if self.setup.external_steps and self.account is AccountMode.NONE:
-            raise ValueError(f"Only tools that act with an account have setup steps: {self.tool_id!r}.")
+        if self.setup.external_steps and self.account is AccountMode.NONE and not self.gate_injections:
+            raise ValueError(f"Only tools that act with an account or gate have setup steps: {self.tool_id!r}.")
         if self.tool_id in self.setup.prerequisites:
             raise ValueError(f"Tool {self.tool_id!r} cannot be its own prerequisite.")
 
@@ -720,14 +795,24 @@ class ScheduleRunIdentityV1(AccessContractModel):
 # ---------------------------------------------------------------------------
 
 
-# Reason code when a tool that needs a linked account has none; the gate, the
-# executors and the MCP runtime all report this one value.
+# Reason codes when a tool's linked account or team gate credential is missing
+# or no longer matches the tool's current definition; the gate, the executors
+# and the MCP runtime all report these values.
 REASON_ACCOUNT_LINK_MISSING = "account_link_missing"
+REASON_ACCOUNT_LINK_OUTDATED = "account_link_outdated"
+REASON_GATE_LINK_MISSING = "gate_link_missing"
 
 
 class LinkOwnerKind(StrEnum):
     TEAM = "team"  # the team's account; an administrator links it
     PERSON = "person"  # a person's own account; used when agents work for them
+
+
+class LinkPurpose(StrEnum):
+    """What a stored credential link is used for."""
+
+    ACCOUNT = "account"  # a person's or team's service account credential
+    GATE = "gate"  # team infrastructure credential sent on every request to a web API tool's hosts
 
 
 class AccountLinkStatus(StrEnum):
@@ -738,9 +823,10 @@ class AccountLinkStatus(StrEnum):
 class AccountLinkV1(AccessContractModel):
     """The stored credential a tool uses for a team or a person, and where it goes.
 
-    Links grant nothing: access to the tool comes from grants. The broker uses
-    the person's own link first and the team's link otherwise, and sends the
-    credential only to the hosts of the tool's definition.
+    Links grant nothing: access to the tool comes from grants. For account links
+    the broker uses the person's own link first and the team's link otherwise;
+    for gate links the broker always uses the team's active gate link regardless
+    of account sharing, and sends credentials only to the tool's hosts.
     """
 
     schema_version: Literal[1] = 1
@@ -749,6 +835,7 @@ class AccountLinkV1(AccessContractModel):
     tool_id: str
     owner_kind: LinkOwnerKind
     owner_id: str = Field(min_length=1, max_length=240)
+    purpose: LinkPurpose = LinkPurpose.ACCOUNT
     credential_key: str
     injections: tuple[CredentialInjectionV1, ...] = ()
     created_by: SubjectRefV1
@@ -775,7 +862,16 @@ class AccountLinkV1(AccessContractModel):
     def _consistent(self) -> "AccountLinkV1":
         if self.owner_kind is LinkOwnerKind.TEAM and self.owner_id != self.team_id:
             raise ValueError("A team account link belongs to its own team.")
-        names = [(item.placement, item.name.lower()) for item in self.injections]
+        if self.purpose is LinkPurpose.GATE:
+            if self.owner_kind is not LinkOwnerKind.TEAM:
+                raise ValueError("A gate credential link always belongs to the team.")
+            if not self.tool_id.startswith("http:"):
+                raise ValueError(f"Only web API tools (http:*) support gate links: {self.tool_id!r}.")
+            if not self.injections:
+                raise ValueError(f"A gate link for {self.tool_id!r} must declare at least one gate injection.")
+            if any(item.placement not in {InjectionPlacement.HEADER, InjectionPlacement.QUERY} for item in self.injections):
+                raise ValueError(f"Gate links inject only HTTP headers or query parameters: {self.tool_id!r}.")
+        names = [_injection_slot_key(item) for item in self.injections]
         if len(names) != len(set(names)):
             raise ValueError("An account link injects into the same place twice.")
         return self
@@ -1009,15 +1105,38 @@ class ProposedHttpToolV1(AccessContractModel):
     routes: tuple[HttpRouteV1, ...] = Field(default=(), max_length=60)
     uses_credential: bool = True
     credential_injections: tuple[CredentialInjectionV1, ...] = Field(default=(), max_length=4)
+    gate_injections: tuple[CredentialInjectionV1, ...] = Field(default=(), max_length=4)
     # Steps outside Universal Agents (such as creating a token on the service's
     # site) and tools to set up first; shown on the review card as proposed.
     setup: ToolSetupSpecV1 | None = None
 
     @model_validator(mode="after")
-    def _setup_needs_an_account(self) -> "ProposedHttpToolV1":
-        if self.setup is not None and self.setup.external_steps and not self.uses_credential:
-            raise ValueError(f"Only a tool that uses a credential has setup steps: {self.tool_id!r}.")
+    def _consistent(self) -> "ProposedHttpToolV1":
+        if self.credential_injections and not self.uses_credential:
+            raise ValueError(
+                f"Only a tool that uses a credential declares credential_injections: {self.tool_id!r}."
+            )
+        for item in self.credential_injections:
+            if item.placement not in {InjectionPlacement.HEADER, InjectionPlacement.QUERY}:
+                raise ValueError(
+                    f"Web API tool {self.tool_id!r} credential_injections may use only header or query placement."
+                )
+        _validate_gate_injections(self.tool_id, ToolKind.HTTP, self.gate_injections, self.credential_injections)
+        if self.setup is not None and self.setup.external_steps and not self.uses_credential and not self.gate_injections:
+            raise ValueError(f"Only a tool that uses an account or gate credential has setup steps: {self.tool_id!r}.")
         return self
+
+
+class ProposedHttpToolChangeV1(ProposedHttpToolV1):
+    """Full replacement definition for an existing proposal-written web API tool.
+
+    ``previous_definition_digest`` pins the SHA-256 hex digest of the existing
+    ``proposed-*.yaml`` file bytes read when preparing the review so applying
+    refuses if the file changed in between. Trusted code sets and overwrites it;
+    agents never supply it.
+    """
+
+    previous_definition_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ProposedCliToolV1(AccessContractModel):
@@ -1094,6 +1213,13 @@ class ProposedAccountLinkV1(AccessContractModel):
     tool_id: str
     owner: Literal["team", "person"] = "team"
     purpose: str = Field(min_length=1, max_length=500)
+    link_purpose: LinkPurpose = LinkPurpose.ACCOUNT
+
+    @model_validator(mode="after")
+    def _gate_is_team_owned(self) -> "ProposedAccountLinkV1":
+        if self.link_purpose is LinkPurpose.GATE and self.owner != "team":
+            raise ValueError("A gate credential link always belongs to the team.")
+        return self
 
 
 class ProposedDataFolderV1(AccessContractModel):
@@ -1116,6 +1242,7 @@ class AccessProposalV1(AccessContractModel):
     title: str = Field(min_length=1, max_length=300)
     reason: str = Field(min_length=1, max_length=2000)
     tools: tuple[ProposedHttpToolV1, ...] = Field(default=(), max_length=4)
+    tool_changes: tuple[ProposedHttpToolChangeV1, ...] = Field(default=(), max_length=4)
     clis: tuple[ProposedCliToolV1, ...] = Field(default=(), max_length=2)
     mcp_servers: tuple[ProposedMCPServerV1, ...] = Field(default=(), max_length=4)
     grants: tuple[ProposedGrantV1, ...] = Field(default=(), max_length=20)
@@ -1128,6 +1255,7 @@ class AccessProposalV1(AccessContractModel):
     def _not_empty(self) -> "AccessProposalV1":
         items = (
             self.tools,
+            self.tool_changes,
             self.clis,
             self.mcp_servers,
             self.grants,
@@ -1142,9 +1270,9 @@ class AccessProposalV1(AccessContractModel):
 
     @property
     def installs(self) -> bool:
-        """Whether it adds to the team's catalog or data folders (an administrator's decision)."""
+        """Whether it adds to or changes the team's catalog or data folders (an administrator's decision)."""
 
-        return bool(self.tools or self.clis or self.mcp_servers or self.data_folders)
+        return bool(self.tools or self.tool_changes or self.clis or self.mcp_servers or self.data_folders)
 
 
 class AccessRequestV1(AccessContractModel):
@@ -1428,14 +1556,15 @@ class AccountLinkRequestV1(AccessContractModel):
     """The gateway asks the broker to open the account link form for a person.
 
     The gateway vouches for the person and their current team roles (it holds
-    the broker's gateway caller token); linking the team's account needs the
-    admin or owner role.
+    the broker's gateway caller token); linking the team's account or team gate
+    credential needs the admin or owner role.
     """
 
     request_id: str = Field(min_length=1, max_length=160)
     team_id: str = Field(min_length=1, max_length=120)
     tool_id: str
     owner_kind: LinkOwnerKind
+    purpose: LinkPurpose = LinkPurpose.ACCOUNT
     person_id: str = Field(min_length=1, max_length=240)
     person_roles: tuple[str, ...] = ()
     reason: str = Field(default="", max_length=2000)
@@ -1446,6 +1575,12 @@ class AccountLinkRequestV1(AccessContractModel):
         if not TOOL_ID_PATTERN.fullmatch(value):
             raise ValueError(f"Invalid tool id: {value!r}")
         return value
+
+    @model_validator(mode="after")
+    def _gate_is_team_owned(self) -> "AccountLinkRequestV1":
+        if self.purpose is LinkPurpose.GATE and self.owner_kind is not LinkOwnerKind.TEAM:
+            raise ValueError("A gate link request always belongs to the team.")
+        return self
 
 
 class PersonCredentialDeletionV1(AccessContractModel):
@@ -1621,6 +1756,8 @@ __all__ = [
     "AccessRequestV1",
     "AccessReviewChoice",
     "REASON_ACCOUNT_LINK_MISSING",
+    "REASON_ACCOUNT_LINK_OUTDATED",
+    "REASON_GATE_LINK_MISSING",
     "AccountLinkRequestV1",
     "ChangeApprovalMode",
     "ChangeApprovalRecordV1",
@@ -1636,6 +1773,10 @@ __all__ = [
     "CredentialsFolderOutcome",
     "InjectionPlacement",
     "LinkOwnerKind",
+    "LinkPurpose",
+    "ProposedHttpToolChangeV1",
+    "canonical_injections",
+    "injections_match",
     "AccessDecisionV1",
     "AccessEventV1",
     "DelegationMode",
