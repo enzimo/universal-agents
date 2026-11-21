@@ -2492,7 +2492,7 @@ Keep keyboard activation, nested panes, rapid toggles, and deep links usable.
 ### Access Review Cards in Web Chat
 
 - An access review announcement in Web Chat shows the Inbox's review card in
-  its compact Option A form (`is-compact`) inside the System message, in place
+  its compact form (`is-compact`) inside the System message, in place
   of the announcement text (**Copy raw message** still copies that text). Both
   pending and decided compact cards drop their own card surface and borders
   (`0px` border, transparent background) so cards never nest; a thin top

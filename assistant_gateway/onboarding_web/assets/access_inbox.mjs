@@ -436,7 +436,7 @@ function lacksAccessWarning(document, model) {
  * One access request card. `onChoose` receives
  * `{ review, choice, button, note, card, group, message }` when a choice is clicked.
  *
- * `compact` is the Web Chat card (Option A): the heading is the one-line
+ * `compact` is the Web Chat card: the heading is the one-line
  * summary, status pill and warning chips share one inline row, the lacks-access
  * warning stays visible, everything else (full title, details, rows with their
  * Keep boxes, reason, optional note and "What each choice does") is folded

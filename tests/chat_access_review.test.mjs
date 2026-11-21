@@ -270,7 +270,7 @@ test("the decision body is shared with the Inbox: keep for access requests, kept
   { choice: "approve", note: "ok", kept_item_ids: ["r1"], hand_on: true });
 });
 
-test("Option A compact card combines status and flags in one row, folds choice help in Details before buttons, and keeps aria-describedby", async () => {
+test("compact card combines status and flags in one row, folds choice help in Details before buttons, and keeps aria-describedby", async () => {
   const choice_effects = {
     approve: { task: "Coder can use it for this task.", kept: "TeamLead keeps it for you." },
     approve_read: { task: "Read only for this task.", kept: "Read only kept." },
