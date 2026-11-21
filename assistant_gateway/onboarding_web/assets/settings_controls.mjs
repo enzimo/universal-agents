@@ -112,6 +112,7 @@ export function createSettingsControls({
     failureMessage,
     onCounts: inboxCounts.set,
     paginate: client.paginate,
+    isVisible: () => !overlay.hidden && !panels.inbox.hidden,
     browser,
   });
   const accessMap = createMap({
@@ -196,6 +197,7 @@ export function createSettingsControls({
     else tasks.deactivate();
     // Team follows the team's live status only while it is on screen.
     if (view !== SETTINGS_VIEWS.TEAM || overlay.hidden) team.deactivate();
+    if (typeof accessInbox.syncFollowUps === "function") accessInbox.syncFollowUps();
   }
 
   /** Switches to a view and reads its content. Resolves when the first read finishes. */
@@ -243,6 +245,7 @@ export function createSettingsControls({
     }
     overlay.setAttribute("aria-hidden", "true");
     overlay.hidden = true;
+    if (typeof accessInbox.syncFollowUps === "function") accessInbox.syncFollowUps();
     setStatusLine(inboxStatus, "", false);
     team.resetStatus();
     memories.resetStatus();
@@ -301,9 +304,14 @@ export function createSettingsControls({
     /**
      * A message arrived from an agent. Access requests and stuck-work reports
      * come with one, so the badge is read again shortly (several messages
-     * close together give one read).
+     * close together give one read) and any open proposal follow-up links are
+     * re-checked so completed buttons clear promptly.
      */
-    noteAgentMessage: inboxCounts.refreshSoon,
+    noteAgentMessage() {
+      inboxCounts.refreshSoon();
+      if (typeof chatReviews.refreshFollowUps === "function") chatReviews.refreshFollowUps();
+      if (typeof accessInbox.refreshFollowUps === "function") accessInbox.refreshFollowUps();
+    },
     /** Adds the access review card to a chat message bubble (chat_access_review.mjs). */
     mountAccessReview: (bubble, message) => chatReviews.mount(bubble, message),
     /** Sign-out: forget the session, every view's content and the last view. */

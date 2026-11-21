@@ -4,9 +4,10 @@ import test from "node:test";
 import vm from "node:vm";
 import {
   ACCESS_REMOVED_LABEL, LACKS_ACCESS_NOTE, NEEDS_DECISION, WAITING_FOR_APPROVER,
-  INBOX_COUNTS_PATH, NOTICES_READ_PATH, createAccessInbox, createInboxCounts, decidableReviewCount, decisionOutcome,
-  emptyNoticesText, followUpLinks, inboxBadgeLabel, inboxBadgeText, inboxCounts, inboxPath, localTimeFormatter,
-  markedText, parseAccessRequestLink, renderNoticeRow, renderReviewCard, reviewCardModel, unreadNoticeCount,
+  INBOX_COUNTS_PATH, NOTICES_READ_PATH, activeFollowUpLinks, createAccessInbox, createInboxCounts,
+  decidableReviewCount, decisionOutcome, emptyNoticesText, followUpLinks, followUpOutcomes, inboxBadgeLabel,
+  inboxBadgeText, inboxCounts, inboxPath, localTimeFormatter, markedText, parseAccessRequestLink,
+  renderDecidedCard, renderNoticeRow, renderReviewCard, reviewCardModel, unreadNoticeCount,
 } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
 
 // A small DOM stand-in. innerHTML throws, so any HTML parsing path fails the tests.
@@ -775,4 +776,109 @@ test("each choice says what it does, follows the Keep box, and is marked while i
   assert.equal(line.classList.contains("is-active"), true);
   approve.dispatchEvent(new Event("mouseleave"));
   assert.equal(line.classList.contains("is-active"), false);
+  assert.equal(byTag(card, "details").length, 0, "Settings Inbox card keeps all sections and choice help always visible");
+  assert.equal(byTag(card, "textarea")[0].rows, 1, "Settings Inbox note starts single-line");
+});
+
+test("follow-up helpers preserve expiry, filter expired links client-side, and render outcomes cleanly", () => {
+  const nowMs = Date.parse("2026-11-21T12:10:00Z");
+  const sample = {
+    follow_up_links: [
+      { label: "Open Portainer", url: "https://broker.example/1", expires_at_utc: "2026-11-21T12:15:00Z" },
+      { label: "Open Expired", url: "https://broker.example/2", expires_at_utc: "2026-11-21T12:05:00Z" },
+    ],
+    follow_up_outcomes: ["The account link for Gitea is done.", "   "],
+  };
+  assert.equal(followUpLinks(sample).length, 2);
+  assert.deepEqual(activeFollowUpLinks(sample, nowMs), [
+    { label: "Open Portainer", url: "https://broker.example/1", expires_at_utc: "2026-11-21T12:15:00Z" },
+  ]);
+  assert.deepEqual(followUpOutcomes(sample), ["The account link for Gitea is done."]);
+
+  const document = fakeDocument();
+  const card = renderDecidedCard(document, {
+    id: "req-1", title: "Approved proposal", compact: true,
+    outcome: { label: "Approved", tone: "granted", explanation: "Saved." },
+    links: [], outcomes: ["The account link for Gitea is done."],
+  });
+  assert.ok(card.classList.contains("is-compact"));
+  assert.equal(byClass(card, "access-review-follow-up-outcomes")[0].getAttribute("role"), "status");
+  assert.equal(byClass(card, "access-review-follow-up-outcome")[0].textContent, "The account link for Gitea is done.");
+});
+
+test("Settings Inbox refreshes kept decided cards with pending follow-up links and clears dismissed buttons", async () => {
+  const document = fakeDocument();
+  const container = document.createElement("div");
+  document.body.append(container);
+  const window = {};
+  vm.runInNewContext(
+    readFileSync(new URL("../assistant_gateway/onboarding_web/assets/action_feedback.js", import.meta.url), "utf8"),
+    { window },
+  );
+  const gets = [], posts = [], intervals = new Map();
+  let timerId = 0;
+  let visible = true;
+  const browser = {
+    document,
+    console: { warn() {} },
+    requestAnimationFrame: cb => cb(),
+    setTimeout: () => 0,
+    setInterval(cb, delay) { timerId += 1; intervals.set(timerId, { cb, delay }); return timerId; },
+    clearInterval(id) { intervals.delete(id); },
+  };
+  const inbox = createAccessInbox({
+    container, browser, formatTime,
+    isVisible: () => visible,
+    get: path => new Promise((resolve, reject) => gets.push({ path, resolve, reject })),
+    post: (path, body) => new Promise((resolve, reject) => posts.push({ path, body, resolve, reject })),
+    beginAction: (button, busyLabel, group) => window.UAActionFeedback.begin(button, { busyLabel, group }),
+    failureMessage: (error, fallback) => (error && error.message) || fallback,
+  });
+  const requestList = container.children[1].lastChild;
+  const loadPromise = inbox.load();
+  await settle();
+  gets.at(-1).resolve({ status: "ok", reviews: [review()], notices: [] });
+  await loadPromise;
+  await settle();
+
+  byTag(requestList.children[0], "button")[0].click();
+  await settle();
+  posts[0].resolve({
+    status: "ok",
+    review: {
+      ...review(),
+      status: "granted",
+      can_decide: false,
+      choices: [],
+      follow_up_links: [{ label: "Choose the credential for Portainer", url: "https://broker.example/link/1", expires_at_utc: "2099-01-01T00:15:00+00:00" }],
+      follow_up_outcomes: [],
+    },
+  });
+  await settle();
+  gets.at(-1).resolve({ status: "ok", reviews: [], notices: [] });
+  await settle();
+
+  assert.equal(byTag(requestList.children[0], "a").length, 1);
+  assert.equal(intervals.size, 1, "Inbox starts follow-up poll while visible");
+
+  // Tick refreshes the kept decided card; once cleared, button disappears and timer stops.
+  [...intervals.values()][0].cb();
+  await settle();
+  assert.equal(gets.at(-1).path, "/api/web-chat/access-inbox/requests/req-1");
+  gets.at(-1).resolve({
+    status: "ok",
+    review: {
+      ...review(),
+      status: "granted",
+      can_decide: false,
+      choices: [],
+      follow_up_links: [],
+      follow_up_outcomes: ["The account link for Portainer is done."],
+    },
+  });
+  await settle();
+
+  assert.equal(byTag(requestList.children[0], "a").length, 0);
+  assert.match(requestList.children[0].textContent, /The account link for Portainer is done\./);
+  assert.equal(intervals.size, 0, "poll stops once follow-up links clear");
 });

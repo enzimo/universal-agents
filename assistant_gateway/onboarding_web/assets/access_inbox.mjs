@@ -66,6 +66,11 @@ export const INBOX_COUNTS_PATH = `${ACCESS_INBOX_API}/counts`;
 export const INBOX_COUNTS_POLL_MS = ATTENTION_COUNT_POLL_MS;
 // Coalesces a burst of chat messages into one count read.
 export const INBOX_COUNTS_SOON_MS = ATTENTION_COUNT_SOON_MS;
+// Proposal follow-up credential link watcher defaults: polls while visible until
+// the latest link's expiry + broker watch grace, bounded by a safety cap.
+export const FOLLOW_UP_POLL_MS = 4000;
+export const FOLLOW_UP_EXPIRY_GRACE_MS = 90000;
+export const FOLLOW_UP_MAX_POLLS = 300;
 export const MARK_READ_LABEL = "Mark as read";
 export const SELECT_PAGE_LABEL = "Select all on this page";
 export const MARK_SELECTED_LABEL = "Mark selected as read";
@@ -431,23 +436,30 @@ function lacksAccessWarning(document, model) {
  * One access request card. `onChoose` receives
  * `{ review, choice, button, note, card, group, message }` when a choice is clicked.
  *
- * `compact` is the Web Chat card: the heading is the one-line summary, warning
- * chips and the lacks-access warning stay visible, everything else (full
- * title, details, rows with their Keep boxes, reason and note) is folded under
- * **Details**, and a person who may not decide sees "Waiting for an
- * administrator". The choices and what they send are the same as the Inbox's.
+ * `compact` is the Web Chat card (Option A): the heading is the one-line
+ * summary, status pill and warning chips share one inline row, the lacks-access
+ * warning stays visible, everything else (full title, details, rows with their
+ * Keep boxes, reason, optional note and "What each choice does") is folded
+ * under **Details** before the action buttons so keyboard and document order
+ * place options before Approve/Deny, and a person who may not decide sees
+ * "Waiting for an administrator". The choices and what they send are the same
+ * as the Inbox's.
  */
 export function renderReviewCard(document, review, { formatTime = localTime, onChoose, warn, compact = false } = {}) {
   const model = reviewCardModel(review, formatTime);
   const card = element(document, "article", `permission-request-card access-review-card${compact ? " is-compact" : ""}`);
   card.setAttribute("data-request-id", model.id);
   const badgeLabel = compact && !model.canDecide ? WAITING_FOR_ADMINISTRATOR : model.status.label;
-  cardHeading(document, card, compact ? model.summary : model.title, statusBadge(document, badgeLabel, model.status.tone));
+  const badge = statusBadge(document, badgeLabel, model.status.tone);
+  cardHeading(document, card, compact ? model.summary : model.title, compact ? null : badge);
   const fold = compact ? foldedDetails(document, model) : null;
   const body = fold || card;
   if (compact) {
+    const statusRow = element(document, "div", "access-review-status-row");
+    statusRow.append(badge);
     const flags = compactFlags(document, model);
-    if (flags) card.append(flags);
+    if (flags) statusRow.append(flags);
+    card.append(statusRow);
     if (model.lacksAccessNote) card.append(lacksAccessWarning(document, model));
     card.append(fold);
   }
@@ -480,7 +492,7 @@ export function renderReviewCard(document, review, { formatTime = localTime, onC
     label.htmlFor = noteId;
     const note = element(document, "textarea", "textarea access-review-note");
     note.id = noteId;
-    note.rows = 2;
+    note.rows = 1;
     note.placeholder = "Add a note for the record, if you like.";
     const group = element(document, "div", "permission-choice-row access-review-choices");
     const help = choiceHelp(document, model, { keepBoxes, handOnBoxes });
@@ -495,12 +507,17 @@ export function renderReviewCard(document, review, { formatTime = localTime, onC
       help.describe(button, choice.choice);
       group.append(button);
     });
-    // The compact card folds the optional note with the details; the buttons
-    // and what each one does stay visible.
-    if (fold) fold.append(label, note);
-    else decision.append(label, note);
-    decision.append(group);
-    if (help.list) decision.append(help.title, help.list);
+    // The compact card folds the optional note and "What each choice does"
+    // inside Details (keeping aria-describedby wired); full Inbox cards keep
+    // both open beside the buttons.
+    if (fold) {
+      fold.append(label, note);
+      if (help.list) fold.append(help.title, help.list);
+      decision.append(group);
+    } else {
+      decision.append(label, note, group);
+      if (help.list) decision.append(help.title, help.list);
+    }
     card.append(decision);
   } else if (model.canDecide) {
     setCardMessage(message, "No choices are available for this request here. Refresh the Inbox and try again.", true);
@@ -633,13 +650,144 @@ export function followUpLinks(review) {
   return links.flatMap(link => {
     const label = text(link && link.label);
     const url = text(link && link.url);
-    return label && /^https:\/\//i.test(url) ? [{ label, url }] : [];
+    if (!label || !/^https:\/\//i.test(url)) return [];
+    const expiresAtUtc = text(link && link.expires_at_utc);
+    return [expiresAtUtc ? { label, url, expires_at_utc: expiresAtUtc } : { label, url }];
   });
 }
 
-/** The card that replaces a request after a decision was saved in this page. */
-export function renderDecidedCard(document, { id, title, outcome, links = [] }) {
-  const card = element(document, "article", `permission-request-card access-review-card is-decided is-${outcome.tone}`);
+/** Pending follow-up links whose expiry has not yet elapsed (client-side hide at expiry). */
+export function activeFollowUpLinks(review, nowMs = Date.now()) {
+  return followUpLinks(review).filter(link => {
+    if (!link.expires_at_utc) return true;
+    const expiresAt = Date.parse(link.expires_at_utc);
+    return Number.isNaN(expiresAt) || expiresAt > nowMs;
+  });
+}
+
+/** Plain-language outcomes for finished or expired proposal follow-up forms. */
+export function followUpOutcomes(review) {
+  const outcomes = Array.isArray(review && review.follow_up_outcomes) ? review.follow_up_outcomes : [];
+  return outcomes.map(text).filter(Boolean);
+}
+
+/** Stable render signature for the currently visible follow-up links and outcomes of a review. */
+export function followUpSignature(review, nowMs = Date.now()) {
+  const links = activeFollowUpLinks(review, nowMs).map(link => `${link.label}|${link.url}`).join("\n");
+  const outcomes = followUpOutcomes(review).join("\n");
+  return `${links}::${outcomes}`;
+}
+
+/** Latest valid `expires_at_utc` timestamp (epoch ms) across `links`, or null when none have one. */
+export function latestFollowUpExpiryMs(links) {
+  let latest = null;
+  (Array.isArray(links) ? links : []).forEach(link => {
+    const raw = text(link && link.expires_at_utc);
+    if (!raw) return;
+    const parsed = Date.parse(raw);
+    if (!Number.isNaN(parsed) && (latest === null || parsed > latest)) latest = parsed;
+  });
+  return latest;
+}
+
+/**
+ * Shared bounded watcher for pending proposal follow-up credential links.
+ *
+ * Used by both Web Chat access review cards and the Settings Access Inbox:
+ * - refreshes when the tab becomes visible or regains focus;
+ * - polls every `pollMs` while visible and any link is pending, up to the
+ *   latest link's `expires_at_utc` + `graceMs` (capped at `maxPolls`);
+ * - calls `onExpire()` on ticks/focus so expired link buttons disappear
+ *   client-side immediately even before the final server poll arrives;
+ * - stops immediately when no pending links remain, while hidden, or on `stop()`.
+ */
+export function createFollowUpWatcher({
+  getPendingLinks, onRefresh, onExpire, isVisible,
+  browser = globalThis, now = () => Date.now(),
+  pollMs = FOLLOW_UP_POLL_MS, graceMs = FOLLOW_UP_EXPIRY_GRACE_MS, maxPolls = FOLLOW_UP_MAX_POLLS,
+}) {
+  const document = browser && browser.document;
+  let timer = 0;
+  let polls = 0;
+
+  const visible = () => (!document || !document.hidden) && (typeof isVisible !== "function" || isVisible());
+
+  function stopTimer() {
+    if (timer && browser && typeof browser.clearInterval === "function") browser.clearInterval(timer);
+    timer = 0;
+  }
+
+  function withinWindow(links) {
+    if (!links.length || polls >= maxPolls) return false;
+    const latest = latestFollowUpExpiryMs(links);
+    return latest === null || now() <= latest + graceMs;
+  }
+
+  function trigger() {
+    if (!visible()) return;
+    const links = getPendingLinks();
+    if (typeof onExpire === "function") onExpire();
+    if (withinWindow(links)) onRefresh();
+    else sync();
+  }
+
+  function tick() {
+    if (!visible()) {
+      stopTimer();
+      return;
+    }
+    const links = getPendingLinks();
+    if (typeof onExpire === "function") onExpire();
+    if (!withinWindow(links)) {
+      stopTimer();
+      return;
+    }
+    polls += 1;
+    onRefresh();
+    if (polls >= maxPolls) stopTimer();
+  }
+
+  function sync() {
+    const links = getPendingLinks();
+    if (!links.length) {
+      stopTimer();
+      polls = 0;
+      return;
+    }
+    if (!visible() || !withinWindow(links)) {
+      stopTimer();
+      return;
+    }
+    if (!timer && browser && typeof browser.setInterval === "function") {
+      timer = browser.setInterval(tick, pollMs);
+    }
+  }
+
+  if (document && typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", () => {
+      if (visible() && getPendingLinks().length) trigger();
+      sync();
+    });
+  }
+  if (browser && typeof browser.addEventListener === "function") {
+    browser.addEventListener("focus", () => {
+      if (visible() && getPendingLinks().length) trigger();
+    });
+  }
+
+  return {
+    sync,
+    stop() {
+      stopTimer();
+      polls = 0;
+    },
+  };
+}
+
+/** The card that replaces a request after a decision was saved in this page or loaded from storage. */
+export function renderDecidedCard(document, { id, title, outcome, links = [], outcomes = [], compact = false }) {
+  const card = element(document, "article",
+    `permission-request-card access-review-card is-decided is-${outcome.tone}${compact ? " is-compact" : ""}`);
   card.setAttribute("data-request-id", id);
   cardHeading(document, card, title, statusBadge(document, outcome.label, outcome.tone));
   card.append(element(document, "p", "permission-effect-summary", outcome.explanation));
@@ -653,6 +801,12 @@ export function renderDecidedCard(document, { id, title, outcome, links = [] }) 
       group.append(anchor);
     });
     card.append(group);
+  }
+  if (outcomes.length) {
+    const statusList = element(document, "div", "access-review-follow-up-outcomes");
+    statusList.setAttribute("role", "status");
+    outcomes.forEach(line => statusList.append(element(document, "p", "access-review-follow-up-outcome", line)));
+    card.append(statusList);
   }
   return card;
 }
@@ -803,7 +957,7 @@ export function createInboxCounts({ get, onChange, browser = globalThis, pollMs 
  */
 export function createAccessInbox({
   container, get, post, beginAction, failureMessage, onCounts, paginate,
-  browser = globalThis, formatTime = localTime,
+  browser = globalThis, formatTime = localTime, now = () => Date.now(), isVisible,
 }) {
   const document = browser.document;
   const warn = (event, detail) => browser.console && browser.console.warn(event, detail);
@@ -814,6 +968,69 @@ export function createAccessInbox({
     outcomes: new Map(), removedGrants: new Set(), focusId: "", highlightId: "",
   };
   const reportCounts = counts => { if (typeof onCounts === "function") onCounts(counts); };
+  const followUpReads = new Map();
+
+  function outcomeProps(entry) {
+    return {
+      id: entry.id,
+      title: entry.title,
+      outcome: entry.outcome,
+      links: activeFollowUpLinks(entry.review, now()),
+      outcomes: followUpOutcomes(entry.review),
+    };
+  }
+
+  function pendingOutcomeLinks() {
+    const links = [];
+    state.outcomes.forEach(entry => {
+      if (!entry.followUpStop) links.push(...followUpLinks(entry.review));
+    });
+    return links;
+  }
+
+  function refreshFollowUps() {
+    const version = state.version;
+    const reads = [];
+    state.outcomes.forEach((entry, id) => {
+      if (entry.followUpStop || !followUpLinks(entry.review).length || followUpReads.has(id)) return;
+      const before = followUpSignature(entry.review, now());
+      const pending = Promise.resolve()
+        .then(() => get(`${ACCESS_INBOX_API}/requests/${encodeURIComponent(id)}`))
+        .then(payload => {
+          if (version !== state.version || state.outcomes.get(id) !== entry) return;
+          if (!payload || !payload.review) return;
+          entry.review = payload.review;
+          if (followUpSignature(entry.review, now()) !== before) renderRequests();
+        }, error => {
+          if (version !== state.version || state.outcomes.get(id) !== entry) return;
+          if (error && (error.status === 403 || error.status === 404)) entry.followUpStop = true;
+          warn("access_inbox_follow_up_read_failed", { request_id: id, status: error && error.status });
+        })
+        .finally(() => {
+          if (followUpReads.get(id) === pending) followUpReads.delete(id);
+          if (version === state.version) followUpWatcher.sync();
+        });
+      followUpReads.set(id, pending);
+      reads.push(pending);
+    });
+    return Promise.all(reads);
+  }
+
+  const followUpWatcher = createFollowUpWatcher({
+    getPendingLinks: pendingOutcomeLinks,
+    onRefresh: refreshFollowUps,
+    onExpire() {
+      let changed = false;
+      state.outcomes.forEach(entry => {
+        const next = followUpSignature(entry.review, now());
+        if (next !== entry.lastRenderedSignature) changed = true;
+      });
+      if (changed) renderRequests();
+    },
+    isVisible: typeof isVisible === "function" ? isVisible : () => !container.hidden,
+    browser,
+    now,
+  });
 
   const status = element(document, "p", "settings-status access-inbox-status-line");
   status.setAttribute("role", "status");
@@ -900,8 +1117,11 @@ export function createAccessInbox({
     const cards = [];
     // Decisions saved in this page stay visible (as their outcome) until the
     // next Inbox open or Refresh, even though the server no longer lists them.
-    state.outcomes.forEach((outcome, id) => {
-      if (!listed.has(id)) cards.push(renderDecidedCard(document, outcome));
+    state.outcomes.forEach((entry, id) => {
+      if (!listed.has(id)) {
+        entry.lastRenderedSignature = followUpSignature(entry.review, now());
+        cards.push(renderDecidedCard(document, outcomeProps(entry)));
+      }
     });
     state.reviews.forEach(review => cards.push(
       renderReviewCard(document, review, { formatTime, onChoose: decide, warn })));
@@ -1004,6 +1224,8 @@ export function createAccessInbox({
     state.noticesVersion += 1;
     if (!keepOutcomes) {
       state.outcomes.clear();
+      followUpReads.clear();
+      followUpWatcher.stop();
       state.highlightId = "";
     }
     return Promise.resolve().then(() => get(inboxPath(state.noticeView, state.noticeOffset))).then(payload => {
@@ -1073,13 +1295,20 @@ export function createAccessInbox({
       .then(() => post(decisionPath(id), body))
       .then(payload => {
         saved = true;
-        const outcome = { id, title: text(review.title) || "Access request",
-          outcome: decisionOutcome(choice.choice, payload && payload.review, kept),
-          links: followUpLinks(payload && payload.review) };
-        state.outcomes.set(id, outcome);
-        const decided = renderDecidedCard(document, outcome);
+        const savedReview = (payload && payload.review) || null;
+        const entry = {
+          id,
+          title: text(review.title) || "Access request",
+          outcome: decisionOutcome(choice.choice, savedReview, kept),
+          review: savedReview,
+          followUpStop: false,
+          lastRenderedSignature: followUpSignature(savedReview, now()),
+        };
+        state.outcomes.set(id, entry);
+        const decided = renderDecidedCard(document, outcomeProps(entry));
         card.replaceWith(decided);
         focusRecord(decided);
+        followUpWatcher.sync();
       })
       .catch(error => {
         setCardMessage(message, failureMessage(error, "Your decision was not saved. Refresh and try again."), true);
@@ -1222,9 +1451,14 @@ export function createAccessInbox({
 
   return {
     load,
+    refreshFollowUps,
+    syncFollowUps: followUpWatcher.sync,
     /** Highlight and focus this request after the next successful load (Inbox links). */
     focusRequest(id) { state.focusId = text(id); },
-    setVisible(visible) { container.hidden = !visible; },
+    setVisible(visible) {
+      container.hidden = !visible;
+      followUpWatcher.sync();
+    },
     /** Sign-out: forget everything and ignore replies to earlier reads. */
     clear() {
       state.version += 1;
@@ -1233,6 +1467,8 @@ export function createAccessInbox({
         noticeView: NOTICE_VIEWS.UNREAD, noticeOffset: 0, noticeTotal: 0, noticeAllTotal: 0,
         focusId: "", highlightId: "" });
       state.outcomes.clear();
+      followUpReads.clear();
+      followUpWatcher.stop();
       state.removedGrants.clear();
       state.selected.clear();
       setStatus("", false);
