@@ -15,6 +15,20 @@ _DEFAULTS = AGENT_DEFAULTS.schedule_workers.value
 SCHEDULE_WORKER_ELIGIBILITY_PATH = "agent.schedule_workers.eligible_agent_types"
 
 
+# A worker rule above its operator maximum is refused with
+# "<RULE_EXCEEDS_OPERATOR_LIMIT>:<field>"; these are the rules that have one.
+# The code can become a start's reason
+# (custom_agents.agent_instantiation_service.refusal_code).
+RULE_EXCEEDS_OPERATOR_LIMIT = "schedule_worker_rule_exceeds_operator_limit"
+OPERATOR_LIMITED_RULES = (
+    "claim_wait_seconds",
+    "startup_timeout_seconds",
+    "admission_timeout_seconds",
+    "max_launch_attempts_per_occurrence",
+    "idle_ttl_seconds",
+)
+
+
 class ScheduleWorkersConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
@@ -80,13 +94,7 @@ class ScheduleWorkersConfig(BaseModel):
         rules = ScheduleWorkerRulesV1.model_validate(
             {**self.defaults.model_dump(), **overrides}
         )
-        for field in (
-            "claim_wait_seconds",
-            "startup_timeout_seconds",
-            "admission_timeout_seconds",
-            "max_launch_attempts_per_occurrence",
-            "idle_ttl_seconds",
-        ):
+        for field in OPERATOR_LIMITED_RULES:
             value = getattr(rules, field)
             limit = (
                 getattr(self, "max_" + field)
@@ -94,5 +102,5 @@ class ScheduleWorkersConfig(BaseModel):
                 else self.max_launch_attempts_per_occurrence
             )
             if value is not None and value > limit:
-                raise ValueError(f"schedule_worker_rule_exceeds_operator_limit:{field}")
+                raise ValueError(f"{RULE_EXCEEDS_OPERATOR_LIMIT}:{field}")
         return rules

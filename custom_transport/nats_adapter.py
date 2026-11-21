@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from pydantic import ValidationError
 
@@ -53,6 +53,8 @@ from custom_transport.nats_pull import (
     ensure_pull_consumer,
     return_or_end,
 )
+from custom_transport.nats_consumer_reconciler import AgentConsumer, NatsConsumerReconciler
+from custom_transport.nats_consumer_state import StreamConsumerCapacity, server_version_of
 from custom_transport.nats_topology import NatsStreamTopology
 from custom_transport.send_barrier import before_send
 from custom_transport.subjects import NatsSubjectMapper
@@ -646,6 +648,42 @@ class NatsTransportAdapter:
             return await self._js.publish(subject, body, headers=headers)
         await self._nc.publish(subject, body, headers=headers)
         return None
+
+    # -- agents' own consumers ----------------------------------------------
+
+    def _consumer_reconciler(self) -> NatsConsumerReconciler:
+        return NatsConsumerReconciler(
+            jetstream=self._js,
+            mapper=self.mapper,
+            logger=self._logger,
+            server_version=server_version_of(self._nc),
+        )
+
+    async def agent_consumers(self) -> tuple[AgentConsumer, ...]:
+        """Every agent's mailbox and control consumer of this team on the work stream.
+
+        Empty before the adapter connects. See
+        ``NatsConsumerReconciler.agent_consumers``; the team lead removes the
+        ones whose agent is gone (``custom_agents.worker_consumer_cleanup``).
+        """
+
+        if self._js is None:
+            return ()
+        return await self._consumer_reconciler().agent_consumers()
+
+    async def stream_consumer_capacity(self) -> StreamConsumerCapacity | None:
+        """The team work stream's consumer count and enforced limit (``NatsConsumerReconciler.stream_capacity``)."""
+
+        if self._js is None:
+            return None
+        return await self._consumer_reconciler().stream_capacity()
+
+    async def delete_agent_consumers(self, consumers: Iterable[AgentConsumer], *, reason: str) -> int:
+        """Delete these agent consumers (``NatsConsumerReconciler.delete_agent_consumers``)."""
+
+        if self._js is None:
+            return 0
+        return await self._consumer_reconciler().delete_agent_consumers(consumers, reason=reason)
 
     # -- worker queues ------------------------------------------------------
 

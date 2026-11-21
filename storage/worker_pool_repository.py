@@ -37,6 +37,25 @@ IncidentKind = Literal["capacity", "provider_limited", "start_failed"]
 INCIDENT_CAPACITY: IncidentKind = "capacity"
 INCIDENT_PROVIDER_LIMITED: IncidentKind = "provider_limited"
 INCIDENT_START_FAILED: IncidentKind = "start_failed"
+
+# Keys of a start_failed incident's evidence (``WorkerPoolIncidentV1.details``):
+# written by the worker pool controller and its incident bookkeeping, read by
+# TeamArchitect's review and administrators' notice
+# (custom_agents.worker_pool_reviews). Named here, which both import, so the
+# writer and the reader agree without importing each other.
+EVIDENCE_POOL = "pool"
+EVIDENCE_REFUSED_BECAUSE = "start_refused_because"
+EVIDENCE_HOURLY_LIMIT = "hourly_start_limit_reached"
+# Keys of the pool view in details[EVIDENCE_POOL]
+# (custom_agents.worker_pool_controller.PoolObservation.as_dict) that those texts read.
+POOL_FAILED_STARTS = "failed_starts_in_row"
+POOL_LAST_START_FAILURE = "last_start_failure"
+POOL_UNCOUNTED_ENDS = "starts_ended_not_counted"
+POOL_LAST_UNCOUNTED_END = "last_start_end_not_counted"
+POOL_HUNG_STARTS = "starts_hung"
+# A registered type whose shared queue cannot be created: the pool view's entry
+# for it, with the reason (custom_agents.worker_pool_controller.pool_views).
+POOL_QUEUE_UNAVAILABLE = "queue_unavailable"
 # The newest changes kept on a limit row, for inspection.
 _LIMIT_HISTORY = 10
 

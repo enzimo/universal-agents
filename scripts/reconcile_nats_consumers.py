@@ -43,8 +43,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from assistant_gateway.runtime_config import load_runtime_config_file  # noqa: E402
 from custom_transport.nats_consumer_reconciler import (  # noqa: E402
+    KIND_LASTING_AGENT,
     ConsumerReconciliationResult,
     NatsConsumerReconciler,
+    configured_agent_ids,
+)
+from custom_transport.nats_consumer_state import (  # noqa: E402
+    log_capacity_if_high,
+    server_version_of,
+    version_label,
 )
 from custom_transport.subjects import NatsSubjectMapper  # noqa: E402
 from default_values import TRANSPORT_DEFAULTS  # noqa: E402
@@ -60,6 +67,8 @@ from docker.nats_service import (  # noqa: E402
 
 
 LOGGER = logging.getLogger("reconcile_nats_consumers")
+# Who reported a stream near its limit (``event=nats_stream_consumer_capacity_high reporter=``).
+REPORTER_CONSUMER_CHECK = "consumer_check"
 DEFAULT_CONFIG_PATH = Path("/data/instance_config.yaml")
 
 # This is a one-shot report, and the launcher waits for it before agents
@@ -145,8 +154,12 @@ async def reconcile_nats_consumers(
     apply: bool,
     minimum_age_seconds: float,
     stable_agent_ids: Sequence[str] = (),
+    delete_kinds: frozenset[str] | None = None,
 ) -> ConsumerReconciliationResult:
-    """Load runtime configuration and run one consumer reconciliation pass."""
+    """Load runtime configuration and run one consumer reconciliation pass.
+
+    ``delete_kinds`` limits what ``apply`` deletes (``NatsConsumerReconciler.reconcile``).
+    """
 
     config = load_runtime_config_file(config_path)
     servers = list(
@@ -154,10 +167,7 @@ async def reconcile_nats_consumers(
         or [config.get("transport.nats_url", TRANSPORT_DEFAULTS.nats_url.value)]
     )
     team_id = resolve_reconciliation_team_id(config)
-    configured_stable_id = str(config.get("agent.agent_id") or "").strip()
-    protected_ids = list(stable_agent_ids)
-    if configured_stable_id:
-        protected_ids.append(configured_stable_id)
+    protected_ids = [*stable_agent_ids, *configured_agent_ids(config)]
 
     try:
         import nats
@@ -192,6 +202,7 @@ async def reconcile_nats_consumers(
         )
         reconciler = NatsConsumerReconciler(
             jetstream=connection.jetstream(),
+            server_version=server_version_of(connection),
             mapper=mapper,
             stable_agent_ids=protected_ids,
             logger=LOGGER,
@@ -199,6 +210,7 @@ async def reconcile_nats_consumers(
         return await reconciler.reconcile(
             apply=apply,
             minimum_age_seconds=minimum_age_seconds,
+            delete_kinds=delete_kinds,
         )
     finally:
         await connection.close()
@@ -215,6 +227,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="Delete eligible consumers. Without this flag the command is read-only.",
+    )
+    parser.add_argument(
+        "--remove-lasting-agent-leftovers",
+        action="store_true",
+        help=(
+            "Delete only the lasting mailbox and control consumers of agents whose id "
+            "is not configured (what releases before 2026-11-19 left for every started "
+            "worker) and report the rest. Requires --confirm-runtime-stopped. The "
+            "launcher runs this before any agent starts."
+        ),
     )
     parser.add_argument(
         "--confirm-runtime-stopped",
@@ -249,16 +271,89 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _deletion_mode(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> tuple[bool, frozenset[str] | None]:
+    """Whether to delete, and which kinds (None: every candidate); deleting needs the runtime stopped."""
+
+    if (args.apply or args.remove_lasting_agent_leftovers) and not args.confirm_runtime_stopped:
+        parser.error(
+            "--apply and --remove-lasting-agent-leftovers require --confirm-runtime-stopped. "
+            "Stop every Universal Agents process for this team before deleting consumers."
+        )
+    apply = bool(args.apply or args.remove_lasting_agent_leftovers)
+    # --apply deletes every candidate; the narrower flag only lasting agent leftovers.
+    return apply, (None if args.apply or not apply else frozenset({KIND_LASTING_AGENT}))
+
+
+def _report(
+    result: ConsumerReconciliationResult, *, apply: bool, delete_kinds: frozenset[str] | None, verbose: bool
+) -> None:
+    """Log what one pass found and did."""
+
+    reason_counts = Counter(decision.reason for decision in result.decisions)
+    stream = result.stream_capacity
+    LOGGER.info(
+        "NATS consumer reconciliation complete. "
+        "event=nats_consumer_reconciliation_complete apply=%s delete_kinds=%s scanned_count=%s "
+        "candidate_count=%s deleted_count=%s account_consumer_count=%s "
+        "account_max_consumers=%s stream_consumer_count=%s stream_consumer_limit=%s "
+        "stream_limit_source=%s nats_server_version=%s reasons=%s",
+        result.applied,
+        sorted(delete_kinds) if delete_kinds is not None else ("all" if apply else None),
+        result.scanned_count,
+        result.candidate_count,
+        result.deleted_count,
+        result.account_consumer_count,
+        result.account_max_consumers,
+        None if stream is None else stream.consumer_count,
+        None if stream is None else stream.consumer_limit,
+        None if stream is None else stream.limit_source,
+        version_label(None if stream is None else stream.server_version),
+        dict(sorted(reason_counts.items())),
+    )
+    if (
+        result.scanned_count == 0
+        and result.account_consumer_count is not None
+        and result.account_consumer_count > 0
+    ):
+        LOGGER.warning(
+            "The resolved team streams contained no consumers even though the "
+            "JetStream account contains consumers. Check the reconciliation "
+            "scope log before applying cleanup. "
+            "event=nats_consumer_reconciliation_scope_empty "
+            "account_consumer_count=%s",
+            result.account_consumer_count,
+        )
+    # NATS applies a consumer limit to each stream, the account's included, so
+    # the warning compares the work stream's count with its enforced limit
+    # (read after this pass's deletions), not the whole account's count.
+    log_capacity_if_high(LOGGER, result.stream_capacity, reporter=REPORTER_CONSUMER_CHECK)
+    if verbose:
+        for decision in result.decisions:
+            LOGGER.info(
+                "Consumer decision. event=nats_consumer_reconciliation_decision "
+                "stream_name=%s consumer_name=%s owner_agent_id=%s "
+                "consumer_role=%s listening=%s num_pending=%s "
+                "num_ack_pending=%s delete=%s reason=%s",
+                decision.stream_name,
+                decision.consumer_name,
+                decision.owner_agent_id,
+                decision.consumer_role,
+                decision.listening,
+                decision.num_pending,
+                decision.num_ack_pending,
+                decision.delete,
+                decision.reason,
+            )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.minimum_age_seconds < 0:
         parser.error("--minimum-age-seconds cannot be negative.")
-    if args.apply and not args.confirm_runtime_stopped:
-        parser.error(
-            "--apply requires --confirm-runtime-stopped. Stop every Universal "
-            "Agents process for this team before deleting legacy consumers."
-        )
+    apply, delete_kinds = _deletion_mode(parser, args)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -292,9 +387,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = asyncio.run(
             reconcile_nats_consumers(
                 config_path=args.config,
-                apply=bool(args.apply),
+                apply=apply,
                 minimum_age_seconds=float(args.minimum_age_seconds),
                 stable_agent_ids=tuple(args.stable_agent_id),
+                delete_kinds=delete_kinds,
             )
         )
     except Exception as exc:
@@ -302,7 +398,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "NATS consumer reconciliation failed. "
             "event=nats_consumer_reconciliation_failed config_path=%s apply=%s error=%s",
             Path(args.config).expanduser(),
-            bool(args.apply),
+            apply,
             _describe_error(exc),
         )
         return 1
@@ -311,63 +407,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             # Logs a stop that times out instead of raising, so the run's own error stays the one reported.
             stop_local_nats(local_nats_process, logger=LOGGER)
 
-    reason_counts = Counter(decision.reason for decision in result.decisions)
-    LOGGER.info(
-        "NATS consumer reconciliation complete. "
-        "event=nats_consumer_reconciliation_complete apply=%s scanned_count=%s "
-        "candidate_count=%s deleted_count=%s account_consumer_count=%s "
-        "account_max_consumers=%s reasons=%s",
-        result.applied,
-        result.scanned_count,
-        result.candidate_count,
-        result.deleted_count,
-        result.account_consumer_count,
-        result.account_max_consumers,
-        dict(sorted(reason_counts.items())),
-    )
-    if (
-        result.scanned_count == 0
-        and result.account_consumer_count is not None
-        and result.account_consumer_count > 0
-    ):
-        LOGGER.warning(
-            "The resolved team streams contained no consumers even though the "
-            "JetStream account contains consumers. Check the reconciliation "
-            "scope log before applying cleanup. "
-            "event=nats_consumer_reconciliation_scope_empty "
-            "account_consumer_count=%s",
-            result.account_consumer_count,
-        )
-    if (
-        result.account_consumer_count is not None
-        and result.account_max_consumers is not None
-        and result.account_max_consumers > 0
-        and result.account_consumer_count >= result.account_max_consumers * 0.9
-    ):
-        LOGGER.warning(
-            "JetStream consumer usage is at or above 90 percent. "
-            "event=nats_consumer_capacity_high account_consumer_count=%s "
-            "account_max_consumers=%s",
-            result.account_consumer_count,
-            result.account_max_consumers,
-        )
-    if args.verbose:
-        for decision in result.decisions:
-            LOGGER.info(
-                "Consumer decision. event=nats_consumer_reconciliation_decision "
-                "stream_name=%s consumer_name=%s owner_agent_id=%s "
-                "consumer_role=%s listening=%s num_pending=%s "
-                "num_ack_pending=%s delete=%s reason=%s",
-                decision.stream_name,
-                decision.consumer_name,
-                decision.owner_agent_id,
-                decision.consumer_role,
-                decision.listening,
-                decision.num_pending,
-                decision.num_ack_pending,
-                decision.delete,
-                decision.reason,
-            )
+    _report(result, apply=apply, delete_kinds=delete_kinds, verbose=bool(args.verbose))
     return 0
 
 

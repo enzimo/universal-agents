@@ -32,7 +32,7 @@ from custom_agents.agent_instantiation_skill import (
     ensure_runtime_agent_instantiation_skill,
 )
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime
-from custom_messages.contracts.schedule_worker_v1 import AgentLaunchResultV1, AgentLaunchState, AgentLaunchV1
+from custom_messages.contracts.schedule_worker_v1 import AgentLaunchResultV1, AgentLaunchV1
 from custom_agents.agent_instructions import strip_access_prompt
 from custom_agents.agent_catalog import load_agent_type_map
 from custom_agents.access_runtime import authorization_enabled
@@ -138,6 +138,11 @@ class _SpawnedAgentHandle:
     thread: threading.Thread
     team_id: str
     runtime_loop: asyncio.AbstractEventLoop | None = None
+    # Why the runtime asked this worker to stop (a startup timeout, a revoked
+    # start, the runtime stopping); set before the request, so the worker's
+    # thread reads it after it exits. A worker that was not ready yet records
+    # it as its start's reason (agent_instantiation_service.record_worker_exit).
+    stop_reason: str | None = None
 
 
 _SPAWNED_AGENT_LOCK = threading.Lock()
@@ -194,7 +199,9 @@ def inspect_worker_launch(launch: AgentLaunchV1) -> str:
     return "ready" if handle.agent._worker_ready else "starting"
 
 
-def stop_worker_launch(launch: AgentLaunchV1) -> bool:
+def stop_worker_launch(launch: AgentLaunchV1, *, reason: str) -> bool:
+    """Ask an unready worker of this process to stop, giving the reason its start record keeps."""
+
     from custom_agents.agent_instantiation_service import PROCESS_HOST_ID
 
     if launch.host_id != PROCESS_HOST_ID:
@@ -207,9 +214,43 @@ def stop_worker_launch(launch: AgentLaunchV1) -> bool:
     # separate task cancellation protocol and must never be killed here.
     if handle.agent._worker_ready:
         return False
-    _request_spawned_agent_exits([handle], team_id=launch.team_id)
+    _request_spawned_agent_exits([handle], team_id=launch.team_id, reason=reason)
     handle.thread.join(timeout=1.0)
     return not handle.thread.is_alive()
+
+
+def _settle_worker_exit(
+    agent: Any, handle: _SpawnedAgentHandle, crash: BaseException | None, *, launch_id: str
+) -> None:
+    """Record a worker thread's end on its start record; a failure is logged, never raised.
+
+    When the launcher stopped a worker that was not ready and its thread
+    outlived the 1 s join, the launcher already wrote the record with the
+    stop reason (custom_agents.schedule_worker_controller), so the worker's
+    own write loses the fence. That one case is expected and logged at info,
+    with the conflict's text; every other failure stays an error: a ready
+    worker whose end nothing recorded, or any failure when no stop was asked.
+    """
+
+    from custom_agents.agent_instantiation_service import record_worker_exit
+    from storage.agent_launch_repository import LaunchConflict
+
+    try:
+        record_worker_exit(agent, crash, stopped_because=handle.stop_reason)
+    except LaunchConflict as conflict:
+        if handle.stop_reason is None or agent._worker_ready:
+            _logger.exception("Could not record worker exit", extra={"launch_id": launch_id, "agent_id": agent.id})
+            return
+        _logger.info(
+            "A stopped worker's start was already recorded by the launcher. "
+            "event=worker_exit_recorded_by_launcher launch_id=%s agent_id=%s reason=%s error=%s",
+            launch_id,
+            agent.id,
+            handle.stop_reason,
+            conflict,
+        )
+    except Exception:
+        _logger.exception("Could not record worker exit", extra={"launch_id": launch_id, "agent_id": agent.id})
 
 
 def _register_spawned_agent(handle: _SpawnedAgentHandle) -> None:
@@ -239,9 +280,14 @@ def _request_spawned_agent_exits(
     handles: list[_SpawnedAgentHandle],
     *,
     team_id: str,
+    reason: str,
 ) -> list[tuple[_SpawnedAgentHandle, Any]]:
     exit_futures: list[tuple[_SpawnedAgentHandle, Any]] = []
     for handle in handles:
+        # The first reason stays: a worker stopped for its startup timeout
+        # is still that when the runtime stops while it winds down.
+        if handle.stop_reason is None:
+            handle.stop_reason = reason
         try:
             if handle.runtime_loop is None or not handle.runtime_loop.is_running():
                 handle.agent.set_exit_flag()
@@ -318,7 +364,13 @@ def shutdown_spawned_agents(
     owner_agent_id: str,
     timeout_seconds: float,
 ) -> None:
-    """Request clean exit for spawned agents and wait for their threads."""
+    """Request clean exit for spawned agents and wait for their threads.
+
+    A worker still starting records ``STOPPED_BY_RUNTIME``, which does not
+    count as a failed start of its type.
+    """
+
+    from custom_agents.agent_instantiation_service import STOPPED_BY_RUNTIME
 
     handles = _spawned_agent_handles(
         team_id=team_id,
@@ -328,7 +380,7 @@ def shutdown_spawned_agents(
         return
 
     deadline = time.monotonic() + max(0.0, float(timeout_seconds))
-    exit_futures = _request_spawned_agent_exits(handles, team_id=team_id)
+    exit_futures = _request_spawned_agent_exits(handles, team_id=team_id, reason=STOPPED_BY_RUNTIME)
     _await_spawned_agent_exit_requests(
         exit_futures,
         deadline=deadline,
@@ -966,24 +1018,30 @@ def instantiate_agent_type(
     Returns:
         A typed startup acknowledgement. Readiness and admission are separate.
     """
-    from custom_agents.agent_instantiation_service import update_runtime_launch
+    from custom_agents.agent_instantiation_service import (
+        DEFINITION_CHANGED_BEFORE_CONSTRUCTION,
+        IDLE_TTL_NOT_POSITIVE,
+        LAUNCH_IDENTITY_MISMATCH,
+        MCP_LAUNCH_PROFILE_UNAVAILABLE,
+    )
+    from custom_agents.schedule_repair_guidance import AGENT_DEFINITION_UNAVAILABLE
     from custom_agents.schedule_definition_identity import launch_definition_digest
 
     config = load_agent_type_map().get(named_agent_type)
 
     if not config:
-        raise ValueError("agent_definition_unavailable")
+        raise ValueError(AGENT_DEFINITION_UNAVAILABLE)
     if launch_definition_digest(config) != launch.definition_digest:
-        raise ValueError("agent_definition_changed_before_construction")
+        raise ValueError(DEFINITION_CHANGED_BEFORE_CONSTRUCTION)
     if (launch.named_agent_type, launch.team_id) != (named_agent_type, team_id) or is_team_lead:
-        raise ValueError("launch_identity_mismatch")
+        raise ValueError(LAUNCH_IDENTITY_MISMATCH)
     if idle_ttl_seconds is not None:
         try:
             idle_ttl_seconds = float(idle_ttl_seconds)
         except (TypeError, ValueError):
-            raise ValueError("idle_ttl_seconds must be a positive number") from None
+            raise ValueError(IDLE_TTL_NOT_POSITIVE) from None
         if idle_ttl_seconds <= 0:
-            raise ValueError("idle_ttl_seconds must be a positive number")
+            raise ValueError(IDLE_TTL_NOT_POSITIVE)
 
     # Copy config to avoid modifying the original
     agent_config = config.copy()
@@ -1017,7 +1075,7 @@ def instantiate_agent_type(
             shared_config.to_dict().get("mcp_profiles"),
         )
     except ValueError as exc:
-        raise ValueError("MCP launch profile unavailable") from exc
+        raise ValueError(MCP_LAUNCH_PROFILE_UNAVAILABLE) from exc
     agent_config["external_mcp_servers"] = merge_external_mcp_server_configs(
         agent_config.get("external_mcp_servers"),
         profile_server_configs,
@@ -1101,6 +1159,7 @@ def instantiate_agent_type(
             await asyncio.gather(ttl_task, return_exceptions=True)
             await connect_task
 
+        crash: BaseException | None = None
         try:
             _logger.debug(
                 "event=agent_thread_connect_start agent_id=%s named_agent_type=%s team_id=%s thread_name=%s",
@@ -1112,7 +1171,11 @@ def instantiate_agent_type(
             # Set agent reference inside the thread so tools have correct context
             set_agent_ref(agent)
             asyncio.run(_connect_with_optional_idle_ttl())
-        except Exception:
+        except BaseException as exc:
+            # BaseException too: a CancelledError that ends the worker is a
+            # crash to record, not a clean exit. Nothing above a thread's
+            # target handles it; the thread ends either way.
+            crash = exc
             _logger.exception(
                 "Spawned agent thread crashed before clean shutdown. "
                 "event=agent_thread_crash agent_id=%s named_agent_type=%s team_id=%s thread_name=%s",
@@ -1122,10 +1185,7 @@ def instantiate_agent_type(
                 threading.current_thread().name,
             )
         finally:
-            try:
-                update_runtime_launch(agent, state=AgentLaunchState.RETIRED if agent._worker_ready else AgentLaunchState.FAILED)
-            except Exception:
-                _logger.exception("Could not record worker exit", extra={"launch_id": launch.launch_id, "agent_id": agent.id})
+            _settle_worker_exit(agent, agent_handle, crash, launch_id=launch.launch_id)
             _unregister_spawned_agent(agent.id)
             _logger.debug(
                 "event=agent_thread_exit agent_id=%s named_agent_type=%s team_id=%s thread_name=%s",
