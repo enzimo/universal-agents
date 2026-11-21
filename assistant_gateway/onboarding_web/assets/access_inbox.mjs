@@ -709,8 +709,21 @@ export function createFollowUpWatcher({
   const document = browser && browser.document;
   let timer = 0;
   let polls = 0;
+  let linkSetKey = "";
 
   const visible = () => (!document || !document.hidden) && (typeof isVisible !== "function" || isVisible());
+
+  function pendingLinkSetKey(links) {
+    return links.map(link => `${link.url}|${link.expires_at_utc || ""}`).sort().join("\n");
+  }
+
+  function updateLinkSet(links) {
+    const nextKey = pendingLinkSetKey(links);
+    if (nextKey !== linkSetKey) {
+      linkSetKey = nextKey;
+      polls = 0;
+    }
+  }
 
   function stopTimer() {
     if (timer && browser && typeof browser.clearInterval === "function") browser.clearInterval(timer);
@@ -723,12 +736,15 @@ export function createFollowUpWatcher({
     return latest === null || now() <= latest + graceMs;
   }
 
+  // Focus and tab switches always perform one read while any link is still
+  // listed, even after the timer's poll cap or expiry+grace window has ended.
   function trigger() {
     if (!visible()) return;
     const links = getPendingLinks();
+    updateLinkSet(links);
     if (typeof onExpire === "function") onExpire();
-    if (withinWindow(links)) onRefresh();
-    else sync();
+    if (links.length) onRefresh();
+    sync();
   }
 
   function tick() {
@@ -737,6 +753,7 @@ export function createFollowUpWatcher({
       return;
     }
     const links = getPendingLinks();
+    updateLinkSet(links);
     if (typeof onExpire === "function") onExpire();
     if (!withinWindow(links)) {
       stopTimer();
@@ -749,9 +766,9 @@ export function createFollowUpWatcher({
 
   function sync() {
     const links = getPendingLinks();
+    updateLinkSet(links);
     if (!links.length) {
       stopTimer();
-      polls = 0;
       return;
     }
     if (!visible() || !withinWindow(links)) {
@@ -766,7 +783,7 @@ export function createFollowUpWatcher({
   if (document && typeof document.addEventListener === "function") {
     document.addEventListener("visibilitychange", () => {
       if (visible() && getPendingLinks().length) trigger();
-      sync();
+      else sync();
     });
   }
   if (browser && typeof browser.addEventListener === "function") {
@@ -780,6 +797,7 @@ export function createFollowUpWatcher({
     stop() {
       stopTimer();
       polls = 0;
+      linkSetKey = "";
     },
   };
 }
@@ -988,19 +1006,31 @@ export function createAccessInbox({
     return links;
   }
 
+  function redrawOutcomeCard(id, entry) {
+    entry.lastRenderedSignature = followUpSignature(entry.review, now());
+    const existing = findRecord(requestList, "data-request-id", id);
+    if (!existing || !existing.classList.contains("is-decided")) return;
+    const hadFocus = Boolean(document.activeElement && existing.contains(document.activeElement));
+    const next = renderDecidedCard(document, outcomeProps(entry));
+    if (state.highlightId === id) next.classList.add("is-highlighted");
+    existing.replaceWith(next);
+    if (hadFocus) focusRecord(next);
+  }
+
   function refreshFollowUps() {
     const version = state.version;
     const reads = [];
     state.outcomes.forEach((entry, id) => {
       if (entry.followUpStop || !followUpLinks(entry.review).length || followUpReads.has(id)) return;
-      const before = followUpSignature(entry.review, now());
       const pending = Promise.resolve()
         .then(() => get(`${ACCESS_INBOX_API}/requests/${encodeURIComponent(id)}`))
         .then(payload => {
           if (version !== state.version || state.outcomes.get(id) !== entry) return;
           if (!payload || !payload.review) return;
           entry.review = payload.review;
-          if (followUpSignature(entry.review, now()) !== before) renderRequests();
+          if (followUpSignature(entry.review, now()) !== entry.lastRenderedSignature) {
+            redrawOutcomeCard(id, entry);
+          }
         }, error => {
           if (version !== state.version || state.outcomes.get(id) !== entry) return;
           if (error && (error.status === 403 || error.status === 404)) entry.followUpStop = true;
@@ -1020,12 +1050,11 @@ export function createAccessInbox({
     getPendingLinks: pendingOutcomeLinks,
     onRefresh: refreshFollowUps,
     onExpire() {
-      let changed = false;
-      state.outcomes.forEach(entry => {
-        const next = followUpSignature(entry.review, now());
-        if (next !== entry.lastRenderedSignature) changed = true;
+      state.outcomes.forEach((entry, id) => {
+        if (followUpSignature(entry.review, now()) !== entry.lastRenderedSignature) {
+          redrawOutcomeCard(id, entry);
+        }
       });
-      if (changed) renderRequests();
     },
     isVisible: typeof isVisible === "function" ? isVisible : () => !container.hidden,
     browser,

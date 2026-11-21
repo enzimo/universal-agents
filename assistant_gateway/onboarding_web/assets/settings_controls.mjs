@@ -197,7 +197,7 @@ export function createSettingsControls({
     else tasks.deactivate();
     // Team follows the team's live status only while it is on screen.
     if (view !== SETTINGS_VIEWS.TEAM || overlay.hidden) team.deactivate();
-    if (typeof accessInbox.syncFollowUps === "function") accessInbox.syncFollowUps();
+    accessInbox.syncFollowUps();
   }
 
   /** Switches to a view and reads its content. Resolves when the first read finishes. */
@@ -245,7 +245,7 @@ export function createSettingsControls({
     }
     overlay.setAttribute("aria-hidden", "true");
     overlay.hidden = true;
-    if (typeof accessInbox.syncFollowUps === "function") accessInbox.syncFollowUps();
+    accessInbox.syncFollowUps();
     setStatusLine(inboxStatus, "", false);
     team.resetStatus();
     memories.resetStatus();
@@ -309,8 +309,8 @@ export function createSettingsControls({
      */
     noteAgentMessage() {
       inboxCounts.refreshSoon();
-      if (typeof chatReviews.refreshFollowUps === "function") chatReviews.refreshFollowUps();
-      if (typeof accessInbox.refreshFollowUps === "function") accessInbox.refreshFollowUps();
+      chatReviews.refreshFollowUps();
+      accessInbox.refreshFollowUps();
     },
     /** Adds the access review card to a chat message bubble (chat_access_review.mjs). */
     mountAccessReview: (bubble, message) => chatReviews.mount(bubble, message),

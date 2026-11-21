@@ -66,6 +66,13 @@ export class FakeElement extends EventTarget {
     for (let current = node; current; current = current.parentNode) if (current === this) return true;
     return false;
   }
+  matches(selector) {
+    if (selector.startsWith(".")) return this.classList.contains(selector.slice(1));
+    if (selector.startsWith("#")) return this.id === selector.slice(1);
+    return this.tagName === selector.toUpperCase();
+  }
+  querySelectorAll(selector) { return descendants(this).filter(node => node.matches(selector)); }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   focus() { this.ownerDocument.activeElement = this; }
   click() { this.dispatchEvent(new Event("click")); }
 }

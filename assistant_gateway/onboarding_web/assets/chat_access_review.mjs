@@ -57,24 +57,10 @@ export function reviewPath(requestId) {
 }
 
 function findReviewSlots(document, id) {
-  const root = document && (document.body || document);
+  const root = document && document.body;
   if (!root) return [];
-  if (typeof root.querySelectorAll === "function") {
-    return Array.from(root.querySelectorAll(".chat-access-review"))
-      .filter(slot => slot.isConnected && slot.getAttribute("data-access-request-id") === id);
-  }
-  const found = [];
-  const stack = Array.isArray(root.children) ? [...root.children] : [];
-  while (stack.length) {
-    const node = stack.pop();
-    if (!node) continue;
-    if (node.classList && node.classList.contains("chat-access-review")
-      && node.getAttribute("data-access-request-id") === id) {
-      found.push(node);
-    }
-    if (Array.isArray(node.children) && node.children.length) stack.push(...node.children);
-  }
-  return found;
+  return Array.from(root.querySelectorAll(".chat-access-review"))
+    .filter(slot => slot.isConnected && slot.getAttribute("data-access-request-id") === id);
 }
 
 /**
@@ -95,6 +81,20 @@ export function createChatAccessReviews({
   // requestId -> { review, localOutcome, error, fetchedAt, pending, followUpStop, lastFollowUpSignature }
   const entries = new Map();
   let generation = 0;
+  let syncQueued = false;
+
+  // Coalesces post-mount watcher sync into one microtask so chat.js
+  // renderMessages finishes attaching detached bubbles before we check them.
+  function queueSync() {
+    if (syncQueued) return;
+    syncQueued = true;
+    const queuedGeneration = generation;
+    Promise.resolve().then(() => {
+      if (queuedGeneration !== generation) return;
+      syncQueued = false;
+      followUpWatcher.sync();
+    });
+  }
 
   function entryFor(id) {
     if (!entries.has(id)) {
@@ -297,7 +297,7 @@ export function createChatAccessReviews({
       if (needsRead(entry) || entry.pending) {
         read(id).then(() => { if (slot.isConnected) draw(slot, id); });
       } else {
-        followUpWatcher.sync();
+        queueSync();
       }
       return slot;
     },
@@ -306,6 +306,7 @@ export function createChatAccessReviews({
     /** Sign-out: forget every request and ignore replies to earlier reads. */
     clear() {
       generation += 1;
+      syncQueued = false;
       entries.clear();
       followUpWatcher.stop();
     },

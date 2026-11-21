@@ -329,12 +329,17 @@ test("decided chat cards are compact and dismiss local-decision follow-up links 
   assert.equal(h.intervals.size, 1, "bounded poll starts while a follow-up link is visible");
   assert.equal([...h.intervals.values()][0].delay, FOLLOW_UP_POLL_MS);
 
-  // Simulate 50 transcript redraws detaching prior slots and mounting fresh ones.
+  // Simulate 50 transcript redraws in chat.js renderMessages order: clear list,
+  // build each bubble detached, call mount, then append bubble to the document.
   for (let i = 0; i < 50; i += 1) {
-    h.bubble.replaceChildren();
-    slot = h.reviewer.mount(h.bubble, message());
+    h.document.body.replaceChildren();
+    const detached = h.document.createElement("article");
+    slot = h.reviewer.mount(detached, message());
+    h.document.body.append(detached);
   }
+  await settle();
   assert.equal(byTag(slot, "a").length, 1);
+  assert.equal(h.intervals.size, 1, "poll timer stays running after detached-bubble transcript redraws");
 
   // Form finishes on the server: focus/poll refreshes and clears the button on the connected slot.
   h.reviews["req-1"] = {
@@ -389,11 +394,24 @@ test("reloaded decided card hides expired follow-up link client-side, stops afte
   assert.equal(byTag(slot, "a").length, 0, "expired link is hidden client-side immediately");
   assert.equal(h.intervals.size, 1, "watcher stays active during grace for final server outcome");
 
-  // Past expiry + grace: watcher stops polling automatically.
+  // Past expiry + grace: watcher stops polling automatically, yet returning
+  // focus still reads the server once so the expired outcome line appears.
   h.advance(FOLLOW_UP_EXPIRY_GRACE_MS + 1000);
   [...h.intervals.values()][0].callback();
   await settle();
   assert.equal(h.intervals.size, 0, "watcher stops after expiry + grace");
+
+  h.reviews["req-1"] = {
+    ...reloaded,
+    follow_up_links: [],
+    follow_up_outcomes: ["The account link for Portainer expired."],
+  };
+  h.fireWin("focus");
+  await settle();
+  assert.equal(byTag(slot, "a").length, 0);
+  assert.match(byClass(slot, "access-review-follow-up-outcomes")[0].textContent,
+    /The account link for Portainer expired\./);
+  assert.equal(h.intervals.size, 0);
 
   // 403/404 during follow-up refresh stops polling without replacing the decided card with an error card.
   const h403 = harness({ startClock: start, reviews: { "req-1": reloaded } });
