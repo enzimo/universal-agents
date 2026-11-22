@@ -791,7 +791,7 @@ that leads to it (owner's request 2026-10-12).
   The links open new windows on the signed-in Web Chat origin. No Collector token, broker token, or credential
   material belongs in either link or browser state.
 - Every signed-in person sees the **Workspace** link. Members get **Your
-  files**, which shows only their own folder. Administrators get **Workspace**,
+  files**, which shows their own folder and `team/`. Administrators get **Workspace**,
   which shows `team/`, `agents/`, and their own folder (see Workspace Files).
 - Inbox lists requests and notices about access, Access shows who can use what,
   Accounts shows whose account agents use for each service, Team shows the live team and installed procedures, Tasks shows the person's
@@ -1373,10 +1373,10 @@ knowledge pages. It applies the existing rules; it adds none.
 ## Workspace Files
 
 - `/webchat?view=files` is **Workspace Files**. Every signed-in person can open
-  it from the Settings rail. Members see **Your files**: only their own folder.
-  Administrators see **Workspace**: `team/`, `agents/`, and their own folder.
-  Use that name as the page title and the tree heading, and do not label the
-  page as an administrator view.
+  it from the Settings rail. Members see **Your files**: their own folder and
+  the shared `team/` folder. Administrators see **Workspace**: `team/`,
+  `agents/`, and their own folder. Use that name as the page title and the tree
+  heading, and do not label the page as an administrator view.
 - A lazy file tree sits on the left and one viewer pane on the right. Narrow
   screens stack the browser above the viewer. Keep folder expansion in place so
   browsing does not replace the selected preview or create page-level
@@ -1390,7 +1390,8 @@ knowledge pages. It applies the existing rules; it adds none.
   every symbolic link, and every multi-linked file. Direct path requests must
   enforce the same rules as directory listings. Unsupported formats and files
   above the 5 MB preview limit show a short explanation in the viewer and expose
-  no raw content response.
+  no raw preview content response; they remain downloadable through the
+  streaming download endpoint.
 - Render Markdown through the same escaped renderer as Web Chat messages.
   Render HTML in a separate iframe with an empty `sandbox` attribute and a
   response policy that blocks scripts, forms, network access, nested frames,
@@ -1403,15 +1404,35 @@ knowledge pages. It applies the existing rules; it adds none.
   browser previews.
 - The viewer never edits files. Clicking a row selects it (one at a time): a
   file opens in the preview, and a folder shows its name with "Folder" and a
-  short note that folders have no preview. For an item the gateway allows the
-  person to share or send, **Share…** and **Send…** (files only) appear at the
-  top right of the preview pane's heading, after any preview controls: ghost
-  buttons with their icon (a person with a plus, a paper plane) and word, and
-  "Share <name>" or "Send <name>" as the accessible name. The tree itself
-  carries no buttons (owner's request 2026-10-04; it replaced a strip under
-  the selected row, which had replaced buttons overlaid on rows). Each opens a
-  frosted modal dialog titled with the item's name, with focus containment,
-  Escape to close, and focus returned to the button.
+  short note that folders have no preview. Every readable selected file (including
+  files above the 5 MB preview limit, non-previewable formats such as audio or
+  archives, and files in `team/`) shows a **Download** ghost button at the top
+  right of the preview pane's heading, before **Share…** and **Send…**: a
+  download icon with the word "Download" and `"Download <name>"` as its
+  accessible name. Folders never show a **Download** button. Clicking
+  **Download** preflights `/api/web-chat/workspace/download?path=<encoded>` with
+  `HEAD` so an expired session re-opens sign-in and failures show a plain-language
+  message in the status line without saving error HTML; on success the browser
+  downloads the streamed attachment in place.
+- For an item inside the person's own folder that the gateway allows them to
+  share or send, **Share…** and **Send…** (files only) appear after **Download**
+  in the preview pane's heading: ghost buttons with their icon (a person with a
+  plus, a paper plane) and word, and "Share <name>" or "Send <name>" as the
+  accessible name. The tree itself carries no buttons (owner's request
+  2026-10-04; it replaced a strip under the selected row, which had replaced
+  buttons overlaid on rows). Each opens a frosted modal dialog titled with the
+  item's name, with focus containment, Escape to close, and focus returned to
+  the button.
+- File deep-links open directly at a file: `/webchat?view=files&path=<workspace-relative-path>`
+  expands each parent folder along `path`, selects the file, and loads its
+  preview and actions. Adding `&download=1` triggers the download once
+  authenticated and strips `download=1` from the address with
+  `history.replaceState` so page refreshes do not re-download. Unauthenticated
+  browser HTML clicks on `/api/web-chat/workspace/download?path=...` (for
+  example links opened from Telegram, Discord, Signal, WhatsApp, or iMessage)
+  redirect (`302 Found`) to `/webchat?view=files&path=<encoded>&download=1` so
+  Web Chat restores the session or prompts sign-in before starting the download;
+  non-HTML API requests without a session continue to return `401 Unauthorized`.
 - **Share…** has a person picker listing team members by name, the level
   (**Read** or **Read and change**), how long (**Until I stop sharing**, **1
   day**, or **7 days**), and **Share** (primary) with **Cancel**. The item then

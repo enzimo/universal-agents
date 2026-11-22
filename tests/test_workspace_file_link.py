@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -38,16 +38,29 @@ def _make_agent(
     *,
     roles: tuple[str, ...] = ("member",),
     signed: bool = True,
+    access_role: str = "",
+    expired: bool = False,
 ) -> SimpleNamespace:
-    context = (
-        context_signer().issue(team_id=TEAM, person_id=person, person_roles=roles)
-        if person
-        else None
-    )
+    if signed:
+        now = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+            if expired
+            else datetime.now(timezone.utc)
+        )
+        lifetime = timedelta(minutes=5) if expired else timedelta(hours=1)
+        context = context_signer().issue(
+            team_id=TEAM,
+            person_id=person,
+            person_roles=roles if person else (),
+            now=now,
+            lifetime=lifetime,
+        )
+    else:
+        context = None
     meta = SimpleNamespace(
         gateway_context=(
-            SimpleNamespace(canonical_user_id=person, task_context=context if signed else None)
-            if person
+            SimpleNamespace(canonical_user_id=person, task_context=context)
+            if (person or context is not None)
             else None
         )
     )
@@ -62,6 +75,7 @@ def _make_agent(
     return SimpleNamespace(
         id="agent-link-1",
         team_id=TEAM,
+        access_role=access_role,
         instance_root=str(layout.root),
         workspace_dir=str(layout.workspaces_dir),
         authorization_config={"enabled": False},
@@ -173,9 +187,41 @@ def test_agents_folder_requires_admin_for_person_tasks_and_allows_admins_and_sys
         assert data["workspace_path"] == "agents/nightly.json"
         assert data["content_type"] == "application/json"
 
-    set_agent_ref(_make_agent(layout, None))
+    set_agent_ref(_make_agent(layout, None, signed=True, access_role="system"))
     system_data = _payload(workspace_file_link(path="nightly.json"))
     assert system_data["workspace_path"] == "agents/nightly.json"
+
+
+def test_unverified_expired_or_non_system_tasks_are_refused_agents_links(
+    layout: InstanceLayout,
+) -> None:
+    report = layout.agents_dir / "nightly.json"
+    report.write_text('{"ok": true}', encoding="utf-8")
+
+    # Unsigned member task must never degrade to system-work eligibility for agents/.
+    set_agent_ref(_make_agent(layout, "alice", roles=("member",), signed=False))
+    unsigned_result = workspace_file_link(path=str(report))
+    assert unsigned_result["status"] == "error"
+    assert unsigned_result["reason_code"] == "not_downloadable_location"
+
+    # Expired member task context is also refused agents/ links.
+    set_agent_ref(_make_agent(layout, "alice", roles=("member",), signed=True, expired=True))
+    expired_result = workspace_file_link(path=str(report))
+    assert expired_result["status"] == "error"
+    assert expired_result["reason_code"] == "not_downloadable_location"
+
+    # A signed person=None context on a non-system worker is refused agents/ links.
+    set_agent_ref(_make_agent(layout, None, signed=True, access_role=""))
+    worker_no_person = workspace_file_link(path="nightly.json")
+    assert worker_no_person["status"] == "error"
+    assert worker_no_person["reason_code"] == "not_downloadable_location"
+
+    # Unsigned tasks can still link files in team/ (gateway enforces session auth).
+    shared = layout.team_dir / "release-notes.txt"
+    shared.write_text("notes", encoding="utf-8")
+    set_agent_ref(_make_agent(layout, "alice", roles=("member",), signed=False))
+    team_data = _payload(workspace_file_link(path=str(shared)))
+    assert team_data["workspace_path"] == "team/release-notes.txt"
 
 
 def test_refuses_missing_empty_directory_and_hard_linked_files(
@@ -204,7 +250,7 @@ def test_refuses_missing_empty_directory_and_hard_linked_files(
 
 
 def test_refuses_symlinks_even_within_persons_own_folder_or_parent_dirs(
-    layout: InstanceLayout,
+    layout: InstanceLayout, tmp_path: Path
 ) -> None:
     set_agent_ref(_make_agent(layout, "alice", roles=("member",)))
     alice = layout.person_dir("alice")
@@ -216,6 +262,8 @@ def test_refuses_symlinks_even_within_persons_own_folder_or_parent_dirs(
     (alice / "dir_link").symlink_to(real_dir, target_is_directory=True)
     (alice / "to_soul.txt").symlink_to(layout.soul_path)
     (alice / "to_bob.txt").symlink_to(layout.person_dir("bob") / "notes.txt")
+    workspaces_link = tmp_path / "ws_link"
+    workspaces_link.symlink_to(layout.workspaces_dir, target_is_directory=True)
 
     own_shortcut = workspace_file_link(path="shortcut.txt")
     assert own_shortcut["status"] == "error"
@@ -232,6 +280,12 @@ def test_refuses_symlinks_even_within_persons_own_folder_or_parent_dirs(
     abs_shortcut = workspace_file_link(path=str(alice / "shortcut.txt"))
     assert abs_shortcut["status"] == "error"
     assert abs_shortcut["reason_code"] == file_access.LINK_NOT_FOLLOWED
+
+    via_workspaces_link = workspace_file_link(
+        path=str(workspaces_link / "users" / person_folder_name("alice") / "notes.txt")
+    )
+    assert via_workspaces_link["status"] == "error"
+    assert via_workspaces_link["reason_code"] == file_access.LINK_NOT_FOLLOWED
 
     soul_link = workspace_file_link(path="to_soul.txt")
     assert soul_link["status"] == "error"

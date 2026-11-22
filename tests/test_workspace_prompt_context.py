@@ -24,6 +24,7 @@ def test_build_workspace_prompt_context_omits_soul_block_when_missing(
     )
 
     assert f"Workspaces: {layout.workspaces_dir}" in prompt
+    assert "workspace_file_link(path)" in prompt
     assert "TeamArchitect identity and operating posture" not in prompt
     assert "TeamArchitect identity and operating posture" not in turn_prompt
 

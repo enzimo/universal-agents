@@ -520,6 +520,16 @@ changing. An existing file is never overwritten. To put a file into another
 person's own folder, that person shares a folder, or the person the agent
 works for sends it with [`/send`](#sending-files-to-a-person-or-the-team).
 
+**Download links for workspace files.** Agents can build authenticated download
+and Workspace Files links with `workspace_file_link(path)` for regular files in
+the person's own folder, `team/`, or (for administrators and verified system
+tasks) `agents/`. Links require an active Web Chat session (clicks opened from
+Telegram, Discord, Signal, WhatsApp, or iMessage redirect to Web Chat to
+restore the session or sign in before starting the download), stream directly
+without the 5 MB preview cap, and enforce the same link-safety, hidden-folder,
+and sensitive-file checks as Workspace Files. Host data folders and other
+people's folders are not downloadable through workspace links.
+
 **Files agents send to people.** `notify_user` attaches files from the
 person's folder, `team/`, `agents/`, a data folder, or something another person
 shared with the person, when the agent may read it. When the gateway receives
@@ -561,9 +571,12 @@ another team member, to read or to read and change:
   `/unshare <share id>` stops a share from the next action.
 
 In Web Chat, **Workspace Files** (in Settings, or `/webchat?view=files`) shows
-your own folder; administrators also see `team/` and `agents/`. Select a file
-or folder in your own folder, and **Share…** and **Send…** (files only) appear
-at the top right of the preview, next to its name. **Share…**
+your own folder and the shared `team/` folder; administrators also see
+`agents/`. Select any readable file to preview it or click **Download** at the
+top right of the preview heading (files larger than the 5 MB preview limit and
+non-previewable formats can still be downloaded). Select a file or folder in
+your own folder, and **Share…** and **Send…** (files only) also appear next to
+its name. **Share…**
 offers the same choices: a person, **Read** or **Read and
 change**, and **Until I stop sharing**, **1 day** or **7 days**. The Access
 page's **Files** tab lists **Shared by you**, with **Stop sharing**, and

@@ -10,7 +10,6 @@ checks the path for the task and never follows a link.
 
 import json
 import logging
-import mimetypes
 import os
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict
@@ -19,6 +18,7 @@ from urllib.parse import quote
 from strands import tool
 
 from access_control import safe_open
+from access_control.entities import AGENT_ROLE_SYSTEM
 from access_control.ownership import RESOURCE_FILE_PATH, WORKSPACE_FILE_READ, private_access
 from access_control.safe_open import UnsafePath
 from access_control.sensitive_paths import is_sensitive_path
@@ -33,27 +33,11 @@ from runtime_settings.instance_layout import (
     USERS_DIRNAME,
     WorkspaceScope,
     is_hidden_workspace_tooling_path,
+    workspace_download_content_type,
 )
 
 logger = logging.getLogger(__name__)
 
-_MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
-_HTML_SUFFIXES = frozenset({".htm", ".html"})
-_PDF_SUFFIXES = frozenset({".pdf"})
-_IMAGE_CONTENT_TYPES = {
-    ".bmp": "image/bmp",
-    ".gif": "image/gif",
-    ".jpeg": "image/jpeg",
-    ".jpg": "image/jpeg",
-    ".png": "image/png",
-    ".webp": "image/webp",
-}
-_COMPRESSED_ENCODING_CONTENT_TYPES = {
-    "gzip": "application/gzip",
-    "bzip2": "application/x-bzip2",
-    "xz": "application/x-xz",
-    "compress": "application/x-compress",
-}
 _SAFE_OPEN_REASON_CODES = {
     safe_open.REASON_LINK: file_access.LINK_NOT_FOLLOWED,
     safe_open.REASON_SEVERAL_LINKS: file_access.SEVERAL_HARD_LINKS,
@@ -151,41 +135,25 @@ def file_move(source: str, destination: str, keep_original: bool = False) -> Dic
     return _tool_result("success", f"{action} {origin.path} to {target.path}")
 
 
-def _guess_download_content_type(name: str) -> str:
-    """Match the gateway download endpoint's MIME type mapping for a filename."""
-
-    lowered = name.casefold()
-    suffix = Path(lowered).suffix
-    if suffix in _MARKDOWN_SUFFIXES:
-        return "text/markdown"
-    if suffix in _HTML_SUFFIXES:
-        return "text/html"
-    if suffix in _IMAGE_CONTENT_TYPES:
-        return _IMAGE_CONTENT_TYPES[suffix]
-    if suffix in _PDF_SUFFIXES:
-        return "application/pdf"
-    guessed_type, encoding = mimetypes.guess_type(lowered)
-    if encoding is not None:
-        return _COMPRESSED_ENCODING_CONTENT_TYPES.get(
-            encoding.casefold(),
-            "application/octet-stream",
-        )
-    return guessed_type or "application/octet-stream"
-
-
-def _verified_task_person(agent: Any) -> Any:
-    """Return the active task's verified PersonPrincipal, or None for system work."""
+def _verified_task_identity(agent: Any) -> tuple[bool, Any, Any]:
+    """Return ``(verified, agent_principal, person_principal)`` for the active task."""
 
     if agent is None:
-        return None
+        return False, None, None
     from access_control.identity import IdentityRejected
     from custom_agents.access_runtime import runtime_access, task_access
 
     try:
-        _principal, person, _task_id = task_access(agent, runtime_access(agent))
-    except (IdentityRejected, RuntimeError):
-        return None
-    return person
+        principal, person, _task_id = task_access(agent, runtime_access(agent))
+    except (IdentityRejected, RuntimeError) as exc:
+        logger.warning(
+            "Workspace file link task identity could not be verified. "
+            "event=workspace_file_link_identity_unverified agent_id=%s error=%s",
+            getattr(agent, "id", None),
+            exc,
+        )
+        return False, None, None
+    return True, principal, person
 
 
 def _enter_workspaces(
@@ -195,12 +163,15 @@ def _enter_workspaces(
 
     acc = Path(candidate.anchor)
     parts = candidate.parts[1:]
-    if Path(os.path.realpath(acc)) == real_workspaces:
+    if Path(os.path.realpath(acc)) == real_workspaces and not acc.is_symlink():
         return real_workspaces, parts
     for index, part in enumerate(parts):
         acc = acc / part
-        if Path(os.path.realpath(acc)) == real_workspaces:
-            return real_workspaces, parts[index + 1 :]
+        if Path(os.path.realpath(acc)) != real_workspaces:
+            continue
+        if acc.is_symlink():
+            break
+        return real_workspaces, parts[index + 1 :]
     raise PathPolicyError(
         f"Symbolic links cannot be shared as workspace download links: {raw}",
         reason_code=file_access.LINK_NOT_FOLLOWED,
@@ -237,6 +208,31 @@ def _check_no_workspace_symlink(
             )
 
 
+def _check_no_person_area(top: str, *, verified: bool, principal: Any) -> None:
+    """Enforce area eligibility when the task has no verified person."""
+
+    if top == TEAM_DIRNAME:
+        return
+    if not verified:
+        raise _WorkspaceLinkRefused(
+            "not_downloadable_location",
+            "Download links for personal folders or agents/ require a verified task identity.",
+        )
+    if top == AGENTS_DIRNAME and getattr(principal, "role", None) == AGENT_ROLE_SYSTEM:
+        return
+    logger.warning(
+        "Workspace file link refused for task without a verified person. "
+        "event=workspace_file_link_unverified_person agent_role=%s area=%s",
+        getattr(principal, "role", None),
+        top,
+    )
+    raise _WorkspaceLinkRefused(
+        "not_downloadable_location",
+        "Only verified system tasks can create agents/ download links without a person; "
+        "personal folder links require a task running for that person.",
+    )
+
+
 def _check_downloadable_area(
     workspace_parts: tuple[str, ...],
     workspace_path: str,
@@ -251,13 +247,9 @@ def _check_downloadable_area(
             "not_downloadable_location",
             "Only files inside your own folder, team/, or agents/ can have workspace download links.",
         )
-    person = _verified_task_person(agent)
+    verified, principal, person = _verified_task_identity(agent)
     if person is None:
-        if top not in {TEAM_DIRNAME, AGENTS_DIRNAME}:
-            raise _WorkspaceLinkRefused(
-                "not_downloadable_location",
-                "Download links for personal folders require a task running for that person.",
-            )
+        _check_no_person_area(top, verified=verified, principal=principal)
         return
     decision = private_access(
         person_id=person.person_id,
@@ -425,7 +417,7 @@ def workspace_file_link(path: str) -> Dict[str, Any]:
     encoded_path = quote(workspace_path, safe="-_.~")
     base_url = website_base_url()
     payload = {
-        "content_type": _guess_download_content_type(filename),
+        "content_type": workspace_download_content_type(filename),
         "download_url": f"{base_url}/api/web-chat/workspace/download?path={encoded_path}",
         "filename": filename,
         "size_bytes": verified_stat.st_size,

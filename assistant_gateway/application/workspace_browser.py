@@ -37,31 +37,23 @@ from access_control.sensitive_paths import is_sensitive_path
 from runtime_settings.instance_layout import (
     TEAM_DIRNAME,
     USERS_DIRNAME,
+    WORKSPACE_HTML_SUFFIXES,
+    WORKSPACE_IMAGE_CONTENT_TYPES,
+    WORKSPACE_MARKDOWN_SUFFIXES,
+    WORKSPACE_PDF_SUFFIXES,
     is_hidden_workspace_tooling_path,
     person_folder_name,
+    workspace_download_content_type,
 )
 
 
 WORKSPACE_PREVIEW_MAX_BYTES = 5 * 1024 * 1024
 WORKSPACE_DIRECTORY_ENTRY_LIMIT = 2_000
 
-_MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
-_HTML_SUFFIXES = frozenset({".htm", ".html"})
-_PDF_SUFFIXES = frozenset({".pdf"})
-_IMAGE_CONTENT_TYPES = {
-    ".bmp": "image/bmp",
-    ".gif": "image/gif",
-    ".jpeg": "image/jpeg",
-    ".jpg": "image/jpeg",
-    ".png": "image/png",
-    ".webp": "image/webp",
-}
-_COMPRESSED_ENCODING_CONTENT_TYPES = {
-    "gzip": "application/gzip",
-    "bzip2": "application/x-bzip2",
-    "xz": "application/x-xz",
-    "compress": "application/x-compress",
-}
+_MARKDOWN_SUFFIXES = WORKSPACE_MARKDOWN_SUFFIXES
+_HTML_SUFFIXES = WORKSPACE_HTML_SUFFIXES
+_PDF_SUFFIXES = WORKSPACE_PDF_SUFFIXES
+_IMAGE_CONTENT_TYPES = WORKSPACE_IMAGE_CONTENT_TYPES
 
 WorkspacePreviewKind = Literal[
     "markdown",
@@ -452,23 +444,7 @@ class WebsiteWorkspaceBrowser:
 
     @staticmethod
     def _download_content_type(name: str) -> str:
-        lowered_name = name.casefold()
-        suffix = Path(lowered_name).suffix
-        if suffix in _MARKDOWN_SUFFIXES:
-            return "text/markdown"
-        if suffix in _HTML_SUFFIXES:
-            return "text/html"
-        if suffix in _IMAGE_CONTENT_TYPES:
-            return _IMAGE_CONTENT_TYPES[suffix]
-        if suffix in _PDF_SUFFIXES:
-            return "application/pdf"
-        guessed_type, encoding = mimetypes.guess_type(lowered_name)
-        if encoding is not None:
-            return _COMPRESSED_ENCODING_CONTENT_TYPES.get(
-                encoding.casefold(),
-                "application/octet-stream",
-            )
-        return guessed_type or "application/octet-stream"
+        return workspace_download_content_type(name)
 
     @staticmethod
     def _read_bytes(file_fd: int, expected_size: int) -> bytes:
