@@ -1315,7 +1315,7 @@ class SSHSessionBroker:
         assert enrolled_target.bootstrap_credential_owner_scope is not None
         effective_timeout = self._effective_timeout(timeout_seconds, interaction)
 
-        stdin_lines: list[str] = []
+        stdin_lines: list[tuple[str, str]] = []
         extra_secrets: list[str] = []
         boot_owner: OwnerScopeV1 = enrolled_target.bootstrap_credential_owner_scope
         boot_key: str = enrolled_target.bootstrap_credential_key
@@ -1325,7 +1325,7 @@ class SSHSessionBroker:
                 owner=boot_owner,
                 credential_key=boot_key,
             )
-            stdin_lines.append(password)
+            stdin_lines.append(("admin_password", password))
             extra_secrets.append(password)
 
         if parsed_recipe is not None:
@@ -1335,7 +1335,7 @@ class SSHSessionBroker:
                 credential_key=boot_key,
                 field_name=secret_field,
             )
-            stdin_lines.append(recipe_secret)
+            stdin_lines.append((secret_field, recipe_secret))
             extra_secrets.append(recipe_secret)
             remote_argv = build_sudo_secret_recipe_command(
                 recipe=parsed_recipe,
@@ -1352,7 +1352,17 @@ class SSHSessionBroker:
                 needs_password=needs_password,
             )
 
-        stdin_payload = ("\n".join(stdin_lines) + "\n").encode("utf-8") if stdin_lines else None
+        for field_name, secret_line in stdin_lines:
+            if "\n" in secret_line or "\r" in secret_line or "\x00" in secret_line:
+                raise ValueError(
+                    f"SSH credential {boot_key!r} field {field_name!r} must be a single line "
+                    "without line breaks or NUL bytes; update the stored credential and retry."
+                )
+        stdin_payload = (
+            ("\n".join(secret_line for _, secret_line in stdin_lines) + "\n").encode("utf-8")
+            if stdin_lines
+            else None
+        )
         cmd = await self._start_tracked_command(
             session=session,
             caller=caller,

@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import ipaddress
+import json
 import logging
 import os
 from pathlib import Path
+import shlex
 import shutil
 import socket
 import subprocess
@@ -2048,7 +2050,8 @@ async def test_c62_and_c65_real_sshd_background_jobs_sigint_and_termination_note
             with pytest.raises(ProcessLookupError):
                 os.kill(bg_pid, 0)
 
-            # C62 + C65(c): Even a background job that ignores SIGTERM is killed after the ~1.5s grace period.
+            # C62 + C65(c) + C67: Even a background job that ignores SIGTERM is killed after
+            # the 2s normal-exit drain grace plus the ~1.5s TERM-to-KILL grace period.
             bg_ign_pid_file = tmp_path / "bg_ign.pid"
             bg_ign_res = await broker.run_command(
                 session_id=session.session_id,
@@ -2057,8 +2060,8 @@ async def test_c62_and_c65_real_sshd_background_jobs_sigint_and_termination_note
                     f"while [ ! -s {bg_ign_pid_file} ]; do sleep 0.02; done; echo bg-ign-started"
                 ),
                 caller=_LEAD_CALLER,
-                timeout_seconds=10.0,
-                wait_seconds=5.0,
+                timeout_seconds=12.0,
+                wait_seconds=7.0,
             )
             assert bg_ign_res.status == SSHCommandStatus.COMPLETED
             assert "bg-ign-started" in bg_ign_res.stdout
@@ -2066,6 +2069,34 @@ async def test_c62_and_c65_real_sshd_background_jobs_sigint_and_termination_note
             await asyncio.sleep(0.2)
             with pytest.raises(ProcessLookupError):
                 os.kill(bg_ign_pid, 0)
+
+            # C67: A script logging through an output helper pipeline (process substitution + tee)
+            # keeps all trailing output (including its final error line) in stdout and its log file.
+            bash_bin = shutil.which("bash")
+            if bash_bin is not None:
+                for run_idx in range(3):
+                    helper_log = tmp_path / f"helper_{run_idx}.log"
+                    helper_script = (
+                        f'exec > >(while IFS= read -r l; do printf "%s %s\\n" "$(date +%T)" "$l"; done '
+                        f'| tee -a "{helper_log}") 2>&1; '
+                        'for i in 1 2 3 4 5 6 7 8; do echo "step $i"; done; '
+                        'echo "FATAL: disk full, aborting"; exit 3'
+                    )
+                    helper_res = await broker.run_command(
+                        session_id=session.session_id,
+                        command=f'{bash_bin} -c {shlex.quote(helper_script)}',
+                        caller=_LEAD_CALLER,
+                        timeout_seconds=10.0,
+                        wait_seconds=5.0,
+                    )
+                    assert helper_res.status == SSHCommandStatus.FAILED, helper_res
+                    assert helper_res.exit_code == 3
+                    assert "FATAL: disk full, aborting" in helper_res.stdout, helper_res
+                    log_text = helper_log.read_text(encoding="utf-8")
+                    assert "FATAL: disk full, aborting" in log_text, log_text
+                    for step_num in range(1, 9):
+                        assert f"step {step_num}" in helper_res.stdout
+                        assert f"step {step_num}" in log_text
 
             # C62 (Windows wording): Non-watched Windows target must not claim "remote process group signalled".
             win_target = _make_enrolled_target(
@@ -2418,3 +2449,252 @@ async def test_c65_shutdown_refusal_non_linux_pid_comm_and_unknown_command_guard
     assert not ssh_credentials._pid_matches_recorded_ssh(42425, expected_start_time=None, expected_comm=None)
     assert ssh_credentials._pid_is_ssh_agent(42426)
     assert not ssh_credentials._pid_is_ssh_agent(42425)
+
+
+# -- 10. C66-C68 hardening: bash 5.1+ as sh, helper output drain, multiline secrets --
+
+
+def _bash_5_1_or_newer() -> Path | None:
+    bash_path = shutil.which("bash")
+    if not bash_path:
+        return None
+    proc = subprocess.run(
+        [bash_path, "-c", 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    parts = proc.stdout.strip().split(".")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    major, minor = int(parts[0]), int(parts[1])
+    return Path(bash_path) if (major, minor) >= (5, 1) else None
+
+
+@pytest.mark.skipif(
+    _bash_5_1_or_newer() is None,
+    reason="bash 5.1 or newer is required to test implicit-exec sh behaviour (C66).",
+)
+@pytest.mark.asyncio
+async def test_c66_password_sudo_and_recipe_succeed_when_sh_is_bash_5_1_plus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C66: Password sudo (free command and secret recipe) keeps sudo's TS_PPID ticket when sh is bash >= 5.1."""
+
+    bash_bin = _bash_5_1_or_newer()
+    assert bash_bin is not None
+    bash_sh_dir = tmp_path / "bash_sh_bin"
+    bash_sh_dir.mkdir()
+    (bash_sh_dir / "sh").symlink_to(bash_bin)
+    monkeypatch.setenv("PATH", f"{bash_sh_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    # Prove `sh` on PATH actually executes bash >= 5.1 in this test.
+    probe = subprocess.run(
+        ["sh", "-c", 'printf "%s" "$BASH_VERSION"'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert probe.stdout.startswith("5.")
+
+    _, _, host_pub = _generate_ed25519_keypair(tmp_path / "host", name="host_ed25519")
+    _, client_priv, client_pub = _generate_ed25519_keypair(tmp_path / "client", name="client_ed25519")
+    repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+    target = _make_enrolled_target(
+        target_id="c66_bash_host",
+        host="198.51.100.97",
+        port=22,
+        username="ops",
+        platform=SSHTargetPlatform.LINUX,
+        host_pub=host_pub,
+        credential_key="ops_key",
+        credential_pub=client_pub,
+        bootstrap_credential_key="ops_boot",
+    )
+    repository.put_ssh_target(target)
+    bounds = SSHDelegationBoundsV1(
+        allow_broker_sudo=True,
+        allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+    )
+    session = _create_session_and_delegation(repository, target, bounds, session_id="ssh_sess_c66")
+
+    admin_pw = "BashShSudoPass!66"
+    ts_key = "tskey-auth-c66-bash-sh-secret"
+    fake_sudo = _write_fake_sudo(tmp_path / "sudo_c66", behavior="password", expected_password=admin_pw)
+    ts_record = tmp_path / "ts_c66.json"
+    fake_ts = _write_fake_tailscale(tmp_path / "ts_c66_bin", ts_record)
+    broker = _catalog_broker(
+        tmp_path,
+        repository,
+        secrets_map={
+            ("ops_key", "ssh_private_key"): client_priv,
+            ("ops_key", "ssh_public_key"): client_pub,
+            ("ops_boot", "admin_password"): admin_pw,
+            ("ops_boot", "tailscale_auth_key"): ts_key,
+        },
+        ssh_executable=_write_fake_ssh_exec(tmp_path / "bin", mode="exec", state_dir=tmp_path / "home"),
+        sudo_search_paths=(str(fake_sudo),),
+        tailscale_search_paths=(str(fake_ts),),
+    )
+    try:
+        # Free password sudo command preserves exact exit code and does NOT fail with 'a password is required'.
+        free_res = await broker.run_sudo(
+            session_id=session.session_id,
+            command="printf 'ran-as-root\\n'; exit 5",
+            caller=_LEAD_CALLER,
+        )
+        assert free_res.status == SSHCommandStatus.FAILED
+        assert free_res.exit_code == 5
+        assert free_res.stdout == "ran-as-root\n"
+        assert "password is required" not in free_res.stderr
+
+        # Free password sudo command with empty stdin completes cleanly.
+        ok_res = await broker.run_sudo(
+            session_id=session.session_id,
+            command="printf 'bash_sh_ok:'; rev",
+            caller=_LEAD_CALLER,
+        )
+        assert ok_res.status == SSHCommandStatus.COMPLETED
+        assert ok_res.stdout == "bash_sh_ok:"
+
+        # Secret recipe under bash-as-sh succeeds and wipes ephemeral keyfile.
+        ts_res = await broker.run_sudo(
+            session_id=session.session_id,
+            secret_recipe=SSHSecretRecipe.TAILSCALE_UP,
+            recipe_params={"hostname": "c66-rhel9"},
+            caller=_LEAD_CALLER,
+        )
+        assert ts_res.status == SSHCommandStatus.COMPLETED, ts_res
+        recorded = json.loads(ts_record.read_text(encoding="utf-8"))
+        assert recorded["key_value"] == ts_key
+        assert not Path(recorded["key_path"]).exists()
+    finally:
+        await broker.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_c68_multiline_secrets_refused_and_watcher_waits_for_true_eof(
+    tmp_path: Path,
+) -> None:
+    """C68(b): Line breaks in stored secrets are refused by field name, and watcher ignores stray lines before EOF."""
+
+    from runtime_hosting.ssh_operations import _wrap_posix_watched_command
+
+    _, _, host_pub = _generate_ed25519_keypair(tmp_path / "host", name="host_ed25519")
+    _, client_priv, client_pub = _generate_ed25519_keypair(tmp_path / "client", name="client_ed25519")
+    repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+    target = _make_enrolled_target(
+        target_id="c68_host",
+        host="198.51.100.98",
+        port=22,
+        username="ops",
+        platform=SSHTargetPlatform.LINUX,
+        host_pub=host_pub,
+        credential_key="ops_key",
+        credential_pub=client_pub,
+        bootstrap_credential_key="ops_boot",
+    )
+    repository.put_ssh_target(target)
+    bounds = SSHDelegationBoundsV1(
+        allow_broker_sudo=True,
+        allow_password_bootstrap=True,
+        allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+    )
+    session = _create_session_and_delegation(repository, target, bounds, session_id="ssh_sess_c68")
+
+    fake_sudo = _write_fake_sudo(tmp_path / "sudo_c68", behavior="password", expected_password="CleanPassword!68")
+    fake_ts = _write_fake_tailscale(tmp_path / "ts_c68_bin", tmp_path / "ts_c68.json")
+    fake_ssh = _write_fake_ssh_exec(tmp_path / "bin", mode="exec", state_dir=tmp_path / "home")
+
+    # (a) Trailing newline in admin_password is refused cleanly with field name (no secret leaked).
+    bad_pw = "TrailingNewlineSecret!68\n"
+    broker_bad_pw = _catalog_broker(
+        tmp_path,
+        repository,
+        secrets_map={
+            ("ops_key", "ssh_private_key"): client_priv,
+            ("ops_key", "ssh_public_key"): client_pub,
+            ("ops_boot", "admin_password"): bad_pw,
+            ("ops_boot", "tailscale_auth_key"): "tskey-auth-clean-68",
+        },
+        ssh_executable=fake_ssh,
+        allow_password_bootstrap=True,
+        sudo_search_paths=(str(fake_sudo),),
+        tailscale_search_paths=(str(fake_ts),),
+    )
+    try:
+        with pytest.raises(ValueError) as exc_sudo_pw:
+            await broker_bad_pw.run_sudo(
+                session_id=session.session_id,
+                command="echo should-not-run",
+                caller=_LEAD_CALLER,
+            )
+        assert "admin_password" in str(exc_sudo_pw.value)
+        assert "TrailingNewlineSecret" not in str(exc_sudo_pw.value)
+
+        with pytest.raises(ValueError) as exc_boot_pw:
+            await broker_bad_pw.enroll_ssh_key(
+                session_id=session.session_id,
+                caller=_LEAD_CALLER,
+            )
+        assert "admin_password" in str(exc_boot_pw.value)
+        assert "TrailingNewlineSecret" not in str(exc_boot_pw.value)
+    finally:
+        await broker_bad_pw.shutdown()
+
+    # (b) Trailing newline in tailscale_auth_key is refused cleanly with field name (no secret leaked).
+    bad_ts = "tskey-auth-trailing-68\r\n"
+    broker_bad_ts = _catalog_broker(
+        tmp_path,
+        repository,
+        secrets_map={
+            ("ops_key", "ssh_private_key"): client_priv,
+            ("ops_key", "ssh_public_key"): client_pub,
+            ("ops_boot", "admin_password"): "CleanPassword!68",
+            ("ops_boot", "tailscale_auth_key"): bad_ts,
+        },
+        ssh_executable=fake_ssh,
+        sudo_search_paths=(str(fake_sudo),),
+        tailscale_search_paths=(str(fake_ts),),
+    )
+    try:
+        with pytest.raises(ValueError) as exc_ts:
+            await broker_bad_ts.run_sudo(
+                session_id=session.session_id,
+                secret_recipe=SSHSecretRecipe.TAILSCALE_UP,
+                caller=_LEAD_CALLER,
+            )
+        assert "tailscale_auth_key" in str(exc_ts.value)
+        assert "tskey-auth-trailing-68" not in str(exc_ts.value)
+    finally:
+        await broker_bad_ts.shutdown()
+
+    # (c) Defense in depth: the POSIX watcher waits for true EOF, not just a single stray stdin line.
+    wrapped = _wrap_posix_watched_command("sh -c 'echo first; sleep 0.5; echo second'")
+    proc = subprocess.Popen(
+        ["sh", "-c", wrapped],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+        proc.stdin.write("\nstray-line\n")
+        proc.stdin.flush()
+        # Keep stdin open while the command finishes naturally (communicate() would close stdin immediately).
+        rc = proc.wait(timeout=5.0)
+        out = proc.stdout.read()
+        err = proc.stderr.read()
+        assert rc == 0, err
+        assert out == "first\nsecond\n"
+    finally:
+        if proc.stdin is not None:
+            proc.stdin.close()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2.0)

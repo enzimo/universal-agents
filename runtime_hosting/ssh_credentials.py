@@ -193,6 +193,18 @@ def is_short_secret(value: str) -> bool:
     return len(value.strip()) < MIN_EXACT_SCRUB_SECRET_LENGTH
 
 
+def _validate_single_line_secret(
+    value: str, *, credential_key: str, field_name: str
+) -> None:
+    """Refuse line breaks or NUL bytes in secrets framed as single stdin lines."""
+
+    if "\n" in value or "\r" in value or "\x00" in value:
+        raise ValueError(
+            f"SSH credential {credential_key!r} field {field_name!r} must be a single line "
+            "without line breaks or NUL bytes; update the stored credential and retry."
+        )
+
+
 def _extract_scrub_variants(secret: str) -> tuple[str, ...]:
     """Return exact strings (full secret plus non-header PEM body lines) to scrub."""
 
@@ -1346,6 +1358,11 @@ class CatalogSSHCredentialMaterialProvider:
             raise PermissionError(
                 f"SSH credential {credential_key!r} is missing required field 'admin_password'."
             )
+        _validate_single_line_secret(
+            password,
+            credential_key=credential_key,
+            field_name="admin_password",
+        )
         if scrubber is not None:
             scrubber.register(password)
         return password
@@ -1370,6 +1387,11 @@ class CatalogSSHCredentialMaterialProvider:
             raise PermissionError(
                 f"SSH credential {credential_key!r} is missing secret field {normalized!r}."
             )
+        _validate_single_line_secret(
+            value,
+            credential_key=credential_key,
+            field_name=normalized,
+        )
         if scrubber is not None:
             scrubber.register(value)
         return value

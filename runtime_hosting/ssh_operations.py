@@ -320,13 +320,16 @@ def _wrap_posix_watched_command(
     - Running ``child_command`` in the foreground preserves default ``SIGINT`` /
       ``SIGQUIT`` dispositions (avoiding POSIX background-job signal ignoring)
       and returns its exact exit code.
-    - The background watcher monitors SSH stdin on fd 3 with stdout/stderr
-      redirected to ``/dev/null`` so normal commands with no leftover
-      background jobs return immediately.
-    - Because the watcher outlives ``child_command``, any leftover background
-      job in the same process group that holds stdout/stderr open is stopped
-      (``SIGTERM``, grace wait, ``SIGKILL``) when stdin closes on shell exit,
-      revoke, timeout, or connection loss.
+    - The background watcher drains SSH stdin on fd 3 until true EOF with
+      stdout/stderr redirected to ``/dev/null`` so normal commands with no
+      leftover background jobs return immediately.
+    - On stdin EOF, the watcher checks ``kill -0 $$`` to distinguish an early
+      stop (revoke, timeout, or connection loss while the wrapper shell is
+      still running) from a normal exit (the wrapper shell has already exited
+      and been reaped before ``sshd`` closes stdin). Early stops send
+      ``SIGTERM`` immediately; normal exits wait 2 seconds first so output
+      helpers (for example ``exec > >(tee ...)`` or timestamping pipes) can
+      flush and close cleanly before any lingering background job is stopped.
     - For ``sudo`` commands, this wrapper runs inside the root shell spawned by
       ``sudo -n -- sh -c ...`` so stopping signals the root process group
       directly as root without a second ``sudo`` call.
@@ -337,19 +340,24 @@ def _wrap_posix_watched_command(
         if cleanup_path_var
         else ""
     )
+    # Keep a trailing command after child_command so shells that implicitly
+    # exec the last simple command in ``sh -c`` (bash 5.1+, ksh93, FreeBSD sh)
+    # keep the wrapper shell PID ``$$`` alive until child_command finishes.
     return (
         "exec 3<&0; "
         "( "
         "trap '' TERM; "
         "trap '_ua_hup=1' HUP; "
-        "IFS= read -r _ua_eof <&3; "
+        "while IFS= read -r _ua_eof <&3; do :; done; "
+        "if ! kill -0 $$ 2>/dev/null; then sleep 2; fi; "
         "kill -TERM 0 2>/dev/null; "
         "sleep 1.5 2>/dev/null || sleep 2; "
         f"{cleanup_snippet}"
         "kill -KILL 0 2>/dev/null "
         ") </dev/null >/dev/null 2>&1 & "
         "exec 3<&-; "
-        f"{child_command} </dev/null"
+        f"{child_command} </dev/null; "
+        '_ua_rc=$?; exit "$_ua_rc"'
     )
 
 
@@ -470,6 +478,10 @@ def build_sudo_free_command(
     sudo_exec = f"{quoted_sudo} -n -- sh -c {shlex.quote(watched_inner)}"
     if not needs_password:
         return _posix_sh_command(sudo_exec)
+    # Never leave sudo as the last command of the outer ``sh -c`` script:
+    # bash 5.1+, ksh93, and FreeBSD sh implicitly exec the final simple command
+    # when no trap is set, replacing the outer shell PID and breaking sudo's
+    # TS_PPID timestamp check.
     script = (
         "IFS= read -r _ua_pw || exit 71; "
         f"printf '%s\\n' \"$_ua_pw\" | {quoted_sudo} -S -p '' -v >/dev/null 2>&1; "
@@ -477,7 +489,8 @@ def build_sudo_free_command(
         f"if [ \"$_ua_rc\" -ne 0 ]; then printf '{SUDO_AUTH_FAILED_MARKER}\\n' >&2; exit 72; fi; "
         f"if ! {quoted_sudo} -n true </dev/null >/dev/null 2>&1; then "
         f"printf '{SUDO_NO_TIMESTAMP_MARKER}\\n' >&2; exit 73; fi; "
-        f"{sudo_exec}"
+        f"{sudo_exec}; "
+        '_ua_rc=$?; exit "$_ua_rc"'
     )
     return _posix_sh_command(script)
 
@@ -587,6 +600,10 @@ def build_sudo_secret_recipe_command(
             "printf '%s\\n' \"$_ua_tskey\" > \"$_ua_keyfile\"",
             "_ua_tskey=''; unset _ua_tskey",
             sudo_tailscale_exec,
+            # Never leave sudo as the last command of the outer ``sh -c`` script
+            # (bash 5.1+, ksh93, FreeBSD sh implicitly exec it if no trap holds
+            # the shell, which would break sudo's TS_PPID ticket).
+            '_ua_rc=$?; exit "$_ua_rc"',
         ]
     )
     return _posix_sh_command("; ".join(parts))
