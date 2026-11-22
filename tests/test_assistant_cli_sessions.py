@@ -897,7 +897,13 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
         "host": "0.0.0.0",
         "port": 8767,
         "token": "test-token",
-        "authorization_keys": ("access_gate", "mcp_config", "tool_setup_recheck_days", "web_chat_origin"),
+        "authorization_keys": (
+            "access_gate",
+            "api_request_user_agent",
+            "mcp_config",
+            "tool_setup_recheck_days",
+            "web_chat_origin",
+        ),
     }
 
 
