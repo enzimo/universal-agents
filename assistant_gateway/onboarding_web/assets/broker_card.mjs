@@ -215,13 +215,17 @@ export function replaceChildrenKeeping(container, nodes, keep) {
 // the same line instead of a new frame.
 export const BROKER_CARD_FINISHED = "finished";
 export const BROKER_CARD_DECLINED = "declined";
+export const BROKER_CARD_CLOSED = "closed";
 export const BROKER_CARD_UNAVAILABLE = "unavailable";
 export const BROKER_CARD_EXPIRED = "expired";
 // The one line a closed card keeps. True whether a task waits on the page or a
-// person opened it with a command.
+// person opened it with a command. BROKER_CARD_CLOSED is used when the card
+// closes after ending outside its frame (for example in its own tab), so it
+// never claims "Done." for a form that may have been declined.
 export const BROKER_CARD_NOTES = Object.freeze({
   [BROKER_CARD_FINISHED]: "Done. This secure page is closed.",
   [BROKER_CARD_DECLINED]: "Declined. Nothing was saved.",
+  [BROKER_CARD_CLOSED]: "This secure page is closed.",
   [BROKER_CARD_UNAVAILABLE]: "This secure page could not be shown here. Open it in its own tab.",
 });
 export const OPEN_IN_OWN_TAB_LABEL = "Open in its own tab";
@@ -282,7 +286,7 @@ function countdown(document, item) {
 /**
  * The chat element of one broker page item.
  *
- * - ``state`` finished or declined: the one-line note; expired: ``expiredMessage``;
+ * - ``state`` finished, declined or closed: the one-line note; expired: ``expiredMessage``;
  * - unavailable (the frame never reported): the reason, the line saying so,
  *   "Open in its own tab" and the countdown;
  * - otherwise the live card: the reason, the sandboxed frame and a footer with
@@ -292,7 +296,12 @@ function countdown(document, item) {
  * Dismiss. ``onState`` receives finished, declined or unavailable.
  */
 export function brokerCardElement({ document, cards, item, state, expiredMessage, onState }) {
-  if (state === BROKER_CARD_FINISHED || state === BROKER_CARD_DECLINED || state === BROKER_CARD_EXPIRED) {
+  if (
+    state === BROKER_CARD_FINISHED
+    || state === BROKER_CARD_DECLINED
+    || state === BROKER_CARD_CLOSED
+    || state === BROKER_CARD_EXPIRED
+  ) {
     const closed = notice(document, item, "is-closed");
     closed.appendChild(statusNote(document, state === BROKER_CARD_EXPIRED ? expiredMessage : BROKER_CARD_NOTES[state]));
     return closed;

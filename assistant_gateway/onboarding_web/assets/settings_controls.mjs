@@ -27,7 +27,8 @@
  */
 
 import {
-  createAccessInbox, createInboxCounts, inboxBadgeLabel, inboxCountWords, inboxCounts as emptyInboxCounts,
+  ACCESS_INBOX_API, createAccessInbox, createFollowUpPageWatcher, createInboxCounts, inboxBadgeLabel,
+  inboxCountWords, inboxCounts as emptyInboxCounts,
 } from "./access_inbox.mjs";
 import { createAccessMap } from "./access_map.mjs";
 import { createAccountsView } from "./accounts_view.mjs";
@@ -60,12 +61,16 @@ const ACCESS_WRITE_FALLBACK = "The change was not saved because the gateway retu
  * - `onClose()`, `onUnauthorized(response)`, `onAppearanceOpen()`: page callbacks.
  * - `onFollowUpPages(requestId, links, placement)`: shows an approved proposal's
  *   credential forms as broker cards in the conversation; returns the links it
- *   took. `onShowFollowUpPages(requestId)` brings those cards into view.
+ *   took. `getOpenFollowUpPages()` returns the currently non-terminal proposal
+ *   follow-up cards across all threads so one page-level watcher closes them
+ *   via `onCloseFollowUpPages(requestId, urls)` when they end outside their
+ *   frame, even after Settings closes or without a review card on screen.
+ *   `onShowFollowUpPages(requestId)` brings those cards into view.
  * - `createInbox`, `createCounts`, `createMap`, `createTasks`, `createChatReviews`: replaceable in tests.
  */
 export function createSettingsControls({
   browser = globalThis, returnFocus, onClose, onUnauthorized, onAppearanceOpen, teamActivity, onFollowUpPages,
-  onShowFollowUpPages,
+  getOpenFollowUpPages, onCloseFollowUpPages, onShowFollowUpPages,
   createInbox = createAccessInbox, createCounts = createInboxCounts, createMap = createAccessMap,
   createChatReviews = createChatAccessReviews,
   createTasks = options => browser.UATaskControls.createTeam(options),
@@ -108,20 +113,79 @@ export function createSettingsControls({
     warning: "ua.settings: the Knowledge proposal count could not be read; retrying.",
     browser,
   });
+  const REVIEW_PATH_PREFIX = `${ACCESS_INBOX_API}/requests/`;
+  function reviewIdFromPath(path) {
+    if (typeof path !== "string" || !path.startsWith(REVIEW_PATH_PREFIX)) return "";
+    const raw = path.slice(REVIEW_PATH_PREFIX.length);
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+  let reviewGeneration = 0;
+  let reviewReadSequence = 0;
+  const inflightReviewReads = new Map();
+  function readAccessReview(path) {
+    if (inflightReviewReads.has(path)) return inflightReviewReads.get(path);
+    const readSeq = ++reviewReadSequence;
+    const pending = Promise.resolve()
+      .then(() => client.get(path, ACCESS_READ_FALLBACK))
+      .then(payload => ({ payload, readSeq }))
+      .finally(() => {
+        if (inflightReviewReads.get(path) === pending) inflightReviewReads.delete(path);
+      });
+    inflightReviewReads.set(path, pending);
+    return pending;
+  }
+  const getInboxOrReview = path => {
+    if (typeof path !== "string" || !path.startsWith(REVIEW_PATH_PREFIX)) {
+      return client.get(path, ACCESS_READ_FALLBACK);
+    }
+    const generation = reviewGeneration;
+    const pathId = reviewIdFromPath(path);
+    return readAccessReview(path).then(({ payload, readSeq }) => {
+      if (generation === reviewGeneration) {
+        const review = (payload && payload.review) || null;
+        const requestId = (review && review.request_id) || pathId;
+        if (review && requestId) followUpPageWatcher.noteReview(requestId, review, readSeq);
+      }
+      return payload;
+    });
+  };
+  const followUpPageWatcher = createFollowUpPageWatcher({
+    getOpenPages: getOpenFollowUpPages,
+    get: path => readAccessReview(path).then(({ payload, readSeq }) => ({
+      review: (payload && payload.review) || null,
+      readSeq,
+    })),
+    currentReadSequence: () => reviewReadSequence,
+    onClosePages: onCloseFollowUpPages,
+    isRequestWatched: id => chatReviews.isWatchingFollowUp(id) || accessInbox.isWatchingFollowUp(id),
+    browser,
+  });
+  const handleFollowUpPages = typeof onFollowUpPages === "function"
+    ? (requestId, links, placement) => {
+      const shown = onFollowUpPages(requestId, links, placement);
+      followUpPageWatcher.sync();
+      return shown;
+    }
+    : undefined;
   const accessInbox = createInbox({
     container: byId("settings-access-inbox"),
-    get: path => client.get(path, ACCESS_READ_FALLBACK),
+    get: getInboxOrReview,
     post: (path, body) => client.post(path, body, ACCESS_WRITE_FALLBACK),
     beginAction: client.beginAction,
     failureMessage,
     onCounts: inboxCounts.set,
     paginate: client.paginate,
     // An approval's credential forms become broker cards in the conversation; this shows them.
-    onFollowUpPages,
+    onFollowUpPages: handleFollowUpPages,
     showConversation: requestId => {
       close();
       if (typeof onShowFollowUpPages === "function") onShowFollowUpPages(requestId);
     },
+    isVisible: () => !overlay.hidden && !panels.inbox.hidden,
     browser,
   });
   const accessMap = createMap({
@@ -163,7 +227,7 @@ export function createSettingsControls({
   });
   const tasks = createTasks({ panel: panels.tasks, headers: client.writeHeaders, onUnauthorized, teamActivity });
   const chatReviews = createChatReviews({
-    get: path => client.get(path, ACCESS_READ_FALLBACK),
+    get: getInboxOrReview,
     post: (path, body) => client.post(path, body, ACCESS_WRITE_FALLBACK),
     beginAction: client.beginAction,
     failureMessage,
@@ -171,7 +235,7 @@ export function createSettingsControls({
     openInbox: requestId => open(SETTINGS_VIEWS.INBOX, state.sessionKey, { accessRequestId: requestId }),
     // A decision in chat changes the Inbox list and its badge.
     onDecided: () => { accessInbox.load({ keepOutcomes: true }); },
-    onFollowUpPages,
+    onFollowUpPages: handleFollowUpPages,
     browser,
   });
 
@@ -207,6 +271,7 @@ export function createSettingsControls({
     else tasks.deactivate();
     // Team follows the team's live status only while it is on screen.
     if (view !== SETTINGS_VIEWS.TEAM || overlay.hidden) team.deactivate();
+    accessInbox.syncFollowUps();
   }
 
   /** Switches to a view and reads its content. Resolves when the first read finishes. */
@@ -254,6 +319,7 @@ export function createSettingsControls({
     }
     overlay.setAttribute("aria-hidden", "true");
     overlay.hidden = true;
+    accessInbox.syncFollowUps();
     setStatusLine(inboxStatus, "", false);
     team.resetStatus();
     memories.resetStatus();
@@ -312,9 +378,17 @@ export function createSettingsControls({
     /**
      * A message arrived from an agent. Access requests and stuck-work reports
      * come with one, so the badge is read again shortly (several messages
-     * close together give one read).
+     * close together give one read) and any open proposal follow-up links are
+     * re-checked so completed buttons clear promptly.
      */
-    noteAgentMessage: inboxCounts.refreshSoon,
+    noteAgentMessage() {
+      inboxCounts.refreshSoon();
+      chatReviews.refreshFollowUps();
+      accessInbox.refreshFollowUps();
+      followUpPageWatcher.refresh();
+    },
+    /** Re-syncs the inline proposal follow-up card watcher when card states change locally. */
+    syncFollowUpPages: followUpPageWatcher.sync,
     /** Adds the access review card to a chat message bubble (chat_access_review.mjs). */
     mountAccessReview: (bubble, message) => chatReviews.mount(bubble, message),
     /** Sign-out: forget the session, every view's content and the last view. */
@@ -322,9 +396,12 @@ export function createSettingsControls({
       state.view = SETTINGS_VIEWS.INBOX;
       state.sessionKey = "";
       client.setCsrfToken("");
+      reviewGeneration += 1;
+      inflightReviewReads.clear();
       tasks.clear();
       chatReviews.clear();
       accessInbox.clear();
+      followUpPageWatcher.clear();
       inboxCounts.stop();
       proposalCount.stop();
       accessMap.clear();

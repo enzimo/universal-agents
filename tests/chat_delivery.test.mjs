@@ -221,36 +221,66 @@ test("a broker page's card view is kept only when it is the same page", () => {
 });
 
 // An approved proposal's credential forms as broker cards (review finding F2).
-test("an approval's credential forms become account link cards right after the review, http included", () => {
+test("an approval's credential forms get stable URL-derived account link card ids right after the review, http included", () => {
+  const portainer = {
+    label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/secret-token-a",
+    frameUrl: "http://127.0.0.1:18600/account-link/secret-token-a?view=card", expiresAtUtc: "2026-11-20T10:15:00Z",
+  };
+  const gitea = {
+    label: "Choose the credential for Gitea", url: "http://127.0.0.1:18600/account-link/secret-token-b",
+    frameUrl: "http://127.0.0.1:18600/account-link/secret-token-b?view=card", expiresAtUtc: "2026-11-20T10:15:00Z",
+  };
   const forms = [
-    { label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/a",
-      frameUrl: "http://127.0.0.1:18600/account-link/a?view=card", expiresAtUtc: "2026-11-20T10:15:00Z" },
+    portainer,
     // A frame address on another page is not shown as a card; neither is a page without one.
-    { label: "Choose the credential for Gitea", url: "https://broker.example.test/account-link/b",
+    { label: "Choose the credential for Evil", url: "https://broker.example.test/account-link/b",
       frameUrl: "https://evil.example.test/account-link/b?view=card" },
     { label: "Choose the credential for Jira", url: "https://broker.example.test/account-link/c" },
     { label: "Not a page", url: "javascript:alert(1)", frameUrl: "javascript:alert(1)" },
+    gitea,
   ];
   const pages = delivery.followUpPageItems("acc_req_1", 7, forms, "http://127.0.0.1:18090");
 
-  assert.equal(pages.length, 1);
-  const [{ item, link }] = pages;
-  assert.equal(link, forms[0]);
-  assert.equal(item.itemId, "account_link:acc_req_1:1");
-  assert.equal(item.kind, "account_link");
-  assert.equal(item.sessionSequence, 7);
-  assert.equal(item.correlationId, "acc_req_1");
-  assert.equal(item.url, forms[0].url);
-  assert.equal(item.frameUrl, forms[0].frameUrl);
-  assert.equal(item.expiresAtUtc, forms[0].expiresAtUtc);
-  assert.equal(item.content, "Choose the credential for Portainer");
+  assert.equal(pages.length, 2);
+  const [{ item: firstItem, link: firstLink }, { item: secondItem, link: secondLink }] = pages;
+  assert.equal(firstLink, portainer);
+  assert.equal(secondLink, gitea);
+  assert.match(firstItem.itemId, /^account_link:acc_req_1:[0-9a-f]{16}$/);
+  assert.match(secondItem.itemId, /^account_link:acc_req_1:[0-9a-f]{16}$/);
+  assert.notEqual(firstItem.itemId, secondItem.itemId);
+  assert.ok(!firstItem.itemId.includes("secret-token-a"), "itemId must not expose the form URL token");
+  assert.equal(firstItem.kind, "account_link");
+  assert.equal(firstItem.sessionSequence, 7);
+  assert.equal(firstItem.correlationId, "acc_req_1");
+  assert.equal(firstItem.url, portainer.url);
+  assert.equal(firstItem.frameUrl, portainer.frameUrl);
+  assert.equal(firstItem.expiresAtUtc, portainer.expiresAtUtc);
+  assert.equal(firstItem.content, "Choose the credential for Portainer");
+
+  // Dropping the first form after it finishes keeps the remaining form's exact itemId.
+  const remaining = delivery.followUpPageItems("acc_req_1", 7, [gitea], "http://127.0.0.1:18090");
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].item.itemId, secondItem.itemId);
+
   // Placed after the review message (sequence 7) and before anything later.
   const timeline = delivery.buildTimeline(
-    [message({ messageId: "m7", sessionSequence: 7 }), message({ messageId: "m8", sessionSequence: 8 })], [item],
+    [message({ messageId: "m7", sessionSequence: 7 }), message({ messageId: "m8", sessionSequence: 8 })], [firstItem],
   );
-  assert.deepEqual(timeline.map(entry => entry.value.messageId || entry.value.itemId), ["m7", "account_link:acc_req_1:1", "m8"]);
+  assert.deepEqual(timeline.map(entry => entry.value.messageId || entry.value.itemId), ["m7", firstItem.itemId, "m8"]);
   assert.deepEqual(delivery.followUpPageItems("", 7, forms, "http://127.0.0.1:18090"), []);
   // An Inbox approval while the open conversation has no messages yet (critique C13): the card starts it.
-  const [first] = delivery.followUpPageItems("acc_req_1", 0, forms, "http://127.0.0.1:18090");
+  const [first] = delivery.followUpPageItems("acc_req_1", 0, [portainer], "http://127.0.0.1:18090");
   assert.equal(first.item.sessionSequence, 1);
+
+  // isFollowUpPageItem identifies proposal follow-up items and excludes /link account_link items.
+  assert.equal(delivery.isFollowUpPageItem(firstItem), true);
+  const slashLinkItem = delivery.normalizeTransientItem({
+    kind: "account_link",
+    item_id: "account_link:cmd-1",
+    correlation_id: "cmd-1",
+    session_sequence: 3,
+    content: "Link Portainer",
+    action: { label: "Link", url: portainer.url, frame_url: portainer.frameUrl },
+  }, "http://127.0.0.1:18090");
+  assert.equal(delivery.isFollowUpPageItem(slashLinkItem), false);
 });

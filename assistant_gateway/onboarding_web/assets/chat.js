@@ -20,7 +20,15 @@ import { createActivityMesh } from "./activity_mesh.mjs";
 import { createTeamActivity } from "./team_activity.mjs";
 import { createSettingsClient } from "./settings_support.mjs";
 import { createChatSubmission } from "./chat_submission.mjs";
-import { brokerCardElement, createBrokerCards, replaceChildrenKeeping } from "./broker_card.mjs";
+import {
+  BROKER_CARD_CLOSED,
+  BROKER_CARD_DECLINED,
+  BROKER_CARD_EXPIRED,
+  BROKER_CARD_FINISHED,
+  brokerCardElement,
+  createBrokerCards,
+  replaceChildrenKeeping,
+} from "./broker_card.mjs";
 import {
   LIST_STATE,
   THREAD_PLACEMENT_ACTION,
@@ -540,6 +548,8 @@ const activityMesh = createActivityMesh({
 sharedState.settingsControls = createSettingsControls({
     teamActivity,
     onFollowUpPages: function (requestId, links, placement) { return addFollowUpPages(requestId, links, placement); },
+    getOpenFollowUpPages: function () { return openFollowUpPages(); },
+    onCloseFollowUpPages: function (requestId, urls) { closeFollowUpPages(requestId, urls); },
     onShowFollowUpPages: function (requestId) { showFollowUpPages(requestId); },
     onClose: function () { renderThreads(); },
     returnFocus: sharedState.settingsButton,
@@ -2912,7 +2922,7 @@ function replaceTransientActionWithExpiredState(countdown) {
     if (notice && notice.hasAttribute("data-broker-card")) {
       // An expired broker card closes its frame and keeps the expired line (no Dismiss).
       var itemId = notice.getAttribute("data-item-id") || "";
-      setBrokerCardState(activeThread(), itemId, "expired");
+      setBrokerCardState(activeThread(), itemId, BROKER_CARD_EXPIRED);
       brokerCards.close(itemId);
       lifecycle.timeout(renderMessages, 0);
       return;
@@ -2921,6 +2931,12 @@ function replaceTransientActionWithExpiredState(countdown) {
     if (!actions) {
       return;
     }
+    var badge = notice.querySelector(".message-transient-badge");
+    if (badge) {
+      badge.textContent = "Expired";
+      badge.classList.add("is-expired");
+    }
+    notice.classList.add("is-expired");
     var openAction = actions.querySelector(".message-transient-open");
     if (openAction) {
       openAction.remove();
@@ -2964,13 +2980,14 @@ function updateTransientCountdown() {
   }
 
 // An approved access proposal's credential forms become broker cards
-// (access_inbox.mjs followUpPages). A decision on the card in the conversation
-// (FOLLOW_UP_AFTER_REVIEW) puts them right after that review message, in the
-// thread that holds it even if another thread is open by now. A decision in
-// the Inbox panel (FOLLOW_UP_AFTER_LATEST) puts them after the open
-// conversation's latest message, where the person is; an empty conversation
-// gets them at its start. Returns the links shown as cards; the decided card
-// keeps any other as a link.
+// (access_inbox.mjs handOffFollowUpLinks). A decision on the card in the
+// conversation (FOLLOW_UP_AFTER_REVIEW) puts them right after that review
+// message, in the thread that holds it even if another thread is open by now.
+// A decision in the Inbox panel (FOLLOW_UP_AFTER_LATEST) puts them after the
+// open conversation's latest message, where the person is; an empty
+// conversation gets them at its start. Existing cards for the same form URL
+// stay in place so live frames do not reload. Returns the links shown as
+// cards; the decided card keeps any other as a link.
 function isReviewOf(requestId) {
     return function (message) {
       return String(message.accessRequestId || "") === String(requestId || "");
@@ -2994,12 +3011,25 @@ function addFollowUpPages(requestId, links, placement) {
       console.warn("An approved request's credential forms could not be shown as cards; they stay links.", requestId);
       return [];
     }
+    var existingUrls = new Set(
+      (Array.isArray(thread.transientItems) ? thread.transientItems : [])
+        .map(function (item) { return String(item && item.url || ""); })
+        .filter(Boolean)
+    );
+    var added = false;
     pages.forEach(function (page) {
+      if (existingUrls.has(page.item.url)) {
+        return;
+      }
+      existingUrls.add(page.item.url);
       thread.transientItems = window.UAChatDelivery.upsertTransientItem(thread.transientItems, page.item);
+      added = true;
     });
-    thread.transientItems = window.UAChatDelivery.reconcileTransientItems(thread.transientItems, thread.messages);
-    // Drawn on the next tick: the caller first saves the decided card that says where the forms are.
-    lifecycle.timeout(renderMessages, 0);
+    if (added) {
+      thread.transientItems = window.UAChatDelivery.reconcileTransientItems(thread.transientItems, thread.messages);
+      // Drawn on the next tick: the caller first saves the decided card that says where the forms are.
+      lifecycle.timeout(renderMessages, 0);
+    }
     return pages.map(function (page) { return page.link; });
   }
 
@@ -3018,12 +3048,152 @@ function showFollowUpPages(requestId) {
     }, 0);
   }
 
-function setBrokerCardState(thread, itemId, state) {
-    if (!thread || !itemId) {
+function isTerminalBrokerCardState(state) {
+    return state === BROKER_CARD_FINISHED
+      || state === BROKER_CARD_DECLINED
+      || state === BROKER_CARD_CLOSED
+      || state === BROKER_CARD_EXPIRED;
+  }
+
+function isFollowUpItemExpired(item, nowMs) {
+    var raw = String(item && item.expiresAtUtc || "").trim();
+    if (!raw) {
+      return false;
+    }
+    var parsed = Date.parse(raw);
+    return !Number.isNaN(parsed) && parsed <= nowMs;
+  }
+
+// Non-terminal inline proposal follow-up cards across all threads, used by the
+// page-level follow-up watcher so cards close when their form ends externally
+// even after Settings closes, the Inbox reloads, or no review card is on screen.
+function openFollowUpPages() {
+    if (!sharedState.authSessionActive) {
+      return [];
+    }
+    var terminalItemIds = new Set();
+    var threads = Array.isArray(sharedState.threads) ? sharedState.threads : [];
+    threads.forEach(function (thread) {
+      if (!thread || !thread.brokerCardStates) {
+        return;
+      }
+      thread.brokerCardStates.forEach(function (state, itemId) {
+        if (isTerminalBrokerCardState(state)) {
+          terminalItemIds.add(itemId);
+        }
+      });
+    });
+    var seen = new Set();
+    var pages = [];
+    threads.forEach(function (thread) {
+      var items = Array.isArray(thread && thread.transientItems) ? thread.transientItems : [];
+      items.forEach(function (item) {
+        if (!window.UAChatDelivery.isFollowUpPageItem(item) || terminalItemIds.has(item.itemId)) {
+          return;
+        }
+        var key = item.correlationId + "|" + item.url;
+        if (seen.has(key)) {
+          return;
+        }
+        seen.add(key);
+        pages.push({
+          requestId: item.correlationId,
+          url: item.url,
+          expiresAtUtc: item.expiresAtUtc || "",
+        });
+      });
+    });
+    return pages;
+  }
+
+// Close inline broker cards whose proposal follow-up forms ended outside the
+// iframe (for example via "Open in its own tab" or another device) so they
+// shrink to the closed one-line state instead of sitting open until expiry.
+// Existing terminal states (finished, declined, closed, expired) are preserved;
+// otherwise an item past its expiry closes as expired and an item ended before
+// expiry uses the neutral closed note (the decided card's follow_up_outcomes
+// says whether it was done or declined).
+function closeFollowUpPages(requestId, urls, nowMs) {
+    var id = String(requestId || "").trim();
+    if (!id || !Array.isArray(urls) || !urls.length) {
       return;
     }
-    thread.brokerCardStates = thread.brokerCardStates || new Map();
-    thread.brokerCardStates.set(itemId, state);
+    var currentNow = typeof nowMs === "number" ? nowMs : Date.now();
+    var itemIds = [];
+    urls.forEach(function (url) {
+      var itemId = window.UAChatDelivery.followUpPageItemId(id, url, window.location.origin);
+      if (itemId && itemIds.indexOf(itemId) === -1) {
+        itemIds.push(itemId);
+      }
+    });
+    if (!itemIds.length) {
+      return;
+    }
+    var changed = false;
+    itemIds.forEach(function (itemId) {
+      var matchedItem = null;
+      var threads = (sharedState.threads || []).filter(function (candidate) {
+        var items = Array.isArray(candidate && candidate.transientItems) ? candidate.transientItems : [];
+        var found = items.find(function (item) { return item && item.itemId === itemId; });
+        if (found && !matchedItem) {
+          matchedItem = found;
+        }
+        return Boolean(found);
+      });
+      if (brokerCards.live(itemId)) {
+        brokerCards.close(itemId);
+        changed = true;
+      }
+      var existingTerminal = "";
+      threads.forEach(function (candidate) {
+        if (existingTerminal) return;
+        var existing = candidate.brokerCardStates ? candidate.brokerCardStates.get(itemId) || "" : "";
+        if (isTerminalBrokerCardState(existing)) {
+          existingTerminal = existing;
+        }
+      });
+      var targetState = existingTerminal
+        || (isFollowUpItemExpired(matchedItem, currentNow) ? BROKER_CARD_EXPIRED : BROKER_CARD_CLOSED);
+      var needsState = threads.some(function (candidate) {
+        var existing = candidate.brokerCardStates ? candidate.brokerCardStates.get(itemId) || "" : "";
+        return existing !== targetState;
+      });
+      if (needsState) {
+        setBrokerCardState(null, itemId, targetState);
+        changed = true;
+      }
+    });
+    if (changed) {
+      lifecycle.timeout(renderMessages, 0);
+    }
+  }
+
+function setBrokerCardState(thread, itemId, state) {
+    if (!itemId) {
+      return;
+    }
+    var targets = [];
+    if (thread) {
+      targets.push(thread);
+    }
+    // An itemId names one broker form across threads (for example when the
+    // Inbox adds a form to the open thread and the review card's thread later
+    // adds the same form). Record outcomes on every thread holding it so both
+    // copies close at once and never reopen a used or expired frame.
+    (sharedState.threads || []).forEach(function (candidate) {
+      if (!candidate || targets.indexOf(candidate) !== -1) {
+        return;
+      }
+      var items = Array.isArray(candidate.transientItems) ? candidate.transientItems : [];
+      if (items.some(function (item) { return item && item.itemId === itemId; })) {
+        targets.push(candidate);
+      }
+    });
+    targets.forEach(function (target) {
+      target.brokerCardStates = target.brokerCardStates || new Map();
+      target.brokerCardStates.set(itemId, state);
+    });
+    sharedState.settingsControls.syncFollowUpPages();
   }
 
 function createTransientItemCard(thread, item) {
@@ -3042,7 +3212,9 @@ function createTransientItemCard(thread, item) {
       });
     }
     var transientNotice = document.createElement("div");
-    transientNotice.className = "message-transient-notice";
+    transientNotice.className = item.url
+      ? "message-transient-notice is-link-card"
+      : "message-transient-notice";
     transientNotice.setAttribute("data-item-id", item.itemId);
     if (item.createdAt) {
       transientNotice.setAttribute("data-created-at", item.createdAt);
@@ -3052,6 +3224,20 @@ function createTransientItemCard(thread, item) {
     var transientActions = document.createElement("div");
     transientActions.className = "message-transient-actions";
     if (item.url) {
+      var transientHeader = document.createElement("div");
+      transientHeader.className = "message-transient-header";
+      var transientBadge = document.createElement("span");
+      transientBadge.className = "message-transient-badge";
+      transientBadge.textContent = "Action needed";
+      transientHeader.appendChild(transientBadge);
+      if (item.expiresAtUtc) {
+        var transientCountdown = document.createElement("span");
+        transientCountdown.className = "message-transient-countdown";
+        transientCountdown.setAttribute("data-expires-at", item.expiresAtUtc);
+        transientCountdown.setAttribute("role", "status");
+        transientHeader.appendChild(transientCountdown);
+      }
+      transientNotice.appendChild(transientHeader);
       var transientOpen = document.createElement("a");
       transientOpen.className = "button primary small message-transient-open";
       transientOpen.textContent = item.label;
@@ -3059,13 +3245,6 @@ function createTransientItemCard(thread, item) {
       transientOpen.target = "_blank";
       transientOpen.rel = "noopener noreferrer";
       transientActions.appendChild(transientOpen);
-      if (item.expiresAtUtc) {
-        var transientCountdown = document.createElement("span");
-        transientCountdown.className = "message-transient-countdown";
-        transientCountdown.setAttribute("data-expires-at", item.expiresAtUtc);
-        transientCountdown.setAttribute("role", "status");
-        transientActions.appendChild(transientCountdown);
-      }
     } else {
       var transientCopy = document.createElement("button");
       transientCopy.type = "button";
@@ -3080,7 +3259,9 @@ function createTransientItemCard(thread, item) {
     }
     var transientDismiss = document.createElement("button");
     transientDismiss.type = "button";
-    transientDismiss.className = "button secondary small message-transient-dismiss";
+    transientDismiss.className = item.url
+      ? "button ghost small message-transient-dismiss"
+      : "button secondary small message-transient-dismiss";
     transientDismiss.textContent = "Dismiss";
     lifecycle.listen(transientDismiss, "click", function () {
       thread.dismissedTransientItems = thread.dismissedTransientItems || new Set();
