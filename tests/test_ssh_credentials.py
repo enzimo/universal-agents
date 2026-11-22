@@ -1933,3 +1933,188 @@ async def test_broker_loop_shutdown_cancellation_does_not_spin_on_open_or_close(
     while not close_exited and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
     assert close_exited is True
+
+
+def test_stream_scrubber_releases_word_attached_progress_dots_without_redacting() -> None:
+    """C38: 'Installing...' progress dots stream promptly and 1500 dots never turn into [REDACTED]."""
+
+    scrubber = SessionSecretScrubber([])
+    stream = scrubber.new_stream_scrubber()
+
+    emitted: list[bytes] = []
+    # Send 'Installing' followed by 24 dots one byte at a time.
+    for ch in "Installing" + ("." * 24):
+        emitted.append(stream.feed(ch.encode("ascii")))
+    # By the 2nd dot, 'Installing..' is released, and each following dot releases immediately.
+    assert b"Installing.." in b"".join(emitted[:12])
+    assert emitted[12:] == [b"."] * 22
+    assert stream.flush() == b""
+
+    # 1500 dots right after a word must not trip the 1024-byte fail-closed redactor.
+    long_stream = scrubber.new_stream_scrubber()
+    long_out = long_stream.feed(("Installing" + ("." * 1500)).encode("ascii")) + long_stream.flush()
+    assert long_out == ("Installing" + ("." * 1500)).encode("ascii")
+    assert b"[REDACTED]" not in long_out
+
+    # A split secret token immediately following '...' is still held and redacted.
+    gh_tok = "ghp_1234567890abcdef1234567890abcdef"
+    tok_stream = scrubber.new_stream_scrubber()
+    p1 = tok_stream.feed(f"Installing...{gh_tok[:12]}".encode("ascii"))
+    assert p1 == b"Installing..."
+    p2 = tok_stream.feed(f"{gh_tok[12:]}\n".encode("ascii"))
+    p3 = tok_stream.flush()
+    assert b"".join((p1, p2, p3)) == b"Installing...[REDACTED]\n"
+
+
+def test_catalog_provider_uses_approved_credential_scope_and_verifies_fingerprint(
+    tmp_path: Path,
+) -> None:
+    """C34: Resolve credentials in target.credential_owner_scope (not session.owner) and verify fingerprint."""
+
+    keygen_bin = shutil.which("ssh-keygen")
+    agent_bin = shutil.which("ssh-agent")
+    add_bin = shutil.which("ssh-add")
+    if not (keygen_bin and agent_bin and add_bin):
+        pytest.skip("OpenSSH binaries are not installed in this environment.")
+
+    team_key = tmp_path / "team_ed25519"
+    user_key = tmp_path / "user_ed25519"
+    host_key = tmp_path / "host_ed25519"
+    for path in (team_key, user_key, host_key):
+        subprocess.run([keygen_bin, "-q", "-t", "ed25519", "-N", "", "-f", str(path)], check=True)
+
+    team_priv = team_key.read_text(encoding="utf-8")
+    team_pub = team_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    user_priv = user_key.read_text(encoding="utf-8")
+    user_pub = user_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    host_pub = host_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+
+    from runtime_hosting.execution_contracts import ssh_public_key_sha256_fingerprint
+
+    host_algo, host_fp = ssh_public_key_sha256_fingerprint(host_pub)
+    _, team_pub_fp = ssh_public_key_sha256_fingerprint(team_pub)
+    _, user_pub_fp = ssh_public_key_sha256_fingerprint(user_pub)
+    assert team_pub_fp != user_pub_fp
+
+    alice_scope = OwnerScopeV1(scope_kind=OwnerScopeKind.USER, owner_id="user_alice", team_id="team_alpha")
+    team_scope = team_owner()
+
+    # Same credential_key exists in BOTH alice_scope and team_scope with different keys.
+    secrets_map = {
+        ("shared_ssh_key", "ssh_private_key", OwnerScopeKind.TEAM, "team_alpha"): team_priv,
+        ("shared_ssh_key", "ssh_public_key", OwnerScopeKind.TEAM, "team_alpha"): team_pub,
+        ("shared_ssh_key", "ssh_private_key", OwnerScopeKind.USER, "user_alice"): user_priv,
+        ("shared_ssh_key", "ssh_public_key", OwnerScopeKind.USER, "user_alice"): user_pub,
+    }
+    resolved_scopes: list[OwnerScopeV1] = []
+
+    def _resolver(key: str, field_name: str, owner: OwnerScopeV1) -> str | None:
+        resolved_scopes.append(owner)
+        return secrets_map.get((key, field_name, owner.scope_kind, owner.owner_id))
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    host_pub_parts = host_pub.split()
+    provider = CatalogSSHCredentialMaterialProvider(
+        ephemeral_base_dir=layout.ssh_ephemeral_dir,
+        secret_resolver=_resolver,
+        known_hosts_line_provider=lambda _sess: (host_pub_parts[0], host_pub_parts[1]),
+    )
+
+    # Target approves team_scope credential + team_pub_fp while session owner is user_alice.
+    target = SSHConnectionTargetV1(
+        host="build.internal",
+        port=22,
+        username="deploy",
+        host_key_algorithm=host_algo,
+        host_key_fingerprint=host_fp,
+        host_key_public_key=host_pub,
+        credential_binding_id="catalog:shared_ssh_key",
+        credential_owner_scope=team_scope,
+        credential_public_key_fingerprint=team_pub_fp,
+    )
+    digest = target.calculate_digest()
+    session = InteractiveSessionV1(
+        session_id="ssh_sess_scope_check",
+        owner=alice_scope,
+        target=target,
+        target_digest=digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_scope_check",
+            resource_digest=digest,
+            owner_scope=alice_scope,
+            function="create_execution_ssh_session",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        ),
+    )
+
+    with provider.prepare(session) as material:
+        assert material.public_key == team_pub
+    assert resolved_scopes and all(scope == team_scope for scope in resolved_scopes)
+
+    # Mismatched credential_public_key_fingerprint fails closed even if key resolves.
+    wrong_fp_target = target.model_copy(
+        update={"credential_public_key_fingerprint": user_pub_fp}
+    )
+    wrong_digest = wrong_fp_target.calculate_digest()
+    wrong_session = InteractiveSessionV1(
+        session_id="ssh_sess_wrong_fp",
+        owner=alice_scope,
+        target=wrong_fp_target,
+        target_digest=wrong_digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_wrong_fp",
+            resource_digest=wrong_digest,
+            owner_scope=alice_scope,
+            function="create_execution_ssh_session",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        ),
+    )
+    with pytest.raises(PermissionError, match="fingerprint does not match"):
+        with provider.prepare(wrong_session):
+            pass
+
+
+def test_ssh_command_separates_options_from_destination_with_double_dash(tmp_path: Path) -> None:
+    """C36: Broker ssh command always inserts '--' before username@host."""
+
+    identity, known_hosts = write_ssh_material(tmp_path / "ssh", key_bytes=b"host-key-bytes")
+    target = SSHConnectionTargetV1(
+        host="ops.internal",
+        username="deploy",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=host_key_fingerprint(b"host-key-bytes"),
+        credential_binding_id="b1",
+        remote_persistent_session_name="work",
+    )
+    digest = target.calculate_digest()
+    session = InteractiveSessionV1(
+        session_id="ssh_sess_dash_check",
+        owner=team_owner(),
+        target=target,
+        target_digest=digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_dash_check",
+            resource_digest=digest,
+            function="create_execution_ssh_session",
+        ),
+    )
+    broker = SSHSessionBroker(
+        repository=SqliteExecutionControlRepository(str(tmp_path / "execution.db")),
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=ConfiguredSSHCredentialMaterialProvider(
+            {"b1": SSHCredentialMaterial(identity_file=identity, known_hosts_file=known_hosts)}
+        ),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        team_id="team_alpha",
+        broker_id="broker-dash",
+    )
+    argv = broker._ssh_argv(
+        session,
+        SSHCredentialMaterial(identity_file=identity, known_hosts_file=known_hosts),
+    )
+    dest_idx = argv.index("deploy@ops.internal")
+    assert argv[dest_idx - 1] == "--"
+    assert argv[dest_idx + 1 :] == ("tmux", "new-session", "-A", "-s", "work")

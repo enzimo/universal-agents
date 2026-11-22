@@ -28,7 +28,12 @@ import threading
 import time
 from typing import Protocol
 
-from runtime_hosting.execution_contracts import InteractiveSessionV1, OwnerScopeKind, OwnerScopeV1
+from runtime_hosting.execution_contracts import (
+    InteractiveSessionV1,
+    OwnerScopeKind,
+    OwnerScopeV1,
+    ssh_public_key_sha256_fingerprint,
+)
 from runtime_hosting.ssh_network import ssh_host_key_alias
 from secure_tool_broker.credential_catalog import ResolvedCredentialField, resolve_secret_field
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
@@ -482,10 +487,10 @@ def _trailing_token_run_length(buf: bytes) -> int:
 
     Pure punctuation runs (such as progress dots ``....`` or separators
     ``====``) never form a pattern token in ``redact_text`` because every
-    recognized prefix and JWT contains letters or digits. Releasing them at
-    once keeps steady progress output visible without hitting the 1024-byte
-    fail-closed token limit, while registered exact secrets remain protected
-    by ``_trailing_prefix_holdback``.
+    recognized prefix and JWT contains letters or digits. Likewise, no pattern
+    in ``redact_text`` contains ``..``, so any ``..`` (such as ``Installing...``)
+    terminates a candidate pattern token immediately while exact stored secrets
+    remain protected by ``_trailing_prefix_holdback``.
     """
 
     if not buf:
@@ -495,6 +500,9 @@ def _trailing_token_run_length(buf: bytes) -> int:
         run_start -= 1
     if run_start == len(buf):
         return 0
+    double_dot = buf.rfind(b"..", run_start)
+    if double_dot != -1:
+        run_start = double_dot + 2
     for idx in range(run_start, len(buf)):
         if buf[idx] in _TOKEN_ALNUM_BYTES:
             return len(buf) - idx
@@ -1026,19 +1034,30 @@ class CatalogSSHCredentialMaterialProvider:
         scrubber: SessionSecretScrubber | None = None,
     ) -> Iterator[SSHCredentialMaterial]:
         credential_key = _extract_catalog_credential_key(session.target.credential_binding_id)
+        credential_owner = session.target.credential_owner_scope or session.owner
+        if credential_owner.team_id != session.owner.team_id or (
+            credential_owner != session.owner
+            and not (
+                credential_owner.scope_kind == OwnerScopeKind.TEAM
+                and credential_owner.owner_id == session.owner.team_id
+            )
+        ):
+            raise PermissionError(
+                "Approved SSH credential owner scope is not reachable from this session owner."
+            )
         lifetime = _compute_key_lifetime_seconds(
             session,
             requested_lifetime_seconds=key_lifetime_seconds,
             default_lifetime_seconds=self.default_key_lifetime_seconds,
         )
 
-        private_key = self.secret_resolver(credential_key, "ssh_private_key", session.owner)
+        private_key = self.secret_resolver(credential_key, "ssh_private_key", credential_owner)
         if not private_key or not private_key.strip():
             raise PermissionError(
                 f"SSH credential {credential_key!r} is missing required field 'ssh_private_key'."
             )
-        passphrase = self.secret_resolver(credential_key, "ssh_passphrase", session.owner)
-        stored_public_key = self.secret_resolver(credential_key, "ssh_public_key", session.owner)
+        passphrase = self.secret_resolver(credential_key, "ssh_passphrase", credential_owner)
+        stored_public_key = self.secret_resolver(credential_key, "ssh_public_key", credential_owner)
 
         touched: list[str] = [private_key]
         if passphrase:
@@ -1074,6 +1093,17 @@ class CatalogSSHCredentialMaterialProvider:
                 public_key_line = sanitized_stored
             else:
                 public_key_line = agent_public_key
+            if session.target.credential_public_key_fingerprint is not None:
+                try:
+                    _algo, actual_fingerprint = ssh_public_key_sha256_fingerprint(public_key_line)
+                except ValueError as exc:
+                    raise PermissionError(
+                        "Unlocked SSH credential public key is invalid."
+                    ) from exc
+                if actual_fingerprint != session.target.credential_public_key_fingerprint:
+                    raise PermissionError(
+                        "Resolved SSH credential public key fingerprint does not match the approved target."
+                    )
 
             pub_path = session_dir / "id.pub"
             _write_private_file(pub_path, f"{public_key_line}\n".encode("utf-8"), mode=0o600)
@@ -1184,11 +1214,24 @@ class CatalogSSHCredentialMaterialProvider:
         return value
 
     def _resolve_known_hosts_line(self, session: InteractiveSessionV1) -> str:
-        if self.known_hosts_line_provider is None:
+        if self.known_hosts_line_provider is not None:
+            algorithm, encoded_key = self.known_hosts_line_provider(session)
+        elif session.target.host_key_public_key:
+            algorithm, fingerprint = ssh_public_key_sha256_fingerprint(
+                session.target.host_key_public_key
+            )
+            if (
+                algorithm != session.target.host_key_algorithm
+                or fingerprint != session.target.host_key_fingerprint
+            ):
+                raise PermissionError(
+                    "Session host_key_public_key does not match the pinned host key."
+                )
+            encoded_key = session.target.host_key_public_key.strip().split()[1]
+        else:
             raise PermissionError(
                 "Catalog SSH credential provider requires a pinned host public key."
             )
-        algorithm, encoded_key = self.known_hosts_line_provider(session)
         alias = ssh_host_key_alias(session.target.host, session.target.port)
         return f"{alias} {algorithm} {encoded_key}\n"
 

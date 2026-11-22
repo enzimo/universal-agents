@@ -469,16 +469,51 @@ def create_execution_ssh_session(
 
 
 @tool
-def plan_execution_ssh_interaction(session_id: str, reason: str) -> str:
-    """Stage permission to type into one SSH session; apply it with apply_change.
+def plan_execution_ssh_interaction(
+    session_id: str,
+    reason: str,
+    expires_at_utc: str = "",
+    ttl_seconds: int = 0,
+    delegated_agent_type: str = "",
+    delegated_task_id: str = "",
+    allow_commands: bool = False,
+    allow_typing: bool = False,
+    allow_password_bootstrap: bool = False,
+    allow_broker_sudo: bool = False,
+    allow_workspace_transfer: bool = False,
+    allowed_secret_recipes_json: str = "",
+) -> str:
+    """Stage time-bounded SSH capabilities and optional single-task worker delegation; apply with apply_change.
 
-    Whatever you type runs on that host, so a person approves each session.
+    Requires either expires_at_utc (ISO 8601 UTC) or ttl_seconds (capped by
+    execution_control.ssh.max_delegation_ttl_seconds) and at least one explicit
+    capability flag. An administrator approves the exact bounds in the Inbox.
     """
     try:
         agent, error = _manager_agent("plan_execution_ssh_interaction")
         if error:
             return json.dumps({"error": error})
-        staged = SSHInteractionChangeService(agent).stage(session_id=session_id, reason=reason)
+        staged = SSHInteractionChangeService(agent).stage(
+            session_id=session_id,
+            reason=reason,
+            expires_at_utc=(
+                _utc(expires_at_utc, field_name="expires_at_utc")
+                if str(expires_at_utc or "").strip()
+                else None
+            ),
+            ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
+            delegated_agent_type=delegated_agent_type or None,
+            delegated_task_id=delegated_task_id or None,
+            allow_commands=allow_commands,
+            allow_typing=allow_typing,
+            allow_password_bootstrap=allow_password_bootstrap,
+            allow_broker_sudo=allow_broker_sudo,
+            allow_workspace_transfer=allow_workspace_transfer,
+            allowed_secret_recipes=_json_strings(
+                allowed_secret_recipes_json,
+                field_name="allowed_secret_recipes_json",
+            ),
+        )
         return json.dumps(staged)
     except Exception as exc:
         return _error_payload(exc)
@@ -596,25 +631,41 @@ async def close_execution_ssh_session(session_id: str) -> str:
 
 @tool
 def list_execution_ssh_sessions() -> str:
-    """List owner-scoped SSH sessions, whether typing is approved, and transcript references."""
+    """List owner-scoped SSH sessions, active delegation status, and transcript references."""
     try:
         service, error = _service("list_execution_ssh_sessions")
         if error:
             return json.dumps({"error": error})
         assert service is not None
         sessions = service.list_ssh_sessions()
-        return json.dumps(
-            {
-                "returned": len(sessions),
-                "sessions": [
-                    {
-                        **item.model_dump(mode="json"),
-                        "typing_approved": service.ssh_interaction(item.session_id) is not None,
-                    }
-                    for item in sessions
-                ],
-            }
-        )
+        payloads: list[dict[str, Any]] = []
+        for item in sessions:
+            interaction = service.ssh_interaction(item.session_id)
+            revocation = service.repository.get_interactive_session_revocation(
+                team_id=service.owner.team_id, session_id=item.session_id
+            )
+            delegation_active = bool(
+                revocation is None and interaction is not None and interaction.is_active()
+            )
+            typing_approved = bool(
+                delegation_active
+                and interaction is not None
+                and (interaction.bounds is None or interaction.bounds.allow_typing)
+            )
+            payloads.append(
+                {
+                    **item.model_dump(mode="json"),
+                    "revoked": revocation is not None,
+                    "delegation_active": delegation_active,
+                    "typing_approved": typing_approved,
+                    "delegation": (
+                        interaction.bounds.model_dump(mode="json")
+                        if interaction is not None and interaction.bounds is not None
+                        else None
+                    ),
+                }
+            )
+        return json.dumps({"returned": len(payloads), "sessions": payloads})
     except Exception as exc:
         return _error_payload(exc)
 

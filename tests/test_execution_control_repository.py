@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 from pathlib import Path
 import sqlite3
+import struct
 
 import pytest
 
@@ -456,7 +458,9 @@ def _enrolled_target(
     expires_at_utc: datetime | None = None,
 ) -> EnrolledSSHTargetV1:
     owner_scope = owner or _owner()
-    key_b64 = base64.b64encode(b"enrolled-host-ed25519-key-material").decode("ascii")
+    wire_type = b"ssh-ed25519"
+    key_blob = struct.pack(">I", len(wire_type)) + wire_type + struct.pack(">I", 32) + (b"\x05" * 32)
+    key_b64 = base64.b64encode(key_blob).decode("ascii")
     pub_line = f"ssh-ed25519 {key_b64}"
     algo, fp = ssh_public_key_sha256_fingerprint(pub_line)
     effective_expiry = (
@@ -510,6 +514,45 @@ def _enrolled_target(
     return EnrolledSSHTargetV1(activation=real_activation, **seed_fields)
 
 
+def _create_live_enrolled_session(
+    repository: SqliteExecutionControlRepository,
+    target: EnrolledSSHTargetV1,
+    *,
+    session_id: str,
+    broker_id: str = "broker-a",
+    lease_token: str = "lease-a",
+) -> InteractiveSessionV1:
+    conn_target = target.to_connection_target()
+    target_digest = conn_target.calculate_digest()
+    session = InteractiveSessionV1(
+        session_id=session_id,
+        owner=target.owner,
+        target=conn_target,
+        target_digest=target_digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id=session_id,
+            resource_digest=target_digest,
+            owner_scope=target.owner,
+            mode=ChangeApprovalMode.HELD_ACCESS,
+        ),
+    )
+    repository.create_interactive_session(session)
+    claimed = repository.claim_interactive_session(
+        team_id=target.owner.team_id,
+        session_id=session_id,
+        broker_id=broker_id,
+        lease_token=lease_token,
+        lease_ttl_seconds=120,
+    )
+    return repository.update_claimed_interactive_session(
+        claimed.model_copy(update={"status": InteractiveSessionStatus.OPEN}),
+        broker_id=broker_id,
+        lease_token=lease_token,
+        fence=claimed.fence,
+    )
+
+
 def test_enrolled_ssh_targets_bootstrap_latch_and_cascade_revocation(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     target = _enrolled_target()
@@ -521,23 +564,16 @@ def test_enrolled_ssh_targets_bootstrap_latch_and_cascade_revocation(tmp_path: P
         repository.put_ssh_target(_enrolled_target(host="other-host.internal"))
     assert repository.get_ssh_target(team_id="team_beta", target_id=target.target_id) is None
 
-    # Create a session referencing this enrolled target with bounded delegation.
-    conn_target = target.to_connection_target()
-    target_digest = conn_target.calculate_digest()
-    session = InteractiveSessionV1(
-        session_id="ssh_sess_enrolled_1",
-        owner=target.owner,
-        target=conn_target,
-        target_digest=target_digest,
-        connect_activation=build_activation(
-            ExecutionActivationKind.SSH_CONNECT,
-            resource_id="ssh_sess_enrolled_1",
-            resource_digest=target_digest,
-            owner_scope=target.owner,
-            mode=ChangeApprovalMode.HELD_ACCESS,
-        ),
+    # Create two live leased sessions referencing this enrolled target.
+    session = _create_live_enrolled_session(
+        repository, target, session_id="ssh_sess_enrolled_1", broker_id="broker-1", lease_token="tok-1"
     )
-    repository.create_interactive_session(session)
+    session_other = _create_live_enrolled_session(
+        repository, target, session_id="ssh_sess_other", broker_id="broker-2", lease_token="tok-2"
+    )
+    session_third = _create_live_enrolled_session(
+        repository, target, session_id="ssh_sess_third", broker_id="broker-3", lease_token="tok-3"
+    )
     bounds = SSHDelegationBoundsV1(
         delegated_agent_type="HostBootstrapper",
         delegated_task_id="work_req_123",
@@ -545,7 +581,9 @@ def test_enrolled_ssh_targets_bootstrap_latch_and_cascade_revocation(tmp_path: P
         allow_broker_sudo=True,
         allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
     )
-    interaction_digest = ssh_interaction_resource_digest(target_digest=target_digest, bounds=bounds)
+    interaction_digest = ssh_interaction_resource_digest(
+        target_digest=session.target_digest, bounds=bounds
+    )
     interaction_act = build_activation(
         ExecutionActivationKind.SSH_INTERACT,
         resource_id=session.session_id,
@@ -560,21 +598,21 @@ def test_enrolled_ssh_targets_bootstrap_latch_and_cascade_revocation(tmp_path: P
     assert stored_interaction.activation.binds_session(session, bounds=bounds)
     assert not stored_interaction.activation.binds_session(session, bounds=None)
 
-    # Atomic password bootstrap claim: only one session holds the claim until released or latched.
+    # Atomic password bootstrap claim: only one live session holds the claim until released or latched.
     assert repository.claim_ssh_target_password_bootstrap(
-        team_id="team_alpha", target_id=target.target_id, session_id="ssh_sess_enrolled_1"
+        team_id="team_alpha", target_id=target.target_id, session_id=session.session_id
     ) is True
     assert repository.claim_ssh_target_password_bootstrap(
-        team_id="team_alpha", target_id=target.target_id, session_id="ssh_sess_other"
+        team_id="team_alpha", target_id=target.target_id, session_id=session_other.session_id
     ) is False
     assert repository.release_ssh_target_password_bootstrap_claim(
-        team_id="team_alpha", target_id=target.target_id, session_id="ssh_sess_other"
+        team_id="team_alpha", target_id=target.target_id, session_id=session_other.session_id
     ) is False
     assert repository.release_ssh_target_password_bootstrap_claim(
-        team_id="team_alpha", target_id=target.target_id, session_id="ssh_sess_enrolled_1"
+        team_id="team_alpha", target_id=target.target_id, session_id=session.session_id
     ) is True
     assert repository.claim_ssh_target_password_bootstrap(
-        team_id="team_alpha", target_id=target.target_id, session_id="ssh_sess_other"
+        team_id="team_alpha", target_id=target.target_id, session_id=session_other.session_id
     ) is True
 
     latched = repository.mark_ssh_target_password_bootstrap_completed(
@@ -584,7 +622,7 @@ def test_enrolled_ssh_targets_bootstrap_latch_and_cascade_revocation(tmp_path: P
     assert latched.password_bootstrap_completed_at_utc is not None
     assert latched.enrollment_digest() == target.enrollment_digest()
     assert repository.claim_ssh_target_password_bootstrap(
-        team_id="team_alpha", target_id=target.target_id, session_id="ssh_sess_third"
+        team_id="team_alpha", target_id=target.target_id, session_id=session_third.session_id
     ) is False
 
     # Revoking the target marks it revoked, preserves enrollment_digest, and cascades to sessions & interactions.
@@ -608,6 +646,105 @@ def test_enrolled_ssh_targets_bootstrap_latch_and_cascade_revocation(tmp_path: P
     assert revoked_interaction is not None
     assert revoked_interaction.revoked_at_utc is not None
     assert revoked_interaction.is_active() is False
+
+
+def test_password_bootstrap_claim_recovers_from_lost_revoked_and_expired_states(tmp_path: Path) -> None:
+    """C35 & C39(b): Claims require live leased sessions, recover after restart/revoke, and refuse expired targets."""
+
+    repository = _repository(tmp_path)
+    target = _enrolled_target(target_id="ssh_tgt_claim_life")
+    repository.put_ssh_target(target)
+
+    # Unknown session is refused.
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id="ssh_sess_does_not_exist"
+    ) is False
+
+    # Unleased pending session is refused.
+    unleased = InteractiveSessionV1(
+        session_id="ssh_sess_unleased",
+        owner=target.owner,
+        target=target.to_connection_target(),
+        target_digest=target.to_connection_target().calculate_digest(),
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_unleased",
+            resource_digest=target.to_connection_target().calculate_digest(),
+            owner_scope=target.owner,
+            mode=ChangeApprovalMode.HELD_ACCESS,
+        ),
+    )
+    repository.create_interactive_session(unleased)
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=unleased.session_id
+    ) is False
+
+    # Session A claims, then broker restarts (marked lost); Session B can claim, while lost A cannot.
+    sess_a = _create_live_enrolled_session(
+        repository, target, session_id="ssh_sess_a", broker_id="broker-a", lease_token="tok-a"
+    )
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_a.session_id
+    ) is True
+    repository.mark_interactive_sessions_lost(
+        team_id="team_alpha", updated_at_utc=datetime.now(timezone.utc)
+    )
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_a.session_id
+    ) is False
+
+    sess_b = _create_live_enrolled_session(
+        repository, target, session_id="ssh_sess_b", broker_id="broker-b", lease_token="tok-b"
+    )
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_b.session_id
+    ) is True
+
+    # Revoking B clears the claim and refuses B from claiming again; live C can take over.
+    repository.revoke_interactive_session(
+        team_id="team_alpha", session_id=sess_b.session_id, revoked_by="person_admin"
+    )
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_b.session_id
+    ) is False
+    sess_c = _create_live_enrolled_session(
+        repository, target, session_id="ssh_sess_c", broker_id="broker-c", lease_token="tok-c"
+    )
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_c.session_id
+    ) is True
+
+    # C35 & C39(b): Expired temporary target is excluded from active list and cannot be claimed.
+    expired_target = _enrolled_target(
+        target_id="ssh_tgt_expired",
+        expires_at_utc=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    repository.put_ssh_target(expired_target)
+    assert expired_target.effective_status() == SSHTargetStatus.EXPIRED
+    active_ids = [item.target_id for item in repository.list_ssh_targets(team_id="team_alpha", include_inactive=False)]
+    assert "ssh_tgt_expired" not in active_ids
+    assert "ssh_tgt_claim_life" in active_ids
+    sess_exp = _create_live_enrolled_session(
+        repository, expired_target, session_id="ssh_sess_exp", broker_id="broker-e", lease_token="tok-e"
+    )
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=expired_target.target_id, session_id=sess_exp.session_id
+    ) is False
+
+
+def test_fresh_execution_store_logs_no_upgrade_column_additions(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    request: pytest.FixtureRequest,
+) -> None:
+    """C37: Brand-new databases define all columns in CREATE TABLE without logging upgrade events."""
+
+    with caplog.at_level(logging.INFO):
+        _repository(tmp_path)
+    if request.config.getoption("--upgrade-from", default=None):
+        assert caplog.text.count("storage_column_added") == 5
+    else:
+        assert "storage_column_added" not in caplog.text
 
 
 def test_session_revocation_columns_cannot_be_overwritten_by_lease_renewals(tmp_path: Path) -> None:

@@ -38,6 +38,7 @@ from runtime_hosting.execution_contracts import (
     AutomationJobV2,
     AutomationScheduleV1,
     CodeArtifactV1,
+    EnrolledSSHTargetV1,
     ExecutionActivationKind,
     ExecutionBackendKind,
     ExecutionLanguage,
@@ -161,9 +162,10 @@ class ExecutionControlService:
         )
 
     def list_ssh_targets(self) -> tuple[dict[str, Any], ...]:
-        return tuple(
+        configured = [
             {
                 "target_id": target.target_id,
+                "source": "configured",
                 "host": target.host,
                 "port": target.port,
                 "username": target.username,
@@ -172,7 +174,32 @@ class ExecutionControlService:
                 "credential_binding_id": target.credential_binding_id,
             }
             for target in self.config.execution_control.ssh.targets
-        )
+        ]
+        enrolled = [
+            {
+                "target_id": target.target_id,
+                "source": "enrolled",
+                "host": target.host,
+                "port": target.port,
+                "username": target.username,
+                "platform": target.platform.value,
+                "host_key_algorithm": target.host_key_algorithm,
+                "host_key_fingerprint": target.host_key_fingerprint,
+                "credential_binding_id": f"catalog:{target.credential_key}",
+                "credential_owner_scope": target.credential_owner_scope.model_dump(mode="json"),
+                "credential_public_key_fingerprint": target.credential_public_key_fingerprint,
+                "bootstrap_credential_key": target.bootstrap_credential_key,
+                "lifecycle": target.lifecycle.value,
+                "expires_at_utc": target.expires_at_utc.isoformat() if target.expires_at_utc else None,
+                "status": target.effective_status().value,
+                "password_bootstrap_completed": target.password_bootstrap_completed_at_utc is not None,
+            }
+            for target in self.repository.list_ssh_targets(
+                team_id=self.owner.team_id, include_inactive=False
+            )
+            if self._target_visible_to_owner(target)
+        ]
+        return tuple(configured + enrolled)
 
     def promote_revision(
         self,
@@ -357,17 +384,20 @@ class ExecutionControlService:
             (item for item in ssh_settings.targets if item.target_id == target_id),
             None,
         )
-        if configured is None:
-            raise LookupError("SSH target is not installed.")
-        target = SSHConnectionTargetV1(
-            host=configured.host,
-            port=configured.port,
-            username=configured.username,
-            host_key_algorithm=configured.host_key_algorithm,
-            host_key_fingerprint=configured.host_key_fingerprint,
-            credential_binding_id=configured.credential_binding_id,
-            remote_persistent_session_name=configured.remote_persistent_session_name,
-        )
+        if configured is not None:
+            target = SSHConnectionTargetV1(
+                host=configured.host,
+                port=configured.port,
+                username=configured.username,
+                host_key_algorithm=configured.host_key_algorithm,
+                host_key_fingerprint=configured.host_key_fingerprint,
+                credential_binding_id=configured.credential_binding_id,
+                remote_persistent_session_name=configured.remote_persistent_session_name,
+            )
+        else:
+            enrolled = self.usable_ssh_target(target_id)
+            self.access_guard().require_ssh_target(enrolled)
+            target = enrolled.to_connection_target()
         target_digest = target.calculate_digest()
         draft = InteractiveSessionV1(
             owner=self.owner,
@@ -521,6 +551,21 @@ class ExecutionControlService:
         if session is None or session.owner != self.owner:
             raise LookupError("SSH session not found.")
         return session
+
+    def _target_visible_to_owner(self, target: EnrolledSSHTargetV1) -> bool:
+        if target.owner.team_id != self.owner.team_id:
+            return False
+        return target.owner == self.owner or target.owner.scope_kind == OwnerScopeKind.TEAM
+
+    def usable_ssh_target(self, target_id: str) -> EnrolledSSHTargetV1:
+        target = self.repository.get_ssh_target(team_id=self.owner.team_id, target_id=target_id)
+        if target is None or not self._target_visible_to_owner(target):
+            raise LookupError("SSH target is not installed.")
+        if not target.is_usable():
+            raise PermissionError(
+                f"Enrolled SSH target {target_id!r} is {target.effective_status().value} and cannot be used."
+            )
+        return target
 
     @staticmethod
     def _first_run(schedule: AutomationScheduleV1) -> datetime:

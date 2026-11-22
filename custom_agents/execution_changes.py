@@ -27,9 +27,11 @@ again in ``apply``.
 
 from __future__ import annotations
 
-import re
-from datetime import datetime, timedelta
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+import logging
 from pathlib import Path
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -49,31 +51,60 @@ from id_generation import new_id
 from runtime_hosting.execution_contracts import (
     AccessHolderV1,
     ActivationRecordV2,
+    EnrolledSSHTargetV1,
     ExecutionActivationKind,
     ExecutionBackendKind,
     InteractiveSessionV1,
     ManagedServiceV1,
+    OwnerScopeKind,
     OwnerScopeV1,
+    SSHConnectionTargetV1,
+    SSHDelegationBoundsV1,
+    SSHSecretRecipe,
+    SSHTargetLifecycle,
+    SSHTargetPlatform,
     ServiceDesiredState,
     ServiceKind,
     ServiceRestartPolicy,
-    SSHConnectionTargetV1,
+    ssh_interaction_resource_digest,
+    ssh_public_key_sha256_fingerprint,
     utc_now,
 )
+from runtime_hosting.ssh_network import (
+    LocalAddressChecker,
+    SSHHostResolver,
+    SSHNetworkPolicy,
+    validate_ssh_host,
+)
 from runtime_settings.instance_layout import RUNTIME_DIRNAME
+from secure_tool_broker.credential_catalog import CredentialCatalog
+from secure_tool_broker.credential_catalog_store import CredentialCatalogStore, CredentialOwnerScope
+
+logger = logging.getLogger(__name__)
 
 MANAGED_SERVICE_CHANGE_KIND = "managed_execution_service"
+SSH_TARGET_ENROLL_CHANGE_KIND = "execution_ssh_target_enroll"
 SSH_INTERACTION_CHANGE_KIND = "execution_ssh_interaction"
 # Change id prefixes (at most 15 characters, id_generation); adapters match them.
 MANAGED_SERVICE_CHANGE_PREFIX = "exec_svc_change"
+SSH_TARGET_ENROLL_CHANGE_PREFIX = "ssh_target_enr"
 SSH_INTERACTION_CHANGE_PREFIX = "ssh_interaction"
 # Long enough for a person to approve later; the digests still refuse a plan
 # whose service, revision, profile or session changed meanwhile.
 EXECUTION_CHANGE_PLAN_TTL_SECONDS = 24 * 60 * 60
 EXECUTION_CHANGE_PLAN_SCHEMA_VERSION: Literal[1] = 1
 _MANAGED_SERVICE_CHANGE_ID = re.compile(rf"{MANAGED_SERVICE_CHANGE_PREFIX}_[0-9a-f]{{12}}\Z")
+_SSH_TARGET_ENROLL_CHANGE_ID = re.compile(rf"{SSH_TARGET_ENROLL_CHANGE_PREFIX}_[0-9a-f]{{12}}\Z")
 _SSH_INTERACTION_CHANGE_ID = re.compile(rf"{SSH_INTERACTION_CHANGE_PREFIX}_[0-9a-f]{{12}}\Z")
+_TARGET_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
+_CREDENTIAL_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 _STALE = "If this changes before approval, the change is refused and must be staged again."
+_REMOTE_HOST_SECRET_BOUNDARY_NOTE = (
+    "Security note: The broker never places secrets in prompts, tool arguments, logs, command lines, "
+    "transcripts, or agent-written commands. Any secret sent to the remote host can still be captured "
+    "by whoever controls that host; enroll SSH keys before running arbitrary commands, prefer single-use "
+    "ephemeral Tailscale auth keys, and rotate bootstrap passwords afterward."
+)
 
 
 class _ExecutionChangePlan(BaseModel):
@@ -121,16 +152,45 @@ class ManagedServiceChangePlan(_ExecutionChangePlan):
         return value
 
 
+class SSHTargetEnrollChangePlan(_ExecutionChangePlan):
+    target_id: str
+    host: str
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str
+    platform: SSHTargetPlatform
+    host_key_algorithm: str
+    host_key_fingerprint: str
+    host_key_public_key: str
+    credential_key: str
+    credential_owner_scope: OwnerScopeV1
+    credential_public_key_fingerprint: str | None = None
+    bootstrap_credential_key: str | None = None
+    bootstrap_credential_owner_scope: OwnerScopeV1 | None = None
+    lifecycle: SSHTargetLifecycle
+    target_expires_at_utc: datetime | None = None
+    enrollment_digest: str
+
+    @field_validator("change_id")
+    @classmethod
+    def _valid_change_id(cls, value: str) -> str:
+        if not _SSH_TARGET_ENROLL_CHANGE_ID.fullmatch(str(value or "")):
+            raise ValueError("Invalid SSH target enrollment change id.")
+        return value
+
+
 class SSHInteractionChangePlan(_ExecutionChangePlan):
     session_id: str
     target: SSHConnectionTargetV1
     target_digest: str
+    delegation_expires_at_utc: datetime
+    bounds: SSHDelegationBoundsV1
+    resource_digest: str
 
     @field_validator("change_id")
     @classmethod
     def _valid_change_id(cls, value: str) -> str:
         if not _SSH_INTERACTION_CHANGE_ID.fullmatch(str(value or "")):
-            raise ValueError("Invalid SSH typing change id.")
+            raise ValueError("Invalid SSH delegation change id.")
         return value
 
 
@@ -215,6 +275,7 @@ class _ExecutionChanges:
         resource_id: str,
         resource_digest: str,
         generation: int,
+        expires_at_utc: datetime | None = None,
     ) -> ActivationRecordV2:
         """The record of this approved change; the runtime checks it before each use."""
 
@@ -234,6 +295,7 @@ class _ExecutionChanges:
                 task_id=plan.source_task_id,
             ),
             approval=approval.to_record(),
+            expires_at_utc=expires_at_utc,
         )
 
     def _staged(self, plan: _ExecutionChangePlan, proposal: ChangeProposalV1) -> dict[str, Any]:
@@ -525,32 +587,659 @@ class ManagedServiceChangeService(_ExecutionChanges):
         }
 
 
+def _catalog_scope(owner: OwnerScopeV1) -> CredentialOwnerScope:
+    if owner.scope_kind == OwnerScopeKind.USER:
+        return CredentialOwnerScope.user(owner.owner_id)
+    return CredentialOwnerScope.team(owner.team_id)
+
+
+def _format_owner_scope(scope: OwnerScopeV1) -> str:
+    return f"{scope.scope_kind.value}:{scope.owner_id}"
+
+
+def _host_key_verification_command(platform: SSHTargetPlatform, algorithm: str) -> str:
+    filename_by_algo = {
+        "ssh-ed25519": "ssh_host_ed25519_key.pub",
+        "ssh-rsa": "ssh_host_rsa_key.pub",
+        "ecdsa-sha2-nistp256": "ssh_host_ecdsa_key.pub",
+        "ecdsa-sha2-nistp384": "ssh_host_ecdsa_key.pub",
+        "ecdsa-sha2-nistp521": "ssh_host_ecdsa_key.pub",
+    }
+    filename = filename_by_algo.get(algorithm, "ssh_host_*.pub")
+    if platform == SSHTargetPlatform.WINDOWS:
+        return f"ssh-keygen -lf C:\\ProgramData\\ssh\\{filename}"
+    return f"ssh-keygen -lf /etc/ssh/{filename}"
+
+
+class SSHTargetEnrollChangeService(_ExecutionChanges):
+    """Stage and enroll a pinned, Sealbox-backed SSH target after administrator approval."""
+
+    kind = SSH_TARGET_ENROLL_CHANGE_KIND
+    label = "SSH target enrollment change"
+
+    def __init__(
+        self,
+        agent: Any,
+        *,
+        resolver: SSHHostResolver | None = None,
+        local_address_checker: LocalAddressChecker | None = None,
+        catalog_loader: Callable[..., CredentialCatalog] | None = None,
+    ) -> None:
+        super().__init__(agent)
+        self._resolver = resolver
+        self._local_address_checker = local_address_checker
+        self._catalog_loader = catalog_loader or self._default_catalog_loader
+
+    def _default_catalog_loader(self, *, scope: CredentialOwnerScope) -> CredentialCatalog:
+        store = CredentialCatalogStore(self.execution.config.credential_catalog_database_path)
+        return CredentialCatalog(credentials=store.load_scope(scope))
+
+    def _plan_store(self) -> FilePlanStore[SSHTargetEnrollChangePlan]:
+        return FilePlanStore(
+            self._plans_dir("ssh-target-enrollments"),
+            SSHTargetEnrollChangePlan,
+            change_id_pattern=_SSH_TARGET_ENROLL_CHANGE_ID,
+            invalid_change_id_message="Invalid SSH target enrollment change id.",
+            missing_plan_message="SSH target enrollment change plan not found: {change_id}",
+        )
+
+    def _resolve_credential_scope(
+        self,
+        scope: OwnerScopeV1 | Literal["user", "team"] | None,
+    ) -> OwnerScopeV1:
+        owner = self.execution.owner
+        if scope is None or scope == "user":
+            return owner
+        if scope == "team":
+            return OwnerScopeV1(
+                scope_kind=OwnerScopeKind.TEAM,
+                owner_id=owner.team_id,
+                team_id=owner.team_id,
+            )
+        if scope.team_id != owner.team_id or (
+            scope != owner
+            and not (scope.scope_kind == OwnerScopeKind.TEAM and scope.owner_id == owner.team_id)
+        ):
+            raise PermissionError(
+                "Enrolled SSH target credentials must belong to the target owner or the team scope."
+            )
+        return scope
+
+    def _inspect_catalog_credentials(
+        self,
+        *,
+        credential_key: str,
+        credential_owner_scope: OwnerScopeV1,
+        requested_public_key_fingerprint: str | None,
+        bootstrap_credential_key: str | None,
+        bootstrap_credential_owner_scope: OwnerScopeV1 | None,
+    ) -> str | None:
+        if not _CREDENTIAL_KEY_PATTERN.fullmatch(credential_key):
+            raise ValueError("credential_key contains invalid characters.")
+        catalog = self._catalog_loader(scope=_catalog_scope(credential_owner_scope))
+        credential = catalog.credentials.get(credential_key)
+        if credential is None:
+            raise LookupError(
+                f"SSH credential {credential_key!r} is not registered in the "
+                f"{credential_owner_scope.scope_kind.value} credential catalog."
+            )
+        if "ssh_private_key" not in credential.fields:
+            raise ValueError(
+                f"SSH credential {credential_key!r} must include an 'ssh_private_key' field."
+            )
+        resolved_fp = requested_public_key_fingerprint
+        pub_field = credential.fields.get("ssh_public_key")
+        if pub_field is not None and not pub_field.is_secret() and (pub_field.value or "").strip():
+            _algo, catalog_fp = ssh_public_key_sha256_fingerprint(pub_field.value or "")
+            if resolved_fp is not None and resolved_fp != catalog_fp:
+                raise ValueError(
+                    "Requested credential_public_key_fingerprint does not match the catalog ssh_public_key metadata."
+                )
+            resolved_fp = catalog_fp
+
+        if bootstrap_credential_key is not None:
+            if not _CREDENTIAL_KEY_PATTERN.fullmatch(bootstrap_credential_key):
+                raise ValueError("bootstrap_credential_key contains invalid characters.")
+            assert bootstrap_credential_owner_scope is not None
+            boot_catalog = (
+                catalog
+                if bootstrap_credential_owner_scope == credential_owner_scope
+                else self._catalog_loader(scope=_catalog_scope(bootstrap_credential_owner_scope))
+            )
+            boot_cred = boot_catalog.credentials.get(bootstrap_credential_key)
+            if boot_cred is None:
+                raise LookupError(
+                    f"Bootstrap credential {bootstrap_credential_key!r} is not registered in the "
+                    f"{bootstrap_credential_owner_scope.scope_kind.value} credential catalog."
+                )
+            if "admin_password" not in boot_cred.fields:
+                raise ValueError(
+                    f"Bootstrap credential {bootstrap_credential_key!r} must include an 'admin_password' field."
+                )
+        return resolved_fp
+
+    def stage(
+        self,
+        *,
+        host: str,
+        username: str,
+        platform: SSHTargetPlatform | str,
+        host_key_public_key: str,
+        credential_key: str,
+        reason: str,
+        port: int = 22,
+        target_id: str | None = None,
+        host_key_fingerprint: str | None = None,
+        credential_owner_scope: OwnerScopeV1 | Literal["user", "team"] | None = None,
+        credential_public_key_fingerprint: str | None = None,
+        bootstrap_credential_key: str | None = None,
+        bootstrap_credential_owner_scope: OwnerScopeV1 | Literal["user", "team"] | None = None,
+        lifecycle: SSHTargetLifecycle | str = SSHTargetLifecycle.TEMPORARY,
+        expires_at_utc: datetime | None = None,
+    ) -> dict[str, Any]:
+        ssh_settings = self.execution.config.execution_control.ssh
+        if not ssh_settings.enabled:
+            raise RuntimeError("execution_control.ssh.enabled is false.")
+        binding = self._binding(reason)
+        policy = SSHNetworkPolicy.from_settings(ssh_settings)
+        validated_host = validate_ssh_host(
+            host,
+            port,
+            policy,
+            resolver=self._resolver,
+            local_address_checker=self._local_address_checker,
+        )
+        parsed_platform = SSHTargetPlatform(platform)
+        parsed_lifecycle = SSHTargetLifecycle(lifecycle)
+        normalized_target_id = str(target_id or "").strip() or new_id("ssh_tgt")
+        if not _TARGET_ID_PATTERN.fullmatch(normalized_target_id):
+            raise ValueError("target_id must contain only letters, numbers, underscore, dot, colon, or dash.")
+        self._ensure_target_id_available(normalized_target_id)
+
+        algorithm, derived_fingerprint = ssh_public_key_sha256_fingerprint(host_key_public_key)
+        if host_key_fingerprint is not None and host_key_fingerprint.strip() != derived_fingerprint:
+            raise ValueError("host_key_fingerprint does not match host_key_public_key.")
+
+        resolved_cred_scope = self._resolve_credential_scope(credential_owner_scope)
+        normalized_boot_key = str(bootstrap_credential_key or "").strip() or None
+        resolved_boot_scope = (
+            self._resolve_credential_scope(
+                bootstrap_credential_owner_scope
+                if bootstrap_credential_owner_scope is not None
+                else resolved_cred_scope
+            )
+            if normalized_boot_key is not None
+            else None
+        )
+        resolved_cred_fp = self._inspect_catalog_credentials(
+            credential_key=str(credential_key or "").strip(),
+            credential_owner_scope=resolved_cred_scope,
+            requested_public_key_fingerprint=credential_public_key_fingerprint,
+            bootstrap_credential_key=normalized_boot_key,
+            bootstrap_credential_owner_scope=resolved_boot_scope,
+        )
+
+        now = utc_now()
+        normalized_expiry: datetime | None = None
+        if expires_at_utc is not None:
+            if expires_at_utc.tzinfo is None:
+                raise ValueError("expires_at_utc must include a timezone.")
+            normalized_expiry = expires_at_utc.astimezone(timezone.utc)
+            if normalized_expiry <= now:
+                raise ValueError("Target expires_at_utc must be in the future.")
+        elif parsed_lifecycle == SSHTargetLifecycle.TEMPORARY:
+            raise ValueError("Temporary enrolled SSH targets require expires_at_utc.")
+
+        # Validate target fields and compute the exact immutable enrollment digest.
+        preview_target = self._build_preview_target(
+            target_id=normalized_target_id,
+            owner=binding["owner"],
+            host=validated_host.host,
+            port=validated_host.port,
+            username=username,
+            platform=parsed_platform,
+            host_key_algorithm=algorithm,
+            host_key_fingerprint=derived_fingerprint,
+            host_key_public_key=host_key_public_key.strip(),
+            credential_key=str(credential_key or "").strip(),
+            credential_owner_scope=resolved_cred_scope,
+            credential_public_key_fingerprint=resolved_cred_fp,
+            bootstrap_credential_key=normalized_boot_key,
+            bootstrap_credential_owner_scope=resolved_boot_scope,
+            lifecycle=parsed_lifecycle,
+            target_expires_at_utc=normalized_expiry,
+            reason=binding["reason"],
+        )
+        enrollment_digest = preview_target.enrollment_digest()
+        plan = SSHTargetEnrollChangePlan(
+            change_id=new_id(SSH_TARGET_ENROLL_CHANGE_PREFIX),
+            **binding,
+            target_id=normalized_target_id,
+            host=preview_target.host,
+            port=preview_target.port,
+            username=preview_target.username,
+            platform=preview_target.platform,
+            host_key_algorithm=preview_target.host_key_algorithm,
+            host_key_fingerprint=preview_target.host_key_fingerprint,
+            host_key_public_key=preview_target.host_key_public_key,
+            credential_key=preview_target.credential_key,
+            credential_owner_scope=preview_target.credential_owner_scope,
+            credential_public_key_fingerprint=preview_target.credential_public_key_fingerprint,
+            bootstrap_credential_key=preview_target.bootstrap_credential_key,
+            bootstrap_credential_owner_scope=preview_target.bootstrap_credential_owner_scope,
+            lifecycle=preview_target.lifecycle,
+            target_expires_at_utc=preview_target.expires_at_utc,
+            enrollment_digest=enrollment_digest,
+        )
+        plan = plan.model_copy(update={"plan_digest": model_digest(plan)})
+        self._plan_store().save(plan)
+        return self._staged(plan, self.describe(plan.change_id))
+
+    @staticmethod
+    def _build_preview_target(
+        *,
+        target_id: str,
+        owner: OwnerScopeV1,
+        host: str,
+        port: int,
+        username: str,
+        platform: SSHTargetPlatform,
+        host_key_algorithm: str,
+        host_key_fingerprint: str,
+        host_key_public_key: str,
+        credential_key: str,
+        credential_owner_scope: OwnerScopeV1,
+        credential_public_key_fingerprint: str | None,
+        bootstrap_credential_key: str | None,
+        bootstrap_credential_owner_scope: OwnerScopeV1 | None,
+        lifecycle: SSHTargetLifecycle,
+        target_expires_at_utc: datetime | None,
+        reason: str,
+    ) -> EnrolledSSHTargetV1:
+        preview_holder = AccessHolderV1(
+            agent_id="preview",
+            agent_type="preview",
+            person_id=owner.owner_id if owner.scope_kind == OwnerScopeKind.USER else None,
+        )
+        placeholder_activation = ActivationRecordV2.build(
+            kind=ExecutionActivationKind.SSH_TARGET_ENROLL,
+            resource_id=target_id,
+            resource_digest="0" * 64,
+            generation=1,
+            owner=owner,
+            operation=operation_id(EXECUTION_TOOL_ID, change_operation(SSH_TARGET_ENROLL_CHANGE_KIND)),
+            holder=preview_holder,
+            approval=ChangeApproval(
+                mode=ChangeApprovalMode.AGREEMENT,
+                approved_by="preview",
+                approved_at_utc=utc_now(),
+            ).to_record(),
+        )
+        raw = EnrolledSSHTargetV1.model_construct(
+            target_id=target_id,
+            owner=owner,
+            host=host,
+            port=port,
+            username=username,
+            platform=platform,
+            host_key_algorithm=host_key_algorithm,
+            host_key_fingerprint=host_key_fingerprint,
+            host_key_public_key=host_key_public_key,
+            credential_key=credential_key,
+            credential_owner_scope=credential_owner_scope,
+            credential_public_key_fingerprint=credential_public_key_fingerprint,
+            bootstrap_credential_key=bootstrap_credential_key,
+            bootstrap_credential_owner_scope=bootstrap_credential_owner_scope,
+            lifecycle=lifecycle,
+            expires_at_utc=target_expires_at_utc,
+            reason=reason,
+            activation=placeholder_activation,
+        )
+        digest = raw.enrollment_digest()
+        checked_activation = ActivationRecordV2.build(
+            kind=ExecutionActivationKind.SSH_TARGET_ENROLL,
+            resource_id=target_id,
+            resource_digest=digest,
+            generation=1,
+            owner=owner,
+            operation=operation_id(EXECUTION_TOOL_ID, change_operation(SSH_TARGET_ENROLL_CHANGE_KIND)),
+            holder=preview_holder,
+            approval=ChangeApproval(
+                mode=ChangeApprovalMode.AGREEMENT,
+                approved_by="preview",
+                approved_at_utc=utc_now(),
+            ).to_record(),
+            expires_at_utc=target_expires_at_utc,
+        )
+        return EnrolledSSHTargetV1(
+            target_id=target_id,
+            owner=owner,
+            host=host,
+            port=port,
+            username=username,
+            platform=platform,
+            host_key_algorithm=host_key_algorithm,
+            host_key_fingerprint=host_key_fingerprint,
+            host_key_public_key=host_key_public_key,
+            credential_key=credential_key,
+            credential_owner_scope=credential_owner_scope,
+            credential_public_key_fingerprint=credential_public_key_fingerprint,
+            bootstrap_credential_key=bootstrap_credential_key,
+            bootstrap_credential_owner_scope=bootstrap_credential_owner_scope,
+            lifecycle=lifecycle,
+            expires_at_utc=target_expires_at_utc,
+            reason=reason,
+            activation=checked_activation,
+        )
+
+    def _ensure_target_id_available(self, target_id: str) -> None:
+        if any(
+            item.target_id == target_id
+            for item in self.execution.config.execution_control.ssh.targets
+        ):
+            raise ValueError(f"SSH target id {target_id!r} conflicts with an operator-configured target.")
+        if self.execution.repository.get_ssh_target(
+            team_id=self.execution.owner.team_id, target_id=target_id
+        ) is not None:
+            raise ValueError(f"SSH target id {target_id!r} is already enrolled.")
+
+    def load_plan(self, change_id: str) -> SSHTargetEnrollChangePlan:
+        plan = self._plan_store().load(str(change_id or "").strip())
+        self._check_binding(plan)
+        return plan
+
+    def _verify_current(self, plan: SSHTargetEnrollChangePlan) -> None:
+        ssh_settings = self.execution.config.execution_control.ssh
+        if not ssh_settings.enabled:
+            raise RuntimeError("execution_control.ssh.enabled is false.")
+        if self.execution.repository.get_ssh_target(
+            team_id=plan.owner.team_id, target_id=plan.target_id
+        ) is not None:
+            raise FileExistsError(f"SSH target enrollment change {plan.change_id} was already applied.")
+        if any(item.target_id == plan.target_id for item in ssh_settings.targets):
+            raise PermissionError(
+                f"SSH target id {plan.target_id!r} now conflicts with an operator-configured target."
+            )
+        if plan.target_expires_at_utc is not None and plan.target_expires_at_utc <= utc_now():
+            raise PermissionError(
+                "The target expiry time passed before approval. Stage a fresh enrollment plan."
+            )
+        validate_ssh_host(
+            plan.host,
+            plan.port,
+            SSHNetworkPolicy.from_settings(ssh_settings),
+            resolver=self._resolver,
+            local_address_checker=self._local_address_checker,
+        )
+        self._inspect_catalog_credentials(
+            credential_key=plan.credential_key,
+            credential_owner_scope=plan.credential_owner_scope,
+            requested_public_key_fingerprint=plan.credential_public_key_fingerprint,
+            bootstrap_credential_key=plan.bootstrap_credential_key,
+            bootstrap_credential_owner_scope=plan.bootstrap_credential_owner_scope,
+        )
+
+    def describe(self, change_id: str) -> ChangeProposalV1:
+        plan = self.load_plan(change_id)
+        self._verify_current(plan)
+        verify_cmd = _host_key_verification_command(plan.platform, plan.host_key_algorithm)
+        lifecycle_line = (
+            f"Lifecycle: temporary — expires at {plan.target_expires_at_utc.isoformat()}."
+            if plan.lifecycle == SSHTargetLifecycle.TEMPORARY and plan.target_expires_at_utc is not None
+            else (
+                f"Lifecycle: persistent (expires at {plan.target_expires_at_utc.isoformat()})."
+                if plan.target_expires_at_utc is not None
+                else "Lifecycle: persistent until revoked by an administrator."
+            )
+        )
+        cred_line = (
+            f"Credential key: {plan.credential_key} (scope {_format_owner_scope(plan.credential_owner_scope)}"
+            + (
+                f", public key {plan.credential_public_key_fingerprint}"
+                if plan.credential_public_key_fingerprint
+                else ""
+            )
+            + ")."
+        )
+        effect = [
+            f"Enrolls SSH target {plan.target_id} for {plan.username}@{plan.host}:{plan.port} (platform: {plan.platform.value}).",
+            f"Pinned host key: {plan.host_key_algorithm} {plan.host_key_fingerprint}. Any future host-key mismatch fails closed.",
+            f"Verify on the target machine before approving: {verify_cmd}",
+            cred_line,
+        ]
+        if plan.bootstrap_credential_key is not None and plan.bootstrap_credential_owner_scope is not None:
+            effect.append(
+                f"Bootstrap credential key: {plan.bootstrap_credential_key} "
+                f"(scope {_format_owner_scope(plan.bootstrap_credential_owner_scope)}; usable only once if password bootstrap is approved)."
+            )
+        effect.extend(
+            [
+                lifecycle_line,
+                "Enrolling this host does not allow typing, commands, sudo, or password bootstrap; each session needs its own approval.",
+                f"Reason: {plan.reason}",
+                _STALE,
+            ]
+        )
+        return ChangeProposalV1(
+            kind=self.kind,
+            change_id=plan.change_id,
+            plan_digest=plan.plan_digest,
+            title=f"Enroll SSH target {plan.username}@{plan.host}:{plan.port} ({plan.platform.value})",
+            summary=summary_line(
+                f"Pin host key {plan.host_key_fingerprint} for {plan.username}@{plan.host}:{plan.port} "
+                f"({plan.lifecycle.value}) using Sealbox credential {plan.credential_key}."
+            ),
+            effect=tuple(line[:1000] for line in effect),
+        )
+
+    def apply(self, change_id: str, approval: ChangeApproval) -> dict[str, Any]:
+        """Persist the approved enrolled SSH target (only the change mechanism calls this)."""
+
+        plan = self.load_plan(change_id)
+        self._check_approval(plan, approval)
+        self._verify_current(plan)
+        activation = self._activation(
+            plan,
+            approval,
+            kind=ExecutionActivationKind.SSH_TARGET_ENROLL,
+            resource_id=plan.target_id,
+            resource_digest=plan.enrollment_digest,
+            generation=1,
+            expires_at_utc=plan.target_expires_at_utc,
+        )
+        record = EnrolledSSHTargetV1(
+            target_id=plan.target_id,
+            owner=plan.owner,
+            host=plan.host,
+            port=plan.port,
+            username=plan.username,
+            platform=plan.platform,
+            host_key_algorithm=plan.host_key_algorithm,
+            host_key_fingerprint=plan.host_key_fingerprint,
+            host_key_public_key=plan.host_key_public_key,
+            credential_key=plan.credential_key,
+            credential_owner_scope=plan.credential_owner_scope,
+            credential_public_key_fingerprint=plan.credential_public_key_fingerprint,
+            bootstrap_credential_key=plan.bootstrap_credential_key,
+            bootstrap_credential_owner_scope=plan.bootstrap_credential_owner_scope,
+            lifecycle=plan.lifecycle,
+            expires_at_utc=plan.target_expires_at_utc,
+            reason=plan.reason,
+            activation=activation,
+        )
+        if record.enrollment_digest() != plan.enrollment_digest:
+            raise PermissionError("Enrolled SSH target digest no longer matches the approved plan.")
+        saved = self.execution.repository.put_ssh_target(record)
+        self._audit(plan, "applied")
+        logger.info(
+            "Enrolled admin-approved SSH target. event=execution_ssh_target_enrolled "
+            "target_id=%s host=%s port=%s platform=%s lifecycle=%s",
+            saved.target_id,
+            saved.host,
+            saved.port,
+            saved.platform.value,
+            saved.lifecycle.value,
+        )
+        return {
+            "status": "applied",
+            "change_id": plan.change_id,
+            "plan_digest": plan.plan_digest,
+            "target": saved.model_dump(mode="json"),
+            "next_step": (
+                f"Create a session with create_execution_ssh_session(target_id='{saved.target_id}'), "
+                "then stage bounded capabilities with plan_execution_ssh_interaction."
+            ),
+        }
+
+
 class SSHInteractionChangeService(_ExecutionChanges):
-    """Let the agent type into one SSH session once a person approves."""
+    """Approve time-bounded SSH capabilities and optional single-task worker delegation for one session."""
 
     kind = SSH_INTERACTION_CHANGE_KIND
-    label = "SSH typing change"
+    label = "SSH delegation change"
 
     def _plan_store(self) -> FilePlanStore[SSHInteractionChangePlan]:
         return FilePlanStore(
             self._plans_dir("ssh-interactions"),
             SSHInteractionChangePlan,
             change_id_pattern=_SSH_INTERACTION_CHANGE_ID,
-            invalid_change_id_message="Invalid SSH typing change id.",
-            missing_plan_message="SSH typing change plan not found: {change_id}",
+            invalid_change_id_message="Invalid SSH delegation change id.",
+            missing_plan_message="SSH delegation change plan not found: {change_id}",
         )
 
-    def stage(self, *, session_id: str, reason: str) -> dict[str, Any]:
+    def _resolve_delegation_expiry(
+        self,
+        *,
+        expires_at_utc: datetime | None,
+        ttl_seconds: int | None,
+        now: datetime,
+    ) -> datetime:
+        max_ttl = self.execution.config.execution_control.ssh.max_delegation_ttl_seconds
+        if expires_at_utc is None and ttl_seconds is None:
+            raise ValueError(
+                "SSH session delegation requires a hard expiry (expires_at_utc or ttl_seconds)."
+            )
+        if expires_at_utc is not None and ttl_seconds is not None:
+            raise ValueError("Provide either expires_at_utc or ttl_seconds, not both.")
+        if ttl_seconds is not None:
+            if isinstance(ttl_seconds, bool) or ttl_seconds <= 0:
+                raise ValueError("ttl_seconds must be a positive integer.")
+            if ttl_seconds > max_ttl:
+                raise ValueError(
+                    f"Requested delegation TTL ({ttl_seconds}s) exceeds execution_control.ssh.max_delegation_ttl_seconds ({max_ttl}s)."
+                )
+            return now + timedelta(seconds=ttl_seconds)
+        assert expires_at_utc is not None
+        if expires_at_utc.tzinfo is None:
+            raise ValueError("expires_at_utc must include a timezone.")
+        normalized = expires_at_utc.astimezone(timezone.utc)
+        if normalized <= now:
+            raise ValueError("expires_at_utc must be in the future.")
+        if normalized > now + timedelta(seconds=max_ttl):
+            raise ValueError(
+                f"Requested delegation expires_at_utc exceeds execution_control.ssh.max_delegation_ttl_seconds ({max_ttl}s)."
+            )
+        return normalized
+
+    def _validate_target_capabilities(
+        self,
+        session: InteractiveSessionV1,
+        bounds: SSHDelegationBoundsV1,
+    ) -> None:
+        ssh_settings = self.execution.config.execution_control.ssh
+        if session.target.target_id is not None:
+            target = self.execution.usable_ssh_target(session.target.target_id)
+            if session.target != target.to_connection_target():
+                raise PermissionError(
+                    "The SSH session's target no longer matches the enrolled target record."
+                )
+            if bounds.allow_password_bootstrap:
+                if not ssh_settings.allow_password_bootstrap:
+                    raise PermissionError(
+                        "execution_control.ssh.allow_password_bootstrap is false; password bootstrap is disabled by operator policy."
+                    )
+                if target.bootstrap_credential_key is None:
+                    raise ValueError(
+                        "Password bootstrap requires an enrolled SSH target with a bootstrap_credential_key."
+                    )
+                if target.password_bootstrap_completed_at_utc is not None:
+                    raise PermissionError(
+                        "Password bootstrap has already completed and is permanently latched off for this target."
+                    )
+        elif bounds.allow_password_bootstrap:
+            raise ValueError(
+                "Password bootstrap is only supported for dynamically enrolled SSH targets."
+            )
+
+    def stage(
+        self,
+        *,
+        session_id: str,
+        reason: str,
+        expires_at_utc: datetime | None = None,
+        ttl_seconds: int | None = None,
+        delegated_agent_type: str | None = None,
+        delegated_task_id: str | None = None,
+        allow_commands: bool = False,
+        allow_typing: bool = False,
+        allow_password_bootstrap: bool = False,
+        allow_broker_sudo: bool = False,
+        allow_workspace_transfer: bool = False,
+        allowed_secret_recipes: tuple[SSHSecretRecipe | str, ...] = (),
+    ) -> dict[str, Any]:
         binding = self._binding(reason)
+        now = utc_now()
+        delegation_expiry = self._resolve_delegation_expiry(
+            expires_at_utc=expires_at_utc,
+            ttl_seconds=ttl_seconds,
+            now=now,
+        )
+        parsed_recipes = tuple(SSHSecretRecipe(recipe) for recipe in allowed_secret_recipes)
+        bounds = SSHDelegationBoundsV1(
+            delegated_agent_type=str(delegated_agent_type or "").strip() or None,
+            delegated_task_id=str(delegated_task_id or "").strip() or None,
+            allow_commands=bool(allow_commands),
+            allow_typing=bool(allow_typing),
+            allow_password_bootstrap=bool(allow_password_bootstrap),
+            allow_broker_sudo=bool(allow_broker_sudo),
+            allow_workspace_transfer=bool(allow_workspace_transfer),
+            allowed_secret_recipes=parsed_recipes,
+            reason=binding["reason"],
+        )
+        if not any(
+            (
+                bounds.allow_commands,
+                bounds.allow_typing,
+                bounds.allow_password_bootstrap,
+                bounds.allow_broker_sudo,
+                bounds.allow_workspace_transfer,
+            )
+        ):
+            raise ValueError(
+                "Enable at least one SSH capability flag (allow_commands, allow_typing, "
+                "allow_password_bootstrap, allow_broker_sudo, or allow_workspace_transfer)."
+            )
         session = self._session_that_can_open(session_id)
-        if self.execution.ssh_interaction(session.session_id) is not None:
-            raise ValueError("Typing into this session is already approved.")
+        existing = self.execution.ssh_interaction(session.session_id)
+        if existing is not None:
+            if existing.revoked_at_utc is not None:
+                raise PermissionError(
+                    "This SSH session's delegation was revoked; create a new session."
+                )
+            raise ValueError("Delegation for this SSH session is already approved.")
+        self._validate_target_capabilities(session, bounds)
+        resource_digest = ssh_interaction_resource_digest(
+            target_digest=session.target_digest, bounds=bounds
+        )
         plan = SSHInteractionChangePlan(
             change_id=new_id(SSH_INTERACTION_CHANGE_PREFIX),
             **binding,
             session_id=session.session_id,
             target=session.target,
             target_digest=session.target_digest,
+            delegation_expires_at_utc=delegation_expiry,
+            bounds=bounds,
+            resource_digest=resource_digest,
         )
         plan = plan.model_copy(update={"plan_digest": model_digest(plan)})
         self._plan_store().save(plan)
@@ -558,6 +1247,10 @@ class SSHInteractionChangeService(_ExecutionChanges):
 
     def _session_that_can_open(self, session_id: str) -> InteractiveSessionV1:
         session = self.execution.owned_session(session_id)
+        if self.execution.repository.get_interactive_session_revocation(
+            team_id=self.execution.owner.team_id, session_id=session.session_id
+        ) is not None:
+            raise PermissionError("This SSH session was revoked; create a new session.")
         if session.connect_activation is None:
             raise PermissionError("This SSH session cannot be opened any more; create a new session.")
         return session
@@ -568,41 +1261,113 @@ class SSHInteractionChangeService(_ExecutionChanges):
         return plan
 
     def _verify_current(self, plan: SSHInteractionChangePlan) -> InteractiveSessionV1:
-        """Not approved yet, and the session and its exact target unchanged."""
+        """Not approved/revoked yet, delegation expiry still valid, and session/target unchanged."""
 
-        if self.execution.ssh_interaction(plan.session_id) is not None:
-            raise FileExistsError(f"SSH typing change {plan.change_id} was already applied.")
+        existing = self.execution.ssh_interaction(plan.session_id)
+        if existing is not None:
+            if existing.revoked_at_utc is not None:
+                raise PermissionError(
+                    "This SSH session's delegation was revoked; create a new session."
+                )
+            raise FileExistsError(f"SSH delegation change {plan.change_id} was already applied.")
+        now = utc_now()
+        if plan.delegation_expires_at_utc <= now:
+            raise PermissionError(
+                "The requested SSH delegation expiry passed before approval. Stage a fresh plan."
+            )
+        max_ttl = self.execution.config.execution_control.ssh.max_delegation_ttl_seconds
+        if plan.delegation_expires_at_utc > now + timedelta(seconds=max_ttl):
+            raise PermissionError(
+                f"The requested SSH delegation expiry now exceeds execution_control.ssh.max_delegation_ttl_seconds ({max_ttl}s). Stage a fresh plan."
+            )
         session = self._session_that_can_open(plan.session_id)
         if session.target != plan.target or session.target_digest != plan.target_digest:
             raise PermissionError("The SSH session's target changed after planning. Stage a fresh plan.")
+        expected_digest = ssh_interaction_resource_digest(
+            target_digest=session.target_digest, bounds=plan.bounds
+        )
+        if plan.resource_digest != expected_digest:
+            raise PermissionError("The SSH delegation plan digest no longer matches its bounds.")
+        self._validate_target_capabilities(session, plan.bounds)
         return session
 
     def describe(self, change_id: str) -> ChangeProposalV1:
         plan = self.load_plan(change_id)
         self._verify_current(plan)
         target = plan.target
-        agent = plan.actor_named_agent_type
+        bounds = plan.bounds
+        acting_agent = bounds.delegated_agent_type or plan.actor_named_agent_type
+        enabled_caps: list[str] = []
+        if bounds.allow_commands:
+            enabled_caps.append("commands")
+        if bounds.allow_typing:
+            enabled_caps.append("interactive typing")
+        if bounds.allow_password_bootstrap:
+            enabled_caps.append("one-time password key bootstrap")
+        if bounds.allow_broker_sudo:
+            enabled_caps.append("broker-assisted sudo")
+        if bounds.allow_workspace_transfer:
+            enabled_caps.append("workspace bundle transfer")
+        caps_summary = ", ".join(enabled_caps)
+
+        def _flag(value: bool) -> str:
+            return "ALLOWED" if value else "disabled"
+
+        scope_line = (
+            f"Delegated agent type: {bounds.delegated_agent_type} (requested by {plan.actor_named_agent_type})"
+            if bounds.delegated_agent_type
+            else f"Allowed agent type: {plan.actor_named_agent_type} only"
+        )
+        task_line = (
+            f"Task restriction: limited to task {bounds.delegated_task_id} only."
+            if bounds.delegated_task_id
+            else "Task restriction: none (bounded by session lifetime and hard expiry)."
+        )
+        effect = [
+            (
+                f"Authorizes {acting_agent} on SSH session {plan.session_id} for "
+                f"{target.username}@{target.host}:{target.port} "
+                f"(pinned host key {target.host_key_algorithm} {target.host_key_fingerprint})."
+            ),
+            f"{scope_line}. {task_line}",
+            f"Hard expiry: {plan.delegation_expires_at_utc.isoformat()} (can be revoked immediately in Settings).",
+            (
+                "Capabilities: "
+                f"allow_commands={_flag(bounds.allow_commands)}, "
+                f"allow_typing={_flag(bounds.allow_typing)}, "
+                f"allow_password_bootstrap={_flag(bounds.allow_password_bootstrap)}, "
+                f"allow_broker_sudo={_flag(bounds.allow_broker_sudo)}, "
+                f"allow_workspace_transfer={_flag(bounds.allow_workspace_transfer)}."
+            ),
+        ]
+        if bounds.allow_broker_sudo:
+            recipes = (
+                ", ".join(recipe.value for recipe in bounds.allowed_secret_recipes)
+                if bounds.allowed_secret_recipes
+                else "none"
+            )
+            effect.append(f"Approved broker secret recipes (allowed_secret_recipes): {recipes}.")
+        if (
+            bounds.allow_password_bootstrap
+            or bounds.allow_broker_sudo
+            or bounds.allowed_secret_recipes
+        ):
+            effect.append(_REMOTE_HOST_SECRET_BOUNDARY_NOTE)
+        effect.extend([f"Reason: {plan.reason}", _STALE])
         return ChangeProposalV1(
             kind=self.kind,
             change_id=plan.change_id,
             plan_digest=plan.plan_digest,
-            title=f"Let {agent} type into an SSH session on {target.username}@{target.host}",
+            title=f"Approve SSH delegation ({caps_summary}) for {acting_agent} on {target.username}@{target.host}",
             summary=summary_line(
-                f"Let {agent} type commands into one SSH session as {target.username}@{target.host}, "
-                "with that account's rights."
+                f"Grant {acting_agent} {caps_summary} on {target.username}@{target.host} "
+                f"until {plan.delegation_expires_at_utc.isoformat()}."
             ),
-            effect=(
-                f"Lets {agent} type into SSH session {plan.session_id} as {target.username}@{target.host}:"
-                f"{target.port} (pinned host key {target.host_key_algorithm} {target.host_key_fingerprint}).",
-                "Whatever it types runs on that host with that account's rights, for as long as this "
-                "session exists. Other sessions need their own approval.",
-                f"Reason: {plan.reason}",
-                _STALE,
-            ),
+            effect=tuple(line[:1000] for line in effect),
         )
 
     def apply(self, change_id: str, approval: ChangeApproval) -> dict[str, Any]:
-        """Record the approved typing permission (only the change mechanism calls this)."""
+        """Record the approved bounded SSH delegation (only the change mechanism calls this)."""
 
         plan = self.load_plan(change_id)
         self._check_approval(plan, approval)
@@ -612,11 +1377,20 @@ class SSHInteractionChangeService(_ExecutionChanges):
             approval,
             kind=ExecutionActivationKind.SSH_INTERACT,
             resource_id=session.session_id,
-            resource_digest=session.target_digest,
+            resource_digest=plan.resource_digest,
             generation=1,
+            expires_at_utc=plan.delegation_expires_at_utc,
         )
-        saved = self.execution.repository.put_ssh_interaction(activation)
+        saved = self.execution.repository.put_ssh_interaction(activation, bounds=plan.bounds)
         self._audit(plan, "applied")
+        logger.info(
+            "Approved bounded SSH delegation. event=execution_ssh_delegation_approved "
+            "session_id=%s delegated_agent_type=%s delegated_task_id=%s expires_at_utc=%s",
+            session.session_id,
+            plan.bounds.delegated_agent_type or plan.actor_named_agent_type,
+            plan.bounds.delegated_task_id or "",
+            plan.delegation_expires_at_utc.isoformat(),
+        )
         return {
             "status": "applied",
             "change_id": plan.change_id,
@@ -624,7 +1398,8 @@ class SSHInteractionChangeService(_ExecutionChanges):
             "session_id": session.session_id,
             "interaction": saved.activation.model_dump(mode="json"),
             "bounds": saved.bounds.model_dump(mode="json") if saved.bounds is not None else None,
-            "next_step": "Type with write_execution_ssh_session; close the session when the task is done.",
+            "expires_at_utc": plan.delegation_expires_at_utc.isoformat(),
+            "next_step": "Use the approved SSH capabilities within the expiry window; close the session when the task is done.",
         }
 
 
@@ -634,8 +1409,12 @@ __all__ = [
     "MANAGED_SERVICE_CHANGE_PREFIX",
     "SSH_INTERACTION_CHANGE_KIND",
     "SSH_INTERACTION_CHANGE_PREFIX",
+    "SSH_TARGET_ENROLL_CHANGE_KIND",
+    "SSH_TARGET_ENROLL_CHANGE_PREFIX",
     "ManagedServiceChangePlan",
     "ManagedServiceChangeService",
     "SSHInteractionChangePlan",
     "SSHInteractionChangeService",
+    "SSHTargetEnrollChangePlan",
+    "SSHTargetEnrollChangeService",
 ]

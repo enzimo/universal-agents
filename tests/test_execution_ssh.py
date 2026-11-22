@@ -351,7 +351,14 @@ async def test_typing_waits_for_a_persons_approval_and_revoking_access_stops_the
     assert refused["error_code"] == "execution_access_refused"
     assert "plan_execution_ssh_interaction" in refused["error"]
 
-    staged = json.loads(tools.plan_execution_ssh_interaction._tool_func(session_id=session_id, reason="Deploy"))
+    staged = json.loads(
+        tools.plan_execution_ssh_interaction._tool_func(
+            session_id=session_id,
+            reason="Deploy",
+            ttl_seconds=600,
+            allow_typing=True,
+        )
+    )
     assert staged["status"] == "staged", staged
     assert staged["change_id"].startswith("ssh_interaction_")
     assert any(host_key_fingerprint() in line for line in staged["effect"])
@@ -393,7 +400,14 @@ async def test_with_authorization_off_agreement_allows_connecting_and_typing(lea
     await tools.open_execution_ssh_session._tool_func(session_id=session_id)
     assert "error" in await _type(session_id, "hello\n")
 
-    staged = json.loads(tools.plan_execution_ssh_interaction._tool_func(session_id=session_id, reason="Deploy"))
+    staged = json.loads(
+        tools.plan_execution_ssh_interaction._tool_func(
+            session_id=session_id,
+            reason="Deploy",
+            ttl_seconds=600,
+            allow_typing=True,
+        )
+    )
     needs_agreement = await _apply(staged["change_id"], ToolCall("tooluse_off"))
     applied = await _apply(staged["change_id"], ToolCall("tooluse_off"), confirmed=True)
 
@@ -418,3 +432,541 @@ async def test_a_session_is_used_only_for_the_person_it_was_created_for(lead: An
     refused = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=session["session_id"]))
 
     assert refused["error"] == "SSH session not found."
+
+
+# -- Checkpoint 6: Enrollment, Bounded Delegation, and ExecutionAccessGuard -------
+
+
+def _framed_ed25519_pub(seed: bytes = b"\x09" * 32) -> str:
+    import base64
+    import struct
+
+    wire = b"ssh-ed25519"
+    blob = struct.pack(">I", len(wire)) + wire + struct.pack(">I", len(seed)) + seed
+    return f"ssh-ed25519 {base64.b64encode(blob).decode('ascii')} test@host"
+
+
+def _seed_ssh_catalog(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    owner_scope: Any,
+    key_name: str = "build_mac_ssh_key",
+    boot_name: str | None = "build_mac_ssh_bootstrap",
+    pub_line: str | None = None,
+) -> str:
+    from secure_tool_broker import credential_catalog
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+        CredentialCatalog,
+    )
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(db_path))
+    key_pub = pub_line or _framed_ed25519_pub(b"\x11" * 32)
+    creds: dict[str, CatalogCredential] = {
+        key_name: CatalogCredential(
+            display_name="Build Mac SSH Key",
+            purpose="SSH key for build host",
+            fields={
+                "ssh_public_key": CatalogCredentialField(
+                    kind="custom",
+                    visibility="metadata_visible",
+                    value_source="user_provided",
+                    value=key_pub,
+                ),
+                "ssh_private_key": CatalogCredentialField(
+                    kind="credential_file",
+                    visibility="secret",
+                    value_source="existing_source",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_name=key_name, field_ref="ssh_private_key")
+                    ],
+                ),
+            },
+        )
+    }
+    if boot_name is not None:
+        creds[boot_name] = CatalogCredential(
+            display_name="Build Mac Bootstrap",
+            purpose="One-time bootstrap password",
+            fields={
+                "username": CatalogCredentialField(
+                    kind="username",
+                    visibility="metadata_visible",
+                    value_source="user_provided",
+                    value="admin",
+                ),
+                "admin_password": CatalogCredentialField(
+                    kind="password",
+                    visibility="secret",
+                    value_source="existing_source",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_name=boot_name, field_ref="admin_password")
+                    ],
+                ),
+            },
+        )
+    scope = (
+        CredentialOwnerScope.user(owner_scope.owner_id)
+        if owner_scope.scope_kind.value == "user"
+        else CredentialOwnerScope.team(owner_scope.team_id)
+    )
+    credential_catalog.save_catalog(CredentialCatalog(credentials=creds), scope=scope)
+    return key_pub
+
+
+@needs_cedar
+@pytest.mark.asyncio
+async def test_ssh_target_enrollment_and_bounded_delegation_end_to_end_with_real_cedar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A3 & A4: Real Cedar enrollment, Admin Inbox cards, non-admin refusal, and ExecutionAccessGuard."""
+
+    from access_control.entities import PersonPrincipal
+    from custom_agents import access_runtime
+    from custom_agents.execution_changes import (
+        SSHInteractionChangeService,
+        SSHTargetEnrollChangeService,
+    )
+    from custom_agents.execution_control_service import ExecutionControlService
+    from custom_messages.contracts.access_v2 import AccessReviewChoice
+    from runtime_hosting.authorization import SSHCallerContext, SSHCapability
+    from runtime_hosting.execution_contracts import (
+        SSHSecretRecipe,
+        SSHTargetLifecycle,
+        SSHTargetPlatform,
+        ssh_public_key_sha256_fingerprint,
+    )
+
+    use_signed_contexts(monkeypatch)
+    tools._SSH_BROKERS.clear()
+    instance = execution_instance(tmp_path, authorization_enabled=True)
+    instance.config.execution_control.ssh.max_delegation_ttl_seconds = 1800
+    instance.config.execution_control.ssh.allow_password_bootstrap = False
+    instance.config.save(instance.config_path)
+
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+    grant_execution(lead)
+
+    exec_service = ExecutionControlService(lead)
+    host_pub = _framed_ed25519_pub(b"\x22" * 32)
+    host_algo, host_fp = ssh_public_key_sha256_fingerprint(host_pub)
+    key_pub = _seed_ssh_catalog(
+        instance.config.credential_catalog_database_path,
+        monkeypatch,
+        owner_scope=exec_service.owner,
+    )
+    _, key_fp = ssh_public_key_sha256_fingerprint(key_pub)
+
+    # 1. Stage dynamic SSH target enrollment (using RFC 5737 public test IP 198.51.100.42).
+    enroll_service = SSHTargetEnrollChangeService(lead)
+    with pytest.raises(PermissionError, match="denied_cidrs|loopback"):
+        enroll_service.stage(
+            host="127.0.0.1",
+            port=22,
+            username="admin",
+            platform=SSHTargetPlatform.MACOS,
+            host_key_public_key=host_pub,
+            credential_key="build_mac_ssh_key",
+            lifecycle=SSHTargetLifecycle.TEMPORARY,
+            expires_at_utc=datetime.now(timezone.utc) + timedelta(hours=2),
+            reason="Should be refused by network guardrails",
+        )
+
+    target_expiry = datetime.now(timezone.utc) + timedelta(hours=2)
+    staged_target = enroll_service.stage(
+        target_id="build_mac_01",
+        host="198.51.100.42",
+        port=2222,
+        username="admin",
+        platform=SSHTargetPlatform.MACOS,
+        host_key_public_key=host_pub,
+        credential_key="build_mac_ssh_key",
+        bootstrap_credential_key="build_mac_ssh_bootstrap",
+        lifecycle=SSHTargetLifecycle.TEMPORARY,
+        expires_at_utc=target_expiry,
+        reason="Bootstrap headless build Mac",
+    )
+    assert staged_target["status"] == "staged"
+    assert staged_target["change_id"].startswith("ssh_target_enr_")
+    effect_text = "\n".join(staged_target["effect"])
+    assert "198.51.100.42:2222" in effect_text
+    assert "admin@198.51.100.42:2222" in effect_text
+    assert host_fp in effect_text
+    assert "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub" in effect_text
+    assert "build_mac_ssh_key" in effect_text
+    assert key_fp in effect_text
+    assert "build_mac_ssh_bootstrap" in effect_text
+    assert "temporary" in effect_text
+    assert "Bootstrap headless build Mac" in effect_text
+
+    # 2. Submit via apply_change -> pauses in Admin Inbox; non-admin member CANNOT approve!
+    enroll_call = ToolCall("tooluse_enroll")
+    with pytest.raises(InterruptException):
+        await _apply(staged_target["change_id"], enroll_call)
+    req = stored_request(lead, enroll_call)
+    assert req.change is not None and req.change.kind == "execution_ssh_target_enroll"
+
+    non_admin = PersonPrincipal("user_bob", lead.team_id, ("member",))
+    with pytest.raises(PermissionError):
+        access_runtime.runtime_requests(lead).decide(
+            enroll_call.request_id, non_admin, AccessReviewChoice.APPROVE
+        )
+
+    # Admin approves -> target persisted in execution_ssh_targets.
+    decide(lead, enroll_call)
+    applied_target = await _apply(staged_target["change_id"], enroll_call)
+    assert applied_target["status"] == "applied", applied_target
+    assert applied_target["result"]["target"]["target_id"] == "build_mac_01"
+    assert applied_target["result"]["target"]["host_key_algorithm"] == host_algo
+    assert applied_target["result"]["target"]["host_key_fingerprint"] == host_fp
+
+    # Replay after approval raises refused ("already applied"), even after latching bootstrap.
+    exec_service.repository.mark_ssh_target_password_bootstrap_completed(
+        team_id=lead.team_id, target_id="build_mac_01"
+    )
+    replay_enroll = await _apply(staged_target["change_id"], enroll_call)
+    assert replay_enroll["status"] == "refused" and "already applied" in replay_enroll["reason"]
+
+    # Wait: enroll a second unlatched target so we can also test password bootstrap guardrails.
+    staged_target2 = enroll_service.stage(
+        target_id="build_mac_02",
+        host="198.51.100.43",
+        port=22,
+        username="admin",
+        platform=SSHTargetPlatform.LINUX,
+        host_key_public_key=host_pub,
+        credential_key="build_mac_ssh_key",
+        bootstrap_credential_key="build_mac_ssh_bootstrap",
+        lifecycle=SSHTargetLifecycle.PERSISTENT,
+        reason="Linux bootstrap target",
+    )
+    enroll_call2 = ToolCall("tooluse_enroll2")
+    with pytest.raises(InterruptException):
+        await _apply(staged_target2["change_id"], enroll_call2)
+    decide(lead, enroll_call2)
+    applied_target2 = await _apply(staged_target2["change_id"], enroll_call2)
+    assert applied_target2["status"] == "applied"
+
+    # Enrolled targets appear in list_ssh_targets without exposing secrets, and sessions can be created.
+    targets = exec_service.list_ssh_targets()
+    enrolled_summary = next(item for item in targets if item["target_id"] == "build_mac_02")
+    assert enrolled_summary["source"] == "enrolled"
+    assert enrolled_summary["host_key_fingerprint"] == host_fp
+    assert enrolled_summary["credential_public_key_fingerprint"] == key_fp
+    session = exec_service.create_ssh_session(target_id="build_mac_02")
+    assert session.target.target_id == "build_mac_02"
+    assert session.target.credential_owner_scope == exec_service.owner
+    assert session.target.credential_public_key_fingerprint == key_fp
+
+    # 3. Delegation validation: mandatory expiry, TTL cap, default-false capabilities, operator bootstrap toggle.
+    interact_service = SSHInteractionChangeService(lead)
+    with pytest.raises(ValueError, match="hard expiry"):
+        interact_service.stage(session_id=session.session_id, reason="No expiry", allow_commands=True)
+    with pytest.raises(ValueError, match="max_delegation_ttl_seconds"):
+        interact_service.stage(
+            session_id=session.session_id,
+            reason="Too long",
+            ttl_seconds=3600,
+            allow_commands=True,
+        )
+    with pytest.raises(ValueError, match="Enable at least one"):
+        interact_service.stage(
+            session_id=session.session_id,
+            reason="No caps",
+            ttl_seconds=600,
+        )
+    with pytest.raises(PermissionError, match="allow_password_bootstrap is false"):
+        interact_service.stage(
+            session_id=session.session_id,
+            reason="Bootstrap while disabled",
+            ttl_seconds=600,
+            allow_password_bootstrap=True,
+        )
+
+    # 4. Stage bounded delegation to specialist worker for one task with sudo + tailscale_up recipe.
+    staged_del = interact_service.stage(
+        session_id=session.session_id,
+        reason="Join host to Tailscale",
+        ttl_seconds=900,
+        delegated_agent_type="HostBootstrapper",
+        delegated_task_id="work_task_42",
+        allow_commands=True,
+        allow_broker_sudo=True,
+        allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+    )
+    del_effect = "\n".join(staged_del["effect"])
+    assert "HostBootstrapper" in del_effect
+    assert "work_task_42" in del_effect
+    assert "allow_commands=ALLOWED" in del_effect
+    assert "allow_typing=disabled" in del_effect
+    assert "allow_password_bootstrap=disabled" in del_effect
+    assert "allow_broker_sudo=ALLOWED" in del_effect
+    assert "allow_workspace_transfer=disabled" in del_effect
+    assert "tailscale_up" in del_effect
+    assert "Security note:" in del_effect
+
+    # Non-admin member cannot approve bounded delegation in Inbox under real Cedar.
+    del_call = ToolCall("tooluse_del")
+    with pytest.raises(InterruptException):
+        await _apply(staged_del["change_id"], del_call)
+    with pytest.raises(PermissionError):
+        access_runtime.runtime_requests(lead).decide(
+            del_call.request_id, non_admin, AccessReviewChoice.APPROVE
+        )
+    decide(lead, del_call)
+    applied_del = await _apply(staged_del["change_id"], del_call)
+    assert applied_del["status"] == "applied", applied_del
+
+    # 5. ExecutionAccessGuard enforces caller type, task id, capability flags, recipes, expiry, and revocation.
+    guard = exec_service.access_guard()
+    stored_target = exec_service.repository.get_ssh_target(team_id=lead.team_id, target_id="build_mac_02")
+    stored_interaction = exec_service.ssh_interaction(session.session_id)
+    assert stored_target is not None and stored_interaction is not None
+
+    valid_worker = SSHCallerContext(agent_type="HostBootstrapper", task_id="work_task_42", person_id="user_alice")
+    guard.require_ssh_capability(
+        session, stored_interaction, capability=SSHCapability.CONNECT, caller=valid_worker, enrolled_target=stored_target
+    )
+    guard.require_ssh_capability(
+        session, stored_interaction, capability=SSHCapability.COMMAND, caller=valid_worker, enrolled_target=stored_target
+    )
+    guard.require_ssh_capability(
+        session,
+        stored_interaction,
+        capability=SSHCapability.BROKER_SUDO,
+        caller=valid_worker,
+        enrolled_target=stored_target,
+        secret_recipe=SSHSecretRecipe.TAILSCALE_UP,
+    )
+
+    # Unapproved capabilities refused.
+    for denied_cap in (
+        SSHCapability.TYPING,
+        SSHCapability.WORKSPACE_TRANSFER,
+        SSHCapability.PASSWORD_BOOTSTRAP,
+    ):
+        with pytest.raises(ExecutionAuthorizationDenied):
+            guard.require_ssh_capability(
+                session,
+                stored_interaction,
+                capability=denied_cap,
+                caller=valid_worker,
+                enrolled_target=stored_target,
+                allow_password_bootstrap_setting=True,
+            )
+
+    # Unauthorized agent types (another worker OR even TeamArchitect) and wrong task refused.
+    for bad_caller in (
+        None,
+        SSHCallerContext(agent_type="OtherWorker", task_id="work_task_42", person_id="user_alice"),
+        SSHCallerContext(agent_type="TeamArchitect", task_id="work_task_42", person_id="user_alice"),
+        SSHCallerContext(agent_type="HostBootstrapper", task_id="wrong_task", person_id="user_alice"),
+        SSHCallerContext(agent_type="HostBootstrapper", task_id="work_task_42", person_id="user_bob"),
+    ):
+        with pytest.raises(ExecutionAuthorizationDenied):
+            guard.require_ssh_capability(
+                session,
+                stored_interaction,
+                capability=SSHCapability.COMMAND,
+                caller=bad_caller,
+                enrolled_target=stored_target,
+            )
+
+    # Expired delegation refused.
+    with pytest.raises(ExecutionAuthorizationDenied, match="expired"):
+        guard.require_ssh_capability(
+            session,
+            stored_interaction,
+            capability=SSHCapability.COMMAND,
+            caller=valid_worker,
+            enrolled_target=stored_target,
+            now=datetime.now(timezone.utc) + timedelta(hours=2),
+        )
+
+    # Revoking the session immediately stops the guard, updates list_execution_ssh_sessions, and guides staging.
+    rev_state = exec_service.repository.revoke_interactive_session(
+        team_id=lead.team_id, session_id=session.session_id, revoked_by="user_alice"
+    )
+    with pytest.raises(ExecutionAuthorizationDenied, match="revoked"):
+        guard.require_ssh_capability(
+            session,
+            exec_service.ssh_interaction(session.session_id),
+            capability=SSHCapability.COMMAND,
+            caller=valid_worker,
+            enrolled_target=stored_target,
+            session_revocation=rev_state,
+        )
+    listed_sessions = json.loads(tools.list_execution_ssh_sessions._tool_func())
+    revoked_entry = next(s for s in listed_sessions["sessions"] if s["session_id"] == session.session_id)
+    assert revoked_entry["revoked"] is True
+    assert revoked_entry["delegation_active"] is False
+    assert revoked_entry["typing_approved"] is False
+
+    replan = json.loads(
+        tools.plan_execution_ssh_interaction._tool_func(
+            session_id=session.session_id,
+            reason="Try again",
+            ttl_seconds=300,
+            allow_commands=True,
+        )
+    )
+    assert "revoked" in replan["error"] and "new session" in replan["error"]
+
+    # Revoking the enrolled target stops target creation and guard checks.
+    revoked_target = exec_service.repository.revoke_ssh_target(
+        team_id=lead.team_id, target_id="build_mac_02", revoked_by="user_alice"
+    )
+    assert revoked_target is not None
+    with pytest.raises(ExecutionAuthorizationDenied, match="revoked"):
+        guard.require_ssh_target(revoked_target, session=session)
+    with pytest.raises(PermissionError, match="revoked"):
+        exec_service.create_ssh_session(target_id="build_mac_02")
+
+    set_agent_ref(None)
+    tools._SSH_BROKERS.clear()
+
+
+def test_execution_access_guard_password_bootstrap_latch_and_host_key_mismatch() -> None:
+    """A3 & A4: Guard refuses password bootstrap when disabled/latched and fails closed on host-key mismatch."""
+
+    from runtime_hosting.authorization import SSHCallerContext, SSHCapability
+    from runtime_hosting.execution_contracts import (
+        EnrolledSSHTargetV1,
+        SSHDelegationBoundsV1,
+        SSHTargetLifecycle,
+        SSHTargetPlatform,
+        ssh_interaction_resource_digest,
+        ssh_public_key_sha256_fingerprint,
+    )
+
+    host_pub = _framed_ed25519_pub(b"\x33" * 32)
+    other_pub = _framed_ed25519_pub(b"\x44" * 32)
+    algo, fp = ssh_public_key_sha256_fingerprint(host_pub)
+    _, other_fp = ssh_public_key_sha256_fingerprint(other_pub)
+    owner_scope = team_owner()
+    seed = {
+        "target_id": "ssh_tgt_guard_boot",
+        "owner": owner_scope,
+        "host": "198.51.100.77",
+        "port": 22,
+        "username": "admin",
+        "platform": SSHTargetPlatform.WINDOWS,
+        "host_key_algorithm": algo,
+        "host_key_fingerprint": fp,
+        "host_key_public_key": host_pub,
+        "credential_key": "win_ssh_key",
+        "credential_owner_scope": owner_scope,
+        "bootstrap_credential_key": "win_boot_cred",
+        "bootstrap_credential_owner_scope": owner_scope,
+        "lifecycle": SSHTargetLifecycle.PERSISTENT,
+        "expires_at_utc": None,
+        "reason": "Windows bootstrap guard check",
+    }
+    placeholder = build_activation(
+        ExecutionActivationKind.SSH_TARGET_ENROLL,
+        resource_id="ssh_tgt_guard_boot",
+        resource_digest="0" * 64,
+        owner_scope=owner_scope,
+        mode=ChangeApprovalMode.AGREEMENT,
+        function="change:execution_ssh_target_enroll",
+    )
+    digest = EnrolledSSHTargetV1.model_construct(activation=placeholder, **seed).enrollment_digest()
+    target = EnrolledSSHTargetV1(
+        activation=build_activation(
+            ExecutionActivationKind.SSH_TARGET_ENROLL,
+            resource_id="ssh_tgt_guard_boot",
+            resource_digest=digest,
+            owner_scope=owner_scope,
+            mode=ChangeApprovalMode.AGREEMENT,
+            function="change:execution_ssh_target_enroll",
+        ),
+        **seed,
+    )
+    conn = target.to_connection_target()
+    conn_digest = conn.calculate_digest()
+    session = InteractiveSessionV1(
+        session_id="ssh_sess_boot_guard",
+        owner=owner_scope,
+        target=conn,
+        target_digest=conn_digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_boot_guard",
+            resource_digest=conn_digest,
+            owner_scope=owner_scope,
+            mode=ChangeApprovalMode.AGREEMENT,
+            function="create_execution_ssh_session",
+        ),
+    )
+    bounds = SSHDelegationBoundsV1(allow_password_bootstrap=True)
+    interaction = SSHInteractionRecordV1(
+        activation=build_activation(
+            ExecutionActivationKind.SSH_INTERACT,
+            resource_id=session.session_id,
+            resource_digest=ssh_interaction_resource_digest(target_digest=conn_digest, bounds=bounds),
+            owner_scope=owner_scope,
+            mode=ChangeApprovalMode.AGREEMENT,
+            function="change:execution_ssh_interaction",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        ),
+        bounds=bounds,
+    )
+    caller = SSHCallerContext(agent_type="TeamArchitect", task_id="task_change", person_id="user_alice")
+
+    # Allowed when operator setting is True and target is unlatched.
+    _AGREEMENT_GUARD.require_ssh_capability(
+        session,
+        interaction,
+        capability=SSHCapability.PASSWORD_BOOTSTRAP,
+        caller=caller,
+        enrolled_target=target,
+        allow_password_bootstrap_setting=True,
+    )
+    # Refused when operator setting is False.
+    with pytest.raises(ExecutionAuthorizationDenied, match="allow_password_bootstrap is disabled"):
+        _AGREEMENT_GUARD.require_ssh_capability(
+            session,
+            interaction,
+            capability=SSHCapability.PASSWORD_BOOTSTRAP,
+            caller=caller,
+            enrolled_target=target,
+            allow_password_bootstrap_setting=False,
+        )
+    # Refused once permanently latched.
+    latched = target.model_copy(update={"password_bootstrap_completed_at_utc": datetime.now(timezone.utc)})
+    with pytest.raises(ExecutionAuthorizationDenied, match="permanently latched off"):
+        _AGREEMENT_GUARD.require_ssh_capability(
+            session,
+            interaction,
+            capability=SSHCapability.PASSWORD_BOOTSTRAP,
+            caller=caller,
+            enrolled_target=latched,
+            allow_password_bootstrap_setting=True,
+        )
+    # Refused if the enrolled target's pinned host key disagrees with the session's target.
+    tampered_conn = conn.model_copy(
+        update={"host_key_fingerprint": other_fp, "host_key_public_key": other_pub}
+    )
+    tampered_digest = tampered_conn.calculate_digest()
+    tampered_session = InteractiveSessionV1(
+        session_id="ssh_sess_boot_guard",
+        owner=owner_scope,
+        target=tampered_conn,
+        target_digest=tampered_digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_boot_guard",
+            resource_digest=tampered_digest,
+            owner_scope=owner_scope,
+            mode=ChangeApprovalMode.AGREEMENT,
+            function="create_execution_ssh_session",
+        ),
+    )
+    with pytest.raises(ExecutionAuthorizationDenied, match="pinned host key"):
+        _AGREEMENT_GUARD.require_ssh_target(target, session=tampered_session)

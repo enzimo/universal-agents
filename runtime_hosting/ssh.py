@@ -667,6 +667,7 @@ class SSHSessionBroker:
             material.argv_identity_file(),
             "-p",
             str(target.port),
+            "--",
             f"{target.username}@{target.host}",
             *remote_command,
         )

@@ -14,6 +14,7 @@ from enum import StrEnum
 import hashlib
 from pathlib import PurePosixPath
 import re
+import struct
 from typing import Any, Literal, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -191,8 +192,51 @@ SUPPORTED_SSH_SECRET_RECIPES: frozenset[SSHSecretRecipe] = frozenset(
 )
 
 
+def _validate_ssh_host_syntax(value: str) -> str:
+    """Reject leading dashes, control chars, whitespace, and option-like syntax in SSH hosts."""
+
+    cleaned = str(value or "").strip()
+    if not cleaned or len(cleaned) > 255:
+        raise ValueError("SSH host must be between 1 and 255 characters.")
+    if cleaned.startswith("-") or any(ord(ch) <= 32 or ord(ch) == 127 for ch in cleaned):
+        raise ValueError("SSH host must not start with '-' or contain whitespace/control characters.")
+    if any(ch in cleaned for ch in ("@", "/", "=", "?", "#")):
+        raise ValueError("SSH host contains disallowed characters.")
+    return cleaned
+
+
+def _validate_ssh_username(value: str) -> str:
+    """Reject leading dashes, whitespace, and control chars in SSH usernames (C36).
+
+    Permits standard Unix/macOS/Windows account characters including interior
+    dashes, dots, underscores, ``$`` and Windows domain backslashes (``DOMAIN\\user``).
+    """
+
+    cleaned = str(value or "").strip()
+    if not cleaned or len(cleaned) > 128:
+        raise ValueError("SSH username must be between 1 and 128 characters.")
+    if cleaned.startswith("-") or any(ord(ch) <= 32 or ord(ch) == 127 for ch in cleaned):
+        raise ValueError("SSH username must not start with '-' or contain whitespace/control characters.")
+    return cleaned
+
+
+def _credential_scope_allowed_for_owner(
+    *, owner: OwnerScopeV1, credential_scope: OwnerScopeV1
+) -> bool:
+    """A target or session may use only its own scope or its team's shared scope."""
+
+    if credential_scope.team_id != owner.team_id:
+        return False
+    if credential_scope == owner:
+        return True
+    return (
+        credential_scope.scope_kind == OwnerScopeKind.TEAM
+        and credential_scope.owner_id == owner.team_id
+    )
+
+
 def ssh_public_key_sha256_fingerprint(public_key_line: str) -> tuple[str, str]:
-    """Parse an OpenSSH public key line and return ``(algorithm, 'SHA256:<digest>')``."""
+    """Parse an OpenSSH public key line, validate its embedded wire key type, and return ``(algorithm, 'SHA256:<digest>')``."""
 
     cleaned = str(public_key_line or "").strip()
     if not cleaned or "\n" in cleaned or "\r" in cleaned:
@@ -205,8 +249,19 @@ def ssh_public_key_sha256_fingerprint(public_key_line: str) -> tuple[str, str]:
         key_bytes = base64.b64decode(encoded_key, validate=True)
     except (ValueError, binascii.Error) as exc:
         raise ValueError("SSH public key contains invalid base64 key data.") from exc
-    if not key_bytes:
-        raise ValueError("SSH public key blob must not be empty.")
+    if len(key_bytes) < 4:
+        raise ValueError("SSH public key blob is truncated.")
+    type_length = struct.unpack(">I", key_bytes[:4])[0]
+    if type_length == 0 or 4 + type_length > len(key_bytes):
+        raise ValueError("SSH public key blob has an invalid embedded key type length.")
+    try:
+        embedded_algorithm = key_bytes[4 : 4 + type_length].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("SSH public key blob has a non-ASCII embedded key type.") from exc
+    if embedded_algorithm != algorithm:
+        raise ValueError(
+            f"SSH public key algorithm {algorithm!r} does not match embedded key type {embedded_algorithm!r}."
+        )
     digest = base64.b64encode(hashlib.sha256(key_bytes).digest()).decode("ascii").rstrip("=")
     return algorithm, f"SHA256:{digest}"
 
@@ -903,7 +958,15 @@ class ManagedServiceV1(BaseModel):
 
 
 _SSH_TARGET_OPTIONAL_DIGEST_FIELDS = frozenset(
-    {"target_id", "platform", "host_key_public_key", "bootstrap_credential_binding_id"}
+    {
+        "target_id",
+        "platform",
+        "host_key_public_key",
+        "credential_owner_scope",
+        "credential_public_key_fingerprint",
+        "bootstrap_credential_binding_id",
+        "bootstrap_credential_owner_scope",
+    }
 )
 
 
@@ -931,7 +994,22 @@ class SSHConnectionTargetV1(BaseModel):
     target_id: str | None = Field(default=None, min_length=1, max_length=240)
     platform: SSHTargetPlatform | None = None
     host_key_public_key: str | None = Field(default=None, min_length=16, max_length=4096)
+    credential_owner_scope: OwnerScopeV1 | None = None
+    credential_public_key_fingerprint: str | None = Field(
+        default=None, pattern=r"^SHA256:[A-Za-z0-9+/]{16,}={0,2}$"
+    )
     bootstrap_credential_binding_id: str | None = Field(default=None, min_length=1, max_length=240)
+    bootstrap_credential_owner_scope: OwnerScopeV1 | None = None
+
+    @field_validator("host", mode="after")
+    @classmethod
+    def _validate_host(cls, value: str) -> str:
+        return _validate_ssh_host_syntax(value)
+
+    @field_validator("username", mode="after")
+    @classmethod
+    def _validate_username(cls, value: str) -> str:
+        return _validate_ssh_username(value)
 
     @model_validator(mode="after")
     def _validate_target(self) -> Self:
@@ -941,6 +1019,21 @@ class SSHConnectionTargetV1(BaseModel):
                 raise ValueError(
                     "SSH target host_key_public_key does not match host_key_algorithm and host_key_fingerprint."
                 )
+        if (
+            self.bootstrap_credential_owner_scope is not None
+            and self.bootstrap_credential_binding_id is None
+        ):
+            raise ValueError(
+                "bootstrap_credential_owner_scope requires bootstrap_credential_binding_id."
+            )
+        if (
+            self.credential_owner_scope is not None
+            and self.bootstrap_credential_owner_scope is not None
+            and self.credential_owner_scope.team_id != self.bootstrap_credential_owner_scope.team_id
+        ):
+            raise ValueError(
+                "SSH target credential scopes must belong to the same team."
+            )
         return self
 
     def calculate_digest(self) -> str:
@@ -1017,6 +1110,8 @@ class SSHInteractionRecordV1(BaseModel):
     def _validate_record(self) -> Self:
         if self.activation.kind != ExecutionActivationKind.SSH_INTERACT:
             raise ValueError("SSH interaction record requires an SSH_INTERACT activation.")
+        if self.bounds is not None and self.activation.expires_at_utc is None:
+            raise ValueError("Bounded SSH delegation requires activation.expires_at_utc.")
         if self.revoked_at_utc is not None:
             _require_aware(self.revoked_at_utc, field_name="revoked_at_utc")
         return self
@@ -1054,12 +1149,12 @@ class EnrolledSSHTargetV1(BaseModel):
     host_key_algorithm: str = Field(min_length=1, max_length=64)
     host_key_fingerprint: str = Field(pattern=r"^SHA256:[A-Za-z0-9+/]{16,}={0,2}$")
     host_key_public_key: str = Field(min_length=16, max_length=4096)
-    credential_key: str = Field(min_length=1, max_length=240)
+    credential_key: str = Field(min_length=1, max_length=232)
     credential_owner_scope: OwnerScopeV1
     credential_public_key_fingerprint: str | None = Field(
         default=None, pattern=r"^SHA256:[A-Za-z0-9+/]{16,}={0,2}$"
     )
-    bootstrap_credential_key: str | None = Field(default=None, min_length=1, max_length=240)
+    bootstrap_credential_key: str | None = Field(default=None, min_length=1, max_length=232)
     bootstrap_credential_owner_scope: OwnerScopeV1 | None = None
     lifecycle: SSHTargetLifecycle = SSHTargetLifecycle.TEMPORARY
     expires_at_utc: datetime | None = None
@@ -1071,6 +1166,16 @@ class EnrolledSSHTargetV1(BaseModel):
     activation: ActivationRecordV2
     created_at_utc: datetime = Field(default_factory=utc_now)
     updated_at_utc: datetime = Field(default_factory=utc_now)
+
+    @field_validator("host", mode="after")
+    @classmethod
+    def _validate_host(cls, value: str) -> str:
+        return _validate_ssh_host_syntax(value)
+
+    @field_validator("username", mode="after")
+    @classmethod
+    def _validate_username(cls, value: str) -> str:
+        return _validate_ssh_username(value)
 
     @model_validator(mode="after")
     def _validate_enrolled_target(self) -> Self:
@@ -1089,20 +1194,23 @@ class EnrolledSSHTargetV1(BaseModel):
             raise ValueError(
                 "Enrolled SSH target host_key_public_key does not match host_key_algorithm and host_key_fingerprint."
             )
-        if self.credential_owner_scope.team_id != self.owner.team_id:
-            raise ValueError("Enrolled SSH target credential owner scope must belong to the same team.")
+        if not _credential_scope_allowed_for_owner(
+            owner=self.owner, credential_scope=self.credential_owner_scope
+        ):
+            raise ValueError(
+                "Enrolled SSH target credential owner scope must match the target owner or its team scope."
+            )
         if (self.bootstrap_credential_key is None) != (
             self.bootstrap_credential_owner_scope is None
         ):
             raise ValueError(
                 "bootstrap_credential_key and bootstrap_credential_owner_scope must be set together."
             )
-        if (
-            self.bootstrap_credential_owner_scope is not None
-            and self.bootstrap_credential_owner_scope.team_id != self.owner.team_id
+        if self.bootstrap_credential_owner_scope is not None and not _credential_scope_allowed_for_owner(
+            owner=self.owner, credential_scope=self.bootstrap_credential_owner_scope
         ):
             raise ValueError(
-                "Enrolled SSH target bootstrap credential owner scope must belong to the same team."
+                "Enrolled SSH target bootstrap credential owner scope must match the target owner or its team scope."
             )
         if self.lifecycle == SSHTargetLifecycle.TEMPORARY and self.expires_at_utc is None:
             raise ValueError("Temporary enrolled SSH targets require expires_at_utc.")
@@ -1162,18 +1270,31 @@ class EnrolledSSHTargetV1(BaseModel):
             target_id=self.target_id,
             platform=self.platform,
             host_key_public_key=self.host_key_public_key,
+            credential_owner_scope=self.credential_owner_scope,
+            credential_public_key_fingerprint=self.credential_public_key_fingerprint,
             bootstrap_credential_binding_id=(
                 f"catalog:{self.bootstrap_credential_key}"
                 if self.bootstrap_credential_key is not None
                 else None
             ),
+            bootstrap_credential_owner_scope=self.bootstrap_credential_owner_scope,
         )
+
+    def effective_status(self, *, now: datetime | None = None) -> SSHTargetStatus:
+        """Return computed status, surfacing expired temporary targets as EXPIRED."""
+
+        current = now or utc_now()
+        if self.status == SSHTargetStatus.REVOKED or self.revoked_at_utc is not None:
+            return SSHTargetStatus.REVOKED
+        if self.status == SSHTargetStatus.EXPIRED or (
+            self.expires_at_utc is not None and current >= self.expires_at_utc
+        ):
+            return SSHTargetStatus.EXPIRED
+        return SSHTargetStatus.ACTIVE
 
     def is_usable(self, *, now: datetime | None = None) -> bool:
         current = now or utc_now()
-        if self.status != SSHTargetStatus.ACTIVE or self.revoked_at_utc is not None:
-            return False
-        if self.expires_at_utc is not None and current >= self.expires_at_utc:
+        if self.effective_status(now=current) != SSHTargetStatus.ACTIVE:
             return False
         return self.activation.is_active(now=current)
 
@@ -1214,6 +1335,24 @@ class InteractiveSessionV1(BaseModel):
         expected = self.target.calculate_digest()
         if self.target_digest != expected:
             raise ValueError("SSH target digest mismatch.")
+        if (
+            self.target.credential_owner_scope is not None
+            and not _credential_scope_allowed_for_owner(
+                owner=self.owner, credential_scope=self.target.credential_owner_scope
+            )
+        ):
+            raise ValueError(
+                "SSH session target credential scope is not reachable from this session owner."
+            )
+        if (
+            self.target.bootstrap_credential_owner_scope is not None
+            and not _credential_scope_allowed_for_owner(
+                owner=self.owner, credential_scope=self.target.bootstrap_credential_owner_scope
+            )
+        ):
+            raise ValueError(
+                "SSH session target bootstrap credential scope is not reachable from this session owner."
+            )
         if (
             self.status in {InteractiveSessionStatus.CONNECTING, InteractiveSessionStatus.OPEN}
             and self.connect_activation is None

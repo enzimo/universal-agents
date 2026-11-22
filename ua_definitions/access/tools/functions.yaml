@@ -474,6 +474,7 @@ tools:
       list_execution_ssh_sessions: read
     changes:
       managed_execution_service: full
+      execution_ssh_target_enroll: full
       execution_ssh_interaction: full
 
   - tool_id: fn:capabilities

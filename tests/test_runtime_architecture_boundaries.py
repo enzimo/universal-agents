@@ -24,6 +24,7 @@ CHANGE_SERVICES = (
     ("custom_agents/skill_uninstallation.py", "SkillUninstallationService"),
     ("custom_agents/mcp_hosting_changes.py", "HostedMCPServerChangeService"),
     ("custom_agents/execution_changes.py", "ManagedServiceChangeService"),
+    ("custom_agents/execution_changes.py", "SSHTargetEnrollChangeService"),
     ("custom_agents/execution_changes.py", "SSHInteractionChangeService"),
     ("custom_agents/system_schedule_changes.py", "SystemScheduleChangeService"),
 )
