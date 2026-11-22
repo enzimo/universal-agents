@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 # The missing step of a tool that needs setup.
 STEP_SIGN_IN: Final = "sign_in"
 STEP_ACCOUNT_LINK: Final = "account_link"
+STEP_GATE_LINK: Final = "gate_link"
 STEP_TEAM_SIGN_IN_APP: Final = "team_sign_in_app"
 STEP_ACCESS: Final = "access"
 # Who can do the missing step.
@@ -51,6 +52,7 @@ FIXED_BY_ADMINISTRATOR: Final = "administrator"
 HOW_SIGNED_IN: Final = "signed_in"
 HOW_OWN_LINK: Final = "own_link"
 HOW_TEAM_LINK: Final = "team_link"
+HOW_GATE_LINK: Final = "gate_link"
 # Who recorded a state.
 SOURCE_TOOL_CALL: Final = "tool_call"
 SOURCE_SETUP_CHECK: Final = "setup_check"
@@ -69,11 +71,13 @@ SETUP_FAILURE_CODES: Final[Mapping[str, str]] = {
     "google_unauthorized_client": STEP_SIGN_IN,
     "google_token_rejected": STEP_SIGN_IN,
     "account_link_missing": STEP_ACCOUNT_LINK,
+    "account_link_outdated": STEP_ACCOUNT_LINK,
+    "gate_link_missing": STEP_GATE_LINK,
     "google_oauth_client_missing": STEP_TEAM_SIGN_IN_APP,
     "x_client_missing": STEP_TEAM_SIGN_IN_APP,
     "x_client_invalid": STEP_TEAM_SIGN_IN_APP,
 }
-_ADMINISTRATOR_STEPS = frozenset({STEP_TEAM_SIGN_IN_APP, STEP_ACCESS})
+_ADMINISTRATOR_STEPS = frozenset({STEP_TEAM_SIGN_IN_APP, STEP_ACCESS, STEP_GATE_LINK})
 MAX_DESCRIBED_TOOLS = 8
 
 Clock = Callable[[], datetime]
@@ -103,8 +107,15 @@ def verdict_from_status(entry: Mapping[str, Any]) -> dict[str, Any] | None:
     ``how``/``account_label`` or ``step``.
     """
 
-    if not entry.get("known") or entry.get("account_mode") == "none":
+    if not entry.get("known"):
         return None
+    gate = entry.get("gate")
+    if entry.get("account_mode") == "none" and gate is None:
+        return None
+    if gate is not None and gate.get("state") != "configured":
+        return {"state": ToolSetupState.NEEDS_SETUP, "step": STEP_GATE_LINK}
+    if entry.get("account_mode") == "none":
+        return {"state": ToolSetupState.READY, "how": HOW_GATE_LINK, "account_label": None}
     link = entry.get("link") or {}
     sign_in = entry.get("sign_in")
     if sign_in is not None:
@@ -117,6 +128,8 @@ def verdict_from_status(entry: Mapping[str, Any]) -> dict[str, Any] | None:
         if sign_in.get("state") == "missing":
             return {"state": ToolSetupState.NEEDS_SETUP, "step": STEP_SIGN_IN}
         return {"state": ToolSetupState.UNKNOWN}
+    if link.get("own_outdated"):
+        return {"state": ToolSetupState.NEEDS_SETUP, "step": STEP_ACCOUNT_LINK}
     if link.get("own"):
         return {"state": ToolSetupState.READY, "how": HOW_OWN_LINK, "account_label": None}
     if link.get("team"):
@@ -277,10 +290,16 @@ def safely(action: Callable[[], Any], /, *, what: str, **ids: Any) -> None:
 _STEP_WORDS = {
     STEP_SIGN_IN: "needs the person's sign-in",
     STEP_ACCOUNT_LINK: "needs an account link",
+    STEP_GATE_LINK: "needs the team's gate credential (an administrator)",
     STEP_TEAM_SIGN_IN_APP: "needs the team's sign-in app (an administrator)",
     STEP_ACCESS: "the person has no access (an administrator)",
 }
-_HOW_WORDS = {HOW_SIGNED_IN: "signed in", HOW_OWN_LINK: "own account linked", HOW_TEAM_LINK: "team account"}
+_HOW_WORDS = {
+    HOW_SIGNED_IN: "signed in",
+    HOW_OWN_LINK: "own account linked",
+    HOW_TEAM_LINK: "team account",
+    HOW_GATE_LINK: "team gate linked",
+}
 
 
 def _when(moment: datetime | None, now: datetime) -> str:
@@ -320,6 +339,7 @@ def describe_states(states: Iterable[ToolSetupStateV1], names: Mapping[str, str]
 __all__ = [
     "FIXED_BY_ADMINISTRATOR",
     "FIXED_BY_PERSON",
+    "HOW_GATE_LINK",
     "HOW_OWN_LINK",
     "HOW_SIGNED_IN",
     "HOW_TEAM_LINK",
@@ -331,6 +351,7 @@ __all__ = [
     "SOURCE_TOOL_CALL",
     "STEP_ACCESS",
     "STEP_ACCOUNT_LINK",
+    "STEP_GATE_LINK",
     "STEP_SIGN_IN",
     "STEP_TEAM_SIGN_IN_APP",
     "ToolSetupStates",

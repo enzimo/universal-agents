@@ -153,7 +153,7 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
-@pytest.mark.parametrize("exported_version", [5, 6, 7, 8, 9, 10, 11])
+@pytest.mark.parametrize("exported_version", [5, 6, 7, 8, 9, 10, 11, 12])
 def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defaults(
     tmp_path: Path, exported_version: int
 ) -> None:
@@ -227,6 +227,40 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
     )
     assert imported.transport.queues == QueueSettings()
     assert outcomes["transport.replicas"].outcome is RecordOutcome.IMPORT and imported.transport.replicas == 1
+    from default_values import DEFAULT_API_REQUEST_USER_AGENT
+
+    assert imported.security_layer.api_request_user_agent == DEFAULT_API_REQUEST_USER_AGENT
+
+
+def test_api_request_user_agent_moves_with_the_team(tmp_path: Path) -> None:
+    import yaml
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    # Default (unset) instances do not write api_request_user_agent or export it as a team choice.
+    default_root = tmp_path / "default_inst"
+    default_path, _default_cfg = _old_instance(default_root)
+    raw_default = yaml.safe_load(default_path.read_text(encoding="utf-8"))
+    assert "api_request_user_agent" not in raw_default["security_layer"]
+    default_out = _export(default_root, default_path)
+    assert "security_layer.api_request_user_agent" not in {record.dotted for record in _records(default_out)}
+
+    # An explicit override is saved and carried by the transfer.
+    def custom_ua(config: Any) -> None:
+        config.security_layer.api_request_user_agent = "CustomTeamUA/1.0"
+
+    path, _config = _old_instance(tmp_path, custom_ua)
+    raw_custom = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw_custom["security_layer"]["api_request_user_agent"] == "CustomTeamUA/1.0"
+    out = _export(tmp_path, path)
+    assert {record.dotted: record.value for record in _records(out)} == {
+        "security_layer.api_request_user_agent": "CustomTeamUA/1.0",
+    }
+    target = tmp_path / "new"
+    plan = _import(out, target, dry_run=False)
+    assert not plan.by_outcome(RecordOutcome.REFUSED)
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert imported.security_layer.api_request_user_agent == "CustomTeamUA/1.0"
 
 
 def _queue_choices(config: Any) -> None:

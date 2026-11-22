@@ -569,7 +569,7 @@ def test_access_imported_under_a_new_id_belongs_to_the_new_team(tmp_path: Path) 
     assert grants["g_data"].subject.id == agent_type_id(NEW, "TeamArchitect")
     assert grants["g_data"].granted_by == OWNER
     assert [folder.path for folder in store.data_folders(NEW)] == [str(datasets)]
-    assert [link.link_id for link in store.list_links(NEW)] == ["link_github_ana"]
+    assert [link.link_id for link in store.list_links(NEW, purpose=None)] == ["link_github_ana"]
     assert store.person_settings(NEW, "usr_ana").uses_team_keys is False
     assert store.profile_choice(NEW, "usr_ben") == ("standard", "person")
 

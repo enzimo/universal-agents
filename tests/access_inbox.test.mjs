@@ -688,7 +688,7 @@ test("ticking Keep sends keep true, and a proposal sends the rows it keeps", asy
   const proposal = review({
     request_id: "req-p", kind: "change", title: "TeamArchitect asks to make a change: add Portainer",
     rows: [
-      { item_id: "tool-1", section: "tool", text: "New tool Portainer at portainer.example.test", flags: ["new_host"] },
+      { item_id: "tool-1", section: "tool", text: "New tool Portainer at portainer.example.test", flags: ["new_host", "credential_to_new_host"] },
       { item_id: "grant-1", section: "access", text: "TeamArchitect: read and change Portainer", keepable: true,
         flags: ["can_hand_on"] },
       { item_id: "grant-2", section: "access", text: "BackgroundOperationsAgent: read and change Portainer",
@@ -701,6 +701,8 @@ test("ticking Keep sends keep true, and a proposal sends the rows it keeps", asy
   const card = f.requestList.children[0];
   const sections = byClass(card, "access-review-row-section").map(node => node.textContent);
   assert.deepEqual(sections, ["New tools", "Access", "Credentials to link"]);
+  const flagTexts = byClass(card, "access-review-flag").map(node => node.textContent);
+  assert.ok(flagTexts.includes("Credentials to new host"));
   const boxes = byTag(card, "input");
   assert.equal(boxes.length, 2);
   assert.deepEqual(boxes.map(box => box.checked), [true, true], "each row asked to keep");
@@ -1567,4 +1569,33 @@ test("Settings Inbox clears handed-off pages prompt when framed form finishes wh
   assert.equal(byTag(requestList.children[0], "a").length, 0);
   assert.equal(byClass(requestList.children[0], "access-review-follow-up-note").length, 0);
   assert.equal(intervals.size, 0);
+});
+
+test("tool-change rows render under Tool changes (not New tools) with widened-block and credential-host flags", () => {
+  const document = fakeDocument();
+  const proposal = review({
+    request_id: "req-tool-change",
+    kind: "change",
+    title: "TeamArchitect asks to make a change: Update Gitea",
+    summary: "Access proposal: change 1 tool (includes a new host, stored credentials sent to a new host, a restriction that will block a whole tool). Takes effect when approved.",
+    rows: [
+      { item_id: "change-0", section: "tool_change", text: "Change web API tool Gitea (http:gitea): updates hosts, routes.", flags: [] },
+      { item_id: "change-0-host-added-0", section: "tool_change", text: "Add host to Gitea (http:gitea): mirror.example.net.", flags: ["new_host", "credential_to_new_host"] },
+      { item_id: "change-0-widened-block-0", section: "tool_change", text: "Block blk-1 on Gitea (http:gitea) widens to the whole tool.", flags: ["block_widened"] },
+      { item_id: "change-0-moved-block-0", section: "tool_change", text: "Block blk-2 on Gitea (http:gitea) now covers GET /status instead of DELETE /repos/{x}.", flags: ["block_moved"] },
+    ],
+    choices: [{ choice: "approve", label: "Approve" }, { choice: "deny", label: "Deny" }],
+  });
+  const card = renderReviewCard(document, proposal, { formatTime });
+  const sections = byClass(card, "access-review-row-section").map(node => node.textContent);
+  assert.deepEqual(sections, ["Tool changes"]);
+  assert.ok(!sections.includes("New tools"));
+  const flags = byClass(card, "access-review-flag").map(node => node.textContent);
+  assert.deepEqual(flags, ["New host", "Credentials to new host", "Block widens to whole tool", "Blocked route changes"]);
+
+  const compact = renderReviewCard(document, proposal, { formatTime, compact: true });
+  const compactFlags = byClass(compact, "access-review-flag").map(node => node.textContent);
+  assert.ok(compactFlags.includes("Credentials to new host"));
+  assert.ok(compactFlags.includes("Block widens to whole tool"));
+  assert.ok(compactFlags.includes("Blocked route changes"));
 });

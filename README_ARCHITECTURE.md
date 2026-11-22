@@ -2743,13 +2743,40 @@ grant's record (`GrantV1.approval_id`), which is how grants travel, so the
 transfer format does not change either.
 
 When nobody can hand the access on, or a service is missing from the tool
-catalog, TeamLead proposes the whole change with `propose_access_change`
+catalog (or an existing proposal-written web API tool needs updated hosts,
+routes, injections, or a team gate credential), TeamLead proposes the whole
+change with `propose_access_change`
 (`custom_tools/providers/access_proposals.py`, catalog `fn:access_proposals`):
-typed items for new web API tools, grants for agent types, restrictions, data
-folders, account links and revocations (`AccessProposalV1`), never code or
-policy text. `access_control/proposals.py` (`ProposalCompiler`) checks every
-item against the catalog as it would be with the new tools and writes the
-review rows in trusted code's words, flagging items that widen access. The
+typed items for new web API tools, changes to existing proposal-written web API
+tools (`tool_changes`, `ProposedHttpToolChangeV1`), grants for agent types,
+restrictions, data folders, account or team gate links (`link_purpose`) and
+revocations (`AccessProposalV1`), never code or policy text.
+`access_control/proposals.py` (`ProposalCompiler`) checks every item against
+the catalog as it would be with the new and changed tools and writes the review
+rows in trusted code's words, flagging items that widen access. For
+`tool_changes`, `with_tool_change_baselines` pins the current file's SHA-256
+(`load_changeable_tool_file` refuses built-in tools, operator hand-written
+files, and files carrying operator-only settings `ProposedHttpToolV1` cannot
+express), and `access_control/tool_change_diffs.py` describes every field
+difference under the `tool_change` review section (**Tool changes** in the
+Inbox), flags `credential_to_new_host` (**Credentials to new host**) when a new
+host would receive active linked credentials, flags `block_widened` (**Block
+widens to whole tool**) when removing or renaming a route widens an active
+one-operation block to the whole tool, flags `block_moved` (**Blocked route
+changes**) when changing a blocked route's method or path moves an active block
+off the request it was written for, and names any account or gate links that
+must be linked again. All web API tool `hosts` (in `ToolDefinitionV1`,
+`ProposedHttpToolV1`, and `ProposedHttpToolChangeV1`) are normalized and
+validated by `custom_messages/contracts/access_v2.py::validate_host_name`:
+exact ASCII names up to 253 characters, single trailing dot removed, with
+dot-separated labels of 1 to 63 ASCII characters that start and end with an
+ASCII letter or digit and allow `-` and `_` only inside labels (refusing
+non-ASCII hosts with a punycode suggestion and refusing labels starting or
+ending with `-` or `_`). With authorization off, `apply_by_agreement` returns
+the same diff rows on `confirmed=false` for the person to read and applies the
+change on `confirmed=true`, like a new tool; the owner chose not to make the
+agent confirm what it saw a second time. The replacement still refuses if the
+file changed between reading its baseline and writing it. The
 proposal is one change request on a platform tool at `full`, so an
 administrator decides it and the Inbox, chat buttons, workflow linking,
 withdrawal and resume work as for any change.
@@ -2763,21 +2790,26 @@ example from `assistant_cli access decide`, is refused. Why at the decision:
 only the gateway holds the reviewer's verified roles at that moment, so it can
 check each item against the reviewer's own authority, and nobody would be
 waiting to apply a file a person sent. The proposal applier re-reads the stored
-plan, compares its digest with the one reviewed, writes any new tool file to
-`control/access/tools/` from the typed item (`access_catalog/instance_tools.py`,
-only `http:*` tools), reloads the catalog, and stores grants, blocks, data
-folders, revocations and the request outcome in one transaction
+plan, compares its digest with the one reviewed, re-verifies every
+`tool_changes` file against its pinned SHA-256, writes any new tool file and
+atomically replaces changed `proposed-*.yaml` files in `control/access/tools/`
+(`access_catalog/instance_tools.py`, `write_instance_tool` /
+`replace_instance_tool`), journaling replacements via
+`access_control/decision_effects.py` (`ReplacedFile`, published inside
+`decision_effect_transaction`), reloads the catalog, and stores grants, blocks,
+data folders, revocations and the request outcome in one transaction
 (`AccessRepository.apply_together`) under the decision's claim; if anything
-fails, including a busy database, the tool files, downloaded programs and MCP
-servers it wrote are taken back, so nothing is half applied. Because the claim
-is held from before the first file is written and renewed around each
+fails, including a busy database, the new tool files, replaced files (restored
+to their recorded bytes unless modified externally), downloaded programs and
+MCP servers it wrote are taken back, so nothing is half applied. Because the
+claim is held from before the first file is written and renewed around each
 download, a second approval of the same proposal is refused while the first
-works; if the first stalls past its limit and the second takes over, the
-first keeps the programs the second may rely on (see "Each request is decided
-once"). A tool with no
-grants gives nobody anything, which is why writing its file first is safe. Afterwards the gateway opens the broker's
-account link form for the approver, tracks each opened form in memory by
-`request_id` scoped strictly to that approver (`assistant_gateway/proposal_follow_ups.py`,
+works; if the first stalls past its limit and the second takes over, the first
+keeps the programs the second may rely on (see "Each request is decided once").
+A tool with no grants gives nobody anything, which is why writing its file
+first is safe. Afterwards the gateway opens the broker's account or gate link
+form for the approver, tracks each opened form in memory by `request_id`
+scoped strictly to that approver (`assistant_gateway/proposal_follow_ups.py`,
 `ProposalFollowUpTracker`), watches it with the tool setup watcher
 (`GatewayToolSetups.after_proposal_links`, which reports each form's ending via
 `on_form_ended`), and holds the decision message to
@@ -2856,7 +2888,8 @@ can stop access at once; `/access block team internet` turns internet access
 off. A block naming an operation the catalog no longer has (an update renamed
 or merged it) blocks its whole tool (`access_control.stale_blocks`, applied in
 `AccessService._evaluate`), and the gateway tells administrators about each
-one at start, so a rename never lifts a block. Standard catalog functions are
+one at start — and `ProposalApplier` immediately after applying a proposed web
+API tool change — so a rename never lifts a block. Standard catalog functions are
 withdrawn from Strands' startup registry as well as its dynamic registry;
 unblocking restores them before the next model call. A person who may remove
 the stale block can narrow it with `/access block ... --replace <block id>`:
@@ -3114,30 +3147,63 @@ agent's MCP client gives to the model (`custom_agents/sdk/strands/mcp.py`).
 Rationale: installing a server is a team decision, like a new web API tool,
 while using it is each person's decision for their own work.
 
-Credentials are chosen by account links, not by agents. A link says which
-stored credential one tool uses for the team or for one person, and where each
-credential field goes (a header, query value or environment variable). The
-broker uses the person's own link first, then the team's, and sends the value
-only to the tool's hosts or MCP connection. People create links in the broker's
-labeled form (`/link <tool>` in chat, or a setup page TeamLead opens); a link
-grants no access by itself. The form (`secure_tool_broker/account_links.py`) either links
+Credentials are chosen by account links, not by agents. A link
+(`AccountLinkV1`, with `purpose` set to `account` or `gate`) says which stored
+credential one tool uses for the team or for one person, and where each
+credential field goes (a header, query value, environment variable, or file).
+For account links, the broker uses the person's own link first, then the
+team's, and sends the value only to the tool's hosts or MCP connection. Web API
+tools (`http:*`) may also declare `gate_injections` (header or query only,
+allowed with or without `account: linked_credential`) for team infrastructure
+gates such as Cloudflare rules. A gate link (`purpose=gate`) is always
+team-owned, created only by an administrator (`/link <tool_id> gate` or from an
+approved proposal), independent of account sharing, and injected alongside any
+account credential. `credential.api_request` reserves both account and gate
+header/query names against agent overrides, redacts gate values regardless of
+stored field visibility, and sets a configurable browser-like default
+`User-Agent` (`security_layer.api_request_user_agent`, defaulting to Chrome's
+reduced Linux string used by Helium) whenever the request provides none. Before
+sending any request, `BrokerAccessGate` checks `injections_match`
+(`canonical_injections`, normalizing order, header-name case, and default
+`{value}` template across http, MCP, and installed CLI tools): a link whose
+stored injections differ from the tool's current `credential_injections` or
+`gate_injections` is refused with `account_link_outdated` and the exact `/link`
+command, and a tool with `gate_injections` and no active gate link is refused
+with `gate_link_missing` and `/link <tool_id> gate`, marking the tool
+`needs_setup`. The one exception is a sign-in tool with an optional team
+fallback link (`cli:x`): if the team's fallback link is outdated,
+`BrokerAccessGate` skips it and logs `event=broker_team_link_outdated` so
+callers with their own X sign-in keep working, while a person without their own
+X sign-in receives X's usual no-account result. People create links in the
+broker's labeled form (`/link <tool> [me|team|gate]` in chat, or a setup page
+TeamLead opens); a link grants no access by itself. The form
+(`secure_tool_broker/account_links.py`) pins the tool's shown hosts and
+canonical injections (`PinnedLinkDefinition`) on the session and in a hidden
+`definition_digest` field; if the tool's definition changes while the form is
+open, `link_account` refuses the submission with
+`account_link_definition_changed` (logging
+`event=account_link_definition_changed`), stores no credential or link, and
+names the `/link` command to reopen the form. Otherwise the form either links
 a stored credential that has every field the tool needs or saves a new one the
 person types, through the broker's own store path (`collect_credential`, in the
-team's collection for a team link and the person's for their own), and links it
-in the same submission, so one form finishes the job. A new credential gets a
-key made from the tool and owner and a number when that key is taken, so it
-never replaces a stored credential. One link per tool and owner is active:
-creating one reads and revokes the earlier link in the same transaction, and a
-partial unique index refuses a second active link. A store that held two from
-before the index (two forms finished at once) keeps the newest, the one in use,
-and revokes the older at the first start, logging
-`event=account_link_duplicate_revoked`; otherwise unlinking the newest would
-have put the older credential back in use. The form's **Used by** line is read by the
-broker from the grant store it already holds (agent-side grants in force that
-reach the tool for the owner's work). It is shown for information only, and the
-access service still decides every call. The broker reads it itself rather than
-taking it from the gateway, so the form request contract stays the same and
-every caller sees the same line.
+team's collection for a team or gate link and the person's for their own), and
+links it in the same submission, so one form finishes the job. A new credential
+gets a key made from the tool, owner, and purpose (suffix `-gate` for gate
+links) and a number when that key is taken, so it never replaces a stored
+credential. One link per tool, owner, and purpose is active: creating one reads
+and revokes the earlier link in the same transaction, and a partial unique
+index (`access_account_links_one_active_purpose`) refuses a second active link
+for the same `(team_id, tool_id, owner_kind, owner_id, purpose)`. Older stores
+add the `purpose` column in place on open (existing rows become `account`) and
+upgrade the index. A store that held two from before the index (two forms
+finished at once) keeps the newest, the one in use, and revokes the older at
+the first start, logging `event=account_link_duplicate_revoked`; otherwise
+unlinking the newest would have put the older credential back in use. The
+form's **Used by** line is read by the broker from the grant store it already
+holds (agent-side grants in force that reach the tool for the owner's work). It
+is shown for information only, and the access service still decides every call.
+The broker reads it itself rather than taking it from the gateway, so the form
+request contract stays the same and every caller sees the same line.
 
 Whether the team's account serves everyone is the team's choice per service
 (`access_control.account_sharing`, owner's decisions 2026-10-08). A tool that
@@ -6035,8 +6101,12 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   Later batches require its receipt and the exact same signed
   export. Imported identities are skipped and existing destination records
   kept; a chat that already has a current session keeps it, and the plan
-  lists the imported session that was current in the export. Account links match by team, owner and tool, since a newer link has a
-  new ID; a file holding two for one tool and owner (from a store before the
+  lists the imported session that was current in the export. Account links
+  match by team, owner, tool, and purpose (`access` v4, converting v3 exports
+  on import; `gate_injections` travel inside the tool files in `team_tools` v1,
+  and `security_layer.api_request_user_agent` travels in `settings` v13,
+  converting v12 exports on import), since a newer link has a new ID; a file
+  holding two for one tool, owner, and purpose (from a store before the
   one-active-link index) has the older refused with the newer named. All
   active destination chat bindings, including removed people's, participate in
   collision checks through a separate read-only identity query.

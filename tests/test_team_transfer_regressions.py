@@ -359,11 +359,53 @@ def test_later_account_link_import_keeps_the_destinations_current_account(tmp_pa
         plan = import_team(reader, target, dry_run=False, sections=sections,
                            choices={"access": {"account_link/link_old"}},
                            allow_existing=True, require_valid=True)
-        current = store.active_link(TEAM, link.tool_id, link.owner_kind, link.owner_id)
+        current = store.active_link(TEAM, link.tool_id, link.owner_kind, link.owner_id, purpose=link.purpose)
         assert (current.link_id, current.credential_key) == ("link_new", "new_credential")
         assert store.get_link("link_old") is None
         assert any(row.key == "account_link/link_old" and "kept" in row.reason
                    for row in plan.skipped_records)
+
+
+def test_destination_identity_keeps_team_account_and_gate_links_distinct() -> None:
+    from custom_messages.contracts.access_v2 import (
+        AccountLinkV1,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkOwnerKind,
+        LinkPurpose,
+        SubjectKind,
+        SubjectRefV1,
+    )
+    from team_transfer.selection import destination_identity
+
+    now = datetime.now(timezone.utc)
+    actor = SubjectRefV1(kind=SubjectKind.USER, id="usr_owner")
+    account = AccountLinkV1(
+        link_id="link_acct",
+        team_id=TEAM,
+        tool_id="http:gitea",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEAM,
+        purpose=LinkPurpose.ACCOUNT,
+        credential_key="gitea_acct",
+        created_by=actor,
+        created_at_utc=now,
+    )
+    gate = AccountLinkV1(
+        link_id="link_gate",
+        team_id=TEAM,
+        tool_id="http:gitea",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEAM,
+        purpose=LinkPurpose.GATE,
+        credential_key="gitea_gate",
+        injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="secret"),),
+        created_by=actor,
+        created_at_utc=now,
+    )
+    assert destination_identity("access", {"kind": "account_link", "record_id": "link_acct", "document": account.model_dump(mode="json")}) != (
+        destination_identity("access", {"kind": "account_link", "record_id": "link_gate", "document": gate.model_dump(mode="json")})
+    )
 
 
 @pytest.mark.parametrize("membership", ["active", "removed", "absent"])

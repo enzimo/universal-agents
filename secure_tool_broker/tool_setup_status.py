@@ -31,7 +31,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from access_control.account_sharing import TeamAccountSharing
-from custom_messages.contracts.access_v2 import AccountMode, LinkOwnerKind, ToolDefinitionV1
+from custom_messages.contracts.access_v2 import (
+    AccountMode,
+    LinkOwnerKind,
+    LinkPurpose,
+    ToolDefinitionV1,
+    injections_match,
+)
 from secure_tool_broker.credential_state import credential_owner_context
 from secure_tools.auth_methods import X_SIGN_IN_PROVIDER, ToolSignIn, tool_sign_in
 from secure_tools.providers import ToolContext
@@ -43,6 +49,7 @@ TOOL_SETUP_PROVIDER = "tool_setup"
 MAX_TOOLS = 12
 SIGNED_IN = "signed_in"
 MISSING = "missing"
+OUTDATED = "outdated"
 UNKNOWN = "unknown"
 CONFIGURED = "configured"
 NOT_NEEDED = "not_needed"
@@ -119,11 +126,37 @@ def _link_state(gate: Any, tool: ToolDefinitionV1, person_id: str) -> dict[str, 
     if links is None:
         return {"own": False, "team": False}
     team_id = gate.team_id
-    team_used = TeamAccountSharing(links, team_id).team_account_used(tool)
-    return {
-        "own": links.active_link(team_id, tool.tool_id, LinkOwnerKind.PERSON, person_id) is not None,
-        "team": team_used and links.active_link(team_id, tool.tool_id, LinkOwnerKind.TEAM, team_id) is not None,
-    }
+    owners = TeamAccountSharing(links, team_id).link_owners(tool)
+    own_link = (
+        links.active_link(team_id, tool.tool_id, LinkOwnerKind.PERSON, person_id, purpose=LinkPurpose.ACCOUNT)
+        if LinkOwnerKind.PERSON in owners
+        else None
+    )
+    team_link = (
+        links.active_link(team_id, tool.tool_id, LinkOwnerKind.TEAM, team_id, purpose=LinkPurpose.ACCOUNT)
+        if LinkOwnerKind.TEAM in owners
+        else None
+    )
+    own_matches = own_link is not None and injections_match(own_link.injections, tool.credential_injections)
+    team_matches = team_link is not None and injections_match(team_link.injections, tool.credential_injections)
+    state: dict[str, bool] = {"own": own_matches, "team": team_matches}
+    if own_link is not None and not own_matches:
+        state["own_outdated"] = True
+    if team_link is not None and not team_matches:
+        state["team_outdated"] = True
+    return state
+
+
+def _gate_link_state(gate: Any, tool: ToolDefinitionV1) -> dict[str, str]:
+    links = gate.links
+    if links is None:
+        return {"state": MISSING}
+    active = links.active_link(gate.team_id, tool.tool_id, LinkOwnerKind.TEAM, gate.team_id, purpose=LinkPurpose.GATE)
+    if active is None:
+        return {"state": MISSING}
+    if not injections_match(active.injections, tool.gate_injections):
+        return {"state": OUTDATED}
+    return {"state": CONFIGURED}
 
 
 def tool_status_entry(tool_id: str, person_id: str, gate: Any) -> dict[str, Any]:
@@ -142,6 +175,8 @@ def tool_status_entry(tool_id: str, person_id: str, gate: Any) -> dict[str, Any]
         entry["sign_in"] = _sign_in_state(sign_in, person_id, gate.team_id)
     if tool.account is AccountMode.LINKED_CREDENTIAL:
         entry["link"] = _link_state(gate, tool, person_id)
+    if tool.gate_injections:
+        entry["gate"] = _gate_link_state(gate, tool)
     return entry
 
 

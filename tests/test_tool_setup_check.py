@@ -368,3 +368,103 @@ async def test_two_missing_sign_ins_are_two_pieces_of_one_workflow(world, monkey
     # One sign-in alone needs no workflow.
     single = await _check(world, monkeypatch, tool_ids=["cli:github"])
     assert not needs_workflow(plan_run(single["tools"], CatalogSource(None).current(), is_admin=True).pieces)
+
+
+@pytest.mark.asyncio
+async def test_gate_tool_setup_check_reports_missing_outdated_and_configured_gate(
+    world, monkeypatch, tmp_path: Path
+) -> None:
+    from access_catalog.instance_tools import write_instance_tool
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        AccountLinkV1,
+        CredentialInjectionV1,
+        HttpRouteV1,
+        InjectionPlacement,
+        LinkPurpose,
+        ProposedHttpToolV1,
+        SubjectKind,
+        SubjectRefV1,
+    )
+    from datetime import datetime, timezone
+
+    instance_root = tmp_path / "gate_instance"
+    write_instance_tool(
+        instance_root,
+        ProposedHttpToolV1(
+            tool_id="http:gated_docs",
+            display_name="Gated Docs",
+            description="Public docs behind a team gate.",
+            hosts=("docs.example.com",),
+            uses_credential=False,
+            gate_injections=(
+                CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate-Key", field="gate_key"),
+            ),
+            routes=(HttpRouteV1(name="docs.read", method="GET", path="/**", level=AccessLevel.READ),),
+        ),
+    )
+    catalogs = CatalogSource(instance_root)
+    world.gate.catalogs = catalogs
+    world.gate.access = None
+    agent = _lead(world, roles=("member",), enabled=False)
+    agent.instance_root = instance_root
+    access_runtime._runtime_access.cache_clear()
+
+    # Missing gate: not ready, administrator step names /link http:gated_docs gate, plan_run stops.
+    missing = await _check(world, monkeypatch, tool_ids=["http:gated_docs"])
+    [report] = missing["tools"]
+    assert report["ready"] is False
+    assert report["gate"] == {"state": "missing"}
+    gate_step = _steps(report)["team_gate_link"]
+    assert gate_step["who"] == "administrator"
+    assert gate_step["fix_with"] == "tell_person_and_stop"
+    assert "/link http:gated_docs gate" in gate_step["say"]
+    assert report["known_state"]["missing_step"] == "gate_link"
+    plan = plan_run(missing["tools"], catalogs.current(), is_admin=False)
+    assert plan.stops and "/link http:gated_docs gate" in plan.stops[0]
+
+    # Outdated gate: reports outdated and names /link http:gated_docs gate.
+    world.store.create_link(
+        AccountLinkV1(
+            link_id="link_docs_gate_old",
+            team_id=TEAM,
+            tool_id="http:gated_docs",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="docs_gate",
+            injections=(
+                CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Old-Gate", field="gate_key"),
+            ),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="admin-1"),
+            created_at_utc=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        )
+    )
+    outdated = await _check(world, monkeypatch, tool_ids=["http:gated_docs"])
+    [outdated_report] = outdated["tools"]
+    assert outdated_report["ready"] is False
+    assert outdated_report["gate"] == {"state": "outdated"}
+    assert "older tool definition" in _steps(outdated_report)["team_gate_link"]["say"]
+    assert "/link http:gated_docs gate" in _steps(outdated_report)["team_gate_link"]["say"]
+
+    # Matching gate: ready.
+    tool_def = catalogs.current().tools["http:gated_docs"]
+    world.store.create_link(
+        AccountLinkV1(
+            link_id="link_docs_gate_new",
+            team_id=TEAM,
+            tool_id="http:gated_docs",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="docs_gate",
+            injections=tool_def.gate_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="admin-1"),
+            created_at_utc=datetime(2026, 11, 2, tzinfo=timezone.utc),
+        )
+    )
+    ready = await _check(world, monkeypatch, tool_ids=["http:gated_docs"])
+    [ready_report] = ready["tools"]
+    assert ready_report["ready"] is True
+    assert ready_report["gate"] == {"state": "configured"}
+    assert ready_report["known_state"]["state"] == "ready"

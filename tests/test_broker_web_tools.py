@@ -204,6 +204,70 @@ def test_brave_without_a_link_fails_with_the_link_commands(broker, agent) -> Non
     assert Path(payload["artifact_dir"], "manifest.json").is_file()
 
 
+def test_outdated_brave_and_crawl4ai_links_give_relink_hints_not_missing_key_hints(
+    broker, agent, monkeypatch
+) -> None:
+    from datetime import datetime, timezone
+
+    from custom_messages.contracts.access_v2 import (
+        AccountLinkV1,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkOwnerKind,
+    )
+    from custom_tools.web_research_artifact_tools import brave_llm_context_artifact
+    from custom_tools.web_service_tools import capture_web_screenshot
+
+    assert broker.gate.links is not None
+    # Outdated personal Brave link -> must tell the person to link again, never suggest /link ... team.
+    broker.gate.links.create_link(
+        AccountLinkV1(
+            link_id="account_link_person_brave_old",
+            team_id=TEST_TEAM,
+            tool_id="http:brave-search",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id="user-1",
+            credential_key="brave_old",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Old-Brave", field="api_key"),),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+            created_at_utc=datetime.now(timezone.utc),
+        )
+    )
+    brave_result = brave_llm_context_artifact("outdated brave link")
+    brave_payload = json.loads(_text(brave_result))
+    assert brave_result["status"] == "error"
+    assert brave_payload["failure_stage"] == "authentication"
+    assert brave_payload["failure_reason"] == "account_link_outdated"
+    assert any("/link http:brave-search." in hint for hint in brave_payload["mitigation_hints"])
+    assert not any("/link http:brave-search team" in hint for hint in brave_payload["mitigation_hints"])
+
+    # Outdated team Crawl4AI link -> must tell an administrator to link the team's account again.
+    monkeypatch.setenv("CRAWL4AI_BASE_URL", CRAWL4AI_URL)
+    broker.gate.links.create_link(
+        AccountLinkV1(
+            link_id="account_link_team_crawl4ai_old",
+            team_id=TEST_TEAM,
+            tool_id="http:crawl4ai",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEST_TEAM,
+            credential_key="crawl4ai_old",
+            injections=(
+                CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Old-Token", field="api_token"),
+            ),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+            created_at_utc=datetime.now(timezone.utc),
+        )
+    )
+    crawl_result = capture_web_screenshot(url="https://example.com", width_px=8, height_px=6)
+    crawl_payload = json.loads(_text(crawl_result))
+    assert crawl_result["status"] == "error"
+    assert crawl_payload["failure_stage"] == "authentication"
+    assert crawl_payload["failure_reason"] == "account_link_outdated"
+    assert any("/link http:crawl4ai team." in hint for hint in crawl_payload["mitigation_hints"])
+    assert not any("links their own" in hint for hint in crawl_payload["mitigation_hints"])
+    assert broker.sent == []
+
+
 def _png(width: int, height: int) -> bytes:
     def chunk(kind: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)

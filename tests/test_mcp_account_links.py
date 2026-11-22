@@ -269,3 +269,121 @@ async def test_a_missing_account_link_is_not_hidden_from_the_loader(monkeypatch)
     monkeypatch.setattr(provider, "_post", AsyncMock(side_effect=PermissionError("No account is linked")))
     with pytest.raises(PermissionError, match="No account is linked"):
         await provider.load_tools()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_mcp_outdated_link_is_refused_and_discards_cached_clients_while_lowercase_header_matches(
+    tmp_path, monkeypatch
+) -> None:
+    from custom_messages.contracts.access_v2 import CredentialInjectionV1
+    from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_OUTDATED
+    from secure_tool_broker.mcp_runtime import MCPAccessRefused
+
+    app, queues, called = mock_crawl4ai()
+    async with TestServer(app) as server:
+        config, record, store, broker_config = prepare(tmp_path, monkeypatch, str(server.make_url("/mcp/sse")))
+        gate = gate_for(config, store)
+        runtime = runtime_for(broker_config, gate)
+        caller = BrokerCaller(CALLER_MANAGER)
+        try:
+            # Outdated link blocks discovery before any network request.
+            store.create_link(
+                AccountLinkV1(
+                    link_id="account_link_mcp_outdated",
+                    team_id=config.manager.team_id,
+                    tool_id="mcp:crawl4ai",
+                    owner_kind=LinkOwnerKind.TEAM,
+                    owner_id=config.manager.team_id,
+                    credential_key="crawl4ai_api_token",
+                    injections=(
+                        CredentialInjectionV1(
+                            placement=InjectionPlacement.HEADER,
+                            name="X-Old-Header",
+                            field="api_token",
+                            template="Bearer {value}",
+                        ),
+                    ),
+                    created_by=SubjectRefV1(kind=SubjectKind.USER, id=config.user.canonical_user_id),
+                    created_at_utc=NOW,
+                )
+            )
+            with pytest.raises(PermissionError, match="/link mcp:crawl4ai team"):
+                await runtime.discover_tools(
+                    record.connection_id,
+                    MCPDiscoveryRequestV1(record_digest=record.record_digest, named_agent_type="TeamArchitect"),
+                    caller=caller,
+                )
+            assert not queues
+
+            # Lowercase header name still matches the tool definition (no false outdated error).
+            store.create_link(
+                AccountLinkV1(
+                    link_id="account_link_mcp_lower",
+                    team_id=config.manager.team_id,
+                    tool_id="mcp:crawl4ai",
+                    owner_kind=LinkOwnerKind.TEAM,
+                    owner_id=config.manager.team_id,
+                    credential_key="crawl4ai_api_token",
+                    injections=(
+                        CredentialInjectionV1(
+                            placement=InjectionPlacement.HEADER,
+                            name="authorization",
+                            field="api_token",
+                            template="Bearer {value}",
+                        ),
+                    ),
+                    created_by=SubjectRefV1(kind=SubjectKind.USER, id=config.user.canonical_user_id),
+                    created_at_utc=NOW,
+                )
+            )
+            discovery = await runtime.discover_tools(
+                record.connection_id,
+                MCPDiscoveryRequestV1(record_digest=record.record_digest, named_agent_type="TeamArchitect"),
+                caller=caller,
+            )
+            invocation = MCPInvocationRequestV1(
+                record_digest=discovery.record_digest,
+                operation_name="screenshot",
+                tool_use_id="call-test",
+                task_id="task-test",
+                principal=PrincipalDescriptorV1(
+                    principal_type=PrincipalType.AGENT,
+                    principal_id="test-lead",
+                    named_agent_type="TeamArchitect",
+                    team_id=config.manager.team_id,
+                    on_behalf_of_user_id=config.user.canonical_user_id,
+                    roles=("team_lead",),
+                ),
+                task_context=signed_task_context(config.user.canonical_user_id, team_id=config.manager.team_id),
+            )
+            assert not (await runtime.invoke(record.connection_id, invocation, caller=caller)).is_error
+            assert runtime._clients and called == ["screenshot"]
+
+            # Replacing with an outdated link refuses invocation and discards the cached client.
+            store.create_link(
+                AccountLinkV1(
+                    link_id="account_link_mcp_outdated_2",
+                    team_id=config.manager.team_id,
+                    tool_id="mcp:crawl4ai",
+                    owner_kind=LinkOwnerKind.TEAM,
+                    owner_id=config.manager.team_id,
+                    credential_key="crawl4ai_api_token",
+                    injections=(
+                        CredentialInjectionV1(
+                            placement=InjectionPlacement.HEADER,
+                            name="X-Wrong",
+                            field="api_token",
+                        ),
+                    ),
+                    created_by=SubjectRefV1(kind=SubjectKind.USER, id=config.user.canonical_user_id),
+                    created_at_utc=NOW,
+                )
+            )
+            with pytest.raises(MCPAccessRefused) as exc_info:
+                await runtime.invoke(record.connection_id, invocation, caller=caller)
+            assert exc_info.value.payload["reason_code"] == REASON_ACCOUNT_LINK_OUTDATED
+            assert "/link mcp:crawl4ai team" in exc_info.value.payload["next_step"]
+            assert not runtime._clients
+        finally:
+            await runtime.close()

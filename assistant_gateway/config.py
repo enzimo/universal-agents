@@ -958,6 +958,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "security_layer.broker_bind_port": "Broker listener port.",
     "security_layer.broker_credentials_dir": "Broker credential-state directory. Relative paths resolve under instance_root.",
     "security_layer.tool_setup_recheck_days": "Days after which the broker re-checks a ready tool setup nobody used or checked since, and tells the person in the Inbox when it needs setting up again; 0 turns it off.",
+    "security_layer.api_request_user_agent": "Default User-Agent header sent on brokered web API requests (credential.api_request) when the request sets none. Omitted or empty uses the built-in browser-like default; a User-Agent header set on the request keeps winning.",
     "security_layer.code_execution": "Sandbox for agent-run shell and python_env commands outside OpenShell mode.",
     "security_layer.code_execution.sandbox": "required confines each command to the workspace, a private temp HOME, and read-only OS files, refusing commands when the sandbox cannot apply; off runs agent code unconfined.",
     "security_layer.code_execution.extra_read_paths": "Extra absolute paths sandboxed code may read. Never list the instance root.",
@@ -2489,6 +2490,7 @@ class GatewayInstanceConfig(BaseModel):
                 "broker_bind_host",
                 "broker_bind_port",
                 "broker_credentials_dir",
+                "api_request_user_agent",
             ):
                 if field_name not in explicit_security_fields:
                     security_layer_payload.pop(field_name, None)

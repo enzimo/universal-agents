@@ -407,7 +407,7 @@ def test_a_long_team_id_moves_through_the_command_line_under_a_new_id(
     assert sorted(person.canonical_user_id for person in people.list_team_people(NEW)) == ["usr_ana", "usr_ben"]
     access = AccessRepository(config.manager_storage_settings)
     assert {grant.grant_id for grant in access.list_team(NEW)} == {"g_person", "g_lead", "g_team", "g_role"}
-    assert [link.owner_id for link in access.list_links(NEW)] == [NEW]
+    assert [link.owner_id for link in access.list_links(NEW, purpose=None)] == [NEW]
     assert [(sharing.team_id, sharing.sharing) for sharing in access.team_account_sharing(NEW)] == [
         (NEW, AccountSharing.PRIVATE)]
     assert [folder.name for folder in access.data_folders(NEW)] == ["datasets"]

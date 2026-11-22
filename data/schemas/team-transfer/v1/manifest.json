@@ -91,7 +91,7 @@
     {
       "filename": "GatewayInstanceConfig.schema.json",
       "model": "GatewayInstanceConfig",
-      "sha256": "4c5151a1e79426bbc4de198956d6f120022bca3424895287376f58994f7c181d"
+      "sha256": "c55757ce9f5f6691d9fe6beb2f0c50adbe0fe62c26acbd92ef6277a8d82c0252"
     },
     {
       "filename": "AgentCatalogDocument.schema.json",
@@ -126,7 +126,7 @@
     {
       "filename": "AccountLinkV1.schema.json",
       "model": "AccountLinkV1",
-      "sha256": "fe23d74b3ed9ac3c8f10ce0f0c8a1c43530ab323f341eb7d52dc60cf33499a66"
+      "sha256": "473e8578dcf67e6e09eae49df15531a39f7eb9dcf19de92fe2912d51e016eff4"
     },
     {
       "filename": "PersonSettingsV1.schema.json",
@@ -216,7 +216,7 @@
         "GatewayInstanceConfig"
       ],
       "record_model": "SettingV1",
-      "schema_version": 12
+      "schema_version": 13
     },
     {
       "name": "operator_secrets",
@@ -282,7 +282,7 @@
         "AccountSharingV1"
       ],
       "record_model": "AccessRecordV1",
-      "schema_version": 3
+      "schema_version": 4
     },
     {
       "name": "objectives",

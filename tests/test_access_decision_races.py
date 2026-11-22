@@ -52,6 +52,7 @@ from custom_messages.contracts.access_v2 import (
     GrantStatus,
     GrantV1,
     LinkOwnerKind,
+    LinkPurpose,
     SubjectKind,
     SubjectRefV1,
     TargetKind,
@@ -551,7 +552,7 @@ def _link(link_id: str, key: str, at: datetime) -> AccountLinkV1:
 
 
 def _active_x_links(store: AccessRepository) -> list[str]:
-    return [link.link_id for link in store.list_links(TEAM) if link.tool_id == "cli:x"]
+    return [link.link_id for link in store.list_links(TEAM, purpose=LinkPurpose.ACCOUNT) if link.tool_id == "cli:x"]
 
 
 def test_two_links_stored_at_once_leave_one_active_link(world, monkeypatch) -> None:
@@ -577,10 +578,17 @@ def test_two_links_stored_at_once_leave_one_active_link(world, monkeypatch) -> N
 
     [active] = _active_x_links(world.store)
     replaced = {"link_a", "link_b"} - {active}
-    [older] = [link for link in world.store.list_links(TEAM, include_revoked=True) if link.link_id in replaced]
+    [older] = [
+        link
+        for link in world.store.list_links(TEAM, purpose=LinkPurpose.ACCOUNT, include_revoked=True)
+        if link.link_id in replaced
+    ]
     assert older.status is AccountLinkStatus.REVOKED
     world.store.revoke_link(active, actor=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id), at=now)
-    assert world.store.active_link(TEAM, "cli:x", LinkOwnerKind.PERSON, OWNER.person_id) is None, (
+    assert (
+        world.store.active_link(TEAM, "cli:x", LinkOwnerKind.PERSON, OWNER.person_id, purpose=LinkPurpose.ACCOUNT)
+        is None
+    ), (
         "unlinking leaves no older credential in use"
     )
 
@@ -590,7 +598,7 @@ def test_the_store_refuses_a_second_active_link_for_one_tool_and_owner(world) ->
     row = sqlite3.connect(str(world.db)).execute("SELECT * FROM access_account_links").fetchone()
     with sqlite3.connect(str(world.db)) as conn, pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO access_account_links VALUES (?,?,?,?,?,?,?,?,?,?)", ("link_b", *row[1:])
+            "INSERT INTO access_account_links VALUES (?,?,?,?,?,?,?,?,?,?,?)", ("link_b", *row[1:])
         )
 
 
@@ -606,8 +614,8 @@ def test_an_older_store_with_two_active_links_keeps_the_newest(tmp_path: Path, c
         row = conn.execute("SELECT * FROM access_account_links").fetchone()
         newer = _link("link_new", "x_account_new", now)
         conn.execute(
-            "INSERT INTO access_account_links VALUES (?,?,?,?,?,?,?,?,?,?)",
-            ("link_new", *row[1:8], newer.model_dump_json(), now.isoformat()),
+            "INSERT INTO access_account_links VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("link_new", *row[1:8], newer.model_dump_json(), now.isoformat(), LinkPurpose.ACCOUNT.value),
         )
 
     with caplog.at_level(logging.WARNING, logger="storage.access_repository"):

@@ -308,7 +308,7 @@ class DiscordInteractiveApp(BaseInteractiveApp):
 
         @app_commands.describe(
             tool="Tool id, for example cli:github, cli:google, cli:x or http:portainer",
-            option="Optional: me (default), team, or a way to sign in such as web",
+            option="Optional: me (default), team, gate, or a way to sign in such as web",
         )
         @tree.command(name="link", description="Sign in to a tool or link its account")
         async def link_command(
