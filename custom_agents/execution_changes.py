@@ -938,7 +938,7 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
     ) -> dict[str, Any]:
         ssh_settings = self.execution.config.execution_control.ssh
         if not ssh_settings.enabled:
-            raise SSHDisabledError("execution_control.ssh.enabled is false.")
+            raise SSHDisabledError()
         binding = self._binding(reason)
         policy = SSHNetworkPolicy.from_settings(ssh_settings)
         validated_host = validate_ssh_host(
@@ -1081,7 +1081,7 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
     def _verify_current(self, plan: SSHTargetEnrollChangePlan) -> None:
         ssh_settings = self.execution.config.execution_control.ssh
         if not ssh_settings.enabled:
-            raise SSHDisabledError("execution_control.ssh.enabled is false.")
+            raise SSHDisabledError()
         if self.execution.repository.get_ssh_target(
             team_id=plan.owner.team_id, target_id=plan.target_id
         ) is not None:
@@ -1395,7 +1395,7 @@ class SSHInteractionChangeService(_ExecutionChanges):
         allowed_secret_recipes: tuple[SSHSecretRecipe | str, ...] = (),
     ) -> dict[str, Any]:
         if not self.execution.config.execution_control.ssh.enabled:
-            raise SSHDisabledError("execution_control.ssh.enabled is false.")
+            raise SSHDisabledError()
         binding = self._binding(reason)
         now = utc_now()
         resolved_ttl, resolved_deadline = self._resolve_delegation_window(
@@ -1507,7 +1507,7 @@ class SSHInteractionChangeService(_ExecutionChanges):
         """Not approved/revoked/expired yet, delegation window within policy, and session/target unchanged."""
 
         if not self.execution.config.execution_control.ssh.enabled:
-            raise SSHDisabledError("execution_control.ssh.enabled is false.")
+            raise SSHDisabledError()
         current = now or utc_now()
         self._check_existing_interaction(plan.session_id, change_id=plan.change_id, now=current)
         max_ttl = self.execution.config.execution_control.ssh.max_delegation_ttl_seconds

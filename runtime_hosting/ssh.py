@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import fcntl
 import hashlib
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -30,6 +31,7 @@ from runtime_hosting.artifacts import ArtifactStore
 from runtime_hosting.authorization import (
     ExecutionAccessGuard,
     ExecutionAuthorizationDenied,
+    SSH_DISABLED_MESSAGE,
     SSHCallerContext,
     SSHCapability,
 )
@@ -419,6 +421,15 @@ class SSHSessionUnavailable(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class SSHSettingsSyncOutcome:
+    """Result of syncing live operator SSH settings before a monitor tick."""
+
+    enabled: bool = True
+    stop_reason: str | None = None
+    stop_event: str = "ssh_broker_disabled_killswitch"
+
+
 @dataclass
 class SSHSessionBroker:
     repository: ExecutionControlRepository
@@ -441,7 +452,7 @@ class SSHSessionBroker:
     sudo_search_paths: tuple[str, ...] = DEFAULT_SUDO_SEARCH_PATHS
     tailscale_search_paths: tuple[str, ...] = DEFAULT_TAILSCALE_SEARCH_PATHS
     revocation_poll_interval_seconds: float = 1.0
-    settings_sync: Callable[[], bool] | None = None
+    settings_sync: Callable[[], Awaitable[SSHSettingsSyncOutcome] | SSHSettingsSyncOutcome] | None = None
     logger: logging.Logger = logging.getLogger(__name__)
     _sessions: dict[str, _LiveSSHSession] = field(default_factory=dict, init=False, repr=False)
     _closing_tasks: dict[str, asyncio.Task[InteractiveSessionV1]] = field(
@@ -452,6 +463,14 @@ class SSHSessionBroker:
     _active_steps: set[_CancellableStep] = field(default_factory=set, init=False, repr=False)
     _monitor_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _shutting_down: bool = field(default=False, init=False, repr=False)
+    _checked_network_policy: SSHNetworkPolicy | None = field(default=None, init=False, repr=False)
+    _checked_material_provider: SSHCredentialMaterialProvider | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        self._checked_network_policy = self.network_policy
+        self._checked_material_provider = self.material_provider
 
     def _require_not_shutting_down(self) -> None:
         if self._shutting_down:
@@ -2511,6 +2530,135 @@ class SSHSessionBroker:
             )
         return failures, should_fail_closed
 
+    async def _terminate_session_work(
+        self,
+        *,
+        session_id: str,
+        reason: str,
+        event: str,
+    ) -> None:
+        self.logger.info(
+            "Stopping live SSH work after operator settings change. "
+            "event=%s session_id=%s reason=%s",
+            event,
+            session_id,
+            reason,
+        )
+        for step in list(self._active_steps):
+            if step.session.session_id == session_id:
+                step.invalidation_reason = reason
+                step.revoked_event.set()
+        cmd_tasks: list[asyncio.Task[None]] = []
+        for cmd in list(self._commands.values()):
+            if cmd.session_id == session_id and cmd.status is SSHCommandStatus.RUNNING:
+                cmd.invalidation_reason = reason
+                cmd.revoked_event.set()
+                if cmd.runner_task is not None and not cmd.runner_task.done():
+                    cmd_tasks.append(cmd.runner_task)
+        if cmd_tasks:
+            await asyncio.gather(*cmd_tasks, return_exceptions=True)
+        if session_id in self._sessions:
+            try:
+                await self._close(session_id=session_id, disconnected=True)
+            except Exception:
+                self.logger.exception(
+                    "Failed to close SSH session after operator settings change. "
+                    "event=ssh_policy_reload_close_failed session_id=%s",
+                    session_id,
+                )
+
+    def _configured_binding_ids(
+        self,
+        provider: SSHCredentialMaterialProvider,
+    ) -> frozenset[str] | None:
+        if isinstance(provider, ConfiguredSSHCredentialMaterialProvider):
+            return frozenset(provider.materials.keys())
+        if isinstance(provider, CompositeSSHCredentialMaterialProvider) and isinstance(
+            provider.configured_provider, ConfiguredSSHCredentialMaterialProvider
+        ):
+            return frozenset(provider.configured_provider.materials.keys())
+        return None
+
+    async def enforce_settings_on_live_work(
+        self,
+        *,
+        check_network: bool = False,
+        check_pinned_targets: bool = False,
+        allowed_pinned_targets: frozenset[tuple[str, int, str, str, str, str]] | None = None,
+    ) -> None:
+        """Re-check live sessions, running commands, and steps once after a settings change."""
+
+        policy_snapshot = self.network_policy
+        provider_snapshot = self.material_provider
+        self._checked_network_policy = policy_snapshot
+        self._checked_material_provider = provider_snapshot
+        if (not check_network and not check_pinned_targets) or not self._has_monitored_work():
+            return
+
+        sessions_by_id: dict[str, InteractiveSessionV1] = {}
+        for sid, live in list(self._sessions.items()):
+            sessions_by_id[sid] = live.session
+        for cmd in list(self._commands.values()):
+            if cmd.status is SSHCommandStatus.RUNNING and cmd.session_id not in sessions_by_id:
+                sessions_by_id[cmd.session_id] = cmd.session
+        for step in list(self._active_steps):
+            if step.session.session_id not in sessions_by_id:
+                sessions_by_id[step.session.session_id] = step.session
+
+        configured_bindings = (
+            self._configured_binding_ids(provider_snapshot) if check_pinned_targets else None
+        )
+        effective_policy = policy_snapshot or SSHNetworkPolicy.default()
+        network_cache: dict[tuple[str, int], str | None] = {}
+
+        for sid, session in sessions_by_id.items():
+            invalidation_reason: str | None = None
+            if session.target.target_id is not None:
+                if check_network:
+                    host_key = (session.target.host, session.target.port)
+                    if host_key not in network_cache:
+                        try:
+                            await asyncio.to_thread(
+                                validate_ssh_host,
+                                session.target.host,
+                                session.target.port,
+                                effective_policy,
+                                resolver=self.resolver,
+                                local_address_checker=self.local_address_checker,
+                            )
+                        except Exception as exc:
+                            network_cache[host_key] = str(exc)
+                        else:
+                            network_cache[host_key] = None
+                    invalidation_reason = network_cache[host_key]
+            elif check_pinned_targets:
+                target = session.target
+                pinned_key = (
+                    target.host,
+                    target.port,
+                    target.username,
+                    target.host_key_algorithm,
+                    target.host_key_fingerprint,
+                    target.credential_binding_id,
+                )
+                if allowed_pinned_targets is not None and pinned_key not in allowed_pinned_targets:
+                    invalidation_reason = (
+                        "SSH target was removed or changed in execution_control.ssh.targets."
+                    )
+                elif (
+                    configured_bindings is not None
+                    and target.credential_binding_id not in configured_bindings
+                ):
+                    invalidation_reason = (
+                        "SSH target credential binding was removed from execution_control.ssh.targets."
+                    )
+            if invalidation_reason is not None:
+                await self._terminate_session_work(
+                    session_id=sid,
+                    reason=invalidation_reason,
+                    event="ssh_work_terminated_by_policy_reload",
+                )
+
     async def _fail_closed_all_monitored_work(self, reason: str) -> None:
         for step in list(self._active_steps):
             step.invalidation_reason = reason
@@ -2584,14 +2732,30 @@ class SSHSessionBroker:
                 self._ensure_monitor_started()
 
     async def _monitor_tick(self) -> None:
-        if self.settings_sync is not None and not self.settings_sync():
-            self.logger.info(
-                "Stopping all active SSH work because execution_control.ssh.enabled is false. "
-                "event=ssh_broker_disabled_killswitch broker_id=%s",
-                self.broker_id,
+        if self.settings_sync is not None:
+            sync_result = self.settings_sync()
+            if inspect.isawaitable(sync_result):
+                sync_result = await sync_result
+            if not sync_result.enabled:
+                stop_reason = sync_result.stop_reason or SSH_DISABLED_MESSAGE
+                stop_event = sync_result.stop_event or "ssh_broker_disabled_killswitch"
+                self.logger.warning(
+                    "Stopping all active SSH work. event=%s broker_id=%s reason=%s",
+                    stop_event,
+                    self.broker_id,
+                    stop_reason,
+                )
+                await self._fail_closed_all_monitored_work(stop_reason)
+                return
+        network_changed = self.network_policy != self._checked_network_policy
+        provider_changed = self.material_provider is not self._checked_material_provider
+        if network_changed or provider_changed:
+            await self.enforce_settings_on_live_work(
+                check_network=network_changed,
+                check_pinned_targets=provider_changed,
             )
-            await self._fail_closed_all_monitored_work("execution_control.ssh.enabled is false.")
-            return
+            if not self._has_monitored_work():
+                return
         now = self.repository.current_time_utc()
         revocation_cache: dict[str, tuple[bool, Any]] = {}
         interaction_cache: dict[str, tuple[bool, SSHInteractionRecordV1 | None | Exception]] = {}
@@ -3132,6 +3296,7 @@ __all__ = [
     "SSHKeyEnrollResult",
     "SSHSessionBroker",
     "SSHSessionUnavailable",
+    "SSHSettingsSyncOutcome",
     "SessionSecretScrubber",
     "StreamSecretScrubber",
     "sweep_stale_ssh_ephemeral_dirs",

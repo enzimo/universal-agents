@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 import logging
+from pathlib import Path
 
 from access_catalog.catalog import CatalogSource, ToolCatalog
 from access_control.decisions import AccessService, UNCONFINED_EXECUTION_OPERATION, UNCONFINED_EXECUTION_TOOL_ID
@@ -69,10 +70,45 @@ class ExecutionAuthorizationDenied(PermissionError):
     pass
 
 
+SSH_DISABLED_MESSAGE = "execution_control.ssh.enabled is false."
+SSH_DISABLED_NEXT_STEP = (
+    "Ask an administrator or operator to set execution_control.ssh.enabled to true "
+    "in instance_config.yaml before using brokered SSH."
+)
+
+
+def ssh_settings_unusable_next_step(config_path: str | None = None) -> str:
+    """Plain-language recovery guidance naming the settings file when SSH settings cannot be used."""
+
+    config_name = Path(config_path).name if config_path else "instance_config.yaml"
+    return (
+        f"Ask an administrator or operator to fix execution_control.ssh in {config_name} "
+        "and save a valid configuration file, then retry."
+    )
+
+
 class SSHDisabledError(RuntimeError):
     """Raised when ``execution_control.ssh.enabled`` is false."""
 
-    pass
+    def __init__(self, message: str = SSH_DISABLED_MESSAGE) -> None:
+        super().__init__(message)
+
+
+class SSHSettingsUnusableError(RuntimeError):
+    """Raised when broker SSH fails closed because the settings file cannot be read or applied."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        config_path: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.config_path = config_path
+
+    @property
+    def next_step(self) -> str:
+        return ssh_settings_unusable_next_step(self.config_path)
 
 
 SSH_SINGLE_REQUEST_ENDED_MESSAGE = (
@@ -598,8 +634,12 @@ class ExecutionAccessGuard:
 __all__ = [
     "ExecutionAccessGuard",
     "ExecutionAuthorizationDenied",
+    "SSH_DISABLED_MESSAGE",
+    "SSH_DISABLED_NEXT_STEP",
     "SSHDisabledError",
+    "SSHSettingsUnusableError",
     "SSH_SINGLE_REQUEST_ENDED_MESSAGE",
     "SSHCallerContext",
     "SSHCapability",
+    "ssh_settings_unusable_next_step",
 ]

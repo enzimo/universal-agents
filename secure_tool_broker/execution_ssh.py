@@ -11,18 +11,32 @@ and Cedar access on ``fn:execution_control``, and this module builds
 Operator SSH settings (``execution_control.ssh``) are reloaded from the
 instance configuration file whenever it changes, so turning ``enabled`` off,
 tightening network rules, changing ``allow_password_bootstrap``, or updating
-pinned targets takes effect immediately without restarting the broker.
+pinned targets takes effect without restarting the broker:
+
+- Turning ``enabled`` off stops all live SSH sessions and running commands and
+  refuses new actions with ``ssh_disabled``.
+- Tightening network rules or removing a pinned target re-checks live work once
+  for the new settings and closes/stops sessions and commands that no longer pass.
+- Any file version that cannot be read, validated, or applied (missing file,
+  empty or incomplete file without ``schema_version``, invalid YAML, schema
+  validation error, inconsistent pinned key bindings, or workspace-scoped key
+  paths) follows one rule: keep the last good settings during a short grace
+  period (default 3 seconds) so an in-place save in progress never drops live
+  work; if the file is still unusable afterwards, fail closed (stop active work
+  with the real reason and refuse actions with ``ssh_settings_unusable``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
+import hashlib
 import logging
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 from aiohttp import web
@@ -34,8 +48,11 @@ from runtime_hosting.artifacts import FilesystemArtifactStore
 from runtime_hosting.authorization import (
     ExecutionAccessGuard,
     ExecutionAuthorizationDenied,
+    SSH_DISABLED_MESSAGE,
+    SSH_DISABLED_NEXT_STEP,
     SSHCallerContext,
     SSHDisabledError,
+    SSHSettingsUnusableError,
 )
 from runtime_hosting.execution_contracts import InteractiveSessionV1, OwnerScopeKind
 from runtime_hosting.ssh import (
@@ -46,6 +63,7 @@ from runtime_hosting.ssh import (
     SSHCredentialMaterial,
     SSHSessionBroker,
     SSHSessionUnavailable,
+    SSHSettingsSyncOutcome,
 )
 from runtime_hosting.ssh_credentials import (
     InvalidSSHCredentialValueError,
@@ -73,6 +91,8 @@ EXECUTION_SSH_PROVIDER = "execution_ssh"
 # Workspace bundle uploads base64-encode up to 16 MiB (~21.3 MiB plus JSON overhead);
 # applied only to POST /v1/tools/execution_ssh while other broker routes keep aiohttp's default limit.
 EXECUTION_SSH_MAX_REQUEST_BYTES = 32 * 1024 * 1024
+DEFAULT_UNUSABLE_SETTINGS_GRACE_SECONDS = 3.0
+_UNCHECKED_FINGERPRINT = object()
 
 
 class SSHRecoveryError(RuntimeError):
@@ -89,6 +109,7 @@ class BrokerExecutionSSHConfig:
     ssh: ExecutionSSHSettings
     lead_agent_type: str = TEAM_ARCHITECT_AGENT_TYPE
     config_path: str | None = None
+    config_source_revision: str | None = None
 
     @classmethod
     def from_runtime_settings(
@@ -100,6 +121,7 @@ class BrokerExecutionSSHConfig:
         ssh: ExecutionSSHSettings,
         lead_agent_type: str = TEAM_ARCHITECT_AGENT_TYPE,
         config_path: str | Path | None = None,
+        config_source_revision: str | None = None,
     ) -> "BrokerExecutionSSHConfig":
         return cls(
             instance_root_path=str(instance_root_path),
@@ -108,24 +130,98 @@ class BrokerExecutionSSHConfig:
             ssh=ssh.model_copy(deep=True),
             lead_agent_type=str(lead_agent_type or TEAM_ARCHITECT_AGENT_TYPE),
             config_path=str(config_path) if config_path is not None else None,
+            config_source_revision=config_source_revision,
         )
 
 
+@dataclass(frozen=True)
+class ExecutionSSHSettingsSnapshot:
+    """Validated SSH settings and broker key table, or a fail-closed unusable state."""
+
+    settings: ExecutionSSHSettings
+    materials: Mapping[str, SSHCredentialMaterial]
+    unusable_error: str | None = None
+    config_path: str | None = None
+
+
+def _unusable_settings_message(snapshot: ExecutionSSHSettingsSnapshot) -> str:
+    config_name = Path(snapshot.config_path).name if snapshot.config_path else "instance_config.yaml"
+    detail = snapshot.unusable_error or "Unknown configuration error."
+    return f"Broker SSH settings in {config_name} could not be loaded or applied: {detail}"
+
+
+def _pinned_target_keys(
+    ssh_settings: ExecutionSSHSettings,
+) -> frozenset[tuple[str, int, str, str, str, str]]:
+    return frozenset(
+        (
+            target.host,
+            target.port,
+            target.username,
+            target.host_key_algorithm,
+            target.host_key_fingerprint,
+            target.credential_binding_id,
+        )
+        for target in ssh_settings.targets
+    )
+
+
 class ExecutionSSHSettingsSource:
-    """Reload ``execution_control.ssh`` from the instance YAML whenever the file changes."""
+    """Reload and validate ``execution_control.ssh`` (plus pinned key bindings) from disk.
+
+    Unified rule for unusable file versions (missing file after it existed,
+    empty/incomplete file without ``schema_version``, invalid YAML, schema
+    validation error, duplicate pinned ``credential_binding_id`` with differing
+    key paths, or key paths inside ``workspaces/``):
+
+    - Remember the file stat fingerprint after a failed load so each broken
+      version is parsed and logged once rather than on every tick or action.
+    - Keep the last good settings for ``unusable_grace_seconds`` (default 3 s)
+      so an in-place editor save does not drop live work.
+    - If the file is still unusable once the grace period elapses, fail closed
+      (``enabled=False`` with ``unusable_error`` set) until a valid version is
+      saved.
+    """
 
     def __init__(
         self,
         initial: ExecutionSSHSettings,
         *,
         config_path: Path | None,
+        layout: InstanceLayout | None = None,
+        initial_revision: str | None = None,
+        unusable_grace_seconds: float = DEFAULT_UNUSABLE_SETTINGS_GRACE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
         logger: logging.Logger | None = None,
     ) -> None:
         self._current = initial.model_copy(deep=True)
+        self._layout = layout
         self._config_path = config_path.expanduser().resolve() if config_path is not None else None
+        self._initial_revision = initial_revision
+        self._checked_initial_revision = False
+        self._unusable_grace_seconds = max(0.0, float(unusable_grace_seconds))
+        self._clock = clock
         self._logger = logger or LOGGER
-        self._fingerprint = self._stat_fingerprint()
-        self._existed = self._fingerprint is not None
+        # Never stamp the current disk fingerprint at construction: the file may have
+        # changed between process config loading and constructing this source.
+        self._last_checked_fp: Any = _UNCHECKED_FINGERPRINT
+        self._existed = self._stat_fingerprint() is not None
+        self._unusable_since: float | None = None
+        self._unusable_error: str | None = None
+        self._failed_closed_logged = False
+        self._current_materials: dict[str, SSHCredentialMaterial] = {}
+        if self._layout is not None:
+            try:
+                self._current_materials = _build_configured_materials(self._layout, self._current)
+            except Exception as exc:
+                self._unusable_error = str(exc)
+                self._unusable_since = self._clock() - self._unusable_grace_seconds
+                self._logger.error(
+                    "Initial execution_control.ssh settings cannot be applied; disabling broker SSH fail-closed. "
+                    "event=broker_ssh_settings_reload_failed path=%s error=%s",
+                    self._config_path,
+                    exc,
+                )
 
     def _stat_fingerprint(self) -> tuple[int, int, int] | None:
         if self._config_path is None:
@@ -136,50 +232,145 @@ class ExecutionSSHSettingsSource:
             return None
         return (int(st.st_ino), int(st.st_size), int(st.st_mtime_ns))
 
-    def current(self) -> ExecutionSSHSettings:
-        if self._config_path is None:
-            return self._current
-        fp = self._stat_fingerprint()
-        if fp == self._fingerprint:
-            return self._current
-        if fp is None:
-            if self._existed:
-                self._logger.warning(
-                    "Instance configuration file disappeared; disabling broker SSH fail-closed. "
-                    "event=broker_ssh_settings_file_missing path=%s",
-                    self._config_path,
-                )
-                self._current = ExecutionSSHSettings(enabled=False)
-                self._fingerprint = None
-                self._existed = False
-            return self._current
-        try:
-            raw_text = self._config_path.read_text(encoding="utf-8")
-            parsed = yaml.safe_load(raw_text)
-            if parsed is None:
-                parsed = {}
-            if not isinstance(parsed, Mapping):
-                raise ValueError("Instance configuration root must be a YAML mapping.")
-            execution_raw = parsed.get("execution_control")
-            if execution_raw is None:
-                ssh_raw: Any = {}
-            elif isinstance(execution_raw, Mapping):
-                ssh_raw = execution_raw.get("ssh") or {}
-            else:
-                raise ValueError("execution_control must be a YAML mapping.")
-            reloaded = ExecutionSSHSettings.model_validate(ssh_raw)
-        except Exception as exc:
-            self._logger.error(
-                "Could not reload execution_control.ssh from instance config; keeping previous settings. "
-                "event=broker_ssh_settings_reload_failed path=%s error=%s",
-                self._config_path,
-                exc,
+    def _parse_and_validate(
+        self,
+        raw_bytes: bytes,
+    ) -> tuple[ExecutionSSHSettings, dict[str, SSHCredentialMaterial]]:
+        raw_text = raw_bytes.decode("utf-8")
+        parsed = yaml.safe_load(raw_text)
+        if not isinstance(parsed, Mapping):
+            raise ValueError(
+                "Instance configuration file is empty or incomplete (must be a YAML mapping with schema_version)."
             )
-            return self._current
-        self._current = reloaded
-        self._fingerprint = fp
-        self._existed = True
-        return reloaded
+        if "schema_version" not in parsed or parsed["schema_version"] is None:
+            raise ValueError("instance_config.yaml must declare schema_version.")
+        execution_raw = parsed.get("execution_control")
+        if execution_raw is None:
+            ssh_raw: Mapping[str, Any] = {}
+        elif isinstance(execution_raw, Mapping):
+            raw_ssh_section = execution_raw.get("ssh")
+            if raw_ssh_section is None:
+                ssh_raw = {}
+            elif isinstance(raw_ssh_section, Mapping):
+                ssh_raw = raw_ssh_section
+            else:
+                raise ValueError("execution_control.ssh must be a YAML mapping.")
+        else:
+            raise ValueError("execution_control must be a YAML mapping.")
+        reloaded = ExecutionSSHSettings.model_validate(ssh_raw)
+        materials = (
+            _build_configured_materials(self._layout, reloaded)
+            if self._layout is not None
+            else {}
+        )
+        return reloaded, materials
+
+    def _record_unusable(self, fp: tuple[int, int, int] | None, error: str) -> None:
+        self._last_checked_fp = fp
+        self._unusable_error = error
+        if self._unusable_since is None:
+            self._unusable_since = self._clock()
+        config_name = self._config_path.name if self._config_path is not None else "instance_config.yaml"
+        if self._failed_closed_logged or (self._clock() - self._unusable_since) >= self._unusable_grace_seconds:
+            self._logger.error(
+                "Could not load or apply execution_control.ssh from %s; broker SSH remains "
+                "disabled fail-closed. event=broker_ssh_settings_reload_failed path=%s error=%s",
+                config_name,
+                self._config_path,
+                error,
+            )
+        else:
+            self._logger.error(
+                "Could not load or apply execution_control.ssh from %s; keeping previous settings "
+                "for up to %.1fs before failing closed. event=broker_ssh_settings_reload_failed "
+                "path=%s error=%s",
+                config_name,
+                self._unusable_grace_seconds,
+                self._config_path,
+                error,
+            )
+
+    def _build_snapshot(self) -> ExecutionSSHSettingsSnapshot:
+        path_str = str(self._config_path) if self._config_path is not None else None
+        if self._unusable_since is not None:
+            elapsed = self._clock() - self._unusable_since
+            if elapsed < self._unusable_grace_seconds:
+                return ExecutionSSHSettingsSnapshot(
+                    settings=self._current,
+                    materials=self._current_materials,
+                    unusable_error=None,
+                    config_path=path_str,
+                )
+            if not self._failed_closed_logged:
+                self._failed_closed_logged = True
+                self._logger.error(
+                    "Disabling broker SSH fail-closed because execution_control.ssh remained unusable "
+                    "past the %.1fs grace period. event=broker_ssh_settings_failed_closed path=%s error=%s",
+                    self._unusable_grace_seconds,
+                    self._config_path,
+                    self._unusable_error,
+                )
+            return ExecutionSSHSettingsSnapshot(
+                settings=ExecutionSSHSettings(enabled=False),
+                materials={},
+                unusable_error=self._unusable_error,
+                config_path=path_str,
+            )
+        return ExecutionSSHSettingsSnapshot(
+            settings=self._current,
+            materials=self._current_materials,
+            unusable_error=None,
+            config_path=path_str,
+        )
+
+    def snapshot(self) -> ExecutionSSHSettingsSnapshot:
+        if self._config_path is None:
+            return self._build_snapshot()
+        fp = self._stat_fingerprint()
+        if fp != self._last_checked_fp:
+            if fp is None:
+                if self._existed:
+                    self._record_unusable(None, "Instance configuration file is missing.")
+                else:
+                    self._last_checked_fp = None
+                return self._build_snapshot()
+            self._existed = True
+            try:
+                raw_bytes = self._config_path.read_bytes()
+                if not self._checked_initial_revision and self._initial_revision is not None:
+                    self._checked_initial_revision = True
+                    # Matches config_file_updates.config_revision (lowercase SHA-256 hex)
+                    # without importing custom_agents into the broker process.
+                    if (
+                        self._unusable_error is None
+                        and hashlib.sha256(raw_bytes).hexdigest() == self._initial_revision
+                    ):
+                        self._last_checked_fp = fp
+                        return self._build_snapshot()
+                self._checked_initial_revision = True
+                reloaded, materials = self._parse_and_validate(raw_bytes)
+            except Exception as exc:
+                self._checked_initial_revision = True
+                self._record_unusable(fp, str(exc))
+                return self._build_snapshot()
+            was_failed_closed = self._failed_closed_logged
+            self._current = reloaded
+            self._current_materials = materials
+            self._last_checked_fp = fp
+            self._unusable_since = None
+            self._unusable_error = None
+            self._failed_closed_logged = False
+            if was_failed_closed:
+                self._logger.info(
+                    "Reloaded valid execution_control.ssh settings after prior failure. "
+                    "event=broker_ssh_settings_recovered path=%s enabled=%s",
+                    self._config_path,
+                    reloaded.enabled,
+                )
+        return self._build_snapshot()
+
+    def current(self) -> ExecutionSSHSettings:
+        return self.snapshot().settings
 
 
 def classify_ssh_error(exc: Exception) -> dict[str, Any]:
@@ -188,10 +379,10 @@ def classify_ssh_error(exc: Exception) -> dict[str, Any]:
     payload: dict[str, Any] = {"error": str(exc)}
     if isinstance(exc, SSHDisabledError):
         payload["error_code"] = "ssh_disabled"
-        payload["next_step"] = (
-            "Ask an administrator or operator to set execution_control.ssh.enabled to true "
-            "in instance_config.yaml before using brokered SSH."
-        )
+        payload["next_step"] = SSH_DISABLED_NEXT_STEP
+    elif isinstance(exc, SSHSettingsUnusableError):
+        payload["error_code"] = "ssh_settings_unusable"
+        payload["next_step"] = exc.next_step
     elif isinstance(exc, SSHRecoveryError):
         payload["error_code"] = "ssh_recovery_failed"
         payload["next_step"] = (
@@ -280,6 +471,8 @@ class BrokerExecutionSSHRuntime:
         self._settings_source = ExecutionSSHSettingsSource(
             config.ssh,
             config_path=watch_path,
+            layout=self._layout,
+            initial_revision=config.config_source_revision,
             logger=self._logger,
         )
         # Opened lazily only when SSH is enabled (or an admin revokes a record),
@@ -290,8 +483,10 @@ class BrokerExecutionSSHRuntime:
         self._catalog_provider: CatalogSSHCredentialMaterialProvider | None = None
         self._broker: SSHSessionBroker | None = None
         self._applied_settings: ExecutionSSHSettings | None = None
+        self._applied_materials: dict[str, SSHCredentialMaterial] | None = None
         self._recovered = False
         self._recovery_lock = asyncio.Lock()
+        self._settings_lock = asyncio.Lock()
 
     def _ensure_repository(self) -> ExecutionControlRepository:
         if self._repository is None:
@@ -308,58 +503,105 @@ class BrokerExecutionSSHRuntime:
 
     @property
     def enabled(self) -> bool:
-        return bool(self._settings_source.current().enabled)
+        snapshot = self._settings_source.snapshot()
+        return snapshot.unusable_error is None and bool(snapshot.settings.enabled)
 
-    def _ensure_broker(self, ssh_settings: ExecutionSSHSettings) -> SSHSessionBroker:
+    def _ensure_broker_sync(self, snapshot: ExecutionSSHSettingsSnapshot) -> SSHSessionBroker:
         if self._broker is None:
-            self._broker = self._build_broker(ssh_settings)
-            self._applied_settings = ssh_settings.model_copy(deep=True)
+            self._broker = self._build_broker(snapshot)
+            self._applied_settings = snapshot.settings.model_copy(deep=True)
+            self._applied_materials = dict(snapshot.materials)
             return self._broker
-        self._apply_settings(ssh_settings)
+        self._apply_settings_sync(snapshot)
         return self._broker
 
-    def _apply_settings(self, ssh_settings: ExecutionSSHSettings) -> None:
-        if self._broker is None or self._applied_settings == ssh_settings:
-            return
-        materials = _build_configured_materials(self._layout, ssh_settings)
-        self._broker.network_policy = SSHNetworkPolicy.from_settings(ssh_settings)
+    def _apply_settings_sync(
+        self,
+        snapshot: ExecutionSSHSettingsSnapshot,
+    ) -> tuple[bool, bool, frozenset[tuple[str, int, str, str, str, str]]]:
+        ssh_settings = snapshot.settings
+        materials = dict(snapshot.materials)
+        if (
+            self._broker is None
+            or (
+                self._applied_settings == ssh_settings
+                and self._applied_materials == materials
+            )
+        ):
+            return False, False, frozenset()
+        new_policy = SSHNetworkPolicy.from_settings(ssh_settings)
+        old_policy = (
+            SSHNetworkPolicy.from_settings(self._applied_settings)
+            if self._applied_settings is not None
+            else self._broker.network_policy
+        )
+        network_changed = old_policy != new_policy
+        pinned_changed = (
+            self._applied_settings is None
+            or self._applied_settings.targets != ssh_settings.targets
+            or self._applied_materials != materials
+        )
+        if network_changed:
+            self._broker.network_policy = new_policy
         self._broker.allow_password_bootstrap = ssh_settings.allow_password_bootstrap
         self._broker.ssh_executable = ssh_settings.ssh_executable
         self._broker.lease_ttl_seconds = ssh_settings.lease_ttl_seconds
         self._broker.transcript_limit_bytes = ssh_settings.transcript_limit_bytes
-        self._broker.material_provider = CompositeSSHCredentialMaterialProvider(
-            configured_provider=ConfiguredSSHCredentialMaterialProvider(materials),
-            catalog_provider=self._catalog_provider,
-        )
-        self._applied_settings = ssh_settings.model_copy(deep=True)
-
-    def _refresh_settings_for_monitor(self) -> bool:
-        """Called on every broker monitor tick to apply live setting changes and enforce kill switch."""
-
-        current = self._settings_source.current()
-        if not current.enabled:
-            return False
-        try:
-            self._apply_settings(current)
-        except Exception as exc:
-            self._logger.error(
-                "Could not apply reloaded SSH settings during monitor tick; failing closed. "
-                "event=broker_ssh_settings_apply_failed error=%s",
-                exc,
+        if pinned_changed:
+            self._broker.material_provider = CompositeSSHCredentialMaterialProvider(
+                configured_provider=ConfiguredSSHCredentialMaterialProvider(materials),
+                catalog_provider=self._catalog_provider,
             )
-            return False
-        return True
+        self._applied_settings = ssh_settings.model_copy(deep=True)
+        self._applied_materials = materials
+        return network_changed, pinned_changed, _pinned_target_keys(ssh_settings)
+
+    async def _apply_settings_and_enforce(self, snapshot: ExecutionSSHSettingsSnapshot) -> None:
+        async with self._settings_lock:
+            if self._broker is None:
+                return
+            network_changed, pinned_changed, pinned_keys = self._apply_settings_sync(snapshot)
+            if network_changed or pinned_changed:
+                await self._broker.enforce_settings_on_live_work(
+                    check_network=network_changed,
+                    check_pinned_targets=pinned_changed,
+                    allowed_pinned_targets=pinned_keys,
+                )
+
+    async def _refresh_settings_for_monitor(self) -> SSHSettingsSyncOutcome:
+        """Called on every broker monitor tick to apply live setting changes and enforce fail-closed rules."""
+
+        snapshot = self._settings_source.snapshot()
+        if snapshot.unusable_error is not None:
+            return SSHSettingsSyncOutcome(
+                enabled=False,
+                stop_reason=_unusable_settings_message(snapshot),
+                stop_event="ssh_broker_settings_unusable_fail_closed",
+            )
+        if not snapshot.settings.enabled:
+            return SSHSettingsSyncOutcome(
+                enabled=False,
+                stop_reason=SSH_DISABLED_MESSAGE,
+                stop_event="ssh_broker_disabled_killswitch",
+            )
+        await self._apply_settings_and_enforce(snapshot)
+        return SSHSettingsSyncOutcome(enabled=True)
 
     @property
     def broker(self) -> SSHSessionBroker:
-        current = self._settings_source.current()
-        if not current.enabled:
-            raise SSHDisabledError("execution_control.ssh.enabled is false.")
-        return self._ensure_broker(current)
+        snapshot = self._settings_source.snapshot()
+        if snapshot.unusable_error is not None:
+            raise SSHSettingsUnusableError(
+                _unusable_settings_message(snapshot),
+                config_path=snapshot.config_path,
+            )
+        if not snapshot.settings.enabled:
+            raise SSHDisabledError()
+        return self._ensure_broker_sync(snapshot)
 
-    def _build_broker(self, ssh_settings: ExecutionSSHSettings) -> SSHSessionBroker:
-        materials = _build_configured_materials(self._layout, ssh_settings)
-        configured_provider = ConfiguredSSHCredentialMaterialProvider(materials)
+    def _build_broker(self, snapshot: ExecutionSSHSettingsSnapshot) -> SSHSessionBroker:
+        ssh_settings = snapshot.settings
+        configured_provider = ConfiguredSSHCredentialMaterialProvider(dict(snapshot.materials))
         catalog_provider = CatalogSSHCredentialMaterialProvider(
             ephemeral_base_dir=self._layout.ssh_ephemeral_dir,
             secret_resolver=make_catalog_secret_resolver(),
@@ -417,24 +659,38 @@ class BrokerExecutionSSHRuntime:
             )
 
     async def _active_broker(self) -> SSHSessionBroker:
-        current = self._settings_source.current()
-        if not current.enabled:
+        snapshot = self._settings_source.snapshot()
+        if snapshot.unusable_error is not None:
+            reason = _unusable_settings_message(snapshot)
             if self._broker is not None and self._broker._has_monitored_work():
-                await self._broker._fail_closed_all_monitored_work(
-                    "execution_control.ssh.enabled is false."
-                )
-            raise SSHDisabledError("execution_control.ssh.enabled is false.")
-        broker = self._ensure_broker(current)
+                await self._broker._fail_closed_all_monitored_work(reason)
+            raise SSHSettingsUnusableError(reason, config_path=snapshot.config_path)
+        if not snapshot.settings.enabled:
+            if self._broker is not None and self._broker._has_monitored_work():
+                await self._broker._fail_closed_all_monitored_work(SSH_DISABLED_MESSAGE)
+            raise SSHDisabledError()
+        if self._broker is None:
+            broker = self._ensure_broker_sync(snapshot)
+        else:
+            await self._apply_settings_and_enforce(snapshot)
+            broker = self._broker
         await self._ensure_recovered(broker)
         return broker
 
     async def startup(self) -> None:
         """Recover crashed sessions and sweep orphaned ephemeral SSH dirs on broker start."""
 
-        current = self._settings_source.current()
-        if not current.enabled:
+        snapshot = self._settings_source.snapshot()
+        if snapshot.unusable_error is not None:
+            self._logger.error(
+                "Skipping broker SSH startup because settings cannot be used. "
+                "event=broker_ssh_startup_settings_unusable error=%s",
+                snapshot.unusable_error,
+            )
             return
-        broker = self._ensure_broker(current)
+        if not snapshot.settings.enabled:
+            return
+        broker = self._ensure_broker_sync(snapshot)
         await self._ensure_recovered(broker)
 
     async def shutdown(self) -> None:
@@ -446,6 +702,7 @@ class BrokerExecutionSSHRuntime:
         self._broker = None
         self._catalog_provider = None
         self._applied_settings = None
+        self._applied_materials = None
         await broker.shutdown()
 
     def _require_owned_session(self, session_id: str, person_id: str) -> InteractiveSessionV1:
@@ -807,8 +1064,10 @@ def register_execution_ssh_app(
 __all__ = [
     "BrokerExecutionSSHConfig",
     "BrokerExecutionSSHRuntime",
+    "DEFAULT_UNUSABLE_SETTINGS_GRACE_SECONDS",
     "EXECUTION_SSH_MAX_REQUEST_BYTES",
     "EXECUTION_SSH_PROVIDER",
+    "ExecutionSSHSettingsSnapshot",
     "ExecutionSSHSettingsSource",
     "SSHRecoveryError",
     "build_execution_ssh_runtime",

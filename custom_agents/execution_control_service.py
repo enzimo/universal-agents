@@ -92,14 +92,18 @@ _SECRETISH_ENV_VALUE = re.compile(
 class ExecutionControlService:
     """Stage, activate, and inspect owner-scoped execution records."""
 
-    def __init__(self, agent: Any):
+    def __init__(self, agent: Any, *, config: Any = None):
         from assistant_gateway.config import GatewayInstanceConfig
 
         configured_path = str(getattr(agent, "instance_config_path", "") or "").strip()
-        if not configured_path:
+        if config is None and not configured_path:
             raise ValueError("Execution control requires an instance config path.")
         self.agent = agent
-        self.config = GatewayInstanceConfig.load_for_process(configured_path)
+        self.config = (
+            config
+            if config is not None
+            else GatewayInstanceConfig.load_for_process(configured_path)
+        )
         if not self.config.execution_control.enabled:
             raise RuntimeError("execution_control.enabled is false.")
         # Who acts, only from the task's signed context (both authorization modes).
@@ -383,7 +387,7 @@ class ExecutionControlService:
 
         ssh_settings = self.config.execution_control.ssh
         if not ssh_settings.enabled:
-            raise SSHDisabledError("execution_control.ssh.enabled is false.")
+            raise SSHDisabledError()
         configured = next(
             (item for item in ssh_settings.targets if item.target_id == target_id),
             None,

@@ -68,9 +68,11 @@ from custom_tools.providers._runtime import _require_manager_tool
 from custom_tools.runtime_context import get_agent_ref
 from runtime_hosting.authorization import (
     ExecutionAuthorizationDenied,
+    SSH_DISABLED_NEXT_STEP,
     SSHCallerContext,
     SSHCapability,
     SSHDisabledError,
+    SSHSettingsUnusableError,
 )
 from runtime_hosting.execution_contracts import InteractiveSessionV1
 from runtime_hosting.ssh import MAX_PTY_WRITE_BYTES, SSHSessionUnavailable
@@ -93,10 +95,10 @@ def _error_payload(exc: Exception) -> str:
     payload: dict[str, Any] = {"error": str(exc)}
     if isinstance(exc, SSHDisabledError):
         payload["error_code"] = "ssh_disabled"
-        payload["next_step"] = (
-            "Ask an administrator or operator to set execution_control.ssh.enabled to true "
-            "in instance_config.yaml before using brokered SSH."
-        )
+        payload["next_step"] = SSH_DISABLED_NEXT_STEP
+    elif isinstance(exc, SSHSettingsUnusableError):
+        payload["error_code"] = "ssh_settings_unusable"
+        payload["next_step"] = exc.next_step
     elif isinstance(exc, InvalidSSHCredentialValueError):
         payload["error_code"] = "invalid_credential_value"
         payload["credential_key"] = exc.credential_key
@@ -142,11 +144,30 @@ def _manager_agent(tool_name: str) -> tuple[Any, str | None]:
     return agent, None
 
 
+def _build_execution_service(agent: Any) -> ExecutionControlService:
+    """Build ``ExecutionControlService``, classifying unreadable instance config as unusable SSH settings."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    configured_path = str(getattr(agent, "instance_config_path", "") or "").strip()
+    if not configured_path:
+        raise ValueError("Execution control requires an instance config path.")
+    try:
+        loaded_config = GatewayInstanceConfig.load_for_process(configured_path)
+    except Exception as exc:
+        config_name = Path(configured_path).name or "instance_config.yaml"
+        raise SSHSettingsUnusableError(
+            f"Broker SSH settings in {config_name} could not be loaded: {exc}",
+            config_path=configured_path,
+        ) from exc
+    return ExecutionControlService(agent, config=loaded_config)
+
+
 def _manager_service(tool_name: str) -> tuple[ExecutionControlService | None, str | None]:
     agent, error = _manager_agent(tool_name)
     if error:
         return None, error
-    return ExecutionControlService(agent), None
+    return _build_execution_service(agent), None
 
 
 def _ssh_service(tool_name: str) -> tuple[ExecutionControlService | None, str | None]:
@@ -156,14 +177,46 @@ def _ssh_service(tool_name: str) -> tuple[ExecutionControlService | None, str | 
     agent = get_agent_ref()
     if agent is None:
         return None, "Agent reference not set"
-    return ExecutionControlService(agent), None
+    return _build_execution_service(agent), None
+
+
+def _preflight_broker_ssh(
+    tool_name: str,
+    *,
+    manager_only: bool = False,
+    session_id: str | None = None,
+) -> str | None:
+    """Run local preflight for a broker-dispatched SSH tool.
+
+    When the instance configuration file cannot be parsed on the agent side
+    (for example during an in-place edit or after an operator mistake), let
+    the broker's ``ExecutionSSHSettingsSource`` decide under its unified
+    grace-period and fail-closed rule.
+    """
+
+    if manager_only:
+        agent, error = _manager_agent(tool_name)
+    else:
+        agent = get_agent_ref()
+        error = None if agent is not None else "Agent reference not set"
+    if error:
+        return error
+    assert agent is not None
+    try:
+        service = _build_execution_service(agent)
+    except SSHSettingsUnusableError:
+        return None
+    _require_ssh_enabled(service)
+    if session_id is not None:
+        service.owned_session(session_id)
+    return None
 
 
 def _require_ssh_enabled(service: ExecutionControlService) -> None:
     """Fail fast on the agent side when operator policy has turned SSH off."""
 
     if not service.config.execution_control.ssh.enabled:
-        raise SSHDisabledError("execution_control.ssh.enabled is false.")
+        raise SSHDisabledError()
 
 
 def _json_strings(value: str, *, field_name: str) -> tuple[str, ...]:
@@ -456,11 +509,9 @@ async def probe_execution_ssh_host_key(
     the target host to confirm the key out-of-band before enrollment.
     """
     try:
-        service, error = _manager_service("probe_execution_ssh_host_key")
+        error = _preflight_broker_ssh("probe_execution_ssh_host_key", manager_only=True)
         if error:
             return json.dumps({"error": error})
-        assert service is not None
-        _require_ssh_enabled(service)
         result = await call_execution_ssh_broker(
             "probe_execution_ssh_host_key",
             {"host": host, "port": port, "timeout_seconds": timeout_seconds},
@@ -685,12 +736,9 @@ def list_execution_ssh_sessions() -> str:
 async def open_execution_ssh_session(session_id: str) -> str:
     """Open a created SSH session's PTY using broker-owned identity material."""
     try:
-        service, error = _ssh_service("open_execution_ssh_session")
+        error = _preflight_broker_ssh("open_execution_ssh_session", session_id=session_id)
         if error:
             return json.dumps({"error": error})
-        assert service is not None
-        _require_ssh_enabled(service)
-        service.owned_session(session_id)
         opened = await call_execution_ssh_broker(
             "open_execution_ssh_session",
             {"session_id": session_id},
@@ -710,12 +758,9 @@ async def read_execution_ssh_session(
 ) -> str:
     """Read bounded, secret-scrubbed output from a live SSH PTY and renew its fenced lease."""
     try:
-        service, error = _ssh_service("read_execution_ssh_session")
+        error = _preflight_broker_ssh("read_execution_ssh_session", session_id=session_id)
         if error:
             return json.dumps({"error": error})
-        assert service is not None
-        _require_ssh_enabled(service)
-        service.owned_session(session_id)
         bounded_bytes = max(1, min(int(maximum_bytes), 1_048_576))
         bounded_timeout = max(0.0, min(float(timeout_seconds), 30.0))
         result = await call_execution_ssh_broker(
@@ -740,17 +785,14 @@ async def write_execution_ssh_session(session_id: str, text: str) -> str:
     Larger files or scripts belong in ``upload_execution_ssh_bundle``.
     """
     try:
-        service, error = _ssh_service("write_execution_ssh_session")
+        error = _preflight_broker_ssh("write_execution_ssh_session", session_id=session_id)
         if error:
             return json.dumps({"error": error})
-        assert service is not None
-        _require_ssh_enabled(service)
         if len(str(text).encode("utf-8")) > MAX_PTY_WRITE_BYTES:
             raise ValueError(
                 f"SSH terminal write exceeds the maximum size ({MAX_PTY_WRITE_BYTES} bytes); "
                 "use upload_execution_ssh_bundle for larger content."
             )
-        service.owned_session(session_id)
         result = await call_execution_ssh_broker(
             "write_execution_ssh_session",
             {"session_id": session_id, "text": text},
@@ -770,12 +812,9 @@ async def resize_execution_ssh_session(
 ) -> str:
     """Resize a live SSH PTY and renew its fenced lease."""
     try:
-        service, error = _ssh_service("resize_execution_ssh_session")
+        error = _preflight_broker_ssh("resize_execution_ssh_session", session_id=session_id)
         if error:
             return json.dumps({"error": error})
-        assert service is not None
-        _require_ssh_enabled(service)
-        service.owned_session(session_id)
         result = await call_execution_ssh_broker(
             "resize_execution_ssh_session",
             {
@@ -795,12 +834,9 @@ async def resize_execution_ssh_session(
 async def close_execution_ssh_session(session_id: str) -> str:
     """Close a live SSH PTY, stop its running commands, and persist its redacted transcript."""
     try:
-        service, error = _ssh_service("close_execution_ssh_session")
+        error = _preflight_broker_ssh("close_execution_ssh_session", session_id=session_id)
         if error:
             return json.dumps({"error": error})
-        assert service is not None
-        _require_ssh_enabled(service)
-        service.owned_session(session_id)
         result = await call_execution_ssh_broker(
             "close_execution_ssh_session",
             {"session_id": session_id},
@@ -842,12 +878,9 @@ async def run_execution_ssh_command(
       revocation.
     """
     try:
-        service, error = _ssh_service("run_execution_ssh_command")
+        error = _preflight_broker_ssh("run_execution_ssh_command", session_id=session_id)
         if error:
             return json.dumps({"error": error})
-        assert service is not None
-        _require_ssh_enabled(service)
-        service.owned_session(session_id)
         bounded_wait = max(0.0, min(float(wait_seconds), 60.0))
         result = await call_execution_ssh_broker(
             "run_execution_ssh_command",
@@ -873,12 +906,9 @@ async def get_execution_ssh_command(
 ) -> str:
     """Poll the status and secret-scrubbed output of a running or completed SSH command."""
     try:
-        service, error = _ssh_service("get_execution_ssh_command")
+        error = _preflight_broker_ssh("get_execution_ssh_command", session_id=session_id)
         if error:
             return json.dumps({"error": error})
-        assert service is not None
-        _require_ssh_enabled(service)
-        service.owned_session(session_id)
         bounded_wait = max(0.0, min(float(wait_seconds), 60.0))
         result = await call_execution_ssh_broker(
             "get_execution_ssh_command",
@@ -907,12 +937,9 @@ async def enroll_execution_ssh_key(
     The broker never exposes the admin password or private key to any agent.
     """
     try:
-        service, error = _ssh_service("enroll_execution_ssh_key")
+        error = _preflight_broker_ssh("enroll_execution_ssh_key", session_id=session_id)
         if error:
             return json.dumps({"error": error})
-        assert service is not None
-        _require_ssh_enabled(service)
-        service.owned_session(session_id)
         result = await call_execution_ssh_broker(
             "enroll_execution_ssh_key",
             {"session_id": session_id, "timeout_seconds": timeout_seconds},
@@ -952,12 +979,9 @@ async def run_execution_ssh_sudo(
     ``launchctl`` / a system service (macOS).
     """
     try:
-        service, error = _ssh_service("run_execution_ssh_sudo")
+        error = _preflight_broker_ssh("run_execution_ssh_sudo", session_id=session_id)
         if error:
             return json.dumps({"error": error})
-        assert service is not None
-        _require_ssh_enabled(service)
-        service.owned_session(session_id)
         recipe_params = _json_dict(recipe_params_json, field_name="recipe_params_json")
         bounded_wait = max(0.0, min(float(wait_seconds), 60.0))
         result = await call_execution_ssh_broker(

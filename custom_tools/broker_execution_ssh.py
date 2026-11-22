@@ -63,12 +63,6 @@ class ExecutionSSHBrokerError(Exception):
         return payload
 
 
-def broker_execution_ssh_available() -> bool:
-    """Return True when this process has the secure tool broker's internal address."""
-
-    return bool(str(os.getenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL") or "").strip())
-
-
 def _broker_connection() -> tuple[str, str]:
     base_url = str(os.getenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL") or "").rstrip("/")
     if not base_url:
@@ -230,7 +224,6 @@ __all__ = [
     "REASON_BROKER_ERROR",
     "REASON_BROKER_UNAVAILABLE",
     "REASON_TASK_CONTEXT_MISSING",
-    "broker_execution_ssh_available",
     "call_execution_ssh_broker",
     "call_execution_ssh_broker_sync",
 ]
