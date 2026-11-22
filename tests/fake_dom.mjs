@@ -81,6 +81,10 @@ export class FakeElement extends EventTarget {
     }
     if (/^\.[A-Za-z0-9_-]+$/.test(selector)) return this.classList.contains(selector.slice(1));
     if (/^#[A-Za-z0-9_-]+$/.test(selector)) return this.id === selector.slice(1);
+    if (/^\[[A-Za-z0-9_-]+\]$/.test(selector)) {
+      const attr = selector.slice(1, -1);
+      return attr === "hidden" ? Boolean(this.hidden) || this.hasAttribute(attr) : this.hasAttribute(attr);
+    }
     if (/^[A-Za-z][A-Za-z0-9-]*$/.test(selector)) return this.tagName === selector.toUpperCase();
     throw new Error(`Unsupported selector in fake_dom: ${selector}`);
   }

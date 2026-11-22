@@ -3050,17 +3050,15 @@ function setBrokerCardState(thread, itemId, state) {
     // Inbox adds a form to the open thread and the review card's thread later
     // adds the same form). Record outcomes on every thread holding it so both
     // copies close at once and never reopen a used or expired frame.
-    if (typeof sharedState !== "undefined" && sharedState && Array.isArray(sharedState.threads)) {
-      sharedState.threads.forEach(function (candidate) {
-        if (!candidate || targets.indexOf(candidate) !== -1) {
-          return;
-        }
-        var items = Array.isArray(candidate.transientItems) ? candidate.transientItems : [];
-        if (items.some(function (item) { return item && item.itemId === itemId; })) {
-          targets.push(candidate);
-        }
-      });
-    }
+    (sharedState.threads || []).forEach(function (candidate) {
+      if (!candidate || targets.indexOf(candidate) !== -1) {
+        return;
+      }
+      var items = Array.isArray(candidate.transientItems) ? candidate.transientItems : [];
+      if (items.some(function (item) { return item && item.itemId === itemId; })) {
+        targets.push(candidate);
+      }
+    });
     targets.forEach(function (target) {
       target.brokerCardStates = target.brokerCardStates || new Map();
       target.brokerCardStates.set(itemId, state);

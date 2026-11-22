@@ -2722,7 +2722,9 @@ Keep keyboard activation, nested panes, rapid toggles, and deep links usable.
   the Inbox decide API with the signed-in session and CSRF header. After a
   saved decision the card collapses to the compact decided form (`is-compact
   is-decided`): concise summary + inline outcome pill, compact muted
-  explanation, any active un-underlined follow-up credential link buttons, and
+  explanation, either the compact inline-card prompt (`.access-review-follow-up-note`:
+  "Choose the credentials in the secure pages below.") while framed account-link
+  cards remain active or any active un-underlined fallback link buttons, and
   plain completion status lines (`role="status"`) as each form finishes.
 - The card reads its request from the gateway by id, so after a reload or a
   decision made elsewhere it shows the stored outcome and who decided, such as
@@ -2732,11 +2734,12 @@ Keep keyboard activation, nested panes, rapid toggles, and deep links usable.
   read again; one with active `follow_up_links` or `follow_up_settling`
   refreshes on tab focus/visibility change, incoming agent messages, and a
   bounded short poll. When a link reaches `expires_at_utc` before the broker
-  watch finishes, the button is hidden and the card shows **"Checking whether
-  the credential form finished…"** (`role="status"`) while polling continues
-  until the form's ending arrives or `follow_up_settling_until_utc` (expiry plus
-  the 60 s watch grace and 15 s backup buffer) passes (or on sign-out), then
-  replaces it with the final compact completion or expiry line.
+  watch finishes, both the inline-card prompt and any fallback link button are
+  hidden and the card shows **"Checking whether the credential form
+  finished…"** (`role="status"`) while polling continues until the form's ending
+  arrives or `follow_up_settling_until_utc` (expiry plus the 60 s watch grace
+  and 15 s backup buffer) passes (or on sign-out), then replaces it with the
+  final compact completion or expiry line.
 - While the request loads, the card says "Loading this request…". When it
   cannot be read, it says why in plain words and offers **Open Inbox**
   (secondary), which opens Settings at that request.

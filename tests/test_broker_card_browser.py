@@ -146,6 +146,19 @@ def _open_form(broker: str) -> str:
         return json.loads(answer.read())["form_url"].split("/", 3)[3]
 
 
+def _open_bitwarden_form(broker: str) -> str:
+    body = json.dumps(
+        {"context": {"canonical_user_id": "user-1", "principal_type": "user", "team_id": TEST_TEAM}, "method": "form"}
+    ).encode()
+    request = urllib.request.Request(
+        f"{broker}/v1/auth/bitwarden/sessions",
+        data=body,
+        headers={**gateway_headers(), "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as answer:  # noqa: S310 - local test broker
+        return json.loads(answer.read())["login_url"].split("/", 3)[3]
+
+
 @requires_chromium
 @pytest.mark.parametrize("deployment", ["own_port", "path_routed"])
 def test_broker_cards_in_the_real_chat_page(deployment: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,6 +182,7 @@ def test_broker_cards_in_the_real_chat_page(deployment: str, monkeypatch: pytest
     threading.Thread(target=preview.serve_forever, daemon=True).start()
     try:
         pages = [f"{page_base}/{_open_form(broker)}" for _ in range(5)]
+        secondary_page = f"{page_base}/{_open_bitwarden_form(broker)}"
         preview.preview_broker_pages = [  # type: ignore[attr-defined]
             preview_broker_page(pages[0], 0),
             preview_broker_page(pages[1], 1),
@@ -180,7 +194,14 @@ def test_broker_cards_in_the_real_chat_page(deployment: str, monkeypatch: pytest
             _proxy_app(chat, broker if deployment == "path_routed" else None, web_chat_csp(page_base)), proxy_port
         ))
         checked = _run(
-            {"mode": "cards", "base": origin, "typed": TYPED, "follow_up": pages[4]}, timeout=240
+            {
+                "mode": "cards",
+                "base": origin,
+                "typed": TYPED,
+                "follow_up": pages[4],
+                "secondary_page": secondary_page,
+            },
+            timeout=240,
         )
     finally:
         preview.shutdown()
@@ -190,6 +211,8 @@ def test_broker_cards_in_the_real_chat_page(deployment: str, monkeypatch: pytest
 
     assert stored == [{"api_token": TYPED}], "the typed value reached the broker, once, from the sandboxed frame"
     assert checked == [
+        "dark mode broker frame matches outer card background (rgb(17, 23, 27))",
+        "dark mode broker frame text meets WCAG contrast",
         "sandboxed without allow-same-origin",
         "chat page cannot read the card's document",
         "an unsandboxed frame of the card address cannot be read either",
@@ -208,7 +231,10 @@ def test_broker_cards_in_the_real_chat_page(deployment: str, monkeypatch: pytest
         "approving a proposal in the Inbox panel says its forms are in the conversation",
         "Show in the conversation closed Settings and showed the form as a broker card",
         "a thread switch removed the remaining frames",
+        "light mode broker frame matches outer card background (rgb(255, 255, 255))",
+        "light mode broker frame text meets WCAG contrast",
         "sign-out removed every frame",
+        "dark broker page .secondary-action meets WCAG contrast",
     ]
 
 
