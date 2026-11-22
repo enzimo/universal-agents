@@ -2758,12 +2758,22 @@ rows in trusted code's words, flagging items that widen access. For
 (`load_changeable_tool_file` refuses built-in tools, operator hand-written
 files, and files carrying operator-only settings `ProposedHttpToolV1` cannot
 express), and `access_control/tool_change_diffs.py` describes every field
-difference, flags `credential_to_new_host` when a new host would receive active
-linked credentials, flags `block_widened` when removing or renaming a route
-widens an active one-operation block to the whole tool, flags `block_moved`
-when changing a blocked route's method or path moves an active block off the
-request it was written for, and names any account
-or gate links that must be linked again. With authorization off, `apply_by_agreement` returns the same diff rows
+difference under the `tool_change` review section (**Tool changes** in the
+Inbox), flags `credential_to_new_host` (**Credentials to new host**) when a new
+host would receive active linked credentials, flags `block_widened` (**Block
+widens to whole tool**) when removing or renaming a route widens an active
+one-operation block to the whole tool, flags `block_moved` (**Blocked route
+changes**) when changing a blocked route's method or path moves an active block
+off the request it was written for, and names any account or gate links that
+must be linked again. All web API tool `hosts` (in `ToolDefinitionV1`,
+`ProposedHttpToolV1`, and `ProposedHttpToolChangeV1`) are normalized and
+validated by `custom_messages/contracts/access_v2.py::validate_host_name`:
+exact ASCII names up to 253 characters, single trailing dot removed, with
+dot-separated labels of 1 to 63 ASCII characters that start and end with an
+ASCII letter or digit and allow `-` and `_` only inside labels (refusing
+non-ASCII hosts with a punycode suggestion and refusing labels starting or
+ending with `-` or `_`). With authorization off, `apply_by_agreement` returns
+the same diff rows
 and an `agreement_digest` on `confirmed=false` and requires that matching
 digest on `confirmed=true`, refusing if the file changed in between. The
 proposal is one change request on a platform tool at `full`, so an
@@ -3137,9 +3147,20 @@ stored injections differ from the tool's current `credential_injections` or
 `gate_injections` is refused with `account_link_outdated` and the exact `/link`
 command, and a tool with `gate_injections` and no active gate link is refused
 with `gate_link_missing` and `/link <tool_id> gate`, marking the tool
-`needs_setup`. People create links in the broker's labeled form (`/link <tool>
-[me|team|gate]` in chat, or a setup page TeamLead opens); a link grants no
-access by itself. The form (`secure_tool_broker/account_links.py`) either links
+`needs_setup`. The one exception is a sign-in tool with an optional team
+fallback link (`cli:x`): if the team's fallback link is outdated,
+`BrokerAccessGate` skips it and logs `event=broker_team_link_outdated` so
+callers with their own X sign-in keep working, while a person without their own
+X sign-in receives X's usual no-account result. People create links in the
+broker's labeled form (`/link <tool> [me|team|gate]` in chat, or a setup page
+TeamLead opens); a link grants no access by itself. The form
+(`secure_tool_broker/account_links.py`) pins the tool's shown hosts and
+canonical injections (`PinnedLinkDefinition`) on the session and in a hidden
+`definition_digest` field; if the tool's definition changes while the form is
+open, `link_account` refuses the submission with
+`account_link_definition_changed` (logging
+`event=account_link_definition_changed`), stores no credential or link, and
+names the `/link` command to reopen the form. Otherwise the form either links
 a stored credential that has every field the tool needs or saves a new one the
 person types, through the broker's own store path (`collect_credential`, in the
 team's collection for a team or gate link and the person's for their own), and
@@ -6033,10 +6054,12 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   export. Imported identities are skipped and existing destination records
   kept; a chat that already has a current session keeps it, and the plan
   lists the imported session that was current in the export. Account links
-  match by team, owner, tool, and purpose (`access` v4, `settings` v13), since
-  a newer link has a new ID; a file holding two for one tool, owner, and
-  purpose (from a store before the one-active-link index) has the older refused
-  with the newer named. All
+  match by team, owner, tool, and purpose (`access` v4, converting v3 exports
+  on import; `gate_injections` travel inside the tool files in `team_tools` v1,
+  and `security_layer.api_request_user_agent` travels in `settings` v13,
+  converting v12 exports on import), since a newer link has a new ID; a file
+  holding two for one tool, owner, and purpose (from a store before the
+  one-active-link index) has the older refused with the newer named. All
   active destination chat bindings, including removed people's, participate in
   collision checks through a separate read-only identity query.
   Noncredential batches hold an import lock and the supervisor's run lock;

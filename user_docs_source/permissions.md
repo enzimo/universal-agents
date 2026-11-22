@@ -414,11 +414,16 @@ once. A proposal can contain:
   team gate credential injections;
 - changes to existing proposal-written web API tools (`tool_changes`, files at
   `control/access/tools/proposed-*.yaml`): the full replacement definition.
-  Built-in tools and operator hand-written files are refused. The review card
-  describes every difference in Universal Agents' own words (hosts added or
-  removed, routes added, removed or re-levelled, credential and gate
-  injections changed, setup changed), flags when a new host would receive
-  existing linked credentials, and names any existing account or gate links
+  Built-in tools and operator hand-written files are refused. On the review
+  card, these rows appear under their own **Tool changes** section (separate
+  from **New tools**), describe every difference in Universal Agents' own words
+  (hosts added or removed, routes added, removed or re-levelled, credential and
+  gate injections changed, setup changed), flag when a new host would receive
+  existing linked credentials (**Credentials to new host**), when removing or
+  renaming a route widens an active one-operation block to the whole tool
+  (**Block widens to whole tool**), or when changing a blocked route's method
+  or path moves an active restriction off the endpoint it was written to stop
+  (**Blocked route changes**), and name any existing account or gate links
   that must be linked again with `/link`;
 - access for TeamLead to tools, tool sets or folders (a level on a whole tool,
   never one operation), optionally with the right to hand it on to workers'
@@ -432,10 +437,13 @@ once. A proposal can contain:
 
 Before anyone sees it, Universal Agents checks every item against the tool
 catalog as it would be with the new and changed tools, and writes each row of
-the review card in its own words; the agent's description is never used for the
-effect. Items that widen access carry a warning: **New host**, **Credentials to
-a new host**, **Private address** (a host on a local or private network), **Full
-access**, **Can hand on**, **Runs code** or **New folder**. The access in a
+the review card in its own words (grouping tool-change rows under **Tool
+changes**); the agent's description is never used for the effect. Items that
+widen access or affect existing restrictions carry a warning: **New host**,
+**Credentials to new host**, **Private address** (a host on a local or private
+network), **Block widens to whole tool** (`block_widened`), **Blocked route
+changes** (`block_moved`), **Full access**, **Can hand on**, **Runs code** or
+**New folder**. The access in a
 proposal serves the work of the person the proposal's task works for. When that
 person lacks the access, the proposal gives it to them too, on its own row. A
 person's own folder is never part of a proposal; its owner shares it instead.
@@ -1109,8 +1117,16 @@ tools:
           verify: Portainer shows the new token once; paste it into the account link form next.
 ```
 
-- `hosts` are exact host names without wildcards or ports. Each host belongs
-  to one tool.
+- `hosts` are exact ASCII host names up to 253 characters, without wildcards or
+  ports, and each host belongs to one tool. Names are normalized to lowercase
+  and a single trailing dot is removed (double dots and empty labels are
+  refused). Each dot-separated label is 1 to 63 ASCII characters, starts and
+  ends with an ASCII letter or digit (`a-z`, `0-9`), and may contain ASCII
+  letters, digits, hyphens (`-`), or underscores (`_`) inside the label (for
+  example Docker Compose service names such as `gitea_web`). Labels cannot
+  start or end with `-` or `_`, and non-ASCII characters are refused (for an
+  internationalized domain name, the error names its ASCII punycode form to use
+  instead).
 - `routes` are optional. Each gives one method and path its own level;
   `{id}` matches one path segment. Other requests use the method's level:
   GET, HEAD, and OPTIONS need read, POST, PUT, and PATCH need write, and
@@ -1317,13 +1333,21 @@ you do one of two things and confirm:
   chat, logs or the result page.
 
 A new link replaces the earlier link for the same tool, owner, and purpose
-(`account` or `gate`). A link records the injections confirmed on the form: if
-a tool's `credential_injections` or `gate_injections` later change, the broker
+(`account` or `gate`). The form pins the tool's hosts and injections that were
+shown when it opened: if the tool's definition changes while the form is open,
+submitting the form is refused with `account_link_definition_changed` without
+storing or linking any credential, and names the `/link` command to open the
+updated form. A link also records the injections confirmed on the form: if a
+tool's `credential_injections` or `gate_injections` later change, the broker
 refuses requests before sending anything with `account_link_outdated`, names
 the exact `/link` command for whose link it is, and marks the tool as needing
-setup until it is linked again. A web API tool with `gate_injections` and no
-active gate link is refused before sending with `gate_link_missing` and
-`/link <tool_id> gate`.
+setup until it is linked again. The one exception is X (`cli:x`), which is a
+sign-in tool with an optional team fallback link: if the team's fallback link
+for X is outdated, the broker skips it and logs `broker_team_link_outdated` so
+people who already signed in to X keep working, while a person without their
+own X sign-in gets X's usual no-account result. A web API tool with
+`gate_injections` and no active gate link is refused before sending with
+`gate_link_missing` and `/link <tool_id> gate`.
 
 Operators can list links (including each link's `[account]` or `[gate]`
 purpose) and remove them (including gate links):
@@ -1755,21 +1779,38 @@ new instance needs none of them.
 
 ### Upgrading to tool changes, outdated link checks, and gate credentials
 
-Account links now check their stored injections against the tool's current
-definition before any request is sent, and carry a purpose (`account` or
-`gate`):
+Account and gate links now check their stored injections against the tool's
+current definition before any request is sent, carry a purpose (`account` or
+`gate`), and web API tool host names follow stricter ASCII rules:
 
 - **Links made before a tool's definition changed must be linked again.** If an
   existing account link's stored injections no longer match the tool's current
-  `credential_injections`, the broker refuses calls with `account_link_outdated`
-  and gives the exact `/link` command to re-link it. Matching links keep
+  `credential_injections`, or a gate link's stored injections no longer match
+  the tool's current `gate_injections`, the broker refuses calls with
+  `account_link_outdated` and gives the exact `/link` command to re-link it.
+  The one exception is X (`cli:x`, a sign-in tool): an outdated team fallback
+  link for X is skipped and logged (`broker_team_link_outdated`) rather than
+  blocking people who already have their own X sign-in, and a person without
+  their own X sign-in gets X's usual no-account result. Matching links keep
   working without change.
-- **In-place store upgrade.** Opening an older access store automatically adds
-  the `purpose` column to `access_account_links`, treats existing links as
-  `account` links, and updates the one-active-link index to cover `(tool,
-  owner, purpose)`. Team transfers carry link purpose and `gate_injections`
-  (`access` section v4, `settings` section v13) and convert older v3 exports on
-  import.
+- **Stricter host-name rules for web API tool files.** Every `hosts` entry in
+  built-in, proposed, and operator-written tool files must now be an exact
+  ASCII host name up to 253 characters whose dot-separated labels (1 to 63
+  characters) start and end with an ASCII letter or digit (`a-z`, `0-9`) and
+  use only ASCII letters, digits, `-`, or `_` inside labels (a single trailing
+  dot is removed). Operator-written tool files containing a non-ASCII host or a
+  label starting or ending with `-` or `_` are refused when the catalog loads
+  (stopping the broker at startup); for a non-ASCII internationalized domain
+  name, the error names the file path and its ASCII punycode replacement.
+- **In-place store upgrade and team transfer versions.** Opening an older
+  access store automatically adds the `purpose` column to
+  `access_account_links`, treats existing links as `account` links, and updates
+  the one-active-link index to cover `(tool, owner, purpose)`. In team
+  transfers, link purpose travels in the `access` section (v4, converting older
+  v3 exports on import), `gate_injections` travel inside the tool files in the
+  `team_tools` section (still v1), and `security_layer.api_request_user_agent`
+  travels in the `settings` section (v13, converting older v12 exports on
+  import).
 
 ### Upgrading to shared or private accounts
 
