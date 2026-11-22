@@ -52,9 +52,10 @@ _PEM_HEADER_PREFIX = "-----BEGIN "
 _PEM_FOOTER_PREFIX = "-----END "
 _ASKPASS_HELPER_PATH = Path(__file__).resolve().with_name("_ssh_askpass_helper.py")
 _ALLOWED_SUBPROCESS_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
-_TOKEN_BYTES = frozenset(
-    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.=-"
+_TOKEN_ALNUM_BYTES = frozenset(
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 )
+_TOKEN_BYTES = _TOKEN_ALNUM_BYTES | frozenset(b"_.=-")
 _MAX_PATTERN_HOLDBACK_BYTES = 1024
 _DEFAULT_QUIET_RELEASE_SECONDS = 0.3
 _DEFAULT_AGENT_START_TIMEOUT_SECONDS = 5.0
@@ -330,10 +331,13 @@ class StreamSecretScrubber:
     Holds back the larger of:
     1. the longest trailing suffix that strictly prefixes any registered exact
        secret, and
-    2. the trailing run of token characters (``[A-Za-z0-9_.=-]``, bounded by
-       ``max_pattern_holdback`` bytes) so token patterns recognized by
-       ``redact_text`` (GitHub/GitLab/Slack/broker tokens, API keys, JWTs)
-       are scrubbed even when split across arbitrary read boundaries.
+    2. the trailing run of token characters (``[A-Za-z0-9_.=-]``) counted from
+       its first letter or digit (bounded by ``max_pattern_holdback`` bytes) so
+       token patterns recognized by ``redact_text`` (GitHub/GitLab/Slack/broker
+       tokens, API keys, JWTs) are scrubbed even when split across arbitrary
+       read boundaries. Pure punctuation runs with no letter or digit (such as
+       steady progress dots ``....`` or separators ``----``) are released at
+       once rather than held or counted toward ``max_pattern_holdback``.
 
     Interactive output that ends in a word (such as ``Enter the new hostname``,
     ``Username``, ``--More--``, typed echoes, or trailing terminal escape
@@ -474,17 +478,27 @@ def _trailing_prefix_holdback(buf: bytes, patterns: tuple[bytes, ...]) -> int:
 
 
 def _trailing_token_run_length(buf: bytes) -> int:
-    """Return the full length of any trailing run of token characters."""
+    """Return the trailing token-run length from its first letter or digit, or 0 if none.
+
+    Pure punctuation runs (such as progress dots ``....`` or separators
+    ``====``) never form a pattern token in ``redact_text`` because every
+    recognized prefix and JWT contains letters or digits. Releasing them at
+    once keeps steady progress output visible without hitting the 1024-byte
+    fail-closed token limit, while registered exact secrets remain protected
+    by ``_trailing_prefix_holdback``.
+    """
 
     if not buf:
         return 0
-    held = 0
-    for idx in range(len(buf) - 1, -1, -1):
-        if buf[idx] in _TOKEN_BYTES:
-            held += 1
-        else:
-            break
-    return held
+    run_start = len(buf)
+    while run_start > 0 and buf[run_start - 1] in _TOKEN_BYTES:
+        run_start -= 1
+    if run_start == len(buf):
+        return 0
+    for idx in range(run_start, len(buf)):
+        if buf[idx] in _TOKEN_ALNUM_BYTES:
+            return len(buf) - idx
+    return 0
 
 
 def _assert_safe_ephemeral_base_dir(base_dir: Path) -> Path:

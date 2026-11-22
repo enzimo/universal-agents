@@ -16,7 +16,6 @@ import yaml
 
 from assistant_gateway.config import GatewayInstanceConfig, _INSTANCE_CONFIG_COMMENTS
 from assistant_gateway.runtime_config import load_runtime_config_file
-from custom_messages.contracts.common_v1 import contract_sha256
 from default_values import DEFAULT_SSH_DENIED_CIDRS
 from runtime_hosting.artifacts import FilesystemArtifactStore
 from runtime_hosting.authorization import ExecutionAccessGuard
@@ -452,7 +451,7 @@ def test_real_openssh_pinned_ip_with_host_key_alias_on_non_default_port(
         host_key_fingerprint=host_key_fingerprint(key_bytes),
         credential_binding_id="binding-test",
     )
-    digest = contract_sha256(target.model_dump(mode="json"))
+    digest = target.calculate_digest()
     session = InteractiveSessionV1(
         session_id="ssh_sess_real_alias",
         owner=team_owner(),

@@ -28,7 +28,6 @@ from typing import Any, Mapping
 from access_control.entities import operation_id
 from custom_agents.access_runtime import ActingAgent, acting_agent, runtime_access
 from custom_messages.contracts.access_v2 import ChangeApprovalMode, ChangeApprovalRecordV1
-from custom_messages.contracts.common_v1 import contract_sha256
 from runtime_hosting.artifacts import FilesystemArtifactStore
 from runtime_hosting.authorization import ExecutionAccessGuard, ExecutionAuthorizationDenied
 from runtime_hosting.builds import DeterministicBuilder, OpenShellRustBuilder
@@ -48,6 +47,7 @@ from runtime_hosting.execution_contracts import (
     OwnerScopeKind,
     OwnerScopeV1,
     SSHConnectionTargetV1,
+    SSHInteractionRecordV1,
     utc_now,
 )
 from runtime_hosting.profiles import ExecutionProfileRegistry
@@ -368,7 +368,7 @@ class ExecutionControlService:
             credential_binding_id=configured.credential_binding_id,
             remote_persistent_session_name=configured.remote_persistent_session_name,
         )
-        target_digest = contract_sha256(target.model_dump(mode="json"))
+        target_digest = target.calculate_digest()
         draft = InteractiveSessionV1(
             owner=self.owner,
             target=target,
@@ -398,8 +398,8 @@ class ExecutionControlService:
             if session.owner == self.owner
         )
 
-    def ssh_interaction(self, session_id: str) -> ActivationRecordV2 | None:
-        """The person's approval to type into one of this owner's sessions, if any."""
+    def ssh_interaction(self, session_id: str) -> SSHInteractionRecordV1 | None:
+        """The person's approval (and delegation bounds) for one of this owner's sessions, if any."""
 
         return self.repository.get_ssh_interaction(team_id=self.owner.team_id, session_id=session_id)
 

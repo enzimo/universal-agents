@@ -26,7 +26,6 @@ from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService
 from custom_agents.access_runtime import decide_call
 from custom_messages.contracts.access_v2 import ChangeApprovalMode
-from custom_messages.contracts.common_v1 import contract_sha256
 from custom_tools.providers import execution_control as tools
 from custom_tools.providers.changes import apply_change
 from tests.task_work_support import set_agent_ref
@@ -38,6 +37,7 @@ from runtime_hosting.execution_contracts import (
     InteractiveSessionStatus,
     InteractiveSessionV1,
     SSHConnectionTargetV1,
+    SSHInteractionRecordV1,
 )
 from runtime_hosting.ssh import SSHCredentialMaterial, SSHSessionBroker
 from storage.access_repository import AccessRepository
@@ -76,7 +76,7 @@ def _session(key_bytes: bytes, *, session_id: str = "ssh_sess_test") -> Interact
         host_key_fingerprint=host_key_fingerprint(key_bytes),
         credential_binding_id="credential_binding_ssh",
     )
-    digest = contract_sha256(target.model_dump(mode="json"))
+    digest = target.calculate_digest()
     return InteractiveSessionV1(
         session_id=session_id,
         owner=team_owner(),
@@ -189,7 +189,10 @@ async def test_a_typing_approval_for_another_session_does_not_count(tmp_path: Pa
     other = _session(key_bytes, session_id="ssh_sess_other")
 
     with pytest.raises(ExecutionAuthorizationDenied, match="another session"):
-        broker.authorization_guard.require_ssh_interact(broker._sessions[session.session_id].session, _typing_approval(other))
+        broker.authorization_guard.require_ssh_interact(
+            broker._sessions[session.session_id].session,
+            SSHInteractionRecordV1(activation=_typing_approval(other)),
+        )
     await broker.close(session_id=session.session_id)
 
 

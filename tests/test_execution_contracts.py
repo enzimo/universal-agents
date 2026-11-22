@@ -6,7 +6,6 @@ import pytest
 from pydantic import ValidationError
 
 from custom_messages.contracts.access_v2 import ChangeApprovalMode
-from custom_messages.contracts.common_v1 import contract_sha256
 from runtime_hosting.execution_contracts import (
     ActivationRecordV2,
     ArtifactKind,
@@ -164,7 +163,7 @@ def test_ssh_session_binds_exact_target_and_loads_expired_authority() -> None:
         host_key_fingerprint="SHA256:abcdefghijklmnopqrstu",
         credential_binding_id="cred_binding_1",
     )
-    target_digest = contract_sha256(target.model_dump(mode="json"))
+    target_digest = target.calculate_digest()
     session_id = "ssh_sess_reconcile"
     session = InteractiveSessionV1(
         session_id=session_id,

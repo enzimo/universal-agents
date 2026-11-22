@@ -21,7 +21,6 @@ from typing import Any, Iterator
 
 import pytest
 
-from custom_messages.contracts.common_v1 import contract_sha256
 from custom_tools.code_sandbox import (
     code_sandbox_status,
     prepare_sandboxed_command,
@@ -279,7 +278,7 @@ def test_catalog_provider_real_sshd_passphrase_agent_and_landlock_isolation(
         host_key_fingerprint=host_fp,
         credential_binding_id="catalog:build_mac_ssh_key",
     )
-    digest = contract_sha256(target.model_dump(mode="json"))
+    digest = target.calculate_digest()
     session = InteractiveSessionV1(
         session_id="ssh_sess_sealbox_real",
         owner=team_owner(),
@@ -579,7 +578,7 @@ def test_catalog_provider_wrong_passphrase_cleans_up_and_scrubs_error(tmp_path: 
         host_key_fingerprint=host_key_fingerprint(b"hostkey"),
         credential_binding_id="catalog:enc_key",
     )
-    digest = contract_sha256(target.model_dump(mode="json"))
+    digest = target.calculate_digest()
     session = InteractiveSessionV1(
         session_id="ssh_sess_wrong_pw",
         owner=team_owner(),
@@ -894,7 +893,7 @@ def test_collect_credential_optional_blank_secrets_and_default_resolver(
         session_id="ssh_sess_unenc_catalog",
         owner=alice_owner,
         target=target,
-        target_digest=contract_sha256(target.model_dump(mode="json")),
+        target_digest=target.calculate_digest(),
     )
     with provider.prepare(session) as mat:
         assert mat.public_key == unenc_pub
@@ -1106,7 +1105,7 @@ async def test_broker_open_and_close_do_not_block_event_loop_and_scrub_split_out
         host_key_fingerprint=host_key_fingerprint(b"host-key-bytes"),
         credential_binding_id="slow_binding",
     )
-    digest = contract_sha256(target.model_dump(mode="json"))
+    digest = target.calculate_digest()
     session = InteractiveSessionV1(
         session_id="ssh_sess_slow_scrub",
         owner=team_owner(),
@@ -1241,7 +1240,7 @@ def test_composite_material_provider_preserves_configured_and_routes_catalog(tmp
         session_id="ssh_sess_static",
         owner=team_owner(),
         target=static_target,
-        target_digest=contract_sha256(static_target.model_dump(mode="json")),
+        target_digest=static_target.calculate_digest(),
     )
     with composite_no_catalog.prepare(static_session) as resolved:
         assert resolved == static_mat
@@ -1251,7 +1250,7 @@ def test_composite_material_provider_preserves_configured_and_routes_catalog(tmp
         session_id="ssh_sess_catalog",
         owner=team_owner(),
         target=catalog_target,
-        target_digest=contract_sha256(catalog_target.model_dump(mode="json")),
+        target_digest=catalog_target.calculate_digest(),
     )
     with pytest.raises(PermissionError, match="not enabled"):
         with composite_no_catalog.prepare(catalog_session):
@@ -1335,10 +1334,9 @@ def test_start_ephemeral_agent_handles_partial_pid_and_slow_python_with_real_age
     slow_py_agent_pid_file = tmp_path / "real_agent.pid"
     slow_python = tmp_path / "slow-python"
     slow_python.write_text(
-        f"#!{sys.executable}\n"
-        "import os, time\n"
-        f"open({str(slow_py_agent_pid_file)!r}, 'w', encoding='utf-8').write(os.environ.get('SSH_AGENT_PID', ''))\n"
-        "time.sleep(15)\n",
+        "#!/bin/sh\n"
+        f"printf '%s' \"$SSH_AGENT_PID\" > '{slow_py_agent_pid_file}'\n"
+        "sleep 15\n",
         encoding="utf-8",
     )
     slow_python.chmod(0o755)
@@ -1357,11 +1355,11 @@ def test_start_ephemeral_agent_handles_partial_pid_and_slow_python_with_real_age
     with pytest.raises(RuntimeError, match="timed out"):
         provider2._start_ephemeral_agent(session_dir2)
     assert time.monotonic() - t1 < 4.0
-    if slow_py_agent_pid_file.exists():
-        raw_pid = slow_py_agent_pid_file.read_text(encoding="utf-8").strip()
-        if raw_pid.isdigit():
-            with pytest.raises(ProcessLookupError):
-                os.kill(int(raw_pid), 0)
+    assert slow_py_agent_pid_file.exists(), "slow wrapper must record real ssh-agent pid"
+    raw_pid = slow_py_agent_pid_file.read_text(encoding="utf-8").strip()
+    assert raw_pid.isdigit()
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(raw_pid), 0)
 
 
 def test_stream_scrubber_quiet_release_and_overlong_token_fail_closed() -> None:
@@ -1436,6 +1434,40 @@ def test_stream_scrubber_quiet_release_and_overlong_token_fail_closed() -> None:
         assert b"BBBB" not in combined
         assert combined == b"[REDACTED] done\n"
 
+    # C33: Steady progress dots (no letter or digit) release immediately and never hit [REDACTED].
+    dot_stream = scrubber.new_stream_scrubber(
+        max_pattern_holdback=1024,
+        quiet_release_seconds=0.3,
+        clock=lambda: now[0],
+    )
+    now[0] = 10.0
+    assert dot_stream.feed(b"waiting ") == b"waiting "
+    for _ in range(24):
+        now[0] += 0.25
+        assert dot_stream.feed(b".") == b"."
+    assert dot_stream.feed(b"\nstatus: done\n") == b"\nstatus: done\n"
+    assert dot_stream.flush() == b""
+
+    # 1500 progress dots (exceeding 1024) stay visible and are never replaced with [REDACTED].
+    many_dots_stream = scrubber.new_stream_scrubber(max_pattern_holdback=1024)
+    emitted_dots = b"".join(many_dots_stream.feed(b".") for _ in range(1500))
+    emitted_dots += many_dots_stream.flush()
+    assert emitted_dots == b"." * 1500
+    assert b"[REDACTED]" not in emitted_dots
+
+    # Punctuation before a split token releases immediately while the alphanumeric token is still redacted.
+    prefixed_tok_stream = scrubber.new_stream_scrubber(max_pattern_holdback=1024)
+    assert prefixed_tok_stream.feed(b"....ghp_1234") == b"...."
+    assert prefixed_tok_stream.feed(b"567890abcdef1234567890abcdef\n") == b"[REDACTED]\n"
+    assert prefixed_tok_stream.flush() == b""
+
+    # Exact stored secrets consisting only of punctuation remain protected by prefix holdback.
+    punct_secret_scrubber = SessionSecretScrubber(["..==..--"])
+    punct_stream = punct_secret_scrubber.new_stream_scrubber(max_pattern_holdback=1024)
+    assert punct_stream.feed(b"val ..==") == b"val "
+    assert punct_stream.feed(b"..-- ok\n") == b"[REDACTED] ok\n"
+    assert punct_stream.flush() == b""
+
 
 @pytest.mark.asyncio
 async def test_broker_read_releases_word_prompts_and_handles_delayed_split_tokens(
@@ -1469,7 +1501,7 @@ async def test_broker_read_releases_word_prompts_and_handles_delayed_split_token
         host_key_fingerprint=host_key_fingerprint(b"host-key-bytes"),
         credential_binding_id="prompt_binding",
     )
-    digest = contract_sha256(target.model_dump(mode="json"))
+    digest = target.calculate_digest()
     session = InteractiveSessionV1(
         session_id="ssh_sess_word_prompt",
         owner=team_owner(),
@@ -1510,13 +1542,22 @@ async def test_broker_read_releases_word_prompts_and_handles_delayed_split_token
             collected += await broker.read(session_id=session.session_id, timeout_seconds=0.5)
         assert b"Username" in collected
 
-        # Wait past quiet time while the split token finishes writing to the PTY buffer;
-        # read() must drain the buffered second half before releasing quiet bytes.
+        # Wait until both halves are sitting in the PTY buffer, then read only the
+        # first half with a small maximum_bytes so stream_scrubber holds it in
+        # _pending while the second half stays buffered; then wait past quiet time
+        # and verify the next read drains the second half BEFORE releasing quiet bytes.
         await asyncio.sleep(0.5)
+        first_chunk = await broker.read(
+            session_id=session.session_id,
+            maximum_bytes=14,  # "\r\n" + first 12 bytes of split_token
+            timeout_seconds=0.1,
+        )
+        assert split_token[:12].encode("ascii") not in first_chunk
+        await asyncio.sleep(0.4)
         token_chunk = await broker.read(session_id=session.session_id, timeout_seconds=0.2)
-        assert split_token.encode("ascii") not in token_chunk
-        assert split_token[:12].encode("ascii") not in token_chunk
-        assert b"[REDACTED]" in token_chunk
+        assert split_token.encode("ascii") not in (first_chunk + token_chunk)
+        assert split_token[:12].encode("ascii") not in (first_chunk + token_chunk)
+        assert b"[REDACTED]" in (first_chunk + token_chunk)
     finally:
         await broker.close(session_id=session.session_id)
 
@@ -1559,7 +1600,7 @@ async def test_broker_open_and_close_cancellation_cleans_up_material_and_persist
         host_key_fingerprint=host_key_fingerprint(b"host-key-bytes"),
         credential_binding_id="slow_cancel_binding",
     )
-    digest = contract_sha256(target.model_dump(mode="json"))
+    digest = target.calculate_digest()
     repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
 
     # (a) Cancel during slow open() prepare.
@@ -1708,7 +1749,7 @@ async def test_dot_leading_paths_truncated_secret_transcript_and_repr_hiding(
         host_key_fingerprint=host_key_fingerprint(b"host-key-bytes"),
         credential_binding_id="trunc_binding",
     )
-    digest = contract_sha256(target.model_dump(mode="json"))
+    digest = target.calculate_digest()
     session = InteractiveSessionV1(
         session_id="ssh_sess_trunc",
         owner=team_owner(),
@@ -1757,3 +1798,138 @@ async def test_dot_leading_paths_truncated_secret_transcript_and_repr_hiding(
     transcript = broker.artifact_store.read_verified(closed.transcript_artifact)
     assert transcript == b"pw="
     assert b"SuperSecret" not in transcript
+
+
+@pytest.mark.asyncio
+async def test_broker_loop_shutdown_cancellation_does_not_spin_on_open_or_close(
+    tmp_path: Path,
+) -> None:
+    """C32: Cancelling every task on the loop (like asyncio.run shutdown) exits promptly without spinning."""
+
+    identity, known_hosts = write_ssh_material(tmp_path / "ssh", key_bytes=b"host-key-bytes")
+    open_exited = False
+    close_exited = False
+
+    class _SlowProvider:
+        def __init__(self, *, slow_enter: float, slow_exit: float, mark: str) -> None:
+            self.slow_enter = slow_enter
+            self.slow_exit = slow_exit
+            self.mark = mark
+
+        @contextmanager
+        def prepare(self, _session: InteractiveSessionV1) -> Iterator[SSHCredentialMaterial]:
+            nonlocal open_exited, close_exited
+            if self.slow_enter:
+                time.sleep(self.slow_enter)
+            try:
+                yield SSHCredentialMaterial(identity_file=identity, known_hosts_file=known_hosts)
+            finally:
+                if self.slow_exit:
+                    time.sleep(self.slow_exit)
+                if self.mark == "open":
+                    open_exited = True
+                else:
+                    close_exited = True
+
+    target = SSHConnectionTargetV1(
+        host="ops.internal",
+        username="deploy",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=host_key_fingerprint(b"host-key-bytes"),
+        credential_binding_id="shutdown_cancel_binding",
+    )
+    digest = target.calculate_digest()
+    repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+
+    # (a) Cancel EVERY task created by open() (mirroring asyncio.run's _cancel_all_tasks).
+    sess_open = InteractiveSessionV1(
+        session_id="ssh_sess_shutdown_open",
+        owner=team_owner(),
+        target=target,
+        target_digest=digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_shutdown_open",
+            resource_digest=digest,
+            function="create_execution_ssh_session",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        ),
+    )
+    repository.create_interactive_session(sess_open)
+    broker_open = SSHSessionBroker(
+        repository=repository,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=_SlowProvider(slow_enter=0.5, slow_exit=0.0, mark="open"),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts-shutdown-open"),
+        team_id="team_alpha",
+        broker_id="broker-shutdown-open",
+        ssh_executable=str(fake_ssh(tmp_path / "bin-shutdown-open")),
+    )
+    current = asyncio.current_task()
+    before_open_tasks = set(asyncio.all_tasks())
+    open_task = asyncio.create_task(
+        broker_open.open(session_id=sess_open.session_id, lease_token="lease-sd-open")
+    )
+    await asyncio.sleep(0.08)
+    spawned_open = [t for t in (asyncio.all_tasks() - before_open_tasks) if t is not current]
+    assert len(spawned_open) >= 2, "expected open_task and inner prepare_task"
+    for task in spawned_open:
+        task.cancel()
+    t0 = time.monotonic()
+    await asyncio.wait_for(asyncio.gather(*spawned_open, return_exceptions=True), timeout=2.0)
+    assert time.monotonic() - t0 < 2.0
+    assert open_task.cancelled()
+    stored_open = repository.get_interactive_session(
+        team_id="team_alpha",
+        session_id=sess_open.session_id,
+    )
+    assert stored_open is not None
+    assert stored_open.status == InteractiveSessionStatus.FAILED
+    assert stored_open.lease_owner is None
+    # Wait for the background prepare thread to finish and confirm it still exits the material.
+    deadline = time.monotonic() + 2.0
+    while not open_exited and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    assert open_exited is True
+
+    # (b) Cancel EVERY task created by close() (mirroring asyncio.run's _cancel_all_tasks).
+    sess_close = InteractiveSessionV1(
+        session_id="ssh_sess_shutdown_close",
+        owner=team_owner(),
+        target=target,
+        target_digest=digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_shutdown_close",
+            resource_digest=digest,
+            function="create_execution_ssh_session",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        ),
+    )
+    repository.create_interactive_session(sess_close)
+    broker_close = SSHSessionBroker(
+        repository=repository,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=_SlowProvider(slow_enter=0.0, slow_exit=0.5, mark="close"),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts-shutdown-close"),
+        team_id="team_alpha",
+        broker_id="broker-shutdown-close",
+        ssh_executable=str(fake_ssh(tmp_path / "bin-shutdown-close")),
+    )
+    await broker_close.open(session_id=sess_close.session_id, lease_token="lease-sd-close")
+    before_close_tasks = set(asyncio.all_tasks())
+    close_task = asyncio.create_task(broker_close.close(session_id=sess_close.session_id))
+    await asyncio.sleep(0.08)
+    spawned_close = [t for t in (asyncio.all_tasks() - before_close_tasks) if t is not current]
+    assert len(spawned_close) >= 2, "expected close_task and inner _finish_close task"
+    for task in spawned_close:
+        task.cancel()
+    t1 = time.monotonic()
+    await asyncio.wait_for(asyncio.gather(*spawned_close, return_exceptions=True), timeout=2.0)
+    assert time.monotonic() - t1 < 2.0
+    assert close_task.cancelled()
+    # Wait for the background exit thread to finish cleanly.
+    deadline = time.monotonic() + 2.0
+    while not close_exited and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    assert close_exited is True

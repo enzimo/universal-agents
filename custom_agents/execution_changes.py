@@ -622,7 +622,8 @@ class SSHInteractionChangeService(_ExecutionChanges):
             "change_id": plan.change_id,
             "plan_digest": plan.plan_digest,
             "session_id": session.session_id,
-            "interaction": saved.model_dump(mode="json"),
+            "interaction": saved.activation.model_dump(mode="json"),
+            "bounds": saved.bounds.model_dump(mode="json") if saved.bounds is not None else None,
             "next_step": "Type with write_execution_ssh_session; close the session when the task is done.",
         }
 

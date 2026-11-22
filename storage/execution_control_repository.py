@@ -21,12 +21,17 @@ from runtime_hosting.execution_contracts import (
     AutomationJobV2,
     BuildAttestationV1,
     CodeArtifactV1,
+    EnrolledSSHTargetV1,
     ExecutionRevisionV1,
     InteractiveSessionStatus,
     InteractiveSessionV1,
     ManagedServiceV1,
     RunAttemptStatus,
     RunAttemptV1,
+    SSHDelegationBoundsV1,
+    SSHInteractionRecordV1,
+    SSHRevocationStateV1,
+    SSHTargetStatus,
     ServiceDesiredState,
     TERMINAL_RUN_ATTEMPT_STATUSES,
 )
@@ -40,7 +45,9 @@ from storage.postgres_connection import (
     validate_postgres_connection,
 )
 from storage.runtime import describe_storage_capabilities, require_repository_backend
+from storage.schema_setup import begin_schema_setup
 from storage.sqlite_connection import connect_sqlite
+from storage.table_columns import ensure_column
 
 
 _ImmutableModel = CodeArtifactV1 | BuildAttestationV1 | ExecutionRevisionV1 | ActivationRecordV2
@@ -312,10 +319,62 @@ class ExecutionControlRepository(Protocol):
     def mark_interactive_sessions_lost(
         self, *, team_id: str, updated_at_utc: datetime
     ) -> tuple[InteractiveSessionV1, ...]: ...
-    def put_ssh_interaction(self, activation: ActivationRecordV2) -> ActivationRecordV2: ...
+    def revoke_interactive_session(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        revoked_by: str,
+        revoked_at_utc: datetime | None = None,
+    ) -> SSHRevocationStateV1 | None: ...
+    def get_interactive_session_revocation(
+        self, *, team_id: str, session_id: str
+    ) -> SSHRevocationStateV1 | None: ...
+    def put_ssh_interaction(
+        self,
+        activation: ActivationRecordV2,
+        *,
+        bounds: SSHDelegationBoundsV1 | None = None,
+    ) -> SSHInteractionRecordV1: ...
     def get_ssh_interaction(
         self, *, team_id: str, session_id: str
-    ) -> ActivationRecordV2 | None: ...
+    ) -> SSHInteractionRecordV1 | None: ...
+    def revoke_ssh_interaction(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        revoked_by: str,
+        revoked_at_utc: datetime | None = None,
+    ) -> SSHInteractionRecordV1 | None: ...
+    def put_ssh_target(self, target: EnrolledSSHTargetV1) -> EnrolledSSHTargetV1: ...
+    def get_ssh_target(
+        self, *, team_id: str, target_id: str
+    ) -> EnrolledSSHTargetV1 | None: ...
+    def list_ssh_targets(
+        self, *, team_id: str, include_inactive: bool = True
+    ) -> tuple[EnrolledSSHTargetV1, ...]: ...
+    def revoke_ssh_target(
+        self,
+        *,
+        team_id: str,
+        target_id: str,
+        revoked_by: str,
+        revoked_at_utc: datetime | None = None,
+    ) -> EnrolledSSHTargetV1 | None: ...
+    def claim_ssh_target_password_bootstrap(
+        self, *, team_id: str, target_id: str, session_id: str
+    ) -> bool: ...
+    def release_ssh_target_password_bootstrap_claim(
+        self, *, team_id: str, target_id: str, session_id: str
+    ) -> bool: ...
+    def mark_ssh_target_password_bootstrap_completed(
+        self,
+        *,
+        team_id: str,
+        target_id: str,
+        completed_at_utc: datetime | None = None,
+    ) -> EnrolledSSHTargetV1 | None: ...
     def old_format_records(self, *, team_id: str) -> OldExecutionRecords: ...
     def retire_old_format_records(self, *, team_id: str) -> OldExecutionRecords: ...
 
@@ -351,15 +410,71 @@ class _RelationalExecutionControlRepository:
     """Shared execution records; concrete adapters own lease transactions."""
 
     _dialect: SqlDialect
+    _db_path: str
+    _logger: logging.Logger
+
+    def _connect(self) -> Any:
+        raise NotImplementedError
+
+    @staticmethod
+    def _begin_claim(connection: Any) -> None:
+        raise NotImplementedError
+
+    @staticmethod
+    def _row_lock_suffix() -> str:
+        raise NotImplementedError
+
+    @staticmethod
+    def _is_integrity_error(exc: Exception) -> bool:
+        raise NotImplementedError
+
+    def _setup_schema(self, connection: Any) -> None:
+        begin_schema_setup(connection, __name__)
+        for statement in _SCHEMA_STATEMENTS:
+            connection.execute(statement)
+        ensure_column(
+            connection,
+            "execution_ssh_interactions",
+            "delegation_json",
+            "TEXT",
+            logger=self._logger,
+        )
+        ensure_column(
+            connection,
+            "execution_ssh_interactions",
+            "revoked_at_utc",
+            "TEXT",
+            logger=self._logger,
+        )
+        ensure_column(
+            connection,
+            "execution_ssh_interactions",
+            "revoked_by",
+            "TEXT",
+            logger=self._logger,
+        )
+        ensure_column(
+            connection,
+            "execution_interactive_sessions",
+            "revoked_at_utc",
+            "TEXT",
+            logger=self._logger,
+        )
+        ensure_column(
+            connection,
+            "execution_interactive_sessions",
+            "revoked_by",
+            "TEXT",
+            logger=self._logger,
+        )
+        connection.commit()
 
     def _initialize_schema(self) -> None:
         if repositories_are_read_only():
             return
         ensure_storage_parent_dir(self._db_path)
         with self._connect() as connection:
-            for statement in _SCHEMA_STATEMENTS:
-                connection.execute(statement)
-            connection.commit()
+            self._setup_schema(connection)
         self._logger.info(
             "SQLite execution control repository initialized at %s", self._db_path
         )
@@ -396,31 +511,410 @@ class _RelationalExecutionControlRepository:
             model_type=ExecutionRevisionV1,
         )
 
-    def put_ssh_interaction(self, activation: ActivationRecordV2) -> ActivationRecordV2:
-        """Record a person's approval to type into one SSH session (once per session).
+    @staticmethod
+    def _interaction_from_row(row: Any) -> SSHInteractionRecordV1:
+        activation = ActivationRecordV2.model_validate_json(str(row["record_json"]))
+        raw_bounds = row["delegation_json"]
+        bounds = (
+            None
+            if raw_bounds is None
+            else SSHDelegationBoundsV1.model_validate_json(str(raw_bounds))
+        )
+        raw_revoked_at = row["revoked_at_utc"]
+        revoked_at = None if raw_revoked_at is None else _parse_datetime(raw_revoked_at)
+        raw_revoked_by = row["revoked_by"]
+        revoked_by = None if raw_revoked_by is None else str(raw_revoked_by)
+        return SSHInteractionRecordV1(
+            activation=activation,
+            bounds=bounds,
+            revoked_at_utc=revoked_at,
+            revoked_by=revoked_by,
+        )
+
+    def put_ssh_interaction(
+        self,
+        activation: ActivationRecordV2,
+        *,
+        bounds: SSHDelegationBoundsV1 | None = None,
+    ) -> SSHInteractionRecordV1:
+        """Record a person's approval (and optional delegation bounds) for one SSH session.
 
         Kept apart from the session record, which the broker rewrites on every
         lease renewal, so an approval can never be written over.
         """
 
-        return self._put_immutable(
-            table="execution_ssh_interactions",
-            id_column="session_id",
-            record_id=activation.resource_id,
-            model=activation,
-            model_type=ActivationRecordV2,
-        )
+        payload = _json(activation)
+        bounds_payload = _json(bounds) if bounds is not None else None
+        with self._connect() as connection:
+            connection.execute(
+                f"""
+                INSERT INTO execution_ssh_interactions (
+                    session_id, team_id, owner_scope_kind, owner_id, record_json, delegation_json
+                )
+                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
+                ON CONFLICT(session_id) DO NOTHING
+                """,
+                (
+                    activation.resource_id,
+                    activation.owner.team_id,
+                    activation.owner.scope_kind.value,
+                    activation.owner.owner_id,
+                    payload,
+                    bounds_payload,
+                ),
+            )
+            row = connection.execute(
+                f"""
+                SELECT record_json, delegation_json, revoked_at_utc, revoked_by
+                  FROM execution_ssh_interactions
+                 WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (activation.resource_id, activation.owner.team_id),
+            ).fetchone()
+            connection.commit()
+        if row is None:
+            raise ImmutableRecordConflict(
+                "Immutable execution id is already owned by another team."
+            )
+        if str(row["record_json"]) != payload or row["delegation_json"] != bounds_payload:
+            raise ImmutableRecordConflict(
+                f"Immutable execution record {activation.resource_id!r} already has different content."
+            )
+        return self._interaction_from_row(row)
 
     def get_ssh_interaction(
         self, *, team_id: str, session_id: str
-    ) -> ActivationRecordV2 | None:
+    ) -> SSHInteractionRecordV1 | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT record_json, delegation_json, revoked_at_utc, revoked_by
+                  FROM execution_ssh_interactions
+                 WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (session_id, team_id),
+            ).fetchone()
+        return None if row is None else self._interaction_from_row(row)
+
+    def revoke_ssh_interaction(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        revoked_by: str,
+        revoked_at_utc: datetime | None = None,
+    ) -> SSHInteractionRecordV1 | None:
+        """Mark an SSH interaction approval revoked without rewriting its immutable record JSON."""
+
+        with self._connect() as connection:
+            effective_time = revoked_at_utc or self._database_now(connection)
+            connection.execute(
+                f"""
+                UPDATE execution_ssh_interactions
+                   SET revoked_at_utc = COALESCE(revoked_at_utc, {self._dialect.bind}),
+                       revoked_by = COALESCE(revoked_by, {self._dialect.bind})
+                 WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (_iso(effective_time), revoked_by, session_id, team_id),
+            )
+            row = connection.execute(
+                f"""
+                SELECT record_json, delegation_json, revoked_at_utc, revoked_by
+                  FROM execution_ssh_interactions
+                 WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (session_id, team_id),
+            ).fetchone()
+            connection.commit()
+        return None if row is None else self._interaction_from_row(row)
+
+    def put_ssh_target(self, target: EnrolledSSHTargetV1) -> EnrolledSSHTargetV1:
+        """Persist an admin-approved enrolled SSH target (idempotent on exact replay)."""
+
+        payload = _json(target)
+        with self._connect() as connection:
+            connection.execute(
+                f"""
+                INSERT INTO execution_ssh_targets (
+                    target_id, team_id, owner_scope_kind, owner_id, status,
+                    host, port, username, platform,
+                    host_key_algorithm, host_key_fingerprint,
+                    expires_at_utc, revoked_at_utc, revoked_by,
+                    password_bootstrap_claimed_by_session_id,
+                    password_bootstrap_completed_at_utc,
+                    record_json
+                )
+                VALUES (
+                    {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind},
+                    {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind},
+                    {self._dialect.bind}, {self._dialect.bind},
+                    {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind},
+                    NULL,
+                    {self._dialect.bind},
+                    {self._dialect.bind}
+                )
+                ON CONFLICT(target_id) DO NOTHING
+                """,
+                (
+                    target.target_id,
+                    target.owner.team_id,
+                    target.owner.scope_kind.value,
+                    target.owner.owner_id,
+                    target.status.value,
+                    target.host,
+                    target.port,
+                    target.username,
+                    target.platform.value,
+                    target.host_key_algorithm,
+                    target.host_key_fingerprint,
+                    _iso(target.expires_at_utc),
+                    _iso(target.revoked_at_utc),
+                    target.revoked_by,
+                    _iso(target.password_bootstrap_completed_at_utc),
+                    payload,
+                ),
+            )
+            row = connection.execute(
+                f"""
+                SELECT record_json FROM execution_ssh_targets
+                 WHERE target_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (target.target_id, target.owner.team_id),
+            ).fetchone()
+            connection.commit()
+        if row is None:
+            raise ImmutableRecordConflict(
+                "Enrolled SSH target id is already owned by another team."
+            )
+        if str(row["record_json"]) != payload:
+            raise ImmutableRecordConflict(
+                f"Enrolled SSH target {target.target_id!r} already exists with different content."
+            )
+        return EnrolledSSHTargetV1.model_validate_json(str(row["record_json"]))
+
+    def get_ssh_target(
+        self, *, team_id: str, target_id: str
+    ) -> EnrolledSSHTargetV1 | None:
         row = self._get_owned_runtime(
-            table="execution_ssh_interactions",
-            id_column="session_id",
-            record_id=session_id,
+            table="execution_ssh_targets",
+            id_column="target_id",
+            record_id=target_id,
             team_id=team_id,
         )
-        return None if row is None else ActivationRecordV2.model_validate_json(row)
+        return None if row is None else EnrolledSSHTargetV1.model_validate_json(row)
+
+    def list_ssh_targets(
+        self, *, team_id: str, include_inactive: bool = True
+    ) -> tuple[EnrolledSSHTargetV1, ...]:
+        with self._connect() as connection:
+            if include_inactive:
+                rows = connection.execute(
+                    f"""
+                    SELECT record_json FROM execution_ssh_targets
+                     WHERE team_id = {self._dialect.bind}
+                     ORDER BY target_id
+                    """,
+                    (team_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    f"""
+                    SELECT record_json FROM execution_ssh_targets
+                     WHERE team_id = {self._dialect.bind}
+                       AND status = {self._dialect.bind}
+                       AND revoked_at_utc IS NULL
+                     ORDER BY target_id
+                    """,
+                    (team_id, SSHTargetStatus.ACTIVE.value),
+                ).fetchall()
+        return tuple(
+            EnrolledSSHTargetV1.model_validate_json(str(row["record_json"]))
+            for row in rows
+        )
+
+    def revoke_ssh_target(
+        self,
+        *,
+        team_id: str,
+        target_id: str,
+        revoked_by: str,
+        revoked_at_utc: datetime | None = None,
+    ) -> EnrolledSSHTargetV1 | None:
+        """Revoke an enrolled SSH target and mark all sessions targeting it revoked."""
+
+        with self._connect() as connection:
+            self._begin_claim(connection)
+            effective_time = revoked_at_utc or self._database_now(connection)
+            row = connection.execute(
+                f"""
+                SELECT record_json FROM execution_ssh_targets
+                 WHERE target_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                {self._row_lock_suffix()}
+                """,
+                (target_id, team_id),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return None
+            current = EnrolledSSHTargetV1.model_validate_json(str(row["record_json"]))
+            final_revoked_at = current.revoked_at_utc or effective_time
+            final_revoked_by = current.revoked_by or revoked_by
+            updated = current.model_copy(
+                update={
+                    "status": SSHTargetStatus.REVOKED,
+                    "revoked_at_utc": final_revoked_at,
+                    "revoked_by": final_revoked_by,
+                    "updated_at_utc": effective_time,
+                }
+            )
+            connection.execute(
+                f"""
+                UPDATE execution_ssh_targets
+                   SET status = {self._dialect.bind},
+                       revoked_at_utc = {self._dialect.bind},
+                       revoked_by = {self._dialect.bind},
+                       password_bootstrap_claimed_by_session_id = NULL,
+                       record_json = {self._dialect.bind}
+                 WHERE target_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (
+                    updated.status.value,
+                    _iso(final_revoked_at),
+                    final_revoked_by,
+                    _json(updated),
+                    target_id,
+                    team_id,
+                ),
+            )
+            session_rows = connection.execute(
+                f"""
+                SELECT session_id, record_json FROM execution_interactive_sessions
+                 WHERE team_id = {self._dialect.bind}
+                """,
+                (team_id,),
+            ).fetchall()
+            for sess_row in session_rows:
+                try:
+                    sess = _authority_record(InteractiveSessionV1, sess_row["record_json"])
+                except OldExecutionRecordFormat:
+                    continue
+                if sess.target.target_id != target_id:
+                    continue
+                connection.execute(
+                    f"""
+                    UPDATE execution_interactive_sessions
+                       SET revoked_at_utc = COALESCE(revoked_at_utc, {self._dialect.bind}),
+                           revoked_by = COALESCE(revoked_by, {self._dialect.bind})
+                     WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                    """,
+                    (_iso(effective_time), revoked_by, sess.session_id, team_id),
+                )
+                connection.execute(
+                    f"""
+                    UPDATE execution_ssh_interactions
+                       SET revoked_at_utc = COALESCE(revoked_at_utc, {self._dialect.bind}),
+                           revoked_by = COALESCE(revoked_by, {self._dialect.bind})
+                     WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                    """,
+                    (_iso(effective_time), revoked_by, sess.session_id, team_id),
+                )
+            connection.commit()
+        return EnrolledSSHTargetV1.model_validate(updated.model_dump(mode="python"))
+
+    def claim_ssh_target_password_bootstrap(
+        self, *, team_id: str, target_id: str, session_id: str
+    ) -> bool:
+        """Atomically claim one-time password bootstrap for ``target_id`` by ``session_id``."""
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE execution_ssh_targets
+                   SET password_bootstrap_claimed_by_session_id = {self._dialect.bind}
+                 WHERE target_id = {self._dialect.bind}
+                   AND team_id = {self._dialect.bind}
+                   AND status = {self._dialect.bind}
+                   AND revoked_at_utc IS NULL
+                   AND password_bootstrap_completed_at_utc IS NULL
+                   AND (
+                       password_bootstrap_claimed_by_session_id IS NULL
+                       OR password_bootstrap_claimed_by_session_id = {self._dialect.bind}
+                   )
+                """,
+                (
+                    session_id,
+                    target_id,
+                    team_id,
+                    SSHTargetStatus.ACTIVE.value,
+                    session_id,
+                ),
+            )
+            connection.commit()
+        return bool(cursor.rowcount == 1)
+
+    def release_ssh_target_password_bootstrap_claim(
+        self, *, team_id: str, target_id: str, session_id: str
+    ) -> bool:
+        """Release an incomplete password bootstrap claim if enrollment failed before latch."""
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE execution_ssh_targets
+                   SET password_bootstrap_claimed_by_session_id = NULL
+                 WHERE target_id = {self._dialect.bind}
+                   AND team_id = {self._dialect.bind}
+                   AND password_bootstrap_claimed_by_session_id = {self._dialect.bind}
+                   AND password_bootstrap_completed_at_utc IS NULL
+                """,
+                (target_id, team_id, session_id),
+            )
+            connection.commit()
+        return bool(cursor.rowcount == 1)
+
+    def mark_ssh_target_password_bootstrap_completed(
+        self,
+        *,
+        team_id: str,
+        target_id: str,
+        completed_at_utc: datetime | None = None,
+    ) -> EnrolledSSHTargetV1 | None:
+        """Permanently latch off password bootstrap for ``target_id``."""
+
+        with self._connect() as connection:
+            self._begin_claim(connection)
+            effective_time = completed_at_utc or self._database_now(connection)
+            row = connection.execute(
+                f"""
+                SELECT record_json FROM execution_ssh_targets
+                 WHERE target_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                {self._row_lock_suffix()}
+                """,
+                (target_id, team_id),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return None
+            current = EnrolledSSHTargetV1.model_validate_json(str(row["record_json"]))
+            latched_at = current.password_bootstrap_completed_at_utc or effective_time
+            updated = current.model_copy(
+                update={
+                    "password_bootstrap_completed_at_utc": latched_at,
+                    "updated_at_utc": effective_time,
+                }
+            )
+            connection.execute(
+                f"""
+                UPDATE execution_ssh_targets
+                   SET password_bootstrap_claimed_by_session_id = NULL,
+                       password_bootstrap_completed_at_utc = {self._dialect.bind},
+                       record_json = {self._dialect.bind}
+                 WHERE target_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (_iso(latched_at), _json(updated), target_id, team_id),
+            )
+            connection.commit()
+        return EnrolledSSHTargetV1.model_validate(updated.model_dump(mode="python"))
 
     def old_format_records(self, *, team_id: str) -> OldExecutionRecords:
         """Jobs, services and SSH sessions saved before schema version 2."""
@@ -746,7 +1240,7 @@ class _RelationalExecutionControlRepository:
                 ),
             )
             connection.commit()
-        return cursor.rowcount == 1
+        return bool(cursor.rowcount == 1)
 
     def has_active_run(self, *, team_id: str, job_id: str) -> bool:
         with self._connect() as connection:
@@ -1242,6 +1736,7 @@ class _RelationalExecutionControlRepository:
                 f"""
                 SELECT record_json FROM execution_interactive_sessions
                  WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                   AND revoked_at_utc IS NULL
                    AND (lease_owner IS NULL OR lease_expires_at_utc IS NULL OR lease_expires_at_utc <= {self._dialect.bind})
                 """,
                 (session_id, team_id, _iso(database_now)),
@@ -1249,7 +1744,7 @@ class _RelationalExecutionControlRepository:
             if row is None:
                 connection.rollback()
                 raise StaleExecutionFence(
-                    "Interactive session is already leased or unavailable."
+                    "Interactive session is already leased, revoked, or unavailable."
                 )
             current = _authority_record(InteractiveSessionV1, row["record_json"])
             claimed = current.model_copy(
@@ -1268,6 +1763,7 @@ class _RelationalExecutionControlRepository:
                    SET generation = {self._dialect.bind}, lease_owner = {self._dialect.bind}, lease_token = {self._dialect.bind}, lease_expires_at_utc = {self._dialect.bind},
                        record_json = {self._dialect.bind}
                  WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                   AND revoked_at_utc IS NULL
                 """,
                 (
                     claimed.fence,
@@ -1307,6 +1803,7 @@ class _RelationalExecutionControlRepository:
             if release
             else session
         )
+        revocation_guard = "" if release else " AND revoked_at_utc IS NULL"
         with self._connect() as connection:
             cursor = connection.execute(
                 f"""
@@ -1314,7 +1811,7 @@ class _RelationalExecutionControlRepository:
                    SET desired_or_status = {self._dialect.bind}, lease_owner = {self._dialect.bind}, lease_token = {self._dialect.bind},
                        lease_expires_at_utc = {self._dialect.bind}, record_json = {self._dialect.bind}
                  WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind} AND generation = {self._dialect.bind}
-                   AND lease_owner = {self._dialect.bind} AND lease_token = {self._dialect.bind}
+                   AND lease_owner = {self._dialect.bind} AND lease_token = {self._dialect.bind}{revocation_guard}
                 """,
                 (
                     updated.status.value,
@@ -1332,9 +1829,78 @@ class _RelationalExecutionControlRepository:
             connection.commit()
         if cursor.rowcount != 1:
             raise StaleExecutionFence(
-                "Interactive-session lease changed before update."
+                "Interactive-session lease changed or session was revoked before update."
             )
         return updated
+
+    def revoke_interactive_session(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        revoked_by: str,
+        revoked_at_utc: datetime | None = None,
+    ) -> SSHRevocationStateV1 | None:
+        """Mark an interactive SSH session (and any interaction approval) revoked in dedicated columns.
+
+        Stored outside ``record_json`` so concurrent broker lease renewals can
+        never overwrite a revocation and immediately see ``StaleExecutionFence``.
+        """
+
+        with self._connect() as connection:
+            effective_time = revoked_at_utc or self._database_now(connection)
+            connection.execute(
+                f"""
+                UPDATE execution_interactive_sessions
+                   SET revoked_at_utc = COALESCE(revoked_at_utc, {self._dialect.bind}),
+                       revoked_by = COALESCE(revoked_by, {self._dialect.bind})
+                 WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (_iso(effective_time), revoked_by, session_id, team_id),
+            )
+            connection.execute(
+                f"""
+                UPDATE execution_ssh_interactions
+                   SET revoked_at_utc = COALESCE(revoked_at_utc, {self._dialect.bind}),
+                       revoked_by = COALESCE(revoked_by, {self._dialect.bind})
+                 WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (_iso(effective_time), revoked_by, session_id, team_id),
+            )
+            row = connection.execute(
+                f"""
+                SELECT revoked_at_utc, revoked_by
+                  FROM execution_interactive_sessions
+                 WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (session_id, team_id),
+            ).fetchone()
+            connection.commit()
+        if row is None or row["revoked_at_utc"] is None:
+            return None
+        return SSHRevocationStateV1(
+            revoked_at_utc=_parse_datetime(row["revoked_at_utc"]),
+            revoked_by=None if row["revoked_by"] is None else str(row["revoked_by"]),
+        )
+
+    def get_interactive_session_revocation(
+        self, *, team_id: str, session_id: str
+    ) -> SSHRevocationStateV1 | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT revoked_at_utc, revoked_by
+                  FROM execution_interactive_sessions
+                 WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                """,
+                (session_id, team_id),
+            ).fetchone()
+        if row is None or row["revoked_at_utc"] is None:
+            return None
+        return SSHRevocationStateV1(
+            revoked_at_utc=_parse_datetime(row["revoked_at_utc"]),
+            revoked_by=None if row["revoked_by"] is None else str(row["revoked_by"]),
+        )
 
     def get_interactive_session(
         self, *, team_id: str, session_id: str
@@ -1517,6 +2083,10 @@ class SqliteExecutionControlRepository(_RelationalExecutionControlRepository):
         connection.execute("BEGIN IMMEDIATE")
 
     @staticmethod
+    def _row_lock_suffix() -> str:
+        return ""
+
+    @staticmethod
     def _is_integrity_error(exc: Exception) -> bool:
         return isinstance(exc, sqlite3.IntegrityError)
 
@@ -1534,9 +2104,7 @@ class PostgresExecutionControlRepository(_RelationalExecutionControlRepository):
             return
         validate_postgres_connection(dsn)
         with self._connect() as connection:
-            for statement in _SCHEMA_STATEMENTS:
-                connection.execute(statement)
-            connection.commit()
+            self._setup_schema(connection)
         self._logger.info(
             "Postgres execution control repository initialized at %s",
             redact_postgres_dsn(dsn),
@@ -1548,6 +2116,10 @@ class PostgresExecutionControlRepository(_RelationalExecutionControlRepository):
     @staticmethod
     def _begin_claim(connection: Any) -> None:
         del connection
+
+    @staticmethod
+    def _row_lock_suffix() -> str:
+        return "FOR UPDATE"
 
     @classmethod
     def _claim_select_sql(cls) -> str:
@@ -1688,6 +2260,31 @@ _SCHEMA_STATEMENTS = tuple(
     """
     CREATE INDEX IF NOT EXISTS idx_execution_sessions_owner
     ON execution_interactive_sessions(team_id, owner_scope_kind, owner_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS execution_ssh_targets (
+        target_id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL,
+        owner_scope_kind TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        username TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        host_key_algorithm TEXT NOT NULL,
+        host_key_fingerprint TEXT NOT NULL,
+        expires_at_utc TEXT,
+        revoked_at_utc TEXT,
+        revoked_by TEXT,
+        password_bootstrap_claimed_by_session_id TEXT,
+        password_bootstrap_completed_at_utc TEXT,
+        record_json TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_execution_ssh_targets_owner
+    ON execution_ssh_targets(team_id, owner_scope_kind, owner_id, status)
     """,
 )
 

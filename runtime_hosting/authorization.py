@@ -50,6 +50,7 @@ from runtime_hosting.execution_contracts import (
     InteractiveSessionV1,
     ManagedServiceV1,
     RunAttemptV1,
+    SSHInteractionRecordV1,
     utc_now,
 )
 
@@ -149,7 +150,7 @@ class ExecutionAccessGuard:
         self.require_authority(activation)
 
     def require_ssh_interact(
-        self, session: InteractiveSessionV1, interaction: ActivationRecordV2 | None
+        self, session: InteractiveSessionV1, interaction: SSHInteractionRecordV1 | None
     ) -> None:
         """Typing: connect authority still holds and a person approved typing in this session."""
 
@@ -159,10 +160,18 @@ class ExecutionAccessGuard:
                 "Typing into this SSH session needs a person's approval. Call "
                 "plan_execution_ssh_interaction for this session, then apply_change."
             )
-        activation = self._active(interaction, ExecutionActivationKind.SSH_INTERACT, "SSH typing")
-        if not activation.binds_session(session):
+        if interaction.revoked_at_utc is not None:
+            raise ExecutionAuthorizationDenied("SSH typing approval has been revoked.")
+        activation = self._active(
+            interaction.activation, ExecutionActivationKind.SSH_INTERACT, "SSH typing"
+        )
+        if not activation.binds_session(session, bounds=interaction.bounds):
             raise ExecutionAuthorizationDenied(
                 "The typing approval is for another session, owner or target."
+            )
+        if interaction.bounds is not None and not interaction.bounds.allow_typing:
+            raise ExecutionAuthorizationDenied(
+                "Interactive typing was not approved on this SSH session delegation."
             )
         self.require_authority(activation)
 

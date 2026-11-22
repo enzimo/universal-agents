@@ -21,6 +21,7 @@ import stat
 import struct
 import subprocess
 import termios
+import threading
 import time
 from typing import TypeVar
 
@@ -48,15 +49,33 @@ from storage.execution_control_repository import ExecutionControlRepository
 _T = TypeVar("_T")
 
 
-async def _await_uninterruptibly(awaitable: Awaitable[_T]) -> _T:
-    """Wait for cleanup work to finish even if additional cancellations arrive."""
+async def _await_shielded(
+    awaitable: Awaitable[_T],
+    *,
+    reraise_on_caller_cancel: bool,
+) -> _T:
+    """Wait for ``awaitable`` despite caller cancellations, stopping if the inner task is cancelled.
+
+    When only the caller task is cancelled, shielding lets cleanup run to
+    completion (and optionally re-raises ``CancelledError`` afterwards). When
+    the event loop shuts down (such as ``asyncio.run`` cancelling every task),
+    the inner task itself ends cancelled; checking ``task.cancelled()`` breaks
+    out immediately instead of spinning on an already-cancelled task.
+    """
 
     task = asyncio.ensure_future(awaitable)
+    caller_cancelled = False
     while True:
         try:
-            return await asyncio.shield(task)
+            result = await asyncio.shield(task)
+            break
         except asyncio.CancelledError:
-            continue
+            if task.cancelled():
+                raise
+            caller_cancelled = True
+    if caller_cancelled and reraise_on_caller_cancel:
+        raise asyncio.CancelledError
+    return result
 
 
 @dataclass
@@ -130,6 +149,9 @@ class SSHSessionBroker:
         prepare_task: asyncio.Task[
             tuple[AbstractContextManager[SSHCredentialMaterial], SSHCredentialMaterial]
         ] | None = None
+        handoff_lock = threading.Lock()
+        prepare_abandoned = False
+        prepared_ctx_ref: list[AbstractContextManager[SSHCredentialMaterial]] = []
         try:
             def _prepare_and_verify() -> tuple[
                 AbstractContextManager[SSHCredentialMaterial],
@@ -142,6 +164,11 @@ class SSHSessionBroker:
                 except Exception:
                     prepared_ctx.__exit__(None, None, None)
                     raise
+                with handoff_lock:
+                    if prepare_abandoned:
+                        prepared_ctx.__exit__(None, None, None)
+                        raise asyncio.CancelledError("SSH open was cancelled during prepare.")
+                    prepared_ctx_ref.append(prepared_ctx)
                 return prepared_ctx, prepared_material
 
             prepare_task = asyncio.create_task(asyncio.to_thread(_prepare_and_verify))
@@ -199,12 +226,19 @@ class SSHSessionBroker:
         except BaseException:
             if not context_entered and prepare_task is not None:
                 try:
-                    prepared_context, _ = await _await_uninterruptibly(prepare_task)
+                    prepared_context, _ = await _await_shielded(
+                        prepare_task,
+                        reraise_on_caller_cancel=False,
+                    )
                     context = prepared_context
                     context_entered = True
                 except BaseException:
-                    pass
-            await _await_uninterruptibly(
+                    with handoff_lock:
+                        prepare_abandoned = True
+                        if prepared_ctx_ref:
+                            context = prepared_ctx_ref[0]
+                            context_entered = True
+            await _await_shielded(
                 self._cleanup_failed_open(
                     claimed=claimed,
                     lease_token=lease_token,
@@ -212,7 +246,8 @@ class SSHSessionBroker:
                     master_fd=master_fd,
                     slave_fd=slave_fd,
                     context=context if context_entered else None,
-                )
+                ),
+                reraise_on_caller_cancel=False,
             )
             raise
 
@@ -396,16 +431,7 @@ class SSHSessionBroker:
                 cancel_expiry_monitor=(live.expiry_monitor is not caller_task),
             )
         )
-        cancelled = False
-        while True:
-            try:
-                result = await asyncio.shield(close_task)
-                break
-            except asyncio.CancelledError:
-                cancelled = True
-        if cancelled:
-            raise asyncio.CancelledError
-        return result
+        return await _await_shielded(close_task, reraise_on_caller_cancel=True)
 
     async def _finish_close(
         self,
