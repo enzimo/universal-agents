@@ -916,6 +916,31 @@ test("createFollowUpPageWatcher watches open inline proposal cards by document v
   watcher.noteReview("req-11", { follow_up_links: [], follow_up_settling: false });
   assert.deepEqual(closed.at(-1), { requestId: "req-11", urls: ["http://b.example/e"] });
   assert.equal(intervals.size, 0, "stops immediately once noteReview closes the last open card");
+
+  // Stale reads started at or before a page was first seen open never close that page (C18).
+  watchedElsewhere.clear();
+  openPages = [{ requestId: "req-12", url: "http://b.example/f", expiresAtUtc: "2099-01-01T00:00:00Z" }];
+  watcher.sync();
+  [...intervals.values()][0].cb();
+  await settle();
+  // A second page opens while the poll for req-12 is in flight.
+  openPages.push({ requestId: "req-12", url: "http://b.example/g", expiresAtUtc: "2099-01-01T00:00:00Z" });
+  watcher.sync();
+  gets.at(-1).resolve({ status: "ok", review: { follow_up_links: [], follow_up_settling: false } });
+  await settle();
+  assert.deepEqual(
+    closed.at(-1),
+    { requestId: "req-12", urls: ["http://b.example/f"] },
+    "in-flight poll closes only the page seen before the read started, not the newly opened one",
+  );
+  assert.equal(openPages.length, 1);
+  // The next poll started after the second page opened does close it.
+  [...intervals.values()][0].cb();
+  await settle();
+  gets.at(-1).resolve({ status: "ok", review: { follow_up_links: [], follow_up_settling: false } });
+  await settle();
+  assert.deepEqual(closed.at(-1), { requestId: "req-12", urls: ["http://b.example/g"] });
+  assert.equal(intervals.size, 0);
 });
 
 test("approving a proposal in the Inbox panel shows its forms in the conversation, not in a new tab", async () => {

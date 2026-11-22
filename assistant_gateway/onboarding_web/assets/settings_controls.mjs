@@ -124,11 +124,14 @@ export function createSettingsControls({
     }
   }
   let reviewGeneration = 0;
+  let reviewReadSequence = 0;
   const inflightReviewReads = new Map();
   function readAccessReview(path) {
     if (inflightReviewReads.has(path)) return inflightReviewReads.get(path);
+    const readStartedAt = ++reviewReadSequence;
     const pending = Promise.resolve()
       .then(() => client.get(path, ACCESS_READ_FALLBACK))
+      .then(payload => ({ payload, readStartedAt }))
       .finally(() => {
         if (inflightReviewReads.get(path) === pending) inflightReviewReads.delete(path);
       });
@@ -141,18 +144,22 @@ export function createSettingsControls({
     }
     const generation = reviewGeneration;
     const pathId = reviewIdFromPath(path);
-    return readAccessReview(path).then(payload => {
+    return readAccessReview(path).then(({ payload, readStartedAt }) => {
       if (generation === reviewGeneration) {
         const review = (payload && payload.review) || null;
         const requestId = (review && review.request_id) || pathId;
-        if (review && requestId) followUpPageWatcher.noteReview(requestId, review);
+        if (review && requestId) followUpPageWatcher.noteReview(requestId, review, readStartedAt);
       }
       return payload;
     });
   };
   const followUpPageWatcher = createFollowUpPageWatcher({
     getOpenPages: getOpenFollowUpPages,
-    get: readAccessReview,
+    get: path => readAccessReview(path).then(({ payload, readStartedAt }) => ({
+      review: (payload && payload.review) || null,
+      readStartedAt,
+    })),
+    currentReadSequence: () => reviewReadSequence,
     onClosePages: onCloseFollowUpPages,
     isRequestWatched: id => chatReviews.isWatchingFollowUp(id) || accessInbox.isWatchingFollowUp(id),
     browser,

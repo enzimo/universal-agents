@@ -698,27 +698,48 @@ function canonicalFollowUpUrl(raw) {
  * `/api/web-chat/access-inbox/requests/<id>` and calls
  * `onClosePages(requestId, urls)` for URLs that left `follow_up_links`,
  * skipping while `isFollowUpSettling(review)` is true.
+ *
+ * `currentReadSequence()` (when supplied by a caller that shares and dedupes
+ * review reads across views) returns the monotonic sequence number of the most
+ * recently started review read; `get()` may then return `{ review, readStartedAt }`
+ * and `noteReview(requestId, review, readStartedAt)` skips any page first seen
+ * open at or after `readStartedAt`, so a read that started before an approval
+ * handed a form off never closes the brand-new inline card.
  */
 export function createFollowUpPageWatcher({
-  getOpenPages, get, onClosePages, isRequestWatched, browser = globalThis, now = () => Date.now(),
+  getOpenPages, get, onClosePages, isRequestWatched, currentReadSequence,
+  browser = globalThis, now = () => Date.now(),
   pollMs = FOLLOW_UP_POLL_MS, graceMs = FOLLOW_UP_EXPIRY_GRACE_MS, maxPolls = FOLLOW_UP_MAX_POLLS,
 }) {
   const warn = (event, detail) => browser && browser.console && browser.console.warn(event, detail);
   let generation = 0;
+  let localReadSequence = 0;
+  const readSequence = typeof currentReadSequence === "function"
+    ? currentReadSequence
+    : () => localReadSequence;
   const inflight = new Map();
   const stopped = new Set();
   const settlingUntil = new Map();
+  const firstSeenAt = new Map();
 
   function openByRequest() {
     const grouped = new Map();
+    const activeKeys = new Set();
+    const currentSeq = readSequence();
     const pages = typeof getOpenPages === "function" ? getOpenPages() : [];
     (Array.isArray(pages) ? pages : []).forEach(page => {
       const requestId = text(page && page.requestId);
       const url = text(page && page.url);
       if (!requestId || !url || stopped.has(requestId)) return;
+      const pageKey = `${requestId}|${canonicalFollowUpUrl(url)}`;
+      activeKeys.add(pageKey);
+      if (!firstSeenAt.has(pageKey)) firstSeenAt.set(pageKey, currentSeq);
       if (!grouped.has(requestId)) grouped.set(requestId, []);
-      grouped.get(requestId).push({ requestId, url, expiresAtUtc: text(page && page.expiresAtUtc) });
+      grouped.get(requestId).push({ requestId, url, pageKey, expiresAtUtc: text(page && page.expiresAtUtc) });
     });
+    for (const key of [...firstSeenAt.keys()]) {
+      if (!activeKeys.has(key)) firstSeenAt.delete(key);
+    }
     for (const id of [...settlingUntil.keys()]) {
       if (!grouped.has(id)) settlingUntil.delete(id);
     }
@@ -739,8 +760,13 @@ export function createFollowUpPageWatcher({
     return targets;
   }
 
-  /** Applies a freshly read review so inline cards close on the same read as chat or Inbox cards. */
-  function noteReview(requestId, review) {
+  /**
+   * Applies a freshly read review so inline cards close on the same read as
+   * chat or Inbox cards. When `readStartedAt` is provided, pages first seen
+   * open at or after that read started are skipped so stale pre-hand-off reads
+   * cannot close a newly opened card.
+   */
+  function noteReview(requestId, review, readStartedAt) {
     const id = text(requestId);
     if (!id || !review || typeof onClosePages !== "function") return;
     const current = openByRequest().get(id) || [];
@@ -748,6 +774,10 @@ export function createFollowUpPageWatcher({
       settlingUntil.delete(id);
       return;
     }
+    const eligible = typeof readStartedAt === "number"
+      ? current.filter(page => readStartedAt > firstSeenAt.get(page.pageKey))
+      : current;
+    if (!eligible.length) return;
     if (isFollowUpSettling(review)) {
       settlingUntil.set(id, text(review.follow_up_settling_until_utc));
       watcher.sync();
@@ -756,7 +786,7 @@ export function createFollowUpPageWatcher({
     settlingUntil.delete(id);
     const pendingUrls = new Set(followUpLinks(review).map(link => canonicalFollowUpUrl(link.url)));
     const ended = [];
-    current.forEach(page => {
+    eligible.forEach(page => {
       if (!pendingUrls.has(canonicalFollowUpUrl(page.url)) && !ended.includes(page.url)) {
         ended.push(page.url);
       }
@@ -771,12 +801,16 @@ export function createFollowUpPageWatcher({
     const reads = [];
     openByRequest().forEach((_pages, requestId) => {
       if (inflight.has(requestId) || (typeof isRequestWatched === "function" && isRequestWatched(requestId))) return;
+      const localStartedAt = typeof currentReadSequence === "function" ? undefined : ++localReadSequence;
       const pending = Promise.resolve()
         .then(() => get(`${ACCESS_INBOX_API}/requests/${encodeURIComponent(requestId)}`))
         .then(payload => {
           if (readGeneration !== generation) return;
           const review = (payload && payload.review) || null;
-          if (review) noteReview(requestId, review);
+          const readStartedAt = payload && typeof payload.readStartedAt === "number"
+            ? payload.readStartedAt
+            : localStartedAt;
+          if (review) noteReview(requestId, review, readStartedAt);
         }, error => {
           if (readGeneration !== generation) return;
           if (error && (error.status === 403 || error.status === 404)) stopped.add(requestId);
@@ -811,6 +845,7 @@ export function createFollowUpPageWatcher({
       inflight.clear();
       stopped.clear();
       settlingUntil.clear();
+      firstSeenAt.clear();
       watcher.stop();
     },
   };
