@@ -2722,10 +2722,12 @@ Keep keyboard activation, nested panes, rapid toggles, and deep links usable.
   the Inbox decide API with the signed-in session and CSRF header. After a
   saved decision the card collapses to the compact decided form (`is-compact
   is-decided`): concise summary + inline outcome pill, compact muted
-  explanation, either the compact inline-card prompt (`.access-review-follow-up-note`:
-  "Choose the credentials in the secure pages below.") while framed account-link
-  cards remain active or any active un-underlined fallback link buttons, and
-  plain completion status lines (`role="status"`) as each form finishes.
+  explanation, the compact inline-card prompt (`.access-review-follow-up-note`:
+  "Choose the credentials in the secure pages below.") while any framed
+  account-link card is still open, any active un-underlined fallback link
+  buttons for forms the chat could not show as cards (both can appear
+  together), and plain completion status lines (`role="status"`) as each form
+  finishes.
 - The card reads its request from the gateway by id, so after a reload or a
   decision made elsewhere it shows the stored outcome and who decided, such as
   **Approved for this task** with "Decided by Dana on <local time>.". A request

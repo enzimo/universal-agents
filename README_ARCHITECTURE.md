@@ -3781,12 +3781,13 @@ page, the gateway, agents and models still never see what is typed.
   cards live only in that browser tab, like every broker card; while any form
   remains open, `ProposalFollowUpTracker` preserves its `frame_url` and
   `expires_at_utc` for the approving person so reloading mid-flow restores the
-  still-pending inline cards, stable URL-derived item ids
-  (`account_link:<requestId>:<urlHash>`) prevent duplicate frames or reloads
-  when both Settings Inbox and Web Chat observe the same form, broker-card
-  outcomes propagate across threads holding the same item id, and once all
-  forms finish or expire the decided card clears both the inline-card prompt
-  and any fallback buttons in favor of plain `follow_up_outcomes`. The Inbox
+  still-pending inline cards. One form may be held as a card in two threads
+  (where the Inbox placed it and under the review message), and stable
+  URL-derived item ids (`account_link:<requestId>:<urlHash>`) let the
+  page-wide card registry keep one live frame per id and propagate an outcome
+  to close every copy; once all forms finish or expire, the decided card
+  clears both the inline-card prompt and any fallback buttons in favor of
+  plain `follow_up_outcomes`. The Inbox
   notice keeps the forms' links. The standalone workflow page is not Web Chat;
   its decided card shows no follow-up today (`workflow.mjs` passes no links),
   so an approver there reaches the forms through the Inbox notice (proposed
