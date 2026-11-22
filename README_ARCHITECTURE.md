@@ -2773,9 +2773,10 @@ dot-separated labels of 1 to 63 ASCII characters that start and end with an
 ASCII letter or digit and allow `-` and `_` only inside labels (refusing
 non-ASCII hosts with a punycode suggestion and refusing labels starting or
 ending with `-` or `_`). With authorization off, `apply_by_agreement` returns
-the same diff rows
-and an `agreement_digest` on `confirmed=false` and requires that matching
-digest on `confirmed=true`, refusing if the file changed in between. The
+the same diff rows on `confirmed=false` for the person to read and applies the
+change on `confirmed=true`, like a new tool; the owner chose not to make the
+agent confirm what it saw a second time. The replacement still refuses if the
+file changed between reading its baseline and writing it. The
 proposal is one change request on a platform tool at `full`, so an
 administrator decides it and the Inbox, chat buttons, workflow linking,
 withdrawal and resume work as for any change.

@@ -479,10 +479,8 @@ credential); TeamLead can then offer the form in the requester's chat, or
 Proposals are decided in the gateway (the Inbox or chat), not with
 `assistant_cli access decide`, because the gateway applies them. With
 authorization off there are no grants: TeamLead explains the new tools, tool
-changes (showing Universal Agents' diff summary first and passing the returned
-`agreement_digest` with `confirmed=true` so a file changed in between is
-refused), and data folders, and applies them after you agree in the
-conversation.
+changes (with Universal Agents' list of differences) and data folders, and
+applies them after you agree in the conversation.
 
 ## Internet access
 
