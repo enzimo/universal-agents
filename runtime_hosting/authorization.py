@@ -69,6 +69,12 @@ class ExecutionAuthorizationDenied(PermissionError):
     pass
 
 
+class SSHDisabledError(RuntimeError):
+    """Raised when ``execution_control.ssh.enabled`` is false."""
+
+    pass
+
+
 SSH_SINGLE_REQUEST_ENDED_MESSAGE = (
     "This approval is for another request. Create a new session; "
     "to keep its approval across messages, stage it with this_request_only=false."
@@ -592,6 +598,7 @@ class ExecutionAccessGuard:
 __all__ = [
     "ExecutionAccessGuard",
     "ExecutionAuthorizationDenied",
+    "SSHDisabledError",
     "SSH_SINGLE_REQUEST_ENDED_MESSAGE",
     "SSHCallerContext",
     "SSHCapability",

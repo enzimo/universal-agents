@@ -13,12 +13,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, AsyncIterator, Iterator
 
 import pytest
+import pytest_asyncio
 from tests.tool_result_support import tool_json
 from strands.interrupt import InterruptException
 
@@ -324,8 +325,60 @@ def test_ssh_broker_restart_marks_non_replayable_live_pty_lost(tmp_path: Path) -
 # -- end to end through the agent tools -------------------------------------------
 
 
-@pytest.fixture
-def lead(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+@asynccontextmanager
+async def _running_ssh_broker(
+    instance: Any,
+    lead: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    root_token: str = "test-ssh-broker-root",
+    configure_runtime: Any = None,
+) -> AsyncIterator[tuple[Any, Any, str]]:
+    """Start a real ``SecureToolBrokerService`` for SSH tests and bind agent env vars to it."""
+
+    from aiohttp.test_utils import TestServer
+    from access_control.caller_tokens import CALLER_MANAGER, derive_caller_token
+    from secure_tool_broker.access_gate import build_broker_access_gate
+    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
+    from secure_tool_broker.service import SecureToolBrokerService
+
+    auth_enabled = bool(instance.config.authorization.enabled)
+    gate = build_broker_access_gate(
+        instance_root=instance.root,
+        team_id=lead.team_id,
+        authorization_enabled=auth_enabled,
+        storage_settings=instance.config.manager_storage_settings,
+        cedar_binary=str(CEDAR_BINARY) if auth_enabled else None,
+        lead_agent_type="TeamArchitect",
+    )
+    ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
+        instance_root_path=str(instance.root),
+        instance_name=instance.config.instance_name,
+        storage_settings=instance.config.manager_storage_settings,
+        ssh=instance.config.execution_control.ssh,
+        lead_agent_type="TeamArchitect",
+        config_path=str(instance.config_path),
+    )
+    broker_service = SecureToolBrokerService(
+        token=root_token,
+        access_gate=gate,
+        execution_ssh_config=ssh_cfg,
+    )
+    if configure_runtime is not None:
+        assert broker_service._execution_ssh is not None
+        configure_runtime(broker_service._execution_ssh)
+    async with TestServer(broker_service.build_app()) as server:
+        base_url = str(server.make_url("")).rstrip("/")
+        monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", base_url)
+        monkeypatch.setenv(
+            "SECURE_TOOL_BROKER_TOKEN",
+            derive_caller_token(root_token, CALLER_MANAGER),
+        )
+        yield broker_service, server, root_token
+
+
+@pytest_asyncio.fixture
+async def lead(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     use_signed_contexts(monkeypatch)
     from custom_tools import agent_team_port
 
@@ -334,17 +387,19 @@ def lead(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtur
         "_agent_type_source",
         lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}, "WebResearchAgent": {}},
     )
-    tools._SSH_BROKERS.clear()
-    agent = execution_lead(execution_instance(tmp_path, authorization_enabled=getattr(request, "param", True)))
+    instance = execution_instance(tmp_path, authorization_enabled=getattr(request, "param", True))
+    agent = execution_lead(instance)
     set_agent_ref(agent)
-    yield agent
+    async with _running_ssh_broker(
+        instance,
+        agent,
+        monkeypatch,
+        configure_runtime=lambda rt: setattr(rt.broker, "revocation_poll_interval_seconds", 0.1),
+    ) as (broker_service, _server, _root_token):
+        agent._test_instance = instance
+        agent._test_broker_service = broker_service
+        yield agent
     set_agent_ref(None)
-    for runner in list(tools._SSH_BROKERS.values()):
-        try:
-            asyncio.run(runner.shutdown())
-        except RuntimeError:
-            pass
-    tools._SSH_BROKERS.clear()
 
 
 async def _apply(change_id: str, call: ToolCall, *, confirmed: bool = False) -> dict[str, Any]:
@@ -415,12 +470,37 @@ async def test_typing_waits_for_a_persons_approval_and_revoking_access_stops_the
     after_revoke = json.loads(
         await tools.read_execution_ssh_session._tool_func(session_id=session_id, timeout_seconds=0)
     )
-    assert after_revoke["error_code"] == "execution_access_refused"
-    assert "no longer holds write access" in after_revoke["error"]
-    closed = json.loads(await tools.close_execution_ssh_session._tool_func(session_id=session_id))
-    assert closed["status"] in {"closed", "disconnected"}, (
-        "closing only ends access (or the broker monitor already disconnected after grant revocation)"
+    assert after_revoke["error_code"] == "execution_access_refused", after_revoke
+
+    # Even with READ re-granted (passing the broker's Cedar gate on read_execution_ssh_session),
+    # ExecutionAccessGuard still refuses because the session's connect activation needs WRITE,
+    # and the broker monitor terminates the live PTY automatically.
+    from custom_messages.contracts.access_v2 import AccessLevel
+    from custom_agents.execution_control_service import ExecutionControlService
+
+    grant_execution(lead, level=AccessLevel.READ)
+    after_read_only = json.loads(
+        await tools.read_execution_ssh_session._tool_func(session_id=session_id, timeout_seconds=0)
     )
+    assert after_read_only["error_code"] == "execution_access_refused", after_read_only
+    assert "no longer holds write access" in after_read_only["error"]
+
+    exec_service = ExecutionControlService(lead)
+    closed = None
+    for _ in range(30):
+        closed = exec_service.repository.get_interactive_session(
+            team_id=lead.team_id, session_id=session_id
+        )
+        if closed is not None and closed.status in {
+            InteractiveSessionStatus.CLOSED,
+            InteractiveSessionStatus.DISCONNECTED,
+        }:
+            break
+        await asyncio.sleep(0.05)
+    assert closed is not None and closed.status in {
+        InteractiveSessionStatus.CLOSED,
+        InteractiveSessionStatus.DISCONNECTED,
+    }, closed
 
 
 @pytest.mark.parametrize("lead", [False], indirect=True)
@@ -596,7 +676,6 @@ async def test_ssh_target_enrollment_and_bounded_delegation_end_to_end_with_real
         "_agent_type_source",
         lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}, "WebResearchAgent": {}},
     )
-    tools._SSH_BROKERS.clear()
     instance = execution_instance(tmp_path, authorization_enabled=True)
     instance.config.user.display_name = "Alice Smith"
     instance.config.execution_control.ssh.max_delegation_ttl_seconds = 1800
@@ -896,7 +975,6 @@ async def test_ssh_target_enrollment_and_bounded_delegation_end_to_end_with_real
         exec_service.create_ssh_session(target_id="build_mac_02")
 
     set_agent_ref(None)
-    tools._SSH_BROKERS.clear()
 
 
 def test_execution_access_guard_password_bootstrap_latch_and_host_key_mismatch() -> None:
@@ -1971,7 +2049,6 @@ async def test_ssh_deleted_credential_at_apply_and_unreadable_catalog_report_cle
     )
 
     use_signed_contexts(monkeypatch)
-    tools._SSH_BROKERS.clear()
     instance = execution_instance(tmp_path, authorization_enabled=True)
     lead = execution_lead(instance)
     set_agent_ref(lead)
@@ -2106,7 +2183,6 @@ async def test_ssh_deleted_credential_at_apply_and_unreadable_catalog_report_cle
             locked_db.chmod(0o600)
 
     set_agent_ref(None)
-    tools._SSH_BROKERS.clear()
 
 
 def test_ssh_delegation_uses_agent_type_port_and_refuses_when_unconfigured(
@@ -2306,8 +2382,6 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
     """
 
     import subprocess
-    from aiohttp.test_utils import TestServer
-    from access_control.caller_tokens import CALLER_MANAGER, derive_caller_token
     from custom_agents import access_runtime
     from custom_agents.execution_control_service import ExecutionControlService
     from custom_messages.contracts.access_v2 import (
@@ -2327,7 +2401,6 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
     from custom_tools.workspace_scope import current_workspace_scope
     from runtime_hosting.execution_contracts import ssh_public_key_sha256_fingerprint
     from secure_tool_broker import credential_catalog
-    from secure_tool_broker.access_gate import build_broker_access_gate
     from secure_tool_broker.credential_catalog import (
         CatalogCredential,
         CatalogCredentialField,
@@ -2335,8 +2408,6 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
         CredentialCatalog,
     )
     from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
-    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
-    from secure_tool_broker.service import SecureToolBrokerService
     from storage.execution_control_repository import StaleExecutionFence
     from tests.change_approval_support import owner
 
@@ -2351,7 +2422,6 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
             "BlockedWorker": {},
         },
     )
-    tools._SSH_BROKERS.clear()
 
     # Generate a real ed25519 keypair so ssh-agent / ssh-add unlock it cleanly inside the broker.
     keygen_dir = tmp_path / "keys"
@@ -2486,32 +2556,10 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
     )
 
     # Start a real SecureToolBrokerService with real Cedar BrokerAccessGate and BrokerExecutionSSHRuntime.
-    broker_root_token = "e2e-broker-root-token"
-    gate = build_broker_access_gate(
-        instance_root=instance.root,
-        team_id=lead.team_id,
-        authorization_enabled=True,
-        storage_settings=instance.config.manager_storage_settings,
-        cedar_binary=str(CEDAR_BINARY),
-        lead_agent_type="TeamArchitect",
-    )
-    ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
-        instance_root_path=str(instance.root),
-        instance_name=instance.config.instance_name,
-        storage_settings=instance.config.manager_storage_settings,
-        ssh=instance.config.execution_control.ssh,
-        lead_agent_type="TeamArchitect",
-    )
-    broker_service = SecureToolBrokerService(
-        token=broker_root_token,
-        access_gate=gate,
-        execution_ssh_config=ssh_cfg,
-    )
-    assert broker_service._execution_ssh is not None
-    broker = broker_service._execution_ssh.broker
-    broker.ssh_keyscan_executable = str(fake_keyscan_bin)
-    broker.sudo_search_paths = (str(fake_sudo_bin),)
-    broker.tailscale_search_paths = (str(fake_ts_bin),)
+    def _configure_e2e(rt: Any) -> None:
+        rt.broker.ssh_keyscan_executable = str(fake_keyscan_bin)
+        rt.broker.sudo_search_paths = (str(fake_sudo_bin),)
+        rt.broker.tailscale_search_paths = (str(fake_ts_bin),)
 
     async def _invoke_with_access_hook(agent: Any, tool_fn: Any, **kwargs: Any) -> dict[str, Any]:
         """Run the real Cedar access hook (decide_call) before invoking the tool function."""
@@ -2530,13 +2578,15 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
             result = await result
         return json.loads(result)
 
-    async with TestServer(broker_service.build_app()) as server:
-        base_url = str(server.make_url("")).rstrip("/")
-        monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", base_url)
-        monkeypatch.setenv(
-            "SECURE_TOOL_BROKER_TOKEN",
-            derive_caller_token(broker_root_token, CALLER_MANAGER),
-        )
+    async with _running_ssh_broker(
+        instance,
+        lead,
+        monkeypatch,
+        root_token="e2e-broker-root-token",
+        configure_runtime=_configure_e2e,
+    ) as (broker_service, _server, _root_token):
+        assert broker_service._execution_ssh is not None
+        broker = broker_service._execution_ssh.broker
 
         # 1. probe_execution_ssh_host_key runs in the broker, enforces guardrails, and returns fingerprint.
         denied_probe = await _invoke_with_access_hook(
@@ -2827,9 +2877,6 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
             denied = await _invoke_with_access_hook(other_worker, fn, **kwargs)
             assert denied["error_code"] == "execution_access_refused", (fn.__name__, denied)
 
-        # 6. No agent-local SSH broker was ever created (everything ran inside SecureToolBrokerService).
-        assert len(_execution_ssh._SSH_BROKERS) == 0
-
         # Delegated worker can close its session via ExecutionAccessGuard.require_ssh_close.
         closed = await _invoke_with_access_hook(
             worker, tools.close_execution_ssh_session, session_id=session_id
@@ -2850,8 +2897,6 @@ async def test_c71_manager_env_cannot_resolve_sealbox_secret_while_secure_broker
     """C71: Manager process environment holds no Sealbox env vars or secrets; secure_broker resolves them and opens SSH."""
 
     import subprocess
-    from aiohttp.test_utils import TestServer
-    from access_control.caller_tokens import CALLER_MANAGER, derive_caller_token
     from custom_agents.execution_changes import SSHTargetEnrollChangeService
     from custom_agents.execution_control_service import ExecutionControlService
     from env_secrets import PROCESS_MANAGER, PROCESS_SECURE_BROKER, environment_for
@@ -2861,7 +2906,6 @@ async def test_c71_manager_env_cannot_resolve_sealbox_secret_while_secure_broker
     )
     from runtime_hosting.ssh_credentials import make_catalog_secret_resolver
     from secure_tool_broker import credential_catalog
-    from secure_tool_broker.access_gate import build_broker_access_gate
     from secure_tool_broker.credential_catalog import (
         CatalogCredential,
         CatalogCredentialField,
@@ -2869,8 +2913,6 @@ async def test_c71_manager_env_cannot_resolve_sealbox_secret_while_secure_broker
         CredentialCatalog,
     )
     from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
-    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
-    from secure_tool_broker.service import SecureToolBrokerService
 
     use_signed_contexts(monkeypatch)
     keygen_dir = tmp_path / "keys"
@@ -3027,58 +3069,45 @@ async def test_c71_manager_env_cannot_resolve_sealbox_secret_while_secure_broker
     # Run SecureToolBrokerService with broker_env's Sealbox settings while agent process uses manager_env
     # (simulated by injecting broker_env ONLY inside the broker's secret resolver and stripping Sealbox
     # env vars from the agent's process environment!).
-    broker_root_token = "c71-broker-root"
-    gate = build_broker_access_gate(
-        instance_root=instance.root,
-        team_id=lead.team_id,
-        authorization_enabled=True,
-        storage_settings=instance.config.manager_storage_settings,
-        cedar_binary=str(CEDAR_BINARY),
-        lead_agent_type="TeamArchitect",
-    )
-    ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
-        instance_root_path=str(instance.root),
-        instance_name=instance.config.instance_name,
-        storage_settings=instance.config.manager_storage_settings,
-        ssh=instance.config.execution_control.ssh,
-        lead_agent_type="TeamArchitect",
-    )
-    broker_service = SecureToolBrokerService(
-        token=broker_root_token,
-        access_gate=gate,
-        execution_ssh_config=ssh_cfg,
-    )
-    assert broker_service._execution_ssh is not None
-    # Wrap broker's catalog secret resolver so it sees ONLY broker_env (simulating separate secure_broker process).
-    raw_provider = broker_service._execution_ssh.broker.material_provider
-    catalog_provider = getattr(raw_provider, "catalog_provider")
-    real_resolver = catalog_provider.secret_resolver
+    def _configure_c71(rt: Any) -> None:
+        raw_provider = rt.broker.material_provider
+        catalog_provider = getattr(raw_provider, "catalog_provider")
+        real_resolver = catalog_provider.secret_resolver
 
-    def _broker_process_resolver(cred_key: str, field_name: str, owner_arg: Any) -> str | None:
-        saved = {k: os.environ.get(k) for k in ("SEALBOX_URL", "SEALBOX_CLI_PATH", "SEALBOX_ROOT_TOKEN_FILE", "SECURE_TOOL_BROKER_CREDENTIALS_DIR")}
-        try:
-            for k in saved:
-                os.environ[k] = broker_env[k]
-            return real_resolver(cred_key, field_name, owner_arg)
-        finally:
-            for k, old in saved.items():
-                if old is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = old
+        def _broker_process_resolver(cred_key: str, field_name: str, owner_arg: Any) -> str | None:
+            saved = {
+                k: os.environ.get(k)
+                for k in (
+                    "SEALBOX_URL",
+                    "SEALBOX_CLI_PATH",
+                    "SEALBOX_ROOT_TOKEN_FILE",
+                    "SECURE_TOOL_BROKER_CREDENTIALS_DIR",
+                )
+            }
+            try:
+                for k in saved:
+                    os.environ[k] = broker_env[k]
+                return real_resolver(cred_key, field_name, owner_arg)
+            finally:
+                for k, old in saved.items():
+                    if old is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = old
 
-    catalog_provider.secret_resolver = _broker_process_resolver
+        catalog_provider.secret_resolver = _broker_process_resolver
 
     # Strip all Sealbox env vars from the agent's environment (matching environment_for('manager', ...)).
     for key in ("SEALBOX_URL", "SEALBOX_CLI_PATH", "SEALBOX_ROOT_TOKEN_FILE", "SECURE_TOOL_BROKER_CREDENTIALS_DIR"):
         monkeypatch.delenv(key, raising=False)
 
-    async with TestServer(broker_service.build_app()) as server:
-        monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", str(server.make_url("")).rstrip("/"))
-        monkeypatch.setenv(
-            "SECURE_TOOL_BROKER_TOKEN",
-            derive_caller_token(broker_root_token, CALLER_MANAGER),
-        )
+    async with _running_ssh_broker(
+        instance,
+        lead,
+        monkeypatch,
+        root_token="c71-broker-root",
+        configure_runtime=_configure_c71,
+    ):
         opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=session_id))
         assert opened["status"] == "open", opened
         assert client_priv not in json.dumps(opened)
@@ -3097,8 +3126,6 @@ async def test_c72_two_threads_two_event_loops_revoke_and_shutdown(
 
     import threading
     import time
-    from aiohttp.test_utils import TestServer
-    from access_control.caller_tokens import CALLER_MANAGER, derive_caller_token
     from custom_agents import access_runtime
     from custom_agents.execution_control_service import ExecutionControlService
     from custom_messages.contracts.access_v2 import (
@@ -3112,9 +3139,6 @@ async def test_c72_two_threads_two_event_loops_revoke_and_shutdown(
         TargetRefV1,
     )
     from custom_tools import agent_team_port
-    from secure_tool_broker.access_gate import build_broker_access_gate
-    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
-    from secure_tool_broker.service import SecureToolBrokerService
     from tests.change_approval_support import owner
 
     use_signed_contexts(monkeypatch)
@@ -3123,7 +3147,6 @@ async def test_c72_two_threads_two_event_loops_revoke_and_shutdown(
         "_agent_type_source",
         lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}},
     )
-    tools._SSH_BROKERS.clear()
 
     extract_root = tmp_path / "c72_extract"
     remote_state = tmp_path / "c72_state"
@@ -3172,36 +3195,14 @@ async def test_c72_two_threads_two_event_loops_revoke_and_shutdown(
     assert (await _apply(staged_deleg["change_id"], call_deleg))["status"] == "applied"
     worker = _make_worker_agent(lead, agent_id="worker_c72", agent_type="CodeWritingAgent")
 
-    broker_root_token = "c72-broker-root"
-    gate = build_broker_access_gate(
-        instance_root=instance.root,
-        team_id=lead.team_id,
-        authorization_enabled=True,
-        storage_settings=instance.config.manager_storage_settings,
-        cedar_binary=str(CEDAR_BINARY),
-        lead_agent_type="TeamArchitect",
-    )
-    ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
-        instance_root_path=str(instance.root),
-        instance_name=instance.config.instance_name,
-        storage_settings=instance.config.manager_storage_settings,
-        ssh=instance.config.execution_control.ssh,
-        lead_agent_type="TeamArchitect",
-    )
-    broker_service = SecureToolBrokerService(
-        token=broker_root_token,
-        access_gate=gate,
-        execution_ssh_config=ssh_cfg,
-    )
-    assert broker_service._execution_ssh is not None
-    broker_service._execution_ssh.broker.revocation_poll_interval_seconds = 0.1
-
-    async with TestServer(broker_service.build_app()) as server:
-        monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", str(server.make_url("")).rstrip("/"))
-        monkeypatch.setenv(
-            "SECURE_TOOL_BROKER_TOKEN",
-            derive_caller_token(broker_root_token, CALLER_MANAGER),
-        )
+    async with _running_ssh_broker(
+        instance,
+        lead,
+        monkeypatch,
+        root_token="c72-broker-root",
+        configure_runtime=lambda rt: setattr(rt.broker, "revocation_poll_interval_seconds", 0.1),
+    ) as (broker_service, _server, _root_token):
+        assert broker_service._execution_ssh is not None
 
         # Thread 1 (own asyncio.run loop): TeamLead opens session.
         from tests.task_work_support import bind_task
@@ -3286,36 +3287,14 @@ async def test_c72_two_threads_two_event_loops_revoke_and_shutdown(
         )
         assert polled["status"] == "revoked", polled
 
-    # Also verify fallback disk-key proxy is loop-safe across two OS threads + shutdown_agent_ssh_broker.
+    # C79: Without SECURE_TOOL_BROKER_INTERNAL_BASE_URL, pinned-target tools fail closed
+    # with broker_unavailable rather than launching an in-agent broker.
     monkeypatch.delenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", raising=False)
     session2 = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID))
-    s2_id = session2["session_id"]
-    t_open_res: dict[str, Any] = {}
-
-    def _fallback_open_thread() -> None:
-        async def _run() -> None:
-            bind_task(active_task_id)
-            set_agent_ref(lead)
-            t_open_res["opened"] = json.loads(
-                await tools.open_execution_ssh_session._tool_func(session_id=s2_id)
-            )
-            set_agent_ref(None)
-
-        asyncio.run(_run())
-
-    t_fb = threading.Thread(target=_fallback_open_thread)
-    t_fb.start()
-    await asyncio.to_thread(t_fb.join, 15.0)
-    assert t_open_res["opened"]["status"] == "open", t_open_res
-    # Shutdown from a DIFFERENT loop (this test's loop) succeeds with zero ValueError and closes s2!
-    from custom_tools.providers._execution_ssh import shutdown_agent_ssh_broker
-
-    await shutdown_agent_ssh_broker(lead.id)
-    assert len(tools._SSH_BROKERS) == 0
-    after_fb = ExecutionControlService(lead).repository.get_interactive_session(
-        team_id=lead.team_id, session_id=s2_id
+    refused_no_broker = json.loads(
+        await tools.open_execution_ssh_session._tool_func(session_id=session2["session_id"])
     )
-    assert after_fb is not None and after_fb.status != InteractiveSessionStatus.OPEN
+    assert refused_no_broker["error_code"] == "broker_unavailable", refused_no_broker
     set_agent_ref(None)
 
 
@@ -3326,15 +3305,11 @@ async def test_c73_broker_startup_recovers_lost_sessions_and_sweeps_stale_dirs_a
 ) -> None:
     """C73: Broker startup immediately marks crashed sessions LOST and sweeps stale ephemeral dirs; base lock prevents sweep races."""
 
-    from aiohttp.test_utils import TestServer
     from runtime_hosting.ssh_credentials import (
         SSH_EPHEMERAL_DIR_PREFIX,
         _create_locked_ephemeral_session_dir,
         sweep_stale_ssh_ephemeral_dirs,
     )
-    from secure_tool_broker.access_gate import build_broker_access_gate
-    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
-    from secure_tool_broker.service import SecureToolBrokerService
 
     use_signed_contexts(monkeypatch)
     instance = execution_instance(tmp_path, authorization_enabled=False)
@@ -3362,27 +3337,8 @@ async def test_c73_broker_startup_recovers_lost_sessions_and_sweeps_stale_dirs_a
     # C73(d): An atomically created + locked session dir survives a sweep under _base_dir_lock.
     live_dir, lock_fd = _create_locked_ephemeral_session_dir(ephemeral_base)
     try:
-        gate = build_broker_access_gate(
-            instance_root=instance.root,
-            team_id=lead.team_id,
-            authorization_enabled=False,
-            storage_settings=instance.config.manager_storage_settings,
-            lead_agent_type="TeamArchitect",
-        )
-        ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
-            instance_root_path=str(instance.root),
-            instance_name=instance.config.instance_name,
-            storage_settings=instance.config.manager_storage_settings,
-            ssh=instance.config.execution_control.ssh,
-            lead_agent_type="TeamArchitect",
-        )
-        broker_service = SecureToolBrokerService(
-            token="c73-broker-root",
-            access_gate=gate,
-            execution_ssh_config=ssh_cfg,
-        )
         # Starting the broker immediately recovers the crashed session and sweeps stale_dir without any SSH tool call!
-        async with TestServer(broker_service.build_app()):
+        async with _running_ssh_broker(instance, lead, monkeypatch, root_token="c73-broker-root"):
             recovered = repo.get_interactive_session(
                 team_id=lead.team_id, session_id="ssh_sess_crashed_c73"
             )
@@ -3396,4 +3352,484 @@ async def test_c73_broker_startup_recovers_lost_sessions_and_sweeps_stale_dirs_a
     assert sweep_stale_ssh_ephemeral_dirs(ephemeral_base) == 1
     assert not live_dir.exists()
     set_agent_ref(None)
+
+
+# -- Checkpoint 15: C77-C80 (live settings reload, non-blocking PTY, broker-only, failure handling) --
+
+
+@needs_cedar
+@pytest.mark.asyncio
+async def test_c77_live_killswitch_and_settings_reload_without_restarting_broker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C77: Turning SSH off in instance_config.yaml stops live sessions/commands and refuses actions immediately; turning on and tightening policy also reload live."""
+
+    import time
+    from custom_agents.execution_control_service import ExecutionControlService
+    from runtime_settings.execution import ExecutionSSHTargetSettings
+
+    use_signed_contexts(monkeypatch)
+    extract_root = tmp_path / "c77_extract"
+    remote_state = tmp_path / "c77_state"
+    fake_ssh_bin = _write_fake_tool_ssh(tmp_path / "c77_bin", extract_root=extract_root, state_dir=remote_state)
+    fake_keyscan_bin = _write_fake_keyscan(tmp_path / "c77_bin", public_key=_framed_ed25519_pub(b"\x77" * 32))
+
+    instance = execution_instance(tmp_path, authorization_enabled=True)
+    instance.config.execution_control.ssh.ssh_executable = str(fake_ssh_bin)
+    instance.config.execution_control.ssh.allow_password_bootstrap = True
+    instance.config.save(instance.config_path)
+
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+    grant_execution(lead)
+
+    session = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID))
+    session_id = session["session_id"]
+    staged = json.loads(
+        tools.plan_execution_ssh_interaction._tool_func(
+            session_id=session_id,
+            reason="C77 killswitch test",
+            ttl_seconds=600,
+            allow_commands=True,
+            allow_typing=True,
+        )
+    )
+    call = ToolCall("tooluse_c77")
+    with pytest.raises(InterruptException):
+        await _apply(staged["change_id"], call)
+    decide(lead, call)
+    assert (await _apply(staged["change_id"], call))["status"] == "applied"
+
+    def _cfg(rt: Any) -> None:
+        rt.broker.revocation_poll_interval_seconds = 0.05
+        rt.broker.ssh_keyscan_executable = str(fake_keyscan_bin)
+
+    async with _running_ssh_broker(
+        instance,
+        lead,
+        monkeypatch,
+        root_token="c77-broker-root",
+        configure_runtime=_cfg,
+    ) as (broker_service, _server, _root_token):
+        assert broker_service._execution_ssh is not None
+        opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=session_id))
+        assert opened["status"] == "open", opened
+        started = json.loads(
+            await tools.run_execution_ssh_command._tool_func(
+                session_id=session_id,
+                command="sleep 30",
+                timeout_seconds=30.0,
+                wait_seconds=0.1,
+            )
+        )
+        assert started["status"] == "running", started
+        cmd_id = started["command_id"]
+
+        # Flip execution_control.ssh.enabled to False in instance_config.yaml while session & command are live!
+        instance.config.execution_control.ssh.enabled = False
+        instance.config.save(instance.config_path)
+
+        # Broker monitor stops the running command and closes the live PTY automatically.
+        exec_service = ExecutionControlService(lead)
+        deadline = time.monotonic() + 3.0
+        final_sess = None
+        while time.monotonic() < deadline:
+            final_sess = exec_service.repository.get_interactive_session(
+                team_id=lead.team_id, session_id=session_id
+            )
+            cmd_obj = broker_service._execution_ssh._broker._commands.get(cmd_id)
+            if (
+                final_sess is not None
+                and final_sess.status in {InteractiveSessionStatus.DISCONNECTED, InteractiveSessionStatus.CLOSED}
+                and (cmd_obj is None or cmd_obj.status.value != "running")
+            ):
+                break
+            await asyncio.sleep(0.05)
+        assert final_sess is not None
+        assert final_sess.status in {
+            InteractiveSessionStatus.DISCONNECTED,
+            InteractiveSessionStatus.CLOSED,
+        }, final_sess
+        assert session_id not in broker_service._execution_ssh._broker._sessions
+        cmd_obj = broker_service._execution_ssh._broker._commands.get(cmd_id)
+        assert cmd_obj is not None and cmd_obj.status.value == "revoked"
+
+        # Agent-side tool refuses immediately with ssh_disabled (when agent config has enabled=False).
+        lead_reloaded = execution_lead(instance)
+        set_agent_ref(lead_reloaded)
+        agent_refused = json.loads(
+            await tools.read_execution_ssh_session._tool_func(session_id=session_id, timeout_seconds=0)
+        )
+        assert agent_refused["error_code"] == "ssh_disabled", agent_refused
+        assert "execution_control.ssh.enabled is false." in agent_refused["error"]
+
+        # Even if an older agent process still thinks ssh.enabled is True, the broker itself refuses with ssh_disabled!
+        set_agent_ref(lead)
+        broker_refused = json.loads(
+            await tools.read_execution_ssh_session._tool_func(session_id=session_id, timeout_seconds=0)
+        )
+        assert broker_refused["error_code"] == "ssh_disabled", broker_refused
+        assert "next_step" in broker_refused
+
+        # Flip SSH back ON, tighten denied_cidrs to block 198.51.100.0/24, disable password bootstrap,
+        # and add a new pinned target — all take effect live without restarting the broker!
+        id2, kh2 = write_ssh_material(instance.root / "broker_credentials" / "ssh2", key_bytes=b"second-key-bytes")
+        instance.config.execution_control.ssh.enabled = True
+        instance.config.execution_control.ssh.allow_password_bootstrap = False
+        instance.config.execution_control.ssh.denied_cidrs = (
+            *instance.config.execution_control.ssh.denied_cidrs,
+            "198.51.100.0/24",
+        )
+        instance.config.execution_control.ssh.targets = (
+            *instance.config.execution_control.ssh.targets,
+            ExecutionSSHTargetSettings(
+                target_id="ops.second",
+                host="ops.internal",
+                username="automation",
+                host_key_algorithm="ssh-ed25519",
+                host_key_fingerprint=host_key_fingerprint(b"second-key-bytes"),
+                credential_binding_id="ssh_binding_second",
+                identity_file=str(id2),
+                known_hosts_file=str(kh2),
+            ),
+        )
+        instance.config.save(instance.config_path)
+
+        lead2 = execution_lead(instance)
+        set_agent_ref(lead2)
+        probed_denied = json.loads(
+            await tools.probe_execution_ssh_host_key._tool_func(host="198.51.100.42", port=22)
+        )
+        assert probed_denied["error_code"] == "execution_access_refused", probed_denied
+        assert broker_service._execution_ssh.broker.allow_password_bootstrap is False
+
+        sess2 = json.loads(tools.create_execution_ssh_session._tool_func(target_id="ops.second"))
+        opened2 = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sess2["session_id"]))
+        assert opened2["status"] == "open", opened2
+        closed2 = json.loads(await tools.close_execution_ssh_session._tool_func(session_id=sess2["session_id"]))
+        assert closed2["status"] == "closed", closed2
+    set_agent_ref(None)
+
+
+@pytest.mark.asyncio
+async def test_c78_nonblocking_pty_write_limit_timeout_read_close_race_and_no_thread_starvation(
+    tmp_path: Path,
+) -> None:
+    """C78: PTY writes are size-capped and non-blocking; quiet reads use zero pool threads and exit cleanly on close."""
+
+    import concurrent.futures
+    import sys
+    import time
+    from runtime_hosting.ssh import MAX_PTY_WRITE_BYTES
+
+    # Stand-in ssh that puts stdin PTY into raw mode and stops reading, so PTY buffers fill up.
+    stalled_ssh = tmp_path / "stalled-ssh"
+    stalled_ssh.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, termios, time, tty\n"
+        "tty.setraw(sys.stdin.fileno())\n"
+        "time.sleep(10)\n",
+        encoding="utf-8",
+    )
+    stalled_ssh.chmod(0o755)
+
+    key_bytes = b"c78-host-public-key"
+    repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+    session = _session(key_bytes, session_id="ssh_sess_c78_stall")
+    repository.create_interactive_session(session)
+    repository.put_ssh_interaction(_typing_approval(session))
+
+    identity, known_hosts = write_ssh_material(tmp_path / "keys", key_bytes=key_bytes)
+    broker = SSHSessionBroker(
+        repository=repository,
+        authorization_guard=_AGREEMENT_GUARD,
+        material_provider=_MaterialProvider(SSHCredentialMaterial(identity, known_hosts)),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        team_id="team_alpha",
+        broker_id="broker-c78",
+        ssh_executable=str(stalled_ssh),
+        lease_ttl_seconds=60,
+    )
+    try:
+        await broker.open(session_id=session.session_id, lease_token="lease-c78", caller=_DEFAULT_CALLER)
+
+        # (a1) Over-limit write (> 64 KiB) is refused immediately.
+        with pytest.raises(ValueError, match="maximum size"):
+            await broker.write(
+                session_id=session.session_id,
+                payload=b"x" * (MAX_PTY_WRITE_BYTES + 1),
+                caller=_DEFAULT_CALLER,
+            )
+
+        # (a2) Stalled raw-mode PTY write times out cleanly while a sibling coroutine keeps ticking!
+        await asyncio.sleep(0.15)  # let stalled-ssh enter raw mode
+        max_gap = 0.0
+        ticks = 0
+        stop_ticking = False
+
+        async def _ticker() -> None:
+            nonlocal max_gap, ticks
+            last = time.monotonic()
+            while not stop_ticking:
+                await asyncio.sleep(0.02)
+                now = time.monotonic()
+                max_gap = max(max_gap, now - last)
+                last = now
+                ticks += 1
+
+        ticker_task = asyncio.create_task(_ticker())
+        try:
+            # Fill PTY buffer with 64 KiB chunks until write hits BlockingIOError and times out.
+            timed_out = False
+            for _ in range(8):
+                try:
+                    await broker.write(
+                        session_id=session.session_id,
+                        payload=b"A" * MAX_PTY_WRITE_BYTES,
+                        caller=_DEFAULT_CALLER,
+                        timeout_seconds=0.35,
+                    )
+                except TimeoutError:
+                    timed_out = True
+                    break
+            assert timed_out, "Expected stalled raw-mode PTY write to time out"
+        finally:
+            stop_ticking = True
+            await ticker_task
+        assert ticks >= 5, ticks
+        assert max_gap < 0.25, f"Event loop stalled for {max_gap:.3f}s during PTY write"
+
+        # (b) Quiet read does NOT hold a thread in the default executor pool!
+        loop = asyncio.get_running_loop()
+        single_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        old_executor = getattr(loop, "_default_executor", None)
+        loop.set_default_executor(single_thread_pool)
+        try:
+            read_task = asyncio.create_task(
+                broker.read(
+                    session_id=session.session_id,
+                    timeout_seconds=1.5,
+                    caller=_DEFAULT_CALLER,
+                )
+            )
+            await asyncio.sleep(0.05)
+            t0 = time.monotonic()
+            pool_result = await asyncio.to_thread(lambda: "pool-free")
+            elapsed = time.monotonic() - t0
+            assert pool_result == "pool-free"
+            assert elapsed < 0.25, f"Quiet read starved default thread pool for {elapsed:.3f}s"
+
+            # (c) Closing the session while read() is waiting returns cleanly without touching master_fd again!
+            closed = await broker.close(session_id=session.session_id, caller=_DEFAULT_CALLER)
+            assert closed.status is InteractiveSessionStatus.CLOSED
+            # Immediately allocate a new pipe fd (likely reusing the closed fd number) with unread bytes
+            # to prove the woken read() never touches that fd number.
+            r_fd, w_fd = os.pipe()
+            try:
+                os.write(w_fd, b"UNRELATED_FD_BYTES")
+                read_out = await asyncio.wait_for(read_task, timeout=1.0)
+                assert b"UNRELATED_FD_BYTES" not in read_out
+            finally:
+                os.close(r_fd)
+                os.close(w_fd)
+        finally:
+            loop.set_default_executor(old_executor)
+            single_thread_pool.shutdown(wait=True)
+    finally:
+        await broker.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_c80_smaller_fixes_secure_cli_case_lazy_init_body_limit_unknown_revoke_and_closing_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C80(a-e): mixed-case secure_cli refusal, lazy DB/artifacts when SSH off + recovery retry, scoped 32 MiB limit, unknown session revoke=false, and _closing_tasks callback cleanup."""
+
+    from aiohttp import ClientSession
+    from aiohttp.test_utils import TestServer
+    from access_control.caller_tokens import CALLER_GATEWAY, CALLER_MANAGER, derive_caller_token
+    from custom_tools.secure_cli_tool import _secure_cli_impl
+    from secure_tool_broker.access_gate import build_broker_access_gate
+    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
+    from secure_tool_broker.service import SecureToolBrokerService
+    from secure_tools.registry import list_providers
+
+    # (a) secure_cli refuses mixed-case execution_ssh names and omits execution_ssh from secure_cli_only list.
+    assert "execution_ssh" not in list_providers(secure_cli_only=True)
+    for variant in ("execution_ssh", "Execution_SSH", "EXECUTION_SSH", "  Execution_SSH  "):
+        res = _secure_cli_impl(variant, "open_execution_ssh_session", {"session_id": "s1"}, "test")
+        assert res["status"] == "error", (variant, res)
+        assert "dedicated function tools" in res["content"][0]["text"], (variant, res)
+
+    # (b) With SSH off, BrokerExecutionSSHRuntime.__init__ & startup do NOT open execution DB or create artifacts dir.
+    use_signed_contexts(monkeypatch)
+    instance = execution_instance(tmp_path, authorization_enabled=False)
+    instance.config.execution_control.ssh.enabled = False
+    instance.config.save(instance.config_path)
+    # Remove any DB/artifacts files so we can prove broker init/startup doesn't create them.
+    db_file = Path(instance.config.manager_storage_settings.sqlite_path)
+    if db_file.exists():
+        db_file.unlink()
+    artifacts_dir = instance.config.layout.execution_artifacts_dir
+    if artifacts_dir.exists():
+        import shutil
+        shutil.rmtree(artifacts_dir)
+
+    lead = execution_lead(instance)
+    root_token = "c80-broker-root"
+    gate = build_broker_access_gate(
+        instance_root=instance.root,
+        team_id=lead.team_id,
+        authorization_enabled=False,
+        storage_settings=instance.config.manager_storage_settings,
+        lead_agent_type="TeamArchitect",
+    )
+    ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
+        instance_root_path=str(instance.root),
+        instance_name=instance.config.instance_name,
+        storage_settings=instance.config.manager_storage_settings,
+        ssh=instance.config.execution_control.ssh,
+        lead_agent_type="TeamArchitect",
+        config_path=str(instance.config_path),
+    )
+    broker_service = SecureToolBrokerService(
+        token=root_token,
+        access_gate=gate,
+        execution_ssh_config=ssh_cfg,
+    )
+    assert broker_service._execution_ssh is not None
+    assert broker_service._execution_ssh._repository is None
+    assert not artifacts_dir.exists()
+
+    async with TestServer(broker_service.build_app()) as server:
+        assert broker_service._execution_ssh._repository is None
+        assert not artifacts_dir.exists()
+
+        base = str(server.make_url("")).rstrip("/")
+        gw_headers = {"Authorization": f"Bearer {derive_caller_token(root_token, CALLER_GATEWAY)}"}
+        mgr_headers = {"Authorization": f"Bearer {derive_caller_token(root_token, CALLER_MANAGER)}"}
+
+        async with ClientSession() as http:
+            # (c) Normal broker tool routes keep aiohttp's default 1 MiB body limit (reject 2 MiB with 413),
+            # while POST /v1/tools/execution_ssh accepts a > 2 MiB body (gets past body size limit).
+            big_body = json.dumps({"provider": "github", "action": "repo.view", "params": {"pad": "x" * (2 * 1024 * 1024)}})
+            async with http.post(f"{base}/v1/tools/github", data=big_body, headers={**mgr_headers, "Content-Type": "application/json"}) as resp:
+                assert resp.status == 413, resp.status
+
+            big_ssh = json.dumps({"provider": "execution_ssh", "action": "probe_execution_ssh_host_key", "params": {"host": "x" * (2 * 1024 * 1024)}})
+            async with http.post(f"{base}/v1/tools/execution_ssh", data=big_ssh, headers={**mgr_headers, "Content-Type": "application/json"}) as resp:
+                assert resp.status != 413, resp.status
+
+            # (d) Unknown session id on /v1/execution-ssh/sessions/<unknown>/revoke answers revoked=false.
+            async with http.post(f"{base}/v1/execution-ssh/sessions/ssh_sess_does_not_exist/revoke", json={"revoked_by": "admin_1"}, headers=gw_headers) as resp:
+                assert resp.status == 200
+                body = await resp.json()
+                assert body["revoked"] is False, body
+                assert body["session"] is None
+
+        # (b2) Failed startup recovery retries before first SSH action and refuses with ssh_recovery_failed while failing.
+        instance.config.execution_control.ssh.enabled = True
+        instance.config.save(instance.config_path)
+        calls = {"count": 0}
+        real_broker = broker_service._execution_ssh.broker
+        real_recover = real_broker.recover_after_restart
+
+        def _flaky_recover():
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("transient db lock")
+            return real_recover()
+
+        monkeypatch.setattr(real_broker, "recover_after_restart", _flaky_recover)
+        monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", base)
+        monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", derive_caller_token(root_token, CALLER_MANAGER))
+        lead_on = execution_lead(instance)
+        set_agent_ref(lead_on)
+
+        first_try = json.loads(
+            await tools.probe_execution_ssh_host_key._tool_func(host="127.0.0.1", port=22)
+        )
+        assert first_try["error_code"] == "ssh_recovery_failed", first_try
+        assert calls["count"] == 1
+        assert broker_service._execution_ssh._recovered is False
+
+        # Second call retries recovery, succeeds, and then proceeds to normal network guardrail refusal!
+        second_try = json.loads(
+            await tools.probe_execution_ssh_host_key._tool_func(host="127.0.0.1", port=22)
+        )
+        assert calls["count"] == 2
+        assert broker_service._execution_ssh._recovered is True
+        assert second_try["error_code"] == "execution_access_refused", second_try
+
+        # (c79) Without SECURE_TOOL_BROKER_INTERNAL_BASE_URL, SSH tools answer broker_unavailable (no in-agent fallback).
+        monkeypatch.delenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", raising=False)
+        no_broker = json.loads(
+            await tools.probe_execution_ssh_host_key._tool_func(host="ops.internal", port=22)
+        )
+        assert no_broker["error_code"] == "broker_unavailable", no_broker
+
+    # (e) Cancelling the caller waiting on _close() still cleans _closing_tasks via add_done_callback.
+    key_bytes = b"c80-close-key"
+    repo_e = SqliteExecutionControlRepository(str(tmp_path / "exec_e.db"))
+    sess_e = _session(key_bytes, session_id="ssh_sess_c80_cancel")
+    repo_e.create_interactive_session(sess_e)
+    broker_e = _broker(tmp_path / "e", repo_e, key_bytes=key_bytes)
+    try:
+        await broker_e.open(session_id=sess_e.session_id, lease_token="lease-e", caller=_DEFAULT_CALLER)
+
+        orig_finish = broker_e._finish_close
+        gate_evt = asyncio.Event()
+
+        async def _slow_finish(**kwargs: Any) -> InteractiveSessionV1:
+            await gate_evt.wait()
+            return await orig_finish(**kwargs)
+
+        monkeypatch.setattr(broker_e, "_finish_close", _slow_finish)
+        caller_task = asyncio.create_task(broker_e._close(session_id=sess_e.session_id, disconnected=False))
+        await asyncio.sleep(0.05)
+        assert sess_e.session_id in broker_e._closing_tasks
+        caller_task.cancel()
+        # Release _finish_close asynchronously so _await_shielded can complete cleanup while re-raising CancelledError.
+        asyncio.get_running_loop().call_later(0.05, gate_evt.set)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(caller_task, timeout=5.0)
+        for _ in range(30):
+            if sess_e.session_id not in broker_e._closing_tasks:
+                break
+            await asyncio.sleep(0.02)
+        assert sess_e.session_id not in broker_e._closing_tasks
+        # A subsequent close reads the closed session from storage cleanly rather than a stale task.
+        stored_after = await broker_e._close(session_id=sess_e.session_id, disconnected=False)
+        assert stored_after.status is InteractiveSessionStatus.CLOSED
+
+        # Also prove cancelling the inner close_task (e.g. loop shutdown) cleans _closing_tasks via add_done_callback.
+        sess_e2 = _session(key_bytes, session_id="ssh_sess_c80_inner_cancel")
+        repo_e.create_interactive_session(sess_e2)
+        await broker_e.open(session_id=sess_e2.session_id, lease_token="lease-e2", caller=_DEFAULT_CALLER)
+        live_e2 = broker_e._sessions[sess_e2.session_id]
+        gate_evt2 = asyncio.Event()
+
+        async def _stuck_finish(**kwargs: Any) -> InteractiveSessionV1:
+            try:
+                await gate_evt2.wait()
+            except asyncio.CancelledError:
+                await orig_finish(**kwargs)
+                raise
+            return await orig_finish(**kwargs)
+
+        monkeypatch.setattr(broker_e, "_finish_close", _stuck_finish)
+        caller_task2 = asyncio.create_task(broker_e._close(session_id=sess_e2.session_id, disconnected=False))
+        await asyncio.sleep(0.05)
+        inner_task2 = broker_e._closing_tasks.get(sess_e2.session_id)
+        assert inner_task2 is not None
+        caller_task2.cancel()
+        inner_task2.cancel()
+        await asyncio.wait_for(asyncio.gather(caller_task2, inner_task2, return_exceptions=True), timeout=5.0)
+        assert sess_e2.session_id not in broker_e._closing_tasks
+        assert live_e2.closed is True
+    finally:
+        await broker_e.shutdown()
+        set_agent_ref(None)
 

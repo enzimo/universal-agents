@@ -50,7 +50,7 @@ from custom_messages.contracts.runtime_v1 import (
     AUTHORITY_MODE_PERSON_APPROVAL,
 )
 from id_generation import new_id
-from runtime_hosting.authorization import SSH_SINGLE_REQUEST_ENDED_MESSAGE
+from runtime_hosting.authorization import SSH_SINGLE_REQUEST_ENDED_MESSAGE, SSHDisabledError
 from runtime_hosting.execution_contracts import (
     AccessHolderV1,
     ActivationRecordV2,
@@ -324,6 +324,7 @@ class _ExecutionChanges:
         resource_id: str,
         resource_digest: str,
         generation: int,
+        activated_at_utc: datetime | None = None,
         expires_at_utc: datetime | None = None,
     ) -> ActivationRecordV2:
         """The record of this approved change; the runtime checks it before each use."""
@@ -344,6 +345,7 @@ class _ExecutionChanges:
                 task_id=plan.source_task_id,
             ),
             approval=approval.to_record(),
+            activated_at_utc=activated_at_utc or utc_now(),
             expires_at_utc=expires_at_utc,
         )
 
@@ -925,7 +927,6 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
         reason: str,
         port: int = 22,
         target_id: str | None = None,
-        expected_host_key_public_key: str | None = None,
         expected_host_key_fingerprint: str | None = None,
         credential_owner_scope: OwnerScopeV1 | Literal["user", "team"] | None = None,
         credential_public_key_fingerprint: str | None = None,
@@ -937,7 +938,7 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
     ) -> dict[str, Any]:
         ssh_settings = self.execution.config.execution_control.ssh
         if not ssh_settings.enabled:
-            raise RuntimeError("execution_control.ssh.enabled is false.")
+            raise SSHDisabledError("execution_control.ssh.enabled is false.")
         binding = self._binding(reason)
         policy = SSHNetworkPolicy.from_settings(ssh_settings)
         validated_host = validate_ssh_host(
@@ -965,15 +966,6 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
             port=validated_host.port,
             timeout_seconds=probe_timeout_seconds,
         )
-        if expected_host_key_public_key is not None and str(expected_host_key_public_key).strip():
-            _exp_algo, exp_fp = ssh_public_key_sha256_fingerprint(str(expected_host_key_public_key).strip())
-            if (
-                str(expected_host_key_public_key).strip() != cleaned_host_key
-                or exp_fp != derived_fingerprint
-            ):
-                raise PermissionError(
-                    "Expected SSH host key does not match the host key observed by the trusted probe."
-                )
         if expected_host_key_fingerprint is not None and str(expected_host_key_fingerprint).strip():
             if str(expected_host_key_fingerprint).strip() != derived_fingerprint:
                 raise PermissionError(
@@ -1089,7 +1081,7 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
     def _verify_current(self, plan: SSHTargetEnrollChangePlan) -> None:
         ssh_settings = self.execution.config.execution_control.ssh
         if not ssh_settings.enabled:
-            raise RuntimeError("execution_control.ssh.enabled is false.")
+            raise SSHDisabledError("execution_control.ssh.enabled is false.")
         if self.execution.repository.get_ssh_target(
             team_id=plan.owner.team_id, target_id=plan.target_id
         ) is not None:
@@ -1402,6 +1394,8 @@ class SSHInteractionChangeService(_ExecutionChanges):
         allow_workspace_transfer: bool = False,
         allowed_secret_recipes: tuple[SSHSecretRecipe | str, ...] = (),
     ) -> dict[str, Any]:
+        if not self.execution.config.execution_control.ssh.enabled:
+            raise SSHDisabledError("execution_control.ssh.enabled is false.")
         binding = self._binding(reason)
         now = utc_now()
         resolved_ttl, resolved_deadline = self._resolve_delegation_window(
@@ -1512,6 +1506,8 @@ class SSHInteractionChangeService(_ExecutionChanges):
     def _verify_current(self, plan: SSHInteractionChangePlan, *, now: datetime | None = None) -> InteractiveSessionV1:
         """Not approved/revoked/expired yet, delegation window within policy, and session/target unchanged."""
 
+        if not self.execution.config.execution_control.ssh.enabled:
+            raise SSHDisabledError("execution_control.ssh.enabled is false.")
         current = now or utc_now()
         self._check_existing_interaction(plan.session_id, change_id=plan.change_id, now=current)
         max_ttl = self.execution.config.execution_control.ssh.max_delegation_ttl_seconds
@@ -1681,6 +1677,7 @@ class SSHInteractionChangeService(_ExecutionChanges):
             resource_id=session.session_id,
             resource_digest=plan.resource_digest,
             generation=1,
+            activated_at_utc=now,
             expires_at_utc=computed_expiry,
         )
         saved = self.execution.repository.put_ssh_interaction(activation, bounds=plan.bounds)

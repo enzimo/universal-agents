@@ -84,6 +84,7 @@ from secure_tool_broker.defaults import (
 )
 from secure_tool_broker.execution_ssh import (
     BrokerExecutionSSHConfig,
+    EXECUTION_SSH_MAX_REQUEST_BYTES,
     EXECUTION_SSH_PROVIDER,
     build_execution_ssh_runtime,
     execute_ssh_broker_action,
@@ -663,7 +664,6 @@ class SecureToolBrokerService:
 
     def build_app(self) -> web.Application:
         app = web.Application(
-            client_max_size=32 * 1024 * 1024,
             middlewares=[
                 _sensitive_session_no_store_middleware,
                 self._auth_middleware,
@@ -1056,8 +1056,16 @@ class SecureToolBrokerService:
         )
 
     async def _handle_execute(self, request: web.Request) -> web.Response:
-        payload = await request.json()
-        validated = self._validated_action(request.match_info["provider"], payload)
+        provider_param = str(request.match_info["provider"] or "").strip()
+        if provider_param.lower() == EXECUTION_SSH_PROVIDER:
+            # Workspace bundle uploads base64-encode up to 16 MiB; keep all other
+            # broker routes at aiohttp's normal request size limit.
+            payload = await request.clone(
+                client_max_size=EXECUTION_SSH_MAX_REQUEST_BYTES
+            ).json()
+        else:
+            payload = await request.json()
+        validated = self._validated_action(provider_param, payload)
         trusted_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
         context = self._admitted_context(
             request[BROKER_CALLER_KEY],

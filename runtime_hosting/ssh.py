@@ -15,7 +15,6 @@ import logging
 import os
 from pathlib import Path
 import pty
-import select
 import shlex
 import signal
 import stat
@@ -24,7 +23,7 @@ import subprocess
 import termios
 import threading
 import time
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from id_generation import new_id
 from runtime_hosting.artifacts import ArtifactStore
@@ -111,6 +110,9 @@ _DEFAULT_MAX_CONCURRENT_COMMANDS_PER_SESSION = 4
 _DEFAULT_MAX_CONCURRENT_COMMANDS_PER_BROKER = 16
 _MONITOR_MAX_CONSECUTIVE_FAILURES = 3
 _STDIN_WRITE_CHUNK_BYTES = 65_536
+MAX_PTY_WRITE_BYTES = 65_536
+_PTY_WRITE_CHUNK_BYTES = 8_192
+_DEFAULT_PTY_WRITE_TIMEOUT_SECONDS = 10.0
 _REMOTE_SIGNALLED_TERMINATION_NOTE = (
     "remote process group signalled; any process that detached into its own session "
     "may still require host-side cleanup"
@@ -345,6 +347,10 @@ class _LiveSSHSession:
     raw_transcript: bytearray = field(default_factory=bytearray, repr=False)
     transcript_truncated: bool = False
     monitor_failures: int = 0
+    closed: bool = False
+    read_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    active_waiters: set[asyncio.Future[bool]] = field(default_factory=set, repr=False)
 
 
 @dataclass(eq=False)
@@ -435,6 +441,7 @@ class SSHSessionBroker:
     sudo_search_paths: tuple[str, ...] = DEFAULT_SUDO_SEARCH_PATHS
     tailscale_search_paths: tuple[str, ...] = DEFAULT_TAILSCALE_SEARCH_PATHS
     revocation_poll_interval_seconds: float = 1.0
+    settings_sync: Callable[[], bool] | None = None
     logger: logging.Logger = logging.getLogger(__name__)
     _sessions: dict[str, _LiveSSHSession] = field(default_factory=dict, init=False, repr=False)
     _closing_tasks: dict[str, asyncio.Task[InteractiveSessionV1]] = field(
@@ -674,6 +681,7 @@ class SSHSessionBroker:
             scrubber = SessionSecretScrubber(material.touched_secrets, logger=self.logger)
             stream_scrubber = scrubber.new_stream_scrubber()
             master_fd, slave_fd = pty.openpty()
+            os.set_blocking(master_fd, False)
             self._set_terminal_size(
                 master_fd,
                 rows=claimed.terminal_rows,
@@ -804,23 +812,131 @@ class SSHSessionBroker:
             self._authorize_session(existing, capability=capability, caller=caller)
         raise SSHSessionUnavailable(f"SSH session {session_id!r} is not live in this broker.")
 
+    @staticmethod
+    def _detach_live_fd(live: _LiveSSHSession) -> None:
+        """Mark a live PTY closed, remove event-loop fd callbacks, and wake pending readers/writers."""
+
+        live.closed = True
+        fd = live.master_fd
+        if fd >= 0:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                try:
+                    loop.remove_reader(fd)
+                except Exception:
+                    pass
+                try:
+                    loop.remove_writer(fd)
+                except Exception:
+                    pass
+        for waiter in list(live.active_waiters):
+            if not waiter.done():
+                waiter.set_result(False)
+
+    @staticmethod
+    async def _wait_fd_ready(
+        live: _LiveSSHSession,
+        *,
+        mode: Literal["read", "write"],
+        timeout: float,
+    ) -> bool:
+        """Wait for non-blocking PTY readiness on the event loop without using thread-pool workers."""
+
+        if live.closed or live.master_fd < 0 or timeout <= 0.0:
+            return False
+        loop = asyncio.get_running_loop()
+        fd = live.master_fd
+        waiter: asyncio.Future[bool] = loop.create_future()
+        live.active_waiters.add(waiter)
+
+        def _on_ready() -> None:
+            if not waiter.done():
+                waiter.set_result(True)
+
+        add = loop.add_reader if mode == "read" else loop.add_writer
+        remove = loop.remove_reader if mode == "read" else loop.remove_writer
+        add(fd, _on_ready)
+        try:
+            return await asyncio.wait_for(waiter, timeout=timeout)
+        except TimeoutError:
+            return False
+        finally:
+            live.active_waiters.discard(waiter)
+            if live.master_fd == fd and fd >= 0:
+                try:
+                    remove(fd)
+                except Exception:
+                    pass
+
     async def write(
         self,
         *,
         session_id: str,
         payload: bytes,
         caller: SSHCallerContext,
+        timeout_seconds: float = _DEFAULT_PTY_WRITE_TIMEOUT_SECONDS,
     ) -> int:
-        """Type into the session: needs a person's approval for this session (trusted record)."""
+        """Type bounded UTF-8 input into a non-blocking PTY without stalling the event loop."""
 
         self._require_not_shutting_down()
+        raw_bytes = bytes(payload)
+        if len(raw_bytes) > MAX_PTY_WRITE_BYTES:
+            raise ValueError(
+                f"SSH terminal write exceeds the maximum size ({MAX_PTY_WRITE_BYTES} bytes); "
+                "use upload_execution_ssh_bundle for larger content."
+            )
         live = self._require_live_authorized(
             session_id,
             capability=SSHCapability.TYPING,
             caller=caller,
         )
-        written = os.write(live.master_fd, bytes(payload))
-        await self._touch(live)
+        if not raw_bytes:
+            await self._touch(live)
+            return 0
+        deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+        view = memoryview(raw_bytes)
+        written = 0
+        async with live.write_lock:
+            while written < len(view):
+                if live.closed or live.master_fd < 0:
+                    raise SSHSessionUnavailable(
+                        f"SSH session {session_id!r} closed during write."
+                    )
+                chunk = view[written : written + _PTY_WRITE_CHUNK_BYTES]
+                try:
+                    count = os.write(live.master_fd, chunk)
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        raise TimeoutError(
+                            f"Timed out writing to SSH session {session_id!r} after "
+                            f"{written} of {len(view)} bytes."
+                        ) from None
+                    ready = await self._wait_fd_ready(live, mode="write", timeout=remaining)
+                    if live.closed or live.master_fd < 0:
+                        raise SSHSessionUnavailable(
+                            f"SSH session {session_id!r} closed during write."
+                        ) from None
+                    if not ready:
+                        raise TimeoutError(
+                            f"Timed out writing to SSH session {session_id!r} after "
+                            f"{written} of {len(view)} bytes."
+                        ) from None
+                    continue
+                except OSError as exc:
+                    raise SSHSessionUnavailable(
+                        f"SSH session {session_id!r} write failed: {exc}"
+                    ) from exc
+                if count <= 0:
+                    raise SSHSessionUnavailable(
+                        f"SSH session {session_id!r} closed during write."
+                    )
+                written += count
+        if not live.closed:
+            await self._touch(live)
         return written
 
     async def read(
@@ -838,58 +954,83 @@ class SSHSessionBroker:
             caller=caller,
         )
 
-        def read_ready(wait_seconds: float) -> tuple[bytes, bool]:
-            readable, _, _ = select.select([live.master_fd], [], [], max(0.0, wait_seconds))
-            if not readable:
+        async def _read_chunk(wait_seconds: float) -> tuple[bytes, bool]:
+            if live.closed or live.master_fd < 0:
+                return b"", True
+            try:
+                data = os.read(live.master_fd, maximum_bytes)
+                return data, (len(data) == 0)
+            except BlockingIOError:
+                pass
+            except OSError:
+                return b"", True
+            if wait_seconds <= 0.0:
+                return b"", False
+            ready = await self._wait_fd_ready(live, mode="read", timeout=wait_seconds)
+            if live.closed or live.master_fd < 0:
+                return b"", True
+            if not ready:
                 return b"", False
             try:
                 data = os.read(live.master_fd, maximum_bytes)
+                return data, (len(data) == 0)
+            except BlockingIOError:
+                return b"", False
             except OSError:
                 return b"", True
-            return data, (len(data) == 0)
 
         deadline = time.monotonic() + max(0.0, float(timeout_seconds))
         scrubbed_parts: list[bytes] = []
         received_any_payload = False
         fd_eof = False
-        while True:
-            quiet_wait = live.stream_scrubber.time_until_quiet_release()
-            remaining = max(0.0, deadline - time.monotonic())
-            if quiet_wait is None:
-                wait_for = remaining
-            elif quiet_wait == 0.0:
-                wait_for = 0.0
-            else:
-                wait_for = min(remaining, quiet_wait + 0.002)
-            payload, fd_eof = await asyncio.to_thread(read_ready, wait_for)
-            if payload:
-                received_any_payload = True
-                remaining_cap = self.transcript_limit_bytes - len(live.raw_transcript)
-                if remaining_cap > 0:
-                    live.raw_transcript.extend(payload[:remaining_cap])
-                if len(payload) > remaining_cap or len(live.raw_transcript) >= self.transcript_limit_bytes:
-                    live.transcript_truncated = True
-                fed = live.stream_scrubber.feed(payload)
-                if fed:
-                    scrubbed_parts.append(fed)
+        async with live.read_lock:
+            while True:
+                if live.closed or live.master_fd < 0:
+                    fd_eof = True
                     break
-                if time.monotonic() >= deadline:
+                quiet_wait = live.stream_scrubber.time_until_quiet_release()
+                remaining = max(0.0, deadline - time.monotonic())
+                if quiet_wait is None:
+                    wait_for = remaining
+                elif quiet_wait == 0.0:
+                    wait_for = 0.0
+                else:
+                    wait_for = min(remaining, quiet_wait + 0.002)
+                payload, fd_eof = await _read_chunk(wait_for)
+                if live.closed:
                     break
-                continue
-            released = live.stream_scrubber.release_quiet()
-            if released:
-                scrubbed_parts.append(released)
-                break
-            if fd_eof or live.process.poll() is not None or time.monotonic() >= deadline:
-                break
+                if payload:
+                    received_any_payload = True
+                    remaining_cap = self.transcript_limit_bytes - len(live.raw_transcript)
+                    if remaining_cap > 0:
+                        live.raw_transcript.extend(payload[:remaining_cap])
+                    if len(payload) > remaining_cap or len(live.raw_transcript) >= self.transcript_limit_bytes:
+                        live.transcript_truncated = True
+                    fed = live.stream_scrubber.feed(payload)
+                    if fed:
+                        scrubbed_parts.append(fed)
+                        break
+                    if time.monotonic() >= deadline:
+                        break
+                    continue
+                released = live.stream_scrubber.release_quiet()
+                if released:
+                    scrubbed_parts.append(released)
+                    break
+                if fd_eof or live.process.poll() is not None or time.monotonic() >= deadline:
+                    break
 
         scrubbed = b"".join(scrubbed_parts)
+        if live.closed:
+            return scrubbed
         if scrubbed:
             live.session = live.session.model_copy(
                 update={"transcript_bytes": live.session.transcript_bytes + len(scrubbed)}
             )
         await self._touch(live)
-        if live.process.poll() is not None and (not received_any_payload or (fd_eof and not scrubbed_parts)):
+        if not live.closed and live.process.poll() is not None and (
+            not received_any_payload or (fd_eof and not scrubbed_parts)
+        ):
             flushed = live.stream_scrubber.flush()
             if flushed:
                 live.session = live.session.model_copy(
@@ -913,6 +1054,8 @@ class SSHSessionBroker:
             capability=SSHCapability.CONNECT,
             caller=caller,
         )
+        if live.closed or live.master_fd < 0:
+            raise SSHSessionUnavailable(f"SSH session {session_id!r} is not live in this broker.")
         self._set_terminal_size(live.master_fd, rows=rows, columns=columns)
         live.session = live.session.model_copy(
             update={"terminal_rows": rows, "terminal_columns": columns}
@@ -2094,6 +2237,9 @@ class SSHSessionBroker:
                     "event=ssh_broker_shutdown_close_failed session_id=%s",
                     sid,
                 )
+        in_flight_closes = tuple(self._closing_tasks.values())
+        if in_flight_closes:
+            await asyncio.gather(*in_flight_closes, return_exceptions=True)
         self.logger.info(
             "Shut down SSH session broker. event=ssh_broker_shutdown closed_sessions=%d stopped_commands=%d",
             len(session_ids),
@@ -2140,7 +2286,7 @@ class SSHSessionBroker:
     ) -> InteractiveSessionV1 | None:
         """Revoke one SSH session immediately: persist revocation, kill PTY and commands, save scrubbed transcript."""
 
-        self.repository.revoke_interactive_session(
+        revocation = self.repository.revoke_interactive_session(
             team_id=self.team_id,
             session_id=session_id,
             revoked_by=revoked_by,
@@ -2152,10 +2298,12 @@ class SSHSessionBroker:
         closed: InteractiveSessionV1 | None = None
         if session_id in self._sessions:
             closed = await self._close(session_id=session_id, disconnected=True)
-        else:
+        elif revocation is not None:
             closed = self.repository.get_interactive_session(
                 team_id=self.team_id, session_id=session_id
             )
+        if revocation is None and closed is None and terminated_cmds == 0:
+            return None
         self.logger.info(
             "Revoked SSH session. event=ssh_session_revoked session_id=%s revoked_by=%s terminated_commands=%d",
             session_id,
@@ -2233,11 +2381,22 @@ class SSHSessionBroker:
             )
         )
         self._closing_tasks[session_id] = close_task
-        try:
-            return await _await_shielded(close_task, reraise_on_caller_cancel=True)
-        finally:
-            if self._closing_tasks.get(session_id) is close_task and close_task.done():
+
+        def _clear_closing_task(done_task: asyncio.Task[InteractiveSessionV1]) -> None:
+            if self._closing_tasks.get(session_id) is done_task:
                 self._closing_tasks.pop(session_id, None)
+            if not done_task.cancelled():
+                exc = done_task.exception()
+                if exc is not None:
+                    self.logger.warning(
+                        "SSH session close task finished with error. "
+                        "event=ssh_close_task_failed session_id=%s error=%s",
+                        session_id,
+                        exc,
+                    )
+
+        close_task.add_done_callback(_clear_closing_task)
+        return await _await_shielded(close_task, reraise_on_caller_cancel=True)
 
     async def _finish_close(
         self,
@@ -2245,13 +2404,18 @@ class SSHSessionBroker:
         live: _LiveSSHSession,
         disconnected: bool,
     ) -> InteractiveSessionV1:
+        self._detach_live_fd(live)
         try:
             await _kill_process_group(live.process, grace_seconds=5.0)
         finally:
-            try:
-                os.close(live.master_fd)
-            except OSError:
-                pass
+            self._detach_live_fd(live)
+            fd = live.master_fd
+            if fd >= 0:
+                live.master_fd = -1
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
                 await asyncio.to_thread(live.material_context.__exit__, None, None, None)
             except Exception:
@@ -2351,10 +2515,15 @@ class SSHSessionBroker:
         for step in list(self._active_steps):
             step.invalidation_reason = reason
             step.revoked_event.set()
+        cmd_tasks: list[asyncio.Task[None]] = []
         for cmd in list(self._commands.values()):
             if cmd.status is SSHCommandStatus.RUNNING:
                 cmd.invalidation_reason = reason
                 cmd.revoked_event.set()
+                if cmd.runner_task is not None and not cmd.runner_task.done():
+                    cmd_tasks.append(cmd.runner_task)
+        if cmd_tasks:
+            await asyncio.gather(*cmd_tasks, return_exceptions=True)
         for sid in list(self._sessions.keys()):
             try:
                 await self._close(session_id=sid, disconnected=True)
@@ -2415,6 +2584,14 @@ class SSHSessionBroker:
                 self._ensure_monitor_started()
 
     async def _monitor_tick(self) -> None:
+        if self.settings_sync is not None and not self.settings_sync():
+            self.logger.info(
+                "Stopping all active SSH work because execution_control.ssh.enabled is false. "
+                "event=ssh_broker_disabled_killswitch broker_id=%s",
+                self.broker_id,
+            )
+            await self._fail_closed_all_monitored_work("execution_control.ssh.enabled is false.")
+            return
         now = self.repository.current_time_utc()
         revocation_cache: dict[str, tuple[bool, Any]] = {}
         interaction_cache: dict[str, tuple[bool, SSHInteractionRecordV1 | None | Exception]] = {}
@@ -2945,6 +3122,7 @@ __all__ = [
     "CatalogSSHCredentialMaterialProvider",
     "CompositeSSHCredentialMaterialProvider",
     "ConfiguredSSHCredentialMaterialProvider",
+    "MAX_PTY_WRITE_BYTES",
     "SSHBundleUploadResult",
     "SSHCommandResult",
     "SSHCommandStatus",

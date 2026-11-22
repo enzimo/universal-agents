@@ -1,12 +1,17 @@
 """Broker-owned SSH runtime, action dispatcher, and gateway revocation routes.
 
-All Sealbox-backed SSH credential resolution, ephemeral ``ssh-agent`` management,
-live PTY ownership, async remote commands, secret scrubbing, and startup crash
-recovery run exclusively inside the ``secure_tool_broker`` process on its single
-event loop. Agent processes call ``POST /v1/tools/execution_ssh`` with their
-signed task context; ``BrokerAccessGate`` verifies the calling process token,
-the signed context, and Cedar access on ``fn:execution_control``, and this
-module builds ``SSHCallerContext`` strictly from that verified context.
+All brokered SSH operations — both Sealbox-backed enrolled targets and
+operator-pinned disk-key targets — run exclusively inside the
+``secure_tool_broker`` process on its single event loop. Agent processes call
+``POST /v1/tools/execution_ssh`` with their signed task context;
+``BrokerAccessGate`` verifies the calling process token, the signed context,
+and Cedar access on ``fn:execution_control``, and this module builds
+``SSHCallerContext`` strictly from that verified context.
+
+Operator SSH settings (``execution_control.ssh``) are reloaded from the
+instance configuration file whenever it changes, so turning ``enabled`` off,
+tightening network rules, changing ``allow_password_bootstrap``, or updating
+pinned targets takes effect immediately without restarting the broker.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from aiohttp import web
+import yaml
 
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from id_generation import new_id
@@ -29,9 +35,11 @@ from runtime_hosting.authorization import (
     ExecutionAccessGuard,
     ExecutionAuthorizationDenied,
     SSHCallerContext,
+    SSHDisabledError,
 )
 from runtime_hosting.execution_contracts import InteractiveSessionV1, OwnerScopeKind
 from runtime_hosting.ssh import (
+    MAX_PTY_WRITE_BYTES,
     CatalogSSHCredentialMaterialProvider,
     CompositeSSHCredentialMaterialProvider,
     ConfiguredSSHCredentialMaterialProvider,
@@ -55,12 +63,20 @@ from secure_tool_broker.defaults import (
 from secure_tools.providers import ToolContext, ValidatedAction
 from storage.config import StorageSettings
 from storage.execution_control_repository import (
+    ExecutionControlRepository,
     StaleExecutionFence,
     create_execution_control_repository,
 )
 
 LOGGER = logging.getLogger(__name__)
 EXECUTION_SSH_PROVIDER = "execution_ssh"
+# Workspace bundle uploads base64-encode up to 16 MiB (~21.3 MiB plus JSON overhead);
+# applied only to POST /v1/tools/execution_ssh while other broker routes keep aiohttp's default limit.
+EXECUTION_SSH_MAX_REQUEST_BYTES = 32 * 1024 * 1024
+
+
+class SSHRecoveryError(RuntimeError):
+    """Raised when broker SSH crash recovery has not completed."""
 
 
 @dataclass(frozen=True)
@@ -72,6 +88,7 @@ class BrokerExecutionSSHConfig:
     storage_settings: StorageSettings
     ssh: ExecutionSSHSettings
     lead_agent_type: str = TEAM_ARCHITECT_AGENT_TYPE
+    config_path: str | None = None
 
     @classmethod
     def from_runtime_settings(
@@ -82,21 +99,106 @@ class BrokerExecutionSSHConfig:
         storage_settings: StorageSettings,
         ssh: ExecutionSSHSettings,
         lead_agent_type: str = TEAM_ARCHITECT_AGENT_TYPE,
+        config_path: str | Path | None = None,
     ) -> "BrokerExecutionSSHConfig":
         return cls(
             instance_root_path=str(instance_root_path),
             instance_name=str(instance_name or "universal-agents"),
             storage_settings=storage_settings,
-            ssh=ssh,
+            ssh=ssh.model_copy(deep=True),
             lead_agent_type=str(lead_agent_type or TEAM_ARCHITECT_AGENT_TYPE),
+            config_path=str(config_path) if config_path is not None else None,
         )
+
+
+class ExecutionSSHSettingsSource:
+    """Reload ``execution_control.ssh`` from the instance YAML whenever the file changes."""
+
+    def __init__(
+        self,
+        initial: ExecutionSSHSettings,
+        *,
+        config_path: Path | None,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._current = initial.model_copy(deep=True)
+        self._config_path = config_path.expanduser().resolve() if config_path is not None else None
+        self._logger = logger or LOGGER
+        self._fingerprint = self._stat_fingerprint()
+        self._existed = self._fingerprint is not None
+
+    def _stat_fingerprint(self) -> tuple[int, int, int] | None:
+        if self._config_path is None:
+            return None
+        try:
+            st = self._config_path.stat()
+        except OSError:
+            return None
+        return (int(st.st_ino), int(st.st_size), int(st.st_mtime_ns))
+
+    def current(self) -> ExecutionSSHSettings:
+        if self._config_path is None:
+            return self._current
+        fp = self._stat_fingerprint()
+        if fp == self._fingerprint:
+            return self._current
+        if fp is None:
+            if self._existed:
+                self._logger.warning(
+                    "Instance configuration file disappeared; disabling broker SSH fail-closed. "
+                    "event=broker_ssh_settings_file_missing path=%s",
+                    self._config_path,
+                )
+                self._current = ExecutionSSHSettings(enabled=False)
+                self._fingerprint = None
+                self._existed = False
+            return self._current
+        try:
+            raw_text = self._config_path.read_text(encoding="utf-8")
+            parsed = yaml.safe_load(raw_text)
+            if parsed is None:
+                parsed = {}
+            if not isinstance(parsed, Mapping):
+                raise ValueError("Instance configuration root must be a YAML mapping.")
+            execution_raw = parsed.get("execution_control")
+            if execution_raw is None:
+                ssh_raw: Any = {}
+            elif isinstance(execution_raw, Mapping):
+                ssh_raw = execution_raw.get("ssh") or {}
+            else:
+                raise ValueError("execution_control must be a YAML mapping.")
+            reloaded = ExecutionSSHSettings.model_validate(ssh_raw)
+        except Exception as exc:
+            self._logger.error(
+                "Could not reload execution_control.ssh from instance config; keeping previous settings. "
+                "event=broker_ssh_settings_reload_failed path=%s error=%s",
+                self._config_path,
+                exc,
+            )
+            return self._current
+        self._current = reloaded
+        self._fingerprint = fp
+        self._existed = True
+        return reloaded
 
 
 def classify_ssh_error(exc: Exception) -> dict[str, Any]:
     """Return structured error metadata (never raw secrets) for an SSH exception."""
 
     payload: dict[str, Any] = {"error": str(exc)}
-    if isinstance(exc, InvalidSSHCredentialValueError):
+    if isinstance(exc, SSHDisabledError):
+        payload["error_code"] = "ssh_disabled"
+        payload["next_step"] = (
+            "Ask an administrator or operator to set execution_control.ssh.enabled to true "
+            "in instance_config.yaml before using brokered SSH."
+        )
+    elif isinstance(exc, SSHRecoveryError):
+        payload["error_code"] = "ssh_recovery_failed"
+        payload["next_step"] = (
+            "Broker SSH startup recovery could not complete; check execution storage health "
+            "and broker logs, then retry."
+        )
+    elif isinstance(exc, InvalidSSHCredentialValueError):
         payload["error_code"] = "invalid_credential_value"
         payload["credential_key"] = exc.credential_key
         payload["field_name"] = exc.field_name
@@ -135,6 +237,27 @@ def _broker_material_path(layout: InstanceLayout, value: str) -> Path:
     return resolved
 
 
+def _build_configured_materials(
+    layout: InstanceLayout,
+    ssh_settings: ExecutionSSHSettings,
+) -> dict[str, SSHCredentialMaterial]:
+    materials: dict[str, SSHCredentialMaterial] = {}
+    for target in ssh_settings.targets:
+        identity = _broker_material_path(layout, target.identity_file)
+        known_hosts = _broker_material_path(layout, target.known_hosts_file)
+        material = SSHCredentialMaterial(
+            identity_file=identity,
+            known_hosts_file=known_hosts,
+        )
+        prior = materials.get(target.credential_binding_id)
+        if prior is not None and prior != material:
+            raise ValueError(
+                "An SSH credential binding id maps to inconsistent operator key paths."
+            )
+        materials[target.credential_binding_id] = material
+    return materials
+
+
 class BrokerExecutionSSHRuntime:
     """Single-owner SSH broker runtime inside ``secure_tool_broker``."""
 
@@ -149,46 +272,102 @@ class BrokerExecutionSSHRuntime:
         self._access_gate = access_gate
         self._logger = logger or LOGGER
         self._layout = InstanceLayout(Path(config.instance_root_path))
-        self._repository = create_execution_control_repository(config.storage_settings)
-        self._artifact_store = FilesystemArtifactStore(self._layout.execution_artifacts_dir)
+        watch_path = (
+            Path(config.config_path)
+            if config.config_path is not None
+            else self._layout.instance_config_path
+        )
+        self._settings_source = ExecutionSSHSettingsSource(
+            config.ssh,
+            config_path=watch_path,
+            logger=self._logger,
+        )
+        # Opened lazily only when SSH is enabled (or an admin revokes a record),
+        # so starting the broker with SSH off never touches execution storage or
+        # creates the execution artifacts directory.
+        self._repository: ExecutionControlRepository | None = None
+        self._artifact_store: FilesystemArtifactStore | None = None
+        self._catalog_provider: CatalogSSHCredentialMaterialProvider | None = None
         self._broker: SSHSessionBroker | None = None
+        self._applied_settings: ExecutionSSHSettings | None = None
+        self._recovered = False
+        self._recovery_lock = asyncio.Lock()
+
+    def _ensure_repository(self) -> ExecutionControlRepository:
+        if self._repository is None:
+            self._repository = create_execution_control_repository(self._config.storage_settings)
+        return self._repository
+
+    def _ensure_artifact_store(self) -> FilesystemArtifactStore:
+        if self._artifact_store is None:
+            self._artifact_store = FilesystemArtifactStore(self._layout.execution_artifacts_dir)
+        return self._artifact_store
+
+    def current_settings(self) -> ExecutionSSHSettings:
+        return self._settings_source.current()
 
     @property
     def enabled(self) -> bool:
-        return bool(self._config.ssh.enabled)
+        return bool(self._settings_source.current().enabled)
+
+    def _ensure_broker(self, ssh_settings: ExecutionSSHSettings) -> SSHSessionBroker:
+        if self._broker is None:
+            self._broker = self._build_broker(ssh_settings)
+            self._applied_settings = ssh_settings.model_copy(deep=True)
+            return self._broker
+        self._apply_settings(ssh_settings)
+        return self._broker
+
+    def _apply_settings(self, ssh_settings: ExecutionSSHSettings) -> None:
+        if self._broker is None or self._applied_settings == ssh_settings:
+            return
+        materials = _build_configured_materials(self._layout, ssh_settings)
+        self._broker.network_policy = SSHNetworkPolicy.from_settings(ssh_settings)
+        self._broker.allow_password_bootstrap = ssh_settings.allow_password_bootstrap
+        self._broker.ssh_executable = ssh_settings.ssh_executable
+        self._broker.lease_ttl_seconds = ssh_settings.lease_ttl_seconds
+        self._broker.transcript_limit_bytes = ssh_settings.transcript_limit_bytes
+        self._broker.material_provider = CompositeSSHCredentialMaterialProvider(
+            configured_provider=ConfiguredSSHCredentialMaterialProvider(materials),
+            catalog_provider=self._catalog_provider,
+        )
+        self._applied_settings = ssh_settings.model_copy(deep=True)
+
+    def _refresh_settings_for_monitor(self) -> bool:
+        """Called on every broker monitor tick to apply live setting changes and enforce kill switch."""
+
+        current = self._settings_source.current()
+        if not current.enabled:
+            return False
+        try:
+            self._apply_settings(current)
+        except Exception as exc:
+            self._logger.error(
+                "Could not apply reloaded SSH settings during monitor tick; failing closed. "
+                "event=broker_ssh_settings_apply_failed error=%s",
+                exc,
+            )
+            return False
+        return True
 
     @property
     def broker(self) -> SSHSessionBroker:
-        if not self._config.ssh.enabled:
-            raise RuntimeError("execution_control.ssh.enabled is false.")
-        if self._broker is None:
-            self._broker = self._build_broker()
-        return self._broker
+        current = self._settings_source.current()
+        if not current.enabled:
+            raise SSHDisabledError("execution_control.ssh.enabled is false.")
+        return self._ensure_broker(current)
 
-    def _build_broker(self) -> SSHSessionBroker:
-        ssh_settings = self._config.ssh
-        materials: dict[str, SSHCredentialMaterial] = {}
-        for target in ssh_settings.targets:
-            identity = _broker_material_path(self._layout, target.identity_file)
-            known_hosts = _broker_material_path(self._layout, target.known_hosts_file)
-            material = SSHCredentialMaterial(
-                identity_file=identity,
-                known_hosts_file=known_hosts,
-            )
-            prior = materials.get(target.credential_binding_id)
-            if prior is not None and prior != material:
-                raise ValueError(
-                    "An SSH credential binding id maps to inconsistent operator key paths."
-                )
-            materials[target.credential_binding_id] = material
-
+    def _build_broker(self, ssh_settings: ExecutionSSHSettings) -> SSHSessionBroker:
+        materials = _build_configured_materials(self._layout, ssh_settings)
+        configured_provider = ConfiguredSSHCredentialMaterialProvider(materials)
         catalog_provider = CatalogSSHCredentialMaterialProvider(
             ephemeral_base_dir=self._layout.ssh_ephemeral_dir,
             secret_resolver=make_catalog_secret_resolver(),
             logger=self._logger,
         )
+        self._catalog_provider = catalog_provider
         material_provider = CompositeSSHCredentialMaterialProvider(
-            configured_provider=ConfiguredSSHCredentialMaterialProvider(materials),
+            configured_provider=configured_provider,
             catalog_provider=catalog_provider,
         )
         auth_enabled = self._access_gate.access is not None
@@ -198,10 +377,10 @@ class BrokerExecutionSSHRuntime:
             catalogs=self._access_gate.catalogs if auth_enabled else None,
         )
         return SSHSessionBroker(
-            repository=self._repository,
+            repository=self._ensure_repository(),
             authorization_guard=guard,
             material_provider=material_provider,
-            artifact_store=self._artifact_store,
+            artifact_store=self._ensure_artifact_store(),
             team_id=self._access_gate.team_id,
             broker_id=f"{self._config.instance_name}.secure-broker-ssh.{os.getpid()}",
             ssh_executable=ssh_settings.ssh_executable,
@@ -209,22 +388,54 @@ class BrokerExecutionSSHRuntime:
             transcript_limit_bytes=ssh_settings.transcript_limit_bytes,
             network_policy=SSHNetworkPolicy.from_settings(ssh_settings),
             allow_password_bootstrap=ssh_settings.allow_password_bootstrap,
+            settings_sync=self._refresh_settings_for_monitor,
             logger=self._logger,
         )
+
+    async def _ensure_recovered(self, broker: SSHSessionBroker) -> None:
+        if self._recovered:
+            return
+        async with self._recovery_lock:
+            if self._recovered:
+                return
+            try:
+                lost = await asyncio.to_thread(broker.recover_after_restart)
+            except Exception as exc:
+                self._logger.exception(
+                    "Broker SSH startup recovery failed. event=broker_ssh_recovery_failed team_id=%s",
+                    self._access_gate.team_id,
+                )
+                raise SSHRecoveryError(
+                    f"Broker SSH startup recovery failed: {exc}"
+                ) from exc
+            self._recovered = True
+            self._logger.info(
+                "Initialized broker-owned SSH runtime. event=broker_ssh_runtime_started "
+                "team_id=%s recovered_lost_sessions=%d",
+                self._access_gate.team_id,
+                len(lost),
+            )
+
+    async def _active_broker(self) -> SSHSessionBroker:
+        current = self._settings_source.current()
+        if not current.enabled:
+            if self._broker is not None and self._broker._has_monitored_work():
+                await self._broker._fail_closed_all_monitored_work(
+                    "execution_control.ssh.enabled is false."
+                )
+            raise SSHDisabledError("execution_control.ssh.enabled is false.")
+        broker = self._ensure_broker(current)
+        await self._ensure_recovered(broker)
+        return broker
 
     async def startup(self) -> None:
         """Recover crashed sessions and sweep orphaned ephemeral SSH dirs on broker start."""
 
-        if not self._config.ssh.enabled:
+        current = self._settings_source.current()
+        if not current.enabled:
             return
-        broker = self.broker
-        lost = await asyncio.to_thread(broker.recover_after_restart)
-        self._logger.info(
-            "Initialized broker-owned SSH runtime. event=broker_ssh_runtime_started "
-            "team_id=%s recovered_lost_sessions=%d",
-            self._access_gate.team_id,
-            len(lost),
-        )
+        broker = self._ensure_broker(current)
+        await self._ensure_recovered(broker)
 
     async def shutdown(self) -> None:
         """Terminate running SSH commands, close live PTYs, and wipe ephemeral dirs."""
@@ -233,10 +444,12 @@ class BrokerExecutionSSHRuntime:
             return
         broker = self._broker
         self._broker = None
+        self._catalog_provider = None
+        self._applied_settings = None
         await broker.shutdown()
 
     def _require_owned_session(self, session_id: str, person_id: str) -> InteractiveSessionV1:
-        session = self._repository.get_interactive_session(
+        session = self._ensure_repository().get_interactive_session(
             team_id=self._access_gate.team_id,
             session_id=session_id,
         )
@@ -315,7 +528,7 @@ class BrokerExecutionSSHRuntime:
         context: ToolContext,
     ) -> dict[str, Any]:
         caller = self._verified_caller(context)
-        broker = self.broker
+        broker = await self._active_broker()
 
         if action == "probe_execution_ssh_host_key":
             if caller.agent_type != self._config.lead_agent_type:
@@ -364,10 +577,18 @@ class BrokerExecutionSSHRuntime:
 
         if action == "write_execution_ssh_session":
             text = str(params.get("text") if params.get("text") is not None else "")
+            encoded = text.encode("utf-8")
+            if len(encoded) > MAX_PTY_WRITE_BYTES:
+                raise ValueError(
+                    f"SSH terminal write exceeds the maximum size ({MAX_PTY_WRITE_BYTES} bytes); "
+                    "use upload_execution_ssh_bundle for larger content."
+                )
+            write_timeout = max(0.1, min(float(params.get("timeout_seconds", 10.0)), 30.0))
             written = await broker.write(
                 session_id=session_id,
-                payload=text.encode("utf-8"),
+                payload=encoded,
                 caller=caller,
+                timeout_seconds=write_timeout,
             )
             return {"session_id": session_id, "written_bytes": written}
 
@@ -456,35 +677,46 @@ class BrokerExecutionSSHRuntime:
         raise ValueError(f"Unsupported execution_ssh action: {action!r}")
 
     async def revoke_session(self, *, session_id: str, revoked_by: str) -> dict[str, Any]:
-        if not self._config.ssh.enabled:
-            self._repository.revoke_interactive_session(
-                team_id=self._access_gate.team_id,
-                session_id=session_id,
-                revoked_by=revoked_by,
-            )
-            return {"revoked": True, "session_id": session_id, "terminated_live": False}
-        was_live = session_id in self.broker._sessions
-        closed = await self.broker.revoke_session(session_id=session_id, revoked_by=revoked_by)
+        if self._broker is not None:
+            was_live = session_id in self._broker._sessions
+            closed = await self._broker.revoke_session(session_id=session_id, revoked_by=revoked_by)
+            return {
+                "revoked": closed is not None or was_live,
+                "session_id": session_id,
+                "terminated_live": was_live,
+                "session": closed.model_dump(mode="json") if closed is not None else None,
+            }
+        repo = self._ensure_repository()
+        revocation = repo.revoke_interactive_session(
+            team_id=self._access_gate.team_id,
+            session_id=session_id,
+            revoked_by=revoked_by,
+        )
+        session = (
+            repo.get_interactive_session(team_id=self._access_gate.team_id, session_id=session_id)
+            if revocation is not None
+            else None
+        )
         return {
-            "revoked": True,
+            "revoked": revocation is not None,
             "session_id": session_id,
-            "terminated_live": was_live,
-            "session": closed.model_dump(mode="json") if closed is not None else None,
+            "terminated_live": False,
+            "session": session.model_dump(mode="json") if session is not None else None,
         }
 
     async def revoke_target(self, *, target_id: str, revoked_by: str) -> dict[str, Any]:
-        if not self._config.ssh.enabled:
-            revoked = self._repository.revoke_ssh_target(
-                team_id=self._access_gate.team_id,
-                target_id=target_id,
-                revoked_by=revoked_by,
-            )
+        if self._broker is not None:
+            revoked = await self._broker.revoke_target(target_id=target_id, revoked_by=revoked_by)
             return {
                 "revoked": revoked is not None,
                 "target_id": target_id,
                 "target": revoked.model_dump(mode="json") if revoked is not None else None,
             }
-        revoked = await self.broker.revoke_target(target_id=target_id, revoked_by=revoked_by)
+        revoked = self._ensure_repository().revoke_ssh_target(
+            team_id=self._access_gate.team_id,
+            target_id=target_id,
+            revoked_by=revoked_by,
+        )
         return {
             "revoked": revoked is not None,
             "target_id": target_id,
@@ -575,7 +807,10 @@ def register_execution_ssh_app(
 __all__ = [
     "BrokerExecutionSSHConfig",
     "BrokerExecutionSSHRuntime",
+    "EXECUTION_SSH_MAX_REQUEST_BYTES",
     "EXECUTION_SSH_PROVIDER",
+    "ExecutionSSHSettingsSource",
+    "SSHRecoveryError",
     "build_execution_ssh_runtime",
     "classify_ssh_error",
     "execute_ssh_broker_action",

@@ -29,7 +29,11 @@ from access_control.entities import operation_id
 from custom_agents.access_runtime import ActingAgent, acting_agent, runtime_access
 from custom_messages.contracts.access_v2 import ChangeApprovalMode, ChangeApprovalRecordV1
 from runtime_hosting.artifacts import FilesystemArtifactStore
-from runtime_hosting.authorization import ExecutionAccessGuard, ExecutionAuthorizationDenied
+from runtime_hosting.authorization import (
+    ExecutionAccessGuard,
+    ExecutionAuthorizationDenied,
+    SSHDisabledError,
+)
 from runtime_hosting.builds import DeterministicBuilder, OpenShellRustBuilder
 from runtime_hosting.execution_contracts import (
     AccessHolderV1,
@@ -379,7 +383,7 @@ class ExecutionControlService:
 
         ssh_settings = self.config.execution_control.ssh
         if not ssh_settings.enabled:
-            raise RuntimeError("execution_control.ssh.enabled is false.")
+            raise SSHDisabledError("execution_control.ssh.enabled is false.")
         configured = next(
             (item for item in ssh_settings.targets if item.target_id == target_id),
             None,

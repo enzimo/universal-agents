@@ -23,8 +23,6 @@ from custom_agents.execution_changes import ManagedServiceChangeService
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers._execution_ssh import (
     SSH_TOOLS,
-    _SSH_BROKERS,
-    _disk_key_broker,
     _error_payload,
     _json_strings,
     _manager_agent,
@@ -368,8 +366,6 @@ PROVIDER = ToolProvider(
 
 __all__ = [
     "PROVIDER",
-    "_SSH_BROKERS",
-    "_disk_key_broker",
     "_ssh_caller",
     "close_execution_ssh_session",
     "create_execution_job",

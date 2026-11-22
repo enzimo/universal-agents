@@ -1,16 +1,12 @@
 """Agent-facing SSH tools for ``fn:execution_control``.
 
-All Sealbox-backed SSH operations (probing, opening sessions, reading/writing/
+Every brokered SSH operation (probing, opening sessions, reading/writing/
 resizing/closing PTYs, remote commands, password key bootstrap, broker sudo,
-and workspace bundle transfer) execute inside the ``secure_tool_broker``
+and workspace bundle transfer — for both Sealbox-backed enrolled targets and
+operator-pinned disk-key targets) executes inside the ``secure_tool_broker``
 process via ``custom_tools.broker_execution_ssh`` using the active task's
-signed context. Agent processes never instantiate
-``CatalogSSHCredentialMaterialProvider`` and never hold Sealbox credentials.
-
-For backward compatibility when ``SECURE_TOOL_BROKER_INTERNAL_BASE_URL`` is
-absent (such as standalone operator-pinned disk-key setups and unit tests),
-operator-configured disk-key targets may run on a local loop-isolated
-``ConfiguredSSHCredentialMaterialProvider`` broker thread.
+signed context. Agent processes never hold SSH key material, never resolve
+Sealbox secrets, and never run an in-agent SSH broker.
 
 Manager-only tools (``TeamArchitect``):
 - ``probe_execution_ssh_host_key`` (read)
@@ -40,15 +36,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Coroutine, Sequence
+from collections.abc import Sequence
 from datetime import datetime, timezone
 import json
 import logging
-import os
 from pathlib import Path, PurePosixPath
 import stat
-import threading
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal
 
 from strands import tool
 
@@ -62,8 +56,6 @@ from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_tools import file_access
 from custom_tools.broker_execution_ssh import (
     ExecutionSSHBrokerError,
-    REASON_BROKER_UNAVAILABLE,
-    broker_execution_ssh_available,
     call_execution_ssh_broker,
 )
 from custom_tools.file_access import (
@@ -74,24 +66,15 @@ from custom_tools.file_access import (
 )
 from custom_tools.providers._runtime import _require_manager_tool
 from custom_tools.runtime_context import get_agent_ref
-from id_generation import new_id
 from runtime_hosting.authorization import (
     ExecutionAuthorizationDenied,
     SSHCallerContext,
     SSHCapability,
+    SSHDisabledError,
 )
 from runtime_hosting.execution_contracts import InteractiveSessionV1
-from runtime_hosting.ssh import (
-    ConfiguredSSHCredentialMaterialProvider,
-    SSHCredentialMaterial,
-    SSHSessionBroker,
-    SSHSessionUnavailable,
-)
-from runtime_hosting.ssh_credentials import (
-    CATALOG_BINDING_PREFIX,
-    InvalidSSHCredentialValueError,
-)
-from runtime_hosting.ssh_network import SSHNetworkPolicy
+from runtime_hosting.ssh import MAX_PTY_WRITE_BYTES, SSHSessionUnavailable
+from runtime_hosting.ssh_credentials import InvalidSSHCredentialValueError
 from runtime_hosting.ssh_operations import (
     MAX_BUNDLE_FILES,
     MAX_BUNDLE_SINGLE_FILE_BYTES,
@@ -100,79 +83,21 @@ from runtime_hosting.ssh_operations import (
 from storage.execution_control_repository import StaleExecutionFence
 
 logger = logging.getLogger(__name__)
-_T = TypeVar("_T")
-
-# Operator-pinned disk-key fallback brokers (used ONLY when no secure tool
-# broker URL is configured and the target is NOT Sealbox/catalog-backed). Each
-# entry runs on its own dedicated event-loop thread so multi-loop callers in
-# one process never hit cross-loop Future errors (C72).
-_SSH_BROKERS: dict[str, "_ThreadedDiskKeySSHBroker"] = {}
-_BROKER_AGENT_IDS: dict[str, set[str]] = {}
-_BROKER_MANAGER_IDS: dict[str, set[str]] = {}
-_BROKER_LOCK = threading.Lock()
 _MAX_BUNDLE_WALK_DEPTH = 32
 _PATH_POLICY_INVALID_REASONS = frozenset({FILE_TOO_LARGE, NOT_A_REGULAR_FILE, NOT_A_FOLDER})
-
-
-class _ThreadedDiskKeySSHBroker:
-    """Loop-isolated runner for an operator-pinned disk-key ``SSHSessionBroker``."""
-
-    def __init__(self, broker: SSHSessionBroker, *, name: str) -> None:
-        self.broker = broker
-        self._loop = asyncio.new_event_loop()
-        self._ready = threading.Event()
-        self._stopped = False
-        self._thread = threading.Thread(
-            target=self._run_loop,
-            name=f"ua-disk-ssh-{name}",
-            daemon=True,
-        )
-        self._thread.start()
-        self._ready.wait(timeout=5.0)
-
-    def _run_loop(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        self._ready.set()
-        try:
-            self._loop.run_forever()
-        finally:
-            pending = asyncio.all_tasks(self._loop)
-            for task in pending:
-                task.cancel()
-            if pending:
-                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            self._loop.close()
-
-    @property
-    def shutting_down(self) -> bool:
-        return self._stopped or self.broker._shutting_down
-
-    async def run(self, coro: Coroutine[Any, Any, _T]) -> _T:
-        if self._stopped or self._loop.is_closed():
-            coro.close()
-            raise SSHSessionUnavailable("SSH session broker has shut down.")
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return await asyncio.wrap_future(future)
-
-    async def shutdown(self) -> None:
-        if self._stopped:
-            return
-        self._stopped = True
-        try:
-            if not self._loop.is_closed():
-                future = asyncio.run_coroutine_threadsafe(self.broker.shutdown(), self._loop)
-                await asyncio.wrap_future(future)
-        finally:
-            if not self._loop.is_closed():
-                self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join(timeout=5.0)
 
 
 def _error_payload(exc: Exception) -> str:
     if isinstance(exc, ExecutionSSHBrokerError):
         return json.dumps(exc.to_payload())
     payload: dict[str, Any] = {"error": str(exc)}
-    if isinstance(exc, InvalidSSHCredentialValueError):
+    if isinstance(exc, SSHDisabledError):
+        payload["error_code"] = "ssh_disabled"
+        payload["next_step"] = (
+            "Ask an administrator or operator to set execution_control.ssh.enabled to true "
+            "in instance_config.yaml before using brokered SSH."
+        )
+    elif isinstance(exc, InvalidSSHCredentialValueError):
         payload["error_code"] = "invalid_credential_value"
         payload["credential_key"] = exc.credential_key
         payload["field_name"] = exc.field_name
@@ -234,6 +159,13 @@ def _ssh_service(tool_name: str) -> tuple[ExecutionControlService | None, str | 
     return ExecutionControlService(agent), None
 
 
+def _require_ssh_enabled(service: ExecutionControlService) -> None:
+    """Fail fast on the agent side when operator policy has turned SSH off."""
+
+    if not service.config.execution_control.ssh.enabled:
+        raise SSHDisabledError("execution_control.ssh.enabled is false.")
+
+
 def _json_strings(value: str, *, field_name: str) -> tuple[str, ...]:
     if not str(value or "").strip():
         return ()
@@ -273,159 +205,6 @@ def _parse_owner_scope_literal(
     if cleaned == "team":
         return "team"
     raise ValueError(f"{field_name} must be 'user' or 'team'.")
-
-
-def _is_broker_only_session(session: InteractiveSessionV1) -> bool:
-    """Return True for Sealbox/catalog-backed or dynamically enrolled SSH targets."""
-
-    return bool(
-        session.target.target_id is not None
-        or str(session.target.credential_binding_id or "").startswith(CATALOG_BINDING_PREFIX)
-    )
-
-
-def _use_secure_broker(session: InteractiveSessionV1 | None = None) -> bool:
-    """Route to ``secure_tool_broker`` whenever configured, and fail closed for Sealbox targets if absent."""
-
-    if broker_execution_ssh_available():
-        return True
-    if session is None or _is_broker_only_session(session):
-        raise ExecutionSSHBrokerError(
-            "Sealbox-backed SSH operations run only in the secure tool broker process, "
-            "but SECURE_TOOL_BROKER_INTERNAL_BASE_URL is not configured in this agent process.",
-            error_code=REASON_BROKER_UNAVAILABLE,
-        )
-    return False
-
-
-def _broker_key(service: ExecutionControlService) -> str:
-    return f"{service.config.instance_root_path.resolve()}:{service.owner.team_id}"
-
-
-def _broker_material_path(service: ExecutionControlService, value: str) -> Path:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = service.config.instance_root_path / path
-    resolved = path.resolve()
-    if resolved.is_relative_to(service.config.workspace_path):
-        raise PermissionError("SSH key material must stay outside the agent workspace.")
-    return resolved
-
-
-def _prune_stale_broker_tracking() -> None:
-    live_keys = set(_SSH_BROKERS)
-    for key in list(_BROKER_AGENT_IDS):
-        if key not in live_keys:
-            _BROKER_AGENT_IDS.pop(key, None)
-    for key in list(_BROKER_MANAGER_IDS):
-        if key not in live_keys:
-            _BROKER_MANAGER_IDS.pop(key, None)
-
-
-def _disk_key_broker(service: ExecutionControlService) -> _ThreadedDiskKeySSHBroker:
-    """Return the loop-isolated disk-key SSH broker for operator-pinned targets when no broker URL is set."""
-
-    ssh_settings = service.config.execution_control.ssh
-    if not ssh_settings.enabled:
-        raise RuntimeError("execution_control.ssh.enabled is false.")
-    key = _broker_key(service)
-    agent_id = str(getattr(service.agent, "id", "") or "")
-    is_manager = service.actor.agent.agent_type == TEAM_ARCHITECT_AGENT_TYPE
-
-    with _BROKER_LOCK:
-        _prune_stale_broker_tracking()
-        existing = _SSH_BROKERS.get(key)
-        if existing is not None and not existing.shutting_down:
-            if agent_id:
-                _BROKER_AGENT_IDS.setdefault(key, set()).add(agent_id)
-                if is_manager:
-                    _BROKER_MANAGER_IDS.setdefault(key, set()).add(agent_id)
-            return existing
-
-        materials: dict[str, SSHCredentialMaterial] = {}
-        for target in ssh_settings.targets:
-            identity = _broker_material_path(service, target.identity_file)
-            known_hosts = _broker_material_path(service, target.known_hosts_file)
-            material = SSHCredentialMaterial(
-                identity_file=identity,
-                known_hosts_file=known_hosts,
-            )
-            prior = materials.get(target.credential_binding_id)
-            if prior is not None and prior != material:
-                raise ValueError(
-                    "An SSH credential binding id maps to inconsistent operator key paths."
-                )
-            materials[target.credential_binding_id] = material
-
-        broker = SSHSessionBroker(
-            repository=service.repository,
-            authorization_guard=service.access_guard(),
-            material_provider=ConfiguredSSHCredentialMaterialProvider(materials),
-            artifact_store=service.artifact_store,
-            team_id=service.owner.team_id,
-            broker_id=f"{service.config.instance_name}.disk-ssh.{os.getpid()}",
-            ssh_executable=ssh_settings.ssh_executable,
-            lease_ttl_seconds=ssh_settings.lease_ttl_seconds,
-            transcript_limit_bytes=ssh_settings.transcript_limit_bytes,
-            network_policy=SSHNetworkPolicy.from_settings(ssh_settings),
-            allow_password_bootstrap=False,
-        )
-        if is_manager:
-            broker.recover_after_restart()
-        runner = _ThreadedDiskKeySSHBroker(broker, name=service.owner.team_id)
-        _SSH_BROKERS[key] = runner
-        if agent_id:
-            _BROKER_AGENT_IDS.setdefault(key, set()).add(agent_id)
-            if is_manager:
-                _BROKER_MANAGER_IDS.setdefault(key, set()).add(agent_id)
-        return runner
-
-
-def active_ssh_brokers(*, team_id: str | None = None) -> tuple[SSHSessionBroker, ...]:
-    """Return live fallback disk-key SSH brokers (optionally filtered by ``team_id``)."""
-
-    with _BROKER_LOCK:
-        brokers = [runner.broker for runner in _SSH_BROKERS.values() if not runner.shutting_down]
-    if team_id is not None:
-        return tuple(item for item in brokers if item.team_id == team_id)
-    return tuple(brokers)
-
-
-async def shutdown_agent_ssh_broker(agent_id: str) -> None:
-    """Detach an exiting agent and shut down any fallback disk-key broker when the manager or last agent exits."""
-
-    to_shutdown: list[_ThreadedDiskKeySSHBroker] = []
-    with _BROKER_LOCK:
-        _prune_stale_broker_tracking()
-        for key in list(_SSH_BROKERS):
-            members = _BROKER_AGENT_IDS.get(key)
-            managers = _BROKER_MANAGER_IDS.get(key)
-            was_manager = bool(managers and agent_id in managers)
-            if members is not None:
-                members.discard(agent_id)
-            if managers is not None:
-                managers.discard(agent_id)
-            should_stop = was_manager or (members is not None and len(members) == 0)
-            if should_stop:
-                runner = _SSH_BROKERS.pop(key, None)
-                _BROKER_AGENT_IDS.pop(key, None)
-                _BROKER_MANAGER_IDS.pop(key, None)
-                if runner is not None:
-                    to_shutdown.append(runner)
-    for runner in to_shutdown:
-        await runner.shutdown()
-
-
-async def shutdown_all_ssh_brokers() -> None:
-    """Shut down every fallback disk-key SSH broker cleanly."""
-
-    with _BROKER_LOCK:
-        runners = list(_SSH_BROKERS.values())
-        _SSH_BROKERS.clear()
-        _BROKER_AGENT_IDS.clear()
-        _BROKER_MANAGER_IDS.clear()
-    for runner in runners:
-        await runner.shutdown()
 
 
 def _ssh_caller(service: ExecutionControlService) -> SSHCallerContext:
@@ -681,7 +460,7 @@ async def probe_execution_ssh_host_key(
         if error:
             return json.dumps({"error": error})
         assert service is not None
-        _use_secure_broker(None)
+        _require_ssh_enabled(service)
         result = await call_execution_ssh_broker(
             "probe_execution_ssh_host_key",
             {"host": host, "port": port, "timeout_seconds": timeout_seconds},
@@ -910,24 +689,15 @@ async def open_execution_ssh_session(session_id: str) -> str:
         if error:
             return json.dumps({"error": error})
         assert service is not None
-        session = service.owned_session(session_id)
-        if _use_secure_broker(session):
-            opened = await call_execution_ssh_broker(
-                "open_execution_ssh_session",
-                {"session_id": session_id},
-                reason=f"Open SSH session {session_id}",
-                timeout_seconds=60.0,
-            )
-            return json.dumps(opened)
-        runner = _disk_key_broker(service)
-        opened_model = await runner.run(
-            runner.broker.open(
-                session_id=session_id,
-                lease_token=new_id("ssh_lease"),
-                caller=_ssh_caller(service),
-            )
+        _require_ssh_enabled(service)
+        service.owned_session(session_id)
+        opened = await call_execution_ssh_broker(
+            "open_execution_ssh_session",
+            {"session_id": session_id},
+            reason=f"Open SSH session {session_id}",
+            timeout_seconds=60.0,
         )
-        return opened_model.model_dump_json()
+        return json.dumps(opened)
     except Exception as exc:
         return _error_payload(exc)
 
@@ -944,68 +714,50 @@ async def read_execution_ssh_session(
         if error:
             return json.dumps({"error": error})
         assert service is not None
-        session = service.owned_session(session_id)
+        _require_ssh_enabled(service)
+        service.owned_session(session_id)
         bounded_bytes = max(1, min(int(maximum_bytes), 1_048_576))
         bounded_timeout = max(0.0, min(float(timeout_seconds), 30.0))
-        if _use_secure_broker(session):
-            result = await call_execution_ssh_broker(
-                "read_execution_ssh_session",
-                {
-                    "session_id": session_id,
-                    "maximum_bytes": bounded_bytes,
-                    "timeout_seconds": bounded_timeout,
-                },
-                reason=f"Read SSH session {session_id}",
-                timeout_seconds=bounded_timeout + 15.0,
-            )
-            return json.dumps(result)
-        runner = _disk_key_broker(service)
-        payload = await runner.run(
-            runner.broker.read(
-                session_id=session_id,
-                maximum_bytes=bounded_bytes,
-                timeout_seconds=bounded_timeout,
-                caller=_ssh_caller(service),
-            )
-        )
-        return json.dumps(
+        result = await call_execution_ssh_broker(
+            "read_execution_ssh_session",
             {
                 "session_id": session_id,
-                "bytes": len(payload),
-                "text": payload.decode("utf-8", errors="replace"),
-                "base64": base64.b64encode(payload).decode("ascii"),
-            }
+                "maximum_bytes": bounded_bytes,
+                "timeout_seconds": bounded_timeout,
+            },
+            reason=f"Read SSH session {session_id}",
+            timeout_seconds=bounded_timeout + 15.0,
         )
+        return json.dumps(result)
     except Exception as exc:
         return _error_payload(exc)
 
 
 @tool
 async def write_execution_ssh_session(session_id: str, text: str) -> str:
-    """Type UTF-8 input into a live SSH PTY; requires an approved delegation with allow_typing."""
+    """Type bounded UTF-8 input (up to 64 KiB per call) into a live SSH PTY; requires an approved delegation with allow_typing.
+
+    Larger files or scripts belong in ``upload_execution_ssh_bundle``.
+    """
     try:
         service, error = _ssh_service("write_execution_ssh_session")
         if error:
             return json.dumps({"error": error})
         assert service is not None
-        session = service.owned_session(session_id)
-        if _use_secure_broker(session):
-            result = await call_execution_ssh_broker(
-                "write_execution_ssh_session",
-                {"session_id": session_id, "text": text},
-                reason=f"Write to SSH session {session_id}",
-                timeout_seconds=30.0,
+        _require_ssh_enabled(service)
+        if len(str(text).encode("utf-8")) > MAX_PTY_WRITE_BYTES:
+            raise ValueError(
+                f"SSH terminal write exceeds the maximum size ({MAX_PTY_WRITE_BYTES} bytes); "
+                "use upload_execution_ssh_bundle for larger content."
             )
-            return json.dumps(result)
-        runner = _disk_key_broker(service)
-        written = await runner.run(
-            runner.broker.write(
-                session_id=session_id,
-                payload=text.encode("utf-8"),
-                caller=_ssh_caller(service),
-            )
+        service.owned_session(session_id)
+        result = await call_execution_ssh_broker(
+            "write_execution_ssh_session",
+            {"session_id": session_id, "text": text},
+            reason=f"Write to SSH session {session_id}",
+            timeout_seconds=30.0,
         )
-        return json.dumps({"session_id": session_id, "written_bytes": written})
+        return json.dumps(result)
     except Exception as exc:
         return _error_payload(exc)
 
@@ -1022,35 +774,19 @@ async def resize_execution_ssh_session(
         if error:
             return json.dumps({"error": error})
         assert service is not None
-        session = service.owned_session(session_id)
-        if _use_secure_broker(session):
-            result = await call_execution_ssh_broker(
-                "resize_execution_ssh_session",
-                {
-                    "session_id": session_id,
-                    "terminal_rows": terminal_rows,
-                    "terminal_columns": terminal_columns,
-                },
-                reason=f"Resize SSH session {session_id}",
-                timeout_seconds=30.0,
-            )
-            return json.dumps(result)
-        runner = _disk_key_broker(service)
-        await runner.run(
-            runner.broker.resize(
-                session_id=session_id,
-                rows=terminal_rows,
-                columns=terminal_columns,
-                caller=_ssh_caller(service),
-            )
-        )
-        return json.dumps(
+        _require_ssh_enabled(service)
+        service.owned_session(session_id)
+        result = await call_execution_ssh_broker(
+            "resize_execution_ssh_session",
             {
                 "session_id": session_id,
                 "terminal_rows": terminal_rows,
                 "terminal_columns": terminal_columns,
-            }
+            },
+            reason=f"Resize SSH session {session_id}",
+            timeout_seconds=30.0,
         )
+        return json.dumps(result)
     except Exception as exc:
         return _error_payload(exc)
 
@@ -1063,23 +799,15 @@ async def close_execution_ssh_session(session_id: str) -> str:
         if error:
             return json.dumps({"error": error})
         assert service is not None
-        session = service.owned_session(session_id)
-        if _use_secure_broker(session):
-            result = await call_execution_ssh_broker(
-                "close_execution_ssh_session",
-                {"session_id": session_id},
-                reason=f"Close SSH session {session_id}",
-                timeout_seconds=30.0,
-            )
-            return json.dumps(result)
-        runner = _disk_key_broker(service)
-        closed = await runner.run(
-            runner.broker.close(
-                session_id=session_id,
-                caller=_ssh_caller(service),
-            )
+        _require_ssh_enabled(service)
+        service.owned_session(session_id)
+        result = await call_execution_ssh_broker(
+            "close_execution_ssh_session",
+            {"session_id": session_id},
+            reason=f"Close SSH session {session_id}",
+            timeout_seconds=30.0,
         )
-        return closed.model_dump_json()
+        return json.dumps(result)
     except Exception as exc:
         return _error_payload(exc)
 
@@ -1118,32 +846,21 @@ async def run_execution_ssh_command(
         if error:
             return json.dumps({"error": error})
         assert service is not None
-        session = service.owned_session(session_id)
+        _require_ssh_enabled(service)
+        service.owned_session(session_id)
         bounded_wait = max(0.0, min(float(wait_seconds), 60.0))
-        if _use_secure_broker(session):
-            result = await call_execution_ssh_broker(
-                "run_execution_ssh_command",
-                {
-                    "session_id": session_id,
-                    "command": command,
-                    "timeout_seconds": timeout_seconds,
-                    "wait_seconds": bounded_wait,
-                },
-                reason=f"Run SSH command on session {session_id}",
-                timeout_seconds=bounded_wait + 30.0,
-            )
-            return json.dumps(result)
-        runner = _disk_key_broker(service)
-        cmd_result = await runner.run(
-            runner.broker.run_command(
-                session_id=session_id,
-                command=command,
-                caller=_ssh_caller(service),
-                timeout_seconds=timeout_seconds,
-                wait_seconds=bounded_wait,
-            )
+        result = await call_execution_ssh_broker(
+            "run_execution_ssh_command",
+            {
+                "session_id": session_id,
+                "command": command,
+                "timeout_seconds": timeout_seconds,
+                "wait_seconds": bounded_wait,
+            },
+            reason=f"Run SSH command on session {session_id}",
+            timeout_seconds=bounded_wait + 30.0,
         )
-        return json.dumps(cmd_result.to_payload())
+        return json.dumps(result)
     except Exception as exc:
         return _error_payload(exc)
 
@@ -1160,30 +877,20 @@ async def get_execution_ssh_command(
         if error:
             return json.dumps({"error": error})
         assert service is not None
-        session = service.owned_session(session_id)
+        _require_ssh_enabled(service)
+        service.owned_session(session_id)
         bounded_wait = max(0.0, min(float(wait_seconds), 60.0))
-        if _use_secure_broker(session):
-            result = await call_execution_ssh_broker(
-                "get_execution_ssh_command",
-                {
-                    "session_id": session_id,
-                    "command_id": command_id,
-                    "wait_seconds": bounded_wait,
-                },
-                reason=f"Poll SSH command {command_id} on session {session_id}",
-                timeout_seconds=bounded_wait + 20.0,
-            )
-            return json.dumps(result)
-        runner = _disk_key_broker(service)
-        cmd_result = await runner.run(
-            runner.broker.get_command(
-                session_id=session_id,
-                command_id=command_id,
-                caller=_ssh_caller(service),
-                wait_seconds=bounded_wait,
-            )
+        result = await call_execution_ssh_broker(
+            "get_execution_ssh_command",
+            {
+                "session_id": session_id,
+                "command_id": command_id,
+                "wait_seconds": bounded_wait,
+            },
+            reason=f"Poll SSH command {command_id} on session {session_id}",
+            timeout_seconds=bounded_wait + 20.0,
         )
-        return json.dumps(cmd_result.to_payload())
+        return json.dumps(result)
     except Exception as exc:
         return _error_payload(exc)
 
@@ -1204,8 +911,8 @@ async def enroll_execution_ssh_key(
         if error:
             return json.dumps({"error": error})
         assert service is not None
+        _require_ssh_enabled(service)
         service.owned_session(session_id)
-        _use_secure_broker(None)
         result = await call_execution_ssh_broker(
             "enroll_execution_ssh_key",
             {"session_id": session_id, "timeout_seconds": timeout_seconds},
@@ -1249,8 +956,8 @@ async def run_execution_ssh_sudo(
         if error:
             return json.dumps({"error": error})
         assert service is not None
+        _require_ssh_enabled(service)
         service.owned_session(session_id)
-        _use_secure_broker(None)
         recipe_params = _json_dict(recipe_params_json, field_name="recipe_params_json")
         bounded_wait = max(0.0, min(float(wait_seconds), 60.0))
         result = await call_execution_ssh_broker(
@@ -1292,6 +999,7 @@ async def upload_execution_ssh_bundle(
         if error:
             return json.dumps({"error": error})
         assert service is not None
+        _require_ssh_enabled(service)
         session = service.owned_session(session_id)
         caller = _ssh_caller(service)
         # Verify delegation capability before reading any files from disk.
@@ -1307,34 +1015,22 @@ async def upload_execution_ssh_bundle(
             service.agent,
             raw_paths,
         )
-        if _use_secure_broker(session):
-            encoded_entries = [
-                {"path": rel_path, "content_base64": base64.b64encode(data).decode("ascii")}
-                for rel_path, data in entries
-            ]
-            result = await call_execution_ssh_broker(
-                "upload_execution_ssh_bundle",
-                {
-                    "session_id": session_id,
-                    "entries": encoded_entries,
-                    "remote_destination": remote_destination,
-                    "timeout_seconds": timeout_seconds,
-                },
-                reason=f"Upload workspace bundle to SSH session {session_id}",
-                timeout_seconds=max(30.0, float(timeout_seconds)),
-            )
-            return json.dumps(result)
-        runner = _disk_key_broker(service)
-        upload_result = await runner.run(
-            runner.broker.upload_bundle(
-                session_id=session_id,
-                entries=entries,
-                remote_destination=remote_destination,
-                caller=caller,
-                timeout_seconds=timeout_seconds,
-            )
+        encoded_entries = [
+            {"path": rel_path, "content_base64": base64.b64encode(data).decode("ascii")}
+            for rel_path, data in entries
+        ]
+        result = await call_execution_ssh_broker(
+            "upload_execution_ssh_bundle",
+            {
+                "session_id": session_id,
+                "entries": encoded_entries,
+                "remote_destination": remote_destination,
+                "timeout_seconds": timeout_seconds,
+            },
+            reason=f"Upload workspace bundle to SSH session {session_id}",
+            timeout_seconds=max(30.0, float(timeout_seconds)),
         )
-        return json.dumps(upload_result.to_payload())
+        return json.dumps(result)
     except Exception as exc:
         return _error_payload(exc)
 
@@ -1360,15 +1056,12 @@ SSH_TOOLS = (
 
 __all__ = [
     "SSH_TOOLS",
-    "_SSH_BROKERS",
-    "_disk_key_broker",
     "_error_payload",
     "_json_strings",
     "_manager_agent",
     "_manager_service",
     "_ssh_caller",
     "_utc",
-    "active_ssh_brokers",
     "close_execution_ssh_session",
     "create_execution_ssh_session",
     "enroll_execution_ssh_key",
@@ -1383,8 +1076,6 @@ __all__ = [
     "resize_execution_ssh_session",
     "run_execution_ssh_command",
     "run_execution_ssh_sudo",
-    "shutdown_agent_ssh_broker",
-    "shutdown_all_ssh_brokers",
     "upload_execution_ssh_bundle",
     "write_execution_ssh_session",
 ]

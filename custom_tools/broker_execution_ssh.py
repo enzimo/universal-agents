@@ -73,7 +73,7 @@ def _broker_connection() -> tuple[str, str]:
     base_url = str(os.getenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL") or "").rstrip("/")
     if not base_url:
         raise ExecutionSSHBrokerError(
-            "Sealbox-backed SSH operations run only in the secure tool broker process, "
+            "Brokered SSH operations run only in the secure tool broker process, "
             "but SECURE_TOOL_BROKER_INTERNAL_BASE_URL is not configured in this agent process.",
             error_code=REASON_BROKER_UNAVAILABLE,
         )

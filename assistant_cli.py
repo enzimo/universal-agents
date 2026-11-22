@@ -4307,6 +4307,7 @@ async def _run_secure_tool_broker_service(
             storage_settings=config.manager_storage_settings,
             ssh=config.execution_control.ssh,
             lead_agent_type=config.manager.named_agent_type,
+            config_path=str(config.config_path),
         )
         access_gate = build_broker_access_gate(
             instance_root=config.instance_root_path,

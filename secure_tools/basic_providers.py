@@ -18,6 +18,7 @@ class DeclaredProvider:
     name: str
     actions: Mapping[str, ActionSpec]
     action_aliases: Mapping[str, str] = {}
+    secure_cli_callable: bool = True
 
     def _valid_action_names(self) -> str:
         return ", ".join(sorted(self.actions))
@@ -390,6 +391,7 @@ class ExecutionSSHProvider(DeclaredProvider):
     """
 
     name = "execution_ssh"
+    secure_cli_callable = False
     actions = {
         "probe_execution_ssh_host_key": ActionSpec(
             "probe_execution_ssh_host_key",
