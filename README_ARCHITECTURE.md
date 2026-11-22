@@ -3789,7 +3789,12 @@ page, the gateway, agents and models still never see what is typed.
   page-level watcher (`access_inbox.mjs createFollowUpPageWatcher`, gated only
   on document visibility so it outlives closing Settings, reloading the Inbox,
   and threads without a review card) tracks them: review reads from the chat
-  card and Inbox feed into `noteReview` so both cards update on the same read,
+  card and Inbox feed into `noteReview` with the monotonic read sequence number
+  assigned when the read started so both cards update on the same read, except
+  that a read which started at or before a card was handed off is ignored for
+  that card (the server commits the decision before it opens the forms and
+  registers their links in `ProposalFollowUpTracker`, so a late pre-hand-off
+  read can return either `waiting` or `granted` with empty `follow_up_links`),
   and the page watcher polls only requests no card watcher is actively polling,
   closing cards whose URLs leave `follow_up_links` once settling ends: cards
   past their expiry close as expired, cards ended before expiry show the neutral

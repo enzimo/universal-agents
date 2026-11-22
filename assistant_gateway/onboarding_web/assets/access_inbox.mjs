@@ -699,33 +699,34 @@ function canonicalFollowUpUrl(raw) {
  * `onClosePages(requestId, urls)` for URLs that left `follow_up_links`,
  * skipping while `isFollowUpSettling(review)` is true.
  *
- * `currentReadSequence()` (when supplied by a caller that shares and dedupes
- * review reads across views) returns the monotonic sequence number of the most
- * recently started review read; `get()` may then return `{ review, readStartedAt }`
- * and `noteReview(requestId, review, readStartedAt)` skips any page first seen
- * open at or after `readStartedAt`, so a read that started before an approval
- * handed a form off never closes the brand-new inline card.
+ * `currentReadSequence()` is required and returns the monotonic sequence number
+ * of the most recently started review read; `get()` returns `{ review, readSeq }`
+ * and `noteReview(requestId, review, readSeq)` skips any page first seen open
+ * at or after `readSeq` (and warns without closing anything if `readSeq` is
+ * missing). Comparing read order rather than review status is required because
+ * the server commits a decision before opening forms and registering their
+ * links, so a read started before the hand-off can return either a pre-decision
+ * `waiting` review or a `granted` review with empty `follow_up_links`.
  */
 export function createFollowUpPageWatcher({
   getOpenPages, get, onClosePages, isRequestWatched, currentReadSequence,
   browser = globalThis, now = () => Date.now(),
   pollMs = FOLLOW_UP_POLL_MS, graceMs = FOLLOW_UP_EXPIRY_GRACE_MS, maxPolls = FOLLOW_UP_MAX_POLLS,
 }) {
+  if (typeof currentReadSequence !== "function") {
+    throw new TypeError("createFollowUpPageWatcher requires currentReadSequence");
+  }
   const warn = (event, detail) => browser && browser.console && browser.console.warn(event, detail);
   let generation = 0;
-  let localReadSequence = 0;
-  const readSequence = typeof currentReadSequence === "function"
-    ? currentReadSequence
-    : () => localReadSequence;
   const inflight = new Map();
   const stopped = new Set();
   const settlingUntil = new Map();
-  const firstSeenAt = new Map();
+  const firstSeenSeq = new Map();
 
   function openByRequest() {
     const grouped = new Map();
     const activeKeys = new Set();
-    const currentSeq = readSequence();
+    const currentSeq = currentReadSequence();
     const pages = typeof getOpenPages === "function" ? getOpenPages() : [];
     (Array.isArray(pages) ? pages : []).forEach(page => {
       const requestId = text(page && page.requestId);
@@ -733,12 +734,12 @@ export function createFollowUpPageWatcher({
       if (!requestId || !url || stopped.has(requestId)) return;
       const pageKey = `${requestId}|${canonicalFollowUpUrl(url)}`;
       activeKeys.add(pageKey);
-      if (!firstSeenAt.has(pageKey)) firstSeenAt.set(pageKey, currentSeq);
+      if (!firstSeenSeq.has(pageKey)) firstSeenSeq.set(pageKey, currentSeq);
       if (!grouped.has(requestId)) grouped.set(requestId, []);
       grouped.get(requestId).push({ requestId, url, pageKey, expiresAtUtc: text(page && page.expiresAtUtc) });
     });
-    for (const key of [...firstSeenAt.keys()]) {
-      if (!activeKeys.has(key)) firstSeenAt.delete(key);
+    for (const key of [...firstSeenSeq.keys()]) {
+      if (!activeKeys.has(key)) firstSeenSeq.delete(key);
     }
     for (const id of [...settlingUntil.keys()]) {
       if (!grouped.has(id)) settlingUntil.delete(id);
@@ -762,21 +763,24 @@ export function createFollowUpPageWatcher({
 
   /**
    * Applies a freshly read review so inline cards close on the same read as
-   * chat or Inbox cards. When `readStartedAt` is provided, pages first seen
-   * open at or after that read started are skipped so stale pre-hand-off reads
-   * cannot close a newly opened card.
+   * chat or Inbox cards. Pages first seen open at or after `readSeq` are
+   * skipped so a pre-hand-off read (whether pre-decision `waiting` or
+   * decided-but-not-yet-registered `granted` with no links) cannot close a
+   * newly opened card; calls without a finite `readSeq` warn and close nothing.
    */
-  function noteReview(requestId, review, readStartedAt) {
+  function noteReview(requestId, review, readSeq) {
     const id = text(requestId);
     if (!id || !review || typeof onClosePages !== "function") return;
+    if (!Number.isFinite(readSeq)) {
+      warn("follow_up_page_note_without_read_sequence", { request_id: id });
+      return;
+    }
     const current = openByRequest().get(id) || [];
     if (!current.length) {
       settlingUntil.delete(id);
       return;
     }
-    const eligible = typeof readStartedAt === "number"
-      ? current.filter(page => readStartedAt > firstSeenAt.get(page.pageKey))
-      : current;
+    const eligible = current.filter(page => readSeq > firstSeenSeq.get(page.pageKey));
     if (!eligible.length) return;
     if (isFollowUpSettling(review)) {
       settlingUntil.set(id, text(review.follow_up_settling_until_utc));
@@ -801,16 +805,13 @@ export function createFollowUpPageWatcher({
     const reads = [];
     openByRequest().forEach((_pages, requestId) => {
       if (inflight.has(requestId) || (typeof isRequestWatched === "function" && isRequestWatched(requestId))) return;
-      const localStartedAt = typeof currentReadSequence === "function" ? undefined : ++localReadSequence;
       const pending = Promise.resolve()
         .then(() => get(`${ACCESS_INBOX_API}/requests/${encodeURIComponent(requestId)}`))
         .then(payload => {
           if (readGeneration !== generation) return;
           const review = (payload && payload.review) || null;
-          const readStartedAt = payload && typeof payload.readStartedAt === "number"
-            ? payload.readStartedAt
-            : localStartedAt;
-          if (review) noteReview(requestId, review, readStartedAt);
+          const readSeq = payload ? payload.readSeq : undefined;
+          if (review) noteReview(requestId, review, readSeq);
         }, error => {
           if (readGeneration !== generation) return;
           if (error && (error.status === 403 || error.status === 404)) stopped.add(requestId);
@@ -845,7 +846,7 @@ export function createFollowUpPageWatcher({
       inflight.clear();
       stopped.clear();
       settlingUntil.clear();
-      firstSeenAt.clear();
+      firstSeenSeq.clear();
       watcher.stop();
     },
   };

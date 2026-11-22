@@ -128,10 +128,10 @@ export function createSettingsControls({
   const inflightReviewReads = new Map();
   function readAccessReview(path) {
     if (inflightReviewReads.has(path)) return inflightReviewReads.get(path);
-    const readStartedAt = ++reviewReadSequence;
+    const readSeq = ++reviewReadSequence;
     const pending = Promise.resolve()
       .then(() => client.get(path, ACCESS_READ_FALLBACK))
-      .then(payload => ({ payload, readStartedAt }))
+      .then(payload => ({ payload, readSeq }))
       .finally(() => {
         if (inflightReviewReads.get(path) === pending) inflightReviewReads.delete(path);
       });
@@ -144,20 +144,20 @@ export function createSettingsControls({
     }
     const generation = reviewGeneration;
     const pathId = reviewIdFromPath(path);
-    return readAccessReview(path).then(({ payload, readStartedAt }) => {
+    return readAccessReview(path).then(({ payload, readSeq }) => {
       if (generation === reviewGeneration) {
         const review = (payload && payload.review) || null;
         const requestId = (review && review.request_id) || pathId;
-        if (review && requestId) followUpPageWatcher.noteReview(requestId, review, readStartedAt);
+        if (review && requestId) followUpPageWatcher.noteReview(requestId, review, readSeq);
       }
       return payload;
     });
   };
   const followUpPageWatcher = createFollowUpPageWatcher({
     getOpenPages: getOpenFollowUpPages,
-    get: path => readAccessReview(path).then(({ payload, readStartedAt }) => ({
+    get: path => readAccessReview(path).then(({ payload, readSeq }) => ({
       review: (payload && payload.review) || null,
-      readStartedAt,
+      readSeq,
     })),
     currentReadSequence: () => reviewReadSequence,
     onClosePages: onCloseFollowUpPages,

@@ -798,9 +798,10 @@ test("createFollowUpPageWatcher watches open inline proposal cards by document v
   const intervals = new Map();
   let nextTimerId = 0;
   let clock = Date.parse("2026-11-21T12:00:00Z");
+  const warnings = [];
   const browser = {
     document,
-    console: { warn() {} },
+    console: { warn(event, detail) { warnings.push({ event, detail }); } },
     addEventListener(type, fn) {
       if (!winListeners.has(type)) winListeners.set(type, []);
       winListeners.get(type).push(fn);
@@ -812,6 +813,11 @@ test("createFollowUpPageWatcher watches open inline proposal cards by document v
     },
     clearInterval(id) { intervals.delete(id); },
   };
+  assert.throws(
+    () => createFollowUpPageWatcher({ getOpenPages: () => [], get: () => {}, onClosePages: () => {}, browser }),
+    TypeError,
+    "requires currentReadSequence so callers cannot silently disable the read-order guard",
+  );
   const expires = "2026-11-21T12:15:00+00:00";
   const formA = { label: "Choose Portainer", url: "http://b.example/a", expires_at_utc: expires };
   const formB = { label: "Choose Gitea", url: "http://b.example/b", expires_at_utc: expires };
@@ -819,12 +825,21 @@ test("createFollowUpPageWatcher watches open inline proposal cards by document v
     { requestId: "req-9", url: formA.url, expiresAtUtc: expires },
     { requestId: "req-9", url: formB.url, expiresAtUtc: expires },
   ];
+  let readSequence = 0;
   const gets = [];
   const closed = [];
   const watchedElsewhere = new Set();
   const watcher = createFollowUpPageWatcher({
     getOpenPages: () => openPages,
-    get: path => new Promise((resolve, reject) => gets.push({ path, resolve, reject })),
+    get: path => {
+      const readSeq = ++readSequence;
+      return new Promise((resolve, reject) => gets.push({
+        path,
+        resolve: payload => resolve({ review: payload && payload.review, readSeq }),
+        reject,
+      }));
+    },
+    currentReadSequence: () => readSequence,
     onClosePages: (requestId, urls) => {
       closed.push({ requestId, urls });
       openPages = openPages.filter(page => !(page.requestId === requestId && urls.includes(page.url)));
@@ -904,7 +919,7 @@ test("createFollowUpPageWatcher watches open inline proposal cards by document v
   await settle();
   assert.equal(closed.length, 2, "stale response after clear() does not close anything");
 
-  // While another watcher owns a request, polling skips it, and noteReview closes ended cards immediately (C16).
+  // While another watcher owns a request, polling skips it, and noteReview closes ended cards immediately (C16, C19).
   openPages = [{ requestId: "req-11", url: "http://b.example/e", expiresAtUtc: "2099-01-01T00:00:00Z" }];
   watchedElsewhere.add("req-11");
   watcher.sync();
@@ -913,7 +928,17 @@ test("createFollowUpPageWatcher watches open inline proposal cards by document v
   [...intervals.values()][0].cb();
   await settle();
   assert.equal(gets.length, getsBeforeSkip, "skips polling while another watcher owns the request");
+  const warningsBeforeMissingSeq = warnings.length;
   watcher.noteReview("req-11", { follow_up_links: [], follow_up_settling: false });
+  assert.deepEqual(
+    warnings.slice(warningsBeforeMissingSeq),
+    [{ event: "follow_up_page_note_without_read_sequence", detail: { request_id: "req-11" } }],
+    "warns and closes nothing when readSeq is omitted",
+  );
+  assert.equal(openPages.length, 1);
+  watcher.noteReview("req-11", { follow_up_links: [], follow_up_settling: false }, readSequence);
+  assert.equal(openPages.length, 1, "ignores noteReview whose readSeq is not newer than firstSeenSeq");
+  watcher.noteReview("req-11", { follow_up_links: [], follow_up_settling: false }, ++readSequence);
   assert.deepEqual(closed.at(-1), { requestId: "req-11", urls: ["http://b.example/e"] });
   assert.equal(intervals.size, 0, "stops immediately once noteReview closes the last open card");
 
