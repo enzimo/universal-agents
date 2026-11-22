@@ -4426,6 +4426,151 @@ body.is-theme-customizing {
 .team-classes-table td { white-space: normal; overflow-wrap: anywhere; }
 .tasks-content { display: grid; gap: 12px; align-content: start; }
 
+/* Settings -> Tasks -> Brokered SSH (execution_ssh_controls.mjs) */
+.settings-execution-ssh {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(28, 69, 60, 0.16);
+}
+
+.execution-ssh-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.execution-ssh-status {
+  margin-bottom: 10px;
+}
+
+.execution-ssh-note {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border: 1px solid rgba(7, 89, 133, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.42);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.execution-ssh-group {
+  margin-top: 14px;
+}
+
+.execution-ssh-group-title {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.execution-ssh-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+
+.execution-ssh-primary {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.execution-ssh-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+  color: var(--ink);
+}
+
+.execution-ssh-meta {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.execution-ssh-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.execution-ssh-cap {
+  display: inline-block;
+  padding: 2px 7px;
+  border: 1px solid rgba(7, 89, 133, 0.24);
+  border-radius: 999px;
+  background: rgba(7, 89, 133, 0.08);
+  color: var(--ocean);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.execution-ssh-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.execution-ssh-badge.is-active {
+  background: rgba(22, 163, 74, 0.14);
+  color: var(--green-dark);
+}
+
+.execution-ssh-badge.is-revoked {
+  background: rgba(185, 28, 28, 0.14);
+  color: var(--danger);
+}
+
+.execution-ssh-badge.is-expired {
+  background: rgba(183, 121, 31, 0.16);
+  color: var(--amber);
+}
+
+.execution-ssh-badge.is-inactive {
+  background: rgba(51, 73, 66, 0.12);
+  color: var(--muted);
+}
+
+:root[data-color-mode="dark"] .settings-execution-ssh {
+  border-top-color: var(--dark-border-subtle);
+}
+
+:root[data-color-mode="dark"] .execution-ssh-note {
+  border-color: var(--dark-border-subtle);
+  background: var(--dark-control);
+  color: var(--muted);
+}
+
+:root[data-color-mode="dark"] .execution-ssh-cap {
+  border-color: var(--dark-border);
+  background: rgba(98, 213, 243, 0.12);
+  color: var(--dark-focus);
+}
+
+:root[data-color-mode="dark"] .execution-ssh-badge.is-active {
+  background: rgba(34, 197, 94, 0.18);
+  color: #86efac;
+}
+
+:root[data-color-mode="dark"] .execution-ssh-badge.is-revoked {
+  background: rgba(185, 72, 80, 0.24);
+  color: #fca5a5;
+}
+
+:root[data-color-mode="dark"] .execution-ssh-badge.is-expired {
+  background: rgba(240, 163, 90, 0.22);
+  color: var(--dark-ember);
+}
+
+:root[data-color-mode="dark"] .execution-ssh-badge.is-inactive {
+  background: var(--dark-raised);
+  color: var(--muted);
+}
+
 .list-pagination {
   display: flex;
   align-items: center;

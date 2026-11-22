@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from assistant_gateway.application.execution_ssh_page import (
+    ExecutionSSHPage,
+    ExecutionSSHRevokeResult,
+)
 from assistant_gateway.application.file_retention_page import FileRetentionPage
 from custom_messages.contracts.access_v2 import ChangeApprovalRecordV1
 from custom_messages.contracts.control_v1 import KnowledgeCommandPayload, KnowledgeCommandResultPayload
@@ -1250,6 +1254,24 @@ class FileRetentionApplication(Protocol):
         """
 
 
+@runtime_checkable
+class ExecutionSSHApplication(Protocol):
+    """Settings > Tasks > Brokered SSH (``assistant_gateway.execution_ssh.GatewayExecutionSSH``)."""
+
+    def page(self, *, person_id: str) -> ExecutionSSHPage:
+        """Enrolled SSH targets and delegated sessions for administrators."""
+
+    async def revoke_target(
+        self, *, person_id: str, target_id: str
+    ) -> ExecutionSSHRevokeResult:
+        """Revoke one enrolled SSH target and stop any live sessions targeting it."""
+
+    async def revoke_session(
+        self, *, person_id: str, session_id: str
+    ) -> ExecutionSSHRevokeResult:
+        """Revoke and terminate one delegated SSH session."""
+
+
 class WebsiteGatewayApplication(GatewayApplication, Protocol):
     """Core channel use cases plus explicit Website-only capability facets."""
 
@@ -1296,3 +1318,7 @@ class WebsiteGatewayApplication(GatewayApplication, Protocol):
     @property
     def file_retention(self) -> FileRetentionApplication:
         """Return Settings > Team > File Retention: how long uploads and scratch files are kept."""
+
+    @property
+    def execution_ssh(self) -> ExecutionSSHApplication:
+        """Return Settings > Tasks > Brokered SSH: enrolled targets and delegated sessions."""

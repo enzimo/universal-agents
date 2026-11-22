@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import aiohttp
 
@@ -13,6 +14,8 @@ from assistant_gateway.application.ports import GatewaySecureBrokerRefusal
 from assistant_gateway.config import GatewayInstanceConfig
 from runtime_settings.network import compose_secure_tool_broker_public_base_url, rewrite_url_to_public_base
 from secure_tool_broker.defaults import (
+    EXECUTION_SSH_REVOKE_SESSION_ROUTE,
+    EXECUTION_SSH_REVOKE_TARGET_ROUTE,
     MODEL_KEY_STATUS_ROUTE,
     ONBOARDING_ACCOUNT_KEYS_ROUTE,
     PERSON_CREDENTIAL_DELETION_ROUTE,
@@ -288,6 +291,40 @@ class HttpGatewaySecureBroker:
             token=token,
             payload=request.model_dump(mode="json"),
             timeout_seconds=60,
+        )
+
+    async def revoke_execution_ssh_session(
+        self, *, session_id: str, revoked_by: str
+    ) -> dict[str, Any]:
+        """Ask the broker to immediately terminate one live SSH session and its commands."""
+
+        base_url, token = self._require_connection()
+        route = EXECUTION_SSH_REVOKE_SESSION_ROUTE.format(
+            session_id=quote(str(session_id), safe="")
+        )
+        return await self._request_json(
+            "POST",
+            f"{base_url}{route}",
+            token=token,
+            payload={"revoked_by": str(revoked_by)},
+            timeout_seconds=15,
+        )
+
+    async def revoke_execution_ssh_target(
+        self, *, target_id: str, revoked_by: str
+    ) -> dict[str, Any]:
+        """Ask the broker to immediately terminate all live SSH work using an enrolled target."""
+
+        base_url, token = self._require_connection()
+        route = EXECUTION_SSH_REVOKE_TARGET_ROUTE.format(
+            target_id=quote(str(target_id), safe="")
+        )
+        return await self._request_json(
+            "POST",
+            f"{base_url}{route}",
+            token=token,
+            payload={"revoked_by": str(revoked_by)},
+            timeout_seconds=15,
         )
 
     async def execute_approved_signup(

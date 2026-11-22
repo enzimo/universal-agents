@@ -133,6 +133,9 @@ test("tabs switch panels in place and read each view", async () => {
   f.node("settings-tasks-tab").click();
   assert.equal(selectedView(f), "tasks");
   assert.deepEqual(f.tasks.at(-1), ["activate", "session-1"]);
+  await answer(f.requests, "/api/web-chat/execution-ssh",
+    jsonResponse({ can_manage: false, ssh_enabled: false, targets: [], sessions: [] }));
+  assert.equal(f.node("settings-execution-ssh").hidden, true, "non-admins do not see brokered SSH controls");
 
   f.node("settings-appearance-tab").click();
   assert.equal(selectedView(f), "appearance");

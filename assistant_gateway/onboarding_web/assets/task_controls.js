@@ -253,6 +253,8 @@
   function createTeam(options) {
     var panel = options.panel;
     var template = panel.cloneNode(true);
+    var templateSsh = template.querySelector("#settings-execution-ssh");
+    if (templateSsh) templateSsh.remove();
     var content = panel.querySelector(".tasks-content");
     var status = panel.querySelector(".tasks-status");
     var refresh = panel.querySelector(".tasks-refresh");

@@ -330,6 +330,9 @@ class ExecutionControlRepository(Protocol):
     def get_interactive_session_revocation(
         self, *, team_id: str, session_id: str
     ) -> SSHRevocationStateV1 | None: ...
+    def list_interactive_session_revocations(
+        self, *, team_id: str
+    ) -> dict[str, SSHRevocationStateV1]: ...
     def put_ssh_interaction(
         self,
         activation: ActivationRecordV2,
@@ -339,6 +342,9 @@ class ExecutionControlRepository(Protocol):
     def get_ssh_interaction(
         self, *, team_id: str, session_id: str
     ) -> SSHInteractionRecordV1 | None: ...
+    def list_ssh_interactions(
+        self, *, team_id: str
+    ) -> tuple[SSHInteractionRecordV1, ...]: ...
     def revoke_ssh_interaction(
         self,
         *,
@@ -595,6 +601,21 @@ class _RelationalExecutionControlRepository:
                 (session_id, team_id),
             ).fetchone()
         return None if row is None else self._interaction_from_row(row)
+
+    def list_ssh_interactions(
+        self, *, team_id: str
+    ) -> tuple[SSHInteractionRecordV1, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT record_json, delegation_json, revoked_at_utc, revoked_by
+                  FROM execution_ssh_interactions
+                 WHERE team_id = {self._dialect.bind}
+                 ORDER BY session_id
+                """,
+                (team_id,),
+            ).fetchall()
+        return tuple(self._interaction_from_row(row) for row in rows)
 
     def revoke_ssh_interaction(
         self,
@@ -2001,6 +2022,27 @@ class _RelationalExecutionControlRepository:
             revoked_at_utc=_parse_datetime(row["revoked_at_utc"]),
             revoked_by=None if row["revoked_by"] is None else str(row["revoked_by"]),
         )
+
+    def list_interactive_session_revocations(
+        self, *, team_id: str
+    ) -> dict[str, SSHRevocationStateV1]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT session_id, revoked_at_utc, revoked_by
+                  FROM execution_interactive_sessions
+                 WHERE team_id = {self._dialect.bind}
+                   AND revoked_at_utc IS NOT NULL
+                """,
+                (team_id,),
+            ).fetchall()
+        return {
+            str(row["session_id"]): SSHRevocationStateV1(
+                revoked_at_utc=_parse_datetime(row["revoked_at_utc"]),
+                revoked_by=None if row["revoked_by"] is None else str(row["revoked_by"]),
+            )
+            for row in rows
+        }
 
     def get_interactive_session(
         self, *, team_id: str, session_id: str

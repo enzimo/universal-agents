@@ -58,6 +58,7 @@ from assistant_gateway.interactive_apps.website_handlers.diagnostics import (
 )
 from assistant_gateway.interactive_apps.website_handlers.status import WebsiteStatusHandlers
 from assistant_gateway.interactive_apps.website_handlers.accounts import WebsiteAccountsHandlers
+from assistant_gateway.interactive_apps.website_handlers.execution_ssh import WebsiteExecutionSSHHandlers
 from assistant_gateway.interactive_apps.website_handlers.file_retention import WebsiteFileRetentionHandlers
 from assistant_gateway.interactive_apps.website_handlers.knowledge import WebsiteKnowledgeHandlers
 from assistant_gateway.interactive_apps.website_handlers.procedures import (
@@ -163,6 +164,7 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
         self.status = WebsiteStatusHandlers(application=application, operations=signed_in)
         self.accounts = WebsiteAccountsHandlers(application=application, operations=signed_in)
         self.file_retention = WebsiteFileRetentionHandlers(application=application, operations=signed_in)
+        self.execution_ssh = WebsiteExecutionSSHHandlers(application=application, operations=signed_in)
         self.knowledge = WebsiteKnowledgeHandlers(
             application=application,
             operations=operations.WebsiteKnowledgeHandlersOperations(
@@ -572,6 +574,18 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
                     # Settings > Team > File Retention (website_handlers.file_retention).
                     ("GET", "/api/web-chat/file-retention", self.file_retention.view),
                     ("PUT", "/api/web-chat/file-retention", self.file_retention.save),
+                    # Settings > Tasks > Brokered SSH (website_handlers.execution_ssh).
+                    ("GET", "/api/web-chat/execution-ssh", self.execution_ssh.view),
+                    (
+                        "POST",
+                        "/api/web-chat/execution-ssh/targets/{target_id}/revoke",
+                        self.execution_ssh.revoke_target,
+                    ),
+                    (
+                        "POST",
+                        "/api/web-chat/execution-ssh/sessions/{session_id}/revoke",
+                        self.execution_ssh.revoke_session,
+                    ),
                     ("GET", "/api/web-chat/access-map", self.access_map.view),
                     (
                         "GET",
