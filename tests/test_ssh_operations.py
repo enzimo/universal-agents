@@ -2795,3 +2795,126 @@ async def test_c67_real_sshd_output_helper_pipeline_flushes_on_normal_exit(
         except subprocess.TimeoutExpired:
             sshd_proc.kill()
             sshd_proc.wait(timeout=2.0)
+
+
+def test_f3_windows_bundle_extract_rejects_unicode_single_quotes_and_uses_base64() -> None:
+    """F3: Windows workspace bundle extraction rejects Unicode single quotes and decodes via base64."""
+
+    import base64
+    from runtime_hosting.ssh_operations import (
+        build_bundle_extract_command,
+        validate_remote_destination,
+    )
+
+    for bad_quote in ("\u2018", "\u2019", "\u201a", "\u201b"):
+        with pytest.raises(ValueError, match="Unicode single-quote"):
+            validate_remote_destination(f"C:\\work\\a{bad_quote}; calc.exe; {bad_quote}b")
+    with pytest.raises(ValueError, match="control characters"):
+        validate_remote_destination("C:\\work\\a\x85b")
+
+    for dest in ("C:\\Deploy\\O'Brien\\app", "~/O'Brien/deploy"):
+        argv = build_bundle_extract_command(dest, SSHTargetPlatform.WINDOWS)
+        assert len(argv) == 1
+        tokens = argv[0].split()
+        assert tokens[0] == "powershell"
+        assert "-EncodedCommand" in tokens
+        encoded_cmd = tokens[tokens.index("-EncodedCommand") + 1]
+        decoded_ps = base64.b64decode(encoded_cmd).decode("utf-16le")
+        assert "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(" in decoded_ps
+        assert "O'Brien" not in decoded_ps
+        expected_b64 = base64.b64encode(
+            (dest[2:] if dest.startswith("~/") else dest).encode("utf-8")
+        ).decode("ascii")
+        assert expected_b64 in decoded_ps
+
+
+@pytest.mark.asyncio
+async def test_f9_enroll_ssh_key_passes_python_executable_under_minimal_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F9: _execute_key_bootstrap passes catalog_provider.python_executable so SSH_ASKPASS works without python3 on PATH."""
+
+    import sys
+
+    _, _, host_pub = _generate_ed25519_keypair(tmp_path / "host", name="host_ed25519")
+    _, client_priv, client_pub = _generate_ed25519_keypair(tmp_path / "client", name="client_ed25519")
+    repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+    target = _make_enrolled_target(
+        target_id="f9_minimal_path_host",
+        host="198.51.100.99",
+        port=22,
+        username="ops",
+        platform=SSHTargetPlatform.LINUX,
+        host_pub=host_pub,
+        credential_key="ops_key",
+        credential_pub=client_pub,
+        bootstrap_credential_key="ops_boot",
+    )
+    repository.put_ssh_target(target)
+    bounds = SSHDelegationBoundsV1(allow_password_bootstrap=True)
+    session = _create_session_and_delegation(repository, target, bounds, session_id="ssh_sess_f9")
+
+    # Put a custom python3-free fake ssh script in a minimal PATH directory that executes
+    # SSH_ASKPASS directly using the inherited PATH (so env python3 fails if python_executable
+    # was not added to PATH).
+    min_bin = tmp_path / "min_bin"
+    min_bin.mkdir(parents=True, exist_ok=True)
+    for required_tool in ("env", "ssh-agent", "ssh-add"):
+        resolved_tool = shutil.which(required_tool)
+        assert resolved_tool is not None, f"Missing {required_tool} in test environment"
+        os.symlink(resolved_tool, min_bin / required_tool)
+    fake_ssh = min_bin / "fake-ssh"
+    askpass_out_file = tmp_path / "askpass_out.txt"
+    fake_ssh.write_text(
+        f"#!{sys.executable}\n"
+        "import os, pathlib, subprocess, sys\n"
+        "args = sys.argv[1:]\n"
+        "if 'PasswordAuthentication=yes' in args:\n"
+        "    askpass = os.environ['SSH_ASKPASS']\n"
+        "    # Run SSH_ASKPASS via its shebang (#!/usr/bin/env python3) with the subprocess PATH.\n"
+        "    res = subprocess.run([askpass], capture_output=True, text=True, env=dict(os.environ))\n"
+        "    if res.returncode != 0:\n"
+        "        sys.stderr.write(res.stderr)\n"
+        "        sys.exit(res.returncode)\n"
+        f"    pathlib.Path({str(askpass_out_file)!r}).write_text(res.stdout.strip(), encoding='utf-8')\n"
+        "    _ = sys.stdin.read()\n"
+        "    sys.exit(0)\n"
+        "print('UA_KEY_AUTH_OK')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+
+    # Create a dedicated bin dir containing ONLY a python3 symlink so catalog_provider.python_executable
+    # is distinct from min_bin and ambient PATH lacks python3 completely.
+    py_bin = tmp_path / "custom_py_bin"
+    py_bin.mkdir(parents=True, exist_ok=True)
+    custom_py = py_bin / "python3"
+    os.symlink(sys.executable, custom_py)
+
+    monkeypatch.setenv("PATH", str(min_bin))
+
+    broker = _catalog_broker(
+        tmp_path,
+        repository,
+        secrets_map={
+            ("ops_key", "ssh_private_key"): client_priv,
+            ("ops_key", "ssh_public_key"): client_pub,
+            ("ops_boot", "admin_password"): "MinimalPathBootPass!99",
+        },
+        ssh_executable=str(fake_ssh),
+        allow_password_bootstrap=True,
+    )
+    catalog_provider = broker._catalog_provider()
+    catalog_provider.python_executable = str(custom_py)
+    try:
+        result = await broker.enroll_ssh_key(
+            session_id=session.session_id,
+            caller=_LEAD_CALLER,
+            timeout_seconds=15.0,
+        )
+        assert result.verified_key_login is True
+        assert askpass_out_file.read_text(encoding="utf-8") == "MinimalPathBootPass!99"
+    finally:
+        await broker.shutdown()

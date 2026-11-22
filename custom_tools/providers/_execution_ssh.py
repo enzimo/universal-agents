@@ -74,7 +74,10 @@ from runtime_hosting.authorization import (
     SSHDisabledError,
     SSHSettingsUnusableError,
 )
-from runtime_hosting.execution_contracts import InteractiveSessionV1
+from runtime_hosting.execution_contracts import (
+    InteractiveSessionV1,
+    TERMINAL_INTERACTIVE_SESSION_STATUSES,
+)
 from runtime_hosting.ssh import MAX_PTY_WRITE_BYTES, SSHSessionUnavailable
 from runtime_hosting.ssh_credentials import InvalidSSHCredentialValueError
 from runtime_hosting.ssh_operations import (
@@ -297,6 +300,12 @@ def _session_capability_view(
 ) -> tuple[bool, bool, str | None]:
     """Derive ``usable_in_this_request`` and ``typing_approved`` directly from ``ExecutionAccessGuard``."""
 
+    if session.status in TERMINAL_INTERACTIVE_SESSION_STATUSES:
+        return (
+            False,
+            False,
+            f"SSH session is {session.status.value} and cannot be used; create a new session.",
+        )
     guard = service.access_guard()
     enrolled_target = (
         service.repository.get_ssh_target(
@@ -708,8 +717,12 @@ def list_execution_ssh_sessions() -> str:
             revocation = service.repository.get_interactive_session_revocation(
                 team_id=service.owner.team_id, session_id=item.session_id
             )
+            is_terminal = item.status in TERMINAL_INTERACTIVE_SESSION_STATUSES
             delegation_active = bool(
-                revocation is None and interaction is not None and interaction.is_active()
+                not is_terminal
+                and revocation is None
+                and interaction is not None
+                and interaction.is_active()
             )
             usable_in_this_request, typing_approved, unusable_reason = _session_capability_view(
                 service, item, interaction, revocation, caller
@@ -726,7 +739,7 @@ def list_execution_ssh_sessions() -> str:
                     else None
                 ),
             }
-            if delegation_active and not usable_in_this_request and unusable_reason:
+            if (delegation_active or is_terminal) and not usable_in_this_request and unusable_reason:
                 entry["unusable_reason"] = unusable_reason
             payloads.append(entry)
         return json.dumps({"returned": len(payloads), "sessions": payloads})

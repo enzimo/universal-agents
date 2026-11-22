@@ -55,15 +55,15 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
         allowed = {fixtures[name]["schema_version"]}
         if name == "schedules":
             allowed.update({4, 5})
-        # Settings versions 6 to 12 have real export/import cases in
+        # Settings versions 6 to 13 have real export/import cases in
         # test_team_transfer_settings, including keep-forever output retention, the
         # retired presence setting (8 and main's 9), version 8 keeping the skill
         # semantic review off, for 9 both main's semantic-review choice and this
         # branch's pre-release shape, for every one the retired concurrency key, for
-        # 11 the queue settings taking their defaults, and for 12 the SSH network
-        # guardrail settings taking their defaults.
+        # 11 the queue settings taking their defaults, for 12 the api_request_user_agent
+        # default, and for 13 the SSH network guardrail settings taking their defaults.
         if name == "settings":
-            allowed.update((6, 7, 8, 9, 10, 11, 12))
+            allowed.update((6, 7, 8, 9, 10, 11, 12, 13))
         assert version in allowed, f"the conversion step from {name} version {version} has no supported export case"
         assert target == sections[name].schema_version
     for name, raw in fixtures.items():

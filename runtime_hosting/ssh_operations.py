@@ -609,21 +609,42 @@ def build_sudo_secret_recipe_command(
     return _posix_sh_command("; ".join(parts))
 
 
+_POWERSHELL_UNICODE_SINGLE_QUOTES: tuple[str, ...] = (
+    "\u2018",  # LEFT SINGLE QUOTATION MARK
+    "\u2019",  # RIGHT SINGLE QUOTATION MARK
+    "\u201a",  # SINGLE LOW-9 QUOTATION MARK
+    "\u201b",  # SINGLE HIGH-REVERSED-9 QUOTATION MARK
+)
+
+
 def validate_remote_destination(destination: str) -> str:
-    """Reject control characters, leading dashes, ``~user`` paths, and empty remote destinations."""
+    """Reject control characters, PowerShell Unicode single quotes, leading dashes, ``~user`` paths, and empty remote destinations."""
 
     cleaned = str(destination or "").strip()
     if not cleaned or len(cleaned) > 512:
         raise ValueError("Remote destination path must be between 1 and 512 characters.")
-    if cleaned.startswith("-") or any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+    if cleaned.startswith("-") or any(
+        ord(ch) < 32 or ord(ch) == 127 or 0x80 <= ord(ch) <= 0x9F for ch in cleaned
+    ):
         raise ValueError(
             "Remote destination path must not start with '-' or contain control characters."
+        )
+    if any(ch in _POWERSHELL_UNICODE_SINGLE_QUOTES for ch in cleaned):
+        raise ValueError(
+            "Remote destination path must not contain Unicode single-quote characters."
         )
     if cleaned.startswith("~") and cleaned != "~" and not cleaned.startswith(("~/", "~\\")):
         raise ValueError(
             "Remote destination path must not use '~user' syntax; use '~/', an absolute path, or a relative path."
         )
     return cleaned
+
+
+def _powershell_utf8_string_expr(value: str) -> str:
+    """Encode a string as ASCII base64 decoded inside PowerShell without quoting hazards."""
+
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return f"[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))"
 
 
 def build_bundle_extract_command(destination: str, platform: SSHTargetPlatform) -> tuple[str, ...]:
@@ -634,11 +655,14 @@ def build_bundle_extract_command(destination: str, platform: SSHTargetPlatform) 
         if cleaned == "~":
             dest_expr = "$env:USERPROFILE"
         elif cleaned.startswith(("~/", "~\\")):
-            sub = cleaned[2:].replace("'", "''")
-            dest_expr = f"(Join-Path $env:USERPROFILE '{sub}')" if sub else "$env:USERPROFILE"
+            sub = cleaned[2:]
+            dest_expr = (
+                f"(Join-Path $env:USERPROFILE ({_powershell_utf8_string_expr(sub)}))"
+                if sub
+                else "$env:USERPROFILE"
+            )
         else:
-            escaped = cleaned.replace("'", "''")
-            dest_expr = f"'{escaped}'"
+            dest_expr = _powershell_utf8_string_expr(cleaned)
         ps_script = (
             "$ErrorActionPreference='Stop'; "
             f"$dest={dest_expr}; "

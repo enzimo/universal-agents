@@ -69,6 +69,7 @@ from runtime_hosting.execution_contracts import (
     ServiceDesiredState,
     ServiceKind,
     ServiceRestartPolicy,
+    TERMINAL_INTERACTIVE_SESSION_STATUSES,
     enrolled_ssh_target_digest,
     ssh_interaction_resource_digest,
     ssh_public_key_sha256_fingerprint,
@@ -1476,6 +1477,10 @@ class SSHInteractionChangeService(_ExecutionChanges):
             team_id=self.execution.owner.team_id, session_id=session.session_id
         ) is not None:
             raise PermissionError("This SSH session was revoked; create a new session.")
+        if session.status in TERMINAL_INTERACTIVE_SESSION_STATUSES:
+            raise PermissionError(
+                f"This SSH session is {session.status.value} and cannot be used; create a new session."
+            )
         if session.connect_activation is None:
             raise PermissionError("This SSH session cannot be opened any more; create a new session.")
         return session

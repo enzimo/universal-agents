@@ -5949,8 +5949,8 @@ async def test_c89_settings_lock_no_rollback_and_shutdown_safety(
             assert opened.get("status") == "open", opened
             return sid
 
-        # (a) S2 (tighter denied_cidrs, removed target_b, allow_password_bootstrap=False) is applied via
-        # lock-free _sync_broker_settings() while Caller A enforces S1 and Caller B is queued on _settings_lock.
+        # (a) S2 (tighter denied_cidrs, removed target_b, allow_password_bootstrap=False) is saved while
+        # Caller A enforces S1 and both Caller B and monitor _sync_broker_settings() queue on _settings_lock.
         enrolled_sid = await _open_enrolled_session()
         pinned_b_sid = await _open_pinned_b_session()
         assert enrolled_sid in broker._sessions and pinned_b_sid in broker._sessions
@@ -5977,30 +5977,30 @@ async def test_c89_settings_lock_no_rollback_and_shutdown_safety(
         await asyncio.sleep(0.05)
         assert not caller_b.done()
 
-        # Apply newer S2 via lock-free _sync_broker_settings() while Caller A holds _settings_lock and B is queued.
+        # Write newer S2 and queue monitor _sync_broker_settings() on _settings_lock while Caller A holds it.
         _save_config(
             enabled=True,
             denied_cidrs=("203.0.113.0/24", "198.51.100.0/24"),
             allow_password_bootstrap=False,
             targets=(target_a,),
         )
-        sync_s2 = rt._sync_broker_settings()
-        assert sync_s2.enabled is True
+        sync_s2_task = asyncio.create_task(rt._sync_broker_settings())
+        await asyncio.sleep(0.02)
+        assert not sync_s2_task.done(), "_sync_broker_settings must serialize on _settings_lock (F4)"
         expected_s2_policy = SSHNetworkPolicy.from_settings(
             ExecutionSSHSettings(denied_cidrs=("203.0.113.0/24", "198.51.100.0/24"))
         )
         expected_s2_pinned = frozenset(
             {("pinned-a.internal", 22, "automation", "ssh-ed25519", pinned_fp, "c89_binding_a")}
         )
-        assert broker.network_policy == expected_s2_policy
-        assert broker.allow_password_bootstrap is False
-        assert broker.allowed_pinned_targets == expected_s2_pinned
 
         # Release Caller A; neither Caller A nor queued Caller B may roll back S2 -> S1.
         pause_resolver.clear()
         release_resolver.set()
         res_a = json.loads(await caller_a)
         res_b = json.loads(await caller_b)
+        sync_s2 = await sync_s2_task
+        assert sync_s2.enabled is True
 
         assert res_a["error_code"] == "session_unavailable", res_a
         assert broker.network_policy == expected_s2_policy
@@ -6034,12 +6034,13 @@ async def test_c89_settings_lock_no_rollback_and_shutdown_safety(
         assert not caller_b_b.done()
 
         _save_config(enabled=False, denied_cidrs=(), targets=(target_a, target_b))
-        assert rt._sync_broker_settings().enabled is False
+        sync_disabled_task = asyncio.create_task(rt._sync_broker_settings())
 
         pause_resolver.clear()
         release_resolver.set()
         res_a_b = json.loads(await caller_a_b)
         res_b_b = json.loads(await caller_b_b)
+        assert (await sync_disabled_task).enabled is False
         assert res_a_b["error_code"] == "ssh_disabled", res_a_b
         assert res_b_b["error_code"] == "ssh_disabled", res_b_b
         assert enrolled_sid_b not in broker._sessions
@@ -6064,13 +6065,14 @@ async def test_c89_settings_lock_no_rollback_and_shutdown_safety(
         assert not caller_b_c.done()
 
         instance.config_path.write_text("schema_version: 2\nexecution_control: [broken\n", encoding="utf-8")
-        unusable_sync = rt._sync_broker_settings()
-        assert unusable_sync.enabled is False and unusable_sync.unusable is True
+        unusable_sync_task = asyncio.create_task(rt._sync_broker_settings())
 
         pause_resolver.clear()
         release_resolver.set()
         res_a_c = json.loads(await caller_a_c)
         res_b_c = json.loads(await caller_b_c)
+        unusable_sync = await unusable_sync_task
+        assert unusable_sync.enabled is False and unusable_sync.unusable is True
         assert res_a_c["error_code"] == "ssh_settings_unusable", res_a_c
         assert res_b_c["error_code"] == "ssh_settings_unusable", res_b_c
         assert enrolled_sid_c not in broker._sessions
@@ -6107,6 +6109,800 @@ async def test_c89_settings_lock_no_rollback_and_shutdown_safety(
         assert rt._broker is None
         assert enrolled_sid_d not in broker._sessions
     set_agent_ref(None)
+
+
+@needs_cedar
+@pytest.mark.asyncio
+async def test_f1_single_task_grant_lifetime_task_allows_lead_and_delegated_worker_under_real_cedar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: GrantLifetime.TASK bound to signed work_id works for TeamArchitect and a delegated worker under real Cedar."""
+
+    from custom_agents.execution_control_service import ExecutionControlService
+    from custom_messages.contracts.access_v2 import AccessLevel, GrantLifetime
+    from custom_tools import agent_team_port
+    from runtime_hosting.authorization import SSHCallerContext, SSHCapability
+    from runtime_hosting.execution_contracts import (
+        ActivationRecordV2,
+        ChangeApprovalMode,
+        ChangeApprovalRecordV1,
+        ExecutionActivationKind,
+        OwnerScopeKind,
+        OwnerScopeV1,
+    )
+    from access_control.entities import operation_id
+
+    use_signed_contexts(monkeypatch)
+    monkeypatch.setattr(
+        agent_team_port,
+        "_agent_type_source",
+        lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}},
+    )
+    instance = execution_instance(tmp_path, authorization_enabled=True)
+    lead = execution_lead(instance)
+    # Give TeamArchitect an agent-local task_id that differs from the signed work_id!
+    exec_service_init = ExecutionControlService(lead)
+    signed_work_id = exec_service_init.actor.agent.work_id
+    assert signed_work_id is not None
+    assert signed_work_id != exec_service_init.actor.task_id
+
+    # Grant fn:execution_control WRITE for ONE TASK ONLY (GrantLifetime.TASK bound to signed work_id).
+    grant_execution(
+        lead,
+        level=AccessLevel.WRITE,
+        lifetime=GrantLifetime.TASK,
+        task_id=signed_work_id,
+    )
+    set_agent_ref(lead)
+    async with _running_ssh_broker(instance, lead, monkeypatch):
+        exec_service = ExecutionControlService(lead)
+        holder = exec_service.holder()
+        assert holder.task_id == signed_work_id
+
+        # TeamArchitect creates and opens an SSH session under the single-task grant.
+        created = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID))
+        assert "session_id" in created, created
+        session_id = created["session_id"]
+        opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=session_id))
+        assert opened["status"] == "open", opened
+
+        # Stage and approve bounded delegation for CodeWritingAgent in the SAME signed work_id.
+        staged = json.loads(
+            tools.plan_execution_ssh_interaction._tool_func(
+                session_id=session_id,
+                reason="Run typing in same single-task request",
+                ttl_seconds=600,
+                delegated_agent_type="CodeWritingAgent",
+                this_request_only=True,
+                allow_typing=True,
+            )
+        )
+        assert staged["status"] == "staged", staged
+        call = ToolCall("tooluse_f1_task_grant")
+        with pytest.raises(InterruptException):
+            await _apply(staged["change_id"], call)
+        decide(lead, call)
+        applied = await _apply(staged["change_id"], call)
+        assert applied["status"] == "applied", applied
+
+        # Real-Cedar ExecutionAccessGuard allows both TeamArchitect (connect) and delegated CodeWritingAgent (typing)
+        # in the SAME signed work_id, and refuses another request's work_id!
+        guard = exec_service.access_guard()
+        stored_session = exec_service.repository.get_interactive_session(
+            team_id=lead.team_id, session_id=session_id
+        )
+        stored_interaction = exec_service.repository.get_ssh_interaction(
+            team_id=lead.team_id, session_id=session_id
+        )
+        assert stored_session is not None and stored_interaction is not None
+        assert stored_session.connect_activation is not None
+        assert stored_session.connect_activation.holder.task_id == signed_work_id
+
+        guard.require_ssh_connect(
+            stored_session,
+            caller=SSHCallerContext(
+                agent_type="TeamArchitect",
+                task_id=signed_work_id,
+                person_id=lead.task_manager.person_id,
+            ),
+            interaction=stored_interaction,
+        )
+        guard.require_ssh_capability(
+            stored_session,
+            stored_interaction,
+            capability=SSHCapability.TYPING,
+            caller=SSHCallerContext(
+                agent_type="CodeWritingAgent",
+                task_id=signed_work_id,
+                person_id=lead.task_manager.person_id,
+            ),
+        )
+        with pytest.raises(ExecutionAuthorizationDenied):
+            guard.require_ssh_capability(
+                stored_session,
+                stored_interaction,
+                capability=SSHCapability.TYPING,
+                caller=SSHCallerContext(
+                    agent_type="CodeWritingAgent",
+                    task_id="other_signed_work_id",
+                    person_id=lead.task_manager.person_id,
+                ),
+            )
+
+        # Unattended ExecutionActivationKind.RUN still passes task_id=None / work_id=None so a
+        # single-task grant NEVER authorizes unattended runs.
+        run_activation = ActivationRecordV2.build(
+            kind=ExecutionActivationKind.RUN,
+            resource_id="job_f1_unattended",
+            resource_digest="b" * 64,
+            generation=1,
+            owner=OwnerScopeV1(
+                scope_kind=OwnerScopeKind.USER,
+                owner_id=lead.task_manager.person_id,
+                team_id=lead.team_id,
+            ),
+            operation=operation_id("fn:execution_control", "create_execution_job"),
+            holder=holder,
+            approval=ChangeApprovalRecordV1(
+                mode=ChangeApprovalMode.HELD_ACCESS,
+                approved_by="TeamArchitect",
+                approved_at_utc=datetime.now(timezone.utc),
+            ),
+            activated_at_utc=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        with pytest.raises(ExecutionAuthorizationDenied):
+            guard.require_authority(run_activation)
+
+        await tools.close_execution_ssh_session._tool_func(session_id=session_id)
+    set_agent_ref(None)
+
+
+@pytest.mark.asyncio
+async def test_f4_cancellation_during_enforcement_and_monitor_tick_serialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F4: _checked_* advances only after enforcement finishes, caller cancel is shielded, and _monitor_tick serializes under _settings_lock."""
+
+    import base64
+    import threading
+    from runtime_hosting.execution_contracts import (
+        EnrolledSSHTargetV1,
+        OwnerScopeKind,
+        OwnerScopeV1,
+        SSHDelegationBoundsV1,
+        SSHTargetLifecycle,
+        SSHTargetPlatform,
+        enrolled_ssh_target_digest,
+        ssh_interaction_resource_digest,
+        ssh_public_key_sha256_fingerprint,
+    )
+    from runtime_hosting.ssh import (
+        ConfiguredSSHCredentialMaterialProvider,
+        SSHCredentialMaterial,
+        SSHSessionBroker,
+    )
+    from runtime_hosting.ssh_network import SSHNetworkPolicy
+    from runtime_settings.execution import ExecutionSSHSettings
+
+    use_signed_contexts(monkeypatch)
+    instance = execution_instance(tmp_path, authorization_enabled=False)
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+
+    # Trigger 1a: Direct cancellation inside enforce_settings_on_live_work must NOT stamp _checked_network_policy.
+    repo = SqliteExecutionControlRepository(str(tmp_path / "f4_direct.db"))
+    host_pub = _framed_ed25519_pub(b"\x44" * 32)
+    host_pub_parts = host_pub.split()
+    host_pub_clean = f"{host_pub_parts[0]} {host_pub_parts[1]}"
+    _algo, fp = ssh_public_key_sha256_fingerprint(host_pub_clean)
+    identity, known_hosts = write_ssh_material(tmp_path / "f4_mat", key_bytes=base64.b64decode(host_pub_parts[1]))
+    owner_scope = OwnerScopeV1(scope_kind=OwnerScopeKind.TEAM, owner_id="team_alpha", team_id="team_alpha")
+    target = EnrolledSSHTargetV1(
+        target_id="ssh_tgt_f4_direct",
+        owner=owner_scope,
+        host="f4.example.internal",
+        port=22,
+        username="ops",
+        platform=SSHTargetPlatform.LINUX,
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=fp,
+        host_key_public_key=host_pub_clean,
+        credential_key="f4_key",
+        credential_owner_scope=owner_scope,
+        credential_public_key_fingerprint=fp,
+        lifecycle=SSHTargetLifecycle.PERSISTENT,
+        reason="f4 test",
+        activation=build_activation(
+            ExecutionActivationKind.SSH_TARGET_ENROLL,
+            resource_id="ssh_tgt_f4_direct",
+            resource_digest=enrolled_ssh_target_digest(
+                target_id="ssh_tgt_f4_direct",
+                owner=owner_scope,
+                host="f4.example.internal",
+                port=22,
+                username="ops",
+                platform=SSHTargetPlatform.LINUX,
+                host_key_algorithm="ssh-ed25519",
+                host_key_fingerprint=fp,
+                host_key_public_key=host_pub_clean,
+                credential_key="f4_key",
+                credential_owner_scope=owner_scope,
+                credential_public_key_fingerprint=fp,
+                bootstrap_credential_key=None,
+                bootstrap_credential_owner_scope=None,
+                lifecycle=SSHTargetLifecycle.PERSISTENT,
+                expires_at_utc=None,
+                reason="f4 test",
+            ),
+            owner_scope=owner_scope,
+            function="plan_execution_ssh_target",
+        ),
+    )
+    repo.put_ssh_target(target)
+    known_hosts.write_text(
+        f"f4.example.internal {host_pub_clean}\n",
+        encoding="utf-8",
+    )
+    conn_target = target.to_connection_target()
+    conn_digest = conn_target.calculate_digest()
+    sess = InteractiveSessionV1(
+        session_id="ssh_sess_f4_direct",
+        owner=owner_scope,
+        target=conn_target,
+        target_digest=conn_digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_f4_direct",
+            resource_digest=conn_digest,
+            owner_scope=owner_scope,
+            function="create_execution_ssh_session",
+        ),
+    )
+    repo.create_interactive_session(sess)
+
+    entered_direct = threading.Event()
+    release_direct = threading.Event()
+    pause_direct = threading.Event()
+
+    def _pausing_resolver(host: str, port: int) -> list[str]:
+        del host, port
+        if pause_direct.is_set():
+            entered_direct.set()
+            release_direct.wait(timeout=5.0)
+        return ["198.51.100.44"]
+
+    old_policy = SSHNetworkPolicy(denied_cidrs=())
+    tight_policy = SSHNetworkPolicy.from_settings(ExecutionSSHSettings(denied_cidrs=("198.51.100.0/24",)))
+    direct_broker = SSHSessionBroker(
+        repository=repo,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=ConfiguredSSHCredentialMaterialProvider(
+            {"catalog:f4_key": SSHCredentialMaterial(identity_file=identity, known_hosts_file=known_hosts)}
+        ),
+        artifact_store=FilesystemArtifactStore(tmp_path / "f4_artifacts"),
+        team_id="team_alpha",
+        broker_id="broker-f4-direct",
+        ssh_executable=str(fake_ssh(tmp_path / "f4_bin")),
+        network_policy=old_policy,
+        resolver=_pausing_resolver,
+        local_address_checker=lambda ip: False,
+    )
+    try:
+        await direct_broker.open(session_id=sess.session_id, lease_token="f4-tok-1", caller=_DEFAULT_CALLER)
+        assert sess.session_id in direct_broker._sessions
+        direct_broker.network_policy = tight_policy
+        pause_direct.set()
+        enforce_task = asyncio.create_task(direct_broker.enforce_settings_on_live_work(check_network=True))
+        assert await asyncio.to_thread(entered_direct.wait, 5.0)
+        enforce_task.cancel()
+        release_direct.set()
+        with pytest.raises(asyncio.CancelledError):
+            await enforce_task
+        # _checked_network_policy MUST NOT have advanced on cancelled enforcement!
+        assert direct_broker._checked_network_policy == old_policy
+        assert sess.session_id in direct_broker._sessions
+        # Next enforcement retry sees network_policy != _checked_network_policy and closes the disallowed session.
+        pause_direct.clear()
+        await direct_broker.enforce_settings_on_live_work(check_network=True)
+        assert direct_broker._checked_network_policy == tight_policy
+        assert sess.session_id not in direct_broker._sessions
+    finally:
+        await direct_broker.shutdown()
+
+    # Trigger 1b & Trigger 2: Runtime shields caller cancellation AND serializes _monitor_tick with concurrent PTY write.
+    entered_rt = threading.Event()
+    release_rt = threading.Event()
+    pause_rt = threading.Event()
+
+    def _rt_resolver(host: str, port: int) -> list[str]:
+        del host, port
+        if pause_rt.is_set():
+            entered_rt.set()
+            release_rt.wait(timeout=5.0)
+        return ["198.51.100.88"]
+
+    async with _running_ssh_broker(instance, lead, monkeypatch) as (broker_service, _server, _token):
+        rt = broker_service._execution_ssh
+        assert rt is not None
+        broker = await rt._active_broker()
+        broker.resolver = _rt_resolver
+        broker.local_address_checker = lambda ip: False
+        broker.revocation_poll_interval_seconds = 60.0  # trigger _monitor_tick explicitly
+
+        # Seed enrolled target + session + typing approval in the runtime's own repository.
+        rt_repo = rt._ensure_repository()
+        rt_owner = OwnerScopeV1(scope_kind=OwnerScopeKind.USER, owner_id=lead.task_manager.person_id, team_id=lead.team_id)
+        rt_target = EnrolledSSHTargetV1(
+            target_id="ssh_tgt_f4_rt",
+            owner=rt_owner,
+            host="f4-rt.example.internal",
+            port=22,
+            username="ops",
+            platform=SSHTargetPlatform.LINUX,
+            host_key_algorithm="ssh-ed25519",
+            host_key_fingerprint=fp,
+            host_key_public_key=host_pub_clean,
+            credential_key="f4_rt_key",
+            credential_owner_scope=rt_owner,
+            credential_public_key_fingerprint=fp,
+            lifecycle=SSHTargetLifecycle.PERSISTENT,
+            reason="f4 runtime test",
+            activation=build_activation(
+                ExecutionActivationKind.SSH_TARGET_ENROLL,
+                resource_id="ssh_tgt_f4_rt",
+                resource_digest=enrolled_ssh_target_digest(
+                    target_id="ssh_tgt_f4_rt",
+                    owner=rt_owner,
+                    host="f4-rt.example.internal",
+                    port=22,
+                    username="ops",
+                    platform=SSHTargetPlatform.LINUX,
+                    host_key_algorithm="ssh-ed25519",
+                    host_key_fingerprint=fp,
+                    host_key_public_key=host_pub_clean,
+                    credential_key="f4_rt_key",
+                    credential_owner_scope=rt_owner,
+                    credential_public_key_fingerprint=fp,
+                    bootstrap_credential_key=None,
+                    bootstrap_credential_owner_scope=None,
+                    lifecycle=SSHTargetLifecycle.PERSISTENT,
+                    expires_at_utc=None,
+                    reason="f4 runtime test",
+                ),
+                owner_scope=rt_owner,
+                function="plan_execution_ssh_target",
+            ),
+        )
+        rt_repo.put_ssh_target(rt_target)
+        rt_kh = tmp_path / "f4_rt_kh"
+        rt_kh.write_text(f"f4-rt.example.internal {host_pub_clean}\n", encoding="utf-8")
+        broker.material_provider = ConfiguredSSHCredentialMaterialProvider(
+            {"catalog:f4_rt_key": SSHCredentialMaterial(identity_file=identity, known_hosts_file=rt_kh)}
+        )
+        broker._checked_material_provider = broker.material_provider
+
+        def _make_rt_session(sid: str) -> str:
+            t_conn = rt_target.to_connection_target()
+            t_dig = t_conn.calculate_digest()
+            s = InteractiveSessionV1(
+                session_id=sid,
+                owner=rt_owner,
+                target=t_conn,
+                target_digest=t_dig,
+                connect_activation=build_activation(
+                    ExecutionActivationKind.SSH_CONNECT,
+                    resource_id=sid,
+                    resource_digest=t_dig,
+                    owner_scope=rt_owner,
+                    function="create_execution_ssh_session",
+                ),
+            )
+            rt_repo.create_interactive_session(s)
+            bounds = SSHDelegationBoundsV1(allow_typing=True)
+            rt_repo.put_ssh_interaction(
+                build_activation(
+                    ExecutionActivationKind.SSH_INTERACT,
+                    resource_id=sid,
+                    resource_digest=ssh_interaction_resource_digest(target_digest=t_dig, bounds=bounds),
+                    owner_scope=rt_owner,
+                    function="plan_execution_ssh_interaction",
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+                ),
+                bounds=bounds,
+            )
+            return sid
+
+        # Trigger 1b: Cancel caller during _apply_settings_and_enforce() -> shielded enforcement still closes session!
+        instance.config.execution_control.ssh.denied_cidrs = ()
+        instance.config.save(instance.config_path)
+        await rt._active_broker()
+        sid_cancel = _make_rt_session("ssh_sess_f4_cancel")
+        opened_c = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid_cancel))
+        assert opened_c["status"] == "open", opened_c
+
+        instance.config.execution_control.ssh.denied_cidrs = ("198.51.100.0/24",)
+        instance.config.save(instance.config_path)
+        entered_rt.clear()
+        release_rt.clear()
+        pause_rt.set()
+        incoming_task = asyncio.create_task(rt._active_broker())
+        assert await asyncio.to_thread(entered_rt.wait, 5.0)
+        incoming_task.cancel()
+        release_rt.set()
+        with pytest.raises(asyncio.CancelledError):
+            await incoming_task
+        assert sid_cancel not in broker._sessions, "shielded enforcement must finish closing disallowed session"
+
+        # Trigger 2: _monitor_tick holds _settings_lock while tightening policy; concurrent PTY write MUST NOT succeed!
+        pause_rt.clear()
+        instance.config.execution_control.ssh.denied_cidrs = ()
+        instance.config.save(instance.config_path)
+        await rt._active_broker()
+        sid_race = _make_rt_session("ssh_sess_f4_monitor_race")
+        opened_r = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid_race))
+        assert opened_r["status"] == "open", opened_r
+
+        instance.config.execution_control.ssh.denied_cidrs = ("198.51.100.0/24",)
+        instance.config.save(instance.config_path)
+        entered_rt.clear()
+        release_rt.clear()
+        pause_rt.set()
+        tick_task = asyncio.create_task(broker._monitor_tick())
+        assert await asyncio.to_thread(entered_rt.wait, 5.0)
+        write_task = asyncio.create_task(
+            tools.write_execution_ssh_session._tool_func(session_id=sid_race, text="should-not-write\n")
+        )
+        await asyncio.sleep(0.05)
+        assert not write_task.done(), "concurrent PTY write must wait on _settings_lock during _monitor_tick enforcement"
+        pause_rt.clear()
+        release_rt.set()
+        await tick_task
+        write_result = json.loads(await write_task)
+        assert "error" in write_result, write_result
+        assert sid_race not in broker._sessions
+    set_agent_ref(None)
+
+
+@pytest.mark.asyncio
+async def test_f6_f10_terminal_session_lifecycle_and_open_preclaim_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F6 & F10: Command-only PENDING close persists CLOSED, terminal sessions cannot reopen/overwrite transcripts, and open() validates before claiming."""
+
+    from custom_agents.execution_changes import SSHInteractionChangeService
+    from custom_agents.execution_control_service import ExecutionControlService
+    from runtime_hosting.authorization import SSHCallerContext
+    from runtime_hosting.execution_contracts import (
+        ArtifactKind,
+        ArtifactReferenceV1,
+        ArtifactStorageBackend,
+    )
+
+    use_signed_contexts(monkeypatch)
+    instance = execution_instance(tmp_path, authorization_enabled=False)
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+
+    async with _running_ssh_broker(instance, lead, monkeypatch) as (broker_service, _server, _token):
+        rt = broker_service._execution_ssh
+        assert rt is not None
+        broker = await rt._active_broker()
+        exec_service = ExecutionControlService(lead)
+        interact_service = SSHInteractionChangeService(lead, execution=exec_service)
+
+        # 1) F10: Unauthorized caller calling open() on PENDING session does NOT claim lease or mark FAILED.
+        created_pending = json.loads(
+            tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID, confirmed=True)
+        )
+        sid_pending = created_pending["session_id"]
+        with pytest.raises(ExecutionAuthorizationDenied):
+            await broker.open(
+                session_id=sid_pending,
+                lease_token="unauth-lease",
+                caller=SSHCallerContext(
+                    agent_type="WebResearchAgent",
+                    task_id="req_other",
+                    person_id=lead.task_manager.person_id,
+                ),
+            )
+        after_unauth = exec_service.repository.get_interactive_session(
+            team_id=lead.team_id, session_id=sid_pending
+        )
+        assert after_unauth is not None
+        assert after_unauth.status == InteractiveSessionStatus.PENDING
+        assert after_unauth.lease_owner is None
+
+        # 2) F10: Post-claim pre-spawn failure releases lease preserving PENDING (NOT FAILED).
+        call_count = {"n": 0}
+        orig_validate = broker._validate_target_network
+
+        def _flaky_validate(sess_arg: Any) -> Any:
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("transient post-claim DNS blip")
+            return orig_validate(sess_arg)
+
+        broker._validate_target_network = _flaky_validate  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError, match="transient post-claim DNS blip"):
+                await broker.open(
+                    session_id=sid_pending,
+                    lease_token="flaky-lease",
+                    caller=SSHCallerContext(
+                        agent_type="TeamArchitect",
+                        task_id="req_1",
+                        person_id=lead.task_manager.person_id,
+                    ),
+                )
+        finally:
+            broker._validate_target_network = orig_validate  # type: ignore[method-assign]
+        after_flaky = exec_service.repository.get_interactive_session(
+            team_id=lead.team_id, session_id=sid_pending
+        )
+        assert after_flaky is not None
+        assert after_flaky.status == InteractiveSessionStatus.PENDING
+        assert after_flaky.lease_owner is None
+
+        # 3) F6: Closing a command-only PENDING session (never opened) persists CLOSED!
+        closed_cmd_only = json.loads(
+            await tools.close_execution_ssh_session._tool_func(session_id=sid_pending)
+        )
+        assert closed_cmd_only["status"] == "closed", closed_cmd_only
+        persisted_closed = exec_service.repository.get_interactive_session(
+            team_id=lead.team_id, session_id=sid_pending
+        )
+        assert persisted_closed is not None
+        assert persisted_closed.status == InteractiveSessionStatus.CLOSED
+
+        # Terminal session is rejected by open(), _session_that_can_open(), and list_execution_ssh_sessions().
+        reopen_err = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid_pending))
+        assert reopen_err["error_code"] == "session_unavailable", reopen_err
+        with pytest.raises(PermissionError, match="closed"):
+            interact_service._session_that_can_open(sid_pending)
+        listed = json.loads(tools.list_execution_ssh_sessions._tool_func())
+        closed_entry = next(item for item in listed["sessions"] if item["session_id"] == sid_pending)
+        assert closed_entry["usable_in_this_request"] is False
+        assert closed_entry["delegation_active"] is False
+        assert "closed" in closed_entry.get("unusable_reason", "").lower()
+
+        # 4) F6: Opening a CLOSED session with a saved transcript_artifact fails and preserves the transcript.
+        created_pty = json.loads(
+            tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID, confirmed=True)
+        )
+        sid_pty = created_pty["session_id"]
+        opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid_pty))
+        assert opened["status"] == "open", opened
+        closed_pty = json.loads(await tools.close_execution_ssh_session._tool_func(session_id=sid_pty))
+        assert closed_pty["status"] == "closed"
+        saved_before = exec_service.repository.get_interactive_session(
+            team_id=lead.team_id, session_id=sid_pty
+        )
+        assert saved_before is not None
+        # Ensure a non-null transcript_artifact is attached to verify it cannot be overwritten.
+        if saved_before.transcript_artifact is None:
+            saved_artifact = ArtifactReferenceV1(
+                artifact_id="art_f6_keep",
+                kind=ArtifactKind.LOG,
+                sha256="c" * 64,
+                size_bytes=12,
+                media_type="text/plain",
+                storage_backend=ArtifactStorageBackend.FILESYSTEM,
+                storage_key="logs/keep.log",
+            )
+            with exec_service.repository._connect() as conn:  # type: ignore[attr-defined]
+                updated_rec = saved_before.model_copy(update={"transcript_artifact": saved_artifact})
+                conn.execute(
+                    "UPDATE execution_interactive_sessions SET record_json = ? WHERE session_id = ?",
+                    (updated_rec.model_dump_json(), sid_pty),
+                )
+                conn.commit()
+            saved_before = exec_service.repository.get_interactive_session(
+                team_id=lead.team_id, session_id=sid_pty
+            )
+        assert saved_before is not None and saved_before.transcript_artifact is not None
+
+        reopen_pty = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid_pty))
+        assert reopen_pty["error_code"] == "session_unavailable", reopen_pty
+        close_again = json.loads(await tools.close_execution_ssh_session._tool_func(session_id=sid_pty))
+        assert close_again["status"] == "closed"
+        saved_after = exec_service.repository.get_interactive_session(
+            team_id=lead.team_id, session_id=sid_pty
+        )
+        assert saved_after is not None
+        assert saved_after.status == InteractiveSessionStatus.CLOSED
+        assert saved_after.transcript_artifact == saved_before.transcript_artifact
+    set_agent_ref(None)
+
+
+@pytest.mark.asyncio
+async def test_f7_classify_ssh_error_redacts_and_broker_scrubs_active_secrets(
+    tmp_path: Path,
+) -> None:
+    """F7: classify_ssh_error redacts secrets via redact_text and SSHSessionBroker scrubs active SessionSecretScrubber values."""
+
+    from contextlib import contextmanager
+    from secure_tool_broker.execution_ssh import classify_ssh_error
+    from runtime_hosting.ssh import SSHCredentialMaterial
+
+    # 1) classify_ssh_error applies redact_text to raw exception strings (JWT, ghp_, stb_, etc.).
+    raw_jwt = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJzdWIiOiJ1c2VyX2FsaWNlX3NlY3JldCJ9"
+        ".c2lnbmF0dXJlX3NlY3JldF92YWx1ZQ"
+    )
+    raw_pat = "ghp_SuperSecretTokenValue1234567890"
+    classified = classify_ssh_error(
+        RuntimeError(f"upstream failed: Authorization: Bearer {raw_jwt} token={raw_pat}")
+    )
+    assert raw_jwt not in classified["error"]
+    assert raw_pat not in classified["error"]
+    assert "[REDACTED]" in classified["error"]
+
+    # 2) SSHSessionBroker scrubs active session secrets from exceptions raised during open().
+    repository = SqliteExecutionControlRepository(str(tmp_path / "f7.db"))
+    session = _session(b"f7-host-key")
+    repository.create_interactive_session(session)
+    secret_val = "ULTRA_SECRET_PASSPHRASE_F7_998877"
+    identity, known_hosts = write_ssh_material(tmp_path / "f7_mat", key_bytes=b"f7-host-key")
+
+    class _LeakingProvider:
+        @contextmanager
+        def prepare(self, sess: InteractiveSessionV1, **kwargs: Any):
+            del sess
+            scrubber = kwargs.get("scrubber")
+            if scrubber is not None:
+                scrubber.register(secret_val)
+            yield SSHCredentialMaterial(
+                identity_file=identity,
+                known_hosts_file=known_hosts,
+                touched_secrets=(secret_val,),
+            )
+
+    broker = _broker(tmp_path, repository, material_provider=_LeakingProvider())
+    # Force an exception after material prepare containing the secret value.
+    broker._ssh_argv = lambda *args, **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError(f"failed building ssh argv with {secret_val}")
+    )
+    with pytest.raises(RuntimeError) as caught:
+        await broker.open(session_id=session.session_id, lease_token="f7-lease", caller=_DEFAULT_CALLER)
+    assert secret_val not in str(caught.value)
+    assert "[REDACTED]" in str(caught.value)
+
+
+def test_f8_ssh_argv_includes_escape_char_none_and_tunnel_no(tmp_path: Path) -> None:
+    """F8: Interactive SSH PTY argv (and command/bootstrap argvs) enforce EscapeChar=none and Tunnel=no."""
+
+    repository = SqliteExecutionControlRepository(str(tmp_path / "f8.db"))
+    session = _session(b"f8-host-key")
+    identity, known_hosts = write_ssh_material(tmp_path / "f8_mat", key_bytes=b"f8-host-key")
+    material = SSHCredentialMaterial(identity_file=identity, known_hosts_file=known_hosts)
+    broker = _broker(tmp_path, repository)
+
+    pty_argv = broker._ssh_argv(session, material)
+    cmd_argv = broker._ssh_command_argv(session, material, remote_command=("echo", "ok"))
+    boot_argv = broker._ssh_password_bootstrap_argv(
+        session=session,
+        known_hosts_argv="./known_hosts",
+        validated_host=None,
+        remote_command=("echo", "ok"),
+    )
+    for argv in (pty_argv, cmd_argv, boot_argv):
+        pairs = list(zip(argv, argv[1:]))
+        assert ("-o", "EscapeChar=none") in pairs, argv
+        assert ("-o", "Tunnel=no") in pairs, argv
+
+
+@pytest.mark.asyncio
+async def test_f11_long_running_command_renews_live_pty_lease_and_expiry_reason(
+    tmp_path: Path,
+) -> None:
+    """F11: Active non-PTY commands renew the live PTY lease past lease_ttl_seconds and lease expiry reports expiry, not revocation."""
+
+    import sys
+    import time
+    from runtime_hosting.execution_contracts import (
+        SSHDelegationBoundsV1,
+        ssh_interaction_resource_digest,
+    )
+    from runtime_hosting.ssh import (
+        ConfiguredSSHCredentialMaterialProvider,
+        SSHCommandStatus,
+        SSHCredentialMaterial,
+        SSHSessionBroker,
+    )
+
+    repository = SqliteExecutionControlRepository(str(tmp_path / "f11.db"))
+    session = _session(b"f11-host-key")
+    repository.create_interactive_session(session)
+    bounds = SSHDelegationBoundsV1(allow_commands=True, allow_typing=True)
+    repository.put_ssh_interaction(
+        build_activation(
+            ExecutionActivationKind.SSH_INTERACT,
+            resource_id=session.session_id,
+            resource_digest=ssh_interaction_resource_digest(
+                target_digest=session.target_digest, bounds=bounds
+            ),
+            function="plan_execution_ssh_interaction",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        ),
+        bounds=bounds,
+    )
+
+    fake_ssh_bin = tmp_path / "f11_ssh.py"
+    fake_ssh_bin.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, time\n"
+        "if '-tt' in sys.argv:\n"
+        "    time.sleep(30)\n"
+        "else:\n"
+        "    time.sleep(2.2)\n"
+        "    print('long-cmd-done', flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_ssh_bin.chmod(0o755)
+    identity, known_hosts = write_ssh_material(tmp_path / "f11_mat", key_bytes=b"f11-host-key")
+    broker = SSHSessionBroker(
+        repository=repository,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=ConfiguredSSHCredentialMaterialProvider(
+            {
+                session.target.credential_binding_id: SSHCredentialMaterial(
+                    identity_file=identity, known_hosts_file=known_hosts
+                )
+            }
+        ),
+        artifact_store=FilesystemArtifactStore(tmp_path / "f11_artifacts"),
+        team_id="team_alpha",
+        broker_id="broker-f11",
+        ssh_executable=str(fake_ssh_bin),
+        lease_ttl_seconds=1,
+        revocation_poll_interval_seconds=0.1,
+    )
+    try:
+        opened = await broker.open(
+            session_id=session.session_id,
+            lease_token="f11-lease",
+            caller=_DEFAULT_CALLER,
+        )
+        initial_lease_exp = opened.lease_expires_at_utc
+        assert initial_lease_exp is not None
+
+        cmd = await broker.run_command(
+            session_id=session.session_id,
+            command="sleep 2 && echo long-cmd-done",
+            caller=_DEFAULT_CALLER,
+            timeout_seconds=10.0,
+            wait_seconds=0.2,
+        )
+        assert cmd.status == SSHCommandStatus.RUNNING
+
+        # Poll past lease_ttl_seconds (1s) while the 2.2s command runs.
+        deadline = time.monotonic() + 8.0
+        result = cmd
+        while result.status == SSHCommandStatus.RUNNING and time.monotonic() < deadline:
+            await asyncio.sleep(0.35)
+            result = await broker.get_command(
+                session_id=session.session_id,
+                command_id=cmd.command_id,
+                caller=_DEFAULT_CALLER,
+                wait_seconds=0.1,
+            )
+        assert result.status == SSHCommandStatus.COMPLETED, result
+        assert "long-cmd-done" in result.stdout
+        assert session.session_id in broker._sessions
+        renewed_exp = broker._sessions[session.session_id].session.lease_expires_at_utc
+        assert renewed_exp is not None and renewed_exp > initial_lease_exp
+
+        # Explicit lease-expiry termination reason must NOT say "revoked".
+        expiry_msg = broker._monitor_termination_reason("lease_expired")
+        assert "lease expired" in expiry_msg.lower()
+        assert "revoked" not in expiry_msg.lower()
+    finally:
+        await broker.shutdown()
+
 
 
 

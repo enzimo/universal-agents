@@ -51,6 +51,7 @@ from runtime_hosting.execution_contracts import (
     SSHTargetPlatform,
     SSHTargetStatus,
     enrolled_ssh_target_digest,
+    ssh_interaction_resource_digest,
 )
 from secure_tool_broker.defaults import EXECUTION_SSH_ROUTE_PREFIX
 from secure_tool_broker.execution_ssh import register_execution_ssh_app
@@ -146,6 +147,7 @@ def _seed_target_and_session(
     allow_commands: bool = False,
     allow_broker_sudo: bool = True,
     allow_workspace_transfer: bool = True,
+    person_roles: tuple[str, ...] = (),
 ) -> tuple[EnrolledSSHTargetV1, InteractiveSessionV1]:
     alg, fingerprint, pubkey = _sample_ed25519_key(target_id)
     _, cred_fp, _ = _sample_ed25519_key(f"cred:{target_id}")
@@ -158,6 +160,7 @@ def _seed_target_and_session(
         agent_type=owner_agent_type,
         agent_id="agent_lead_1",
         person_id="usr_admin",
+        person_roles=person_roles,
     )
     lifecycle = (
         SSHTargetLifecycle.TEMPORARY
@@ -274,7 +277,13 @@ def _seed_target_and_session(
             activation_id=f"act_{session_id}",
             kind=ExecutionActivationKind.SSH_INTERACT,
             resource_id=session_id,
-            resource_digest=conn_target.calculate_digest(),
+            resource_digest=(
+                conn_target.calculate_digest()
+                if bounds is None
+                else ssh_interaction_resource_digest(
+                    target_digest=conn_target.calculate_digest(), bounds=bounds
+                )
+            ),
             generation=1,
             owner=owner,
             operation="fn:execution_control#change:execution_ssh_interaction",
@@ -789,4 +798,252 @@ def test_gateway_execution_ssh_summarizes_capabilities_owner_and_connect_expiry(
         assert empty.capabilities == ()
         assert empty.owner_agent_type == "TeamArchitect"
     finally:
+        person_changes.close()
+
+
+@pytest.mark.asyncio
+async def test_f12_gateway_to_broker_live_revocation_and_manager_403_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """F12: Real GatewayExecutionSSH -> HttpGatewaySecureBroker -> SecureToolBrokerService terminates live non-PTY work and refuses CALLER_MANAGER with 403."""
+
+    import sys
+    from access_control.caller_tokens import (
+        CALLER_GATEWAY,
+        CALLER_MANAGER,
+        derive_caller_token,
+    )
+    from access_control.entities import PersonPrincipal
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        GrantLifetime,
+        GrantV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
+    from runtime_hosting.ssh import (
+        ConfiguredSSHCredentialMaterialProvider,
+        SSHCommandStatus,
+        SSHCredentialMaterial,
+    )
+    from runtime_hosting.authorization import SSHCallerContext
+    from runtime_hosting.ssh_network import SSHNetworkPolicy, ssh_host_key_alias
+    from secure_tool_broker.access_gate import build_broker_access_gate
+    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
+    from secure_tool_broker.service import SecureToolBrokerService
+
+    now = datetime.now(timezone.utc)
+    config = _make_config(tmp_path, authorization_enabled=True, ssh_enabled=True)
+    _, person_changes = _make_person_changes(config, roles_by_person={"usr_admin": ("admin",)})
+    repo = create_execution_control_repository(config.manager_storage_settings)
+
+    # Create a fake ssh executable that sleeps until terminated by stdin EOF / SIGTERM.
+    fake_ssh = tmp_path / "fake_ssh_sleep.py"
+    fake_ssh.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, time\n"
+        "print('cmd-started', flush=True)\n"
+        "try:\n"
+        "    sys.stdin.read()\n"
+        "except KeyboardInterrupt:\n"
+        "    pass\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    config.execution_control.ssh.ssh_executable = str(fake_ssh)
+    config.save(config.config_path)
+
+    # Seed two enrolled targets and two command-capable PENDING sessions (no PTY open!).
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_live_1",
+        session_id="ssh_sess_live_1",
+        session_status=InteractiveSessionStatus.PENDING,
+        delegated_agent_type="TeamArchitect",
+        delegated_task_id="req_f12",
+        allow_commands=True,
+        person_roles=("admin",),
+    )
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_live_2",
+        session_id="ssh_sess_live_2",
+        session_status=InteractiveSessionStatus.PENDING,
+        delegated_agent_type="TeamArchitect",
+        delegated_task_id="req_f12",
+        allow_commands=True,
+        person_roles=("admin",),
+    )
+
+    root_token = "f12-broker-root-token"
+    gateway_token = derive_caller_token(root_token, CALLER_GATEWAY)
+    manager_token = derive_caller_token(root_token, CALLER_MANAGER)
+
+    gate = build_broker_access_gate(
+        instance_root=config.instance_root_path,
+        team_id=config.manager.team_id,
+        authorization_enabled=True,
+        storage_settings=config.manager_storage_settings,
+        cedar_binary=str(CEDAR_BINARY),
+        lead_agent_type="TeamArchitect",
+    )
+    assert gate.access is not None
+    gate.access.grant_by_person(
+        PersonPrincipal("usr_admin", config.manager.team_id, ("admin",)),
+        GrantV1(
+            grant_id="new",
+            team_id=config.manager.team_id,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{config.manager.team_id}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="fn:execution_control"),
+            level=AccessLevel.WRITE,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id="usr_admin"),
+            created_at_utc=now,
+        ),
+    )
+    ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
+        instance_root_path=str(config.instance_root_path),
+        instance_name=config.instance_name,
+        storage_settings=config.manager_storage_settings,
+        ssh=config.execution_control.ssh,
+        execution_enabled=config.execution_control.enabled,
+        config_path=config.config_path,
+    )
+    broker_service = SecureToolBrokerService(
+        token=root_token,
+        access_gate=gate,
+        execution_ssh_config=ssh_cfg,
+    )
+    app = broker_service.build_app()
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        base_url = f"http://{server.host}:{server.port}"
+        rt = broker_service._execution_ssh
+        assert rt is not None
+        live_broker = await rt._active_broker()
+        # Use a simple configured material provider + permissive loopback/test resolver so commands start immediately.
+        key_file = tmp_path / "dummy_id"
+        key_file.write_text("dummy", encoding="utf-8")
+        key_file.chmod(0o600)
+        kh_shared = tmp_path / "kh_shared"
+        t1 = repo.get_ssh_target(team_id=config.manager.team_id, target_id="ssh_tgt_live_1")
+        t2 = repo.get_ssh_target(team_id=config.manager.team_id, target_id="ssh_tgt_live_2")
+        assert t1 is not None and t2 is not None
+        kh_shared.write_text(
+            f"{ssh_host_key_alias(t1.host, t1.port)} {t1.host_key_public_key}\n"
+            f"{ssh_host_key_alias(t2.host, t2.port)} {t2.host_key_public_key}\n",
+            encoding="utf-8",
+        )
+        live_broker.material_provider = ConfiguredSSHCredentialMaterialProvider(
+            {
+                f"catalog:{t1.credential_key}": SSHCredentialMaterial(
+                    identity_file=key_file,
+                    known_hosts_file=kh_shared,
+                ),
+            }
+        )
+        live_broker._checked_material_provider = live_broker.material_provider
+        live_broker.network_policy = SSHNetworkPolicy(denied_cidrs=())
+        live_broker._checked_network_policy = live_broker.network_policy
+        live_broker.resolver = lambda host, port: ["198.51.100.55"]
+        live_broker.local_address_checker = lambda ip: False
+        caller = SSHCallerContext(
+            agent_type="TeamArchitect",
+            task_id="req_f12",
+            person_id="usr_admin",
+        )
+
+        # Start non-PTY command on session 1 (no PTY open!).
+        cmd1 = await live_broker.run_command(
+            session_id="ssh_sess_live_1",
+            command="sleep 30",
+            caller=caller,
+            timeout_seconds=30.0,
+            wait_seconds=0.3,
+        )
+        assert cmd1.status == SSHCommandStatus.RUNNING
+        assert "ssh_sess_live_1" not in live_broker._sessions
+
+        # Start non-PTY command on session 2 (no PTY open!).
+        cmd2 = await live_broker.run_command(
+            session_id="ssh_sess_live_2",
+            command="sleep 30",
+            caller=caller,
+            timeout_seconds=30.0,
+            wait_seconds=0.3,
+        )
+        assert cmd2.status == SSHCommandStatus.RUNNING
+        assert "ssh_sess_live_2" not in live_broker._sessions
+
+        # 1) CALLER_MANAGER must be refused with 403 on both gateway-only revocation routes.
+        import aiohttp
+
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"{base_url}{EXECUTION_SSH_ROUTE_PREFIX}sessions/ssh_sess_live_1/revoke",
+                json={"revoked_by": "usr_admin"},
+                headers={"Authorization": f"Bearer {manager_token}"},
+            ) as resp_sess:
+                assert resp_sess.status == 403
+            async with client.post(
+                f"{base_url}{EXECUTION_SSH_ROUTE_PREFIX}targets/ssh_tgt_live_2/revoke",
+                json={"revoked_by": "usr_admin"},
+                headers={"Authorization": f"Bearer {manager_token}"},
+            ) as resp_tgt:
+                assert resp_tgt.status == 403
+
+        # 2) Real GatewayExecutionSSH -> HttpGatewaySecureBroker -> SecureToolBrokerService.
+        http_broker = HttpGatewaySecureBroker(
+            internal_base_url=base_url,
+            public_base_url=None,
+            token=gateway_token,
+        )
+        gateway_ssh = GatewayExecutionSSH(
+            team_id=config.manager.team_id,
+            config_path=config.config_path,
+            repository=repo,
+            person_changes=person_changes,
+            broker=http_broker,
+            default_ssh_enabled=True,
+        )
+
+        # Revoke session 1 (non-PTY command running) -> terminated_live=True!
+        sess_res = await gateway_ssh.revoke_session(
+            person_id="usr_admin",
+            session_id="ssh_sess_live_1",
+        )
+        assert sess_res.revoked is True
+        assert sess_res.broker_notified is True
+        assert sess_res.terminated_live is True
+        cmd1_after = await live_broker.get_command(
+            session_id="ssh_sess_live_1",
+            command_id=cmd1.command_id,
+            caller=caller,
+        )
+        assert cmd1_after.status == SSHCommandStatus.REVOKED
+
+        # Revoke target 2 (non-PTY command running) -> terminated_live=True!
+        tgt_res = await gateway_ssh.revoke_target(
+            person_id="usr_admin",
+            target_id="ssh_tgt_live_2",
+        )
+        assert tgt_res.revoked is True
+        assert tgt_res.broker_notified is True
+        assert tgt_res.terminated_live is True
+        cmd2_after = await live_broker.get_command(
+            session_id="ssh_sess_live_2",
+            command_id=cmd2.command_id,
+            caller=caller,
+        )
+        assert cmd2_after.status == SSHCommandStatus.REVOKED
+    finally:
+        await server.close()
         person_changes.close()

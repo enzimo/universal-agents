@@ -591,7 +591,11 @@ class ExecutionAccessGuard:
             self._catalog()  # decisions use the current catalog
             return self.access.decide(
                 agent=AgentPrincipal(
-                    holder.agent_id, holder.agent_type, self.access.agent_role_of(holder.agent_type), team_id
+                    holder.agent_id,
+                    holder.agent_type,
+                    self.access.agent_role_of(holder.agent_type),
+                    team_id,
+                    work_id=task_id,
                 ),
                 person=PersonPrincipal(holder.person_id, team_id, holder.person_roles),
                 resolution=resolution,

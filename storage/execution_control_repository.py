@@ -33,6 +33,7 @@ from runtime_hosting.execution_contracts import (
     SSHRevocationStateV1,
     SSHTargetStatus,
     ServiceDesiredState,
+    TERMINAL_INTERACTIVE_SESSION_STATUSES,
     TERMINAL_RUN_ATTEMPT_STATUSES,
 )
 from storage.backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
@@ -313,6 +314,14 @@ class ExecutionControlRepository(Protocol):
         fence: int,
         release: bool = False,
     ) -> InteractiveSessionV1: ...
+    def close_unleased_interactive_session(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        disconnected: bool = False,
+        updated_at_utc: datetime | None = None,
+    ) -> InteractiveSessionV1 | None: ...
     def list_interactive_sessions(
         self, *, team_id: str
     ) -> tuple[InteractiveSessionV1, ...]: ...
@@ -1829,6 +1838,9 @@ class _RelationalExecutionControlRepository:
         lease_token: str,
         lease_ttl_seconds: int,
     ) -> InteractiveSessionV1:
+        pending_status = InteractiveSessionStatus.PENDING.value
+        row_lock = self._row_lock_suffix()
+        lock_clause = f" {row_lock}" if row_lock else ""
         with self._connect() as connection:
             self._begin_claim(connection)
             database_now = self._database_now(connection)
@@ -1836,17 +1848,23 @@ class _RelationalExecutionControlRepository:
                 f"""
                 SELECT record_json FROM execution_interactive_sessions
                  WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                   AND desired_or_status = {self._dialect.bind}
                    AND revoked_at_utc IS NULL
-                   AND (lease_owner IS NULL OR lease_expires_at_utc IS NULL OR lease_expires_at_utc <= {self._dialect.bind})
+                   AND (lease_owner IS NULL OR lease_expires_at_utc IS NULL OR lease_expires_at_utc <= {self._dialect.bind}){lock_clause}
                 """,
-                (session_id, team_id, _iso(database_now)),
+                (session_id, team_id, pending_status, _iso(database_now)),
             ).fetchone()
             if row is None:
                 connection.rollback()
                 raise StaleExecutionFence(
-                    "Interactive session is already leased, revoked, or unavailable."
+                    "Interactive session is already leased, revoked, closed, or unavailable."
                 )
             current = _authority_record(InteractiveSessionV1, row["record_json"])
+            if current.status is not InteractiveSessionStatus.PENDING:
+                connection.rollback()
+                raise StaleExecutionFence(
+                    f"Interactive session is {current.status.value} and cannot be claimed."
+                )
             claimed = current.model_copy(
                 update={
                     "fence": current.fence + 1,
@@ -1863,6 +1881,8 @@ class _RelationalExecutionControlRepository:
                    SET generation = {self._dialect.bind}, lease_owner = {self._dialect.bind}, lease_token = {self._dialect.bind}, lease_expires_at_utc = {self._dialect.bind},
                        record_json = {self._dialect.bind}
                  WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                   AND desired_or_status = {self._dialect.bind}
+                   AND generation = {self._dialect.bind}
                    AND revoked_at_utc IS NULL
                 """,
                 (
@@ -1873,15 +1893,103 @@ class _RelationalExecutionControlRepository:
                     _json(claimed),
                     session_id,
                     team_id,
+                    pending_status,
+                    current.fence,
                 ),
             )
             if cursor.rowcount != 1:
                 connection.rollback()
                 raise StaleExecutionFence(
-                    "Interactive session disappeared during claim."
+                    "Interactive session changed or disappeared during claim."
                 )
             connection.commit()
         return InteractiveSessionV1.model_validate(claimed.model_dump(mode="python"))
+
+    def close_unleased_interactive_session(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        disconnected: bool = False,
+        updated_at_utc: datetime | None = None,
+    ) -> InteractiveSessionV1 | None:
+        """Atomically persist ``CLOSED``/``DISCONNECTED`` for a non-terminal unleased session."""
+
+        row_lock = self._row_lock_suffix()
+        lock_clause = f" {row_lock}" if row_lock else ""
+        with self._connect() as connection:
+            self._begin_claim(connection)
+            database_now = self._database_now(connection)
+            row = connection.execute(
+                f"""
+                SELECT record_json FROM execution_interactive_sessions
+                 WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}{lock_clause}
+                """,
+                (session_id, team_id),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return None
+            current = _authority_record(InteractiveSessionV1, row["record_json"])
+            if current.status in TERMINAL_INTERACTIVE_SESSION_STATUSES:
+                connection.rollback()
+                return current
+            if (
+                current.lease_owner is not None
+                and current.lease_expires_at_utc is not None
+                and current.lease_expires_at_utc > database_now
+            ):
+                connection.rollback()
+                raise StaleExecutionFence(
+                    "Interactive session is currently leased by another operation or broker."
+                )
+            target_status = (
+                InteractiveSessionStatus.DISCONNECTED
+                if disconnected
+                else InteractiveSessionStatus.CLOSED
+            )
+            closed = current.model_copy(
+                update={
+                    "status": target_status,
+                    "lease_owner": None,
+                    "lease_token": None,
+                    "lease_expires_at_utc": None,
+                    "updated_at_utc": updated_at_utc or database_now,
+                }
+            )
+            cursor = connection.execute(
+                f"""
+                UPDATE execution_interactive_sessions
+                   SET desired_or_status = {self._dialect.bind}, lease_owner = NULL, lease_token = NULL,
+                       lease_expires_at_utc = NULL, record_json = {self._dialect.bind}
+                 WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                   AND generation = {self._dialect.bind}
+                """,
+                (
+                    closed.status.value,
+                    _json(closed),
+                    session_id,
+                    team_id,
+                    current.fence,
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StaleExecutionFence(
+                    "Interactive session changed during close."
+                )
+            connection.execute(
+                f"""
+                UPDATE execution_ssh_targets
+                   SET password_bootstrap_claimed_by_session_id = NULL
+                 WHERE team_id = {self._dialect.bind}
+                   AND password_bootstrap_claimed_by_session_id = {self._dialect.bind}
+                   AND password_bootstrap_completed_at_utc IS NULL
+                """,
+                (team_id, session_id),
+            )
+            connection.commit()
+        return InteractiveSessionV1.model_validate(closed.model_dump(mode="python"))
 
     def update_claimed_interactive_session(
         self,
@@ -2086,40 +2194,72 @@ class _RelationalExecutionControlRepository:
             ).fetchall()
             for row in rows:
                 current = _authority_record(InteractiveSessionV1, row["record_json"])
-                if current.status not in {
+                if current.status in {
                     InteractiveSessionStatus.CONNECTING,
                     InteractiveSessionStatus.OPEN,
                 }:
+                    lost = current.model_copy(
+                        update={
+                            "status": InteractiveSessionStatus.LOST,
+                            "lease_owner": None,
+                            "lease_token": None,
+                            "lease_expires_at_utc": None,
+                            "updated_at_utc": updated_at_utc,
+                        }
+                    )
+                    connection.execute(
+                        f"""
+                        UPDATE execution_interactive_sessions
+                           SET desired_or_status = {self._dialect.bind}, lease_owner = NULL, lease_token = NULL,
+                               lease_expires_at_utc = NULL, record_json = {self._dialect.bind}
+                         WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                        """,
+                        (lost.status.value, _json(lost), lost.session_id, team_id),
+                    )
+                    connection.execute(
+                        f"""
+                        UPDATE execution_ssh_targets
+                           SET password_bootstrap_claimed_by_session_id = NULL
+                         WHERE team_id = {self._dialect.bind}
+                           AND password_bootstrap_claimed_by_session_id = {self._dialect.bind}
+                           AND password_bootstrap_completed_at_utc IS NULL
+                        """,
+                        (team_id, lost.session_id),
+                    )
+                    recovered.append(lost)
                     continue
-                lost = current.model_copy(
-                    update={
-                        "status": InteractiveSessionStatus.LOST,
-                        "lease_owner": None,
-                        "lease_token": None,
-                        "lease_expires_at_utc": None,
-                        "updated_at_utc": updated_at_utc,
-                    }
-                )
-                connection.execute(
-                    f"""
-                    UPDATE execution_interactive_sessions
-                       SET desired_or_status = {self._dialect.bind}, lease_owner = NULL, lease_token = NULL,
-                           lease_expires_at_utc = NULL, record_json = {self._dialect.bind}
-                     WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
-                    """,
-                    (lost.status.value, _json(lost), lost.session_id, team_id),
-                )
-                connection.execute(
-                    f"""
-                    UPDATE execution_ssh_targets
-                       SET password_bootstrap_claimed_by_session_id = NULL
-                     WHERE team_id = {self._dialect.bind}
-                       AND password_bootstrap_claimed_by_session_id = {self._dialect.bind}
-                       AND password_bootstrap_completed_at_utc IS NULL
-                    """,
-                    (team_id, lost.session_id),
-                )
-                recovered.append(lost)
+                if current.status is InteractiveSessionStatus.PENDING and (
+                    current.lease_owner is not None
+                    or current.lease_token is not None
+                    or current.lease_expires_at_utc is not None
+                ):
+                    released = current.model_copy(
+                        update={
+                            "lease_owner": None,
+                            "lease_token": None,
+                            "lease_expires_at_utc": None,
+                            "updated_at_utc": updated_at_utc,
+                        }
+                    )
+                    connection.execute(
+                        f"""
+                        UPDATE execution_interactive_sessions
+                           SET lease_owner = NULL, lease_token = NULL,
+                               lease_expires_at_utc = NULL, record_json = {self._dialect.bind}
+                         WHERE session_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
+                        """,
+                        (_json(released), released.session_id, team_id),
+                    )
+                    connection.execute(
+                        f"""
+                        UPDATE execution_ssh_targets
+                           SET password_bootstrap_claimed_by_session_id = NULL
+                         WHERE team_id = {self._dialect.bind}
+                           AND password_bootstrap_claimed_by_session_id = {self._dialect.bind}
+                           AND password_bootstrap_completed_at_utc IS NULL
+                        """,
+                        (team_id, released.session_id),
+                    )
             connection.commit()
         return tuple(recovered)
 

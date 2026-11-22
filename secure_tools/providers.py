@@ -59,7 +59,9 @@ class ToolResult:
 
 class SecureToolProvider(Protocol):
     name: str
-    actions: Mapping[str, ActionSpec]
+
+    @property
+    def actions(self) -> Mapping[str, ActionSpec]: ...
 
     def validate(self, action: str, params: dict[str, Any]) -> ValidatedAction: ...
 

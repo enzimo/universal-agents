@@ -392,7 +392,7 @@ class ExecutionSSHProvider(DeclaredProvider):
 
     name = "execution_ssh"
     secure_cli_callable = False
-    actions = {
+    actions: Mapping[str, ActionSpec] = {
         "probe_execution_ssh_host_key": ActionSpec(
             "probe_execution_ssh_host_key",
             "Probe a remote SSH host's ed25519 host key from the broker without authenticating.",

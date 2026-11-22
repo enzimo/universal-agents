@@ -152,7 +152,7 @@ class ExecutionControlService:
             agent_type=self.actor.agent.agent_type,
             person_id=person.person_id if person else None,
             person_roles=tuple(person.roles) if person else (),
-            task_id=self.actor.task_id,
+            task_id=self.actor.agent.work_id or self.actor.task_id,
         )
 
     def list_profiles(self) -> tuple[dict[str, Any], ...]:

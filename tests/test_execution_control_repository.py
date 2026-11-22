@@ -987,3 +987,225 @@ def test_upgrade_from_0_9_sqlite_fixture_preserves_job_service_session_and_inter
     assert loaded_interaction.activation.binds_session(loaded_session)
     assert repository.get_interactive_session_revocation(team_id="team_alpha", session_id="ssh_sess_09") is None
     assert repository.list_ssh_targets(team_id="team_alpha") == ()
+
+
+def test_f5_mark_interactive_sessions_lost_clears_leased_pending_and_bootstrap_claim(
+    tmp_path: Path,
+) -> None:
+    """F5: Restart recovery clears stale leases and uncompleted bootstrap claims on leased PENDING sessions."""
+
+    repository = _repository(tmp_path)
+    target = _enrolled_target(target_id="ssh_tgt_f5_pending_boot")
+    repository.put_ssh_target(target)
+    conn_target = target.to_connection_target()
+    pending = InteractiveSessionV1(
+        session_id="ssh_sess_f5_pending",
+        owner=target.owner,
+        target=conn_target,
+        target_digest=conn_target.calculate_digest(),
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_f5_pending",
+            resource_digest=conn_target.calculate_digest(),
+            owner_scope=target.owner,
+            mode=ChangeApprovalMode.HELD_ACCESS,
+        ),
+    )
+    repository.create_interactive_session(pending)
+
+    # Simulate enroll_execution_ssh_key claiming a temp lease on a PENDING session and claiming bootstrap.
+    claimed = repository.claim_interactive_session(
+        team_id="team_alpha",
+        session_id=pending.session_id,
+        broker_id="crashed-broker",
+        lease_token="dead-token",
+        lease_ttl_seconds=600,
+    )
+    assert claimed.status == InteractiveSessionStatus.PENDING
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha",
+        target_id=target.target_id,
+        session_id=pending.session_id,
+    ) is True
+
+    # Simulate broker crash & restart recovery.
+    recovered = repository.mark_interactive_sessions_lost(
+        team_id="team_alpha",
+        updated_at_utc=datetime.now(timezone.utc),
+    )
+    assert recovered == ()
+
+    # The PENDING session stays PENDING with its stale lease cleared, and bootstrap claim is released.
+    after = repository.get_interactive_session(team_id="team_alpha", session_id=pending.session_id)
+    assert after is not None
+    assert after.status == InteractiveSessionStatus.PENDING
+    assert after.lease_owner is None
+    assert after.lease_token is None
+    assert after.lease_expires_at_utc is None
+
+    # Immediate retry on the same session succeeds without waiting for dead lease TTL expiry.
+    retried = repository.claim_interactive_session(
+        team_id="team_alpha",
+        session_id=pending.session_id,
+        broker_id="restarted-broker",
+        lease_token="fresh-token",
+        lease_ttl_seconds=60,
+    )
+    assert retried.lease_owner == "restarted-broker"
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha",
+        target_id=target.target_id,
+        session_id=pending.session_id,
+    ) is True
+
+
+def test_f6_claim_rejects_terminal_sessions_close_unleased_persists_closed_and_pg_uses_for_update_cas(
+    tmp_path: Path,
+) -> None:
+    """F6: Terminal sessions cannot be re-claimed, unleased PENDING closes atomically, and PG uses FOR UPDATE + fence CAS."""
+
+    from typing import Any
+    from runtime_hosting.execution_contracts import (
+        ArtifactKind,
+        ArtifactReferenceV1,
+        ArtifactStorageBackend,
+    )
+    from storage.execution_control_repository import PostgresExecutionControlRepository
+
+    repository = _repository(tmp_path)
+    owner = _owner()
+
+    # 1) Command-only PENDING session closed via close_unleased_interactive_session persists CLOSED.
+    pending = _session(owner, session_id="ssh_sess_f6_pending")
+    repository.create_interactive_session(pending)
+    closed = repository.close_unleased_interactive_session(
+        team_id="team_alpha",
+        session_id=pending.session_id,
+    )
+    assert closed is not None
+    assert closed.status == InteractiveSessionStatus.CLOSED
+    stored = repository.get_interactive_session(team_id="team_alpha", session_id=pending.session_id)
+    assert stored is not None and stored.status == InteractiveSessionStatus.CLOSED
+
+    # Cannot re-claim CLOSED session.
+    with pytest.raises(StaleExecutionFence):
+        repository.claim_interactive_session(
+            team_id="team_alpha",
+            session_id=pending.session_id,
+            broker_id="broker-1",
+            lease_token="tok-1",
+            lease_ttl_seconds=60,
+        )
+
+    # 2) CLOSED session with transcript_artifact stays CLOSED with transcript intact on re-close/re-claim.
+    with_transcript = _session(owner, session_id="ssh_sess_f6_transcript")
+    repository.create_interactive_session(with_transcript)
+    claimed = repository.claim_interactive_session(
+        team_id="team_alpha",
+        session_id=with_transcript.session_id,
+        broker_id="broker-1",
+        lease_token="tok-t",
+        lease_ttl_seconds=60,
+    )
+    artifact = ArtifactReferenceV1(
+        artifact_id="art_transcript_f6",
+        kind=ArtifactKind.LOG,
+        sha256="a" * 64,
+        size_bytes=42,
+        media_type="text/plain",
+        storage_backend=ArtifactStorageBackend.FILESYSTEM,
+        storage_key="logs/f6.log",
+    )
+    repository.update_claimed_interactive_session(
+        claimed.model_copy(
+            update={
+                "status": InteractiveSessionStatus.CLOSED,
+                "transcript_artifact": artifact,
+            }
+        ),
+        broker_id="broker-1",
+        lease_token="tok-t",
+        fence=claimed.fence,
+        release=True,
+    )
+    idempotent_close = repository.close_unleased_interactive_session(
+        team_id="team_alpha",
+        session_id=with_transcript.session_id,
+    )
+    assert idempotent_close is not None
+    assert idempotent_close.status == InteractiveSessionStatus.CLOSED
+    assert idempotent_close.transcript_artifact == artifact
+    with pytest.raises(StaleExecutionFence):
+        repository.claim_interactive_session(
+            team_id="team_alpha",
+            session_id=with_transcript.session_id,
+            broker_id="broker-2",
+            lease_token="tok-2",
+            lease_ttl_seconds=60,
+        )
+
+    # 3) Actively leased session refuses close_unleased_interactive_session with StaleExecutionFence.
+    active = _session(owner, session_id="ssh_sess_f6_active_lease")
+    repository.create_interactive_session(active)
+    repository.claim_interactive_session(
+        team_id="team_alpha",
+        session_id=active.session_id,
+        broker_id="broker-live",
+        lease_token="tok-live",
+        lease_ttl_seconds=600,
+    )
+    with pytest.raises(StaleExecutionFence, match="leased"):
+        repository.close_unleased_interactive_session(
+            team_id="team_alpha",
+            session_id=active.session_id,
+        )
+
+    # 4) Verify PostgreSQL claim_interactive_session emits FOR UPDATE, pending status guard, and generation CAS.
+    executed_sql: list[str] = []
+
+    class _FakeCursor:
+        rowcount = 1
+
+        def __init__(self, row: dict[str, Any] | None = None) -> None:
+            self._row = row
+
+        def fetchone(self) -> dict[str, Any] | None:
+            return self._row
+
+    class _FakePgConn:
+        def __enter__(self) -> "_FakePgConn":
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+        def execute(self, sql: str, params: tuple[Any, ...] = ()) -> _FakeCursor:
+            del params
+            executed_sql.append(sql)
+            if "CURRENT_TIMESTAMP" in sql:
+                return _FakeCursor({"database_now": datetime.now(timezone.utc).isoformat()})
+            if sql.lstrip().startswith("SELECT"):
+                return _FakeCursor({"record_json": pending.model_dump_json()})
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+    pg_repo = object.__new__(PostgresExecutionControlRepository)
+    pg_repo._connect = lambda: _FakePgConn()  # type: ignore[method-assign]
+    pg_repo.claim_interactive_session(
+        team_id="team_alpha",
+        session_id=pending.session_id,
+        broker_id="pg-broker",
+        lease_token="pg-tok",
+        lease_ttl_seconds=60,
+    )
+    select_sql = next(sql for sql in executed_sql if "SELECT record_json" in sql)
+    update_sql = next(sql for sql in executed_sql if "UPDATE execution_interactive_sessions" in sql)
+    assert "FOR UPDATE" in select_sql
+    assert "desired_or_status = %s" in select_sql
+    assert "desired_or_status = %s" in update_sql
+    assert "AND generation = %s" in update_sql

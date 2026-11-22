@@ -164,6 +164,17 @@ class InteractiveSessionStatus(StrEnum):
     EXPIRED = "expired"
 
 
+TERMINAL_INTERACTIVE_SESSION_STATUSES: frozenset[InteractiveSessionStatus] = frozenset(
+    {
+        InteractiveSessionStatus.DISCONNECTED,
+        InteractiveSessionStatus.CLOSED,
+        InteractiveSessionStatus.LOST,
+        InteractiveSessionStatus.FAILED,
+        InteractiveSessionStatus.EXPIRED,
+    }
+)
+
+
 class SSHTargetPlatform(StrEnum):
     LINUX = "linux"
     MACOS = "macos"
@@ -1485,6 +1496,7 @@ __all__ = [
     "ServiceKind",
     "ServiceObservedState",
     "ServiceRestartPolicy",
+    "TERMINAL_INTERACTIVE_SESSION_STATUSES",
     "TERMINAL_RUN_ATTEMPT_STATUSES",
     "enrolled_ssh_target_digest",
     "ssh_interaction_resource_digest",

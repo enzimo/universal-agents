@@ -409,12 +409,14 @@ class GatewayExecutionSSH:
         if revoked is None:
             raise ExecutionSSHNotFound(TARGET_NOT_FOUND_TEXT)
         broker_notified = False
+        terminated_live = False
         if self._broker is not None and self._broker.available:
             try:
-                await self._broker.revoke_execution_ssh_target(
+                broker_result = await self._broker.revoke_execution_ssh_target(
                     target_id=normalized_id, revoked_by=person_id
                 )
                 broker_notified = True
+                terminated_live = bool(broker_result.get("terminated_live"))
             except Exception as exc:  # noqa: BLE001 - DB revocation is already durable
                 logger.warning(
                     "Could not notify the secure tool broker of an SSH target revocation; "
@@ -428,7 +430,7 @@ class GatewayExecutionSSH:
         logger.info(
             "Enrolled SSH target revoked by administrator. "
             "event=gateway_ssh_target_revoked team_id=%s person_id=%s target_id=%s "
-            "host=%s port=%d username=%s broker_notified=%s",
+            "host=%s port=%d username=%s broker_notified=%s terminated_live=%s",
             self._team_id,
             person_id,
             normalized_id,
@@ -436,6 +438,7 @@ class GatewayExecutionSSH:
             revoked.port,
             revoked.username,
             broker_notified,
+            terminated_live,
         )
         message = (
             f"Revoked enrolled host {revoked.username}@{revoked.host}:{revoked.port}. "
@@ -452,7 +455,7 @@ class GatewayExecutionSSH:
             resource_id=normalized_id,
             revoked=True,
             broker_notified=broker_notified,
-            terminated_live=False,
+            terminated_live=terminated_live,
             message=message,
             page=page,
         )
