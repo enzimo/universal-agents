@@ -4298,8 +4298,16 @@ async def _run_secure_tool_broker_service(
         )
         from runtime_settings.services import web_service_urls
         from secure_tool_broker.access_gate import build_broker_access_gate
+        from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
         from secure_tool_broker.page_view import web_chat_origin
 
+        execution_ssh_config = BrokerExecutionSSHConfig.from_runtime_settings(
+            instance_root_path=str(config.instance_root_path),
+            instance_name=config.instance_name,
+            storage_settings=config.manager_storage_settings,
+            ssh=config.execution_control.ssh,
+            lead_agent_type=config.manager.named_agent_type,
+        )
         access_gate = build_broker_access_gate(
             instance_root=config.instance_root_path,
             team_id=config.manager.team_id,
@@ -4316,6 +4324,7 @@ async def _run_secure_tool_broker_service(
             token=token,
             access_gate=access_gate,
             mcp_config=mcp_config,
+            execution_ssh_config=execution_ssh_config,
             tool_setup_recheck_days=config.security_layer.tool_setup_recheck_days,
             # Web Chat may show the broker's pages as cards only from its own address.
             web_chat_origin=(

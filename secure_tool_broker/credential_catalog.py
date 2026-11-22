@@ -420,23 +420,10 @@ def resolve_secret_field(
     env: Mapping[str, str] | None = None,
     context: ToolContext | None = None,
     scope: CredentialOwnerScope | None = None,
-    fallback_db_path: Path | None = None,
 ) -> ResolvedCredentialField | ToolResult:
     key = _credential_key(credential_key)
     resolved_scope = _owner_scope(context=context, scope=scope)
-    if catalog is not None:
-        active_catalog = catalog
-    elif fallback_db_path is not None and not str(
-        os.getenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH") or ""
-    ).strip():
-        resolved_fallback = Path(fallback_db_path).expanduser().resolve()
-        active_catalog = (
-            CredentialCatalog(credentials=CredentialCatalogStore(resolved_fallback).load_scope(resolved_scope))
-            if resolved_fallback.exists()
-            else CredentialCatalog(credentials={})
-        )
-    else:
-        active_catalog = load_catalog(scope=resolved_scope)
+    active_catalog = catalog if catalog is not None else load_catalog(scope=resolved_scope)
     credential = active_catalog.credentials.get(key)
     if credential is None:
         return ToolResult(

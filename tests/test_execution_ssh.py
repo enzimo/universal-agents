@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -338,6 +339,11 @@ def lead(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtur
     set_agent_ref(agent)
     yield agent
     set_agent_ref(None)
+    for runner in list(tools._SSH_BROKERS.values()):
+        try:
+            asyncio.run(runner.shutdown())
+        except RuntimeError:
+            pass
     tools._SSH_BROKERS.clear()
 
 
@@ -412,7 +418,9 @@ async def test_typing_waits_for_a_persons_approval_and_revoking_access_stops_the
     assert after_revoke["error_code"] == "execution_access_refused"
     assert "no longer holds write access" in after_revoke["error"]
     closed = json.loads(await tools.close_execution_ssh_session._tool_func(session_id=session_id))
-    assert closed["status"] == "closed", "closing only ends access"
+    assert closed["status"] in {"closed", "disconnected"}, (
+        "closing only ends access (or the broker monitor already disconnected after grant revocation)"
+    )
 
 
 @pytest.mark.parametrize("lead", [False], indirect=True)
@@ -612,14 +620,16 @@ async def test_ssh_target_enrollment_and_bounded_delegation_end_to_end_with_real
     _, key_fp = ssh_public_key_sha256_fingerprint(key_pub)
 
     # 1. Stage dynamic SSH target enrollment (using RFC 5737 public test IP 198.51.100.42).
-    enroll_service = SSHTargetEnrollChangeService(lead)
+    enroll_service = SSHTargetEnrollChangeService(
+        lead,
+        host_key_prober=lambda _h, _p, _t: {"host_key_public_key": host_pub},
+    )
     with pytest.raises(PermissionError, match="denied_cidrs|loopback"):
         enroll_service.stage(
             host="127.0.0.1",
             port=22,
             username="admin",
             platform=SSHTargetPlatform.MACOS,
-            host_key_public_key=host_pub,
             credential_key="build_mac_ssh_key",
             lifecycle=SSHTargetLifecycle.TEMPORARY,
             expires_at_utc=datetime.now(timezone.utc) + timedelta(hours=2),
@@ -633,7 +643,6 @@ async def test_ssh_target_enrollment_and_bounded_delegation_end_to_end_with_real
         port=2222,
         username="admin",
         platform=SSHTargetPlatform.MACOS,
-        host_key_public_key=host_pub,
         credential_key="build_mac_ssh_key",
         bootstrap_credential_key="build_mac_ssh_bootstrap",
         lifecycle=SSHTargetLifecycle.TEMPORARY,
@@ -695,7 +704,6 @@ async def test_ssh_target_enrollment_and_bounded_delegation_end_to_end_with_real
         port=22,
         username="admin",
         platform=SSHTargetPlatform.LINUX,
-        host_key_public_key=host_pub,
         credential_key="build_mac_ssh_key",
         bootstrap_credential_key="build_mac_ssh_bootstrap",
         lifecycle=SSHTargetLifecycle.PERSISTENT,
@@ -1157,13 +1165,15 @@ def test_ssh_target_enrollment_rejects_bad_credential_shapes_and_uses_readonly_c
     # staging refuses cleanly AND neither that path nor config.credential_catalog_database_path is created.
     missing_env_db = tmp_path / "never_created_dir" / "missing_catalog.db"
     monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(missing_env_db))
-    enroll_service = SSHTargetEnrollChangeService(lead)
+    enroll_service = SSHTargetEnrollChangeService(
+        lead,
+        host_key_prober=lambda _h, _p, _t: {"host_key_public_key": host_pub},
+    )
     with pytest.raises(PermissionError, match="not registered"):
         enroll_service.stage(
             host="198.51.100.60",
             username="admin",
             platform=SSHTargetPlatform.LINUX,
-            host_key_public_key=host_pub,
             credential_key="nonexistent_key",
             lifecycle=SSHTargetLifecycle.PERSISTENT,
             reason="Missing DB must not be created",
@@ -1289,7 +1299,6 @@ def test_ssh_target_enrollment_rejects_bad_credential_shapes_and_uses_readonly_c
             host="198.51.100.61",
             username="root",
             platform=SSHTargetPlatform.LINUX,
-            host_key_public_key=host_pub,
             credential_key="visible_priv",
             lifecycle=SSHTargetLifecycle.PERSISTENT,
             reason="Visible key",
@@ -1300,7 +1309,6 @@ def test_ssh_target_enrollment_rejects_bad_credential_shapes_and_uses_readonly_c
             host="198.51.100.62",
             username="root",
             platform=SSHTargetPlatform.LINUX,
-            host_key_public_key=host_pub,
             credential_key="no_pub",
             lifecycle=SSHTargetLifecycle.PERSISTENT,
             reason="No pub key",
@@ -1311,7 +1319,6 @@ def test_ssh_target_enrollment_rejects_bad_credential_shapes_and_uses_readonly_c
             host="198.51.100.63",
             username="root",
             platform=SSHTargetPlatform.LINUX,
-            host_key_public_key=host_pub,
             credential_key="good_key",
             bootstrap_credential_key="wrong_user_boot",
             lifecycle=SSHTargetLifecycle.PERSISTENT,
@@ -1323,7 +1330,6 @@ def test_ssh_target_enrollment_rejects_bad_credential_shapes_and_uses_readonly_c
             host="198.51.100.64",
             username="root",
             platform=SSHTargetPlatform.LINUX,
-            host_key_public_key=host_pub,
             credential_key="good_key",
             bootstrap_credential_key="visible_pass_boot",
             lifecycle=SSHTargetLifecycle.PERSISTENT,
@@ -1334,7 +1340,6 @@ def test_ssh_target_enrollment_rejects_bad_credential_shapes_and_uses_readonly_c
         host="198.51.100.65",
         username="deploy",
         platform=SSHTargetPlatform.LINUX,
-        host_key_public_key=host_pub,
         credential_key="team_key",
         credential_owner_scope="team",
         lifecycle=SSHTargetLifecycle.PERSISTENT,
@@ -1390,7 +1395,10 @@ def test_ssh_delegation_rejects_unknown_agent_types_invalid_targets_expired_sess
         approved_by="agreement",
         approved_at_utc=datetime.now(timezone.utc),
     )
-    enroll_service = SSHTargetEnrollChangeService(lead)
+    enroll_service = SSHTargetEnrollChangeService(
+        lead,
+        host_key_prober=lambda _h, _p, _t: {"host_key_public_key": host_pub},
+    )
 
     # Enroll three targets: Linux without bootstrap cred, Linux with bootstrap (no tailscale key), and Windows with bootstrap.
     s_no_boot = enroll_service.stage(
@@ -1398,7 +1406,6 @@ def test_ssh_delegation_rejects_unknown_agent_types_invalid_targets_expired_sess
         host="198.51.100.70",
         username="admin",
         platform=SSHTargetPlatform.LINUX,
-        host_key_public_key=host_pub,
         credential_key="build_mac_ssh_key",
         lifecycle=SSHTargetLifecycle.PERSISTENT,
         reason="Linux without bootstrap",
@@ -1410,7 +1417,6 @@ def test_ssh_delegation_rejects_unknown_agent_types_invalid_targets_expired_sess
         host="198.51.100.71",
         username="admin",
         platform=SSHTargetPlatform.LINUX,
-        host_key_public_key=host_pub,
         credential_key="build_mac_ssh_key",
         bootstrap_credential_key="build_mac_ssh_bootstrap",
         lifecycle=SSHTargetLifecycle.PERSISTENT,
@@ -1423,7 +1429,6 @@ def test_ssh_delegation_rejects_unknown_agent_types_invalid_targets_expired_sess
         host="198.51.100.72",
         username="admin",
         platform=SSHTargetPlatform.WINDOWS,
-        host_key_public_key=host_pub,
         credential_key="build_mac_ssh_key",
         bootstrap_credential_key="build_mac_ssh_bootstrap",
         lifecycle=SSHTargetLifecycle.PERSISTENT,
@@ -1763,12 +1768,14 @@ async def test_ssh_target_enrollment_with_authorization_off_requires_agreement(
         monkeypatch,
         owner_scope=exec_service.owner,
     )
-    staged = SSHTargetEnrollChangeService(lead).stage(
+    staged = SSHTargetEnrollChangeService(
+        lead,
+        host_key_prober=lambda _h, _p, _t: {"host_key_public_key": host_pub},
+    ).stage(
         target_id="auth_off_host",
         host="198.51.100.91",
         username="admin",
         platform=SSHTargetPlatform.MACOS,
-        host_key_public_key=host_pub,
         credential_key="build_mac_ssh_key",
         lifecycle=SSHTargetLifecycle.PERSISTENT,
         reason="Auth-off enrollment agreement check",
@@ -1782,11 +1789,12 @@ async def test_ssh_target_enrollment_with_authorization_off_requires_agreement(
 
     session = json.loads(tools.create_execution_ssh_session._tool_func(target_id="auth_off_host", confirmed=True))
     assert session["target"]["target_id"] == "auth_off_host"
-    # Broker verifies the enrolled target via ExecutionAccessGuard and routes catalog:<key>
-    # through CatalogSSHCredentialMaterialProvider (here the seeded Sealbox item has no secret).
+    # C71: Sealbox-backed enrolled targets refuse to resolve credentials inside agent processes
+    # when SECURE_TOOL_BROKER_INTERNAL_BASE_URL is not configured.
+    monkeypatch.delenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", raising=False)
     opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=session["session_id"]))
-    assert opened["error_code"] == "execution_access_refused"
-    assert "Could not resolve SSH credential 'build_mac_ssh_key'.ssh_private_key" in opened["error"]
+    assert opened["error_code"] == "broker_unavailable"
+    assert "secure tool broker" in opened["error"]
 
 
 # -- Checkpoint 8: C48-C51 Hardening Tests -----------------------------------------
@@ -1974,13 +1982,15 @@ async def test_ssh_deleted_credential_at_apply_and_unreadable_catalog_report_cle
     _seed_ssh_catalog(db_path, monkeypatch, owner_scope=exec_service.owner)
 
     # (a1) Admin approves target enrollment, then credential is deleted before apply_change runs.
-    enroll_service = SSHTargetEnrollChangeService(lead)
+    enroll_service = SSHTargetEnrollChangeService(
+        lead,
+        host_key_prober=lambda _h, _p, _t: {"host_key_public_key": host_pub},
+    )
     staged_enroll = enroll_service.stage(
         target_id="c49_deleted_key_target",
         host="198.51.100.95",
         username="admin",
         platform=SSHTargetPlatform.LINUX,
-        host_key_public_key=host_pub,
         credential_key="build_mac_ssh_key",
         lifecycle=SSHTargetLifecycle.PERSISTENT,
         reason="Test deleted key at apply",
@@ -2009,7 +2019,6 @@ async def test_ssh_deleted_credential_at_apply_and_unreadable_catalog_report_cle
         host="198.51.100.96",
         username="admin",
         platform=SSHTargetPlatform.LINUX,
-        host_key_public_key=host_pub,
         credential_key="build_mac_ssh_key",
         bootstrap_credential_key="build_mac_ssh_bootstrap",
         lifecycle=SSHTargetLifecycle.PERSISTENT,
@@ -2063,7 +2072,6 @@ async def test_ssh_deleted_credential_at_apply_and_unreadable_catalog_report_cle
                 host="198.51.100.97",
                 username="admin",
                 platform=SSHTargetPlatform.LINUX,
-                host_key_public_key=host_pub,
                 credential_key="build_mac_ssh_key",
                 lifecycle=SSHTargetLifecycle.PERSISTENT,
                 reason="Corrupt catalog check",
@@ -2088,7 +2096,6 @@ async def test_ssh_deleted_credential_at_apply_and_unreadable_catalog_report_cle
                         host="198.51.100.98",
                         username="admin",
                         platform=SSHTargetPlatform.LINUX,
-                        host_key_public_key=host_pub,
                         credential_key="build_mac_ssh_key",
                         lifecycle=SSHTargetLifecycle.PERSISTENT,
                         reason="Unreadable catalog check",
@@ -2158,6 +2165,7 @@ def _make_worker_agent(lead: Any, *, agent_id: str, agent_type: str) -> Any:
     fields["id"] = agent_id
     fields["agent_id"] = agent_id
     fields["named_agent_type"] = agent_type
+    fields["is_team_lead"] = False
     return SimpleNamespace(**fields)
 
 
@@ -2281,16 +2289,45 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end real Cedar + SQLite test of all new SSH agent tools, worker delegation, bundle safety, and broker shutdown."""
+    """End-to-end real Cedar + SQLite + live SecureToolBrokerService test (C71, C74, C75, C76).
+
+    Verifies:
+    - All Sealbox-backed SSH operations run inside SecureToolBrokerService (C71).
+    - plan_execution_ssh_target runs a trusted broker probe and refuses a mismatched
+      expected_host_key_fingerprint (C74).
+    - Delegated worker receives fn:execution_control only via TeamLead hand-on for
+      the task (NO lasting worker grant), verified through BOTH the agent Cedar
+      access hook (decide_call) and BrokerAccessGate; a worker without access is
+      refused by the hook and gate, while an unrelated worker with hand-on access
+      is refused by ExecutionAccessGuard (C75).
+    - close_execution_ssh_session enforces ExecutionAccessGuard.require_ssh_close
+      and _error_payload maps missing path, file-size/type, and lost lease to
+      distinct actionable error codes (C76).
+    """
 
     import subprocess
+    from aiohttp.test_utils import TestServer
+    from access_control.caller_tokens import CALLER_MANAGER, derive_caller_token
+    from custom_agents import access_runtime
     from custom_agents.execution_control_service import ExecutionControlService
-    from custom_messages.contracts.access_v2 import AccessLevel, GrantLifetime, GrantV1, SubjectKind, SubjectRefV1, TargetKind, TargetRefV1
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        DelegationMode,
+        GrantKind,
+        GrantLifetime,
+        GrantV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
     from custom_tools import agent_team_port
+    from custom_tools.file_access import FILE_TOO_LARGE, NOT_A_REGULAR_FILE, PathPolicyError
     from custom_tools.providers import _execution_ssh
     from custom_tools.workspace_scope import current_workspace_scope
     from runtime_hosting.execution_contracts import ssh_public_key_sha256_fingerprint
     from secure_tool_broker import credential_catalog
+    from secure_tool_broker.access_gate import build_broker_access_gate
     from secure_tool_broker.credential_catalog import (
         CatalogCredential,
         CatalogCredentialField,
@@ -2298,17 +2335,25 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
         CredentialCatalog,
     )
     from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
+    from secure_tool_broker.service import SecureToolBrokerService
+    from storage.execution_control_repository import StaleExecutionFence
     from tests.change_approval_support import owner
 
     use_signed_contexts(monkeypatch)
     monkeypatch.setattr(
         agent_team_port,
         "_agent_type_source",
-        lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}, "WebResearchAgent": {}},
+        lambda: {
+            "TeamArchitect": {},
+            "CodeWritingAgent": {},
+            "WebResearchAgent": {},
+            "BlockedWorker": {},
+        },
     )
     tools._SSH_BROKERS.clear()
 
-    # Generate a real ed25519 keypair so ssh-agent / ssh-add unlock it cleanly.
+    # Generate a real ed25519 keypair so ssh-agent / ssh-add unlock it cleanly inside the broker.
     keygen_dir = tmp_path / "keys"
     keygen_dir.mkdir()
     client_key = keygen_dir / "client_ed25519"
@@ -2322,6 +2367,8 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
 
     host_pub = _framed_ed25519_pub(b"\x55" * 32)
     _, host_fp = ssh_public_key_sha256_fingerprint(host_pub)
+    other_host_pub = _framed_ed25519_pub(b"\x99" * 32)
+    _, other_host_fp = ssh_public_key_sha256_fingerprint(other_host_pub)
 
     extract_root = tmp_path / "remote_extract"
     remote_state = tmp_path / "remote_state"
@@ -2342,26 +2389,42 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
 
     lead = execution_lead(instance)
     set_agent_ref(lead)
-    grant_execution(lead)
 
-    # Grant CodeWritingAgent and WebResearchAgent fn:execution_control write access in real Cedar
-    # so ExecutionAccessGuard (not missing Cedar grants) is what separates authorized vs unauthorized workers.
-    from custom_agents import access_runtime
-
-    for worker_type in ("CodeWritingAgent", "WebResearchAgent"):
-        access_runtime.runtime_access(lead).service.grant_by_person(
-            owner(lead),
-            GrantV1(
-                grant_id="new",
-                team_id=lead.team_id,
-                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{lead.team_id}/{worker_type}"),
-                target=TargetRefV1(kind=TargetKind.TOOL, id="fn:execution_control"),
-                level=AccessLevel.WRITE,
-                lifetime=GrantLifetime.UNTIL_REVOKED,
-                granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner(lead).person_id),
-                created_at_utc=datetime.now(timezone.utc),
-            ),
-        )
+    # C75: Give TeamArchitect a delegable fn:execution_control grant for Alice's work.
+    # NO lasting worker grants are created for CodeWritingAgent or WebResearchAgent.
+    access_svc = access_runtime.runtime_access(lead).service
+    assert access_svc is not None
+    access_svc.grant_by_person(
+        owner(lead),
+        GrantV1(
+            grant_id="new",
+            team_id=lead.team_id,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{lead.team_id}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="fn:execution_control"),
+            level=AccessLevel.WRITE,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            delegation_depth=1,
+            delegation_mode=DelegationMode.AUTOMATIC,
+            for_person_id=owner(lead).person_id,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner(lead).person_id),
+            created_at_utc=datetime.now(timezone.utc),
+        ),
+    )
+    # Block BlockedWorker on fn:execution_control so the access hook and broker gate refuse it.
+    access_svc.grant_by_person(
+        owner(lead),
+        GrantV1(
+            grant_id="new",
+            team_id=lead.team_id,
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{lead.team_id}/BlockedWorker"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="fn:execution_control"),
+            level=AccessLevel.READ,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner(lead).person_id),
+            created_at_utc=datetime.now(timezone.utc),
+        ),
+    )
 
     exec_service = ExecutionControlService(lead)
     monkeypatch.setenv(
@@ -2422,38 +2485,104 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
         scope=scope,
     )
 
-    # Wire fake keyscan, sudo, and tailscale paths onto the shared broker once created.
-    broker = tools._ssh_broker(exec_service)
+    # Start a real SecureToolBrokerService with real Cedar BrokerAccessGate and BrokerExecutionSSHRuntime.
+    broker_root_token = "e2e-broker-root-token"
+    gate = build_broker_access_gate(
+        instance_root=instance.root,
+        team_id=lead.team_id,
+        authorization_enabled=True,
+        storage_settings=instance.config.manager_storage_settings,
+        cedar_binary=str(CEDAR_BINARY),
+        lead_agent_type="TeamArchitect",
+    )
+    ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
+        instance_root_path=str(instance.root),
+        instance_name=instance.config.instance_name,
+        storage_settings=instance.config.manager_storage_settings,
+        ssh=instance.config.execution_control.ssh,
+        lead_agent_type="TeamArchitect",
+    )
+    broker_service = SecureToolBrokerService(
+        token=broker_root_token,
+        access_gate=gate,
+        execution_ssh_config=ssh_cfg,
+    )
+    assert broker_service._execution_ssh is not None
+    broker = broker_service._execution_ssh.broker
     broker.ssh_keyscan_executable = str(fake_keyscan_bin)
     broker.sudo_search_paths = (str(fake_sudo_bin),)
     broker.tailscale_search_paths = (str(fake_ts_bin),)
 
-    # 1. probe_execution_ssh_host_key enforces guardrails and returns fingerprint + verification commands.
-    denied_probe = json.loads(
-        await tools.probe_execution_ssh_host_key._tool_func(host="127.0.0.1", port=22)
-    )
-    assert denied_probe["error_code"] == "execution_access_refused"
+    async def _invoke_with_access_hook(agent: Any, tool_fn: Any, **kwargs: Any) -> dict[str, Any]:
+        """Run the real Cedar access hook (decide_call) before invoking the tool function."""
+        set_agent_ref(agent)
+        fn_name = tool_fn._tool_func.__name__
+        decision = decide_call(agent, fn_name, kwargs)
+        assert decision is not None
+        if not decision.allowed:
+            return {
+                "status": "access_denied",
+                "error_code": "hook_access_denied",
+                "reason": decision.reason,
+            }
+        result = tool_fn._tool_func(**kwargs)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return json.loads(result)
 
-    probed = json.loads(
-        await tools.probe_execution_ssh_host_key._tool_func(host="198.51.100.77", port=2222)
-    )
-    assert probed["host"] == "198.51.100.77"
-    assert probed["port"] == 2222
-    assert probed["host_key_algorithm"] == "ssh-ed25519"
-    assert probed["host_key_fingerprint"] == host_fp
-    assert "linux" in probed["verification_commands"]
+    async with TestServer(broker_service.build_app()) as server:
+        base_url = str(server.make_url("")).rstrip("/")
+        monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", base_url)
+        monkeypatch.setenv(
+            "SECURE_TOOL_BROKER_TOKEN",
+            derive_caller_token(broker_root_token, CALLER_MANAGER),
+        )
 
-    # 2. plan_execution_ssh_target + apply_change enrolls the target under real Cedar.
-    target_expiry = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
-    staged_target = json.loads(
-        tools.plan_execution_ssh_target._tool_func(
+        # 1. probe_execution_ssh_host_key runs in the broker, enforces guardrails, and returns fingerprint.
+        denied_probe = await _invoke_with_access_hook(
+            lead, tools.probe_execution_ssh_host_key, host="127.0.0.1", port=22
+        )
+        assert denied_probe["error_code"] == "execution_access_refused"
+
+        probed = await _invoke_with_access_hook(
+            lead, tools.probe_execution_ssh_host_key, host="198.51.100.77", port=2222
+        )
+        assert probed["host"] == "198.51.100.77"
+        assert probed["port"] == 2222
+        assert probed["host_key_algorithm"] == "ssh-ed25519"
+        assert probed["host_key_fingerprint"] == host_fp
+        assert "linux" in probed["verification_commands"]
+
+        # 2. C74: plan_execution_ssh_target runs the trusted broker probe at staging (no host_key_public_key arg)
+        #    and refuses if expected_host_key_fingerprint differs from what the trusted probe saw.
+        target_expiry = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        mismatch_stage = await _invoke_with_access_hook(
+            lead,
+            tools.plan_execution_ssh_target,
+            target_id="e2e_host_mismatch",
+            host="198.51.100.77",
+            port=2222,
+            username="ops",
+            platform="linux",
+            expected_host_key_fingerprint=other_host_fp,
+            credential_key="e2e_ssh_key",
+            credential_public_key_fingerprint=client_pub_fp,
+            bootstrap_credential_key="e2e_boot",
+            lifecycle="temporary",
+            expires_at_utc=target_expiry,
+            reason="Should refuse mismatched expected fingerprint",
+        )
+        assert mismatch_stage["error_code"] == "execution_access_refused", mismatch_stage
+        assert "does not match" in mismatch_stage["error"]
+
+        staged_target = await _invoke_with_access_hook(
+            lead,
+            tools.plan_execution_ssh_target,
             target_id="e2e_host_01",
             host="198.51.100.77",
             port=2222,
             username="ops",
             platform="linux",
-            host_key_public_key=probed["host_key_public_key"],
-            host_key_fingerprint=probed["host_key_fingerprint"],
             credential_key="e2e_ssh_key",
             credential_public_key_fingerprint=client_pub_fp,
             bootstrap_credential_key="e2e_boot",
@@ -2461,23 +2590,24 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
             expires_at_utc=target_expiry,
             reason="Bootstrap E2E build host",
         )
-    )
-    assert staged_target["status"] == "staged", staged_target
-    call_enroll = ToolCall("tooluse_e2e_enroll")
-    with pytest.raises(InterruptException):
-        await _apply(staged_target["change_id"], call_enroll)
-    decide(lead, call_enroll)
-    applied_enroll = await _apply(staged_target["change_id"], call_enroll)
-    assert applied_enroll["status"] == "applied", applied_enroll
+        assert staged_target["status"] == "staged", staged_target
+        assert any(host_fp in line for line in staged_target["effect"])
+        call_enroll = ToolCall("tooluse_e2e_enroll")
+        with pytest.raises(InterruptException):
+            await _apply(staged_target["change_id"], call_enroll)
+        decide(lead, call_enroll)
+        applied_enroll = await _apply(staged_target["change_id"], call_enroll)
+        assert applied_enroll["status"] == "applied", applied_enroll
 
-    # 3. Create session and delegate all operational capabilities to CodeWritingAgent for this request.
-    created_session = json.loads(
-        tools.create_execution_ssh_session._tool_func(target_id="e2e_host_01")
-    )
-    session_id = created_session["session_id"]
+        # 3. Create session and delegate all operational capabilities to CodeWritingAgent for this request.
+        created_session = await _invoke_with_access_hook(
+            lead, tools.create_execution_ssh_session, target_id="e2e_host_01"
+        )
+        session_id = created_session["session_id"]
 
-    staged_deleg = json.loads(
-        tools.plan_execution_ssh_interaction._tool_func(
+        staged_deleg = await _invoke_with_access_hook(
+            lead,
+            tools.plan_execution_ssh_interaction,
             session_id=session_id,
             reason="Run bootstrap commands, key enrollment, sudo recipe, and bundle upload",
             ttl_seconds=600,
@@ -2488,193 +2618,782 @@ async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdo
             allow_workspace_transfer=True,
             allowed_secret_recipes_json=json.dumps(["tailscale_up"]),
         )
-    )
-    assert staged_deleg["status"] == "staged", staged_deleg
-    call_deleg = ToolCall("tooluse_e2e_deleg")
-    with pytest.raises(InterruptException):
-        await _apply(staged_deleg["change_id"], call_deleg)
-    decide(lead, call_deleg)
-    applied_deleg = await _apply(staged_deleg["change_id"], call_deleg)
-    assert applied_deleg["status"] == "applied", applied_deleg
+        assert staged_deleg["status"] == "staged", staged_deleg
+        call_deleg = ToolCall("tooluse_e2e_deleg")
+        with pytest.raises(InterruptException):
+            await _apply(staged_deleg["change_id"], call_deleg)
+        decide(lead, call_deleg)
+        applied_deleg = await _apply(staged_deleg["change_id"], call_deleg)
+        assert applied_deleg["status"] == "applied", applied_deleg
 
-    # 4. Switch to delegated CodeWritingAgent worker.
-    worker = _make_worker_agent(lead, agent_id="worker_code_1", agent_type="CodeWritingAgent")
-    other_worker = _make_worker_agent(lead, agent_id="worker_web_1", agent_type="WebResearchAgent")
-    set_agent_ref(worker)
+        # 4. Switch to delegated CodeWritingAgent worker (NO lasting worker grant; handed on for this task!).
+        worker = _make_worker_agent(lead, agent_id="worker_code_1", agent_type="CodeWritingAgent")
+        other_worker = _make_worker_agent(lead, agent_id="worker_web_1", agent_type="WebResearchAgent")
+        blocked_worker = _make_worker_agent(lead, agent_id="worker_blocked_1", agent_type="BlockedWorker")
 
-    # Manager-only tools are refused for workers.
-    mgr_only = json.loads(await tools.probe_execution_ssh_host_key._tool_func(host="198.51.100.77"))
-    assert "manager-only" in mgr_only["error"]
-    mgr_only_plan = json.loads(
-        tools.plan_execution_ssh_target._tool_func(
+        # C75: Blocked worker with no access is refused by BOTH the access hook AND BrokerAccessGate.
+        hook_denied = await _invoke_with_access_hook(
+            blocked_worker,
+            tools.run_execution_ssh_command,
+            session_id=session_id,
+            command="echo blocked",
+        )
+        assert hook_denied["error_code"] == "hook_access_denied", hook_denied
+        # Bypassing the agent hook directly still gets refused by BrokerAccessGate inside the broker!
+        set_agent_ref(blocked_worker)
+        gate_denied = json.loads(
+            await tools.run_execution_ssh_command._tool_func(
+                session_id=session_id,
+                command="echo blocked",
+            )
+        )
+        assert gate_denied["error_code"] == "execution_access_refused", gate_denied
+        assert gate_denied.get("reason_code") == "access_denied", gate_denied
+
+        # Manager-only tools are refused for workers.
+        mgr_only = await _invoke_with_access_hook(
+            worker, tools.probe_execution_ssh_host_key, host="198.51.100.77"
+        )
+        assert "manager-only" in mgr_only["error"]
+        mgr_only_plan = await _invoke_with_access_hook(
+            worker,
+            tools.plan_execution_ssh_target,
             host="198.51.100.77",
             username="ops",
             platform="linux",
-            host_key_public_key=host_pub,
             credential_key="e2e_ssh_key",
             reason="worker attempt",
         )
-    )
-    assert "manager-only" in mgr_only_plan["error"]
+        assert "manager-only" in mgr_only_plan["error"]
 
-    # Worker lists sessions and sees usable_in_this_request=True.
-    worker_sessions = json.loads(tools.list_execution_ssh_sessions._tool_func())
-    matched = [s for s in worker_sessions["sessions"] if s["session_id"] == session_id]
-    assert len(matched) == 1 and matched[0]["usable_in_this_request"] is True
+        # Worker lists sessions through real Cedar access hook (hand-on!) and sees usable_in_this_request=True.
+        worker_sessions = await _invoke_with_access_hook(worker, tools.list_execution_ssh_sessions)
+        matched = [s for s in worker_sessions["sessions"] if s["session_id"] == session_id]
+        assert len(matched) == 1 and matched[0]["usable_in_this_request"] is True
 
-    # Worker runs an async command and polls it via get_execution_ssh_command.
-    started_cmd = json.loads(
-        await tools.run_execution_ssh_command._tool_func(
+        # Worker runs an async command and polls it via get_execution_ssh_command through real Cedar + broker.
+        started_cmd = await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_command,
             session_id=session_id,
             command="sleep 0.25; echo worker-async-done",
             timeout_seconds=15.0,
             wait_seconds=0.05,
         )
-    )
-    assert started_cmd["status"] == "running", started_cmd
-    polled_cmd = json.loads(
-        await tools.get_execution_ssh_command._tool_func(
+        assert started_cmd["status"] == "running", started_cmd
+        polled_cmd = await _invoke_with_access_hook(
+            worker,
+            tools.get_execution_ssh_command,
             session_id=session_id,
             command_id=started_cmd["command_id"],
             wait_seconds=5.0,
         )
-    )
-    assert polled_cmd["status"] == "completed", polled_cmd
-    assert "worker-async-done" in polled_cmd["stdout"]
+        assert polled_cmd["status"] == "completed", polled_cmd
+        assert "worker-async-done" in polled_cmd["stdout"]
 
-    # Worker runs one-time enroll_execution_ssh_key and sees it latch off permanently.
-    enrolled_key = json.loads(
-        await tools.enroll_execution_ssh_key._tool_func(session_id=session_id, timeout_seconds=30.0)
-    )
-    assert enrolled_key["verified_key_login"] is True, enrolled_key
-    assert (remote_state / "askpass_pw.txt").read_text(encoding="utf-8") == admin_pw
-    assert (remote_state / "enrolled_pub.txt").read_text(encoding="utf-8") == client_pub
-    second_enroll = json.loads(
-        await tools.enroll_execution_ssh_key._tool_func(session_id=session_id, timeout_seconds=30.0)
-    )
-    assert second_enroll["error_code"] == "execution_access_refused"
-    assert "latched" in second_enroll["error"]
+        # Worker runs one-time enroll_execution_ssh_key and sees it latch off permanently.
+        enrolled_key = await _invoke_with_access_hook(
+            worker, tools.enroll_execution_ssh_key, session_id=session_id, timeout_seconds=30.0
+        )
+        assert enrolled_key["verified_key_login"] is True, enrolled_key
+        assert (remote_state / "askpass_pw.txt").read_text(encoding="utf-8") == admin_pw
+        assert (remote_state / "enrolled_pub.txt").read_text(encoding="utf-8") == client_pub
+        second_enroll = await _invoke_with_access_hook(
+            worker, tools.enroll_execution_ssh_key, session_id=session_id, timeout_seconds=30.0
+        )
+        assert second_enroll["error_code"] == "execution_access_refused"
+        assert "latched" in second_enroll["error"]
 
-    # Worker runs run_execution_ssh_sudo (free command + tailscale_up recipe).
-    sudo_free = json.loads(
-        await tools.run_execution_ssh_sudo._tool_func(
+        # Worker runs run_execution_ssh_sudo (free command + tailscale_up recipe).
+        sudo_free = await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_sudo,
             session_id=session_id,
             command="echo sudo-worker-ok",
             timeout_seconds=15.0,
             wait_seconds=5.0,
         )
-    )
-    assert sudo_free["status"] == "completed", sudo_free
-    assert "sudo-worker-ok" in sudo_free["stdout"]
-    assert admin_pw not in sudo_free["stdout"]
+        assert sudo_free["status"] == "completed", sudo_free
+        assert "sudo-worker-ok" in sudo_free["stdout"]
+        assert admin_pw not in sudo_free["stdout"]
 
-    sudo_ts = json.loads(
-        await tools.run_execution_ssh_sudo._tool_func(
+        sudo_ts = await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_sudo,
             session_id=session_id,
             secret_recipe="tailscale_up",
             recipe_params_json=json.dumps({"hostname": "build-node-1", "ssh": True}),
             timeout_seconds=15.0,
             wait_seconds=5.0,
         )
-    )
-    assert sudo_ts["status"] == "completed", sudo_ts
-    assert ts_key not in sudo_ts["stdout"]
-    ts_data = json.loads(ts_record.read_text(encoding="utf-8"))
-    assert ts_data["auth_key"] == ts_key
-    assert "--hostname" in ts_data["args"] and "--ssh" in ts_data["args"]
+        assert sudo_ts["status"] == "completed", sudo_ts
+        assert ts_key not in sudo_ts["stdout"]
+        ts_data = json.loads(ts_record.read_text(encoding="utf-8"))
+        assert ts_data["auth_key"] == ts_key
+        assert "--hostname" in ts_data["args"] and "--ssh" in ts_data["args"]
 
-    # Critic Note #1: Multiline stored credential returns structured invalid_credential_value without leaking secret.
-    monkeypatch.setenv("TEST_E2E_TS_KEY", "tskey-bad-line1\nline2-secret")
-    bad_cred_res = json.loads(
-        await tools.run_execution_ssh_sudo._tool_func(
+        # Critic Note #1: Multiline stored credential returns structured invalid_credential_value without leaking secret.
+        monkeypatch.setenv("TEST_E2E_TS_KEY", "tskey-bad-line1\nline2-secret")
+        bad_cred_res = await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_sudo,
             session_id=session_id,
             secret_recipe="tailscale_up",
             timeout_seconds=15.0,
             wait_seconds=5.0,
         )
-    )
-    assert bad_cred_res["error_code"] == "invalid_credential_value", bad_cred_res
-    assert bad_cred_res["credential_key"] == "e2e_boot"
-    assert bad_cred_res["field_name"] == "tailscale_auth_key"
-    assert "next_step" in bad_cred_res
-    assert "line2-secret" not in json.dumps(bad_cred_res)
-    monkeypatch.setenv("TEST_E2E_TS_KEY", ts_key)
+        assert bad_cred_res["error_code"] == "invalid_credential_value", bad_cred_res
+        assert bad_cred_res["credential_key"] == "e2e_boot"
+        assert bad_cred_res["field_name"] == "tailscale_auth_key"
+        assert "next_step" in bad_cred_res
+        assert "line2-secret" not in json.dumps(bad_cred_res)
+        monkeypatch.setenv("TEST_E2E_TS_KEY", ts_key)
 
-    # Worker uploads non-sensitive workspace files via upload_execution_ssh_bundle; sensitive files & symlinks refused.
-    ws_home = current_workspace_scope(worker).home
-    deploy_dir = ws_home / "deploy"
-    deploy_dir.mkdir(parents=True, exist_ok=True)
-    (deploy_dir / "install.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
-    (deploy_dir / "config.yaml").write_text("mode: prod\n", encoding="utf-8")
+        # Worker uploads non-sensitive workspace files via upload_execution_ssh_bundle; sensitive files, symlinks,
+        # and missing paths return accurate error codes (C76(b)).
+        ws_home = current_workspace_scope(worker).home
+        deploy_dir = ws_home / "deploy"
+        deploy_dir.mkdir(parents=True, exist_ok=True)
+        (deploy_dir / "install.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+        (deploy_dir / "config.yaml").write_text("mode: prod\n", encoding="utf-8")
 
-    uploaded = json.loads(
-        await tools.upload_execution_ssh_bundle._tool_func(
+        uploaded = await _invoke_with_access_hook(
+            worker,
+            tools.upload_execution_ssh_bundle,
             session_id=session_id,
             paths_json=json.dumps(["deploy"]),
             remote_destination="~/bundle",
         )
-    )
-    assert uploaded["file_count"] == 2, uploaded
-    assert (extract_root / "deploy" / "install.sh").read_text(encoding="utf-8") == "#!/bin/sh\necho hi\n"
-    assert (extract_root / "deploy" / "config.yaml").read_text(encoding="utf-8") == "mode: prod\n"
+        assert uploaded["file_count"] == 2, uploaded
+        assert (extract_root / "deploy" / "install.sh").read_text(encoding="utf-8") == "#!/bin/sh\necho hi\n"
+        assert (extract_root / "deploy" / "config.yaml").read_text(encoding="utf-8") == "mode: prod\n"
 
-    # Sensitive .env inside a folder is refused before upload.
-    bad_dir = ws_home / "with_secret"
-    bad_dir.mkdir(parents=True, exist_ok=True)
-    (bad_dir / "ok.txt").write_text("ok\n", encoding="utf-8")
-    (bad_dir / ".env").write_text("API_KEY=secret\n", encoding="utf-8")
-    env_refused = json.loads(
-        await tools.upload_execution_ssh_bundle._tool_func(
+        missing_path_res = await _invoke_with_access_hook(
+            worker,
+            tools.upload_execution_ssh_bundle,
+            session_id=session_id,
+            paths_json=json.dumps(["does_not_exist.txt"]),
+            remote_destination="~/bundle",
+        )
+        assert missing_path_res["error_code"] == "not_found", missing_path_res
+
+        # C76(b): PathPolicyError for size/type maps to invalid_argument; StaleExecutionFence maps to session_lease_lost.
+        assert json.loads(_execution_ssh._error_payload(PathPolicyError("too big", reason_code=FILE_TOO_LARGE)))[
+            "error_code"
+        ] == "invalid_argument"
+        assert json.loads(_execution_ssh._error_payload(PathPolicyError("fifo", reason_code=NOT_A_REGULAR_FILE)))[
+            "error_code"
+        ] == "invalid_argument"
+        fence_err = json.loads(_execution_ssh._error_payload(StaleExecutionFence("lease superseded")))
+        assert fence_err["error_code"] == "session_lease_lost"
+        assert "next_step" in fence_err
+
+        # Sensitive .env inside a folder is refused before upload.
+        bad_dir = ws_home / "with_secret"
+        bad_dir.mkdir(parents=True, exist_ok=True)
+        (bad_dir / "ok.txt").write_text("ok\n", encoding="utf-8")
+        (bad_dir / ".env").write_text("API_KEY=secret\n", encoding="utf-8")
+        env_refused = await _invoke_with_access_hook(
+            worker,
+            tools.upload_execution_ssh_bundle,
             session_id=session_id,
             paths_json=json.dumps(["with_secret"]),
             remote_destination="~/bundle",
         )
-    )
-    assert env_refused["error_code"] == "execution_access_refused", env_refused
+        assert env_refused["error_code"] == "execution_access_refused", env_refused
 
-    # Symlink inside a folder is refused without following.
-    sym_dir = ws_home / "with_link"
-    sym_dir.mkdir(parents=True, exist_ok=True)
-    (sym_dir / "link.txt").symlink_to(deploy_dir / "config.yaml")
-    sym_refused = json.loads(
-        await tools.upload_execution_ssh_bundle._tool_func(
+        # Symlink inside a folder is refused without following.
+        sym_dir = ws_home / "with_link"
+        sym_dir.mkdir(parents=True, exist_ok=True)
+        (sym_dir / "link.txt").symlink_to(deploy_dir / "config.yaml")
+        sym_refused = await _invoke_with_access_hook(
+            worker,
+            tools.upload_execution_ssh_bundle,
             session_id=session_id,
             paths_json=json.dumps(["with_link"]),
             remote_destination="~/bundle",
         )
+        assert sym_refused["error_code"] == "execution_access_refused", sym_refused
+
+        # 5. C75 & C76(a): WebResearchAgent gets task access via hand-on (passes Cedar hook & gate)
+        #    but is refused by ExecutionAccessGuard inside the broker on every operational tool including close.
+        for fn, kwargs in (
+            (tools.run_execution_ssh_command, {"session_id": session_id, "command": "echo nope"}),
+            (tools.get_execution_ssh_command, {"session_id": session_id, "command_id": started_cmd["command_id"]}),
+            (tools.run_execution_ssh_sudo, {"session_id": session_id, "command": "echo nope"}),
+            (tools.upload_execution_ssh_bundle, {"session_id": session_id, "paths_json": json.dumps(["deploy"]), "remote_destination": "~/bundle"}),
+            (tools.close_execution_ssh_session, {"session_id": session_id}),
+        ):
+            denied = await _invoke_with_access_hook(other_worker, fn, **kwargs)
+            assert denied["error_code"] == "execution_access_refused", (fn.__name__, denied)
+
+        # 6. No agent-local SSH broker was ever created (everything ran inside SecureToolBrokerService).
+        assert len(_execution_ssh._SSH_BROKERS) == 0
+
+        # Delegated worker can close its session via ExecutionAccessGuard.require_ssh_close.
+        closed = await _invoke_with_access_hook(
+            worker, tools.close_execution_ssh_session, session_id=session_id
+        )
+        assert closed["session_id"] == session_id
+
+    # Broker server exited -> BrokerExecutionSSHRuntime.shutdown() ran cleanly on the broker's loop.
+    assert broker._shutting_down
+    set_agent_ref(None)
+
+
+@needs_cedar
+@pytest.mark.asyncio
+async def test_c71_manager_env_cannot_resolve_sealbox_secret_while_secure_broker_opens_ssh_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C71: Manager process environment holds no Sealbox env vars or secrets; secure_broker resolves them and opens SSH."""
+
+    import subprocess
+    from aiohttp.test_utils import TestServer
+    from access_control.caller_tokens import CALLER_MANAGER, derive_caller_token
+    from custom_agents.execution_changes import SSHTargetEnrollChangeService
+    from custom_agents.execution_control_service import ExecutionControlService
+    from env_secrets import PROCESS_MANAGER, PROCESS_SECURE_BROKER, environment_for
+    from runtime_hosting.execution_contracts import (
+        SSHTargetLifecycle,
+        SSHTargetPlatform,
     )
-    assert sym_refused["error_code"] == "execution_access_refused", sym_refused
+    from runtime_hosting.ssh_credentials import make_catalog_secret_resolver
+    from secure_tool_broker import credential_catalog
+    from secure_tool_broker.access_gate import build_broker_access_gate
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+        CredentialCatalog,
+    )
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
+    from secure_tool_broker.service import SecureToolBrokerService
 
-    # 5. Unauthorized worker (WebResearchAgent) is refused on every operational tool, including close.
-    set_agent_ref(other_worker)
-    for fn, kwargs in (
-        (tools.run_execution_ssh_command, {"session_id": session_id, "command": "echo nope"}),
-        (tools.get_execution_ssh_command, {"session_id": session_id, "command_id": started_cmd["command_id"]}),
-        (tools.run_execution_ssh_sudo, {"session_id": session_id, "command": "echo nope"}),
-        (tools.upload_execution_ssh_bundle, {"session_id": session_id, "paths_json": json.dumps(["deploy"]), "remote_destination": "~/bundle"}),
-        (tools.close_execution_ssh_session, {"session_id": session_id}),
-    ):
-        denied = json.loads(await fn._tool_func(**kwargs))
-        assert denied["error_code"] == "execution_access_refused", (fn.__name__, denied)
+    use_signed_contexts(monkeypatch)
+    keygen_dir = tmp_path / "keys"
+    keygen_dir.mkdir()
+    client_key = keygen_dir / "id_ed25519"
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(client_key)],
+        check=True,
+    )
+    client_priv = client_key.read_text(encoding="utf-8")
+    client_pub = client_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    host_pub = _framed_ed25519_pub(b"\x66" * 32)
 
-    # 6. Shared broker lifecycle: worker exit keeps manager's broker alive; manager exit shuts it down cleanly.
-    set_agent_ref(worker)
-    running_cmd = json.loads(
-        await tools.run_execution_ssh_command._tool_func(
+    # Create a fake sealbox-cli that returns client_priv ONLY when SEALBOX_URL + SEALBOX_TOKEN_FILE are present.
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore
+
+    broker_creds_dir = tmp_path / "broker_creds"
+    broker_creds_dir.mkdir()
+    root_token_file = broker_creds_dir / "sealbox_root_token"
+    root_token_file.write_text("root-sealbox-token\n", encoding="utf-8")
+    secret_store_file = broker_creds_dir / "stored_priv.pem"
+    secret_store_file.write_text(client_priv, encoding="utf-8")
+
+    fake_sealbox_cli = tmp_path / "fake-sealbox-cli"
+    fake_sealbox_cli.write_text(
+        f"#!{__import__('sys').executable}\n"
+        "import json, os, pathlib, sys\n"
+        "if not os.environ.get('SEALBOX_URL') or not os.environ.get('SEALBOX_TOKEN_FILE'):\n"
+        "    sys.stderr.write('missing sealbox broker env\\n')\n"
+        "    sys.exit(1)\n"
+        "args = sys.argv[1:]\n"
+        "if 'secret' in args and 'get' in args:\n"
+        f"    val = pathlib.Path({str(secret_store_file)!r}).read_text(encoding='utf-8')\n"
+        "    print(json.dumps({'value': val}))\n"
+        "    sys.exit(0)\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    fake_sealbox_cli.chmod(0o755)
+
+    instance = execution_instance(tmp_path, authorization_enabled=True)
+    instance.config.execution_control.ssh.ssh_executable = str(fake_ssh(tmp_path / "bin_c71"))
+    instance.config.save(instance.config_path)
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+    grant_execution(lead)
+    exec_service = ExecutionControlService(lead)
+
+    # Seed Sealbox tenant mapping + valid RSA tenant client material under broker_creds_dir (only broker can read it).
+    from secure_tool_broker.sealbox_runtime import ensure_sealbox_key_pair_files
+
+    tenant_material_dir = broker_creds_dir / "sealbox" / "tenants" / "owner-alice-c71"
+    tenant_material_dir.mkdir(parents=True, exist_ok=True)
+    (tenant_material_dir / "token").write_text("tenant-alice-token\n", encoding="utf-8")
+    ensure_sealbox_key_pair_files(
+        public_key_file=tenant_material_dir / "public.pem",
+        private_key_file=tenant_material_dir / "private.pem",
+    )
+    CredentialCatalogStore(instance.config.credential_catalog_database_path).put_sealbox_tenant_mapping(
+        CredentialOwnerScope.user(exec_service.owner.owner_id),
+        tenant_id="tenant-alice-c71",
+        material_id="owner-alice-c71",
+    )
+
+    # Build a combined supervisor environment, then partition it with env_secrets.environment_for!
+    supervisor_env = dict(os.environ)
+    supervisor_env.update(
+        {
+            "SEALBOX_URL": "http://127.0.0.1:8767",
+            "SEALBOX_CLI_PATH": str(fake_sealbox_cli),
+            "SEALBOX_ROOT_TOKEN_FILE": str(root_token_file),
+            "SECURE_TOOL_BROKER_CREDENTIALS_DIR": str(broker_creds_dir),
+            "SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH": str(
+                instance.config.credential_catalog_database_path
+            ),
+        }
+    )
+    manager_env = environment_for(PROCESS_MANAGER, supervisor_env)
+    broker_env = environment_for(PROCESS_SECURE_BROKER, supervisor_env)
+
+    # Verify manager env has NO Sealbox vars, whereas secure_broker env has them all.
+    for key in ("SEALBOX_URL", "SEALBOX_CLI_PATH", "SEALBOX_ROOT_TOKEN_FILE", "SECURE_TOOL_BROKER_CREDENTIALS_DIR"):
+        assert key not in manager_env
+        assert key in broker_env
+
+    # Seed the Sealbox-backed catalog credential using the broker's catalog DB path.
+    monkeypatch.setenv(
+        "SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH",
+        broker_env["SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH"],
+    )
+    owner_scope = CredentialOwnerScope.user(exec_service.owner.owner_id)
+    credential_catalog.save_catalog(
+        CredentialCatalog(
+            credentials={
+                "sealbox_host_key": CatalogCredential(
+                    display_name="Sealbox Host Key",
+                    purpose="Broker-only Sealbox SSH key",
+                    fields={
+                        "ssh_public_key": CatalogCredentialField(
+                            kind="custom",
+                            visibility="metadata_visible",
+                            value_source="user_provided",
+                            value=client_pub,
+                        ),
+                        "ssh_private_key": CatalogCredentialField(
+                            kind="credential_file",
+                            visibility="secret",
+                            value_source="sealbox",
+                            resolution_order=[
+                                CatalogSourceRef(
+                                    source="sealbox",
+                                    item_name="sealbox_host_key",
+                                    field_ref="ssh_private_key",
+                                )
+                            ],
+                        ),
+                    },
+                )
+            }
+        ),
+        scope=owner_scope,
+    )
+
+    # Prove manager's environment cannot resolve the Sealbox secret directly.
+    with monkeypatch.context() as mgr_ctx:
+        for key in ("SEALBOX_URL", "SEALBOX_CLI_PATH", "SEALBOX_ROOT_TOKEN_FILE", "SECURE_TOOL_BROKER_CREDENTIALS_DIR"):
+            mgr_ctx.delenv(key, raising=False)
+        with pytest.raises(PermissionError, match="Could not resolve SSH credential"):
+            make_catalog_secret_resolver()("sealbox_host_key", "ssh_private_key", exec_service.owner)
+
+    # Enroll target and create session (agent side reads metadata only, never resolves secrets).
+    staged = SSHTargetEnrollChangeService(
+        lead,
+        host_key_prober=lambda _h, _p, _t: {"host_key_public_key": host_pub},
+    ).stage(
+        target_id="c71_sealbox_host",
+        host="198.51.100.88",
+        username="ops",
+        platform=SSHTargetPlatform.LINUX,
+        credential_key="sealbox_host_key",
+        lifecycle=SSHTargetLifecycle.PERSISTENT,
+        reason="C71 broker isolation test",
+    )
+    enroll_call = ToolCall("tooluse_c71_enroll")
+    with pytest.raises(InterruptException):
+        await _apply(staged["change_id"], enroll_call)
+    decide(lead, enroll_call)
+    applied = await _apply(staged["change_id"], enroll_call)
+    assert applied["status"] == "applied", applied
+
+    session = json.loads(tools.create_execution_ssh_session._tool_func(target_id="c71_sealbox_host"))
+    session_id = session["session_id"]
+
+    # Run SecureToolBrokerService with broker_env's Sealbox settings while agent process uses manager_env
+    # (simulated by injecting broker_env ONLY inside the broker's secret resolver and stripping Sealbox
+    # env vars from the agent's process environment!).
+    broker_root_token = "c71-broker-root"
+    gate = build_broker_access_gate(
+        instance_root=instance.root,
+        team_id=lead.team_id,
+        authorization_enabled=True,
+        storage_settings=instance.config.manager_storage_settings,
+        cedar_binary=str(CEDAR_BINARY),
+        lead_agent_type="TeamArchitect",
+    )
+    ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
+        instance_root_path=str(instance.root),
+        instance_name=instance.config.instance_name,
+        storage_settings=instance.config.manager_storage_settings,
+        ssh=instance.config.execution_control.ssh,
+        lead_agent_type="TeamArchitect",
+    )
+    broker_service = SecureToolBrokerService(
+        token=broker_root_token,
+        access_gate=gate,
+        execution_ssh_config=ssh_cfg,
+    )
+    assert broker_service._execution_ssh is not None
+    # Wrap broker's catalog secret resolver so it sees ONLY broker_env (simulating separate secure_broker process).
+    raw_provider = broker_service._execution_ssh.broker.material_provider
+    catalog_provider = getattr(raw_provider, "catalog_provider")
+    real_resolver = catalog_provider.secret_resolver
+
+    def _broker_process_resolver(cred_key: str, field_name: str, owner_arg: Any) -> str | None:
+        saved = {k: os.environ.get(k) for k in ("SEALBOX_URL", "SEALBOX_CLI_PATH", "SEALBOX_ROOT_TOKEN_FILE", "SECURE_TOOL_BROKER_CREDENTIALS_DIR")}
+        try:
+            for k in saved:
+                os.environ[k] = broker_env[k]
+            return real_resolver(cred_key, field_name, owner_arg)
+        finally:
+            for k, old in saved.items():
+                if old is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old
+
+    catalog_provider.secret_resolver = _broker_process_resolver
+
+    # Strip all Sealbox env vars from the agent's environment (matching environment_for('manager', ...)).
+    for key in ("SEALBOX_URL", "SEALBOX_CLI_PATH", "SEALBOX_ROOT_TOKEN_FILE", "SECURE_TOOL_BROKER_CREDENTIALS_DIR"):
+        monkeypatch.delenv(key, raising=False)
+
+    async with TestServer(broker_service.build_app()) as server:
+        monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", str(server.make_url("")).rstrip("/"))
+        monkeypatch.setenv(
+            "SECURE_TOOL_BROKER_TOKEN",
+            derive_caller_token(broker_root_token, CALLER_MANAGER),
+        )
+        opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=session_id))
+        assert opened["status"] == "open", opened
+        assert client_priv not in json.dumps(opened)
+        closed = json.loads(await tools.close_execution_ssh_session._tool_func(session_id=session_id))
+        assert closed["status"] == "closed", closed
+    set_agent_ref(None)
+
+
+@needs_cedar
+@pytest.mark.asyncio
+async def test_c72_two_threads_two_event_loops_revoke_and_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C72: Two threads each running their own asyncio.run() loop work safely across broker revoke & shutdown."""
+
+    import threading
+    import time
+    from aiohttp.test_utils import TestServer
+    from access_control.caller_tokens import CALLER_MANAGER, derive_caller_token
+    from custom_agents import access_runtime
+    from custom_agents.execution_control_service import ExecutionControlService
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        DelegationMode,
+        GrantLifetime,
+        GrantV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
+    from custom_tools import agent_team_port
+    from secure_tool_broker.access_gate import build_broker_access_gate
+    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
+    from secure_tool_broker.service import SecureToolBrokerService
+    from tests.change_approval_support import owner
+
+    use_signed_contexts(monkeypatch)
+    monkeypatch.setattr(
+        agent_team_port,
+        "_agent_type_source",
+        lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}},
+    )
+    tools._SSH_BROKERS.clear()
+
+    extract_root = tmp_path / "c72_extract"
+    remote_state = tmp_path / "c72_state"
+    fake_ssh_bin = _write_fake_tool_ssh(tmp_path / "c72_bin", extract_root=extract_root, state_dir=remote_state)
+
+    instance = execution_instance(tmp_path, authorization_enabled=True)
+    instance.config.execution_control.ssh.ssh_executable = str(fake_ssh_bin)
+    instance.config.save(instance.config_path)
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+    access_svc = access_runtime.runtime_access(lead).service
+    assert access_svc is not None
+    access_svc.grant_by_person(
+        owner(lead),
+        GrantV1(
+            grant_id="new",
+            team_id=lead.team_id,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{lead.team_id}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="fn:execution_control"),
+            level=AccessLevel.WRITE,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            delegation_depth=1,
+            delegation_mode=DelegationMode.AUTOMATIC,
+            for_person_id=owner(lead).person_id,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner(lead).person_id),
+            created_at_utc=datetime.now(timezone.utc),
+        ),
+    )
+
+    session = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID))
+    session_id = session["session_id"]
+    staged_deleg = json.loads(
+        tools.plan_execution_ssh_interaction._tool_func(
             session_id=session_id,
-            command="sleep 30",
-            timeout_seconds=30.0,
-            wait_seconds=0.1,
+            reason="C72 two-loop worker test",
+            ttl_seconds=600,
+            delegated_agent_type="CodeWritingAgent",
+            allow_commands=True,
+            allow_typing=True,
         )
     )
-    assert running_cmd["status"] == "running"
-    await _execution_ssh.shutdown_agent_ssh_broker(worker.id)
-    assert len(_execution_ssh.active_ssh_brokers(team_id=lead.team_id)) == 1
-    assert not broker._shutting_down
+    call_deleg = ToolCall("tooluse_c72_deleg")
+    with pytest.raises(InterruptException):
+        await _apply(staged_deleg["change_id"], call_deleg)
+    decide(lead, call_deleg)
+    assert (await _apply(staged_deleg["change_id"], call_deleg))["status"] == "applied"
+    worker = _make_worker_agent(lead, agent_id="worker_c72", agent_type="CodeWritingAgent")
 
-    await _execution_ssh.shutdown_agent_ssh_broker(lead.id)
-    assert len(_execution_ssh.active_ssh_brokers(team_id=lead.team_id)) == 0
-    assert broker._shutting_down
+    broker_root_token = "c72-broker-root"
+    gate = build_broker_access_gate(
+        instance_root=instance.root,
+        team_id=lead.team_id,
+        authorization_enabled=True,
+        storage_settings=instance.config.manager_storage_settings,
+        cedar_binary=str(CEDAR_BINARY),
+        lead_agent_type="TeamArchitect",
+    )
+    ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
+        instance_root_path=str(instance.root),
+        instance_name=instance.config.instance_name,
+        storage_settings=instance.config.manager_storage_settings,
+        ssh=instance.config.execution_control.ssh,
+        lead_agent_type="TeamArchitect",
+    )
+    broker_service = SecureToolBrokerService(
+        token=broker_root_token,
+        access_gate=gate,
+        execution_ssh_config=ssh_cfg,
+    )
+    assert broker_service._execution_ssh is not None
+    broker_service._execution_ssh.broker.revocation_poll_interval_seconds = 0.1
 
+    async with TestServer(broker_service.build_app()) as server:
+        monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", str(server.make_url("")).rstrip("/"))
+        monkeypatch.setenv(
+            "SECURE_TOOL_BROKER_TOKEN",
+            derive_caller_token(broker_root_token, CALLER_MANAGER),
+        )
+
+        # Thread 1 (own asyncio.run loop): TeamLead opens session.
+        from tests.task_work_support import bind_task
+
+        active_task_id = lead.task_manager.current_task_id
+        lead_result: dict[str, Any] = {}
+        worker_result: dict[str, Any] = {}
+
+        def _lead_thread() -> None:
+            async def _run() -> None:
+                bind_task(active_task_id)
+                set_agent_ref(lead)
+                lead_result["opened"] = json.loads(
+                    await tools.open_execution_ssh_session._tool_func(session_id=session_id)
+                )
+                set_agent_ref(None)
+
+            asyncio.run(_run())
+
+        def _worker_thread() -> None:
+            async def _run() -> None:
+                bind_task(active_task_id)
+                set_agent_ref(worker)
+                worker_result["started"] = json.loads(
+                    await tools.run_execution_ssh_command._tool_func(
+                        session_id=session_id,
+                        command="sleep 30",
+                        timeout_seconds=30.0,
+                        wait_seconds=0.1,
+                    )
+                )
+                set_agent_ref(None)
+
+            asyncio.run(_run())
+
+        t1 = threading.Thread(target=_lead_thread)
+        t1.start()
+        await asyncio.to_thread(t1.join, 15.0)
+        assert lead_result["opened"]["status"] == "open", lead_result
+
+        t2 = threading.Thread(target=_worker_thread)
+        t2.start()
+        await asyncio.to_thread(t2.join, 15.0)
+        assert worker_result["started"]["status"] == "running", worker_result
+        cmd_id = worker_result["started"]["command_id"]
+
+        # Write revocation directly to SQLite (as the gateway will) while neither agent loop is running.
+        exec_service = ExecutionControlService(lead)
+        exec_service.repository.revoke_interactive_session(
+            team_id=lead.team_id,
+            session_id=session_id,
+            revoked_by="admin_c72",
+        )
+
+        # Broker's single-loop monitor stops both the command and live PTY within ~2 seconds!
+        deadline = time.monotonic() + 3.0
+        final_session = None
+        while time.monotonic() < deadline:
+            final_session = exec_service.repository.get_interactive_session(
+                team_id=lead.team_id, session_id=session_id
+            )
+            if (
+                final_session is not None
+                and final_session.status != InteractiveSessionStatus.OPEN
+                and session_id not in broker_service._execution_ssh.broker._sessions
+            ):
+                break
+            await asyncio.sleep(0.05)
+
+        assert final_session is not None
+        assert final_session.status in {
+            InteractiveSessionStatus.DISCONNECTED,
+            InteractiveSessionStatus.CLOSED,
+        }, final_session
+        set_agent_ref(lead)
+        polled = json.loads(
+            await tools.get_execution_ssh_command._tool_func(
+                session_id=session_id,
+                command_id=cmd_id,
+                wait_seconds=1.0,
+            )
+        )
+        assert polled["status"] == "revoked", polled
+
+    # Also verify fallback disk-key proxy is loop-safe across two OS threads + shutdown_agent_ssh_broker.
+    monkeypatch.delenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", raising=False)
+    session2 = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID))
+    s2_id = session2["session_id"]
+    t_open_res: dict[str, Any] = {}
+
+    def _fallback_open_thread() -> None:
+        async def _run() -> None:
+            bind_task(active_task_id)
+            set_agent_ref(lead)
+            t_open_res["opened"] = json.loads(
+                await tools.open_execution_ssh_session._tool_func(session_id=s2_id)
+            )
+            set_agent_ref(None)
+
+        asyncio.run(_run())
+
+    t_fb = threading.Thread(target=_fallback_open_thread)
+    t_fb.start()
+    await asyncio.to_thread(t_fb.join, 15.0)
+    assert t_open_res["opened"]["status"] == "open", t_open_res
+    # Shutdown from a DIFFERENT loop (this test's loop) succeeds with zero ValueError and closes s2!
+    from custom_tools.providers._execution_ssh import shutdown_agent_ssh_broker
+
+    await shutdown_agent_ssh_broker(lead.id)
+    assert len(tools._SSH_BROKERS) == 0
+    after_fb = ExecutionControlService(lead).repository.get_interactive_session(
+        team_id=lead.team_id, session_id=s2_id
+    )
+    assert after_fb is not None and after_fb.status != InteractiveSessionStatus.OPEN
     set_agent_ref(None)
-    tools._SSH_BROKERS.clear()
+
+
+@pytest.mark.asyncio
+async def test_c73_broker_startup_recovers_lost_sessions_and_sweeps_stale_dirs_and_base_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C73: Broker startup immediately marks crashed sessions LOST and sweeps stale ephemeral dirs; base lock prevents sweep races."""
+
+    from aiohttp.test_utils import TestServer
+    from runtime_hosting.ssh_credentials import (
+        SSH_EPHEMERAL_DIR_PREFIX,
+        _create_locked_ephemeral_session_dir,
+        sweep_stale_ssh_ephemeral_dirs,
+    )
+    from secure_tool_broker.access_gate import build_broker_access_gate
+    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
+    from secure_tool_broker.service import SecureToolBrokerService
+
+    use_signed_contexts(monkeypatch)
+    instance = execution_instance(tmp_path, authorization_enabled=False)
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+
+    # Seed an 'open' session row left over from a crashed prior broker run and a stale ephemeral dir.
+    from storage.execution_control_repository import create_execution_control_repository
+
+    repo = create_execution_control_repository(instance.config.manager_storage_settings)
+    crashed_sess = _session(b"c73-host-key", session_id="ssh_sess_crashed_c73").model_copy(
+        update={
+            "status": InteractiveSessionStatus.OPEN,
+            "lease_owner": "prior-broker",
+            "lease_token": "prior-token",
+        }
+    )
+    repo.create_interactive_session(crashed_sess)
+    ephemeral_base = instance.config.layout.ssh_ephemeral_dir
+    ephemeral_base.mkdir(parents=True, mode=0o700, exist_ok=True)
+    stale_dir = ephemeral_base / f"{SSH_EPHEMERAL_DIR_PREFIX}crashed123"
+    stale_dir.mkdir(mode=0o700)
+    (stale_dir / "known_hosts").write_text("stale\n", encoding="utf-8")
+
+    # C73(d): An atomically created + locked session dir survives a sweep under _base_dir_lock.
+    live_dir, lock_fd = _create_locked_ephemeral_session_dir(ephemeral_base)
+    try:
+        gate = build_broker_access_gate(
+            instance_root=instance.root,
+            team_id=lead.team_id,
+            authorization_enabled=False,
+            storage_settings=instance.config.manager_storage_settings,
+            lead_agent_type="TeamArchitect",
+        )
+        ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
+            instance_root_path=str(instance.root),
+            instance_name=instance.config.instance_name,
+            storage_settings=instance.config.manager_storage_settings,
+            ssh=instance.config.execution_control.ssh,
+            lead_agent_type="TeamArchitect",
+        )
+        broker_service = SecureToolBrokerService(
+            token="c73-broker-root",
+            access_gate=gate,
+            execution_ssh_config=ssh_cfg,
+        )
+        # Starting the broker immediately recovers the crashed session and sweeps stale_dir without any SSH tool call!
+        async with TestServer(broker_service.build_app()):
+            recovered = repo.get_interactive_session(
+                team_id=lead.team_id, session_id="ssh_sess_crashed_c73"
+            )
+            assert recovered is not None
+            assert recovered.status is InteractiveSessionStatus.LOST
+            assert not stale_dir.exists()
+            assert live_dir.exists()
+    finally:
+        os.close(lock_fd)
+    # Once unlocked, sweep cleans up live_dir cleanly.
+    assert sweep_stale_ssh_ephemeral_dirs(ephemeral_base) == 1
+    assert not live_dir.exists()
+    set_agent_ref(None)
+

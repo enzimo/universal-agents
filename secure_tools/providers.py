@@ -33,7 +33,9 @@ class ToolContext:
     principal_type: str | None = None
     named_agent_type: str | None = None
     invocation_id: str | None = None
-    # Chosen by the broker's access gate, never by the request.
+    # Verified request id (signed context id) and account link chosen by the
+    # broker's access gate, never by request fields.
+    work_id: str | None = None
     account_link: AccountLinkV1 | None = None
 
     def require_user(self) -> str:

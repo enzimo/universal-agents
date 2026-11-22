@@ -479,6 +479,22 @@ tools:
       enroll_execution_ssh_key: write
       run_execution_ssh_sudo: write
       upload_execution_ssh_bundle: write
+    # Broker-owned SSH actions called by the fn:execution_control SSH tools
+    # (secure_tool_broker.execution_ssh); decided by the broker access gate
+    # under this same fn:execution_control tool and matching operation names.
+    broker_provider: execution_ssh
+    broker_actions:
+      probe_execution_ssh_host_key: read
+      open_execution_ssh_session: write
+      read_execution_ssh_session: read
+      write_execution_ssh_session: write
+      resize_execution_ssh_session: write
+      close_execution_ssh_session: write
+      run_execution_ssh_command: write
+      get_execution_ssh_command: read
+      enroll_execution_ssh_key: write
+      run_execution_ssh_sudo: write
+      upload_execution_ssh_bundle: write
     changes:
       managed_execution_service: full
       execution_ssh_target_enroll: full

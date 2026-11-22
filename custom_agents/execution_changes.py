@@ -27,13 +27,14 @@ again in ``apply``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
 import re
-from typing import Any, Literal, Self
+from typing import Any, Literal, Mapping, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -763,10 +764,42 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
         *,
         resolver: SSHHostResolver | None = None,
         local_address_checker: LocalAddressChecker | None = None,
+        host_key_prober: Callable[[str, int, int], Mapping[str, Any] | Any] | None = None,
     ) -> None:
         super().__init__(agent)
         self._resolver = resolver
         self._local_address_checker = local_address_checker
+        self._host_key_prober = host_key_prober
+
+    def _probe_host_key(
+        self,
+        *,
+        host: str,
+        port: int,
+        timeout_seconds: int = 10,
+    ) -> tuple[str, str, str]:
+        """Run a trusted broker SSH host-key probe and return ``(algorithm, fingerprint, public_key)``."""
+
+        if self._host_key_prober is not None:
+            raw = self._host_key_prober(host, port, timeout_seconds)
+            if isinstance(raw, Mapping):
+                public_key = str(raw.get("host_key_public_key") or "").strip()
+            else:
+                public_key = str(getattr(raw, "host_key_public_key", "") or "").strip()
+        else:
+            from custom_tools.broker_execution_ssh import call_execution_ssh_broker_sync
+
+            probed = call_execution_ssh_broker_sync(
+                "probe_execution_ssh_host_key",
+                {"host": host, "port": port, "timeout_seconds": timeout_seconds},
+                reason=f"Probe SSH host key for {host}:{port} before staging enrollment.",
+                timeout_seconds=float(timeout_seconds),
+            )
+            public_key = str(probed.get("host_key_public_key") or "").strip()
+        if not public_key:
+            raise RuntimeError("Trusted SSH host-key probe returned an empty public key.")
+        algorithm, derived_fingerprint = ssh_public_key_sha256_fingerprint(public_key)
+        return algorithm, derived_fingerprint, public_key
 
     def _plan_store(self) -> FilePlanStore[SSHTargetEnrollChangePlan]:
         return FilePlanStore(
@@ -888,18 +921,19 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
         host: str,
         username: str,
         platform: SSHTargetPlatform | str,
-        host_key_public_key: str,
         credential_key: str,
         reason: str,
         port: int = 22,
         target_id: str | None = None,
-        host_key_fingerprint: str | None = None,
+        expected_host_key_public_key: str | None = None,
+        expected_host_key_fingerprint: str | None = None,
         credential_owner_scope: OwnerScopeV1 | Literal["user", "team"] | None = None,
         credential_public_key_fingerprint: str | None = None,
         bootstrap_credential_key: str | None = None,
         bootstrap_credential_owner_scope: OwnerScopeV1 | Literal["user", "team"] | None = None,
         lifecycle: SSHTargetLifecycle | str = SSHTargetLifecycle.TEMPORARY,
         expires_at_utc: datetime | None = None,
+        probe_timeout_seconds: int = 10,
     ) -> dict[str, Any]:
         ssh_settings = self.execution.config.execution_control.ssh
         if not ssh_settings.enabled:
@@ -922,10 +956,29 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
             raise ValueError("target_id must contain only letters, numbers, underscore, dot, colon, or dash.")
         self._ensure_target_id_available(normalized_target_id)
 
-        cleaned_host_key = host_key_public_key.strip()
-        algorithm, derived_fingerprint = ssh_public_key_sha256_fingerprint(cleaned_host_key)
-        if host_key_fingerprint is not None and host_key_fingerprint.strip() != derived_fingerprint:
-            raise ValueError("host_key_fingerprint does not match host_key_public_key.")
+        # Trusted-code probe (C09 / C74): always observe the host key directly
+        # through the broker after the network policy check, never trusting an
+        # agent-typed key as the source of truth. Optional expected values may
+        # be provided only as strict assertions that fail closed on mismatch.
+        algorithm, derived_fingerprint, cleaned_host_key = self._probe_host_key(
+            host=normalized_host,
+            port=validated_host.port,
+            timeout_seconds=probe_timeout_seconds,
+        )
+        if expected_host_key_public_key is not None and str(expected_host_key_public_key).strip():
+            _exp_algo, exp_fp = ssh_public_key_sha256_fingerprint(str(expected_host_key_public_key).strip())
+            if (
+                str(expected_host_key_public_key).strip() != cleaned_host_key
+                or exp_fp != derived_fingerprint
+            ):
+                raise PermissionError(
+                    "Expected SSH host key does not match the host key observed by the trusted probe."
+                )
+        if expected_host_key_fingerprint is not None and str(expected_host_key_fingerprint).strip():
+            if str(expected_host_key_fingerprint).strip() != derived_fingerprint:
+                raise PermissionError(
+                    "Expected SSH host key fingerprint does not match the host key observed by the trusted probe."
+                )
 
         normalized_cred_key = str(credential_key or "").strip()
         resolved_cred_scope = self._resolve_credential_scope(credential_owner_scope)

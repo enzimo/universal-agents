@@ -306,6 +306,38 @@ class ExecutionAccessGuard:
         ):
             raise ExecutionAuthorizationDenied(SSH_SINGLE_REQUEST_ENDED_MESSAGE)
 
+    def require_ssh_close(
+        self,
+        session: InteractiveSessionV1,
+        *,
+        caller: SSHCallerContext,
+        interaction: SSHInteractionRecordV1 | None = None,
+    ) -> None:
+        """Who may close an SSH session: owning agent or the session's delegated worker.
+
+        Closing only ends remote access and saves the redacted transcript, so
+        expired or revoked sessions and delegations may still be closed by
+        their owner or delegated worker.
+        """
+
+        if caller is None:
+            raise ExecutionAuthorizationDenied("Closing an SSH session requires verified caller identity.")
+        activation = session.connect_activation
+        if activation is None:
+            raise ExecutionAuthorizationDenied("SSH session is missing its connect activation.")
+        holder = activation.holder
+        if holder.person_id is not None and caller.person_id != holder.person_id:
+            raise ExecutionAuthorizationDenied("SSH session belongs to another person.")
+        if caller.agent_type == holder.agent_type:
+            return
+        bounds = interaction.bounds if interaction is not None else None
+        if bounds is None or bounds.delegated_agent_type != caller.agent_type:
+            raise ExecutionAuthorizationDenied(
+                "Only the owning agent or the session's delegated worker may close this SSH session."
+            )
+        if bounds.delegated_task_id is not None and caller.task_id != bounds.delegated_task_id:
+            raise ExecutionAuthorizationDenied(SSH_SINGLE_REQUEST_ENDED_MESSAGE)
+
     def require_ssh_capability(
         self,
         session: InteractiveSessionV1,

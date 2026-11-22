@@ -76,6 +76,7 @@ class GateResult:
     next_step: str = ""
     resolution: OperationResolutionV1 | None = None
     person_id: str | None = None
+    work_id: str | None = None
     account_link: AccountLinkV1 | None = None
 
     def as_error(self) -> dict[str, Any]:
@@ -238,7 +239,7 @@ class BrokerAccessGate:
             )
             if not decision.allowed:
                 return GateResult(False, REASON_ACCESS_DENIED, decision.reason, decision.next_step, resolution)
-        return self._with_account(resolution, person_id, context)
+        return self._with_account(resolution, person_id, context, work_id=work_id)
 
     def account_sharing(self) -> TeamAccountSharing | None:
         """The team's sharing choices, from the access store the links are in (both authorization modes).
@@ -273,18 +274,29 @@ class BrokerAccessGate:
         return self.links.active_link(self.team_id, tool_id, LinkOwnerKind.TEAM, self.team_id)
 
     def _with_account(
-        self, resolution: OperationResolutionV1, person_id: str | None, context: Mapping[str, Any]
+        self,
+        resolution: OperationResolutionV1,
+        person_id: str | None,
+        context: Mapping[str, Any],
+        *,
+        work_id: str | None = None,
     ) -> GateResult:
         tool = self.catalog.tools.get(resolution.tool_id)
         if tool is None or tool.account is not AccountMode.LINKED_CREDENTIAL:
-            return GateResult(True, resolution=resolution, person_id=person_id)
+            return GateResult(True, resolution=resolution, person_id=person_id, work_id=work_id)
         if tool_sign_in(tool.tool_id) is not None:
             # A sign-in tool with a team fallback (X): the executor uses the
             # person's own sign-in first, and this team link (only while the
             # team shares the service) without one; it tells the person how to
             # sign in when neither exists.
             team_link = self.account_link_for(tool.tool_id, None)
-            return GateResult(True, resolution=resolution, person_id=person_id, account_link=team_link)
+            return GateResult(
+                True,
+                resolution=resolution,
+                person_id=person_id,
+                work_id=work_id,
+                account_link=team_link,
+            )
         if self.links is None:
             logger.error(
                 "A tool call needs an account but the broker has no access store. "
@@ -310,7 +322,13 @@ class BrokerAccessGate:
                 next_step=account_link_next_step(tool, team_used=team_used),
                 resolution=resolution,
             )
-        return GateResult(True, resolution=resolution, person_id=person_id, account_link=link)
+        return GateResult(
+            True,
+            resolution=resolution,
+            person_id=person_id,
+            work_id=work_id,
+            account_link=link,
+        )
 
 
 def account_link_next_step(tool: ToolDefinitionV1, *, team_used: bool) -> str:

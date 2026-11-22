@@ -437,6 +437,9 @@ class SSHSessionBroker:
     revocation_poll_interval_seconds: float = 1.0
     logger: logging.Logger = logging.getLogger(__name__)
     _sessions: dict[str, _LiveSSHSession] = field(default_factory=dict, init=False, repr=False)
+    _closing_tasks: dict[str, asyncio.Task[InteractiveSessionV1]] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _commands: dict[str, _LiveSSHCommand] = field(default_factory=dict, init=False, repr=False)
     _session_commands: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
     _active_steps: set[_CancellableStep] = field(default_factory=set, init=False, repr=False)
@@ -779,6 +782,28 @@ class SSHSessionBroker:
             except StaleExecutionFence:
                 pass
 
+    def _require_live_authorized(
+        self,
+        session_id: str,
+        *,
+        capability: SSHCapability,
+        caller: SSHCallerContext,
+    ) -> _LiveSSHSession:
+        live = self._sessions.get(session_id)
+        if live is not None:
+            self._authorize_session(live.session, capability=capability, caller=caller)
+            return live
+        # If the background monitor already terminated this session after a grant or
+        # session revocation, surface the real authorization denial rather than a
+        # generic "not live" error.
+        existing = self.repository.get_interactive_session(
+            team_id=self.team_id,
+            session_id=session_id,
+        )
+        if existing is not None:
+            self._authorize_session(existing, capability=capability, caller=caller)
+        raise SSHSessionUnavailable(f"SSH session {session_id!r} is not live in this broker.")
+
     async def write(
         self,
         *,
@@ -789,8 +814,11 @@ class SSHSessionBroker:
         """Type into the session: needs a person's approval for this session (trusted record)."""
 
         self._require_not_shutting_down()
-        live = self._require_live(session_id)
-        self._authorize_session(live.session, capability=SSHCapability.TYPING, caller=caller)
+        live = self._require_live_authorized(
+            session_id,
+            capability=SSHCapability.TYPING,
+            caller=caller,
+        )
         written = os.write(live.master_fd, bytes(payload))
         await self._touch(live)
         return written
@@ -804,8 +832,11 @@ class SSHSessionBroker:
         caller: SSHCallerContext,
     ) -> bytes:
         self._require_not_shutting_down()
-        live = self._require_live(session_id)
-        self._authorize_session(live.session, capability=SSHCapability.CONNECT, caller=caller)
+        live = self._require_live_authorized(
+            session_id,
+            capability=SSHCapability.CONNECT,
+            caller=caller,
+        )
 
         def read_ready(wait_seconds: float) -> tuple[bytes, bool]:
             readable, _, _ = select.select([live.master_fd], [], [], max(0.0, wait_seconds))
@@ -877,8 +908,11 @@ class SSHSessionBroker:
         caller: SSHCallerContext,
     ) -> None:
         self._require_not_shutting_down()
-        live = self._require_live(session_id)
-        self._authorize_session(live.session, capability=SSHCapability.CONNECT, caller=caller)
+        live = self._require_live_authorized(
+            session_id,
+            capability=SSHCapability.CONNECT,
+            caller=caller,
+        )
         self._set_terminal_size(live.master_fd, rows=rows, columns=columns)
         live.session = live.session.model_copy(
             update={"terminal_rows": rows, "terminal_columns": columns}
@@ -2071,9 +2105,31 @@ class SSHSessionBroker:
         *,
         session_id: str,
         disconnected: bool = False,
+        caller: SSHCallerContext | None = None,
     ) -> InteractiveSessionV1:
         """Close the PTY and stop any running commands for this session."""
 
+        if caller is not None:
+            live = self._sessions.get(session_id)
+            session = (
+                live.session
+                if live is not None
+                else self.repository.get_interactive_session(
+                    team_id=self.team_id,
+                    session_id=session_id,
+                )
+            )
+            if session is None:
+                raise SSHSessionUnavailable(f"SSH session {session_id!r} does not exist.")
+            interaction = self.repository.get_ssh_interaction(
+                team_id=self.team_id,
+                session_id=session_id,
+            )
+            self.authorization_guard.require_ssh_close(
+                session,
+                caller=caller,
+                interaction=interaction,
+            )
         return await self._close(session_id=session_id, disconnected=disconnected)
 
     async def revoke_session(
@@ -2157,6 +2213,9 @@ class SSHSessionBroker:
         disconnected: bool,
     ) -> InteractiveSessionV1:
         await self._terminate_session_commands(session_id)
+        in_flight = self._closing_tasks.get(session_id)
+        if in_flight is not None:
+            return await _await_shielded(in_flight, reraise_on_caller_cancel=True)
         live = self._sessions.get(session_id)
         if live is None:
             existing = self.repository.get_interactive_session(
@@ -2173,7 +2232,12 @@ class SSHSessionBroker:
                 disconnected=disconnected,
             )
         )
-        return await _await_shielded(close_task, reraise_on_caller_cancel=True)
+        self._closing_tasks[session_id] = close_task
+        try:
+            return await _await_shielded(close_task, reraise_on_caller_cancel=True)
+        finally:
+            if self._closing_tasks.get(session_id) is close_task and close_task.done():
+                self._closing_tasks.pop(session_id, None)
 
     async def _finish_close(
         self,

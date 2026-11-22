@@ -1001,6 +1001,46 @@ def _terminate_recorded_ssh_pid(
     return True
 
 
+@contextmanager
+def _base_dir_lock(base_dir: Path) -> Iterator[None]:
+    """Serialize session-directory creation+locking against cross-process sweeps.
+
+    Locking ``base_dir`` itself leaves zero extra files on disk and guarantees
+    a sweep never observes an unlocked newly-created session directory or
+    collides with ``_acquire_dir_owner_lock``.
+    """
+
+    resolved_base = _assert_safe_ephemeral_base_dir(base_dir)
+    resolved_base.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(resolved_base, 0o700)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(resolved_base, flags)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
+def _create_locked_ephemeral_session_dir(base_dir: Path) -> tuple[Path, int]:
+    """Create and exclusively lock an ephemeral SSH session dir atomically under ``_base_dir_lock``."""
+
+    with _base_dir_lock(base_dir):
+        session_dir = _create_ephemeral_session_dir(base_dir)
+        try:
+            owner_lock_fd = _acquire_dir_owner_lock(session_dir)
+        except BaseException:
+            _wipe_tree(session_dir)
+            raise
+        return session_dir, owner_lock_fd
+
+
 def _acquire_dir_owner_lock(session_dir: Path) -> int:
     """Hold a non-blocking exclusive flock directly on ``session_dir`` for this process's lifetime.
 
@@ -1065,47 +1105,48 @@ def sweep_stale_ssh_ephemeral_dirs(
         return 0
     active_resolved = {Path(item).resolve() for item in active_dirs}
     swept = 0
-    for entry in sorted(resolved_base.iterdir()):
-        if not entry.name.startswith(SSH_EPHEMERAL_DIR_PREFIX):
-            continue
-        try:
-            entry_stat = os.lstat(entry)
-        except OSError:
-            continue
-        if not stat.S_ISDIR(entry_stat.st_mode):
-            log.warning(
-                "Skipping non-directory entry under SSH ephemeral base directory. "
-                "event=ssh_ephemeral_non_dir_skipped entry=%s",
+    with _base_dir_lock(resolved_base):
+        for entry in sorted(resolved_base.iterdir()):
+            if not entry.name.startswith(SSH_EPHEMERAL_DIR_PREFIX):
+                continue
+            try:
+                entry_stat = os.lstat(entry)
+            except OSError:
+                continue
+            if not stat.S_ISDIR(entry_stat.st_mode):
+                log.warning(
+                    "Skipping non-directory entry under SSH ephemeral base directory. "
+                    "event=ssh_ephemeral_non_dir_skipped entry=%s",
+                    entry.name,
+                )
+                continue
+            if entry.resolve() in active_resolved:
+                continue
+            if _is_dir_locked_by_other_process(entry):
+                continue
+            killed_ssh = False
+            parsed_ssh = _parse_ssh_pid_file(entry / _SSH_PID_FILENAME)
+            if parsed_ssh is not None:
+                ssh_pid, ssh_start, ssh_comm = parsed_ssh
+                killed_ssh = _terminate_recorded_ssh_pid(
+                    ssh_pid,
+                    expected_start_time=ssh_start,
+                    expected_comm=ssh_comm,
+                )
+            killed_agent = False
+            parsed_pid = _parse_agent_pid_file(entry / _AGENT_PID_FILENAME)
+            if parsed_pid is not None:
+                recorded_pid, recorded_start = parsed_pid
+                killed_agent = _terminate_pid(recorded_pid, expected_start_time=recorded_start)
+            _wipe_tree(entry)
+            swept += 1
+            log.info(
+                "Swept stale ephemeral SSH session directory. "
+                "event=ssh_ephemeral_dir_swept directory=%s killed_ssh=%s killed_agent=%s",
                 entry.name,
+                killed_ssh,
+                killed_agent,
             )
-            continue
-        if entry.resolve() in active_resolved:
-            continue
-        if _is_dir_locked_by_other_process(entry):
-            continue
-        killed_ssh = False
-        parsed_ssh = _parse_ssh_pid_file(entry / _SSH_PID_FILENAME)
-        if parsed_ssh is not None:
-            ssh_pid, ssh_start, ssh_comm = parsed_ssh
-            killed_ssh = _terminate_recorded_ssh_pid(
-                ssh_pid,
-                expected_start_time=ssh_start,
-                expected_comm=ssh_comm,
-            )
-        killed_agent = False
-        parsed_pid = _parse_agent_pid_file(entry / _AGENT_PID_FILENAME)
-        if parsed_pid is not None:
-            recorded_pid, recorded_start = parsed_pid
-            killed_agent = _terminate_pid(recorded_pid, expected_start_time=recorded_start)
-        _wipe_tree(entry)
-        swept += 1
-        log.info(
-            "Swept stale ephemeral SSH session directory. "
-            "event=ssh_ephemeral_dir_swept directory=%s killed_ssh=%s killed_agent=%s",
-            entry.name,
-            killed_ssh,
-            killed_agent,
-        )
     return swept
 
 
@@ -1113,8 +1154,6 @@ def _default_catalog_secret_resolver(
     credential_key: str,
     field_name: str,
     owner: OwnerScopeV1,
-    *,
-    fallback_db_path: Path | None = None,
 ) -> str | None:
     scope = (
         CredentialOwnerScope.user(owner.owner_id)
@@ -1125,7 +1164,6 @@ def _default_catalog_secret_resolver(
         credential_key,
         field_name,
         scope=scope,
-        fallback_db_path=fallback_db_path,
     )
     if isinstance(resolved, ToolResult):
         error_code = (resolved.content or {}).get("error_code") if isinstance(resolved.content, dict) else None
@@ -1138,20 +1176,10 @@ def _default_catalog_secret_resolver(
     return resolved.value or None
 
 
-def make_catalog_secret_resolver(
-    *, fallback_db_path: Path | None = None
-) -> SecretFieldResolver:
-    """Build a catalog secret resolver that falls back to ``fallback_db_path`` when the env override is unset."""
+def make_catalog_secret_resolver() -> SecretFieldResolver:
+    """Build the broker-process catalog secret resolver (uses broker Sealbox/catalog env)."""
 
-    def _resolve(credential_key: str, field_name: str, owner: OwnerScopeV1) -> str | None:
-        return _default_catalog_secret_resolver(
-            credential_key,
-            field_name,
-            owner,
-            fallback_db_path=fallback_db_path,
-        )
-
-    return _resolve
+    return _default_catalog_secret_resolver
 
 
 def _serve_oneshot_fifo(
@@ -1324,14 +1352,12 @@ class CatalogSSHCredentialMaterialProvider:
         active_scrubber.register_many(touched)
 
         known_hosts_line = self._resolve_known_hosts_line(session)
-        session_dir = _create_ephemeral_session_dir(self.ephemeral_base_dir)
+        session_dir, owner_lock_fd = _create_locked_ephemeral_session_dir(self.ephemeral_base_dir)
         with self._active_lock:
             self._active_dirs.add(session_dir)
 
-        owner_lock_fd: int | None = None
         agent_handle: _EphemeralAgentHandle | None = None
         try:
-            owner_lock_fd = _acquire_dir_owner_lock(session_dir)
             known_hosts_path = session_dir / "known_hosts"
             _write_private_file(known_hosts_path, known_hosts_line.encode("utf-8"), mode=0o600)
 
@@ -1406,15 +1432,13 @@ class CatalogSSHCredentialMaterialProvider:
             credential_key=credential_key,
             scrubber=scrubber,
         )
-        session_dir = _create_ephemeral_session_dir(self.ephemeral_base_dir)
+        session_dir, owner_lock_fd = _create_locked_ephemeral_session_dir(self.ephemeral_base_dir)
         with self._active_lock:
             self._active_dirs.add(session_dir)
         fifo_path = session_dir / "pw.fifo"
         stop_event = threading.Event()
         writer_thread: threading.Thread | None = None
-        owner_lock_fd: int | None = None
         try:
-            owner_lock_fd = _acquire_dir_owner_lock(session_dir)
             os.mkfifo(fifo_path, 0o600)
             os.chmod(fifo_path, 0o600)
             writer_thread = threading.Thread(

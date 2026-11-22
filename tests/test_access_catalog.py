@@ -506,5 +506,23 @@ def test_execution_ssh_tools_and_change_kinds_have_expected_catalog_levels(catal
         resolved = catalog.resolve_function(fn_name)
         assert resolved.tool_id == "fn:execution_control", fn_name
         assert resolved.level is expected_level, (fn_name, resolved.level, expected_level)
+    expected_broker_actions = {
+        "probe_execution_ssh_host_key": READ,
+        "open_execution_ssh_session": WRITE,
+        "read_execution_ssh_session": READ,
+        "write_execution_ssh_session": WRITE,
+        "resize_execution_ssh_session": WRITE,
+        "close_execution_ssh_session": WRITE,
+        "run_execution_ssh_command": WRITE,
+        "get_execution_ssh_command": READ,
+        "enroll_execution_ssh_key": WRITE,
+        "run_execution_ssh_sudo": WRITE,
+        "upload_execution_ssh_bundle": WRITE,
+    }
+    for action_name, expected_level in expected_broker_actions.items():
+        resolved_broker = catalog.resolve_broker_action("execution_ssh", action_name, {})
+        assert resolved_broker.tool_id == "fn:execution_control", action_name
+        assert resolved_broker.operation == action_name
+        assert resolved_broker.level is expected_level, (action_name, resolved_broker.level, expected_level)
     assert catalog.changes["execution_ssh_target_enroll"] == ("fn:execution_control", FULL)
     assert catalog.changes["execution_ssh_interaction"] == ("fn:execution_control", FULL)

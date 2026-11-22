@@ -99,6 +99,12 @@ def _secure_cli_impl(
     provider: str, action: str, params: dict[str, Any], reason: str
 ) -> Dict[str, Any]:
     """Run validated broker transport; model guidance lives in the mandatory workflow skill."""
+    if str(provider or "").strip() == "execution_ssh":
+        return _tool_result(
+            "error",
+            "Brokered SSH operations are reached only through the fn:execution_control SSH function tools, "
+            "not through secure_cli.",
+        )
     provider_impl = get_provider(provider) or _installed_cli(provider)
     if provider_impl is None:
         return _tool_result(
