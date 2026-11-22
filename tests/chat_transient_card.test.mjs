@@ -5,6 +5,12 @@ import vm from "node:vm";
 
 import { byClass, byTag, fakeDocument } from "./fake_dom.mjs";
 import { FOLLOW_UP_AFTER_LATEST, FOLLOW_UP_AFTER_REVIEW } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
+import {
+  BROKER_CARD_FINISHED,
+  CARD_MESSAGE_TYPE,
+  brokerCardElement,
+  createBrokerCards,
+} from "../assistant_gateway/onboarding_web/assets/broker_card.mjs";
 import "../assistant_gateway/onboarding_web/assets/chat_delivery.js";
 
 const CHAT_JS = readFileSync(new URL("../assistant_gateway/onboarding_web/assets/chat.js", import.meta.url), "utf8");
@@ -12,6 +18,8 @@ const EXPIRE_FN = CHAT_JS.split("function replaceTransientActionWithExpiredState
   .split("function updateTransientCountdown()")[0];
 const ADD_FOLLOW_UP_FNS = CHAT_JS.split("function isReviewOf(requestId)")[1]
   .split("function showFollowUpPages(requestId)")[0];
+const SET_BROKER_STATE_FN = CHAT_JS.split("function setBrokerCardState(thread, itemId, state)")[1]
+  .split("function createTransientItemCard(thread, item)")[0];
 const CREATE_FN = CHAT_JS.split("function createTransientItemCard(thread, item)")[1]
   .split("function renderMessages(options)")[0];
 
@@ -230,4 +238,106 @@ test("addFollowUpPages scopes duplicate checks to the target thread (Inbox in T1
     thread1.transientItems.find(item => item.url === formB.url).itemId,
     "same form gets the same stable itemId across threads",
   );
+});
+
+test("cross-thread broker card outcome and expiry close the form in every thread holding its itemId", () => {
+  const document = fakeDocument();
+  const messageListeners = [];
+  const browser = {
+    innerHeight: 800,
+    console: { warn() {} },
+    addEventListener(event, handler) {
+      if (event === "message") messageListeners.push(handler);
+    },
+    removeEventListener() {},
+  };
+  let nextTimer = 1;
+  const lifecycle = {
+    listen(node, event, handler) { node.addEventListener(event, handler); },
+    timeout(fn, delayMs) {
+      if (delayMs === 0) fn();
+      return nextTimer++;
+    },
+    clearTimeout() {},
+  };
+  const brokerCards = createBrokerCards({ browser, document, lifecycle });
+  const formItem = {
+    itemId: "account_link:req-1:0123456789abcdef",
+    content: "Choose the credential for Portainer.",
+    label: "Choose the credential for Portainer",
+    url: "http://127.0.0.1:18600/account-link/token-a",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-a?view=card",
+    expiresAtUtc: "2026-11-21T12:15:00Z",
+  };
+  const thread1 = { id: "t1", transientItems: [{ ...formItem }], brokerCardStates: new Map() };
+  const thread2 = { id: "t2", transientItems: [{ ...formItem }], brokerCardStates: new Map() };
+  const thread3 = { id: "t3", transientItems: [{ itemId: "account_link:req-2:fedcba9876543210" }], brokerCardStates: new Map() };
+  let current = thread2;
+  let renders = 0;
+
+  const context = {
+    document,
+    brokerCards,
+    brokerCardElement,
+    lifecycle,
+    sharedState: { threads: [thread1, thread2, thread3] },
+    activeThread: () => current,
+    shellState: { expiredSecureFormMessage: "This secure form link has expired." },
+    copyTextToClipboard: () => Promise.resolve(),
+    renderMessages: () => { renders += 1; },
+  };
+  vm.runInNewContext(
+    `function replaceTransientActionWithExpiredState(countdown)${EXPIRE_FN}\n`
+    + `function setBrokerCardState(thread, itemId, state)${SET_BROKER_STATE_FN}\n`
+    + `function createTransientItemCard(thread, item)${CREATE_FN}\n`
+    + `this.createTransientItemCard = createTransientItemCard;\n`
+    + `this.replaceTransientActionWithExpiredState = replaceTransientActionWithExpiredState;`,
+    context,
+  );
+
+  // 1) T2 renders first, opening the live frame whose onState closes over T2.
+  const t2Card = context.createTransientItemCard(thread2, thread2.transientItems[0]);
+  const frame = byTag(t2Card, "iframe")[0];
+  const frameWindow = {};
+  frame.contentWindow = frameWindow;
+  assert.deepEqual(brokerCards.openItemIds(), [formItem.itemId]);
+
+  // 2) Person switches back to T1; T1 reuses T2's live element from the shared registry.
+  current = thread1;
+  const t1Live = context.createTransientItemCard(thread1, thread1.transientItems[0]);
+  assert.equal(t1Live, t2Card, "T1 reuses the live card element for the same itemId");
+
+  // 3) Person finishes the form while viewing T1; the message fires T2's onState handler.
+  messageListeners.forEach(fn => fn({ source: frameWindow, data: { type: CARD_MESSAGE_TYPE, outcome: BROKER_CARD_FINISHED } }));
+  assert.equal(renders, 1);
+  assert.equal(thread1.brokerCardStates.get(formItem.itemId), BROKER_CARD_FINISHED);
+  assert.equal(thread2.brokerCardStates.get(formItem.itemId), BROKER_CARD_FINISHED);
+  assert.equal(thread3.brokerCardStates.get(formItem.itemId), undefined, "unrelated thread is untouched");
+  assert.deepEqual(brokerCards.openItemIds(), [], "live frame closed on outcome");
+
+  // 4) Re-rendering T1 and T2 produces closed cards immediately with zero new frames opened.
+  const t1Closed = context.createTransientItemCard(thread1, thread1.transientItems[0]);
+  const t2Closed = context.createTransientItemCard(thread2, thread2.transientItems[0]);
+  assert.ok(t1Closed.classList.contains("is-closed"));
+  assert.ok(t2Closed.classList.contains("is-closed"));
+  assert.deepEqual(brokerCards.openItemIds(), [], "neither thread reopens the used form");
+
+  // 5) Expiry via replaceTransientActionWithExpiredState also updates every thread holding the itemId.
+  const expItem = {
+    itemId: "account_link:req-3:1111222233334444",
+    content: "Choose the credential for Gitea.",
+    label: "Choose the credential for Gitea",
+    url: "http://127.0.0.1:18600/account-link/token-c",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-c?view=card",
+    expiresAtUtc: "2026-11-21T12:15:00Z",
+  };
+  thread1.transientItems.push({ ...expItem });
+  thread2.transientItems.push({ ...expItem });
+  const expCard = context.createTransientItemCard(thread1, expItem);
+  document.body.append(expCard);
+  const expCountdown = byClass(expCard, "message-transient-countdown")[0];
+  context.replaceTransientActionWithExpiredState(expCountdown);
+  assert.equal(thread1.brokerCardStates.get(expItem.itemId), "expired");
+  assert.equal(thread2.brokerCardStates.get(expItem.itemId), "expired");
+  assert.equal(thread3.brokerCardStates.get(expItem.itemId), undefined);
 });

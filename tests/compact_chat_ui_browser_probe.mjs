@@ -75,7 +75,18 @@ export async function verifyCompactChatUi() {
     check(ratio >= minRatio, `${label}: border contrast ${ratio.toFixed(2)} < ${minRatio} (border=${style.borderTopColor}, parentBg=rgb(${Math.round(parentBg.r)},${Math.round(parentBg.g)},${Math.round(parentBg.b)}))`);
   };
 
-  const { renderReviewCard, renderDecidedCard } = await import("/access_inbox.mjs");
+  const {
+    renderReviewCard,
+    renderDecidedCard,
+    FOLLOW_UP_PAGES_BELOW,
+    FOLLOW_UP_PAGES_IN_CONVERSATION,
+    SHOW_CONVERSATION_LABEL,
+  } = await import("/access_inbox.mjs");
+  const {
+    brokerCardElement,
+    BROKER_CARD_FINISHED,
+    BROKER_CARD_UNAVAILABLE,
+  } = await import("/broker_card.mjs");
   const { renderAgentCard, renderToolCard } = await import("/access_map.mjs");
   const { mountWorkflowCard } = await import("/workflow_card.mjs");
 
@@ -210,6 +221,69 @@ export async function verifyCompactChatUi() {
       decidedBubble.append(decidedSlot);
       messageList.append(decidedBubble);
 
+      // 3b. Compact decided Web Chat card with inline broker-card pages prompt
+      const decidedPagesBubble = document.createElement("div");
+      decidedPagesBubble.className = "message-bubble is-system";
+      const decidedPagesSlot = document.createElement("div");
+      decidedPagesSlot.className = "chat-access-review";
+      const decidedPagesCard = renderDecidedCard(document, {
+        id: "req-decided-pages",
+        title: "Connect Portainer account",
+        outcome: { label: "Approved", tone: "granted", explanation: "Approved by Alice." },
+        pages: { note: FOLLOW_UP_PAGES_BELOW },
+        compact: true,
+      });
+      decidedPagesSlot.append(decidedPagesCard);
+      decidedPagesBubble.append(decidedPagesSlot);
+      messageList.append(decidedPagesBubble);
+
+      // 3c. Inline broker credential cards (framed, closed, unavailable)
+      const stubBrokerCards = {
+        live: () => null,
+        open: ({ title }) => {
+          const frame = document.createElement("iframe");
+          frame.className = "broker-card-frame";
+          frame.title = title || "Secure page";
+          frame.style.height = "140px";
+          return frame;
+        },
+      };
+      const brokerSampleItem = (itemId) => ({
+        itemId,
+        content: "Choose the credential for Portainer.",
+        label: "Choose the credential for Portainer",
+        url: "https://broker.example/account-link/sample",
+        frameUrl: "https://broker.example/account-link/sample?view=card",
+        expiresAtUtc: "2026-11-21T12:15:00Z",
+      });
+      const brokerFramed = brokerCardElement({
+        document,
+        cards: stubBrokerCards,
+        item: brokerSampleItem("account_link:probe:framed"),
+        state: "",
+        expiredMessage: "This secure form link has expired.",
+        onState: () => {},
+      });
+      brokerFramed.querySelector(".message-transient-countdown").textContent = "9:59 remaining";
+      const brokerClosed = brokerCardElement({
+        document,
+        cards: stubBrokerCards,
+        item: brokerSampleItem("account_link:probe:closed"),
+        state: BROKER_CARD_FINISHED,
+        expiredMessage: "This secure form link has expired.",
+        onState: () => {},
+      });
+      const brokerUnavailable = brokerCardElement({
+        document,
+        cards: stubBrokerCards,
+        item: brokerSampleItem("account_link:probe:unavailable"),
+        state: BROKER_CARD_UNAVAILABLE,
+        expiredMessage: "This secure form link has expired.",
+        onState: () => {},
+      });
+      brokerUnavailable.querySelector(".message-transient-countdown").textContent = "9:59 remaining";
+      messageList.append(brokerFramed, brokerClosed, brokerUnavailable);
+
       // 4a. Active standalone transient link notice
       const transientActive = document.createElement("div");
       transientActive.className = "message-transient-notice is-link-card";
@@ -271,12 +345,23 @@ export async function verifyCompactChatUi() {
       workflowBubble.append(wfLink);
       messageList.append(workflowBubble);
 
-      // 6. Settings Access Inbox full request card
+      // 6. Settings Access Inbox full request card + decided card with pages prompt
       const inboxWrap = document.createElement("section");
       inboxWrap.className = "access-inbox-list";
       Object.assign(inboxWrap.style, { width: "760px" });
       const inboxCard = renderReviewCard(document, sampleReview(true), { compact: false });
-      inboxWrap.append(inboxCard);
+      const inboxDecidedPages = renderDecidedCard(document, {
+        id: "req-inbox-pages",
+        title: "Connect Portainer account",
+        outcome: { label: "Approved", tone: "granted", explanation: "Approved by Alice." },
+        pages: {
+          note: FOLLOW_UP_PAGES_IN_CONVERSATION,
+          actionLabel: SHOW_CONVERSATION_LABEL,
+          onAction: () => {},
+        },
+        compact: false,
+      });
+      inboxWrap.append(inboxCard, inboxDecidedPages);
 
       stage.append(chatMain, inboxWrap);
 
@@ -373,6 +458,51 @@ export async function verifyCompactChatUi() {
       checkTextContrast(decidedCard.querySelector(".access-review-follow-up-outcome"), canvas, `${mode} decided follow-up outcome`);
       checkTextContrast(followUpAnchor, canvas, `${mode} decided follow-up anchor`);
 
+      // --- Checks for 3b: Compact decided card with inline broker-card pages note ---
+      const chatPagesNote = decidedPagesCard.querySelector(".access-review-follow-up-note");
+      check(chatPagesNote && chatPagesNote.textContent === FOLLOW_UP_PAGES_BELOW,
+        `${mode} compact decided pages note missing`);
+      const chatPagesNoteStyle = getComputedStyle(chatPagesNote);
+      check(chatPagesNoteStyle.marginTop === "0px" && chatPagesNoteStyle.marginBottom === "0px",
+        `${mode} compact decided pages note kept vertical margin (${chatPagesNoteStyle.marginTop} / ${chatPagesNoteStyle.marginBottom})`);
+      checkTextContrast(chatPagesNote, canvas, `${mode} compact decided pages note`);
+
+      // --- Checks for 3c: Inline broker credential cards (neutral surface, no amber leak, quiet footer) ---
+      const expectedBrokerBg = mode === "dark" ? "rgb(17, 23, 27)" : "rgb(255, 255, 255)";
+      for (const [label, el] of [
+        ["framed broker card", brokerFramed],
+        ["closed broker card", brokerClosed],
+        ["unavailable broker card", brokerUnavailable],
+      ]) {
+        const st = getComputedStyle(el);
+        check(st.backgroundColor === expectedBrokerBg && st.backgroundImage === "none",
+          `${mode} ${label} surface drifted from neutral (${st.backgroundColor} / ${st.backgroundImage}, expected ${expectedBrokerBg})`);
+        check(st.borderLeftWidth === "1px",
+          `${mode} ${label} picked up amber left accent (borderLeftWidth=${st.borderLeftWidth})`);
+        check(!st.borderTopColor.includes("183, 121, 31") && !st.borderTopColor.includes("208, 168, 95"),
+          `${mode} ${label} leaked amber border (${st.borderTopColor})`);
+      }
+      const brokerReason = brokerFramed.querySelector(".broker-card-reason");
+      const brokerCountdown = brokerFramed.querySelector(".broker-card-footer .message-transient-countdown");
+      const brokerOpen = brokerFramed.querySelector(".broker-card-footer .broker-card-open");
+      checkTextContrast(brokerReason, canvas, `${mode} framed broker card reason`);
+      checkTextContrast(brokerCountdown, canvas, `${mode} framed broker card countdown`);
+      checkTextContrast(brokerOpen, canvas, `${mode} framed broker card open link`);
+      const countdownStyle = getComputedStyle(brokerCountdown);
+      const openStyle = getComputedStyle(brokerOpen);
+      check(Number(countdownStyle.fontWeight) <= Number(openStyle.fontWeight),
+        `${mode} broker card countdown weight ${countdownStyle.fontWeight} overpowers open link ${openStyle.fontWeight}`);
+      check(countdownStyle.fontSize === openStyle.fontSize,
+        `${mode} broker card countdown fontSize ${countdownStyle.fontSize} differs from open link ${openStyle.fontSize}`);
+      const closedBrokerHeight = brokerClosed.getBoundingClientRect().height;
+      check(closedBrokerHeight <= 48,
+        `${mode} closed broker card too tall (${closedBrokerHeight.toFixed(1)}px > 48px)`);
+      checkTextContrast(brokerClosed.querySelector(".broker-card-note"), canvas, `${mode} closed broker card note`);
+      checkTextContrast(brokerUnavailable.querySelector(".broker-card-reason"), canvas, `${mode} unavailable broker card reason`);
+      checkTextContrast(brokerUnavailable.querySelector(".broker-card-note"), canvas, `${mode} unavailable broker card note`);
+      checkTextContrast(brokerUnavailable.querySelector(".message-transient-countdown"), canvas, `${mode} unavailable broker card countdown`);
+      checkTextContrast(brokerUnavailable.querySelector(".broker-card-open"), canvas, `${mode} unavailable broker card open link`);
+
       // --- Checks for 4: Standalone transient link notices ---
       const tBadgeRect = tBadge.getBoundingClientRect();
       const tCountRect = tCountdown.getBoundingClientRect();
@@ -435,6 +565,18 @@ export async function verifyCompactChatUi() {
         `${mode} Inbox choice help should be always visible`);
       checkTextContrast(inboxChoiceHelp, canvas, `${mode} Inbox choice help text`);
       checkTextContrast(inboxCard.querySelector(".access-review-keep-help"), canvas, `${mode} Inbox keep help text`);
+      const inboxPagesNote = inboxDecidedPages.querySelector(".access-review-follow-up-note");
+      const inboxShowBtn = inboxDecidedPages.querySelector(".access-review-follow-up .permission-choice-button");
+      const inboxPagesNoteStyle = getComputedStyle(inboxPagesNote);
+      check(inboxPagesNoteStyle.marginTop === "0px" && inboxPagesNoteStyle.marginBottom === "0px",
+        `${mode} Inbox decided pages note kept vertical margin (${inboxPagesNoteStyle.marginTop} / ${inboxPagesNoteStyle.marginBottom})`);
+      const inboxShowHeight = inboxShowBtn.getBoundingClientRect().height;
+      check(inboxShowHeight >= 30 && inboxShowHeight <= 38,
+        `${mode} Inbox Show-in-conversation button height ${inboxShowHeight.toFixed(1)}px not in [30, 38]`);
+      check(getComputedStyle(inboxShowBtn).boxShadow === "none",
+        `${mode} Inbox Show-in-conversation button kept shadow`);
+      checkTextContrast(inboxPagesNote, canvas, `${mode} Inbox decided pages note`);
+      checkTextContrast(inboxShowBtn, canvas, `${mode} Inbox Show-in-conversation button`);
 
       // --- Checks for 7: Buttons outside scope & Access map grid layout (F1 & F2) ---
       const outsideBtn = document.createElement("button");

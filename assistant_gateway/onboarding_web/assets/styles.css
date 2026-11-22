@@ -7086,7 +7086,7 @@ body.is-theme-customizing {
    reads as part of the card. */
 .message-transient-notice.broker-card {
   max-width: min(760px, 100%);
-  padding: 14px 16px 10px;
+  padding: 12px 14px 10px;
   border-color: var(--inner-line);
   background: #ffffff;
 }
@@ -7097,9 +7097,9 @@ body.is-theme-customizing {
 }
 
 .broker-card-reason {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.86rem;
   line-height: 1.45;
 }
 
@@ -7118,9 +7118,14 @@ body.is-theme-customizing {
 .message-transient-actions.broker-card-footer {
   justify-content: flex-end;
   gap: 6px 10px;
-  margin-top: 8px;
+  margin-top: 6px;
   color: var(--muted);
-  font-size: 0.85rem;
+  font-size: 0.82rem;
+}
+
+.broker-card-footer .message-transient-countdown {
+  font-size: inherit;
+  font-weight: 500;
 }
 
 .broker-card-open {
@@ -7142,7 +7147,7 @@ body.is-theme-customizing {
 .broker-card-note {
   margin: 0;
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.86rem;
   line-height: 1.45;
 }
 
@@ -7471,7 +7476,15 @@ body.is-theme-customizing {
 }
 
 .access-review-follow-up {
+  align-items: center;
   margin-top: 2px;
+}
+
+.access-review-follow-up-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.4;
 }
 
 .access-review-follow-up-outcomes {

@@ -3039,11 +3039,32 @@ function showFollowUpPages(requestId) {
   }
 
 function setBrokerCardState(thread, itemId, state) {
-    if (!thread || !itemId) {
+    if (!itemId) {
       return;
     }
-    thread.brokerCardStates = thread.brokerCardStates || new Map();
-    thread.brokerCardStates.set(itemId, state);
+    var targets = [];
+    if (thread) {
+      targets.push(thread);
+    }
+    // An itemId names one broker form across threads (for example when the
+    // Inbox adds a form to the open thread and the review card's thread later
+    // adds the same form). Record outcomes on every thread holding it so both
+    // copies close at once and never reopen a used or expired frame.
+    if (typeof sharedState !== "undefined" && sharedState && Array.isArray(sharedState.threads)) {
+      sharedState.threads.forEach(function (candidate) {
+        if (!candidate || targets.indexOf(candidate) !== -1) {
+          return;
+        }
+        var items = Array.isArray(candidate.transientItems) ? candidate.transientItems : [];
+        if (items.some(function (item) { return item && item.itemId === itemId; })) {
+          targets.push(candidate);
+        }
+      });
+    }
+    targets.forEach(function (target) {
+      target.brokerCardStates = target.brokerCardStates || new Map();
+      target.brokerCardStates.set(itemId, state);
+    });
   }
 
 function createTransientItemCard(thread, item) {

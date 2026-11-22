@@ -529,6 +529,9 @@ BROKER_AUTH_THEME = """
     background: rgba(255, 255, 255, 0.58);
     color: var(--text-strong);
   }
+  :root[data-color-mode="dark"] .secondary-action {
+    background: var(--surface-soft);
+  }
   h1 {
     max-width: none;
   }
