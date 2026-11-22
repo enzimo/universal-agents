@@ -498,6 +498,7 @@ class BrokerExecutionSSHRuntime:
         self._applied_settings: ExecutionSSHSettings | None = None
         self._applied_materials: dict[str, SSHCredentialMaterial] | None = None
         self._recovered = False
+        self._shutting_down = False
         self._recovery_lock = asyncio.Lock()
         self._settings_lock = asyncio.Lock()
 
@@ -516,6 +517,8 @@ class BrokerExecutionSSHRuntime:
 
     @property
     def enabled(self) -> bool:
+        if self._shutting_down:
+            return False
         snapshot = self._settings_source.snapshot()
         return snapshot.unusable_error is None and bool(snapshot.settings.enabled)
 
@@ -570,27 +573,55 @@ class BrokerExecutionSSHRuntime:
         self._applied_materials = materials
         return network_changed, pinned_changed
 
-    async def _apply_settings_and_enforce(self, snapshot: ExecutionSSHSettingsSnapshot) -> None:
+    async def _apply_settings_and_enforce(self) -> SSHSessionBroker:
+        """Reload settings under ``_settings_lock``, fail closed if needed, and enforce live changes."""
+
         async with self._settings_lock:
-            if self._broker is None:
-                return
-            network_changed, pinned_changed = self._apply_settings_sync(snapshot)
-            broker = self._broker
-            need_network = network_changed or broker.network_policy != broker._checked_network_policy
-            need_pinned = (
-                pinned_changed
-                or broker.material_provider is not broker._checked_material_provider
-                or broker.allowed_pinned_targets != broker._checked_allowed_pinned_targets
-            )
-            if need_network or need_pinned:
+            while True:
+                if self._shutting_down:
+                    raise SSHSessionUnavailable("SSH session broker is shutting down.")
+                snapshot = self._settings_source.snapshot()
+                if snapshot.unusable_error is not None:
+                    reason = _unusable_settings_message(snapshot)
+                    broker = self._broker
+                    if broker is not None and broker._has_monitored_work():
+                        await broker._fail_closed_all_monitored_work(reason)
+                    raise SSHSettingsUnusableError(reason, config_path=snapshot.config_path)
+                if not snapshot.settings.enabled:
+                    broker = self._broker
+                    if broker is not None and broker._has_monitored_work():
+                        await broker._fail_closed_all_monitored_work(SSH_DISABLED_MESSAGE)
+                    raise SSHDisabledError()
+                if self._broker is None:
+                    return self._ensure_broker_sync(snapshot)
+                network_changed, pinned_changed = self._apply_settings_sync(snapshot)
+                broker = self._broker
+                if broker._shutting_down:
+                    raise SSHSessionUnavailable("SSH session broker is shutting down.")
+                need_network = network_changed or broker.network_policy != broker._checked_network_policy
+                need_pinned = (
+                    pinned_changed
+                    or broker.material_provider is not broker._checked_material_provider
+                    or broker.allowed_pinned_targets != broker._checked_allowed_pinned_targets
+                )
+                if not need_network and not need_pinned:
+                    return broker
                 await broker.enforce_settings_on_live_work(
                     check_network=need_network,
                     check_pinned_targets=need_pinned,
                 )
+                if self._shutting_down or self._broker is not broker or broker._shutting_down:
+                    raise SSHSessionUnavailable("SSH session broker is shutting down.")
 
     def _sync_broker_settings(self) -> SSHSettingsSyncOutcome:
         """Reload operator settings and sync broker attributes without awaiting teardowns."""
 
+        if self._shutting_down:
+            return SSHSettingsSyncOutcome(
+                enabled=False,
+                stop_reason="SSH session broker is shutting down.",
+                stop_event="ssh_broker_shutting_down",
+            )
         snapshot = self._settings_source.snapshot()
         if snapshot.unusable_error is not None:
             return SSHSettingsSyncOutcome(
@@ -611,6 +642,8 @@ class BrokerExecutionSSHRuntime:
 
     @property
     def broker(self) -> SSHSessionBroker:
+        if self._shutting_down:
+            raise SSHSessionUnavailable("SSH session broker is shutting down.")
         snapshot = self._settings_source.snapshot()
         if snapshot.unusable_error is not None:
             raise SSHSettingsUnusableError(
@@ -663,6 +696,8 @@ class BrokerExecutionSSHRuntime:
         async with self._recovery_lock:
             if self._recovered:
                 return
+            if self._shutting_down or self._broker is not broker or broker._shutting_down:
+                raise SSHSessionUnavailable("SSH session broker is shutting down.")
             try:
                 lost = await asyncio.to_thread(broker.recover_after_restart)
             except Exception as exc:
@@ -673,6 +708,8 @@ class BrokerExecutionSSHRuntime:
                 raise SSHRecoveryError(
                     f"Broker SSH startup recovery failed: {exc}"
                 ) from exc
+            if self._shutting_down or self._broker is not broker or broker._shutting_down:
+                raise SSHSessionUnavailable("SSH session broker is shutting down.")
             self._recovered = True
             self._logger.info(
                 "Initialized broker-owned SSH runtime. event=broker_ssh_runtime_started "
@@ -682,43 +719,40 @@ class BrokerExecutionSSHRuntime:
             )
 
     async def _active_broker(self) -> SSHSessionBroker:
-        snapshot = self._settings_source.snapshot()
-        if snapshot.unusable_error is not None:
-            reason = _unusable_settings_message(snapshot)
-            if self._broker is not None and self._broker._has_monitored_work():
-                await self._broker._fail_closed_all_monitored_work(reason)
-            raise SSHSettingsUnusableError(reason, config_path=snapshot.config_path)
-        if not snapshot.settings.enabled:
-            if self._broker is not None and self._broker._has_monitored_work():
-                await self._broker._fail_closed_all_monitored_work(SSH_DISABLED_MESSAGE)
-            raise SSHDisabledError()
-        if self._broker is None:
-            broker = self._ensure_broker_sync(snapshot)
-        else:
-            await self._apply_settings_and_enforce(snapshot)
-            broker = self._broker
+        broker = await self._apply_settings_and_enforce()
         await self._ensure_recovered(broker)
+        if self._shutting_down or self._broker is not broker or broker._shutting_down:
+            raise SSHSessionUnavailable("SSH session broker is shutting down.")
         return broker
 
     async def startup(self) -> None:
         """Recover crashed sessions and sweep orphaned ephemeral SSH dirs on broker start."""
 
-        snapshot = self._settings_source.snapshot()
-        if snapshot.unusable_error is not None:
-            self._logger.error(
-                "Skipping broker SSH startup because settings cannot be used. "
-                "event=broker_ssh_startup_settings_unusable error=%s",
-                snapshot.unusable_error,
-            )
-            return
-        if not snapshot.settings.enabled:
-            return
-        broker = self._ensure_broker_sync(snapshot)
-        await self._ensure_recovered(broker)
+        async with self._settings_lock:
+            if self._shutting_down:
+                return
+            snapshot = self._settings_source.snapshot()
+            if snapshot.unusable_error is not None:
+                self._logger.error(
+                    "Skipping broker SSH startup because settings cannot be used. "
+                    "event=broker_ssh_startup_settings_unusable error=%s",
+                    snapshot.unusable_error,
+                )
+                return
+            if not snapshot.settings.enabled:
+                return
+            broker = self._ensure_broker_sync(snapshot)
+        try:
+            await self._ensure_recovered(broker)
+        except SSHSessionUnavailable:
+            if self._shutting_down:
+                return
+            raise
 
     async def shutdown(self) -> None:
         """Terminate running SSH commands, close live PTYs, and wipe ephemeral dirs."""
 
+        self._shutting_down = True
         if self._broker is None:
             return
         broker = self._broker
@@ -726,6 +760,7 @@ class BrokerExecutionSSHRuntime:
         self._catalog_provider = None
         self._applied_settings = None
         self._applied_materials = None
+        self._recovered = False
         await broker.shutdown()
 
     def _require_owned_session(self, session_id: str, person_id: str) -> InteractiveSessionV1:

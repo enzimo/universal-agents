@@ -5746,3 +5746,367 @@ async def test_c88_enforce_settings_partial_flag_preserves_unchecked_axes(tmp_pa
         await broker.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_c89_settings_lock_no_rollback_and_shutdown_safety(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C89: _apply_settings_and_enforce reads fresh settings under _settings_lock without rolling back newer syncs or breaking on shutdown."""
+
+    import base64
+    import threading
+    from contextlib import contextmanager
+
+    from runtime_hosting.execution_contracts import (
+        EnrolledSSHTargetV1,
+        ExecutionActivationKind,
+        SSHTargetLifecycle,
+        SSHTargetPlatform,
+        ssh_public_key_sha256_fingerprint,
+    )
+    from assistant_gateway.config import GatewayInstanceConfig
+    from runtime_hosting.ssh import (
+        CompositeSSHCredentialMaterialProvider,
+        SSHCredentialMaterial,
+        SSHSessionUnavailable,
+    )
+    from runtime_hosting.ssh_network import SSHNetworkPolicy
+    from runtime_settings.execution import ExecutionSSHSettings, ExecutionSSHTargetSettings
+
+    use_signed_contexts(monkeypatch)
+    instance = execution_instance(tmp_path / "c89-inst", authorization_enabled=False)
+    fake_ssh = tmp_path / "c89-fake-ssh"
+    fake_ssh.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    fake_ssh.chmod(0o755)
+
+    host_pub = _framed_ed25519_pub(b"\x89" * 32)
+    host_algo, host_fp = ssh_public_key_sha256_fingerprint(host_pub)
+    enrolled_key_bytes = base64.b64decode(host_pub.split()[1])
+    enrolled_id_file, enrolled_kh_file = write_ssh_material(
+        tmp_path / "c89-enrolled-mat", key_bytes=enrolled_key_bytes
+    )
+    enrolled_kh_file.write_text(
+        f"c89-enrolled.example.com {host_algo} {base64.b64encode(enrolled_key_bytes).decode('ascii')}\n",
+        encoding="utf-8",
+    )
+
+    pinned_key_bytes = b"c89-pinned-host-key"
+    pinned_id, pinned_kh = write_ssh_material(
+        instance.root / "broker_credentials" / "c89",
+        key_bytes=pinned_key_bytes,
+    )
+    pinned_key_b64 = base64.b64encode(pinned_key_bytes).decode("ascii")
+    pinned_kh.write_text(
+        f"pinned-a.internal ssh-ed25519 {pinned_key_b64}\n"
+        f"pinned-b.internal ssh-ed25519 {pinned_key_b64}\n",
+        encoding="utf-8",
+    )
+    pinned_fp = host_key_fingerprint(pinned_key_bytes)
+    target_a = ExecutionSSHTargetSettings(
+        target_id="c89.pinned.a",
+        host="pinned-a.internal",
+        port=22,
+        username="automation",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=pinned_fp,
+        credential_binding_id="c89_binding_a",
+        identity_file=str(pinned_id),
+        known_hosts_file=str(pinned_kh),
+    )
+    target_b = ExecutionSSHTargetSettings(
+        target_id="c89.pinned.b",
+        host="pinned-b.internal",
+        port=22,
+        username="automation",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=pinned_fp,
+        credential_binding_id="c89_binding_b",
+        identity_file=str(pinned_id),
+        known_hosts_file=str(pinned_kh),
+    )
+
+    def _save_config(
+        *,
+        enabled: bool = True,
+        denied_cidrs: tuple[str, ...] = (),
+        allow_password_bootstrap: bool = True,
+        targets: tuple[ExecutionSSHTargetSettings, ...] = (target_a, target_b),
+    ) -> None:
+        instance.config.execution_control.enabled = True
+        instance.config.execution_control.ssh.enabled = enabled
+        instance.config.execution_control.ssh.ssh_executable = str(fake_ssh)
+        instance.config.execution_control.ssh.denied_cidrs = denied_cidrs
+        instance.config.execution_control.ssh.allow_password_bootstrap = allow_password_bootstrap
+        instance.config.execution_control.ssh.targets = targets
+        instance.config.save(instance.config_path)
+
+    _save_config()
+    baseline_yaml = instance.config_path.read_text(encoding="utf-8")
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+
+    pause_resolver = threading.Event()
+    entered_resolver = threading.Event()
+    release_resolver = threading.Event()
+
+    def _hooked_resolver(host: str, port: int) -> list[str]:
+        if host == "c89-enrolled.example.com" and pause_resolver.is_set():
+            entered_resolver.set()
+            assert release_resolver.wait(timeout=5.0)
+        if host == "c89-enrolled.example.com":
+            return ["198.51.100.89"]
+        if host == "c89-probe.example.com":
+            return ["198.51.100.90"]
+        return ["198.51.100.99"]
+
+    async with _running_ssh_broker(
+        instance,
+        lead,
+        monkeypatch,
+        root_token="c89-broker-root",
+    ) as (broker_service, _server, _tok):
+        rt = broker_service._execution_ssh
+        assert rt is not None
+        rt._settings_source._unusable_grace_seconds = 0.0
+        broker = rt.broker
+        broker.resolver = _hooked_resolver
+        broker.local_address_checker = lambda ip: False
+        broker.revocation_poll_interval_seconds = 60.0
+
+        # Enroll a target in the broker's repository so enforce_settings_on_live_work validates its host.
+        inst_scope = team_owner().model_copy(update={"team_id": broker.team_id})
+        seed = {
+            "target_id": "c89_enrolled",
+            "owner": inst_scope,
+            "host": "c89-enrolled.example.com",
+            "port": 22,
+            "username": "deploy",
+            "platform": SSHTargetPlatform.LINUX,
+            "host_key_algorithm": host_algo,
+            "host_key_fingerprint": host_fp,
+            "host_key_public_key": host_pub,
+            "credential_key": "c89_ssh_key",
+            "credential_owner_scope": inst_scope,
+            "credential_public_key_fingerprint": host_fp,
+            "lifecycle": SSHTargetLifecycle.PERSISTENT,
+            "expires_at_utc": None,
+            "reason": "C89 concurrency test",
+        }
+        placeholder = build_activation(
+            ExecutionActivationKind.SSH_TARGET_ENROLL,
+            resource_id="c89_enrolled",
+            resource_digest="0" * 64,
+            owner_scope=inst_scope,
+            mode=ChangeApprovalMode.AGREEMENT,
+            function="change:execution_ssh_target_enroll",
+        )
+        digest = EnrolledSSHTargetV1.model_construct(activation=placeholder, **seed).enrollment_digest()
+        enrolled = EnrolledSSHTargetV1(
+            activation=build_activation(
+                ExecutionActivationKind.SSH_TARGET_ENROLL,
+                resource_id="c89_enrolled",
+                resource_digest=digest,
+                owner_scope=inst_scope,
+                mode=ChangeApprovalMode.AGREEMENT,
+                function="change:execution_ssh_target_enroll",
+            ),
+            **seed,
+        )
+        broker.repository.put_ssh_target(enrolled)
+
+        # Wrap the catalog provider so enrolled sessions open cleanly without Sealbox I/O.
+        class _StaticCatalogProvider:
+            @contextmanager
+            def prepare(self, session: InteractiveSessionV1, **kwargs: Any):
+                yield SSHCredentialMaterial(
+                    identity_file=enrolled_id_file,
+                    known_hosts_file=enrolled_kh_file,
+                )
+
+        rt._catalog_provider = _StaticCatalogProvider()  # type: ignore[assignment]
+        assert isinstance(broker.material_provider, CompositeSSHCredentialMaterialProvider)
+        broker.material_provider = CompositeSSHCredentialMaterialProvider(
+            configured_provider=broker.material_provider.configured_provider,
+            catalog_provider=rt._catalog_provider,
+        )
+        broker._checked_material_provider = broker.material_provider
+
+        async def _open_enrolled_session() -> str:
+            created = json.loads(
+                tools.create_execution_ssh_session._tool_func(target_id="c89_enrolled", confirmed=True)
+            )
+            sid = created["session_id"]
+            opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid))
+            assert opened.get("status") == "open", opened
+            return sid
+
+        async def _open_pinned_b_session() -> str:
+            created = json.loads(
+                tools.create_execution_ssh_session._tool_func(target_id="c89.pinned.b", confirmed=True)
+            )
+            sid = created["session_id"]
+            opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid))
+            assert opened.get("status") == "open", opened
+            return sid
+
+        # (a) S2 (tighter denied_cidrs, removed target_b, allow_password_bootstrap=False) is applied via
+        # lock-free _sync_broker_settings() while Caller A enforces S1 and Caller B is queued on _settings_lock.
+        enrolled_sid = await _open_enrolled_session()
+        pinned_b_sid = await _open_pinned_b_session()
+        assert enrolled_sid in broker._sessions and pinned_b_sid in broker._sessions
+
+        _save_config(
+            enabled=True,
+            denied_cidrs=("203.0.113.0/24",),
+            allow_password_bootstrap=True,
+            targets=(target_a, target_b),
+        )
+        entered_resolver.clear()
+        release_resolver.clear()
+        pause_resolver.set()
+
+        caller_a = asyncio.create_task(
+            tools.read_execution_ssh_session._tool_func(session_id=enrolled_sid, timeout_seconds=0.05)
+        )
+        assert await asyncio.to_thread(entered_resolver.wait, 5.0)
+
+        # Queue Caller B (probe_execution_ssh_host_key has no second _sync_settings_before_spawn) on _settings_lock.
+        caller_b = asyncio.create_task(
+            tools.probe_execution_ssh_host_key._tool_func(host="c89-probe.example.com", port=22)
+        )
+        await asyncio.sleep(0.05)
+        assert not caller_b.done()
+
+        # Apply newer S2 via lock-free _sync_broker_settings() while Caller A holds _settings_lock and B is queued.
+        _save_config(
+            enabled=True,
+            denied_cidrs=("203.0.113.0/24", "198.51.100.0/24"),
+            allow_password_bootstrap=False,
+            targets=(target_a,),
+        )
+        sync_s2 = rt._sync_broker_settings()
+        assert sync_s2.enabled is True
+        expected_s2_policy = SSHNetworkPolicy.from_settings(
+            ExecutionSSHSettings(denied_cidrs=("203.0.113.0/24", "198.51.100.0/24"))
+        )
+        expected_s2_pinned = frozenset(
+            {("pinned-a.internal", 22, "automation", "ssh-ed25519", pinned_fp, "c89_binding_a")}
+        )
+        assert broker.network_policy == expected_s2_policy
+        assert broker.allow_password_bootstrap is False
+        assert broker.allowed_pinned_targets == expected_s2_pinned
+
+        # Release Caller A; neither Caller A nor queued Caller B may roll back S2 -> S1.
+        pause_resolver.clear()
+        release_resolver.set()
+        res_a = json.loads(await caller_a)
+        res_b = json.loads(await caller_b)
+
+        assert res_a["error_code"] == "session_unavailable", res_a
+        assert broker.network_policy == expected_s2_policy
+        assert broker._checked_network_policy == expected_s2_policy
+        assert broker.allow_password_bootstrap is False
+        assert rt._applied_settings is not None and rt._applied_settings.allow_password_bootstrap is False
+        assert broker.allowed_pinned_targets == expected_s2_pinned
+        assert broker._checked_allowed_pinned_targets == expected_s2_pinned
+        assert enrolled_sid not in broker._sessions
+        assert pinned_b_sid not in broker._sessions
+        assert res_b["error_code"] == "execution_access_refused", res_b
+        assert "denied_cidrs" in res_b["error"], res_b
+
+        # (b) S2 disables SSH (ssh.enabled=False) while Caller B is queued on _settings_lock.
+        _save_config(enabled=True, denied_cidrs=(), allow_password_bootstrap=True, targets=(target_a, target_b))
+        _ = rt.broker
+        enrolled_sid_b = await _open_enrolled_session()
+        _save_config(enabled=True, denied_cidrs=("203.0.113.0/24",), targets=(target_a, target_b))
+        entered_resolver.clear()
+        release_resolver.clear()
+        pause_resolver.set()
+
+        caller_a_b = asyncio.create_task(
+            tools.read_execution_ssh_session._tool_func(session_id=enrolled_sid_b, timeout_seconds=0.05)
+        )
+        assert await asyncio.to_thread(entered_resolver.wait, 5.0)
+        caller_b_b = asyncio.create_task(
+            tools.probe_execution_ssh_host_key._tool_func(host="c89-probe.example.com", port=22)
+        )
+        await asyncio.sleep(0.05)
+        assert not caller_b_b.done()
+
+        _save_config(enabled=False, denied_cidrs=(), targets=(target_a, target_b))
+        assert rt._sync_broker_settings().enabled is False
+
+        pause_resolver.clear()
+        release_resolver.set()
+        res_a_b = json.loads(await caller_a_b)
+        res_b_b = json.loads(await caller_b_b)
+        assert res_a_b["error_code"] == "ssh_disabled", res_a_b
+        assert res_b_b["error_code"] == "ssh_disabled", res_b_b
+        assert enrolled_sid_b not in broker._sessions
+
+        # (c) S2 writes an unusable config (past grace period) while Caller B is queued on _settings_lock.
+        _save_config(enabled=True, denied_cidrs=(), allow_password_bootstrap=True, targets=(target_a, target_b))
+        _ = rt.broker
+        enrolled_sid_c = await _open_enrolled_session()
+        _save_config(enabled=True, denied_cidrs=("203.0.113.0/24",), targets=(target_a, target_b))
+        entered_resolver.clear()
+        release_resolver.clear()
+        pause_resolver.set()
+
+        caller_a_c = asyncio.create_task(
+            tools.read_execution_ssh_session._tool_func(session_id=enrolled_sid_c, timeout_seconds=0.05)
+        )
+        assert await asyncio.to_thread(entered_resolver.wait, 5.0)
+        caller_b_c = asyncio.create_task(
+            tools.probe_execution_ssh_host_key._tool_func(host="c89-probe.example.com", port=22)
+        )
+        await asyncio.sleep(0.05)
+        assert not caller_b_c.done()
+
+        instance.config_path.write_text("schema_version: 2\nexecution_control: [broken\n", encoding="utf-8")
+        unusable_sync = rt._sync_broker_settings()
+        assert unusable_sync.enabled is False and unusable_sync.unusable is True
+
+        pause_resolver.clear()
+        release_resolver.set()
+        res_a_c = json.loads(await caller_a_c)
+        res_b_c = json.loads(await caller_b_c)
+        assert res_a_c["error_code"] == "ssh_settings_unusable", res_a_c
+        assert res_b_c["error_code"] == "ssh_settings_unusable", res_b_c
+        assert enrolled_sid_c not in broker._sessions
+
+        # (d) shutdown() clears self._broker while Caller A enforces S1 and Caller B waits on _settings_lock.
+        instance.config_path.write_text(baseline_yaml, encoding="utf-8")
+        instance.config = GatewayInstanceConfig.load(instance.config_path)
+        _save_config(enabled=True, denied_cidrs=(), allow_password_bootstrap=True, targets=(target_a, target_b))
+        _ = rt.broker
+        enrolled_sid_d = await _open_enrolled_session()
+        _save_config(enabled=True, denied_cidrs=("203.0.113.0/24",), targets=(target_a, target_b))
+        entered_resolver.clear()
+        release_resolver.clear()
+        pause_resolver.set()
+
+        caller_a_d = asyncio.create_task(rt._active_broker())
+        assert await asyncio.to_thread(entered_resolver.wait, 5.0)
+        caller_b_d = asyncio.create_task(rt._active_broker())
+        await asyncio.sleep(0.05)
+        assert not caller_b_d.done()
+
+        shutdown_task = asyncio.create_task(rt.shutdown())
+        await asyncio.sleep(0.02)
+        assert rt._shutting_down is True
+        assert rt._broker is None
+
+        pause_resolver.clear()
+        release_resolver.set()
+        await shutdown_task
+        with pytest.raises(SSHSessionUnavailable):
+            await caller_a_d
+        with pytest.raises(SSHSessionUnavailable):
+            await caller_b_d
+        assert rt._broker is None
+        assert enrolled_sid_d not in broker._sessions
+    set_agent_ref(None)
+
+
+

@@ -527,6 +527,7 @@ class SSHSessionBroker:
         """Re-sync settings, re-authorize, and re-validate target policy right before spawning ssh."""
 
         while True:
+            self._require_not_shutting_down()
             await self._sync_settings_before_spawn()
             self._require_not_shutting_down()
             if revoked_event is not None and revoked_event.is_set():
