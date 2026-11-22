@@ -2759,8 +2759,9 @@ rows in trusted code's words, flagging items that widen access. For
 files, and files carrying operator-only settings `ProposedHttpToolV1` cannot
 express), and `access_control/tool_change_diffs.py` describes every field
 difference, flags `credential_to_new_host` when a new host would receive active
-linked credentials, and names any account or gate links that must be linked
-again. With authorization off, `apply_by_agreement` returns the same diff rows
+linked credentials, flags `block_widened` when removing or renaming a route
+widens an active one-operation block to the whole tool, and names any account
+or gate links that must be linked again. With authorization off, `apply_by_agreement` returns the same diff rows
 and an `agreement_digest` on `confirmed=false` and requires that matching
 digest on `confirmed=true`, refusing if the file changed in between. The
 proposal is one change request on a platform tool at `full`, so an
@@ -2852,7 +2853,8 @@ can stop access at once; `/access block team internet` turns internet access
 off. A block naming an operation the catalog no longer has (an update renamed
 or merged it) blocks its whole tool (`access_control.stale_blocks`, applied in
 `AccessService._evaluate`), and the gateway tells administrators about each
-one at start, so a rename never lifts a block. Standard catalog functions are
+one at start — and `ProposalApplier` immediately after applying a proposed web
+API tool change — so a rename never lifts a block. Standard catalog functions are
 withdrawn from Strands' startup registry as well as its dynamic registry;
 unblocking restores them before the next model call. A person who may remove
 the stale block can narrow it with `/access block ... --replace <block id>`:

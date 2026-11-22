@@ -65,6 +65,7 @@ from access_control.proposals import (
     with_mcp_defaults,
     with_tool_change_baselines,
 )
+from access_control.stale_blocks import active_operation_blocks_for_tool
 from access_control.tool_change_diffs import tool_change_rows
 from custom_messages.contracts.access_v2 import (
     AccessProposalV1,
@@ -244,6 +245,9 @@ def _prepare_agreement_tool_changes(
             current=tool_file.definition,
             proposed=tool_definition(item),
             active_links=[link for link in all_links if link.tool_id == item.tool_id],
+            active_blocks=active_operation_blocks_for_tool(
+                store, team_id, item.tool_id, now=datetime.now(timezone.utc)
+            ),
         )
         if not diff.has_changes:
             logger.warning(
@@ -479,6 +483,9 @@ def _submit(agent: Any, proposal: AccessProposalV1, tool_context: ToolContext) -
         links_for_tool=lambda tool_id: [
             link for link in service.store.list_links(service.team_id, purpose=None) if link.tool_id == tool_id
         ],
+        blocks_for_tool=lambda tool_id: active_operation_blocks_for_tool(
+            service.store, service.team_id, tool_id, now=service.clock()
+        ),
     ).compile(proposal, person=person, task_id=principal.work_id)
     change_id = new_id("proposal")
     service.store.save_plan(

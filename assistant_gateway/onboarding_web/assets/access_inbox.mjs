@@ -54,6 +54,7 @@ export const ROW_SECTIONS = Object.freeze({
 });
 export const ROW_FLAGS = Object.freeze({
   new_host: "New host", credential_to_new_host: "Credentials to new host", private_address: "Private address",
+  block_widened: "Block widens to whole tool",
   full_access: "Full access", can_hand_on: "Can hand on", runs_code: "Runs code", new_folder: "New folder",
   setup_steps: "Steps for people", new_program: "New program", download_host: "Download", team_account: "Team account",
 });

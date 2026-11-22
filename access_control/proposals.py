@@ -84,6 +84,7 @@ from access_control.grant_entries import GrantPlan
 from access_control.mcp_servers import default_proposal_grants
 from access_control.people import is_administrator
 from access_control.requests import ACCESS_PROPOSAL_CHANGE, LEVEL_WORDS, AccessRequests
+from access_control.stale_blocks import active_operation_blocks_for_tool, report_stale_blocks
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccessProposalV1,
@@ -342,6 +343,7 @@ _SUMMARY_FLAG_WORDS = {
     "new_host": "a new host",
     "credential_to_new_host": "stored credentials sent to a new host",
     "private_address": "a private address",
+    "block_widened": "a restriction that will block a whole tool",
     "full_access": "full access",
     "can_hand_on": "access that can be handed on",
     "runs_code": "code that runs",
@@ -452,6 +454,8 @@ class ProposalCompiler:
     instance_root: Path | None = None
     # Active links (account and gate) for one tool_id, used for re-link and new-host warnings.
     links_for_tool: Callable[[str], list[AccountLinkV1]] = lambda _tool_id: []
+    # Active operation blocks on one tool_id, used to warn when route removals widen them.
+    blocks_for_tool: Callable[[str], list[GrantV1]] = lambda _tool_id: []
 
     def compile(
         self, proposal: AccessProposalV1, *, person: PersonPrincipal | None, task_id: str | None
@@ -605,6 +609,7 @@ class ProposalCompiler:
                     current=tool_file.definition,
                     proposed=proposed_def,
                     active_links=self.links_for_tool(item.tool_id),
+                    active_blocks=self.blocks_for_tool(item.tool_id),
                 )
             except ValueError as exc:
                 logger.warning(
@@ -833,6 +838,9 @@ class ProposalApplier:
             links_for_tool=lambda tool_id: [
                 link for link in service.store.list_links(service.team_id, purpose=None) if link.tool_id == tool_id
             ],
+            blocks_for_tool=lambda tool_id: active_operation_blocks_for_tool(
+                service.store, service.team_id, tool_id, now=service.clock()
+            ),
         )
 
     def stored_proposal(self, requests: AccessRequests, request: AccessRequestV1) -> AccessProposalV1:
@@ -868,6 +876,8 @@ class ProposalApplier:
         except ProposalRefused as exc:
             raise HandDownRefused(f"The proposal no longer applies: {exc}") from exc
         applied = self._apply_items(requests, request, reviewer, finished, compiled, claim)
+        if proposal.tool_changes:
+            self._report_stale_blocks(requests)
         if proposal.account_links:
             self.account_links[request.request_id] = list(proposal.account_links)
         logger.warning(
@@ -883,6 +893,24 @@ class ProposalApplier:
             ",".join(proposal.revoke_grant_ids),
         )
         return applied
+
+    def _report_stale_blocks(self, requests: AccessRequests) -> None:
+        """Notify administrators immediately when a tool change widens an operation block to the whole tool."""
+
+        service = requests.service
+        try:
+            report_stale_blocks(
+                self.catalogs.current(),
+                service.store,
+                service.team_id,
+                now=service.clock(),
+            )
+        except Exception:  # noqa: BLE001 - the tool change is committed and the block already fails closed
+            logger.exception(
+                "Could not report widened blocks after applying a tool change. "
+                "event=stale_block_check_failed team_id=%s",
+                service.team_id,
+            )
 
     def _apply_items(
         self,

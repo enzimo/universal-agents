@@ -655,3 +655,103 @@ def test_tool_change_with_authorization_off_applies_with_confirmed_and_rolls_bac
     finally:
         access_runtime._runtime_access.cache_clear()
         set_agent_ref(None)
+
+
+def test_tool_change_removing_blocked_route_warns_on_card_and_reports_stale_block_immediately(world) -> None:
+    """F5 (R4): applying a tool change that drops a blocked route creates the BLOCK_WIDENED admin notice at once."""
+
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        AccessNoticeKind,
+        GrantKind,
+        GrantV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
+
+    lead, requests, _gate, _instance, service = world
+    set_agent_ref(lead)
+
+    portainer_with_route = {
+        **PORTAINER,
+        "routes": [
+            {"name": "stacks.restart", "method": "POST", "path": "/api/stacks/{id}/restart", "level": "write"},
+            {"name": "stacks.delete", "method": "DELETE", "path": "/api/stacks/{id}", "level": "full"},
+        ],
+    }
+    c1 = Context("tooluse-seed-block-route")
+    with pytest.raises(InterruptException):
+        asyncio.run(
+            propose_access_change(
+                title="Add Portainer with routes",
+                reason="Manage stacks",
+                tool_context=c1,
+                tools=[portainer_with_route],
+                grants=[
+                    {
+                        "agent_type": "TeamArchitect",
+                        "target": {"kind": "tool", "id": "http:portainer"},
+                        "level": "write",
+                        "delegation_depth": 1,
+                    }
+                ],
+            )
+        )
+    requests().decide(c1.raised[0]["access_request_id"], OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",))
+
+    # Administrator blocks one route for a worker type.
+    block = GrantV1(
+        grant_id="blk-portainer-delete",
+        team_id=TEAM,
+        kind=GrantKind.BLOCK,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/BackgroundOperationsAgent"),
+        target=TargetRefV1(kind=TargetKind.OPERATION, id="http:portainer#route:stacks.delete"),
+        level=AccessLevel.FULL,
+        granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+        created_at_utc=service.clock(),
+    )
+    service.store.create(block)
+
+    # TeamLead proposes removing stacks.delete.
+    updated = {
+        **PORTAINER,
+        "routes": [
+            {"name": "stacks.restart", "method": "POST", "path": "/api/stacks/{id}/restart", "level": "write"},
+        ],
+    }
+    c2 = Context("tooluse-remove-blocked-route")
+    with pytest.raises(InterruptException):
+        _propose_tool_change(c2, updated)
+    req_id = c2.raised[0]["access_request_id"]
+
+    waiting = service.store.get_request(req_id)
+    assert waiting is not None and waiting.change is not None
+    widened_items = [item for item in waiting.change.items if "block_widened" in item.flags]
+    assert len(widened_items) == 1
+    assert "blk-portainer-delete" in widened_items[0].text
+    assert "route:stacks.delete" in widened_items[0].text
+    assert "a restriction that will block a whole tool" in waiting.change.summary
+
+    # No stale-block notice exists before approval.
+    notices_before = [
+        notice
+        for notice, _read in service.store.notices_for(TEAM, person_id=OWNER.person_id, roles=("owner", "admin"))
+        if notice.kind is AccessNoticeKind.BLOCK_WIDENED
+    ]
+    assert notices_before == []
+
+    # Approving applies the tool change and immediately creates the BLOCK_WIDENED admin notice.
+    requests().decide(req_id, OWNER, AccessReviewChoice.APPROVE)
+    notices_after = [
+        notice
+        for notice, _read in service.store.notices_for(TEAM, person_id=OWNER.person_id, roles=("owner", "admin"))
+        if notice.kind is AccessNoticeKind.BLOCK_WIDENED
+    ]
+    assert len(notices_after) == 1
+    notice = notices_after[0]
+    assert notice.notice_id == "stale_block:blk-portainer-delete"
+    assert "blk-portainer-delete" in notice.summary
+    assert "route:stacks.delete" in notice.summary
+    assert "--replace blk-portainer-delete" in notice.summary

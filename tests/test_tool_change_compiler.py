@@ -939,3 +939,97 @@ def test_host_validation_accepts_punycode_underscores_trailing_dot_and_boundary_
         valid_63_label,
         valid_253,
     )
+
+
+def test_tool_change_removing_or_renaming_blocked_route_adds_widened_block_row_and_flag(tmp_path: Path) -> None:
+    """F5 (R4): removing or renaming a route with an active one-operation block warns with block_widened."""
+
+    from datetime import timedelta
+
+    from access_control.stale_blocks import active_operation_blocks_for_tool
+    from custom_messages.contracts.access_v2 import GrantKind, GrantLifetime, GrantV1
+
+    instance = tmp_path / "instance"
+    write_instance_tool(instance, _gitea_tool())
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    # Active block on the route being removed/renamed.
+    widened = GrantV1(
+        grant_id="blk-issues-create",
+        team_id=TEAM,
+        kind=GrantKind.BLOCK,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+        target=TargetRefV1(kind=TargetKind.OPERATION, id="http:gitea#route:issues.create"),
+        level=AccessLevel.FULL,
+        granted_by=ACTOR,
+        created_at_utc=NOW,
+    )
+    # Active block on a route that stays (same name, only re-levelled) -> should NOT be flagged.
+    kept = GrantV1(
+        grant_id="blk-repos-list",
+        team_id=TEAM,
+        kind=GrantKind.BLOCK,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+        target=TargetRefV1(kind=TargetKind.OPERATION, id="http:gitea#route:repos.list"),
+        level=AccessLevel.FULL,
+        granted_by=ACTOR,
+        created_at_utc=NOW,
+    )
+    # Expired block on the removed route -> should NOT be flagged.
+    expired = GrantV1(
+        grant_id="blk-expired",
+        team_id=TEAM,
+        kind=GrantKind.BLOCK,
+        subject=SubjectRefV1(kind=SubjectKind.TEAM, id=TEAM),
+        target=TargetRefV1(kind=TargetKind.OPERATION, id="http:gitea#route:issues.create"),
+        level=AccessLevel.FULL,
+        lifetime=GrantLifetime.UNTIL,
+        expires_at_utc=NOW - timedelta(minutes=1),
+        granted_by=ACTOR,
+        created_at_utc=NOW - timedelta(hours=1),
+    )
+    for grant in (widened, kept, expired):
+        store.create(grant)
+
+    catalog = load_catalog(instance)
+    compiler = ProposalCompiler(
+        catalog=catalog,
+        team_id=TEAM,
+        holds=lambda _person, _target, _level: True,
+        account_sharing=TeamAccountSharing(store, TEAM),
+        instance_root=instance,
+        blocks_for_tool=lambda tool_id: active_operation_blocks_for_tool(store, TEAM, tool_id, now=NOW),
+    )
+    # Rename issues.create -> issues.open, keep repos.list with higher level.
+    change = _gitea_change(
+        routes=(
+            HttpRouteV1(name="repos.list", method="GET", path="/api/v1/user/repos", level=AccessLevel.WRITE),
+            HttpRouteV1(
+                name="issues.open",
+                method="POST",
+                path="/api/v1/repos/{owner}/{repo}/issues",
+                level=AccessLevel.WRITE,
+            ),
+        ),
+    )
+    proposal = with_tool_change_baselines(
+        AccessProposalV1(title="Rename issues route", reason="Match API naming.", tool_changes=(change,)),
+        instance_root=instance,
+        catalog=catalog,
+    )
+    compiled = compiler.compile(proposal, person=None, task_id="task-1")
+    widened_rows = [row for row in compiled.rows if "block_widened" in row.flags]
+    assert len(widened_rows) == 1
+    row = widened_rows[0]
+    assert row.item_id == "change-0-widened-block-0"
+    assert row.flags == ("block_widened",)
+    assert "blk-issues-create" in row.text
+    assert "WebResearchAgent" in row.text
+    assert "route:issues.create" in row.text
+    assert "all of http:gitea" in row.text
+    assert "blk-repos-list" not in row.text and "blk-expired" not in row.text
+
+    summary = proposal_summary(compiled.rows)
+    assert "change 1 tool" in summary
+    assert "a restriction that will block a whole tool" in summary

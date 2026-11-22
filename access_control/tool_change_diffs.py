@@ -27,21 +27,27 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 
 from access_catalog.instance_tools import private_host_names
 from access_control.requests import LEVEL_WORDS
+from access_control.stale_blocks import subject_name
 from custom_messages.contracts.access_v2 import (
     AccountLinkStatus,
     AccountLinkV1,
     AccountMode,
     AccountSharing,
     CredentialInjectionV1,
+    GrantKind,
+    GrantStatus,
+    GrantV1,
     HttpRouteV1,
     InjectionPlacement,
     LinkOwnerKind,
     LinkPurpose,
     OwnerScope,
     ReviewItemV1,
+    TargetKind,
     ToolDefinitionV1,
     injections_match,
 )
@@ -771,12 +777,70 @@ def _policy_row(
     ]
 
 
+def widened_blocks(
+    current: ToolDefinitionV1,
+    proposed: ToolDefinitionV1,
+    active_blocks: Iterable[GrantV1],
+    *,
+    now: datetime | None = None,
+) -> list[GrantV1]:
+    """Active operation blocks on ``current`` whose operation ``proposed`` removes (so they widen to the whole tool)."""
+
+    prefix = f"{proposed.tool_id}#"
+    affected: list[GrantV1] = []
+    for block in active_blocks:
+        if block.kind is not GrantKind.BLOCK or block.status is not GrantStatus.ACTIVE:
+            continue
+        if now is not None and block.expires_at_utc is not None and block.expires_at_utc <= now:
+            continue
+        if block.target.kind is not TargetKind.OPERATION or not block.target.id.startswith(prefix):
+            continue
+        operation = block.target.id.partition("#")[2]
+        if current.operation(operation) is not None and proposed.operation(operation) is None:
+            affected.append(block)
+    affected.sort(
+        key=lambda block: (
+            block.target.id.partition("#")[2],
+            block.subject.kind.value,
+            block.subject.id,
+            block.grant_id,
+        )
+    )
+    return affected
+
+
+def _widened_block_rows(
+    index: int,
+    current: ToolDefinitionV1,
+    proposed: ToolDefinitionV1,
+    diff: ToolChangeDiff,
+    active_blocks: Iterable[GrantV1],
+) -> list[ReviewItemV1]:
+    """One review row per active one-operation block that a route removal or rename widens to the whole tool."""
+
+    rows: list[ReviewItemV1] = []
+    for block_index, block in enumerate(widened_blocks(current, proposed, active_blocks)):
+        who = subject_name(block.subject)
+        operation = block.target.id.partition("#")[2]
+        rows.append(
+            _review_row(
+                f"change-{index}-widened-block-{block_index}",
+                f"Block {block.grant_id} on {diff.proposed_name} ({diff.tool_id}) widens to the whole tool: "
+                f"it stopped {who} from {operation}, which this change removes. Once approved, it will block "
+                f"all of {diff.tool_id} for {who} until an administrator replaces or removes it.",
+                flags=("block_widened",),
+            )
+        )
+    return rows
+
+
 def tool_change_rows(
     index: int,
     *,
     current: ToolDefinitionV1,
     proposed: ToolDefinitionV1,
     active_links: Iterable[AccountLinkV1] = (),
+    active_blocks: Iterable[GrantV1] = (),
 ) -> tuple[ToolChangeDiff, list[ReviewItemV1]]:
     """Compute the diff and trusted-code review rows for one ``tool_changes`` item."""
 
@@ -788,6 +852,7 @@ def tool_change_rows(
         _overview_row(index, diff),
         *_host_rows(index, diff, impact),
         *_route_rows(index, current, proposed, diff),
+        *_widened_block_rows(index, current, proposed, diff, active_blocks),
         *_credential_rows(index, current, proposed, diff),
         *_relink_row(index, diff, impact),
         *_setup_rows(index, proposed, diff),
