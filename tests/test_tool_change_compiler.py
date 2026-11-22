@@ -1033,3 +1033,120 @@ def test_tool_change_removing_or_renaming_blocked_route_adds_widened_block_row_a
     summary = proposal_summary(compiled.rows)
     assert "change 1 tool" in summary
     assert "a restriction that will block a whole tool" in summary
+
+
+def test_tool_change_compiler_output_renders_under_tool_changes_section_in_inbox_mjs(tmp_path: Path) -> None:
+    """F6 (R6): real ProposalCompiler output for tool_changes renders under 'Tool changes' in access_inbox.mjs."""
+
+    import json
+    import shutil
+    import subprocess
+
+    from access_control.stale_blocks import active_operation_blocks_for_tool
+    from custom_messages.contracts.access_v2 import GrantKind, GrantV1
+
+    node = shutil.which("node")
+    assert node is not None, "node is required to render access_inbox.mjs"
+
+    instance = tmp_path / "instance"
+    write_instance_tool(instance, _gitea_tool())
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    store.create_link(_link(link_id="team-1", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM))
+    store.create(
+        GrantV1(
+            grant_id="blk-render-1",
+            team_id=TEAM,
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+            target=TargetRefV1(kind=TargetKind.OPERATION, id="http:gitea#route:issues.create"),
+            level=AccessLevel.FULL,
+            granted_by=ACTOR,
+            created_at_utc=NOW,
+        )
+    )
+    catalog = load_catalog(instance)
+    compiler = ProposalCompiler(
+        catalog=catalog,
+        team_id=TEAM,
+        holds=lambda _person, _target, _level: True,
+        account_sharing=TeamAccountSharing(store, TEAM),
+        instance_root=instance,
+        links_for_tool=lambda tool_id: [
+            link for link in store.list_links(TEAM, purpose=None) if link.tool_id == tool_id
+        ],
+        blocks_for_tool=lambda tool_id: active_operation_blocks_for_tool(store, TEAM, tool_id, now=NOW),
+    )
+    change = _gitea_change(
+        hosts=("gitea.example.com", "mirror.example.net"),
+        routes=(HttpRouteV1(name="repos.list", method="GET", path="/api/v1/user/repos", level=AccessLevel.READ),),
+    )
+    proposal = with_tool_change_baselines(
+        AccessProposalV1(title="Add mirror and drop issues route", reason="Mirror reads only.", tool_changes=(change,)),
+        instance_root=instance,
+        catalog=catalog,
+    )
+    compiled = compiler.compile(proposal, person=None, task_id="task-1")
+    assert compiled.rows and all(row.section == "tool_change" for row in compiled.rows)
+
+    review_payload = {
+        "request_id": "req-real-tool-change",
+        "kind": "change",
+        "title": f"TeamArchitect asks to make a change: access proposal: {proposal.title}",
+        "summary": proposal_summary(compiled.rows),
+        "rows": [row.model_dump(mode="json") for row in compiled.rows],
+        "reason": proposal.reason,
+        "created_at_utc": NOW.isoformat(),
+        "can_decide": True,
+        "choices": [{"choice": "approve", "label": "Approve"}, {"choice": "deny", "label": "Deny"}],
+    }
+    inbox_mjs = Path(__file__).resolve().parents[1] / "assistant_gateway" / "onboarding_web" / "assets" / "access_inbox.mjs"
+    script = """
+const { renderReviewCard } = await import(process.argv[1]);
+const review = JSON.parse(process.argv[2]);
+class FakeElement extends EventTarget {
+  constructor(document, tagName) {
+    super();
+    Object.assign(this, { ownerDocument: document, tagName: tagName.toUpperCase(), children: [],
+      parentNode: null, attributes: new Map(), className: "", ownText: "", hidden: false,
+      disabled: false, readOnly: false, value: "", tabIndex: 0 });
+  }
+  get classList() {
+    const names = () => this.className.split(/\\s+/).filter(Boolean);
+    return {
+      contains: name => names().includes(name),
+      toggle: (name, force) => {
+        const cur = names();
+        const on = force === undefined ? !cur.includes(name) : Boolean(force);
+        this.className = [...new Set(on ? [...cur, name] : cur.filter(v => v !== name))].join(" ");
+      },
+    };
+  }
+  get textContent() { return this.ownText + this.children.map(c => c.textContent).join(""); }
+  set textContent(v) { this.children = []; this.ownText = String(v); }
+  setAttribute(k, v) { this.attributes.set(k, String(v)); }
+  getAttribute(k) { return this.attributes.has(k) ? this.attributes.get(k) : null; }
+  append(...nodes) { for (const n of nodes) { n.parentNode = this; this.children.push(n); } }
+}
+const doc = { createElement: tag => new FakeElement(doc, tag) };
+const descendants = n => n.children.flatMap(c => [c, ...descendants(c)]);
+const byClass = (n, cls) => descendants(n).filter(c => c.classList.contains(cls));
+const card = renderReviewCard(doc, review, { formatTime: () => "Nov 22, 2026" });
+console.log(JSON.stringify({
+  sections: byClass(card, "access-review-row-section").map(n => n.textContent),
+  rows: byClass(card, "access-review-row-text").map(n => n.textContent),
+  flags: byClass(card, "access-review-flag").map(n => n.textContent),
+}));
+"""
+    rendered = subprocess.run(
+        [node, "--input-type=module", "-e", script, inbox_mjs.as_uri(), json.dumps(review_payload)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(rendered.stdout)
+    assert result["sections"] == ["Tool changes"]
+    assert "New tools" not in result["sections"]
+    assert result["rows"] == [row.text for row in compiled.rows]
+    assert set(result["flags"]) == {"New host", "Credentials to new host", "Block widens to whole tool"}

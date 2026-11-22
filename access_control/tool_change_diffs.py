@@ -89,7 +89,7 @@ def _review_row(item_id: str, text: str, *, flags: tuple[str, ...] = ()) -> Revi
         raise ValueError(
             f"Review row {item_id!r} is {len(text)} characters, exceeding the {_ROW_TEXT_LIMIT}-character limit."
         )
-    return ReviewItemV1(item_id=item_id, section="tool", text=text, flags=flags)
+    return ReviewItemV1(item_id=item_id, section="tool_change", text=text, flags=flags)
 
 
 def _pack_text_rows(

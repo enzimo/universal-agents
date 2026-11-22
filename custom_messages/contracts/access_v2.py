@@ -1052,7 +1052,7 @@ REVIEW_FLAGS = frozenset(
         "team_account",
     }
 )
-REVIEW_SECTIONS = ("tool", "access", "restriction", "folder", "account", "revocation", "delivery")
+REVIEW_SECTIONS = ("tool", "tool_change", "access", "restriction", "folder", "account", "revocation", "delivery")
 
 
 class ReviewItemV1(AccessContractModel):
@@ -1064,7 +1064,7 @@ class ReviewItemV1(AccessContractModel):
     """
 
     item_id: str = Field(min_length=1, max_length=80)
-    section: Literal["tool", "access", "restriction", "folder", "account", "revocation", "delivery"]
+    section: Literal["tool", "tool_change", "access", "restriction", "folder", "account", "revocation", "delivery"]
     # Long enough for one proposed setup step in its exact words (tool_setup_spec_v1 limits).
     text: str = Field(min_length=1, max_length=1600)
     flags: tuple[str, ...] = ()

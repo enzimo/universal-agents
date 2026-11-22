@@ -49,8 +49,9 @@ export const KEEP_DURATIONS = Object.freeze([
 ]);
 // Section headings and warning chips for review rows (ui/DESIGN.md, "Inbox").
 export const ROW_SECTIONS = Object.freeze({
-  tool: "New tools", access: "Access", restriction: "Restrictions", folder: "Folders to register",
-  account: "Credentials to link", revocation: "Access to remove", delivery: "Delivery",
+  tool: "New tools", tool_change: "Tool changes", access: "Access", restriction: "Restrictions",
+  folder: "Folders to register", account: "Credentials to link", revocation: "Access to remove",
+  delivery: "Delivery",
 });
 export const ROW_FLAGS = Object.freeze({
   new_host: "New host", credential_to_new_host: "Credentials to new host", private_address: "Private address",

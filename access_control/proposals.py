@@ -365,7 +365,7 @@ def proposal_summary(rows: tuple[ReviewItemV1, ...]) -> str:
     """The proposal in one line from its review rows, such as "Access proposal: add 1 new tool, give 2 accesses"."""
 
     # A tool's extra rows (its commands, its setup steps, its change details) are not more tools.
-    items = [row for row in rows if not (row.section == "tool" and row.item_id.count("-") > 1)]
+    items = [row for row in rows if not (row.section in {"tool", "tool_change"} and row.item_id.count("-") > 1)]
     counts = {section: sum(1 for row in items if _summary_bucket(row) == section) for section in _SUMMARY_SECTION_WORDS}
     parts = [
         _SUMMARY_SECTION_WORDS[section][count != 1].format(n=count) for section, count in counts.items() if count

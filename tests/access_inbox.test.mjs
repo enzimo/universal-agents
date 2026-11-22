@@ -840,3 +840,30 @@ test("each choice says what it does, follows the Keep box, and is marked while i
   approve.dispatchEvent(new Event("mouseleave"));
   assert.equal(line.classList.contains("is-active"), false);
 });
+
+test("tool-change rows render under Tool changes (not New tools) with widened-block and credential-host flags", () => {
+  const document = fakeDocument();
+  const proposal = review({
+    request_id: "req-tool-change",
+    kind: "change",
+    title: "TeamArchitect asks to make a change: Update Gitea",
+    summary: "Access proposal: change 1 tool (includes a new host, stored credentials sent to a new host, a restriction that will block a whole tool). Takes effect when approved.",
+    rows: [
+      { item_id: "change-0", section: "tool_change", text: "Change web API tool Gitea (http:gitea): updates hosts, routes.", flags: [] },
+      { item_id: "change-0-host-added-0", section: "tool_change", text: "Add host to Gitea (http:gitea): mirror.example.net.", flags: ["new_host", "credential_to_new_host"] },
+      { item_id: "change-0-widened-block-0", section: "tool_change", text: "Block blk-1 on Gitea (http:gitea) widens to the whole tool.", flags: ["block_widened"] },
+    ],
+    choices: [{ choice: "approve", label: "Approve" }, { choice: "deny", label: "Deny" }],
+  });
+  const card = renderReviewCard(document, proposal, { formatTime });
+  const sections = byClass(card, "access-review-row-section").map(node => node.textContent);
+  assert.deepEqual(sections, ["Tool changes"]);
+  assert.ok(!sections.includes("New tools"));
+  const flags = byClass(card, "access-review-flag").map(node => node.textContent);
+  assert.deepEqual(flags, ["New host", "Credentials to new host", "Block widens to whole tool"]);
+
+  const compact = renderReviewCard(document, proposal, { formatTime, compact: true });
+  const compactFlags = byClass(compact, "access-review-flag").map(node => node.textContent);
+  assert.ok(compactFlags.includes("Credentials to new host"));
+  assert.ok(compactFlags.includes("Block widens to whole tool"));
+});
