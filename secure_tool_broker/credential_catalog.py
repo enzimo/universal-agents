@@ -25,6 +25,7 @@ from custom_messages.contracts.access_v2 import (
     AccountLinkV1,
     InjectionPlacement,
     LinkOwnerKind,
+    LinkPurpose,
 )
 from env_secrets import get_env_with_file_fallback
 from secure_tool_broker.bitwarden_cli import ensure_bitwarden_server_configured_from_env
@@ -2077,7 +2078,9 @@ def _resolve_injections(
             return resolved
         rendered = injection.render(resolved.value)
         values[(injection.placement, injection.name)] = rendered
-        if resolved.secret and resolved.value:
+        # Team gate credentials are always redacted from responses and errors,
+        # even when stored in a field not marked secret.
+        if resolved.value and (resolved.secret or link.purpose is LinkPurpose.GATE):
             secrets_found += [resolved.value, rendered]
     return values, secrets_found
 

@@ -1667,6 +1667,79 @@ def test_api_request_injects_account_and_team_gate_credentials_and_redacts_both(
     assert "GATE-QUERY-SECRET" not in redir.content["redirect_location"]
     assert "CF-GATE-SECRET-VALUE" not in redir.content["text"]
 
+    # C03/C16: a gate value stored in a non-secret metadata field is still redacted everywhere
+    # (JSON body, text body, and redirect Location).
+    credential_catalog.save_catalog(
+        CredentialCatalog(
+            credentials={
+                "gitea_plain_gate": CatalogCredential(
+                    display_name="Gitea Plain Gate",
+                    purpose="Team gate stored as metadata text.",
+                    fields={
+                        "gate_header": CatalogCredentialField(
+                            kind="text",
+                            visibility="metadata",
+                            value="GATE-PLAIN-VALUE",
+                        ),
+                    },
+                )
+            }
+        ),
+        scope=TEST_TEAM_SCOPE,
+    )
+    plain_gate = AccountLinkV1(
+        link_id="account_link_team_gitea_plain_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="gitea_plain_gate",
+        injections=(_header("X-Gate-Token", field="gate_header"),),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+
+    _capture_requests(monkeypatch, b'{"echo": "GATE-PLAIN-VALUE"}')
+    plain_json = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/json"},
+        context=_linked_context(None, gate_link=plain_gate),
+    )
+    assert plain_json.status == "success"
+    assert plain_json.content["json"] == {"echo": "[REDACTED]"}
+    assert "GATE-PLAIN-VALUE" not in json.dumps(plain_json.content)
+
+    class _PlainTextResponse(_JsonResponse):
+        def __init__(self) -> None:
+            super().__init__(b"echoed GATE-PLAIN-VALUE in text", status=200)
+            self.headers = _JsonHeaders({"Content-Type": "text/plain"})
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", lambda _req, *, timeout: _PlainTextResponse())
+    plain_text = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/text"},
+        context=_linked_context(None, gate_link=plain_gate),
+    )
+    assert plain_text.status == "success"
+    assert "GATE-PLAIN-VALUE" not in plain_text.content["text"]
+    assert "[REDACTED]" in plain_text.content["text"]
+
+    class _PlainRedirectResponse(_JsonResponse):
+        def __init__(self) -> None:
+            super().__init__(b"moved GATE-PLAIN-VALUE", status=302)
+            self.headers = _JsonHeaders(
+                {"Content-Type": "text/plain", "Location": "https://other.example.com/?seen=GATE-PLAIN-VALUE"}
+            )
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", lambda _req, *, timeout: _PlainRedirectResponse())
+    plain_redir = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/redirect"},
+        context=_linked_context(None, gate_link=plain_gate),
+    )
+    assert plain_redir.status == "success"
+    assert "GATE-PLAIN-VALUE" not in plain_redir.content["redirect_location"]
+    assert "GATE-PLAIN-VALUE" not in plain_redir.content["text"]
+    assert "[REDACTED]" in plain_redir.content["redirect_location"]
+
 
 def test_api_request_refuses_agent_supplied_gate_header_query_and_injection_collisions(
     tmp_path: Path,

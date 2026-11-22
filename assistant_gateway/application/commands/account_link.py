@@ -36,6 +36,8 @@ from assistant_gateway.application.account_links import (
     ACCOUNT_LINK_NO_ACCESS_NOTE,
     ACCOUNT_LINK_OWNER_PERSON,
     ACCOUNT_LINK_OWNER_TEAM,
+    GATE_LINK_FORM_ACTION_LABEL,
+    GATE_LINK_NO_ACCESS_NOTE,
     AccountLinkOwner,
     AccountLinkUnavailable,
     GatewayAccountLinks,
@@ -55,18 +57,21 @@ from assistant_gateway.application.transient_presentation import (
     ACCOUNT_LINK_COMMAND_ACTION_KIND,
     GatewayTransientAction,
 )
+from custom_messages.contracts.access_v2 import LinkOwnerKind, LinkPurpose
 from id_generation import new_id
 from secure_tools.auth_methods import ToolSignIn, sign_in_instead_text, tool_sign_in
+from secure_tools.chat_commands import link_command
 
 LOGGER = logging.getLogger(__name__)
 
 ACCOUNT_LINK_COMMAND = "/link"
 ACCOUNT_LINK_COMMAND_USAGE = (
-    "Usage: /link <tool_id> [me|team]\n"
+    "Usage: /link <tool_id> [me|team|gate]\n"
     "Signs you in to a tool, or links the stored credential it uses. "
     "GitHub, Google and X use your own sign-in: /link cli:github, /link cli:google, /link cli:x. "
     "Other tools use a linked account, for you (me, the default) or for the whole team "
-    "(team, administrators only). Example: /link http:portainer"
+    "(team, administrators only), or a team gate credential (gate, administrators only, for gated web API tools). "
+    "Example: /link http:portainer"
 )
 # Shown as the reason on the broker's form.
 _COMMAND_REASON = "You asked for this with /link."
@@ -151,6 +156,14 @@ class AccountLinkCommandHandler:
         person_id = resolve_actor_canonical_user_id(request.actor, self._identity)
         if not person_id:
             return "Account links are available only to registered users."
+        if option == LinkPurpose.GATE.value:
+            return await self._open_link_form(
+                tool_id,
+                ACCOUNT_LINK_OWNER_TEAM,
+                person_id,
+                request,
+                purpose=LinkPurpose.GATE,
+            )
         sign_in = tool_sign_in(tool_id)
         if sign_in is not None and option != "team":
             return await self._sign_in(sign_in, option, person_id, request)
@@ -193,30 +206,50 @@ class AccountLinkCommandHandler:
         owner: AccountLinkOwner,
         person_id: str,
         request: AccountLinkCommandRequest,
+        *,
+        purpose: LinkPurpose = LinkPurpose.ACCOUNT,
     ) -> str | GatewayTransientAction:
+        gate = purpose is LinkPurpose.GATE
         try:
-            form = await self._account_links.open_form(
-                request_id=new_id("acct_link_cmd"),
-                person_id=person_id,
-                person_roles=self._identity.team_roles_for_person(person_id),
-                tool_id=tool_id,
-                owner=owner,
-                reason=_COMMAND_REASON,
-            )
+            open_kwargs: dict[str, Any] = {
+                "request_id": new_id("acct_link_cmd"),
+                "person_id": person_id,
+                "person_roles": self._identity.team_roles_for_person(person_id),
+                "tool_id": tool_id,
+                "owner": owner,
+                "reason": _COMMAND_REASON,
+            }
+            if gate:
+                open_kwargs["purpose"] = purpose
+            form = await self._account_links.open_form(**open_kwargs)
         except AccountLinkUnavailable as exc:
-            return f"Could not open the account link form for {tool_id}. {exc.message}"
+            kind_words = "team gate link form" if gate else "account link form"
+            return f"Could not open the {kind_words} for {tool_id}. {exc.message}"
         target = result_target(request, person_id)
         if target is not None:
-            self._link_results.watch_account_link(
-                form=form,
-                tool_id=tool_id,
-                owner=owner,
-                restart_command=(
-                    f"{ACCOUNT_LINK_COMMAND} {tool_id} team"
-                    if owner == ACCOUNT_LINK_OWNER_TEAM
-                    else f"{ACCOUNT_LINK_COMMAND} {tool_id}"
+            watch_kwargs: dict[str, Any] = {
+                "form": form,
+                "tool_id": tool_id,
+                "owner": owner,
+                "restart_command": link_command(tool_id, LinkOwnerKind(owner), purpose=purpose),
+                "target": target,
+            }
+            if gate:
+                watch_kwargs["purpose"] = purpose
+            self._link_results.watch_account_link(**watch_kwargs)
+        if gate:
+            return GatewayTransientAction(
+                kind=ACCOUNT_LINK_COMMAND_ACTION_KIND,
+                label=GATE_LINK_FORM_ACTION_LABEL,
+                description=(
+                    f"Link the team's gate credential to {tool_id}. "
+                    "Open the form to choose or save the gate credential sent on every request "
+                    f"to this tool's hosts. {GATE_LINK_NO_ACCESS_NOTE}"
                 ),
-                target=target,
+                url=form.form_url,
+                expires_at_utc=form.expires_at_utc,
+                receipt=f"Team gate link form opened for {tool_id}.",
+                broker_page=True,
             )
         return GatewayTransientAction(
             kind=ACCOUNT_LINK_COMMAND_ACTION_KIND,

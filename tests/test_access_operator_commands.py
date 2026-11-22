@@ -140,20 +140,33 @@ def test_a_person_removes_their_own_link_and_administrators_remove_any(service) 
     from custom_messages.contracts.access_v2 import (
         AccountLinkStatus,
         AccountLinkV1,
+        CredentialInjectionV1,
+        InjectionPlacement,
         LinkOwnerKind,
+        LinkPurpose,
         SubjectRefV1,
     )
     from access_control.operator_commands import describe_link, unlink
 
-    def stored(owner_kind: LinkOwnerKind, owner_id: str, key: str) -> AccountLinkV1:
+    def stored(
+        owner_kind: LinkOwnerKind,
+        owner_id: str,
+        key: str,
+        *,
+        tool_id: str = "cli:x",
+        purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+        injections: tuple[CredentialInjectionV1, ...] = (),
+    ) -> AccountLinkV1:
         return service.store.create_link(
             AccountLinkV1(
                 link_id=f"account_link_{key}",
                 team_id=TEAM,
-                tool_id="cli:x",
+                tool_id=tool_id,
                 owner_kind=owner_kind,
                 owner_id=owner_id,
+                purpose=purpose,
                 credential_key=key,
+                injections=injections,
                 created_by=SubjectRefV1(kind=SubjectKind.USER, id=owner_id),
                 created_at_utc=NOW,
             )
@@ -161,12 +174,28 @@ def test_a_person_removes_their_own_link_and_administrators_remove_any(service) 
 
     bobs = stored(LinkOwnerKind.PERSON, "bob", "bob_x")
     teams = stored(LinkOwnerKind.TEAM, TEAM, "team_x")
+    gate = stored(
+        LinkOwnerKind.TEAM,
+        TEAM,
+        "team_gitea_gate",
+        tool_id="http:gitea",
+        purpose=LinkPurpose.GATE,
+        injections=(
+            CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="CF-Access-Client-Secret", field="secret"),
+        ),
+    )
+    assert "[account]" in describe_link(bobs)
     assert "cli:x uses person bob's credential bob_x" in describe_link(bobs)
+    assert "[gate]" in describe_link(gate)
+    assert "http:gitea uses the team's credential team_gitea_gate" in describe_link(gate)
 
     with pytest.raises(OperatorCommandError, match="team administrator"):
         unlink(service.store, person_for(MEMBERS, "bob", TEAM), teams.link_id, now=NOW)
+    with pytest.raises(OperatorCommandError, match="team administrator"):
+        unlink(service.store, person_for(MEMBERS, "bob", TEAM), gate.link_id, now=NOW)
     assert unlink(service.store, person_for(MEMBERS, "bob", TEAM), bobs.link_id, now=NOW).status is AccountLinkStatus.REVOKED
     assert unlink(service.store, person_for(MEMBERS, "alice", TEAM), teams.link_id, now=NOW).status is AccountLinkStatus.REVOKED
+    assert unlink(service.store, person_for(MEMBERS, "alice", TEAM), gate.link_id, now=NOW).status is AccountLinkStatus.REVOKED
     assert service.store.list_links(TEAM, purpose=None) == []
 
 
