@@ -344,3 +344,31 @@ test("sign-out forgets the CSRF token, so later writes are refused locally", asy
   assert.equal(f.requests.filter(request => request.method === "POST").length, 0);
   assert.match(f.node("settings-access-inbox").textContent, /sign-in session expired/);
 });
+
+test("noteAgentMessage refreshes both chat review and Settings Inbox follow-up links", async () => {
+  const f = fixture();
+  const bubble = f.document.createElement("article");
+  f.document.body.append(bubble);
+  f.settings.mountAccessReview(bubble, {
+    role: "system", messageType: "access_review", accessRequestId: "req-follow", content: "announcement",
+  });
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-follow", jsonResponse({
+    review: review({
+      request_id: "req-follow", status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [{ label: "Choose the credential for Portainer", url: "https://broker.example/link/1", expires_at_utc: "2099-01-01T00:15:00+00:00" }],
+      follow_up_outcomes: [],
+    }),
+  }));
+  assert.equal(bubble.querySelectorAll("a").length, 1);
+
+  f.settings.noteAgentMessage();
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-follow", jsonResponse({
+    review: review({
+      request_id: "req-follow", status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [],
+      follow_up_outcomes: ["The account link for Portainer is done."],
+    }),
+  }));
+  assert.equal(bubble.querySelectorAll("a").length, 0);
+  assert.match(bubble.textContent, /The account link for Portainer is done\./);
+});

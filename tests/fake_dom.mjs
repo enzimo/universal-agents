@@ -43,6 +43,14 @@ export class FakeElement extends EventTarget {
     this.children.push(node);
     return node;
   }
+  insertBefore(node, reference) {
+    node.remove();
+    node.parentNode = this;
+    const index = reference ? this.children.indexOf(reference) : -1;
+    if (index >= 0) this.children.splice(index, 0, node);
+    else this.children.push(node);
+    return node;
+  }
   replaceChildren(...nodes) {
     this.children.forEach(child => { child.parentNode = null; });
     this.children = [];
@@ -66,6 +74,21 @@ export class FakeElement extends EventTarget {
     for (let current = node; current; current = current.parentNode) if (current === this) return true;
     return false;
   }
+  matches(selector) {
+    if (typeof selector !== "string" || !selector) {
+      throw new Error(`Unsupported selector in fake_dom: ${String(selector)}`);
+    }
+    if (/^\.[A-Za-z0-9_-]+$/.test(selector)) return this.classList.contains(selector.slice(1));
+    if (/^#[A-Za-z0-9_-]+$/.test(selector)) return this.id === selector.slice(1);
+    if (/^[A-Za-z][A-Za-z0-9-]*$/.test(selector)) return this.tagName === selector.toUpperCase();
+    throw new Error(`Unsupported selector in fake_dom: ${selector}`);
+  }
+  closest(selector) {
+    for (let node = this; node; node = node.parentNode) if (node.matches && node.matches(selector)) return node;
+    return null;
+  }
+  querySelectorAll(selector) { return descendants(this).filter(node => node.matches(selector)); }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   focus() { this.ownerDocument.activeElement = this; }
   click() { this.dispatchEvent(new Event("click")); }
 }

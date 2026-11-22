@@ -81,6 +81,7 @@ credential available; grants decide who may use the tool.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -272,6 +273,13 @@ def _unconfirmed(what: str) -> str:
 
 def _form_expired(what: str) -> str:
     return f"The form for {what} expired before it was used."
+
+
+def account_link_form_expired(tool_name: str) -> str:
+    """Plain expiry sentence for one account-link form (shared with proposal follow-up tracking)."""
+
+    name = " ".join(str(tool_name or "").split()) or "this tool"
+    return _form_expired(_what(TOOL_SETUP_ACCOUNT_LINK, name))
 
 
 @dataclass(frozen=True)
@@ -817,29 +825,89 @@ class GatewayToolSetups:
         request_id: str,
         forms: list[tuple[AccountLinkForm, str, str]],
         then: Callable[[], Awaitable[None]],
+        on_form_ended: Callable[[AccountLinkForm, str, str, PageEnding], Awaitable[None] | None] | None = None,
     ) -> None:
         """Watch an approved proposal's forms ``(form, tool_id, owner)``; run ``then`` once all ended.
 
-        The proposal's task waits inside ``propose_access_change``; ``then``
-        sends its decision notice, and the tool reads which links exist.
+        When ``on_form_ended`` is given, it runs as each individual form ends
+        with ``(form, tool_id, owner, ending)`` so the gateway can dismiss that
+        form's link immediately while sibling forms stay open. The proposal's
+        task waits inside ``propose_access_change``; ``then`` sends its decision
+        notice after every form has ended, and the tool reads which links exist.
         """
 
-        pages = [self._account_link_page(tool_id, owner, form) for form, tool_id, owner in forms]
+        watched = [
+            (form, tool_id, owner, self._account_link_page(tool_id, owner, form))
+            for form, tool_id, owner in forms
+        ]
         self._watches.start(
-            self._after_pages(request_id, pages, then),
+            self._after_pages(request_id, watched, then, on_form_ended),
             name=f"gateway_proposal_links_{request_id[:24]}",
         )
 
+    async def _watch_proposal_form(
+        self,
+        request_id: str,
+        form: AccountLinkForm,
+        tool_id: str,
+        owner: str,
+        page: _OpenedPage,
+        on_form_ended: Callable[[AccountLinkForm, str, str, PageEnding], Awaitable[None] | None] | None,
+    ) -> PageEnding:
+        what = _what(TOOL_SETUP_ACCOUNT_LINK, form.tool_display_name)
+        try:
+            ending = await page.watch()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - report an unconfirmed ending so the link clears and siblings finish
+            self._logger.exception(
+                "Could not watch an approved proposal's account link form. "
+                "event=gateway_proposal_link_watch_failed request_id=%s tool_id=%s",
+                request_id,
+                tool_id,
+            )
+            ending = PageEnding(
+                TOOL_SETUP_UNAVAILABLE,
+                _unconfirmed(what),
+                reason_code=REASON_PAGE_UNCONFIRMED,
+            )
+        if on_form_ended is not None:
+            try:
+                callback_result = on_form_ended(form, tool_id, owner, ending)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one callback error must not disrupt sibling forms or release
+                self._logger.exception(
+                    "Could not record an approved proposal's account link form ending. "
+                    "event=gateway_proposal_link_callback_failed request_id=%s tool_id=%s",
+                    request_id,
+                    tool_id,
+                )
+        return ending
+
     async def _after_pages(
-        self, request_id: str, pages: list[_OpenedPage], then: Callable[[], Awaitable[None]]
+        self,
+        request_id: str,
+        watched: list[tuple[AccountLinkForm, str, str, _OpenedPage]],
+        then: Callable[[], Awaitable[None]],
+        on_form_ended: Callable[[AccountLinkForm, str, str, PageEnding], Awaitable[None] | None] | None = None,
     ) -> None:
         try:
-            endings = await asyncio.gather(*(page.watch() for page in pages))
+            results = await asyncio.gather(
+                *(
+                    self._watch_proposal_form(request_id, form, tool_id, owner, page, on_form_ended)
+                    for form, tool_id, owner, page in watched
+                ),
+                return_exceptions=True,
+            )
+            statuses = [result.status if isinstance(result, PageEnding) else "error" for result in results]
             self._logger.info(
                 "An approved proposal's account link forms ended. event=gateway_proposal_links_ended "
                 "request_id=%s statuses=%s",
                 request_id,
-                ",".join(ending.status for ending in endings),
+                ",".join(statuses),
             )
         finally:
             await then()
@@ -1456,6 +1524,7 @@ __all__ = [
     "REASON_OFFER_LIMIT",
     "REASON_PAGE_NOT_WATCHED",
     "SETUP_STATUS_WAITING",
+    "account_link_form_expired",
     "account_link_page_ending",
     "sign_in_page_ending",
 ]

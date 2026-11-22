@@ -24,8 +24,9 @@
  */
 
 import {
-  ACCESS_INBOX_API, ACCESS_REVIEW_MESSAGE_TYPE, decisionOutcome, decisionPath, decisionRequestBody, followUpLinks, renderDecidedCard,
-  renderReviewCard, setCardMessage, storedDecisionOutcome,
+  ACCESS_INBOX_API, ACCESS_REVIEW_MESSAGE_TYPE, activeFollowUpLinks, createFollowUpWatcher, decisionOutcome,
+  decisionPath, decisionRequestBody, followUpOutcomes, followUpSignature, followUpWatchTargets, hasPendingFollowUp,
+  isFollowUpSettling, renderDecidedCard, renderReviewCard, setCardMessage, storedDecisionOutcome,
 } from "./access_inbox.mjs";
 
 export const REFRESH_WAITING_AFTER_MS = 15000;
@@ -55,6 +56,13 @@ export function reviewPath(requestId) {
   return `${ACCESS_INBOX_API}/requests/${encodeURIComponent(text(requestId))}`;
 }
 
+function findReviewSlots(document, id) {
+  const root = document && document.body;
+  if (!root) return [];
+  return Array.from(root.querySelectorAll(".chat-access-review"))
+    .filter(slot => slot.isConnected && slot.getAttribute("data-access-request-id") === id);
+}
+
 /**
  * Creates the chat's access review cards.
  *
@@ -70,17 +78,40 @@ export function createChatAccessReviews({
 }) {
   const document = browser.document;
   const warn = (event, detail) => browser.console && browser.console.warn(event, detail);
-  // requestId -> { review, outcome, error, fetchedAt, pending }
+  // requestId -> { review, localOutcome, error, fetchedAt, pending, followUpStop, lastFollowUpSignature }
   const entries = new Map();
   let generation = 0;
+  let syncQueued = false;
+
+  // Coalesces post-mount watcher sync into one microtask so chat.js
+  // renderMessages finishes attaching detached bubbles before we check them.
+  function queueSync() {
+    if (syncQueued) return;
+    syncQueued = true;
+    const queuedGeneration = generation;
+    Promise.resolve().then(() => {
+      if (queuedGeneration !== generation) return;
+      syncQueued = false;
+      followUpWatcher.sync();
+    });
+  }
 
   function entryFor(id) {
-    if (!entries.has(id)) entries.set(id, { review: null, outcome: null, error: "", fetchedAt: 0, pending: null });
+    if (!entries.has(id)) {
+      entries.set(id, {
+        review: null, localOutcome: null, error: "", fetchedAt: 0, pending: null,
+        followUpStop: false, lastFollowUpSignature: "",
+      });
+    }
     return entries.get(id);
   }
 
   function isDecided(entry) {
-    return Boolean(entry.outcome) || Boolean(entry.review && text(entry.review.status) !== "waiting");
+    return Boolean(entry.localOutcome) || Boolean(entry.review && text(entry.review.status) !== "waiting");
+  }
+
+  function hasPendingFollowUps(entry) {
+    return Boolean(!entry.followUpStop && entry.review && hasPendingFollowUp(entry.review));
   }
 
   function needsRead(entry) {
@@ -90,7 +121,7 @@ export function createChatAccessReviews({
   }
 
   /** Reads the request once at a time; replies from before a sign-out are ignored. */
-  function read(id) {
+  function read(id, { refreshFollowUp = false } = {}) {
     const entry = entryFor(id);
     if (entry.pending) return entry.pending;
     const readGeneration = generation;
@@ -98,22 +129,51 @@ export function createChatAccessReviews({
       .then(() => get(reviewPath(id)))
       .then(payload => {
         if (readGeneration !== generation) return;
-        entry.review = (payload && payload.review) || null;
+        const nextReview = (payload && payload.review) || null;
+        if (refreshFollowUp) {
+          if (!nextReview) return;
+          entry.review = nextReview;
+          if (followUpSignature(entry.review, now()) !== entry.lastFollowUpSignature) drawAll(id);
+          return;
+        }
+        entry.review = nextReview;
         entry.error = entry.review ? "" : READ_FAILED;
       }, error => {
         if (readGeneration !== generation) return;
+        if (refreshFollowUp) {
+          if (error && (error.status === 403 || error.status === 404)) entry.followUpStop = true;
+          warn("chat_access_review_follow_up_read_failed", { request_id: id, status: error && error.status });
+          return;
+        }
         entry.error = failureMessage(error, READ_FAILED);
         warn("chat_access_review_read_failed", { request_id: id, status: error && error.status });
       })
       .finally(() => {
+        if (readGeneration !== generation) return;
         entry.fetchedAt = now();
         entry.pending = null;
+        followUpWatcher.sync();
       });
     return entry.pending;
   }
 
   function summaryOf(entry, id) {
     return text(entry.review && (entry.review.summary || entry.review.title)) || `Request ${id}`;
+  }
+
+  /** Single source of truth for decided-card rendering across local and stored decisions. */
+  function decidedCardProps(entry, id) {
+    const outcome = entry.localOutcome || (entry.review && storedDecisionOutcome(entry.review, formatTime));
+    if (!outcome) return null;
+    return {
+      id,
+      title: summaryOf(entry, id),
+      outcome,
+      links: activeFollowUpLinks(entry.review, now()),
+      outcomes: followUpOutcomes(entry.review),
+      settling: isFollowUpSettling(entry.review),
+      compact: true,
+    };
   }
 
   function statusCard(id, value, { isError = false, withInboxButton = false } = {}) {
@@ -133,12 +193,14 @@ export function createChatAccessReviews({
 
   function cardFor(id) {
     const entry = entryFor(id);
-    if (entry.outcome) return renderDecidedCard(document, entry.outcome);
+    const decided = decidedCardProps(entry, id);
+    if (decided) {
+      entry.lastFollowUpSignature = followUpSignature(entry.review, now());
+      return renderDecidedCard(document, decided);
+    }
     if (!entry.review) {
       return entry.error ? statusCard(id, entry.error, { isError: true, withInboxButton: true }) : statusCard(id, LOADING_TEXT);
     }
-    const stored = storedDecisionOutcome(entry.review, formatTime);
-    if (stored) return renderDecidedCard(document, { id, title: summaryOf(entry, id), outcome: stored });
     return renderReviewCard(document, entry.review, {
       compact: true, formatTime, warn, onChoose: chosen => decide(id, chosen),
     });
@@ -148,8 +210,44 @@ export function createChatAccessReviews({
     slot.replaceChildren(cardFor(id));
   }
 
+  function drawAll(id) {
+    findReviewSlots(document, id).forEach(slot => draw(slot, id));
+  }
+
+  function refreshFollowUps() {
+    const reads = [];
+    entries.forEach((entry, id) => {
+      if (!hasPendingFollowUps(entry) || !findReviewSlots(document, id).length) return;
+      reads.push(read(id, { refreshFollowUp: true }));
+    });
+    return Promise.all(reads);
+  }
+
+  const followUpWatcher = createFollowUpWatcher({
+    getPendingLinks() {
+      const links = [];
+      entries.forEach((entry, id) => {
+        if (hasPendingFollowUps(entry) && findReviewSlots(document, id).length) {
+          links.push(...followUpWatchTargets(entry.review, id));
+        }
+      });
+      return links;
+    },
+    onRefresh: refreshFollowUps,
+    onExpire() {
+      entries.forEach((entry, id) => {
+        if (!hasPendingFollowUps(entry)) return;
+        const next = followUpSignature(entry.review, now());
+        if (next !== entry.lastFollowUpSignature) drawAll(id);
+      });
+    },
+    browser,
+    now,
+  });
+
   function decide(id, { review, choice, button, note, card, group, message, keepBoxes, handOnBoxes, keepSelects }) {
     const entry = entryFor(id);
+    const decideGeneration = generation;
     const { body, kept } = decisionRequestBody({ review, choice, note, keepBoxes, handOnBoxes, keepSelects });
     const finish = beginAction(button, choice.busyLabel, group);
     note.readOnly = true;
@@ -158,24 +256,26 @@ export function createChatAccessReviews({
       .then(() => post(decisionPath(id), body))
       .then(payload => {
         finish();
+        if (decideGeneration !== generation) return;
         const saved = (payload && payload.review) || review;
         entry.review = saved;
         entry.fetchedAt = now();
-        entry.outcome = { id, title: summaryOf(entry, id), outcome: decisionOutcome(choice.choice, saved, kept),
-          links: followUpLinks(saved) };
-        if (card.isConnected) card.replaceWith(renderDecidedCard(document, entry.outcome));
+        entry.followUpStop = false;
+        entry.localOutcome = decisionOutcome(choice.choice, saved, kept);
+        if (card.isConnected) card.replaceWith(cardFor(id));
+        followUpWatcher.sync();
         if (typeof onDecided === "function") onDecided(id);
       }, error => {
         finish();
+        if (decideGeneration !== generation) return;
         note.readOnly = false;
         setCardMessage(message, failureMessage(error, DECISION_FAILED), true);
         // Someone may have decided it elsewhere first: read it again, and
         // show the stored decision instead of buttons that can only fail.
         return read(id).then(() => {
-          const stored = entry.review && storedDecisionOutcome(entry.review, formatTime);
-          if (stored && card.isConnected) {
-            card.replaceWith(renderDecidedCard(document, { id, title: summaryOf(entry, id), outcome: stored }));
-          }
+          if (decideGeneration !== generation) return;
+          if (decidedCardProps(entry, id) && card.isConnected) card.replaceWith(cardFor(id));
+          followUpWatcher.sync();
         });
       });
   }
@@ -196,13 +296,19 @@ export function createChatAccessReviews({
       const entry = entryFor(id);
       if (needsRead(entry) || entry.pending) {
         read(id).then(() => { if (slot.isConnected) draw(slot, id); });
+      } else {
+        queueSync();
       }
       return slot;
     },
+    /** Re-reads decided cards that still have open proposal follow-up links. */
+    refreshFollowUps,
     /** Sign-out: forget every request and ignore replies to earlier reads. */
     clear() {
       generation += 1;
+      syncQueued = false;
       entries.clear();
+      followUpWatcher.stop();
     },
   };
 }
