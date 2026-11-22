@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote
 
 from storage import sqlite_connection
 
@@ -284,9 +285,47 @@ class CredentialCatalogStore:
         return mapping
 
 
+def load_scope_readonly(
+    path: str | os.PathLike[str],
+    scope: CredentialOwnerScope,
+) -> dict[str, dict[str, Any]]:
+    """Read one owner's catalog rows read-only without creating files, folders, or tables."""
+
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        return {}
+    uri = f"file:{quote(str(resolved), safe='/')}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=_LOCK_WAIT_MS / 1000)
+    except sqlite3.OperationalError:
+        return {}
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout={_LOCK_WAIT_MS}")
+        try:
+            rows = conn.execute(
+                """
+                SELECT credential_key, credential_json
+                FROM credential_catalog_entries
+                WHERE scope_kind = ? AND owner_id = ?
+                ORDER BY credential_key
+                """,
+                (scope.scope_kind, scope.owner_id),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        return {
+            str(row["credential_key"]): dict(json.loads(str(row["credential_json"])))
+            for row in rows
+        }
+    finally:
+        conn.close()
+
+
 __all__ = [
     "CredentialCatalogStore",
     "CredentialOwnerScope",
     "SealboxTenantMapping",
+    "load_scope_readonly",
     "resolve_catalog_db_path",
 ]

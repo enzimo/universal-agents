@@ -24,6 +24,7 @@ from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers._runtime import _require_manager_tool
 from custom_tools.runtime_context import get_agent_ref
 from id_generation import new_id
+from runtime_hosting.authorization import SSHCallerContext
 from runtime_hosting.ssh import (
     ConfiguredSSHCredentialMaterialProvider,
     SSHCredentialMaterial,
@@ -472,10 +473,10 @@ def create_execution_ssh_session(
 def plan_execution_ssh_interaction(
     session_id: str,
     reason: str,
-    expires_at_utc: str = "",
     ttl_seconds: int = 0,
+    expires_at_utc: str = "",
     delegated_agent_type: str = "",
-    delegated_task_id: str = "",
+    this_request_only: bool = True,
     allow_commands: bool = False,
     allow_typing: bool = False,
     allow_password_bootstrap: bool = False,
@@ -483,11 +484,14 @@ def plan_execution_ssh_interaction(
     allow_workspace_transfer: bool = False,
     allowed_secret_recipes_json: str = "",
 ) -> str:
-    """Stage time-bounded SSH capabilities and optional single-task worker delegation; apply with apply_change.
+    """Stage time-bounded SSH capabilities and optional single-request worker delegation; apply with apply_change.
 
-    Requires either expires_at_utc (ISO 8601 UTC) or ttl_seconds (capped by
-    execution_control.ssh.max_delegation_ttl_seconds) and at least one explicit
-    capability flag. An administrator approves the exact bounds in the Inbox.
+    Requires ttl_seconds (duration from administrator approval, capped by
+    execution_control.ssh.max_delegation_ttl_seconds) and/or expires_at_utc
+    (ISO 8601 UTC hard deadline), plus at least one explicit capability flag.
+    When this_request_only is true, trusted code binds the delegation to the
+    current verified request id so delegated workers on this request can use it
+    and no other request can. An administrator approves the exact bounds in the Inbox.
     """
     try:
         agent, error = _manager_agent("plan_execution_ssh_interaction")
@@ -503,7 +507,7 @@ def plan_execution_ssh_interaction(
             ),
             ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
             delegated_agent_type=delegated_agent_type or None,
-            delegated_task_id=delegated_task_id or None,
+            this_request_only=bool(this_request_only),
             allow_commands=allow_commands,
             allow_typing=allow_typing,
             allow_password_bootstrap=allow_password_bootstrap,
@@ -519,6 +523,14 @@ def plan_execution_ssh_interaction(
         return _error_payload(exc)
 
 
+def _ssh_caller(service: ExecutionControlService) -> SSHCallerContext:
+    return SSHCallerContext(
+        agent_type=service.actor.agent.agent_type,
+        task_id=service.actor.agent.work_id,
+        person_id=service.actor.person_id,
+    )
+
+
 @tool
 async def open_execution_ssh_session(session_id: str) -> str:
     """Open a created SSH session's PTY using broker-owned identity material."""
@@ -531,6 +543,7 @@ async def open_execution_ssh_session(session_id: str) -> str:
         opened = await _ssh_broker(service).open(
             session_id=session_id,
             lease_token=new_id("ssh_lease"),
+            caller=_ssh_caller(service),
         )
         return opened.model_dump_json()
     except Exception as exc:
@@ -554,6 +567,7 @@ async def read_execution_ssh_session(
             session_id=session_id,
             maximum_bytes=max(1, min(int(maximum_bytes), 1_048_576)),
             timeout_seconds=max(0.0, min(float(timeout_seconds), 30.0)),
+            caller=_ssh_caller(service),
         )
         return json.dumps(
             {
@@ -579,6 +593,7 @@ async def write_execution_ssh_session(session_id: str, text: str) -> str:
         written = await _ssh_broker(service).write(
             session_id=session_id,
             payload=text.encode("utf-8"),
+            caller=_ssh_caller(service),
         )
         return json.dumps({"session_id": session_id, "written_bytes": written})
     except Exception as exc:
@@ -602,6 +617,7 @@ async def resize_execution_ssh_session(
             session_id=session_id,
             rows=terminal_rows,
             columns=terminal_columns,
+            caller=_ssh_caller(service),
         )
         return json.dumps(
             {

@@ -192,7 +192,7 @@ SUPPORTED_SSH_SECRET_RECIPES: frozenset[SSHSecretRecipe] = frozenset(
 )
 
 
-def _validate_ssh_host_syntax(value: str) -> str:
+def validate_ssh_host_syntax(value: str) -> str:
     """Reject leading dashes, control chars, whitespace, and option-like syntax in SSH hosts."""
 
     cleaned = str(value or "").strip()
@@ -205,19 +205,78 @@ def _validate_ssh_host_syntax(value: str) -> str:
     return cleaned
 
 
-def _validate_ssh_username(value: str) -> str:
-    """Reject leading dashes, whitespace, and control chars in SSH usernames (C36).
+def validate_ssh_username(value: str) -> str:
+    """Reject leading dashes, tabs, line breaks, and control chars in SSH usernames (C36, C47).
 
     Permits standard Unix/macOS/Windows account characters including interior
-    dashes, dots, underscores, ``$`` and Windows domain backslashes (``DOMAIN\\user``).
+    spaces (such as Windows ``Build Admin`` accounts), dashes, dots,
+    underscores, ``$`` and Windows domain backslashes (``DOMAIN\\user``).
     """
 
     cleaned = str(value or "").strip()
     if not cleaned or len(cleaned) > 128:
         raise ValueError("SSH username must be between 1 and 128 characters.")
-    if cleaned.startswith("-") or any(ord(ch) <= 32 or ord(ch) == 127 for ch in cleaned):
-        raise ValueError("SSH username must not start with '-' or contain whitespace/control characters.")
+    if cleaned.startswith("-") or any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        raise ValueError(
+            "SSH username must not start with '-' or contain tabs, line breaks, or control characters."
+        )
     return cleaned
+
+
+_SSH_DELEGATED_AGENT_TYPE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}\Z")
+
+
+def enrolled_ssh_target_digest(
+    *,
+    target_id: str,
+    owner: OwnerScopeV1,
+    host: str,
+    port: int,
+    username: str,
+    platform: SSHTargetPlatform,
+    host_key_algorithm: str,
+    host_key_fingerprint: str,
+    host_key_public_key: str,
+    credential_key: str,
+    credential_owner_scope: OwnerScopeV1,
+    credential_public_key_fingerprint: str | None,
+    bootstrap_credential_key: str | None,
+    bootstrap_credential_owner_scope: OwnerScopeV1 | None,
+    lifecycle: SSHTargetLifecycle,
+    expires_at_utc: datetime | None,
+    reason: str,
+) -> str:
+    """Compute the canonical SHA-256 digest of an enrolled SSH target's immutable fields."""
+
+    return contract_sha256(
+        {
+            "target_id": target_id,
+            "owner": owner.model_dump(mode="json"),
+            "host": host,
+            "port": port,
+            "username": username,
+            "platform": platform.value,
+            "host_key_algorithm": host_key_algorithm,
+            "host_key_fingerprint": host_key_fingerprint,
+            "host_key_public_key": host_key_public_key,
+            "credential_key": credential_key,
+            "credential_owner_scope": credential_owner_scope.model_dump(mode="json"),
+            "credential_public_key_fingerprint": credential_public_key_fingerprint,
+            "bootstrap_credential_key": bootstrap_credential_key,
+            "bootstrap_credential_owner_scope": (
+                bootstrap_credential_owner_scope.model_dump(mode="json")
+                if bootstrap_credential_owner_scope is not None
+                else None
+            ),
+            "lifecycle": lifecycle.value,
+            "expires_at_utc": (
+                expires_at_utc.astimezone(timezone.utc).isoformat()
+                if expires_at_utc is not None
+                else None
+            ),
+            "reason": reason,
+        }
+    )
 
 
 def _credential_scope_allowed_for_owner(
@@ -1004,12 +1063,12 @@ class SSHConnectionTargetV1(BaseModel):
     @field_validator("host", mode="after")
     @classmethod
     def _validate_host(cls, value: str) -> str:
-        return _validate_ssh_host_syntax(value)
+        return validate_ssh_host_syntax(value)
 
     @field_validator("username", mode="after")
     @classmethod
     def _validate_username(cls, value: str) -> str:
-        return _validate_ssh_username(value)
+        return validate_ssh_username(value)
 
     @model_validator(mode="after")
     def _validate_target(self) -> Self:
@@ -1047,11 +1106,22 @@ class SSHConnectionTargetV1(BaseModel):
 
 
 class SSHDelegationBoundsV1(BaseModel):
-    """Admin-approved delegation scope and explicit default-false capabilities for one SSH session."""
+    """Admin-approved delegation scope and explicit default-false capabilities for one SSH session.
+
+    ``delegated_agent_type`` names a registered agent type in this team that may
+    use the approved capabilities (when ``None``, only the staging agent type
+    may use them).
+
+    ``delegated_task_id`` is the verified request id (``AgentPrincipal.work_id`` /
+    ``TaskContextV1.context_id``), set by trusted code when the delegation is
+    scoped to ``this_request_only``. It travels unchanged from the team lead to
+    delegated worker subtasks of that person's request and is never accepted as
+    free-form agent text.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
-    delegated_agent_type: str | None = Field(default=None, min_length=1, max_length=240)
+    delegated_agent_type: str | None = Field(default=None, min_length=1, max_length=128)
     delegated_task_id: str | None = Field(default=None, min_length=1, max_length=240)
     allow_commands: bool = False
     allow_typing: bool = False
@@ -1060,6 +1130,17 @@ class SSHDelegationBoundsV1(BaseModel):
     allow_workspace_transfer: bool = False
     allowed_secret_recipes: tuple[SSHSecretRecipe, ...] = ()
     reason: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("delegated_agent_type", mode="after")
+    @classmethod
+    def _validate_delegated_agent_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not _SSH_DELEGATED_AGENT_TYPE_PATTERN.fullmatch(value):
+            raise ValueError(
+                "delegated_agent_type must be a valid agent type identifier (letters, digits, '_' or '-')."
+            )
+        return value
 
     @field_validator("allowed_secret_recipes", mode="after")
     @classmethod
@@ -1170,12 +1251,12 @@ class EnrolledSSHTargetV1(BaseModel):
     @field_validator("host", mode="after")
     @classmethod
     def _validate_host(cls, value: str) -> str:
-        return _validate_ssh_host_syntax(value)
+        return validate_ssh_host_syntax(value)
 
     @field_validator("username", mode="after")
     @classmethod
     def _validate_username(cls, value: str) -> str:
-        return _validate_ssh_username(value)
+        return validate_ssh_username(value)
 
     @model_validator(mode="after")
     def _validate_enrolled_target(self) -> Self:
@@ -1229,34 +1310,24 @@ class EnrolledSSHTargetV1(BaseModel):
     def enrollment_digest(self) -> str:
         """Digest of immutable enrollment fields (excludes status/revocation/bootstrap latch)."""
 
-        return contract_sha256(
-            {
-                "target_id": self.target_id,
-                "owner": self.owner.model_dump(mode="json"),
-                "host": self.host,
-                "port": self.port,
-                "username": self.username,
-                "platform": self.platform.value,
-                "host_key_algorithm": self.host_key_algorithm,
-                "host_key_fingerprint": self.host_key_fingerprint,
-                "host_key_public_key": self.host_key_public_key,
-                "credential_key": self.credential_key,
-                "credential_owner_scope": self.credential_owner_scope.model_dump(mode="json"),
-                "credential_public_key_fingerprint": self.credential_public_key_fingerprint,
-                "bootstrap_credential_key": self.bootstrap_credential_key,
-                "bootstrap_credential_owner_scope": (
-                    self.bootstrap_credential_owner_scope.model_dump(mode="json")
-                    if self.bootstrap_credential_owner_scope is not None
-                    else None
-                ),
-                "lifecycle": self.lifecycle.value,
-                "expires_at_utc": (
-                    self.expires_at_utc.astimezone(timezone.utc).isoformat()
-                    if self.expires_at_utc is not None
-                    else None
-                ),
-                "reason": self.reason,
-            }
+        return enrolled_ssh_target_digest(
+            target_id=self.target_id,
+            owner=self.owner,
+            host=self.host,
+            port=self.port,
+            username=self.username,
+            platform=self.platform,
+            host_key_algorithm=self.host_key_algorithm,
+            host_key_fingerprint=self.host_key_fingerprint,
+            host_key_public_key=self.host_key_public_key,
+            credential_key=self.credential_key,
+            credential_owner_scope=self.credential_owner_scope,
+            credential_public_key_fingerprint=self.credential_public_key_fingerprint,
+            bootstrap_credential_key=self.bootstrap_credential_key,
+            bootstrap_credential_owner_scope=self.bootstrap_credential_owner_scope,
+            lifecycle=self.lifecycle,
+            expires_at_utc=self.expires_at_utc,
+            reason=self.reason,
         )
 
     def to_connection_target(self) -> SSHConnectionTargetV1:
@@ -1415,7 +1486,10 @@ __all__ = [
     "ServiceObservedState",
     "ServiceRestartPolicy",
     "TERMINAL_RUN_ATTEMPT_STATUSES",
+    "enrolled_ssh_target_digest",
     "ssh_interaction_resource_digest",
     "ssh_public_key_sha256_fingerprint",
     "utc_now",
+    "validate_ssh_host_syntax",
+    "validate_ssh_username",
 ]

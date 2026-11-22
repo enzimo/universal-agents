@@ -57,6 +57,7 @@ from runtime_hosting.execution_contracts import (
     SSHInteractionRecordV1,
     SSHRevocationStateV1,
     SSHSecretRecipe,
+    SSHTargetPlatform,
     SSHTargetStatus,
     utc_now,
 )
@@ -81,7 +82,13 @@ class SSHCapability(StrEnum):
 
 @dataclass(frozen=True)
 class SSHCallerContext:
-    """Verified agent and task identity attempting an SSH broker operation."""
+    """Verified agent, person, and request identity attempting an SSH broker operation.
+
+    ``task_id`` is the verified request id (``AgentPrincipal.work_id`` /
+    ``TaskContextV1.context_id``), which travels unchanged across the team
+    lead's task and every worker subtask delegated for that person's request.
+    It is never an agent-local task id or agent-supplied string.
+    """
 
     agent_type: str
     task_id: str | None = None
@@ -267,11 +274,7 @@ class ExecutionAccessGuard:
         now: datetime,
     ) -> None:
         holder = connect_activation.holder
-        if (
-            caller.person_id is not None
-            and holder.person_id is not None
-            and caller.person_id != holder.person_id
-        ):
+        if holder.person_id is not None and caller.person_id != holder.person_id:
             raise ExecutionAuthorizationDenied("SSH session belongs to another person.")
         if caller.agent_type == holder.agent_type:
             return
@@ -295,7 +298,7 @@ class ExecutionAccessGuard:
             and caller.task_id != interaction.bounds.delegated_task_id
         ):
             raise ExecutionAuthorizationDenied(
-                "This SSH session is delegated only for one specific task."
+                "This SSH session is delegated only for one specific request."
             )
 
     def require_ssh_capability(
@@ -324,6 +327,10 @@ class ExecutionAccessGuard:
         )
         if capability is SSHCapability.CONNECT:
             return
+        if capability not in {SSHCapability.CONNECT, SSHCapability.TYPING} and caller is None:
+            raise ExecutionAuthorizationDenied(
+                f"SSH capability {capability.value!r} requires verified caller identity."
+            )
         if interaction is None:
             raise ExecutionAuthorizationDenied(
                 "This SSH operation needs a person's approval. Call "
@@ -342,13 +349,9 @@ class ExecutionAccessGuard:
                 "The SSH approval is for another session, owner, target, or delegation scope."
             )
         self.require_authority(activation)
-        if (
-            caller is not None
-            and caller.person_id is not None
-            and activation.holder.person_id is not None
-            and caller.person_id != activation.holder.person_id
-        ):
-            raise ExecutionAuthorizationDenied("SSH delegation belongs to another person.")
+        if caller is not None and activation.holder.person_id is not None:
+            if caller.person_id != activation.holder.person_id:
+                raise ExecutionAuthorizationDenied("SSH delegation belongs to another person.")
 
         bounds = interaction.bounds
         if bounds is None:
@@ -375,7 +378,7 @@ class ExecutionAccessGuard:
         if bounds.delegated_task_id is not None:
             if caller is None or caller.task_id != bounds.delegated_task_id:
                 raise ExecutionAuthorizationDenied(
-                    "This SSH session is delegated only for one specific task."
+                    "This SSH session is delegated only for one specific request."
                 )
 
         if capability is SSHCapability.COMMAND:
@@ -409,6 +412,14 @@ class ExecutionAccessGuard:
             if not bounds.allow_broker_sudo:
                 raise ExecutionAuthorizationDenied(
                     "Broker-assisted sudo (allow_broker_sudo) was not approved on this SSH delegation."
+                )
+            if enrolled_target is None or enrolled_target.bootstrap_credential_key is None:
+                raise ExecutionAuthorizationDenied(
+                    "Broker-assisted sudo requires an enrolled SSH target with a bootstrap credential."
+                )
+            if enrolled_target.platform == SSHTargetPlatform.WINDOWS:
+                raise ExecutionAuthorizationDenied(
+                    "Broker-assisted sudo is not supported on Windows targets."
                 )
             if secret_recipe is not None and secret_recipe not in bounds.allowed_secret_recipes:
                 raise ExecutionAuthorizationDenied(

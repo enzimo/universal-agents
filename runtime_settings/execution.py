@@ -5,7 +5,11 @@ import ipaddress
 from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 from default_values import EXECUTION_CONTROL_DEFAULTS
-from runtime_hosting.execution_contracts import ExecutionProfileV1
+from runtime_hosting.execution_contracts import (
+    ExecutionProfileV1,
+    validate_ssh_host_syntax,
+    validate_ssh_username,
+)
 from runtime_hosting.ssh_network import normalize_ssh_hostname
 
 
@@ -212,6 +216,16 @@ class ExecutionSSHTargetSettings(BaseModel):
     )
     identity_file: str = Field(min_length=1, max_length=2048)
     known_hosts_file: str = Field(min_length=1, max_length=2048)
+
+    @field_validator("host", mode="after")
+    @classmethod
+    def _validate_host(cls, value: str) -> str:
+        return validate_ssh_host_syntax(value)
+
+    @field_validator("username", mode="after")
+    @classmethod
+    def _validate_username(cls, value: str) -> str:
+        return validate_ssh_username(value)
 
 
 class ExecutionControlSettings(BaseModel):

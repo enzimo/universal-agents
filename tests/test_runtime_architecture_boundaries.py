@@ -1103,3 +1103,31 @@ def test_only_the_team_lead_reads_retired_gateway_commands_and_nothing_sends_the
         if any(name in path.read_text(encoding="utf-8") for name in _RETIRED_GATEWAY_COMMAND_NAMES)
     }
     assert naming == _RETIRED_GATEWAY_COMMAND_READERS
+
+
+# Credential catalog ownership (C43): only modules inside secure_tool_broker/ may
+# construct or import CredentialCatalogStore. Trusted manager code that needs
+# non-secret SSH credential metadata (display name, purpose, field shapes, public
+# key) calls secure_tool_broker.credential_catalog.read_credential_metadata_readonly
+# instead, which opens the broker's resolved catalog path read-only and never
+# creates directories, files, or tables.
+_CREDENTIAL_CATALOG_STORE_PREFIX = "secure_tool_broker/"
+
+
+def test_only_broker_modules_use_credential_catalog_store() -> None:
+    offenders: list[str] = []
+    for path in _production_python_files():
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        if relative.startswith(_CREDENTIAL_CATALOG_STORE_PREFIX):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == "CredentialCatalogStore":
+                offenders.append(f"{relative}:{node.lineno}")
+            elif isinstance(node, ast.Attribute) and node.attr == "CredentialCatalogStore":
+                offenders.append(f"{relative}:{node.lineno}")
+            elif isinstance(node, ast.ImportFrom) and any(
+                alias.name == "CredentialCatalogStore" for alias in node.names
+            ):
+                offenders.append(f"{relative}:{node.lineno}")
+    assert offenders == []

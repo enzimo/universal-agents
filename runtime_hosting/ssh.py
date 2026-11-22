@@ -26,7 +26,7 @@ import time
 from typing import TypeVar
 
 from runtime_hosting.artifacts import ArtifactStore
-from runtime_hosting.authorization import ExecutionAccessGuard
+from runtime_hosting.authorization import ExecutionAccessGuard, SSHCallerContext
 from runtime_hosting.execution_contracts import (
     ArtifactKind,
     InteractiveSessionStatus,
@@ -110,7 +110,13 @@ class SSHSessionBroker:
     logger: logging.Logger = logging.getLogger(__name__)
     _sessions: dict[str, _LiveSSHSession] = field(default_factory=dict, init=False, repr=False)
 
-    async def open(self, *, session_id: str, lease_token: str) -> InteractiveSessionV1:
+    async def open(
+        self,
+        *,
+        session_id: str,
+        lease_token: str,
+        caller: SSHCallerContext | None = None,
+    ) -> InteractiveSessionV1:
         claimed = self.repository.claim_interactive_session(
             team_id=self.team_id,
             session_id=session_id,
@@ -119,7 +125,7 @@ class SSHSessionBroker:
             lease_ttl_seconds=self.lease_ttl_seconds,
         )
         try:
-            self.authorization_guard.require_ssh_connect(claimed)
+            self.authorization_guard.require_ssh_connect(claimed, caller=caller)
         except Exception:
             self.repository.update_claimed_interactive_session(
                 claimed.model_copy(update={"status": InteractiveSessionStatus.FAILED}),
@@ -306,12 +312,18 @@ class SSHSessionBroker:
                 release=True,
             )
 
-    async def write(self, *, session_id: str, payload: bytes) -> int:
+    async def write(
+        self,
+        *,
+        session_id: str,
+        payload: bytes,
+        caller: SSHCallerContext | None = None,
+    ) -> int:
         """Type into the session: needs a person's approval for this session (trusted record)."""
 
         live = self._require_live(session_id)
         interaction = self.repository.get_ssh_interaction(team_id=self.team_id, session_id=session_id)
-        self.authorization_guard.require_ssh_interact(live.session, interaction)
+        self.authorization_guard.require_ssh_interact(live.session, interaction, caller=caller)
         written = os.write(live.master_fd, bytes(payload))
         self._touch(live)
         return written
@@ -322,9 +334,10 @@ class SSHSessionBroker:
         session_id: str,
         maximum_bytes: int = 65_536,
         timeout_seconds: float = 1.0,
+        caller: SSHCallerContext | None = None,
     ) -> bytes:
         live = self._require_live(session_id)
-        self.authorization_guard.require_ssh_connect(live.session)
+        self.authorization_guard.require_ssh_connect(live.session, caller=caller)
 
         def read_ready(wait_seconds: float) -> tuple[bytes, bool]:
             readable, _, _ = select.select([live.master_fd], [], [], max(0.0, wait_seconds))
@@ -387,9 +400,16 @@ class SSHSessionBroker:
             return scrubbed + flushed
         return scrubbed
 
-    async def resize(self, *, session_id: str, rows: int, columns: int) -> None:
+    async def resize(
+        self,
+        *,
+        session_id: str,
+        rows: int,
+        columns: int,
+        caller: SSHCallerContext | None = None,
+    ) -> None:
         live = self._require_live(session_id)
-        self.authorization_guard.require_ssh_connect(live.session)
+        self.authorization_guard.require_ssh_connect(live.session, caller=caller)
         self._set_terminal_size(live.master_fd, rows=rows, columns=columns)
         live.session = live.session.model_copy(
             update={"terminal_rows": rows, "terminal_columns": columns}

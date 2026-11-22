@@ -44,6 +44,7 @@ from secure_tool_broker.credential_sources import (
 from secure_tool_broker.credential_catalog_store import (
     CredentialCatalogStore,
     CredentialOwnerScope,
+    load_scope_readonly,
     resolve_catalog_db_path,
 )
 from secure_tool_broker.credential_state import (
@@ -285,6 +286,34 @@ def load_catalog(*, scope: CredentialOwnerScope) -> CredentialCatalog:
 
     store = CredentialCatalogStore(resolve_catalog_db_path())
     return CredentialCatalog(credentials=store.load_scope(scope))
+
+
+def read_credential_metadata_readonly(
+    credential_key: str,
+    *,
+    scope: CredentialOwnerScope,
+    fallback_db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Read sanitized non-secret metadata for one credential without creating or modifying the DB.
+
+    Resolves the catalog path through ``resolve_catalog_db_path()`` whenever
+    ``SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH`` is set (matching the
+    broker process), falling back to ``fallback_db_path`` only when the env
+    override is absent. Never returns secret values or secret source locations.
+    """
+
+    key = _credential_key(credential_key)
+    explicit = str(os.getenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH") or "").strip()
+    if explicit or fallback_db_path is None:
+        db_path = resolve_catalog_db_path()
+    else:
+        db_path = Path(fallback_db_path).expanduser().resolve()
+    rows = load_scope_readonly(db_path, scope)
+    raw = rows.get(key)
+    if raw is None:
+        return None
+    credential = CatalogCredential.model_validate(raw)
+    return _metadata_for_agent(key, credential)
 
 
 def save_catalog(catalog: CredentialCatalog, *, scope: CredentialOwnerScope) -> Path:
