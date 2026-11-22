@@ -753,11 +753,7 @@ def _pid_is_ssh_agent(pid: int) -> bool:
             return comm == "ssh-agent"
         except OSError:
             return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    return _read_proc_comm(pid) == "ssh-agent"
 
 
 def _pid_is_zombie(pid: int) -> bool:
@@ -830,13 +826,33 @@ def _terminate_pid(pid: int, *, expected_start_time: int | None) -> bool:
 
 
 def _read_proc_comm(pid: int) -> str | None:
-    if sys.platform != "linux":
+    if sys.platform == "linux":
+        try:
+            comm = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8", errors="ignore").strip()
+            return comm or None
+        except OSError:
+            return None
+    if os.name != "posix":
         return None
     try:
-        comm = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8", errors="ignore").strip()
-        return comm or None
-    except OSError:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            env=build_ssh_subprocess_env(),
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
+    if completed.returncode != 0:
+        return None
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not lines:
+        return None
+    # macOS `ps -o comm=` may return a full path such as /usr/bin/ssh; normalize to basename.
+    return Path(lines[0]).name or None
 
 
 def record_ssh_child_pid(working_dir: Path | None, pid: int) -> None:
@@ -849,6 +865,8 @@ def record_ssh_child_pid(working_dir: Path | None, pid: int) -> None:
     comm = _read_proc_comm(pid) or ""
     if start_time is not None:
         payload = f"{pid} {start_time} {comm}\n" if comm else f"{pid} {start_time}\n"
+    elif comm:
+        payload = f"{pid} - {comm}\n"
     else:
         payload = f"{pid}\n"
     try:
@@ -878,7 +896,7 @@ def _parse_ssh_pid_file(pid_file: Path) -> tuple[int, int | None, str | None] | 
         return None
     try:
         pid = int(parts[0])
-        start_time = int(parts[1]) if len(parts) >= 2 else None
+        start_time = None if len(parts) < 2 or parts[1] == "-" else int(parts[1])
         comm = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else None
     except ValueError:
         return None
@@ -901,11 +919,12 @@ def _pid_matches_recorded_ssh(
         if expected_comm is not None and _read_proc_comm(pid) != expected_comm:
             return False
         return True
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
+    actual_comm = _read_proc_comm(pid)
+    if actual_comm is None:
         return False
+    if expected_comm is not None:
+        return actual_comm == expected_comm
+    return actual_comm == "ssh"
 
 
 def _terminate_recorded_ssh_pid(

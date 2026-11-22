@@ -11,9 +11,12 @@ broker (never by agents):
   sending ``admin_password`` on NOPASSWD hosts), validates ``admin_password``
   alone via ``<sudo_bin> -S -p '' -v`` with no retries when needed (without
   ``-k`` so ``sudo`` caches its ``TS_PPID`` timestamp for the outer shell),
-  verifies that a sudo timestamp persists, and executes free commands as a
-  child of that same shell with stdin wired to ``/dev/null`` and a stdin-EOF
-  watcher that terminates the remote process group on revoke or timeout.
+  verifies that a sudo timestamp persists, and executes the watched root shell
+  as a child of that same shell. The stdin-EOF watcher runs inside the root
+  shell with the command in the foreground (stdin ``/dev/null``), so revoking
+  or timing out signals the remote process group directly as root without any
+  second ``sudo`` call (even after ``timestamp_timeout`` expires or under
+  ``sudo`` ``use_pty``) and cleans up leftover background jobs in the group.
 - Secret-consuming sudo steps are restricted to broker-written named recipes
   (``SSHSecretRecipe.TAILSCALE_UP``) with strictly validated non-secret flags;
   no Sealbox secret is ever piped to an arbitrary agent-written command.
@@ -310,19 +313,23 @@ def _windows_powershell_command(script: str) -> tuple[str, ...]:
 def _wrap_posix_watched_command(
     child_command: str,
     *,
-    sudo_path: str | None = None,
     cleanup_path_var: str | None = None,
 ) -> str:
-    """Run ``child_command`` as a child of the outer shell and stop its process group on stdin EOF.
+    """Run ``child_command`` in the foreground while a watcher stops the process group on stdin EOF.
 
-    - Keeps the outer shell alive as parent (never ``exec``) so ``sudo``'s non-TTY
-      ``TS_PPID`` timestamp matches across validation, command execution, and
-      revocation cleanup.
-    - Redirects the command's own stdin to ``/dev/null`` while a tiny watcher
-      subshell monitors the SSH channel's stdin on fd 3; closing SSH stdin or
-      losing the connection signals the outer shell (``USR1``), which sends
-      ``SIGTERM`` then ``SIGKILL`` to the remote process group (via ``sudo -n``
-      when running as root).
+    - Running ``child_command`` in the foreground preserves default ``SIGINT`` /
+      ``SIGQUIT`` dispositions (avoiding POSIX background-job signal ignoring)
+      and returns its exact exit code.
+    - The background watcher monitors SSH stdin on fd 3 with stdout/stderr
+      redirected to ``/dev/null`` so normal commands with no leftover
+      background jobs return immediately.
+    - Because the watcher outlives ``child_command``, any leftover background
+      job in the same process group that holds stdout/stderr open is stopped
+      (``SIGTERM``, grace wait, ``SIGKILL``) when stdin closes on shell exit,
+      revoke, timeout, or connection loss.
+    - For ``sudo`` commands, this wrapper runs inside the root shell spawned by
+      ``sudo -n -- sh -c ...`` so stopping signals the root process group
+      directly as root without a second ``sudo`` call.
     """
 
     cleanup_snippet = (
@@ -330,55 +337,19 @@ def _wrap_posix_watched_command(
         if cleanup_path_var
         else ""
     )
-    if sudo_path is not None:
-        quoted_sudo = shlex.quote(sudo_path)
-        pgid_capture = "_ua_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' '); "
-        term_cmd = (
-            f"{quoted_sudo} -n -- sh -c "
-            "'trap \"\" TERM; kill -TERM \"$1\" 2>/dev/null; "
-            "[ -n \"$2\" ] && kill -TERM \"-$2\" 2>/dev/null; exit 0' "
-            "_ \"$_ua_cpid\" \"$_ua_pgid\" </dev/null >/dev/null 2>&1 || true; "
-            "kill -TERM 0 2>/dev/null || kill -TERM \"$_ua_cpid\" 2>/dev/null || true; "
-        )
-        kill_cmd = (
-            f"{quoted_sudo} -n -- sh -c "
-            "'kill -KILL \"$1\" 2>/dev/null; "
-            "[ -n \"$2\" ] && kill -KILL \"-$2\" 2>/dev/null; exit 0' "
-            "_ \"$_ua_cpid\" \"$_ua_pgid\" </dev/null >/dev/null 2>&1 || true; "
-            "kill -KILL 0 2>/dev/null || kill -KILL \"$_ua_cpid\" 2>/dev/null || true; "
-        )
-    else:
-        pgid_capture = ""
-        term_cmd = "kill -TERM 0 2>/dev/null || kill -TERM \"$_ua_cpid\" 2>/dev/null || true; "
-        kill_cmd = "kill -KILL 0 2>/dev/null || kill -KILL \"$_ua_cpid\" 2>/dev/null || true; "
-
     return (
         "exec 3<&0; "
-        "_ua_stop=0; "
-        "trap '_ua_stop=1' USR1; "
-        f"{pgid_capture}"
-        f"{child_command} </dev/null 3<&- & "
-        "_ua_cpid=$!; "
-        "( IFS= read -r _ua_eof <&3; "
-        "while kill -0 $$ 2>/dev/null; do kill -USR1 $$ 2>/dev/null; "
-        "sleep 0.2 2>/dev/null || sleep 1; done "
-        ") </dev/null >/dev/null 2>&1 & "
-        "_ua_wpid=$!; "
-        "exec 3<&-; "
-        "_ua_rc=0; "
-        "if [ \"$_ua_stop\" -eq 0 ]; then wait \"$_ua_cpid\"; _ua_rc=$?; fi; "
-        "if [ \"$_ua_stop\" -eq 1 ]; then "
+        "( "
         "trap '' TERM; "
-        f"{term_cmd}"
-        "sleep 0.2 2>/dev/null || sleep 1; "
+        "trap '_ua_hup=1' HUP; "
+        "IFS= read -r _ua_eof <&3; "
+        "kill -TERM 0 2>/dev/null; "
+        "sleep 1.5 2>/dev/null || sleep 2; "
         f"{cleanup_snippet}"
-        f"{kill_cmd}"
-        "wait \"$_ua_cpid\" 2>/dev/null; "
-        "_ua_rc=143; "
-        "fi; "
-        "kill \"$_ua_wpid\" 2>/dev/null; "
-        "wait \"$_ua_wpid\" 2>/dev/null; "
-        "exit \"$_ua_rc\""
+        "kill -KILL 0 2>/dev/null "
+        ") </dev/null >/dev/null 2>&1 & "
+        "exec 3<&-; "
+        f"{child_command} </dev/null"
     )
 
 
@@ -483,9 +454,11 @@ def build_sudo_free_command(
     When ``needs_password`` is True, line 1 of SSH stdin is read into a shell
     variable, piped alone to ``<sudo_path> -S -p '' -v`` (one attempt, no
     retries, without ``-k`` so ``sudo`` records its ``TS_PPID`` timestamp for
-    this outer shell), unset immediately, verified with ``<sudo_path> -n true``,
-    and then the agent command runs as a direct child of this same shell via
-    ``<sudo_path> -n -- sh -c <command> </dev/null`` under the stdin-EOF watcher.
+    this outer shell), unset immediately, and verified with
+    ``<sudo_path> -n true``. The outer shell then spawns
+    ``<sudo_path> -n -- sh -c <watched_inner>`` passing the now-secret-free SSH
+    stdin to the root shell, where the stdin-EOF watcher runs as root and the
+    agent command runs in the foreground with stdin ``/dev/null``.
     """
 
     validate_trusted_bin_paths((sudo_path,), label="sudo")
@@ -493,12 +466,10 @@ def build_sudo_free_command(
         raise ValueError("Sudo command must not be empty.")
     quoted_sudo = shlex.quote(sudo_path)
     quoted_cmd = shlex.quote(command)
-    watched_sudo = _wrap_posix_watched_command(
-        f"{quoted_sudo} -n -- sh -c {quoted_cmd}",
-        sudo_path=sudo_path,
-    )
+    watched_inner = _wrap_posix_watched_command(f"sh -c {quoted_cmd}")
+    sudo_exec = f"{quoted_sudo} -n -- sh -c {shlex.quote(watched_inner)}"
     if not needs_password:
-        return _posix_sh_command(watched_sudo)
+        return _posix_sh_command(sudo_exec)
     script = (
         "IFS= read -r _ua_pw || exit 71; "
         f"printf '%s\\n' \"$_ua_pw\" | {quoted_sudo} -S -p '' -v >/dev/null 2>&1; "
@@ -506,7 +477,7 @@ def build_sudo_free_command(
         f"if [ \"$_ua_rc\" -ne 0 ]; then printf '{SUDO_AUTH_FAILED_MARKER}\\n' >&2; exit 72; fi; "
         f"if ! {quoted_sudo} -n true </dev/null >/dev/null 2>&1; then "
         f"printf '{SUDO_NO_TIMESTAMP_MARKER}\\n' >&2; exit 73; fi; "
-        f"{watched_sudo}"
+        f"{sudo_exec}"
     )
     return _posix_sh_command(script)
 
@@ -595,9 +566,13 @@ def build_sudo_secret_recipe_command(
             ]
         )
     watched_tailscale = _wrap_posix_watched_command(
-        f"{quoted_sudo} -n -- \"$_ua_ts\" up --auth-key=\"file:$_ua_keyfile\"{quoted_flags}",
-        sudo_path=sudo_path,
-        cleanup_path_var="_ua_keyfile",
+        f'"$1" up --auth-key="file:$2"{quoted_flags}',
+        cleanup_path_var="_ua_kf",
+    )
+    root_tailscale_script = f"_ua_kf=$2; {watched_tailscale}"
+    sudo_tailscale_exec = (
+        f"{quoted_sudo} -n -- sh -c {shlex.quote(root_tailscale_script)} "
+        '_ "$_ua_ts" "$_ua_keyfile"'
     )
     parts.extend(
         [
@@ -611,7 +586,7 @@ def build_sudo_secret_recipe_command(
             "chmod 600 \"$_ua_keyfile\" || exit 76",
             "printf '%s\\n' \"$_ua_tskey\" > \"$_ua_keyfile\"",
             "_ua_tskey=''; unset _ua_tskey",
-            watched_tailscale,
+            sudo_tailscale_exec,
         ]
     )
     return _posix_sh_command("; ".join(parts))
