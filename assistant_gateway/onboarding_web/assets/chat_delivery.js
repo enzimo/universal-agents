@@ -247,21 +247,52 @@
     }
   }
 
+  // Stable per-form key derived from the canonical form URL so removing a
+  // finished form from follow_up_links never shifts another form's card id or
+  // brokerCardStates entry, and without putting the one-time token in ids/logs.
+  function followUpFormKey(rawUrl, origin) {
+    var text = String(rawUrl || "").trim();
+    if (!text) {
+      return "";
+    }
+    try {
+      var parsed = new URL(text, String(origin || "http://localhost"));
+      var canonical = parsed.href;
+      var h1 = 0x811c9dc5;
+      var h2 = 0x01000193;
+      for (var i = 0; i < canonical.length; i += 1) {
+        var code = canonical.charCodeAt(i);
+        h1 = Math.imul(h1 ^ code, 0x01000193) >>> 0;
+        h2 = Math.imul(h2 ^ (code + i + 1), 0x85ebca6b) >>> 0;
+      }
+      return h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+    } catch (error) {
+      return "";
+    }
+  }
+
   // An approved access proposal's credential forms (access_inbox.mjs
   // followUpLinks) as broker card items placed after ``sessionSequence``:
   // one "account_link" item per form, built through normalizeTransientItem so
   // the same address checks apply (http or https, the frame address on the
-  // page's own origin and path). Only forms that get a card view are returned,
-  // each with the link it came from, so the caller keeps any other as a link.
-  // A conversation without messages yet places them at its start (1).
+  // page's own origin and path). Each item gets a stable id derived from the
+  // form URL under the ``account_link:<requestId>:`` prefix so partial subsets
+  // after one form finishes keep every remaining form's id and card state.
+  // Only forms that get a card view are returned, each with the link it came
+  // from, so the caller keeps any other as a link. A conversation without
+  // messages yet places them at its start (1).
   function followUpPageItems(requestId, sessionSequence, links, origin) {
     var id = String(requestId || "").trim();
     if (!id) {
       return [];
     }
     var position = Math.max(1, nonNegativeInteger(sessionSequence));
-    return (Array.isArray(links) ? links : []).flatMap(function (link, index) {
-      var pageId = id + ":" + String(index + 1);
+    return (Array.isArray(links) ? links : []).flatMap(function (link) {
+      var formKey = followUpFormKey(link && link.url, origin);
+      if (!formKey) {
+        return [];
+      }
+      var pageId = id + ":" + formKey;
       var item = normalizeTransientItem({
         kind: "account_link",
         item_id: "account_link:" + pageId,

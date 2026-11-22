@@ -541,3 +541,156 @@ test("Web Chat card keeps polling while a form is settling in watch grace and re
   assert.equal(byClass(reloadSlot, "access-review-follow-up-outcomes")[0].textContent, FOLLOW_UP_SETTLING_TEXT);
   assert.equal(hReload.intervals.size, 1, "reloaded settling card starts follow-up watcher");
 });
+
+test("reloaded decided card hands off active framed forms once, clears pages prompt when finished while keeping non-handed-off link, and ignores non-approver empty links", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const framedForm = {
+    label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/a",
+    frame_url: "http://127.0.0.1:18600/account-link/a?view=card", expires_at_utc: expires,
+  };
+  const plainForm = {
+    label: "Choose the credential for Gitea", url: "http://127.0.0.1:18600/account-link/b",
+    expires_at_utc: expires,
+  };
+  const handed = [];
+  const h = harness({
+    startClock: start,
+    reviews: {
+      "req-1": changeReview({
+        status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+        follow_up_links: [framedForm, plainForm], follow_up_outcomes: [],
+      }),
+    },
+    onFollowUpPages: (id, links, placement) => {
+      handed.push({ id, urls: links.map(link => link.url), placement });
+      return links;
+    },
+  });
+
+  const slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+
+  assert.deepEqual(handed, [{ id: "req-1", urls: [framedForm.url], placement: FOLLOW_UP_AFTER_REVIEW }],
+    "reload hands off framed link once");
+  assert.equal(byClass(slot, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_BELOW);
+  assert.deepEqual(byTag(slot, "a").map(a => a.textContent), ["Choose the credential for Gitea"]);
+
+  // Re-mounting during transcript re-renders never calls onFollowUpPages inside render.
+  h.reviewer.mount(h.bubble, message());
+  await settle();
+  assert.equal(handed.length, 1);
+
+  // Framed form finishes on the server: pages prompt clears while plain link remains a button.
+  h.reviews["req-1"] = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [plainForm], follow_up_outcomes: ["The account link for Portainer is done."],
+  });
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(byClass(slot, "access-review-follow-up-note").length, 0, "pages prompt clears once handed-off form finishes");
+  assert.deepEqual(byTag(slot, "a").map(a => a.textContent), ["Choose the credential for Gitea"]);
+  assert.match(byClass(slot, "access-review-follow-up-outcomes")[0].textContent, /Portainer is done\./);
+
+  // Plain form finishes too: button disappears and watcher stops.
+  h.reviews["req-1"] = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [], follow_up_outcomes: ["The account link for Portainer is done.", "The account link for Gitea is done."],
+  });
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(byTag(slot, "a").length, 0);
+  assert.equal(byClass(slot, "access-review-follow-up-note").length, 0);
+  assert.equal(h.intervals.size, 0);
+
+  // Non-approver reload (server returns empty follow_up_links): no hand-off, no prompt, no buttons.
+  const otherHanded = [];
+  const hOther = harness({
+    startClock: start,
+    reviews: {
+      "req-1": changeReview({
+        status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+        follow_up_links: [], follow_up_outcomes: [],
+      }),
+    },
+    onFollowUpPages: (id, links) => { otherHanded.push({ id, links }); return links; },
+  });
+  const otherSlot = hOther.reviewer.mount(hOther.bubble, message());
+  await settle();
+  assert.equal(otherHanded.length, 0);
+  assert.equal(byClass(otherSlot, "access-review-follow-up-note").length, 0);
+  assert.equal(byTag(otherSlot, "a").length, 0);
+});
+
+test("waiting-to-decided re-read hands off remaining subset after one form finished and clears prompt on client-side expiry", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const formB = {
+    label: "Choose the credential for Gitea", url: "http://127.0.0.1:18600/account-link/b",
+    frame_url: "http://127.0.0.1:18600/account-link/b?view=card", expires_at_utc: expires,
+  };
+  const handed = [];
+  const h = harness({
+    startClock: start,
+    onFollowUpPages: (id, links, placement) => {
+      handed.push({ id, urls: links.map(link => link.url), placement });
+      return links;
+    },
+  });
+
+  // Initial mount sees waiting request.
+  h.reviewer.mount(h.bubble, message());
+  await settle();
+  assert.equal(handed.length, 0);
+
+  // Approved elsewhere and form A already finished, leaving partial subset [formB].
+  h.reviews["req-1"] = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [formB], follow_up_outcomes: ["The account link for Portainer is done."],
+  });
+  h.advance(REFRESH_WAITING_AFTER_MS);
+  const slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+
+  assert.deepEqual(handed, [{ id: "req-1", urls: [formB.url], placement: FOLLOW_UP_AFTER_REVIEW }]);
+  assert.equal(byClass(slot, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_BELOW);
+  assert.equal(byTag(slot, "a").length, 0);
+  assert.equal(h.intervals.size, 1);
+
+  // Crossing expiry hides the pages prompt client-side immediately.
+  h.advance(15 * 60 * 1000);
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(byClass(slot, "access-review-follow-up-note").length, 0, "expired handed-off form clears pages prompt client-side");
+});
+
+test("refreshFollowUps redraws the decided card when a hand-off succeeds with an unchanged followUpSignature", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const formA = {
+    label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/a",
+    frame_url: "http://127.0.0.1:18600/account-link/a?view=card", expires_at_utc: expires,
+  };
+  let allowHandOff = false;
+  const decidedReview = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [formA], follow_up_outcomes: [],
+  });
+  const h = harness({
+    startClock: start,
+    reviews: { "req-1": decidedReview },
+    onFollowUpPages: (_id, links) => (allowHandOff ? links : []),
+  });
+
+  const slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+  assert.equal(byTag(slot, "a").length, 1, "starts as fallback button when initial hand-off returns empty");
+  assert.equal(byClass(slot, "access-review-follow-up-note").length, 0);
+
+  // Next poll returns the identical review (same followUpSignature), but hand-off now succeeds.
+  allowHandOff = true;
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(byTag(slot, "a").length, 0, "card redraws to remove fallback button");
+  assert.equal(byClass(slot, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_BELOW);
+});

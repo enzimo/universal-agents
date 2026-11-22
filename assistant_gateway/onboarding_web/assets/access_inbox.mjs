@@ -646,22 +646,47 @@ export function renderReviewRows(document, model, { canDecide, keepBoxes, handOn
 }
 
 /**
- * Hand an approved proposal's credential forms to the conversation as broker cards.
+ * Hand an approved proposal's framed credential forms to the conversation as
+ * broker cards, at most once per form URL.
  *
- * ``onFollowUpPages(requestId, links, placement)`` returns the links the chat
- * now shows as cards; the decided card says where they are (``pages``) and
- * keeps any other link as a button. Without the hand-off every link stays a
- * button. ``placement`` is FOLLOW_UP_AFTER_REVIEW for a decision on the card in
- * the conversation (the forms go right below it) and FOLLOW_UP_AFTER_LATEST
- * for one in the Inbox panel (below the open conversation's latest message,
- * where the person is).
+ * ``onFollowUpPages(requestId, links, placement)`` is called only for active
+ * links carrying a ``frameUrl`` whose ``url`` is not yet in ``handedOffUrls``.
+ * Each returned link's ``url`` is added to ``handedOffUrls``. Returns true
+ * when at least one new URL was recorded so callers whose redraw depends on
+ * ``followUpSignature`` know to redraw the card. ``placement`` is
+ * FOLLOW_UP_AFTER_REVIEW for a card in the conversation (the forms go right
+ * below it) and FOLLOW_UP_AFTER_LATEST for one in the Inbox panel (below the
+ * open conversation's latest message, where the person is). Never call this
+ * from a render function.
  */
-export function followUpPages(requestId, links, onFollowUpPages, pages, placement) {
-  if (!links.length || typeof onFollowUpPages !== "function") return { links, pages: null };
-  const shown = onFollowUpPages(requestId, links, placement) || [];
+export function handOffFollowUpLinks(requestId, links, onFollowUpPages, placement, handedOffUrls) {
+  if (typeof onFollowUpPages !== "function") return false;
+  const candidates = (Array.isArray(links) ? links : [])
+    .filter(link => link && link.url && link.frameUrl && !handedOffUrls.has(link.url));
+  if (!candidates.length) return false;
+  const shown = onFollowUpPages(requestId, candidates, placement) || [];
+  let added = false;
+  shown.forEach(link => {
+    if (link && link.url && !handedOffUrls.has(link.url)) {
+      handedOffUrls.add(link.url);
+      added = true;
+    }
+  });
+  return added;
+}
+
+/**
+ * Splits a decided review's active follow-up links into fallback new-tab
+ * buttons (``links``) and the inline broker-card prompt (``pages``), clearing
+ * ``pages`` once every handed-off link has finished or expired.
+ */
+export function followUpCardParts(review, handedOffUrls, nowMs, pages) {
+  const active = activeFollowUpLinks(review, nowMs);
+  const links = active.filter(link => !handedOffUrls.has(link.url));
+  const hasActivePages = active.some(link => handedOffUrls.has(link.url));
   return {
-    links: links.filter(link => !shown.includes(link)),
-    pages: shown.length ? pages : null,
+    links,
+    pages: hasActivePages ? pages : null,
   };
 }
 
@@ -1066,22 +1091,17 @@ export function createAccessInbox({
   const followUpReads = new Map();
 
   function outcomeProps(entry) {
-    const active = activeFollowUpLinks(entry.review, now());
-    const handedOff = entry.handedOffUrls;
-    const links = handedOff && handedOff.size
-      ? active.filter(link => !handedOff.has(link.url))
-      : active;
-    const hasActivePages = Boolean(handedOff && handedOff.size && active.some(link => handedOff.has(link.url)));
+    const { links, pages } = followUpCardParts(entry.review, entry.handedOffUrls, now(), {
+      note: FOLLOW_UP_PAGES_IN_CONVERSATION,
+      actionLabel: SHOW_CONVERSATION_LABEL,
+      onAction: () => { if (typeof showConversation === "function") showConversation(entry.id); },
+    });
     return {
       id: entry.id,
       title: entry.title,
       outcome: entry.outcome,
       links,
-      pages: hasActivePages ? {
-        note: FOLLOW_UP_PAGES_IN_CONVERSATION,
-        actionLabel: SHOW_CONVERSATION_LABEL,
-        onAction: () => { if (typeof showConversation === "function") showConversation(entry.id); },
-      } : null,
+      pages,
       outcomes: followUpOutcomes(entry.review),
       settling: isFollowUpSettling(entry.review),
     };
@@ -1117,7 +1137,10 @@ export function createAccessInbox({
           if (version !== state.version || state.outcomes.get(id) !== entry) return;
           if (!payload || !payload.review) return;
           entry.review = payload.review;
-          if (followUpSignature(entry.review, now()) !== entry.lastRenderedSignature) {
+          const handedOff = handOffFollowUpLinks(
+            id, activeFollowUpLinks(entry.review, now()), onFollowUpPages, FOLLOW_UP_AFTER_LATEST, entry.handedOffUrls,
+          );
+          if (handedOff || followUpSignature(entry.review, now()) !== entry.lastRenderedSignature) {
             redrawOutcomeCard(id, entry);
           }
         }, error => {
@@ -1415,11 +1438,9 @@ export function createAccessInbox({
         saved = true;
         const savedReview = (payload && payload.review) || null;
         const handedOffUrls = new Set();
-        const active = activeFollowUpLinks(savedReview, now());
-        if (active.length && typeof onFollowUpPages === "function") {
-          const shown = onFollowUpPages(id, active, FOLLOW_UP_AFTER_LATEST) || [];
-          shown.forEach(link => { if (link && link.url) handedOffUrls.add(link.url); });
-        }
+        handOffFollowUpLinks(
+          id, activeFollowUpLinks(savedReview, now()), onFollowUpPages, FOLLOW_UP_AFTER_LATEST, handedOffUrls,
+        );
         const entry = {
           id,
           title: text(review.title) || "Access request",

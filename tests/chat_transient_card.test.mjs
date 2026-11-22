@@ -4,10 +4,14 @@ import test from "node:test";
 import vm from "node:vm";
 
 import { byClass, byTag, fakeDocument } from "./fake_dom.mjs";
+import { FOLLOW_UP_AFTER_LATEST, FOLLOW_UP_AFTER_REVIEW } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
+import "../assistant_gateway/onboarding_web/assets/chat_delivery.js";
 
 const CHAT_JS = readFileSync(new URL("../assistant_gateway/onboarding_web/assets/chat.js", import.meta.url), "utf8");
 const EXPIRE_FN = CHAT_JS.split("function replaceTransientActionWithExpiredState(countdown)")[1]
   .split("function updateTransientCountdown()")[0];
+const ADD_FOLLOW_UP_FNS = CHAT_JS.split("function isReviewOf(requestId)")[1]
+  .split("function showFollowUpPages(requestId)")[0];
 const CREATE_FN = CHAT_JS.split("function createTransientItemCard(thread, item)")[1]
   .split("function renderMessages(options)")[0];
 
@@ -116,4 +120,114 @@ test("fake_dom matches throws on unsupported selectors instead of returning fals
   assert.throws(() => link.matches("a[href]"), /Unsupported selector/);
   assert.throws(() => link.matches(".alpha.beta"), /Unsupported selector/);
   assert.throws(() => link.matches(".alpha .beta"), /Unsupported selector/);
+});
+
+function followUpPagesHarness({ threads, active }) {
+  let scheduledRenders = 0;
+  const warnings = [];
+  const context = {
+    FOLLOW_UP_AFTER_REVIEW,
+    sharedState: { threads },
+    activeThread: () => active(),
+    window: {
+      UAChatDelivery: globalThis.UAChatDelivery,
+      location: { origin: "http://127.0.0.1:18090" },
+    },
+    console: { warn: (...args) => warnings.push(args) },
+    lifecycle: { timeout(fn) { fn(); } },
+    renderMessages: () => { scheduledRenders += 1; },
+  };
+  vm.runInNewContext(
+    `function isReviewOf(requestId)${ADD_FOLLOW_UP_FNS}\n`
+    + `this.addFollowUpPages = addFollowUpPages;`,
+    context,
+  );
+  return {
+    addFollowUpPages: context.addFollowUpPages,
+    warnings,
+    get scheduledRenders() { return scheduledRenders; },
+  };
+}
+
+test("addFollowUpPages guards duplicates by URL in the same thread and keeps stable ids across partial subsets", () => {
+  const formA = {
+    label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/token-a",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-a?view=card", expiresAtUtc: "2026-11-21T12:15:00Z",
+  };
+  const formB = {
+    label: "Choose the credential for Gitea", url: "http://127.0.0.1:18600/account-link/token-b",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-b?view=card", expiresAtUtc: "2026-11-21T12:15:00Z",
+  };
+  const thread1 = {
+    id: "t1",
+    messages: [
+      { messageId: "m1", sessionSequence: 3, accessRequestId: "req-1" },
+      { messageId: "m2", sessionSequence: 8 },
+    ],
+    transientItems: [],
+    brokerCardStates: new Map(),
+  };
+  const h = followUpPagesHarness({ threads: [thread1], active: () => thread1 });
+
+  // 1) Inbox approves while t1 is open: both cards land at latest sequence (8).
+  const shownInbox = h.addFollowUpPages("req-1", [formA, formB], FOLLOW_UP_AFTER_LATEST);
+  assert.deepEqual(shownInbox, [formA, formB]);
+  assert.equal(thread1.transientItems.length, 2);
+  assert.equal(h.scheduledRenders, 1);
+  const itemA = thread1.transientItems.find(item => item.url === formA.url);
+  const itemB = thread1.transientItems.find(item => item.url === formB.url);
+  assert.equal(itemA.sessionSequence, 8);
+  assert.equal(itemB.sessionSequence, 8);
+
+  // Form A finishes in its inline card.
+  thread1.brokerCardStates.set(itemA.itemId, "finished");
+
+  // 2) Chat card re-reads in t1 and hands off the remaining subset [formB] with FOLLOW_UP_AFTER_REVIEW:
+  //    existing card B stays in place (position 8, no extra render), and B's itemId never collides with A's finished state.
+  const shownChat = h.addFollowUpPages("req-1", [formB], FOLLOW_UP_AFTER_REVIEW);
+  assert.deepEqual(shownChat, [formB]);
+  assert.equal(thread1.transientItems.length, 2);
+  assert.equal(h.scheduledRenders, 1, "no redraw or frame relocation when URL is already in the thread");
+  assert.equal(thread1.transientItems.find(item => item.url === formB.url).sessionSequence, 8);
+  assert.equal(thread1.brokerCardStates.get(itemB.itemId), undefined, "B does not inherit A's finished state");
+});
+
+test("addFollowUpPages scopes duplicate checks to the target thread (Inbox in T1, review card in T2)", () => {
+  const formA = {
+    label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/token-a",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-a?view=card", expiresAtUtc: "2026-11-21T12:15:00Z",
+  };
+  const formB = {
+    label: "Choose the credential for Gitea", url: "http://127.0.0.1:18600/account-link/token-b",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-b?view=card", expiresAtUtc: "2026-11-21T12:15:00Z",
+  };
+  const thread1 = {
+    id: "t1",
+    messages: [{ messageId: "m1", sessionSequence: 5 }],
+    transientItems: [],
+  };
+  const thread2 = {
+    id: "t2",
+    messages: [{ messageId: "m2", sessionSequence: 4, accessRequestId: "req-1" }],
+    transientItems: [],
+  };
+  let current = thread1;
+  const h = followUpPagesHarness({ threads: [thread1, thread2], active: () => current });
+
+  // Inbox approves while T1 is open -> cards land in T1.
+  assert.deepEqual(h.addFollowUpPages("req-1", [formA, formB], FOLLOW_UP_AFTER_LATEST), [formA, formB]);
+  assert.equal(thread1.transientItems.length, 2);
+  assert.equal(thread2.transientItems.length, 0);
+
+  // Person switches to T2 where the review message lives; form A already finished so T2 hands off [formB].
+  current = thread2;
+  assert.deepEqual(h.addFollowUpPages("req-1", [formB], FOLLOW_UP_AFTER_REVIEW), [formB]);
+  assert.equal(thread2.transientItems.length, 1);
+  assert.equal(thread2.transientItems[0].url, formB.url);
+  assert.equal(thread2.transientItems[0].sessionSequence, 4, "placed right after the review message in T2");
+  assert.equal(
+    thread2.transientItems[0].itemId,
+    thread1.transientItems.find(item => item.url === formB.url).itemId,
+    "same form gets the same stable itemId across threads",
+  );
 });

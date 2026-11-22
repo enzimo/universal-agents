@@ -7,9 +7,9 @@ import {
   FOLLOW_UP_PAGES_BELOW, FOLLOW_UP_PAGES_IN_CONVERSATION, FOLLOW_UP_SETTLING_TEXT, LACKS_ACCESS_NOTE,
   NEEDS_DECISION, SHOW_CONVERSATION_LABEL, WAITING_FOR_APPROVER, INBOX_COUNTS_PATH, NOTICES_READ_PATH,
   activeFollowUpLinks, createAccessInbox, createFollowUpWatcher, createInboxCounts, decidableReviewCount,
-  decisionOutcome, emptyNoticesText, followUpLinks, followUpOutcomes, followUpPages, inboxBadgeLabel, inboxBadgeText,
-  inboxCounts, inboxPath, localTimeFormatter, markedText, parseAccessRequestLink, renderDecidedCard,
-  renderNoticeRow, renderReviewCard, reviewCardModel, unreadNoticeCount,
+  decisionOutcome, emptyNoticesText, followUpCardParts, followUpLinks, followUpOutcomes, handOffFollowUpLinks,
+  inboxBadgeLabel, inboxBadgeText, inboxCounts, inboxPath, localTimeFormatter, markedText, parseAccessRequestLink,
+  renderDecidedCard, renderNoticeRow, renderReviewCard, reviewCardModel, unreadNoticeCount,
 } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
 
 // A small DOM stand-in. innerHTML throws, so any HTML parsing path fails the tests.
@@ -725,24 +725,59 @@ test("after approving a proposal, the credential forms it opened keep their card
   ]);
 });
 
-test("forms handed to the conversation are named on the decided card; the rest stay links", () => {
-  const links = followUpLinks({ follow_up_links: [
-    { label: "Choose the credential for Portainer", url: "http://b.example/a", frame_url: "http://b.example/a?view=card" },
-    { label: "Choose the credential for Gitea", url: "http://b.example/b" },
-  ] });
-  const handed = [];
-  const result = followUpPages("req-9", links, (id, given, placement) => { handed.push([id, placement]); return [given[0]]; },
-    { note: FOLLOW_UP_PAGES_BELOW }, FOLLOW_UP_AFTER_REVIEW);
-  assert.deepEqual(handed, [["req-9", FOLLOW_UP_AFTER_REVIEW]]);
-  assert.deepEqual(result.links.map(link => link.label), ["Choose the credential for Gitea"]);
-  assert.equal(result.pages.note, FOLLOW_UP_PAGES_BELOW);
-  assert.deepEqual(followUpPages("req-9", links, undefined, { note: "x" }), { links, pages: null });
+test("handOffFollowUpLinks hands framed forms once per URL and followUpCardParts clears pages when finished or expired", () => {
+  const nowMs = Date.parse("2026-11-20T10:00:00Z");
+  const sample = {
+    follow_up_links: [
+      { label: "Choose the credential for Portainer", url: "http://b.example/a",
+        frame_url: "http://b.example/a?view=card", expires_at_utc: "2026-11-20T10:15:00Z" },
+      { label: "Choose the credential for Gitea", url: "http://b.example/b", expires_at_utc: "2026-11-20T10:15:00Z" },
+    ],
+  };
+  const active = activeFollowUpLinks(sample, nowMs);
+  const handedOff = new Set();
+  const calls = [];
+  const addedFirst = handOffFollowUpLinks("req-9", active, (id, given, placement) => {
+    calls.push([id, given.map(link => link.url), placement]);
+    return given;
+  }, FOLLOW_UP_AFTER_REVIEW, handedOff);
+
+  assert.equal(addedFirst, true);
+  assert.deepEqual(calls, [["req-9", ["http://b.example/a"], FOLLOW_UP_AFTER_REVIEW]],
+    "only framed links not yet handed off are sent to onFollowUpPages");
+  assert.deepEqual([...handedOff], ["http://b.example/a"]);
+
+  // A second call with the same active links does not invoke the hook again.
+  assert.equal(handOffFollowUpLinks("req-9", active, () => { throw new Error("should not re-call"); },
+    FOLLOW_UP_AFTER_REVIEW, handedOff), false);
+  // Without a hook, nothing is handed off and every active link stays a button.
+  assert.equal(handOffFollowUpLinks("req-9", active, undefined, FOLLOW_UP_AFTER_REVIEW, new Set()), false);
+  assert.deepEqual(followUpCardParts(sample, new Set(), nowMs, { note: FOLLOW_UP_PAGES_BELOW }), {
+    links: active, pages: null,
+  });
+
+  // Handed-off form gets the pages prompt; the plain link stays a button.
+  const whileBothOpen = followUpCardParts(sample, handedOff, nowMs, { note: FOLLOW_UP_PAGES_BELOW });
+  assert.deepEqual(whileBothOpen.links.map(link => link.label), ["Choose the credential for Gitea"]);
+  assert.equal(whileBothOpen.pages.note, FOLLOW_UP_PAGES_BELOW);
+
+  // Once the handed-off form finishes on the server, pages clears while the plain link remains a button.
+  const afterFramedFinished = followUpCardParts(
+    { follow_up_links: [sample.follow_up_links[1]] }, handedOff, nowMs, { note: FOLLOW_UP_PAGES_BELOW },
+  );
+  assert.deepEqual(afterFramedFinished.links.map(link => link.label), ["Choose the credential for Gitea"]);
+  assert.equal(afterFramedFinished.pages, null);
+
+  // Expiry clears both pages and fallback buttons client-side.
+  const afterExpiry = followUpCardParts(sample, handedOff, Date.parse("2026-11-20T10:15:01Z"), { note: FOLLOW_UP_PAGES_BELOW });
+  assert.deepEqual(afterExpiry, { links: [], pages: null });
 
   const document = fakeDocument();
   let shown = 0;
   const card = renderDecidedCard(document, {
     id: "req-9", title: "Proposal", outcome: { tone: "approved", label: "Approved", explanation: "Approved." },
-    links: result.links, pages: { note: FOLLOW_UP_PAGES_IN_CONVERSATION, actionLabel: SHOW_CONVERSATION_LABEL, onAction: () => { shown += 1; } },
+    links: whileBothOpen.links,
+    pages: { note: FOLLOW_UP_PAGES_IN_CONVERSATION, actionLabel: SHOW_CONVERSATION_LABEL, onAction: () => { shown += 1; } },
   });
   assert.equal(byClass(card, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_IN_CONVERSATION);
   byTag(card, "button").find(button => button.textContent === SHOW_CONVERSATION_LABEL).click();
@@ -1241,4 +1276,112 @@ test("Settings Inbox keeps polling while a kept decided card is settling and sho
   assert.match(requestList.children[0].textContent, /The account link for Portainer is done\./);
   assert.doesNotMatch(requestList.children[0].textContent, new RegExp(FOLLOW_UP_SETTLING_TEXT.replace(".", "\\.")));
   assert.equal(intervals.size, 0, "Inbox stops polling once final outcome arrives");
+});
+
+test("Settings Inbox clears handed-off pages prompt when framed form finishes while keeping non-handed-off button, and redraws on refresh hand-off", async () => {
+  const document = fakeDocument();
+  const container = document.createElement("div");
+  document.body.append(container);
+  const window = {};
+  vm.runInNewContext(
+    readFileSync(new URL("../assistant_gateway/onboarding_web/assets/action_feedback.js", import.meta.url), "utf8"),
+    { window },
+  );
+  const gets = [], posts = [], intervals = new Map(), handed = [];
+  let timerId = 0;
+  let allowHandOff = false;
+  let clock = Date.parse("2026-11-21T12:00:00Z");
+  const browser = {
+    document,
+    console: { warn() {} },
+    requestAnimationFrame: cb => cb(),
+    setTimeout: () => 0,
+    setInterval(cb, delay) { timerId += 1; intervals.set(timerId, { cb, delay }); return timerId; },
+    clearInterval(id) { intervals.delete(id); },
+  };
+  const inbox = createAccessInbox({
+    container, browser, formatTime,
+    now: () => clock,
+    isVisible: () => true,
+    onFollowUpPages: (id, links, placement) => {
+      handed.push({ id, urls: links.map(l => l.url), placement });
+      return allowHandOff ? links : [];
+    },
+    get: path => new Promise((resolve, reject) => gets.push({ path, resolve, reject })),
+    post: (path, body) => new Promise((resolve, reject) => posts.push({ path, body, resolve, reject })),
+    beginAction: (button, busyLabel, group) => window.UAActionFeedback.begin(button, { busyLabel, group }),
+    failureMessage: (error, fallback) => (error && error.message) || fallback,
+  });
+  const requestList = container.children[1].lastChild;
+  const loadPromise = inbox.load();
+  await settle();
+  gets.at(-1).resolve({ status: "ok", reviews: [review()], notices: [] });
+  await loadPromise;
+  await settle();
+
+  const framedLink = {
+    label: "Choose the credential for Portainer", url: "https://broker.example/link/1",
+    frame_url: "https://broker.example/link/1?view=card", expires_at_utc: "2026-11-21T12:15:00+00:00",
+  };
+  const plainLink = {
+    label: "Choose the credential for Gitea", url: "https://broker.example/link/2",
+    expires_at_utc: "2026-11-21T12:15:00+00:00",
+  };
+
+  // On initial decide, allowHandOff is false: both stay fallback buttons.
+  byTag(requestList.children[0], "button")[0].click();
+  await settle();
+  posts[0].resolve({
+    status: "ok",
+    review: { ...review(), status: "granted", can_decide: false, choices: [], follow_up_links: [framedLink, plainLink], follow_up_outcomes: [] },
+  });
+  await settle();
+  gets.at(-1).resolve({ status: "ok", reviews: [], notices: [] });
+  await settle();
+  assert.equal(byTag(requestList.children[0], "a").length, 2);
+  assert.equal(byClass(requestList.children[0], "access-review-follow-up-note").length, 0);
+
+  // Next poll returns the exact same review (same followUpSignature), but now hand-off succeeds: card must redraw.
+  allowHandOff = true;
+  [...intervals.values()][0].cb();
+  await settle();
+  gets.at(-1).resolve({
+    status: "ok",
+    review: { ...review(), status: "granted", can_decide: false, choices: [], follow_up_links: [framedLink, plainLink], follow_up_outcomes: [] },
+  });
+  await settle();
+  assert.equal(byClass(requestList.children[0], "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_IN_CONVERSATION);
+  assert.deepEqual(byTag(requestList.children[0], "a").map(a => a.textContent), ["Choose the credential for Gitea"]);
+
+  // Framed form finishes on the server: pages prompt clears while plain link remains a button.
+  [...intervals.values()][0].cb();
+  await settle();
+  gets.at(-1).resolve({
+    status: "ok",
+    review: {
+      ...review(), status: "granted", can_decide: false, choices: [],
+      follow_up_links: [plainLink], follow_up_outcomes: ["The account link for Portainer is done."],
+    },
+  });
+  await settle();
+  assert.equal(byClass(requestList.children[0], "access-review-follow-up-note").length, 0,
+    "pages prompt clears as soon as handed-off form finishes");
+  assert.deepEqual(byTag(requestList.children[0], "a").map(a => a.textContent), ["Choose the credential for Gitea"]);
+  assert.match(requestList.children[0].textContent, /The account link for Portainer is done\./);
+
+  // Plain form finishes too: button clears, both outcomes remain, and poll stops.
+  [...intervals.values()][0].cb();
+  await settle();
+  gets.at(-1).resolve({
+    status: "ok",
+    review: {
+      ...review(), status: "granted", can_decide: false, choices: [],
+      follow_up_links: [],
+      follow_up_outcomes: ["The account link for Portainer is done.", "The account link for Gitea is done."],
+    },
+  });
+  await settle();
+  assert.equal(byTag(requestList.children[0], "a").length, 0);
+  assert.equal(byClass(requestList.children[0], "access-review-follow-up-note").length, 0);
+  assert.equal(intervals.size, 0);
 });

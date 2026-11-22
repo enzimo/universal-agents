@@ -25,9 +25,9 @@
 
 import {
   ACCESS_INBOX_API, ACCESS_REVIEW_MESSAGE_TYPE, FOLLOW_UP_AFTER_REVIEW, FOLLOW_UP_PAGES_BELOW, activeFollowUpLinks,
-  createFollowUpWatcher, decisionOutcome, decisionPath, decisionRequestBody, followUpOutcomes, followUpSignature,
-  followUpWatchTargets, hasPendingFollowUp, isFollowUpSettling, renderDecidedCard, renderReviewCard, setCardMessage,
-  storedDecisionOutcome,
+  createFollowUpWatcher, decisionOutcome, decisionPath, decisionRequestBody, followUpCardParts, followUpOutcomes,
+  followUpSignature, followUpWatchTargets, handOffFollowUpLinks, hasPendingFollowUp, isFollowUpSettling,
+  renderDecidedCard, renderReviewCard, setCardMessage, storedDecisionOutcome,
 } from "./access_inbox.mjs";
 
 export const REFRESH_WAITING_AFTER_MS = 15000;
@@ -72,9 +72,9 @@ function findReviewSlots(document, id) {
  * client). `beginAction(button, busyLabel, group)` is the shared busy-button
  * helper. `openInbox(requestId)` opens the Inbox at the request.
  * `onDecided(requestId)` runs after a saved decision.
- * `onFollowUpPages(requestId, links)` hands an approved proposal's credential
- * forms to the conversation as broker cards and returns the links it took
- * (``access_inbox.followUpPages``).
+ * `onFollowUpPages(requestId, links, placement)` hands an approved proposal's
+ * credential forms to the conversation as broker cards and returns the links
+ * it took (``access_inbox.handOffFollowUpLinks``).
  */
 export function createChatAccessReviews({
   get, post, beginAction, failureMessage, openInbox, onDecided, onFollowUpPages,
@@ -82,7 +82,7 @@ export function createChatAccessReviews({
 }) {
   const document = browser.document;
   const warn = (event, detail) => browser.console && browser.console.warn(event, detail);
-  // requestId -> { review, localOutcome, error, fetchedAt, pending, followUpStop, lastFollowUpSignature }
+  // requestId -> { review, localOutcome, error, fetchedAt, pending, followUpStop, lastFollowUpSignature, handedOffUrls }
   const entries = new Map();
   let generation = 0;
   let syncQueued = false;
@@ -137,11 +137,19 @@ export function createChatAccessReviews({
         if (refreshFollowUp) {
           if (!nextReview) return;
           entry.review = nextReview;
-          if (followUpSignature(entry.review, now()) !== entry.lastFollowUpSignature) drawAll(id);
+          const handedOff = isDecided(entry) && handOffFollowUpLinks(
+            id, activeFollowUpLinks(entry.review, now()), onFollowUpPages, FOLLOW_UP_AFTER_REVIEW, entry.handedOffUrls,
+          );
+          if (handedOff || followUpSignature(entry.review, now()) !== entry.lastFollowUpSignature) drawAll(id);
           return;
         }
         entry.review = nextReview;
         entry.error = entry.review ? "" : READ_FAILED;
+        if (isDecided(entry) && entry.review) {
+          handOffFollowUpLinks(
+            id, activeFollowUpLinks(entry.review, now()), onFollowUpPages, FOLLOW_UP_AFTER_REVIEW, entry.handedOffUrls,
+          );
+        }
       }, error => {
         if (readGeneration !== generation) return;
         if (refreshFollowUp) {
@@ -169,18 +177,15 @@ export function createChatAccessReviews({
   function decidedCardProps(entry, id) {
     const outcome = entry.localOutcome || (entry.review && storedDecisionOutcome(entry.review, formatTime));
     if (!outcome) return null;
-    const active = activeFollowUpLinks(entry.review, now());
-    const handedOff = entry.handedOffUrls;
-    const links = handedOff && handedOff.size
-      ? active.filter(link => !handedOff.has(link.url))
-      : active;
-    const hasActivePages = Boolean(handedOff && handedOff.size && active.some(link => handedOff.has(link.url)));
+    const { links, pages } = followUpCardParts(entry.review, entry.handedOffUrls, now(), {
+      note: FOLLOW_UP_PAGES_BELOW,
+    });
     return {
       id,
       title: summaryOf(entry, id),
       outcome,
       links,
-      pages: hasActivePages ? { note: FOLLOW_UP_PAGES_BELOW } : null,
+      pages,
       outcomes: followUpOutcomes(entry.review),
       settling: isFollowUpSettling(entry.review),
       compact: true,
@@ -273,11 +278,9 @@ export function createChatAccessReviews({
         entry.fetchedAt = now();
         entry.followUpStop = false;
         entry.localOutcome = decisionOutcome(choice.choice, saved, kept);
-        const active = activeFollowUpLinks(saved, now());
-        if (active.length && typeof onFollowUpPages === "function") {
-          const shown = onFollowUpPages(id, active, FOLLOW_UP_AFTER_REVIEW) || [];
-          shown.forEach(link => { if (link && link.url) entry.handedOffUrls.add(link.url); });
-        }
+        handOffFollowUpLinks(
+          id, activeFollowUpLinks(saved, now()), onFollowUpPages, FOLLOW_UP_AFTER_REVIEW, entry.handedOffUrls,
+        );
         if (card.isConnected) card.replaceWith(cardFor(id));
         followUpWatcher.sync();
         if (typeof onDecided === "function") onDecided(id);

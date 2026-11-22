@@ -2970,13 +2970,14 @@ function updateTransientCountdown() {
   }
 
 // An approved access proposal's credential forms become broker cards
-// (access_inbox.mjs followUpPages). A decision on the card in the conversation
-// (FOLLOW_UP_AFTER_REVIEW) puts them right after that review message, in the
-// thread that holds it even if another thread is open by now. A decision in
-// the Inbox panel (FOLLOW_UP_AFTER_LATEST) puts them after the open
-// conversation's latest message, where the person is; an empty conversation
-// gets them at its start. Returns the links shown as cards; the decided card
-// keeps any other as a link.
+// (access_inbox.mjs handOffFollowUpLinks). A decision on the card in the
+// conversation (FOLLOW_UP_AFTER_REVIEW) puts them right after that review
+// message, in the thread that holds it even if another thread is open by now.
+// A decision in the Inbox panel (FOLLOW_UP_AFTER_LATEST) puts them after the
+// open conversation's latest message, where the person is; an empty
+// conversation gets them at its start. Existing cards for the same form URL
+// stay in place so live frames do not reload. Returns the links shown as
+// cards; the decided card keeps any other as a link.
 function isReviewOf(requestId) {
     return function (message) {
       return String(message.accessRequestId || "") === String(requestId || "");
@@ -3000,12 +3001,25 @@ function addFollowUpPages(requestId, links, placement) {
       console.warn("An approved request's credential forms could not be shown as cards; they stay links.", requestId);
       return [];
     }
+    var existingUrls = new Set(
+      (Array.isArray(thread.transientItems) ? thread.transientItems : [])
+        .map(function (item) { return String(item && item.url || ""); })
+        .filter(Boolean)
+    );
+    var added = false;
     pages.forEach(function (page) {
+      if (existingUrls.has(page.item.url)) {
+        return;
+      }
+      existingUrls.add(page.item.url);
       thread.transientItems = window.UAChatDelivery.upsertTransientItem(thread.transientItems, page.item);
+      added = true;
     });
-    thread.transientItems = window.UAChatDelivery.reconcileTransientItems(thread.transientItems, thread.messages);
-    // Drawn on the next tick: the caller first saves the decided card that says where the forms are.
-    lifecycle.timeout(renderMessages, 0);
+    if (added) {
+      thread.transientItems = window.UAChatDelivery.reconcileTransientItems(thread.transientItems, thread.messages);
+      // Drawn on the next tick: the caller first saves the decided card that says where the forms are.
+      lifecycle.timeout(renderMessages, 0);
+    }
     return pages.map(function (page) { return page.link; });
   }
 

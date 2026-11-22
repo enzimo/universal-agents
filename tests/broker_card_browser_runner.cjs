@@ -226,7 +226,7 @@ async function cards(browser, {base, typed, follow_up: followUp}) {
   const decidedLinks = await inbox.locator('[data-request-id="req-proposal"] a').count();
   check(decidedLinks === 0, "approving a proposal in the Inbox panel says its forms are in the conversation");
   await inbox.locator("button", {hasText: "Show in the conversation"}).click();
-  const followUpCard = '[data-item-id="account_link:req-proposal:1"]';
+  const followUpCard = '[data-item-id^="account_link:req-proposal:"]';
   await page.waitForFunction(
     ([selector, frame]) => Boolean(document.querySelector(`${selector} ${frame}`)), [followUpCard, FRAME], {timeout: 15000},
   );
