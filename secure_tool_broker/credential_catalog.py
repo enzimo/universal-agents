@@ -680,10 +680,20 @@ def collect_credential(
         secret_fields: dict[str, str] = {}
         public_fields: dict[str, str] = {}
         generated_secret_fields: set[str] = set()
+        active_field_specs: dict[str, dict[str, Any]] = {}
+        pending_non_sealbox_generated: list[tuple[str, dict[str, Any]]] = []
+        # Validate every field before calling any password generator or writing
+        # anything to the credential store so refusals leave no partial records.
         for field_name, field_spec in field_specs.items():
             source = _string(field_spec.get("value_source")) or "user_input"
             kind = _string(field_spec.get("kind")) or "custom"
-            secret = bool(field_spec.get("secret", kind.lower() in SECRET_FIELD_KINDS))
+            secret = bool(
+                field_spec.get(
+                    "secret",
+                    kind.lower() in SECRET_FIELD_KINDS
+                    or _string(field_spec.get("visibility")).lower() == "secret",
+                )
+            )
             if secret and _string(field_spec.get("value")):
                 return ToolResult(
                     status="error",
@@ -693,20 +703,22 @@ def collect_credential(
                     ),
                     content={"error_code": "secret_value_in_request_rejected", "field_ref": field_name},
                 )
+            required = bool(field_spec.get("required", True))
             if source == "store_generated_secret":
+                active_field_specs[field_name] = field_spec
                 if write_source == "sealbox":
                     generated_secret_fields.add(field_name)
-                    value = ""
+                    values[field_name] = ""
+                    if secret:
+                        secret_fields[field_name] = ""
                 else:
-                    generated = generate_password(write_source=write_source, field_spec=field_spec)
-                    if isinstance(generated, ToolResult):
-                        return generated
-                    value = generated
-            elif source in {"agent_supplied_metadata", "user_or_agent_supplied_metadata"}:
+                    pending_non_sealbox_generated.append((field_name, field_spec))
+                continue
+            if source in {"agent_supplied_metadata", "user_or_agent_supplied_metadata"}:
                 value = _string(field_spec.get("value")) or _string(submitted_fields.get(field_name))
             else:
                 value = _string(submitted_fields.get(field_name))
-            if not value and field_name not in generated_secret_fields and bool(field_spec.get("required", True)):
+            if not value and required:
                 return ToolResult(
                     status="error",
                     error=(
@@ -722,17 +734,28 @@ def collect_credential(
                         "form_creation_action": "secure_credential_collection_request",
                     },
                 )
+            # Optional secret fields left blank are omitted from both the secret
+            # store and the catalog entry so callers observe credential_field_missing.
+            if not value and not required and secret:
+                continue
+            active_field_specs[field_name] = field_spec
             values[field_name] = value
             if secret:
                 secret_fields[field_name] = value
             else:
                 public_fields[field_name] = value
+        for field_name, field_spec in pending_non_sealbox_generated:
+            generated = generate_password(write_source=write_source, field_spec=field_spec)
+            if isinstance(generated, ToolResult):
+                return generated
+            values[field_name] = generated
+            secret_fields[field_name] = generated
         write_result = write_credential_to_source(
             write_source=write_source,
             credential_key=credential_key,
             request_payload=request_payload,
             values=values,
-            field_specs=field_specs,
+            field_specs=active_field_specs,
             generated_secret_fields=generated_secret_fields,
             scope=resolved_scope,
         )
@@ -741,7 +764,7 @@ def collect_credential(
         credential = build_catalog_credential(
             credential_key=credential_key,
             request_payload=request_payload,
-            field_specs=field_specs,
+            field_specs=active_field_specs,
             public_fields=public_fields,
             write_result=write_result,
         )
@@ -1066,6 +1089,17 @@ def _write_sealbox_credential(
     if isinstance(tenant_env, ToolResult):
         return tenant_env
     item_key = _sealbox_catalog_key(credential_key, request_payload)
+    # Pre-check every non-generated secret field before the first Sealbox write
+    # so a refusal never leaves partial secrets behind.
+    for field_name, spec in field_specs.items():
+        if not _field_is_secret(spec) or field_name in generated_secret_fields:
+            continue
+        if not _string(values.get(field_name)):
+            field_ref = safe_key_component(_field_storage_ref(field_name, spec), fallback=field_name)
+            return ToolResult(
+                status="error",
+                error=f"Sealbox secret field '{item_key}:{field_ref}' resolved to an empty value.",
+            )
     refs: dict[str, CatalogSourceRef] = {}
     username = _first_value_by_kind(values, field_specs, {"username", "email", "login"})
     password_field = _secret_password_field_name(field_specs)

@@ -36,6 +36,7 @@ from runtime_hosting.ssh_credentials import (
     SSHCredentialMaterialProvider,
     SessionSecretScrubber,
     StreamSecretScrubber,
+    build_ssh_subprocess_env,
     sweep_stale_ssh_ephemeral_dirs,
 )
 from runtime_hosting.ssh_network import ValidatedSSHHost, ssh_host_key_alias
@@ -49,7 +50,9 @@ class _LiveSSHSession:
     process: subprocess.Popen[bytes]
     master_fd: int
     material_context: AbstractContextManager[SSHCredentialMaterial]
-    transcript: bytearray = field(default_factory=bytearray)
+    scrubber: SessionSecretScrubber
+    stream_scrubber: StreamSecretScrubber
+    raw_transcript: bytearray = field(default_factory=bytearray)
     expiry_monitor: asyncio.Task[None] | None = None
 
 
@@ -108,10 +111,24 @@ class SSHSessionBroker:
         process: subprocess.Popen[bytes] | None = None
         context_entered = False
         try:
-            context = self.material_provider.prepare(claimed)
-            material = context.__enter__()
+            def _prepare_and_verify() -> tuple[
+                AbstractContextManager[SSHCredentialMaterial],
+                SSHCredentialMaterial,
+            ]:
+                prepared_ctx = self.material_provider.prepare(claimed)
+                prepared_material = prepared_ctx.__enter__()
+                try:
+                    self._verify_material(claimed, prepared_material)
+                except Exception:
+                    prepared_ctx.__exit__(None, None, None)
+                    raise
+                return prepared_ctx, prepared_material
+
+            prepared_context, material = await asyncio.to_thread(_prepare_and_verify)
+            context = prepared_context
             context_entered = True
-            self._verify_material(claimed, material)
+            scrubber = SessionSecretScrubber(material.touched_secrets, logger=self.logger)
+            stream_scrubber = scrubber.new_stream_scrubber()
             master_fd, slave_fd = pty.openpty()
             self._set_terminal_size(
                 master_fd,
@@ -148,7 +165,9 @@ class SSHSessionBroker:
                 lease_token=lease_token,
                 process=process,
                 master_fd=master_fd,
-                material_context=context,
+                material_context=prepared_context,
+                scrubber=scrubber,
+                stream_scrubber=stream_scrubber,
             )
             self._sessions[session_id] = live
             live.expiry_monitor = asyncio.create_task(
@@ -172,7 +191,7 @@ class SSHSessionBroker:
             if slave_fd >= 0:
                 os.close(slave_fd)
             if context_entered and context is not None:
-                context.__exit__(None, None, None)
+                await asyncio.to_thread(context.__exit__, None, None, None)
             failed = claimed.model_copy(
                 update={
                     "status": InteractiveSessionStatus.FAILED,
@@ -218,17 +237,25 @@ class SSHSessionBroker:
                 return b""
 
         payload = await asyncio.to_thread(read_ready)
-        if payload and len(live.transcript) < self.transcript_limit_bytes:
-            live.transcript.extend(
-                payload[: self.transcript_limit_bytes - len(live.transcript)]
+        if payload and len(live.raw_transcript) < self.transcript_limit_bytes:
+            live.raw_transcript.extend(
+                payload[: self.transcript_limit_bytes - len(live.raw_transcript)]
             )
+        scrubbed = live.stream_scrubber.feed(payload) if payload else b""
+        if scrubbed:
             live.session = live.session.model_copy(
-                update={"transcript_bytes": live.session.transcript_bytes + len(payload)}
+                update={"transcript_bytes": live.session.transcript_bytes + len(scrubbed)}
             )
         self._touch(live)
         if live.process.poll() is not None and not payload:
+            flushed = live.stream_scrubber.flush()
+            if flushed:
+                live.session = live.session.model_copy(
+                    update={"transcript_bytes": live.session.transcript_bytes + len(flushed)}
+                )
             await self._close(session_id=session_id, disconnected=True)
-        return payload
+            return scrubbed + flushed
+        return scrubbed
 
     async def resize(self, *, session_id: str, rows: int, columns: int) -> None:
         live = self._require_live(session_id)
@@ -279,14 +306,23 @@ class SSHSessionBroker:
                 os.killpg(live.process.pid, signal.SIGKILL)
                 await asyncio.to_thread(live.process.wait)
         os.close(live.master_fd)
-        live.material_context.__exit__(None, None, None)
+        await asyncio.to_thread(live.material_context.__exit__, None, None, None)
+        # Scrub the entire stored transcript as a whole so read chunk boundaries
+        # never leave split secrets or held tail bytes behind.
+        live.stream_scrubber.flush()
+        scrubbed_transcript = (
+            live.scrubber.scrub_bytes(bytes(live.raw_transcript))
+            if live.raw_transcript
+            else b""
+        )
+        live.raw_transcript.clear()
         transcript_artifact = (
             self.artifact_store.put_bytes(
                 kind=ArtifactKind.LOG,
-                payload=bytes(live.transcript),
+                payload=scrubbed_transcript,
                 media_type="application/vnd.ua.ssh-transcript",
             )
-            if live.transcript
+            if scrubbed_transcript
             else None
         )
         closed = live.session.model_copy(
@@ -297,6 +333,7 @@ class SSHSessionBroker:
                     else InteractiveSessionStatus.CLOSED
                 ),
                 "transcript_artifact": transcript_artifact,
+                "transcript_bytes": len(scrubbed_transcript),
                 "updated_at_utc": self.repository.current_time_utc(),
             }
         )
@@ -379,12 +416,8 @@ class SSHSessionBroker:
 
     @staticmethod
     def _ssh_env(material: SSHCredentialMaterial) -> dict[str, str]:
-        env = dict(os.environ)
-        if material.ssh_auth_sock:
-            env["SSH_AUTH_SOCK"] = material.ssh_auth_sock
-        else:
-            env.pop("SSH_AUTH_SOCK", None)
-        return env
+        extra = {"SSH_AUTH_SOCK": material.ssh_auth_sock} if material.ssh_auth_sock else None
+        return build_ssh_subprocess_env(extra=extra, include_term=True)
 
     def _ssh_argv(
         self,
@@ -438,7 +471,7 @@ class SSHSessionBroker:
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
-            f"UserKnownHostsFile={material.known_hosts_file}",
+            f"UserKnownHostsFile={material.argv_known_hosts_file()}",
             "-o",
             "GlobalKnownHostsFile=/dev/null",
             "-o",
@@ -465,7 +498,7 @@ class SSHSessionBroker:
             "-o",
             "ServerAliveCountMax=3",
             "-i",
-            str(material.identity_file),
+            material.argv_identity_file(),
             "-p",
             str(target.port),
             f"{target.username}@{target.host}",
@@ -478,8 +511,9 @@ class SSHSessionBroker:
         session: InteractiveSessionV1,
         material: SSHCredentialMaterial,
     ) -> None:
-        cls._require_private_regular_file(material.identity_file)
-        known_hosts = material.known_hosts_file
+        identity_file = material.resolved_identity_file()
+        cls._require_private_regular_file(identity_file)
+        known_hosts = material.resolved_known_hosts_file()
         file_stat = known_hosts.lstat()
         if not stat.S_ISREG(file_stat.st_mode):
             raise PermissionError("SSH known-hosts material must be a regular file.")

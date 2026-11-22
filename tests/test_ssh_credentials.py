@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import getpass
 import logging
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
+import stat
 import subprocess
+import sys
 import time
+from typing import Any, Iterator
 
 import pytest
 
@@ -41,11 +47,14 @@ from runtime_hosting.ssh import (
 )
 from runtime_hosting.ssh_credentials import (
     FORBIDDEN_EXTRA_SECRET_FIELDS,
+    _ASKPASS_HELPER_PATH,
+    _read_proc_start_time,
+    build_ssh_subprocess_env,
     is_short_secret,
 )
 from runtime_hosting.ssh_network import ValidatedSSHHost, ssh_host_key_alias
 from runtime_settings.instance_layout import InstanceLayout
-from secure_tool_broker import credential_catalog
+from secure_tool_broker import credential_catalog, credential_sources
 from secure_tool_broker.credential_catalog import (
     CatalogCredential,
     CatalogCredentialField,
@@ -59,7 +68,7 @@ from secure_tool_broker.credential_templates import (
 )
 from storage.execution_control_repository import SqliteExecutionControlRepository
 from tests.execution_access_support import activation as build_activation
-from tests.execution_access_support import host_key_fingerprint, team_owner
+from tests.execution_access_support import fake_ssh, host_key_fingerprint, team_owner, write_ssh_material
 
 
 def _free_local_port() -> int:
@@ -157,7 +166,29 @@ def test_session_secret_scrubber_handles_split_reads_multiline_keys_and_short_se
             assert secret_pw[:9].encode() not in part
             assert secret_pw[9:].encode() not in part
 
-    # Ordinary interactive output is emitted immediately with zero unnecessary buffering.
+    # C25: Token patterns (GitHub, OpenAI, JWT) split across chunk boundaries are redacted.
+    gh_tok = "ghp_1234567890abcdef1234567890abcdef"
+    oai_tok = "sk-proj-abcdefghijklmnopqrstuvwxyz123456"
+    jwt_tok = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9aaaa."
+        "eyJzdWIiOiIxMjM0NTY3ODkwIn0bbbb."
+        "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    )
+    for token, split_at in ((gh_tok, 14), (oai_tok, 10), (jwt_tok, 45)):
+        pattern_stream = scrubber.new_stream_scrubber()
+        p1 = pattern_stream.feed(f"token {token[:split_at]}".encode("utf-8"))
+        p2 = pattern_stream.feed(f"{token[split_at:]}\n".encode("utf-8"))
+        p3 = pattern_stream.flush()
+        assert token[:split_at].encode("utf-8") not in p1
+        assert token[split_at:].encode("utf-8") not in p2
+        assert b"".join((p1, p2, p3)).decode("utf-8") == "token [REDACTED]\n"
+
+    # Held prefix bytes (e.g. partial match of a registered secret) are released at flush.
+    held_stream = scrubber.new_stream_scrubber()
+    assert held_stream.feed(b"login as Super") == b"login as "
+    assert held_stream.flush() == b"Super"
+
+    # Ordinary interactive output ending in prompt punctuation/whitespace is emitted immediately.
     prompt_stream = scrubber.new_stream_scrubber()
     assert prompt_stream.feed(b"deploy@box:~$ ") == b"deploy@box:~$ "
     assert prompt_stream.flush() == b""
@@ -181,6 +212,7 @@ def test_catalog_provider_rejects_dev_shm_paths() -> None:
 
 def test_catalog_provider_real_sshd_passphrase_agent_and_landlock_isolation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sshd_bin = shutil.which("sshd")
     ssh_bin = shutil.which("ssh")
@@ -189,6 +221,10 @@ def test_catalog_provider_real_sshd_passphrase_agent_and_landlock_isolation(
     add_bin = shutil.which("ssh-add")
     if not (sshd_bin and ssh_bin and keygen_bin and agent_bin and add_bin):
         pytest.skip("OpenSSH binaries are not installed in this environment.")
+
+    # C24: Broker-only secrets in process environment must never leak into SSH subprocesses.
+    monkeypatch.setenv("SEALBOX_TOKEN", "sbx-secret-broker-token-should-not-leak")
+    monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", "stb-secret-broker-token-should-not-leak")
 
     layout = InstanceLayout.at(tmp_path / "instance")
     ws_dir = layout.team_dir
@@ -273,6 +309,7 @@ def test_catalog_provider_real_sshd_passphrase_agent_and_landlock_isolation(
         ssh_agent_executable=agent_bin,
         ssh_add_executable=add_bin,
     )
+    assert provider.default_key_lifetime_seconds == 60
     broker = SSHSessionBroker(
         repository=SqliteExecutionControlRepository(str(tmp_path / "execution.db")),
         authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
@@ -298,26 +335,38 @@ def test_catalog_provider_real_sshd_passphrase_agent_and_landlock_isolation(
             assert material.working_dir is not None
             session_dir = material.working_dir
             assert material.ssh_auth_sock == "./s"
+            assert material.argv_identity_file() == "./id.pub"
+            assert material.argv_known_hosts_file() == "./known_hosts"
             assert private_key_pem in material.touched_secrets
             assert passphrase in material.touched_secrets
+            # C24: repr() must never expose raw secrets.
+            material_repr = repr(material)
+            assert private_key_pem not in material_repr
+            assert passphrase not in material_repr
             broker._verify_material(session, material)
 
-            # No private key or passphrase bytes exist anywhere in the ephemeral dir.
+            # No private key, passphrase, or executable scripts exist anywhere in the ephemeral dir.
             for child in session_dir.iterdir():
                 if child.is_file():
                     raw_text = child.read_text(encoding="utf-8", errors="ignore")
                     assert "PRIVATE KEY" not in raw_text
                     assert passphrase not in raw_text
+                    assert not (child.lstat().st_mode & 0o111)
 
             # ssh-agent cmdline never leaks full directory path or secrets.
-            agent_pid = int((session_dir / "agent.pid").read_text(encoding="utf-8").strip())
+            pid_tokens = (session_dir / "agent.pid").read_text(encoding="utf-8").strip().split()
+            agent_pid = int(pid_tokens[0])
+            if sys.platform == "linux":
+                assert len(pid_tokens) == 2
+                assert int(pid_tokens[1]) == _read_proc_start_time(agent_pid)
             cmdline_path = Path(f"/proc/{agent_pid}/cmdline")
             if cmdline_path.exists():
                 cmdline = cmdline_path.read_bytes().decode("utf-8", errors="ignore")
                 assert session_dir.name not in cmdline
                 assert passphrase not in cmdline
 
-            # Real OpenSSH login via private ssh-agent with zero private key file on disk.
+            # C21 + C24: ssh argv uses relative ./id.pub and ./known_hosts (never session_dir)
+            # and env is allowlisted (never carries broker tokens).
             validated = ValidatedSSHHost(
                 host="bootstrap.internal",
                 port=port,
@@ -327,12 +376,21 @@ def test_catalog_provider_real_sshd_passphrase_agent_and_landlock_isolation(
             )
             argv = list(broker._ssh_argv(session, material, validated_host=validated))
             assert "IdentityAgent=SSH_AUTH_SOCK" in argv
-            argv[argv.index("-tt")] = "-T"
-            argv.append("echo sealbox-agent-ok")
+            assert "UserKnownHostsFile=./known_hosts" in argv
+            assert "./id.pub" in argv
+            assert all(session_dir.name not in arg for arg in argv)
+            child_env = broker._ssh_env(material)
+            assert "SEALBOX_TOKEN" not in child_env
+            assert "SECURE_TOOL_BROKER_TOKEN" not in child_env
+
+            # Real OpenSSH login via private ssh-agent with zero private key file on disk.
+            login_argv = list(argv)
+            login_argv[login_argv.index("-tt")] = "-T"
+            login_argv.append("echo sealbox-agent-ok")
             login = subprocess.run(
-                argv,
+                login_argv,
                 cwd=str(material.working_dir),
-                env=broker._ssh_env(material),
+                env=child_env,
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -341,43 +399,139 @@ def test_catalog_provider_real_sshd_passphrase_agent_and_landlock_isolation(
             assert login.returncode == 0, f"ssh failed: out={login.stdout!r} err={login.stderr!r}"
             assert "sealbox-agent-ok" in login.stdout
 
-            # C01: Real Landlock code_sandbox cannot list ssh_ephemeral_dir, read files,
-            # or inspect the private ssh-agent's environment/cwd.
+            # C01 + C21: Keep a real broker-started ssh process alive AND trigger a
+            # passphrase unlock while a no-hint Landlock sandbox scans /proc for
+            # any trace of any ua-ssh-* folder path.
             status = code_sandbox_status()
             if status.available:
-                probe_code = (
-                    "import os\n"
-                    f"for fn in (lambda: os.listdir({str(layout.ssh_ephemeral_dir)!r}), "
-                    f"lambda: os.listdir({str(session_dir)!r}), "
-                    f"lambda: open({str(material.known_hosts_file)!r}).read(), "
-                    f"lambda: open('/proc/{agent_pid}/environ', 'rb').read(), "
-                    f"lambda: os.readlink('/proc/{agent_pid}/cwd')):\n"
-                    "  try:\n"
-                    "    fn()\n"
-                    "    raise SystemExit('LEAKED')\n"
-                    "  except PermissionError:\n"
-                    "    pass\n"
-                    "print('SANDBOX_ISOLATED')\n"
-                )
-                sandboxed = prepare_sandboxed_command(
-                    ("python3", "-c", probe_code),
-                    task_roots=[str(ws_dir)],
-                    env={**os.environ, "TEAM_INSTANCE_ROOT": str(layout.root)},
-                    network=False,
+                live_ssh_argv = list(argv)
+                live_ssh_argv[live_ssh_argv.index("-tt")] = "-T"
+                live_ssh_argv.append("sleep 30")
+                live_ssh = subprocess.Popen(
+                    live_ssh_argv,
+                    cwd=str(material.working_dir),
+                    env=child_env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                 )
                 try:
-                    probe = subprocess.run(
-                        sandboxed.argv,
-                        env=sandboxed.env,
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        check=False,
+                    time.sleep(0.25)
+                    assert live_ssh.poll() is None
+                    no_hint_probe_code = (
+                        "import os, time\n"
+                        "from pathlib import Path\n"
+                        "needle = 'ua-' + 'ssh-'\n"
+                        "needle_bytes = needle.encode('ascii')\n"
+                        "my_pid = os.getpid()\n"
+                        "leaks = []\n"
+                        "deadline = time.monotonic() + 0.6\n"
+                        "while time.monotonic() < deadline:\n"
+                        "  for entry in os.listdir('/proc'):\n"
+                        "    if not entry.isdigit() or int(entry) == my_pid:\n"
+                        "      continue\n"
+                        "    p = Path('/proc') / entry\n"
+                        "    for fname in ('cmdline', 'environ', 'maps'):\n"
+                        "      try:\n"
+                        "        data = (p / fname).read_bytes()\n"
+                        "        if needle_bytes in data:\n"
+                        "          leaks.append(f'{entry}/{fname}:{data[:120]!r}')\n"
+                        "      except OSError:\n"
+                        "        pass\n"
+                        "    for lname in ('cwd', 'exe', 'root'):\n"
+                        "      try:\n"
+                        "        target = os.readlink(p / lname)\n"
+                        "        if needle in target:\n"
+                        "          leaks.append(f'{entry}/{lname}:{target}')\n"
+                        "      except OSError:\n"
+                        "        pass\n"
+                        "    try:\n"
+                        "      for fd_name in os.listdir(p / 'fd'):\n"
+                        "        try:\n"
+                        "          target = os.readlink(p / 'fd' / fd_name)\n"
+                        "          if needle in target:\n"
+                        "            leaks.append(f'{entry}/fd/{fd_name}:{target}')\n"
+                        "        except OSError:\n"
+                        "          pass\n"
+                        "    except OSError:\n"
+                        "      pass\n"
+                        "  try:\n"
+                        "    unix_txt = Path('/proc/net/unix').read_text(errors='ignore')\n"
+                        "    if needle in unix_txt:\n"
+                        "      leaks.append('proc/net/unix')\n"
+                        "  except OSError:\n"
+                        "    pass\n"
+                        "  time.sleep(0.02)\n"
+                        "if leaks:\n"
+                        "  raise SystemExit('LEAKED:' + ';'.join(leaks[:3]))\n"
+                        "print('NO_HINT_ISOLATED')\n"
                     )
+                    sandboxed = prepare_sandboxed_command(
+                        ("python3", "-c", no_hint_probe_code),
+                        task_roots=[str(ws_dir)],
+                        env={**os.environ, "TEAM_INSTANCE_ROOT": str(layout.root)},
+                        network=False,
+                    )
+                    try:
+                        probe_proc = subprocess.Popen(
+                            sandboxed.argv,
+                            env=sandboxed.env,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                        )
+                        # Trigger a real passphrase unlock while the no-hint sandbox polls /proc.
+                        with provider.prepare(session, scrubber=scrubber):
+                            pass
+                        out, err = probe_proc.communicate(timeout=10)
+                    finally:
+                        release_sandboxed_command(sandboxed)
+                    assert probe_proc.returncode == 0, f"no-hint sandbox probe failed: {out!r} {err!r}"
+                    assert "NO_HINT_ISOLATED" in out
+
+                    # Also verify direct access to ephemeral dir / files / agent proc is denied by Landlock.
+                    direct_probe_code = (
+                        "import os\n"
+                        f"for fn in (lambda: os.listdir({str(layout.ssh_ephemeral_dir)!r}), "
+                        f"lambda: os.listdir({str(session_dir)!r}), "
+                        f"lambda: open({str(material.resolved_known_hosts_file())!r}).read(), "
+                        f"lambda: open('/proc/{agent_pid}/environ', 'rb').read(), "
+                        f"lambda: os.readlink('/proc/{agent_pid}/cwd')):\n"
+                        "  try:\n"
+                        "    fn()\n"
+                        "    raise SystemExit('DIRECT_LEAK')\n"
+                        "  except PermissionError:\n"
+                        "    pass\n"
+                        "print('DIRECT_ISOLATED')\n"
+                    )
+                    direct_sandboxed = prepare_sandboxed_command(
+                        ("python3", "-c", direct_probe_code),
+                        task_roots=[str(ws_dir)],
+                        env={**os.environ, "TEAM_INSTANCE_ROOT": str(layout.root)},
+                        network=False,
+                    )
+                    try:
+                        direct_res = subprocess.run(
+                            direct_sandboxed.argv,
+                            env=direct_sandboxed.env,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            check=False,
+                        )
+                    finally:
+                        release_sandboxed_command(direct_sandboxed)
+                    assert direct_res.returncode == 0, (
+                        f"direct sandbox probe failed: {direct_res.stdout!r} {direct_res.stderr!r}"
+                    )
+                    assert "DIRECT_ISOLATED" in direct_res.stdout
                 finally:
-                    release_sandboxed_command(sandboxed)
-                assert probe.returncode == 0, f"sandbox probe failed: {probe.stdout!r} {probe.stderr!r}"
-                assert "SANDBOX_ISOLATED" in probe.stdout
+                    live_ssh.terminate()
+                    try:
+                        live_ssh.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        live_ssh.kill()
+                        live_ssh.wait(timeout=5)
 
         # After context exit: ephemeral directory wiped and ssh-agent terminated.
         assert session_dir is not None and not session_dir.exists()
@@ -541,19 +695,296 @@ def test_catalog_provider_owner_scope_isolation_and_named_secrets(
             field_name="tailscale_auth_key",
         )
 
-    # One-shot password askpass emits the password once and wipes the secret file immediately.
+    # C24 + C27: One-shot FIFO password askpass uses tracked helper outside session_dir,
+    # writes zero password bytes to disk, hides password from repr(), and rejects a second read.
     with provider.prepare_password_askpass(
         owner=alice_owner,
         credential_key="alice_boot",
         scrubber=scrubber,
     ) as askpass:
+        assert "alice-admin-password-789" not in repr(askpass)
+        assert askpass.working_dir is not None
         helper = Path(askpass.env["SSH_ASKPASS"])
-        secret_file = helper.parent / "bootstrap.pw"
-        assert secret_file.exists()
-        first = subprocess.run([str(helper)], capture_output=True, text=True, check=True)
+        assert helper == _ASKPASS_HELPER_PATH
+        assert askpass.working_dir not in helper.parents
+        assert askpass.env["UA_SSH_ASKPASS_FIFO"] == "./pw.fifo"
+        fifo_path = askpass.working_dir / "pw.fifo"
+        assert stat.S_ISFIFO(os.lstat(fifo_path).st_mode)
+        assert [p.name for p in askpass.working_dir.iterdir()] == ["pw.fifo"]
+
+        askpass_env = build_ssh_subprocess_env(extra=askpass.env, python_executable=sys.executable)
+        first = subprocess.run(
+            [str(helper)],
+            cwd=str(askpass.working_dir),
+            env=askpass_env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
         assert first.stdout.strip() == "alice-admin-password-789"
-        assert not secret_file.exists()
-    assert not helper.parent.exists()
+        assert not fifo_path.exists()
+
+        second = subprocess.run(
+            [str(helper)],
+            cwd=str(askpass.working_dir),
+            env=askpass_env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        assert second.returncode != 0
+        assert second.stdout == ""
+    assert not askpass.working_dir.exists()
+
+    # Exiting prepare_password_askpass without reading the FIFO cleans up immediately without hanging.
+    t0 = time.monotonic()
+    with provider.prepare_password_askpass(
+        owner=alice_owner,
+        credential_key="alice_boot",
+        scrubber=scrubber,
+    ) as unused_askpass:
+        assert unused_askpass.working_dir is not None
+        unused_dir = unused_askpass.working_dir
+    assert time.monotonic() - t0 < 2.0
+    assert not unused_dir.exists()
+
+
+def test_collect_credential_optional_blank_secrets_and_default_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C22: Both SSH templates save with optional secrets blank and resolve cleanly."""
+
+    keygen_bin = shutil.which("ssh-keygen")
+    agent_bin = shutil.which("ssh-agent")
+    add_bin = shutil.which("ssh-add")
+    if not (keygen_bin and agent_bin and add_bin):
+        pytest.skip("OpenSSH binaries are not installed in this environment.")
+
+    db_path = tmp_path / "catalog.db"
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(db_path))
+    monkeypatch.setenv("TEAM_INSTANCE_NAME", "test-inst")
+    credential_catalog._SECRET_CACHE.clear()
+
+    stored_sealbox: dict[tuple[str, str], str] = {}
+    sealbox_write_calls: list[list[str]] = []
+
+    def fake_tenant_env(*, scope_kind: str, owner_id: str, provision: bool = True) -> dict[str, str]:
+        return {"TEST_TENANT": f"{scope_kind}:{owner_id}"}
+
+    def fake_run_sealbox(
+        args: list[str],
+        *,
+        input_text: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 30,
+    ) -> subprocess.CompletedProcess[str]:
+        sealbox_write_calls.append(list(args))
+        tenant = (env or {}).get("TEST_TENANT", "")
+        if args[:2] == ["credential", "set"]:
+            stored_sealbox[(tenant, args[2])] = input_text or ""
+        elif args[:2] == ["secret", "set"]:
+            stored_sealbox[(tenant, args[2])] = input_text or ""
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout='{"version":1}\n', stderr="")
+
+    class _FakeSealboxSource:
+        def get_secret(self, request: Any) -> str | None:
+            tenant = f"{request.owner_scope_kind}:{request.owner_id}"
+            item_key = request.ref.item_id or request.ref.item_name or ""
+            return stored_sealbox.get((tenant, item_key))
+
+    monkeypatch.setattr(credential_catalog, "sealbox_tenant_environment", fake_tenant_env)
+    monkeypatch.setattr(credential_catalog, "run_sealbox", fake_run_sealbox)
+    monkeypatch.setattr(
+        credential_catalog,
+        "get_credential_source",
+        lambda name: _FakeSealboxSource() if name == "sealbox" else credential_sources.get_credential_source(name),
+    )
+
+    alice_scope = CredentialOwnerScope.user("usr_alice")
+    alice_owner = OwnerScopeV1(scope_kind=OwnerScopeKind.USER, owner_id="usr_alice", team_id="team_alpha")
+
+    # (a) ssh_host_bootstrap with only username and admin_password (optional secrets blank).
+    boot_rendered = render_credential_template_request(
+        {"template_id": "ssh_host_bootstrap", "service_name": "Lab Linux"}
+    )
+    assert boot_rendered.status == "success"
+    boot_req = boot_rendered.content["request"]
+    boot_req["write_source"] = "sealbox"
+
+    # Missing required admin_password leaves zero writes in Sealbox.
+    missing_req = credential_catalog.collect_credential(
+        boot_req,
+        {"username": "admin", "admin_password": "", "ssh_private_key": ""},
+        scope=alice_scope,
+    )
+    assert missing_req.status == "error"
+    assert missing_req.content["error_code"] == "missing_required_credential_field"
+    assert sealbox_write_calls == []
+
+    boot_saved = credential_catalog.collect_credential(
+        boot_req,
+        {
+            "username": "admin",
+            "admin_password": "bootstrap-admin-pw-1234",
+            "ssh_public_key": "",
+            "ssh_private_key": "",
+            "ssh_passphrase": "",
+            "tailscale_auth_key": "",
+        },
+        scope=alice_scope,
+    )
+    assert boot_saved.status == "success", boot_saved.error
+    assert boot_saved.content["stored_secret_fields"] == ["admin_password"]
+    saved_boot_cred = credential_catalog.load_catalog(scope=alice_scope).credentials[boot_req["credential_key"]]
+    assert "ssh_private_key" not in saved_boot_cred.fields
+    assert "ssh_passphrase" not in saved_boot_cred.fields
+    assert "tailscale_auth_key" not in saved_boot_cred.fields
+
+    layout = InstanceLayout.at(tmp_path / "inst")
+    provider = CatalogSSHCredentialMaterialProvider(
+        ephemeral_base_dir=layout.ssh_ephemeral_dir,
+        known_hosts_line_provider=lambda _s: ("ssh-ed25519", base64.b64encode(b"hostkey").decode("ascii")),
+        ssh_agent_executable=agent_bin,
+        ssh_add_executable=add_bin,
+    )
+    assert (
+        provider.resolve_admin_password(owner=alice_owner, credential_key=boot_req["credential_key"])
+        == "bootstrap-admin-pw-1234"
+    )
+
+    # (b) ssh_private_key with an unencrypted key and blank optional ssh_passphrase.
+    unenc_key = tmp_path / "unenc_ed25519"
+    subprocess.run([keygen_bin, "-q", "-t", "ed25519", "-N", "", "-f", str(unenc_key)], check=True)
+    unenc_pem = unenc_key.read_text(encoding="utf-8")
+    unenc_pub = unenc_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+
+    key_rendered = render_credential_template_request(
+        {"template_id": "ssh_private_key", "service_name": "Unenc Box"}
+    )
+    assert key_rendered.status == "success"
+    key_req = key_rendered.content["request"]
+    key_req["write_source"] = "sealbox"
+    key_saved = credential_catalog.collect_credential(
+        key_req,
+        {
+            "ssh_public_key": unenc_pub,
+            "ssh_private_key": unenc_pem,
+            "ssh_passphrase": "",
+        },
+        scope=alice_scope,
+    )
+    assert key_saved.status == "success", key_saved.error
+    assert key_saved.content["stored_secret_fields"] == ["ssh_private_key"]
+    saved_key_cred = credential_catalog.load_catalog(scope=alice_scope).credentials[key_req["credential_key"]]
+    assert "ssh_passphrase" not in saved_key_cred.fields
+
+    target = SSHConnectionTargetV1(
+        host="box.internal",
+        port=22,
+        username="deploy",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=host_key_fingerprint(b"hostkey"),
+        credential_binding_id=f"catalog:{key_req['credential_key']}",
+    )
+    session = InteractiveSessionV1(
+        session_id="ssh_sess_unenc_catalog",
+        owner=alice_owner,
+        target=target,
+        target_digest=contract_sha256(target.model_dump(mode="json")),
+    )
+    with provider.prepare(session) as mat:
+        assert mat.public_key == unenc_pub
+
+    # (c) ssh_private_key with encrypted key and passphrase also saves and prepares cleanly.
+    enc_key = tmp_path / "enc_ed25519"
+    subprocess.run(
+        [keygen_bin, "-q", "-t", "ed25519", "-N", "key-passphrase-456", "-f", str(enc_key)],
+        check=True,
+    )
+    enc_pem = enc_key.read_text(encoding="utf-8")
+    enc_pub = enc_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    enc_rendered = render_credential_template_request(
+        {"template_id": "ssh_private_key", "service_name": "Enc Box"}
+    )
+    enc_req = enc_rendered.content["request"]
+    enc_req["write_source"] = "sealbox"
+    enc_saved = credential_catalog.collect_credential(
+        enc_req,
+        {
+            "ssh_public_key": enc_pub,
+            "ssh_private_key": enc_pem,
+            "ssh_passphrase": "key-passphrase-456",
+        },
+        scope=alice_scope,
+    )
+    assert enc_saved.status == "success", enc_saved.error
+    enc_session = session.model_copy(
+        update={
+            "session_id": "ssh_sess_enc_catalog",
+            "target": target.model_copy(update={"credential_binding_id": f"catalog:{enc_req['credential_key']}"}),
+        }
+    )
+    with provider.prepare(enc_session) as mat:
+        assert mat.public_key == enc_pub
+
+
+def test_ephemeral_agent_exits_after_broker_sigkill(tmp_path: Path) -> None:
+    """C23: Private ssh-agent exits on its own even when its starting broker receives SIGKILL."""
+
+    agent_bin = shutil.which("ssh-agent")
+    if not agent_bin:
+        pytest.skip("ssh-agent is not installed in this environment.")
+
+    layout = InstanceLayout.at(tmp_path / "inst")
+    session_dir = layout.ssh_ephemeral_dir / "ua-ssh-sigkill-check"
+    session_dir.mkdir(parents=True, mode=0o700)
+
+    standin_code = (
+        "from pathlib import Path\n"
+        "import time\n"
+        "from runtime_hosting.ssh_credentials import CatalogSSHCredentialMaterialProvider\n"
+        f"provider = CatalogSSHCredentialMaterialProvider(ephemeral_base_dir=Path({str(layout.ssh_ephemeral_dir)!r}), ssh_agent_executable={agent_bin!r})\n"
+        f"handle = provider._start_ephemeral_agent(Path({str(session_dir)!r}))\n"
+        "print(handle.agent_pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    standin = subprocess.Popen(
+        [sys.executable, "-c", standin_code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    agent_pid: int | None = None
+    try:
+        assert standin.stdout is not None
+        line = standin.stdout.readline().strip()
+        assert line.isdigit(), f"stand-in failed: {standin.stderr.read() if standin.stderr else ''}"
+        agent_pid = int(line)
+        os.kill(agent_pid, 0)
+
+        os.kill(standin.pid, signal.SIGKILL)
+        standin.wait(timeout=5)
+
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(agent_pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.2)
+        pytest.fail(f"ssh-agent pid {agent_pid} survived 15s after starting process received SIGKILL")
+    finally:
+        if standin.poll() is None:
+            standin.kill()
+            standin.wait(timeout=5)
+        if agent_pid is not None:
+            try:
+                os.kill(agent_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def test_sweep_stale_ssh_ephemeral_dirs_kills_orphaned_agent_and_keeps_active(tmp_path: Path) -> None:
@@ -563,13 +994,29 @@ def test_sweep_stale_ssh_ephemeral_dirs_kills_orphaned_agent_and_keeps_active(tm
 
     layout = InstanceLayout.at(tmp_path / "inst")
     stale_dir = layout.ssh_ephemeral_dir / "ua-ssh-stale-crash"
+    wrong_start_dir = layout.ssh_ephemeral_dir / "ua-ssh-wrong-start"
+    no_start_dir = layout.ssh_ephemeral_dir / "ua-ssh-no-start"
     active_dir = layout.ssh_ephemeral_dir / "ua-ssh-active-live"
-    stale_dir.mkdir(parents=True, mode=0o700)
-    active_dir.mkdir(parents=True, mode=0o700)
+    outside_dir = tmp_path / "outside-precious"
+    outside_dir.mkdir(parents=True)
+    precious = outside_dir / "precious.txt"
+    precious.write_text("do-not-delete", encoding="utf-8")
+
+    for directory in (stale_dir, wrong_start_dir, no_start_dir, active_dir):
+        directory.mkdir(parents=True, mode=0o700)
+    symlink_entry = layout.ssh_ephemeral_dir / "ua-ssh-symlink-outside"
+    symlink_entry.symlink_to(outside_dir)
 
     orphan = subprocess.Popen(
         [agent_bin, "-D", "-s", "-a", "./s"],
         cwd=str(stale_dir),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    unrelated_agent = subprocess.Popen(
+        [agent_bin, "-D", "-s", "-a", "./unrelated.sock"],
+        cwd=str(tmp_path),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
@@ -579,22 +1026,196 @@ def test_sweep_stale_ssh_ephemeral_dirs_kills_orphaned_agent_and_keeps_active(tm
         while not (stale_dir / "s").exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         assert (stale_dir / "s").exists()
-        (stale_dir / "agent.pid").write_text(f"{orphan.pid}\n", encoding="utf-8")
+
+        orphan_start = _read_proc_start_time(orphan.pid)
+        pid_line = f"{orphan.pid} {orphan_start}\n" if orphan_start is not None else f"{orphan.pid}\n"
+        (stale_dir / "agent.pid").write_text(pid_line, encoding="utf-8")
         (stale_dir / "leftover.txt").write_text("stale-data", encoding="utf-8")
+
+        # C23: Unrelated ssh-agent with mismatched or missing start time must NOT be stopped.
+        unrelated_start = _read_proc_start_time(unrelated_agent.pid)
+        wrong_start = (unrelated_start + 99999) if unrelated_start is not None else 1
+        (wrong_start_dir / "agent.pid").write_text(f"{unrelated_agent.pid} {wrong_start}\n", encoding="utf-8")
+        (no_start_dir / "agent.pid").write_text(f"{unrelated_agent.pid}\n", encoding="utf-8")
         (active_dir / "keep.txt").write_text("still-live", encoding="utf-8")
 
         swept = sweep_stale_ssh_ephemeral_dirs(
             layout.ssh_ephemeral_dir,
             active_dirs=[active_dir],
         )
-        assert swept == 1
+        assert swept == 3
         assert not stale_dir.exists()
+        assert not wrong_start_dir.exists()
+        assert not no_start_dir.exists()
         assert active_dir.exists()
         assert orphan.wait(timeout=5) is not None
+        # Symlink was skipped and external file is intact.
+        assert symlink_entry.is_symlink()
+        assert precious.read_text(encoding="utf-8") == "do-not-delete"
+        # Unrelated ssh-agent was NOT killed on Linux.
+        if sys.platform == "linux":
+            assert unrelated_agent.poll() is None
     finally:
-        if orphan.poll() is None:
-            orphan.kill()
-            orphan.wait(timeout=5)
+        for proc in (orphan, unrelated_agent):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_broker_open_and_close_do_not_block_event_loop_and_scrub_split_output(
+    tmp_path: Path,
+) -> None:
+    """C25 + C26: Material enter/exit run off the event loop; split secrets and held tails scrub cleanly."""
+
+    exact_secret = "SuperSecretBrokerPw!99"
+    split_token = "ghp_1234567890abcdef1234567890abcdef"
+    identity, known_hosts = write_ssh_material(tmp_path / "ssh", key_bytes=b"host-key-bytes")
+
+    # Fake ssh script that writes split exact secret, split token pattern, and a held prefix then exits.
+    fake_ssh_path = tmp_path / "bin" / "split-ssh"
+    fake_ssh_path.parent.mkdir(parents=True, exist_ok=True)
+    fake_ssh_path.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, time\n"
+        f"sys.stdout.write('pw=' + {exact_secret[:10]!r}); sys.stdout.flush(); time.sleep(0.08)\n"
+        f"sys.stdout.write({exact_secret[10:]!r} + ' tok=' + {split_token[:14]!r}); sys.stdout.flush(); time.sleep(0.08)\n"
+        f"sys.stdout.write({split_token[14:]!r} + '\\nlogin as Super'); sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    fake_ssh_path.chmod(0o755)
+
+    class _SlowSecretMaterialProvider:
+        @contextmanager
+        def prepare(self, _session: InteractiveSessionV1) -> Iterator[SSHCredentialMaterial]:
+            time.sleep(0.25)
+            try:
+                yield SSHCredentialMaterial(
+                    identity_file=identity,
+                    known_hosts_file=known_hosts,
+                    touched_secrets=(exact_secret,),
+                )
+            finally:
+                time.sleep(0.25)
+
+    target = SSHConnectionTargetV1(
+        host="ops.internal",
+        username="deploy",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=host_key_fingerprint(b"host-key-bytes"),
+        credential_binding_id="slow_binding",
+    )
+    digest = contract_sha256(target.model_dump(mode="json"))
+    session = InteractiveSessionV1(
+        session_id="ssh_sess_slow_scrub",
+        owner=team_owner(),
+        target=target,
+        target_digest=digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_slow_scrub",
+            resource_digest=digest,
+            function="create_execution_ssh_session",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        ),
+    )
+    repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+    repository.create_interactive_session(session)
+    broker = SSHSessionBroker(
+        repository=repository,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=_SlowSecretMaterialProvider(),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        team_id="team_alpha",
+        broker_id="broker-async-test",
+        ssh_executable=str(fake_ssh_path),
+    )
+
+    # Verify concurrent coroutine keeps ticking during broker.open().
+    open_ticks = 0
+    stop_ticking = asyncio.Event()
+
+    async def ticker() -> None:
+        nonlocal open_ticks
+        while not stop_ticking.is_set():
+            open_ticks += 1
+            await asyncio.sleep(0.02)
+
+    tick_task = asyncio.create_task(ticker())
+    try:
+        await broker.open(session_id=session.session_id, lease_token="lease-1")
+    finally:
+        stop_ticking.set()
+        await tick_task
+    assert open_ticks >= 5, f"Event loop was blocked during broker.open() (ticks={open_ticks})"
+
+    # Read until the script exits (EOF triggers flush + close).
+    received_chunks: list[bytes] = []
+    for _ in range(20):
+        if session.session_id not in broker._sessions:
+            break
+        chunk = await broker.read(session_id=session.session_id, timeout_seconds=0.05)
+        if chunk:
+            assert exact_secret.encode() not in chunk
+            assert split_token[:14].encode() not in chunk
+            assert split_token[14:].encode() not in chunk
+            received_chunks.append(chunk)
+
+    combined = b"".join(received_chunks).decode("utf-8", errors="replace")
+    assert exact_secret not in combined
+    assert split_token not in combined
+    assert "pw=[REDACTED] tok=[REDACTED]" in combined
+    assert "login as Super" in combined
+
+    persisted = repository.get_interactive_session(team_id="team_alpha", session_id=session.session_id)
+    assert persisted is not None and persisted.transcript_artifact is not None
+    transcript_text = broker.artifact_store.read_verified(persisted.transcript_artifact).decode("utf-8")
+    assert exact_secret not in transcript_text
+    assert split_token not in transcript_text
+    assert "pw=[REDACTED] tok=[REDACTED]" in transcript_text
+    assert "login as Super" in transcript_text
+
+    # Also verify broker.close() does not block the event loop when __exit__ is slow.
+    session2 = session.model_copy(
+        update={
+            "session_id": "ssh_sess_slow_close",
+            "connect_activation": build_activation(
+                ExecutionActivationKind.SSH_CONNECT,
+                resource_id="ssh_sess_slow_close",
+                resource_digest=digest,
+                function="create_execution_ssh_session",
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            ),
+        }
+    )
+    repository.create_interactive_session(session2)
+    broker2 = SSHSessionBroker(
+        repository=repository,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=_SlowSecretMaterialProvider(),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts2"),
+        team_id="team_alpha",
+        broker_id="broker-async-test-2",
+        ssh_executable=str(fake_ssh(tmp_path / "bin2")),
+    )
+    await broker2.open(session_id=session2.session_id, lease_token="lease-2")
+
+    close_ticks = 0
+    stop_close_ticking = asyncio.Event()
+
+    async def close_ticker() -> None:
+        nonlocal close_ticks
+        while not stop_close_ticking.is_set():
+            close_ticks += 1
+            await asyncio.sleep(0.02)
+
+    close_tick_task = asyncio.create_task(close_ticker())
+    try:
+        await broker2.close(session_id=session2.session_id)
+    finally:
+        stop_close_ticking.set()
+        await close_tick_task
+    assert close_ticks >= 5, f"Event loop was blocked during broker.close() (ticks={close_ticks})"
 
 
 def test_composite_material_provider_preserves_configured_and_routes_catalog(tmp_path: Path) -> None:
