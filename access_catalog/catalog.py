@@ -350,6 +350,26 @@ class ToolCatalog:
             level = _level(spec, where=f"{tool_id}.changes.{kind}")
             self.changes[str(kind)] = (tool_id, level)
             operations.append(OperationDefinitionV1(name=change_operation(str(kind)), level=level))
+        broker_provider = str(raw.get("broker_provider") or "").strip()
+        broker_actions = raw.get("broker_actions") or {}
+        if broker_actions and not broker_provider:
+            raise CatalogError(f"{tool_id}: broker_actions requires broker_provider.")
+        existing_ops = {op.name: op.level for op in operations}
+        for action, spec in broker_actions.items():
+            action_name = str(action)
+            key = (broker_provider, action_name)
+            if key in self.broker_actions:
+                raise CatalogError(f"Broker action {broker_provider}.{action_name} is listed twice.")
+            level = _level(spec, where=f"{tool_id}.broker_actions.{action_name}")
+            if action_name in existing_ops and existing_ops[action_name] is not level:
+                raise CatalogError(
+                    f"{tool_id}: broker action {action_name!r} level ({level.value}) does not match "
+                    f"function level ({existing_ops[action_name].value})."
+                )
+            self.broker_actions[key] = BrokerActionBinding(tool_id, broker_provider, action_name, level=level)
+            if action_name not in existing_ops:
+                existing_ops[action_name] = level
+                operations.append(OperationDefinitionV1(name=action_name, level=level))
         self.add_tool(ToolDefinitionV1(**_tool_fields(raw, operations)))
 
     def _load_broker_tool(self, raw: Mapping[str, Any]) -> None:

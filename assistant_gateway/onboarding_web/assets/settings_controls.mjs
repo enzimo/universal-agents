@@ -40,6 +40,7 @@ import {
 } from "./settings_support.mjs";
 import { createTeamControls } from "./team_controls.mjs";
 import { createFileRetentionControls } from "./file_retention_controls.mjs";
+import { createExecutionSSHControls } from "./execution_ssh_controls.mjs";
 
 export const SETTINGS_VIEWS = Object.freeze({
   INBOX: "inbox", ACCESS: "access", ACCOUNTS: "accounts", TEAM: "team", TASKS: "tasks", MEMORIES: "memories",
@@ -226,6 +227,9 @@ export function createSettingsControls({
     isVisible: () => !overlay.hidden && !panels.memories.hidden,
   });
   const tasks = createTasks({ panel: panels.tasks, headers: client.writeHeaders, onUnauthorized, teamActivity });
+  const executionSsh = createExecutionSSHControls({
+    container: byId("settings-execution-ssh"), client, browser,
+  });
   const chatReviews = createChatReviews({
     get: getInboxOrReview,
     post: (path, body) => client.post(path, body, ACCESS_WRITE_FALLBACK),
@@ -287,6 +291,8 @@ export function createSettingsControls({
         return accounts.load();
       case SETTINGS_VIEWS.TEAM:
         return team.activate();
+      case SETTINGS_VIEWS.TASKS:
+        return executionSsh.load();
       case SETTINGS_VIEWS.MEMORIES:
         if (!state.sessionKey) {
           setStatusLine(memoriesStatus, "Open a conversation before managing memories.", true);
@@ -323,6 +329,7 @@ export function createSettingsControls({
     setStatusLine(inboxStatus, "", false);
     team.resetStatus();
     memories.resetStatus();
+    executionSsh.resetStatus();
     if (typeof onClose === "function") onClose();
   }
 
@@ -408,6 +415,7 @@ export function createSettingsControls({
       accounts.clear();
       team.clear();
       memories.clear();
+      executionSsh.clear();
       close();
     },
   };

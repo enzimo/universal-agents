@@ -1964,6 +1964,20 @@ class UIDefaultValues:
     )
 
 
+DEFAULT_SSH_DENIED_CIDRS: tuple[str, ...] = (
+    "127.0.0.0/8",
+    "::1/128",
+    "0.0.0.0/8",
+    "::/128",
+    "169.254.0.0/16",
+    "fe80::/10",
+    "fd00:ec2::254/128",
+    "::ffff:127.0.0.0/104",
+    "::ffff:0.0.0.0/104",
+    "::ffff:169.254.0.0/112",
+)
+
+
 @dataclass(frozen=True)
 class ExecutionControlDefaultValues:
     enabled: DefaultValue[bool] = default_value(
@@ -2003,8 +2017,13 @@ class ExecutionControlDefaultValues:
             "ssh_executable": "ssh",
             "lease_ttl_seconds": 300,
             "transcript_limit_bytes": 4194304,
+            "allowed_cidrs": [],
+            "allowed_domains": [],
+            "denied_cidrs": list(DEFAULT_SSH_DENIED_CIDRS),
+            "max_delegation_ttl_seconds": 7200,
+            "allow_password_bootstrap": False,
         },
-        "Interactive SSH PTY broker settings.",
+        "Brokered SSH session, network guardrail, and host-bootstrap settings.",
         onboarding_overridable=False,
     )
 

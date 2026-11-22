@@ -331,3 +331,123 @@ templates:
         form:
           input_control: file
           autocomplete: "off"
+
+  ssh_private_key:
+    template_id: ssh_private_key
+    display_name: SSH Private Key
+    description: Store an SSH key pair in the broker credential store for admin-approved brokered SSH sessions.
+    credential_kind: ssh_key
+    aliases:
+      - ssh key
+      - ssh private key
+      - ssh keypair
+      - ssh identity
+    domains: []
+    default_credential_key_template: "{{service_slug}}_ssh_key"
+    default_purpose_template: "SSH key credential for admin-approved {{service_name}} sessions."
+    flow: credential_collection
+    store_target: default
+    fields:
+      - name: ssh_public_key
+        kind: public_key
+        visibility: metadata_visible
+        value_source: user_or_agent_supplied_metadata
+        required: true
+        label: SSH public key
+        description: OpenSSH public key line (for example ssh-ed25519 AAAA...). Visible as non-secret metadata.
+        form:
+          input_control: textarea
+          autocomplete: "off"
+      - name: ssh_private_key
+        kind: credential_file
+        visibility: secret
+        value_source: user_input
+        required: true
+        label: SSH private key
+        description: Upload the OpenSSH private key file directly through the secure broker form. Never paste private keys in chat.
+        form:
+          input_control: file
+          autocomplete: "off"
+      - name: ssh_passphrase
+        kind: password
+        visibility: secret
+        value_source: user_input
+        required: false
+        label: SSH key passphrase (optional)
+        description: Optional passphrase protecting the private key. Unlocked only inside a private broker ssh-agent.
+        form:
+          input_control: password
+          autocomplete: "off"
+
+  ssh_host_bootstrap:
+    template_id: ssh_host_bootstrap
+    display_name: SSH Host Bootstrap
+    description: Store initial admin login credentials and optional SSH/Tailscale keys for admin-approved host bootstrapping.
+    credential_kind: ssh_bootstrap
+    aliases:
+      - ssh bootstrap
+      - host bootstrap
+      - ssh host bootstrap
+      - machine bootstrap
+    domains: []
+    default_credential_key_template: "{{service_slug}}_ssh_bootstrap"
+    default_purpose_template: "Host bootstrap credential for admin-approved {{service_name}} setup."
+    flow: credential_collection
+    store_target: default
+    fields:
+      - name: username
+        kind: username
+        visibility: metadata_visible
+        value_source: user_or_agent_supplied_metadata
+        required: true
+        label: Remote admin username
+        form:
+          input_control: text
+          autocomplete: username
+      - name: admin_password
+        kind: password
+        visibility: secret
+        value_source: user_input
+        required: true
+        label: Remote admin / sudo password
+        description: Used only by the broker for one-time key installation or approved sudo validation. Never shown to agents.
+        form:
+          input_control: password
+          autocomplete: current-password
+      - name: ssh_public_key
+        kind: public_key
+        visibility: metadata_visible
+        value_source: user_or_agent_supplied_metadata
+        required: false
+        label: SSH public key (optional)
+        form:
+          input_control: textarea
+          autocomplete: "off"
+      - name: ssh_private_key
+        kind: credential_file
+        visibility: secret
+        value_source: user_input
+        required: false
+        label: SSH private key (optional)
+        form:
+          input_control: file
+          autocomplete: "off"
+      - name: ssh_passphrase
+        kind: password
+        visibility: secret
+        value_source: user_input
+        required: false
+        label: SSH key passphrase (optional)
+        form:
+          input_control: password
+          autocomplete: "off"
+      - name: tailscale_auth_key
+        kind: token
+        visibility: secret
+        value_source: user_input
+        required: false
+        label: Tailscale auth key (optional)
+        description: Prefer a single-use ephemeral Tailscale auth key. Used only by the broker tailscale_up recipe.
+        form:
+          input_control: password
+          autocomplete: "off"

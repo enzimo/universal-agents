@@ -1,6 +1,7 @@
 """Environment configuration and contracts."""
 
 from __future__ import annotations
+import copy
 import json
 import os
 from typing import Any, Dict
@@ -99,7 +100,7 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
             "artifact_store": dict(EXECUTION_CONTROL_DEFAULTS.artifact_store.value),
             "profiles": [],
             "kubernetes": dict(EXECUTION_CONTROL_DEFAULTS.kubernetes.value),
-            "ssh": dict(EXECUTION_CONTROL_DEFAULTS.ssh.value),
+            "ssh": copy.deepcopy(EXECUTION_CONTROL_DEFAULTS.ssh.value),
         },
         _mapping_or_empty(config.get("execution_control")),
     )

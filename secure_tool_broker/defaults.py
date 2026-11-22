@@ -47,6 +47,11 @@ def resolve_secure_tool_broker_internal_base_url(
 # Gateway-only route that deletes a removed person's credentials
 # (secure_tool_broker.departed_person_credentials).
 PERSON_CREDENTIAL_DELETION_ROUTE = "/v1/people/credentials/delete"
+# Gateway-only routes for immediate revocation of broker-held SSH sessions and targets
+# (secure_tool_broker.execution_ssh).
+EXECUTION_SSH_ROUTE_PREFIX = "/v1/execution-ssh/"
+EXECUTION_SSH_REVOKE_SESSION_ROUTE = f"{EXECUTION_SSH_ROUTE_PREFIX}sessions/{{session_id}}/revoke"
+EXECUTION_SSH_REVOKE_TARGET_ROUTE = f"{EXECUTION_SSH_ROUTE_PREFIX}targets/{{target_id}}/revoke"
 # Team transfer (secure_tool_broker.credential_transfer): the operator caller only.
 TRANSFER_ROUTE_PREFIX = "/v1/transfer/"
 CREDENTIAL_TRANSFER_EXPORT_ROUTE = f"{TRANSFER_ROUTE_PREFIX}credentials/export"

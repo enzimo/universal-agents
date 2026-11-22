@@ -41,5 +41,11 @@ def get_provider(name: str) -> SecureToolProvider | None:
     return provider
 
 
-def list_providers() -> list[str]:
-    return sorted(_PROVIDERS)
+def list_providers(*, secure_cli_only: bool = False) -> list[str]:
+    if not secure_cli_only:
+        return sorted(_PROVIDERS)
+    return sorted(
+        name
+        for name, provider in _PROVIDERS.items()
+        if getattr(provider, "secure_cli_callable", True)
+    )

@@ -18,6 +18,7 @@ class DeclaredProvider:
     name: str
     actions: Mapping[str, ActionSpec]
     action_aliases: Mapping[str, str] = {}
+    secure_cli_callable: bool = True
 
     def _valid_action_names(self) -> str:
         return ", ".join(sorted(self.actions))
@@ -379,6 +380,66 @@ class ToolSetupProvider(DeclaredProvider):
     }
 
 
+class ExecutionSSHProvider(DeclaredProvider):
+    """Broker-owned SSH operations (``secure_tool_broker.execution_ssh``).
+
+    Agents reach these actions only through the ``fn:execution_control`` SSH
+    function tools, never through ``secure_cli``. Every action is decided by
+    ``secure_tool_broker.access_gate`` under ``fn:execution_control`` and
+    checked against ``ExecutionAccessGuard`` using verified signed context.
+    Raw Sealbox credentials remain strictly inside the broker process.
+    """
+
+    name = "execution_ssh"
+    secure_cli_callable = False
+    actions: Mapping[str, ActionSpec] = {
+        "probe_execution_ssh_host_key": ActionSpec(
+            "probe_execution_ssh_host_key",
+            "Probe a remote SSH host's ed25519 host key from the broker without authenticating.",
+        ),
+        "open_execution_ssh_session": ActionSpec(
+            "open_execution_ssh_session",
+            "Open a live SSH PTY session inside the broker using broker-held credentials.",
+        ),
+        "read_execution_ssh_session": ActionSpec(
+            "read_execution_ssh_session",
+            "Read bounded, secret-scrubbed output from a live broker SSH PTY.",
+        ),
+        "write_execution_ssh_session": ActionSpec(
+            "write_execution_ssh_session",
+            "Write UTF-8 input to a live broker SSH PTY under approved allow_typing.",
+        ),
+        "resize_execution_ssh_session": ActionSpec(
+            "resize_execution_ssh_session",
+            "Resize a live broker SSH PTY and renew its lease.",
+        ),
+        "close_execution_ssh_session": ActionSpec(
+            "close_execution_ssh_session",
+            "Close a live broker SSH PTY, stop its commands, and persist its redacted transcript.",
+        ),
+        "run_execution_ssh_command": ActionSpec(
+            "run_execution_ssh_command",
+            "Run a non-interactive remote command under approved allow_commands.",
+        ),
+        "get_execution_ssh_command": ActionSpec(
+            "get_execution_ssh_command",
+            "Poll status and scrubbed output of a broker-tracked remote SSH command.",
+        ),
+        "enroll_execution_ssh_key": ActionSpec(
+            "enroll_execution_ssh_key",
+            "One-time broker password bootstrap to install ssh_public_key and latch password bootstrap off.",
+        ),
+        "run_execution_ssh_sudo": ActionSpec(
+            "run_execution_ssh_sudo",
+            "Run a broker-assisted sudo command or admin-approved secret recipe.",
+        ),
+        "upload_execution_ssh_bundle": ActionSpec(
+            "upload_execution_ssh_bundle",
+            "Upload non-sensitive workspace bundle bytes over SSH under approved allow_workspace_transfer.",
+        ),
+    }
+
+
 def register_builtin_providers() -> None:
     for provider in hub_cli_providers():
         register_provider(provider)
@@ -392,6 +453,7 @@ def register_builtin_providers() -> None:
     register_provider(CredentialCatalogProvider())
     register_provider(SecureRequestsProvider())
     register_provider(ToolSetupProvider())
+    register_provider(ExecutionSSHProvider())
 
 
 register_builtin_providers()

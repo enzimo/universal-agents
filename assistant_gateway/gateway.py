@@ -14,6 +14,7 @@ from access_control.identity import ISSUER_GATEWAY, ContextSigner
 from assistant_gateway.access_commands import GatewayAccessCommands
 from assistant_gateway.account_sharing import GatewayAccountSharing
 from assistant_gateway.status_page import StatusPage
+from assistant_gateway.execution_ssh import ExecutionSSHRevokeBroker, GatewayExecutionSSH
 from assistant_gateway.file_retention import GatewayFileRetention
 from assistant_gateway.inbound_attachments import resolve_inbound_attachment_cache_dir
 from assistant_gateway.queue_capacity import build_queue_capacity
@@ -566,6 +567,22 @@ def _stored_data(
             storage_usage=usage,
             storage_capacity=capacity,
         ),
+    )
+
+
+def _execution_ssh(
+    config: GatewayInstanceConfig,
+    *,
+    person_changes: PersonChangeCheck,
+    broker: GatewaySecureBroker | ExecutionSSHRevokeBroker | None,
+) -> GatewayExecutionSSH:
+    """Settings > Tasks > Brokered SSH: admin inspection and live revocation."""
+
+    revoke_broker = broker if isinstance(broker, ExecutionSSHRevokeBroker) else None
+    return GatewayExecutionSSH.from_gateway_config(
+        config,
+        person_changes=person_changes,
+        broker=revoke_broker,
     )
 
 
@@ -1521,6 +1538,11 @@ class UserGateway:
             ),
             accounts=self.account_sharing,
             file_retention=self.stored_data.settings,
+            execution_ssh=_execution_ssh(
+                config,
+                person_changes=person_changes,
+                broker=self._secure_broker,
+            ),
         )
         self._activity_source = (
             activity_source or HttpGatewayActivitySource.from_gateway_config(config)

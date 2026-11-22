@@ -555,7 +555,8 @@ raw credential in any field.
   `signup.manual_fallback_session`.
   - Common collection templates include `generic_username_password`,
     `generic_signup_username_password`, `generic_api_token`,
-    `generic_oauth_client_secret`, and `generic_service_account_file`.
+    `generic_oauth_client_secret`, `generic_service_account_file`,
+    `ssh_private_key`, and `ssh_host_bootstrap`.
     `credential.collect` is the post-form storage action; `signup.prepare` only
     validates. A user-facing form requires the terminal
     `secure_credential_collection_request` structured action.
@@ -633,6 +634,28 @@ form takes the `oauth_json` file, or collect it first with the `xurl_oauth2`
 template). A Hugging Face token can be typed straight into the account link
 form for `cli:huggingface`.
 Reconcile unknown write outcomes before another publish or upload.
+
+## Brokered SSH Credentials
+
+When a person wants agents to connect to or bootstrap a remote host over
+brokered SSH (see `runtime-operations-workflows`):
+
+- Use the built-in `ssh_private_key` template (`ssh_public_key` metadata-visible,
+  `ssh_private_key` secret file, optional `ssh_passphrase` secret) for key-based
+  SSH access, and `ssh_host_bootstrap` (`username` metadata-visible,
+  `admin_password` secret, optional `ssh_public_key` / `ssh_private_key` /
+  `ssh_passphrase`, optional `tailscale_auth_key` secret) for initial host
+  bootstrapping, broker `sudo`, or secret recipes.
+- Collect missing SSH credentials through the broker's secure form
+  (`secure_credential_collection_request`), never in chat, prompts, workspace
+  files, or shell commands.
+- Attach a stored Sealbox credential to a host only through TeamLead's staged
+  `plan_execution_ssh_target` + `apply_change` workflow (administrator approval
+  in the Inbox). The broker resolves keys, unlocks passphrases in a private
+  ephemeral `ssh-agent`, injects `admin_password` or named secret fields via
+  `SSH_ASKPASS` / `sudo -S`, and scrubs every touched secret from outputs and
+  transcripts. Agents never receive the raw key, passphrase, password, or auth
+  key.
 
 ## Credentials for scheduled work
 

@@ -78,10 +78,19 @@ from secure_tool_broker.team_export_page import add_team_export_routes
 from secure_tool_broker.defaults import (
     AUTH_PAGE_STATUS_ROUTE,
     DEFAULT_API_REQUEST_USER_AGENT,
+    EXECUTION_SSH_ROUTE_PREFIX,
     is_decline,
     ONBOARDING_ACCOUNT_KEYS_ROUTE,
     PERSON_CREDENTIAL_DELETION_ROUTE,
     TRANSFER_ROUTE_PREFIX,
+)
+from secure_tool_broker.execution_ssh import (
+    BrokerExecutionSSHConfig,
+    EXECUTION_SSH_MAX_REQUEST_BYTES,
+    EXECUTION_SSH_PROVIDER,
+    build_execution_ssh_runtime,
+    execute_ssh_broker_action,
+    register_execution_ssh_app,
 )
 from secure_tool_broker.departed_person_credentials import delete_person_credentials
 from secure_tool_broker.page_decline import (
@@ -177,6 +186,7 @@ GATEWAY_ROUTE_PREFIXES = (
     "/v1/credential-collection/",
     "/v1/account-link/",
     "/v1/people/",  # deleting a removed person's credentials
+    EXECUTION_SSH_ROUTE_PREFIX,  # immediate admin revocation of broker-held SSH sessions/targets
 )
 # Starting and stopping hosted MCP servers: the manager (after the per-call
 # access hook allowed an agent) and the gateway (after the access service
@@ -620,6 +630,7 @@ class SecureToolBrokerService:
         access_gate: BrokerAccessGate,
         logger: logging.Logger | None = None,
         mcp_config: BrokerMCPConfig | None = None,
+        execution_ssh_config: BrokerExecutionSSHConfig | None = None,
         web_chat_origin: str | None = None,
         api_request_user_agent: str = DEFAULT_API_REQUEST_USER_AGENT,
     ) -> None:
@@ -639,6 +650,11 @@ class SecureToolBrokerService:
         self._logger = logger or LOGGER
         self._mcp_config = mcp_config
         self._mcp_runtime: Any | None = None
+        self._execution_ssh = build_execution_ssh_runtime(
+            config=execution_ssh_config,
+            access_gate=access_gate,
+            logger=self._logger,
+        )
         self._auth_sessions: dict[str, BrokerAuthSession] = {}
         self._credential_collection_sessions: dict[
             str, CredentialCollectionSession
@@ -656,7 +672,7 @@ class SecureToolBrokerService:
                 _sensitive_session_no_store_middleware,
                 self._auth_middleware,
                 page_view_middleware(self._web_chat_origin, error_page=_error_page),
-            ]
+            ],
         )
         app.router.add_get("/health", self._handle_health)
         app.router.add_get("/v1/tools", self._handle_list_tools)
@@ -709,6 +725,7 @@ class SecureToolBrokerService:
             "/v1/auth/{provider}/sessions", self._handle_create_auth_session
         )
         app.cleanup_ctx.append(self._mcp_lifecycle_context)
+        register_execution_ssh_app(app, self._execution_ssh)
         app.router.add_post(
             "/v1/auth/bitwarden/server", self._handle_bitwarden_server_config
         )
@@ -1038,14 +1055,23 @@ class SecureToolBrokerService:
         return dataclasses.replace(
             context,
             team_id=self._access_gate.team_id,
+            work_id=gate.work_id,
             account_link=gate.account_link,
             gate_link=gate.gate_link,
             api_request_user_agent=self._api_request_user_agent,
         )
 
     async def _handle_execute(self, request: web.Request) -> web.Response:
-        payload = await request.json()
-        validated = self._validated_action(request.match_info["provider"], payload)
+        provider_param = str(request.match_info["provider"] or "").strip()
+        if provider_param.lower() == EXECUTION_SSH_PROVIDER:
+            # Workspace bundle uploads base64-encode up to 16 MiB; keep all other
+            # broker routes at aiohttp's normal request size limit.
+            payload = await request.clone(
+                client_max_size=EXECUTION_SSH_MAX_REQUEST_BYTES
+            ).json()
+        else:
+            payload = await request.json()
+        validated = self._validated_action(provider_param, payload)
         trusted_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
         context = self._admitted_context(
             request[BROKER_CALLER_KEY],
@@ -1053,6 +1079,10 @@ class SecureToolBrokerService:
             self._request_tool_context(payload, trusted_context, provider=validated.provider),
             trusted_context,
         )
+        if validated.provider == EXECUTION_SSH_PROVIDER:
+            return web.json_response(
+                await execute_ssh_broker_action(self._execution_ssh, validated, context)
+            )
         if validated.provider == TOOL_SETUP_PROVIDER:
             # Needs the gate's account links and catalog (set_up_tools).
             return web.json_response(
@@ -2964,6 +2994,7 @@ async def run_secure_tool_broker(
     token: str,
     access_gate: BrokerAccessGate,
     mcp_config: BrokerMCPConfig | None = None,
+    execution_ssh_config: BrokerExecutionSSHConfig | None = None,
     tool_setup_recheck_days: int = 0,
     web_chat_origin: str | None = None,
     api_request_user_agent: str = DEFAULT_API_REQUEST_USER_AGENT,
@@ -3029,6 +3060,7 @@ async def run_secure_tool_broker(
         token=token,
         access_gate=access_gate,
         mcp_config=mcp_config,
+        execution_ssh_config=execution_ssh_config,
         web_chat_origin=web_chat_origin,
         api_request_user_agent=api_request_user_agent,
     )

@@ -778,6 +778,17 @@ class InstanceLayout:
 
         return self.runtime_dir / "python-env-locks"
 
+    @property
+    def ssh_ephemeral_dir(self) -> Path:
+        """Broker-private ephemeral SSH session artifacts (known_hosts, sockets, askpass).
+
+        Lives under ``runtime/``, outside ``workspaces/`` and ``/dev``, so Linux
+        Landlock (``custom_tools.code_sandbox``) never grants sandboxed agent
+        code access to list it, read files, or discover private ssh-agent sockets.
+        """
+
+        return self.runtime_dir / "ssh-ephemeral"
+
     # People
     def person_scratch_dir(self, canonical_user_id: str | None) -> Path:
         """``scratch/`` of a person's folder, or of ``agents/`` for work for no person."""

@@ -1972,6 +1972,32 @@
     },
     "ExecutionSSHSettings": {
       "properties": {
+        "allow_password_bootstrap": {
+          "default": false,
+          "title": "Allow Password Bootstrap",
+          "type": "boolean"
+        },
+        "allowed_cidrs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Cidrs",
+          "type": "array"
+        },
+        "allowed_domains": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Domains",
+          "type": "array"
+        },
+        "denied_cidrs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Denied Cidrs",
+          "type": "array"
+        },
         "enabled": {
           "default": false,
           "title": "Enabled",
@@ -1980,6 +2006,11 @@
         "lease_ttl_seconds": {
           "default": 300,
           "title": "Lease Ttl Seconds",
+          "type": "integer"
+        },
+        "max_delegation_ttl_seconds": {
+          "default": 7200,
+          "title": "Max Delegation Ttl Seconds",
           "type": "integer"
         },
         "ssh_executable": {

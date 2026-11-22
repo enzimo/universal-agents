@@ -1,0 +1,1049 @@
+"""Gateway Settings > Tasks > Brokered SSH service and HTTP route tests.
+
+Covers real Cedar authorization through ``PersonChangeCheck``, SQLite
+``ExecutionControlRepository`` storage, broker revocation notifications via
+``HttpGatewaySecureBroker`` / ``register_execution_ssh_app``, structured
+``event=`` audit logs, and ``InternalWebsiteInteractiveApp`` HTTP routes.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+
+from assistant_gateway.access_setup import MembershipRoles, PersonChangeCheck
+from assistant_gateway.application.execution_ssh_page import (
+    ExecutionSSHNotFound,
+    ExecutionSSHRefused,
+)
+from assistant_gateway.config import GatewayInstanceConfig
+from assistant_gateway.execution_ssh import GatewayExecutionSSH
+from assistant_gateway.http_secure_broker import HttpGatewaySecureBroker
+from assistant_gateway.store import GatewayStateStore
+from custom_agents.execution_changes import (
+    SSH_INTERACTION_CHANGE_KIND,
+    SSH_TARGET_ENROLL_CHANGE_KIND,
+)
+from custom_messages.contracts.access_v2 import (
+    ChangeApprovalMode,
+    ChangeApprovalRecordV1,
+)
+from runtime_hosting.execution_contracts import (
+    AccessHolderV1,
+    ActivationRecordV2,
+    EnrolledSSHTargetV1,
+    ExecutionActivationKind,
+    InteractiveSessionStatus,
+    InteractiveSessionV1,
+    OwnerScopeKind,
+    OwnerScopeV1,
+    SSHDelegationBoundsV1,
+    SSHTargetLifecycle,
+    SSHTargetPlatform,
+    SSHTargetStatus,
+    enrolled_ssh_target_digest,
+    ssh_interaction_resource_digest,
+)
+from secure_tool_broker.defaults import EXECUTION_SSH_ROUTE_PREFIX
+from secure_tool_broker.execution_ssh import register_execution_ssh_app
+from storage.execution_control_repository import (
+    ExecutionControlRepository,
+    create_execution_control_repository,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CEDAR_BINARY = REPO_ROOT / "target" / "debug" / "ua-cedar-authorizer"
+
+
+def _sample_ed25519_key(seed: str = "gateway-test-host") -> tuple[str, str, str]:
+    key_type = b"ssh-ed25519"
+    key_bytes = hashlib.sha256(seed.encode("utf-8")).digest()
+    blob = (
+        len(key_type).to_bytes(4, "big")
+        + key_type
+        + len(key_bytes).to_bytes(4, "big")
+        + key_bytes
+    )
+    encoded = base64.b64encode(blob).decode("ascii")
+    digest = base64.b64encode(hashlib.sha256(blob).digest()).decode("ascii").rstrip("=")
+    return "ssh-ed25519", f"SHA256:{digest}", f"ssh-ed25519 {encoded}"
+
+
+def _make_config(
+    tmp_path: Path,
+    *,
+    authorization_enabled: bool = True,
+    execution_enabled: bool = True,
+    ssh_enabled: bool = True,
+) -> GatewayInstanceConfig:
+    config = GatewayInstanceConfig.create(
+        instance_name="ssh-gateway-test",
+        instance_root=str(tmp_path / "instance"),
+        team_id="team_ssh",
+        timezone="UTC",
+    )
+    config.gateway.users.enabled = True
+    config.interactive_apps.internal_website.web_chat_enabled = True
+    config.authorization.enabled = authorization_enabled
+    if authorization_enabled:
+        assert CEDAR_BINARY.exists(), f"Cedar binary required at {CEDAR_BINARY}"
+        config.authorization.cedar_binary_path = str(CEDAR_BINARY)
+    config.execution_control.enabled = execution_enabled
+    config.execution_control.ssh.enabled = ssh_enabled
+    config.save(config.layout.instance_config_path)
+    return config
+
+
+def _make_person_changes(
+    config: GatewayInstanceConfig,
+    *,
+    roles_by_person: dict[str, tuple[str, ...]],
+) -> tuple[GatewayStateStore, PersonChangeCheck]:
+    store = GatewayStateStore(
+        config.state_storage_settings.sqlite_path or str(config.layout.gateway_state_db_path),
+        storage_settings=config.state_storage_settings,
+    )
+    for person_id, roles in roles_by_person.items():
+        store.identity_repository.create_gateway_user(
+            canonical_user_id=person_id,
+            display_name=person_id,
+            timezone="UTC",
+        )
+        for role in roles:
+            store.identity_repository.create_team_membership(
+                team_id=config.manager.team_id,
+                canonical_user_id=person_id,
+                role=role,
+                status="active",
+            )
+    return store, PersonChangeCheck(config, MembershipRoles(store.identity_repository))
+
+
+def _seed_target_and_session(
+    repo: ExecutionControlRepository,
+    *,
+    team_id: str,
+    now: datetime,
+    target_id: str = "ssh_tgt_01",
+    session_id: str = "ssh_sess_01",
+    owner_agent_type: str = "TeamArchitect",
+    target_expires_at: datetime | None = None,
+    session_status: InteractiveSessionStatus = InteractiveSessionStatus.OPEN,
+    connect_expires_at: datetime | None = None,
+    session_expires_at: datetime | None = None,
+    with_interaction: bool = True,
+    legacy_bounds: bool = False,
+    delegated_agent_type: str | None = "InfraWorker",
+    delegated_task_id: str | None = "task_123",
+    allow_commands: bool = False,
+    allow_broker_sudo: bool = True,
+    allow_workspace_transfer: bool = True,
+    person_roles: tuple[str, ...] = (),
+) -> tuple[EnrolledSSHTargetV1, InteractiveSessionV1]:
+    alg, fingerprint, pubkey = _sample_ed25519_key(target_id)
+    _, cred_fp, _ = _sample_ed25519_key(f"cred:{target_id}")
+    owner = OwnerScopeV1(
+        team_id=team_id,
+        scope_kind=OwnerScopeKind.TEAM,
+        owner_id=team_id,
+    )
+    holder = AccessHolderV1(
+        agent_type=owner_agent_type,
+        agent_id="agent_lead_1",
+        person_id="usr_admin",
+        person_roles=person_roles,
+    )
+    lifecycle = (
+        SSHTargetLifecycle.TEMPORARY
+        if target_expires_at is not None
+        else SSHTargetLifecycle.PERSISTENT
+    )
+    target_digest = enrolled_ssh_target_digest(
+        target_id=target_id,
+        owner=owner,
+        host="198.51.100.25",
+        port=22,
+        username="deploy",
+        platform=SSHTargetPlatform.LINUX,
+        host_key_algorithm=alg,
+        host_key_fingerprint=fingerprint,
+        host_key_public_key=pubkey,
+        credential_key="prod-ed25519",
+        credential_owner_scope=owner,
+        credential_public_key_fingerprint=cred_fp,
+        bootstrap_credential_key="prod-bootstrap",
+        bootstrap_credential_owner_scope=owner,
+        lifecycle=lifecycle,
+        expires_at_utc=target_expires_at,
+        reason="Bootstrap Linux worker",
+    )
+    target_activation = ActivationRecordV2.build(
+        activation_id=f"act_{target_id}",
+        kind=ExecutionActivationKind.SSH_TARGET_ENROLL,
+        resource_id=target_id,
+        resource_digest=target_digest,
+        generation=1,
+        owner=owner,
+        operation="fn:execution_control#change:execution_ssh_target_enroll",
+        holder=holder,
+        approval=ChangeApprovalRecordV1(
+            mode=ChangeApprovalMode.PERSON_APPROVAL,
+            access_request_id=f"req_{target_id}",
+            approved_by="usr_admin",
+            approved_at_utc=now - timedelta(minutes=10),
+        ),
+        activated_at_utc=now - timedelta(minutes=10),
+        expires_at_utc=target_expires_at,
+    )
+    target = EnrolledSSHTargetV1(
+        target_id=target_id,
+        owner=owner,
+        host="198.51.100.25",
+        port=22,
+        username="deploy",
+        platform=SSHTargetPlatform.LINUX,
+        host_key_algorithm=alg,
+        host_key_fingerprint=fingerprint,
+        host_key_public_key=pubkey,
+        credential_key="prod-ed25519",
+        credential_owner_scope=owner,
+        credential_public_key_fingerprint=cred_fp,
+        bootstrap_credential_key="prod-bootstrap",
+        bootstrap_credential_owner_scope=owner,
+        lifecycle=lifecycle,
+        expires_at_utc=target_expires_at,
+        status=SSHTargetStatus.ACTIVE,
+        reason="Bootstrap Linux worker",
+        activation=target_activation,
+        created_at_utc=now - timedelta(minutes=10),
+        updated_at_utc=now - timedelta(minutes=10),
+    )
+    repo.put_ssh_target(target)
+
+    conn_target = target.to_connection_target()
+    connect_activation = ActivationRecordV2.build(
+        activation_id=f"act_conn_{session_id}",
+        kind=ExecutionActivationKind.SSH_CONNECT,
+        resource_id=session_id,
+        resource_digest=conn_target.calculate_digest(),
+        generation=1,
+        owner=owner,
+        operation="fn:execution_control#create_execution_ssh_session",
+        holder=holder,
+        approval=ChangeApprovalRecordV1(
+            mode=ChangeApprovalMode.HELD_ACCESS,
+            approved_by="usr_admin",
+            approved_at_utc=now - timedelta(minutes=5),
+        ),
+        activated_at_utc=now - timedelta(minutes=5),
+        expires_at_utc=connect_expires_at,
+    )
+    session = InteractiveSessionV1(
+        session_id=session_id,
+        owner=owner,
+        target=conn_target,
+        target_digest=conn_target.calculate_digest(),
+        connect_activation=connect_activation,
+        status=session_status,
+        created_at_utc=now - timedelta(minutes=5),
+        updated_at_utc=now - timedelta(minutes=1),
+    )
+    repo.create_interactive_session(session)
+
+    if with_interaction:
+        bounds = (
+            None
+            if legacy_bounds
+            else SSHDelegationBoundsV1(
+                delegated_agent_type=delegated_agent_type,
+                delegated_task_id=delegated_task_id,
+                allow_commands=allow_commands,
+                allow_typing=False,
+                allow_password_bootstrap=False,
+                allow_broker_sudo=allow_broker_sudo,
+                allow_workspace_transfer=allow_workspace_transfer,
+            )
+        )
+        interaction_activation = ActivationRecordV2.build(
+            activation_id=f"act_{session_id}",
+            kind=ExecutionActivationKind.SSH_INTERACT,
+            resource_id=session_id,
+            resource_digest=(
+                conn_target.calculate_digest()
+                if bounds is None
+                else ssh_interaction_resource_digest(
+                    target_digest=conn_target.calculate_digest(), bounds=bounds
+                )
+            ),
+            generation=1,
+            owner=owner,
+            operation="fn:execution_control#change:execution_ssh_interaction",
+            holder=holder,
+            approval=ChangeApprovalRecordV1(
+                mode=ChangeApprovalMode.PERSON_APPROVAL,
+                access_request_id=f"req_{session_id}",
+                approved_by="usr_admin",
+                approved_at_utc=now - timedelta(minutes=4),
+            ),
+            activated_at_utc=now - timedelta(minutes=4),
+            expires_at_utc=session_expires_at or (now + timedelta(hours=1)),
+        )
+        repo.put_ssh_interaction(interaction_activation, bounds=bounds)
+    return target, session
+
+
+class _RecordingBroker:
+    def __init__(self, *, available: bool = True, fail: bool = False, terminated_live: bool = True) -> None:
+        self.available = available
+        self.fail = fail
+        self.terminated_live = terminated_live
+        self.revoked_targets: list[tuple[str, str]] = []
+        self.revoked_sessions: list[tuple[str, str]] = []
+
+    async def revoke_execution_ssh_target(self, *, target_id: str, revoked_by: str) -> dict[str, Any]:
+        if self.fail:
+            raise RuntimeError("broker offline")
+        self.revoked_targets.append((target_id, revoked_by))
+        return {"revoked": True, "target_id": target_id}
+
+    async def revoke_execution_ssh_session(self, *, session_id: str, revoked_by: str) -> dict[str, Any]:
+        if self.fail:
+            raise RuntimeError("broker offline")
+        self.revoked_sessions.append((session_id, revoked_by))
+        return {
+            "revoked": True,
+            "session_id": session_id,
+            "terminated_live": self.terminated_live,
+        }
+
+
+@pytest.mark.asyncio
+async def test_gateway_execution_ssh_real_cedar_admin_vs_member_and_revocation_audit(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 11, 22, 19, 0, 0, tzinfo=timezone.utc)
+    config = _make_config(tmp_path, authorization_enabled=True, ssh_enabled=True)
+    _, person_changes = _make_person_changes(
+        config,
+        roles_by_person={
+            "usr_admin": ("admin",),
+            "usr_member": ("member",),
+        },
+    )
+    repo = create_execution_control_repository(config.manager_storage_settings)
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_01",
+        session_id="ssh_sess_01",
+    )
+    broker = _RecordingBroker(terminated_live=True)
+    service = GatewayExecutionSSH(
+        team_id=config.manager.team_id,
+        config_path=config.config_path,
+        repository=repo,
+        person_changes=person_changes,
+        broker=broker,
+        default_ssh_enabled=True,
+        clock=lambda: now,
+    )
+    caplog.set_level(logging.INFO)
+    try:
+        # Non-admin member cannot see any hosts or sessions and cannot revoke.
+        member_page = service.page(person_id="usr_member")
+        assert member_page.can_manage is False
+        assert member_page.targets == ()
+        assert member_page.sessions == ()
+
+        with pytest.raises(ExecutionSSHRefused):
+            await service.revoke_session(person_id="usr_member", session_id="ssh_sess_01")
+        with pytest.raises(ExecutionSSHRefused):
+            await service.revoke_target(person_id="usr_member", target_id="ssh_tgt_01")
+        assert "event=gateway_ssh_session_revoke_refused" in caplog.text
+        assert "event=gateway_ssh_target_revoke_refused" in caplog.text
+        assert repo.get_interactive_session_revocation(team_id="team_ssh", session_id="ssh_sess_01") is None
+        assert repo.get_ssh_target(team_id="team_ssh", target_id="ssh_tgt_01").status is SSHTargetStatus.ACTIVE
+
+        # Admin sees non-secret target & delegated session metadata.
+        admin_page = service.page(person_id="usr_admin")
+        assert admin_page.can_manage is True
+        assert admin_page.ssh_enabled is True
+        assert len(admin_page.targets) == 1
+        assert admin_page.targets[0].target_id == "ssh_tgt_01"
+        assert admin_page.targets[0].credential_key == "prod-ed25519"
+        assert admin_page.targets[0].can_revoke is True
+        assert len(admin_page.sessions) == 1
+        assert admin_page.sessions[0].session_id == "ssh_sess_01"
+        assert admin_page.sessions[0].owner_agent_type == "TeamArchitect"
+        assert admin_page.sessions[0].delegated_agent_type == "InfraWorker"
+        assert admin_page.sessions[0].delegated_task_id == "task_123"
+        assert admin_page.sessions[0].capabilities == ("broker_sudo", "workspace_transfer")
+        assert admin_page.sessions[0].is_active is True
+
+        # Admin terminates the active session.
+        session_result = await service.revoke_session(person_id="usr_admin", session_id="ssh_sess_01")
+        assert session_result.revoked is True
+        assert session_result.broker_notified is True
+        assert session_result.terminated_live is True
+        assert broker.revoked_sessions == [("ssh_sess_01", "usr_admin")]
+        assert "event=gateway_ssh_session_revoked" in caplog.text
+        assert session_result.page.sessions[0].status == "revoked"
+        assert session_result.page.sessions[0].can_revoke is False
+
+        # Admin revokes the enrolled target.
+        target_result = await service.revoke_target(person_id="usr_admin", target_id="ssh_tgt_01")
+        assert target_result.revoked is True
+        assert target_result.broker_notified is True
+        assert broker.revoked_targets == [("ssh_tgt_01", "usr_admin")]
+        assert "event=gateway_ssh_target_revoked" in caplog.text
+        assert target_result.page.targets[0].status == "revoked"
+        assert target_result.page.targets[0].can_revoke is False
+
+        # Unknown ids raise ExecutionSSHNotFound.
+        with pytest.raises(ExecutionSSHNotFound):
+            await service.revoke_target(person_id="usr_admin", target_id="ssh_tgt_missing")
+        with pytest.raises(ExecutionSSHNotFound):
+            await service.revoke_session(person_id="usr_admin", session_id="ssh_sess_missing")
+    finally:
+        person_changes.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_execution_ssh_broker_failure_still_persists_revocation_fail_closed(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 11, 22, 19, 0, 0, tzinfo=timezone.utc)
+    config = _make_config(tmp_path, authorization_enabled=False, ssh_enabled=True)
+    _, person_changes = _make_person_changes(config, roles_by_person={"usr_solo": ("member",)})
+    repo = create_execution_control_repository(config.manager_storage_settings)
+    _seed_target_and_session(repo, team_id=config.manager.team_id, now=now)
+    service = GatewayExecutionSSH(
+        team_id=config.manager.team_id,
+        config_path=config.config_path,
+        repository=repo,
+        person_changes=person_changes,
+        broker=_RecordingBroker(fail=True),
+        default_ssh_enabled=True,
+        clock=lambda: now,
+    )
+    caplog.set_level(logging.WARNING)
+    try:
+        # With authorization disabled (D8), active team member can revoke;
+        # broker outage still persists DB revocation fail-closed.
+        result = await service.revoke_target(person_id="usr_solo", target_id="ssh_tgt_01")
+        assert result.revoked is True
+        assert result.broker_notified is False
+        assert "could not be reached right now" in result.message
+        assert "event=gateway_ssh_broker_revoke_notify_failed" in caplog.text
+        assert repo.get_ssh_target(team_id="team_ssh", target_id="ssh_tgt_01").status is SSHTargetStatus.REVOKED
+        assert repo.get_interactive_session_revocation(team_id="team_ssh", session_id="ssh_sess_01") is not None
+    finally:
+        person_changes.close()
+
+
+@pytest.mark.asyncio
+async def test_website_execution_ssh_http_routes_enforce_csrf_and_admin_checks(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from tests.test_gateway_website_app import (
+        InternalWebsiteInteractiveApp,
+        _UserTokenStatefulFakeGateway,
+    )
+
+    now = datetime(2026, 11, 22, 19, 0, 0, tzinfo=timezone.utc)
+    config = _make_config(tmp_path, authorization_enabled=True, ssh_enabled=True)
+    store, person_changes = _make_person_changes(
+        config,
+        roles_by_person={"user_alpha": ("member",)},
+    )
+    repo = create_execution_control_repository(config.manager_storage_settings)
+    _seed_target_and_session(repo, team_id=config.manager.team_id, now=now)
+    broker = _RecordingBroker(terminated_live=True)
+
+    gateway = _UserTokenStatefulFakeGateway(store)
+    gateway.execution_ssh = GatewayExecutionSSH(
+        team_id=config.manager.team_id,
+        config_path=config.config_path,
+        repository=repo,
+        person_changes=person_changes,
+        broker=broker,
+        default_ssh_enabled=True,
+        clock=lambda: now,
+    )
+    app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
+    caplog.set_level(logging.INFO)
+    try:
+        async with TestClient(TestServer(app.build_app())) as client:
+            # Asset is served cleanly by the website app.
+            asset_resp = await client.get("/execution_ssh_controls.mjs")
+            assert asset_resp.status == 200
+            assert "createExecutionSSHControls" in await asset_resp.text()
+
+            auth_response = await client.post("/api/web-chat/auth", json={"token": "ua_user_token"})
+            auth_payload = await auth_response.json()
+            read_headers = {
+                "Cookie": f"ua_web_chat_session={auth_response.cookies['ua_web_chat_session'].value}"
+            }
+            write_headers = {
+                **read_headers,
+                "Origin": str(client.make_url("/")).rstrip("/"),
+                "Sec-Fetch-Site": "same-origin",
+                "X-UA-Permission-CSRF": auth_payload["permission_csrf_token"],
+            }
+
+            # Member gets empty view and 403 on revoke routes.
+            member_view = await (await client.get("/api/web-chat/execution-ssh", headers=read_headers)).json()
+            assert member_view == {
+                "status": "ok",
+                "can_manage": False,
+                "ssh_enabled": False,
+                "targets": [],
+                "sessions": [],
+            }
+            denied_target = await client.post(
+                "/api/web-chat/execution-ssh/targets/ssh_tgt_01/revoke",
+                headers=write_headers,
+                json={},
+            )
+            assert denied_target.status == 403
+            denied_session = await client.post(
+                "/api/web-chat/execution-ssh/sessions/ssh_sess_01/revoke",
+                headers=write_headers,
+                json={},
+            )
+            assert denied_session.status == 403
+
+            # Promote user_alpha to admin in gateway memberships (read live by PersonChangeCheck).
+            store.identity_repository.change_team_membership_role(
+                team_id=config.manager.team_id,
+                canonical_user_id="user_alpha",
+                role="admin",
+            )
+            admin_view = await (await client.get("/api/web-chat/execution-ssh", headers=read_headers)).json()
+            assert admin_view["can_manage"] is True
+            assert len(admin_view["targets"]) == 1
+            assert len(admin_view["sessions"]) == 1
+
+            # Missing CSRF header is refused even for an admin.
+            no_csrf = await client.post(
+                "/api/web-chat/execution-ssh/sessions/ssh_sess_01/revoke",
+                headers=read_headers,
+                json={},
+            )
+            assert no_csrf.status == 403
+
+            # Admin revokes session and target with valid CSRF + origin headers.
+            revoked_sess = await client.post(
+                "/api/web-chat/execution-ssh/sessions/ssh_sess_01/revoke",
+                headers=write_headers,
+                json={},
+            )
+            assert revoked_sess.status == 200
+            revoked_sess_body = await revoked_sess.json()
+            assert revoked_sess_body["revoked"] is True
+            assert revoked_sess_body["terminated_live"] is True
+            assert revoked_sess_body["sessions"][0]["status"] == "revoked"
+
+            revoked_tgt = await client.post(
+                "/api/web-chat/execution-ssh/targets/ssh_tgt_01/revoke",
+                headers=write_headers,
+                json={},
+            )
+            assert revoked_tgt.status == 200
+            revoked_tgt_body = await revoked_tgt.json()
+            assert revoked_tgt_body["revoked"] is True
+            assert revoked_tgt_body["targets"][0]["status"] == "revoked"
+
+            # Unknown id returns 404.
+            missing = await client.post(
+                "/api/web-chat/execution-ssh/targets/does_not_exist/revoke",
+                headers=write_headers,
+                json={},
+            )
+            assert missing.status == 404
+    finally:
+        person_changes.close()
+
+
+@pytest.mark.asyncio
+async def test_http_gateway_secure_broker_calls_execution_ssh_revoke_routes() -> None:
+    """Verify HttpGatewaySecureBroker wires cleanly to register_execution_ssh_app routes."""
+
+    seen: list[tuple[str, str, str, str]] = []
+
+    class _FakeBrokerRuntime:
+        async def startup(self) -> None:
+            return None
+
+        async def shutdown(self) -> None:
+            return None
+
+        async def revoke_session(self, *, session_id: str, revoked_by: str) -> dict[str, Any]:
+            seen.append(("session", session_id, revoked_by, ""))
+            return {"revoked": True, "session_id": session_id, "terminated_live": True}
+
+        async def revoke_target(self, *, target_id: str, revoked_by: str) -> dict[str, Any]:
+            seen.append(("target", target_id, revoked_by, ""))
+            return {"revoked": True, "target_id": target_id}
+
+    @web.middleware
+    async def _auth_middleware(request: web.Request, handler):
+        if request.path.startswith(EXECUTION_SSH_ROUTE_PREFIX):
+            assert request.headers.get("Authorization") == "Bearer gw-broker-token"
+        return await handler(request)
+
+    broker_app = web.Application(middlewares=[_auth_middleware])
+    register_execution_ssh_app(broker_app, _FakeBrokerRuntime())  # type: ignore[arg-type]
+
+    async with TestServer(broker_app) as server:
+        client = HttpGatewaySecureBroker(
+            internal_base_url=str(server.make_url("/")).rstrip("/"),
+            public_base_url=None,
+            token="gw-broker-token",
+        )
+        sess_res = await client.revoke_execution_ssh_session(
+            session_id="ssh_sess/special", revoked_by="usr_admin"
+        )
+        tgt_res = await client.revoke_execution_ssh_target(
+            target_id="ssh_tgt/special", revoked_by="usr_admin"
+        )
+
+    assert sess_res["terminated_live"] is True
+    assert tgt_res["revoked"] is True
+    assert seen == [
+        ("session", "ssh_sess/special", "usr_admin", ""),
+        ("target", "ssh_tgt/special", "usr_admin", ""),
+    ]
+
+
+def test_gateway_execution_ssh_checks_both_change_kinds_and_bounds_inactive_rows(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 11, 22, 19, 0, 0, tzinfo=timezone.utc)
+    config = _make_config(tmp_path, authorization_enabled=False, ssh_enabled=False)
+    repo = create_execution_control_repository(config.manager_storage_settings)
+    for idx in range(55):
+        _seed_target_and_session(
+            repo,
+            team_id=config.manager.team_id,
+            now=now - timedelta(minutes=idx),
+            target_id=f"ssh_tgt_{idx:03d}",
+            session_id=f"ssh_sess_{idx:03d}",
+            target_expires_at=(now - timedelta(seconds=1)) if idx >= 2 else (now + timedelta(hours=2)),
+            session_status=(
+                InteractiveSessionStatus.OPEN if idx < 2 else InteractiveSessionStatus.CLOSED
+            ),
+            session_expires_at=(now - timedelta(seconds=1)) if idx >= 2 else (now + timedelta(hours=2)),
+        )
+
+    asked: list[tuple[str | None, str]] = []
+
+    class _RecordingChanges:
+        def may_change(self, person_id: str | None, kind: str) -> bool:
+            asked.append((person_id, kind))
+            return True
+
+    service = GatewayExecutionSSH(
+        team_id=config.manager.team_id,
+        config_path=config.config_path,
+        repository=repo,
+        person_changes=_RecordingChanges(),
+        default_ssh_enabled=False,
+        clock=lambda: now,
+    )
+    page = service.page(person_id="usr_admin")
+    assert asked == [
+        ("usr_admin", SSH_TARGET_ENROLL_CHANGE_KIND),
+        ("usr_admin", SSH_INTERACTION_CHANGE_KIND),
+    ]
+    # 2 active + 50 bounded inactive = 52
+    assert len(page.targets) == 52
+    assert [t.status for t in page.targets[:2]] == ["active", "active"]
+    assert all(t.status == "expired" for t in page.targets[2:])
+    assert len(page.sessions) == 52
+    assert all(s.is_active for s in page.sessions[:2])
+    assert all(not s.is_active for s in page.sessions[2:])
+
+
+def test_gateway_execution_ssh_reports_disabled_when_execution_control_disabled(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 11, 22, 19, 0, 0, tzinfo=timezone.utc)
+    config = _make_config(
+        tmp_path,
+        authorization_enabled=False,
+        execution_enabled=False,
+        ssh_enabled=True,
+    )
+    _, person_changes = _make_person_changes(config, roles_by_person={"usr_admin": ("admin",)})
+    try:
+        service = GatewayExecutionSSH.from_gateway_config(
+            config,
+            person_changes=person_changes,
+        )
+        service._clock = lambda: now
+        page = service.page(person_id="usr_admin")
+        assert page.can_manage is True
+        assert page.ssh_enabled is False
+    finally:
+        person_changes.close()
+
+
+def test_gateway_execution_ssh_summarizes_capabilities_owner_and_connect_expiry(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 11, 22, 19, 0, 0, tzinfo=timezone.utc)
+    config = _make_config(tmp_path, authorization_enabled=False, ssh_enabled=True)
+    _, person_changes = _make_person_changes(config, roles_by_person={"usr_admin": ("admin",)})
+    repo = create_execution_control_repository(config.manager_storage_settings)
+
+    # 1) Connect-only session whose connect_activation already expired.
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_connect_exp",
+        session_id="ssh_sess_connect_exp",
+        owner_agent_type="TeamArchitect",
+        connect_expires_at=now - timedelta(minutes=1),
+        with_interaction=False,
+    )
+    # 2) Legacy 0.9 interaction (bounds=None) -> typing only, custom owning agent type.
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_legacy",
+        session_id="ssh_sess_legacy",
+        owner_agent_type="CustomLead",
+        with_interaction=True,
+        legacy_bounds=True,
+        session_expires_at=now + timedelta(minutes=30),
+    )
+    # 3) Bounded delegation with allow_commands=True and connect expiry earlier than interaction expiry.
+    earlier_connect = now + timedelta(minutes=10)
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_cmd",
+        session_id="ssh_sess_cmd",
+        owner_agent_type="TeamArchitect",
+        connect_expires_at=earlier_connect,
+        session_expires_at=now + timedelta(hours=1),
+        with_interaction=True,
+        delegated_agent_type="InfraWorker",
+        allow_commands=True,
+        allow_broker_sudo=True,
+        allow_workspace_transfer=False,
+    )
+    # 4) Bounded delegation with all capability flags disabled.
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_empty",
+        session_id="ssh_sess_empty",
+        owner_agent_type="TeamArchitect",
+        with_interaction=True,
+        delegated_agent_type=None,
+        allow_commands=False,
+        allow_broker_sudo=False,
+        allow_workspace_transfer=False,
+    )
+    try:
+        service = GatewayExecutionSSH(
+            team_id=config.manager.team_id,
+            config_path=config.config_path,
+            repository=repo,
+            person_changes=person_changes,
+            default_ssh_enabled=True,
+            clock=lambda: now,
+        )
+        page = service.page(person_id="usr_admin")
+        by_id = {item.session_id: item for item in page.sessions}
+
+        connect_exp = by_id["ssh_sess_connect_exp"]
+        assert connect_exp.capabilities == ()
+        assert connect_exp.owner_agent_type == "TeamArchitect"
+        assert connect_exp.status == "expired"
+        assert connect_exp.is_active is False
+        assert connect_exp.can_revoke is False
+        assert connect_exp.expires_at_utc == (now - timedelta(minutes=1)).isoformat()
+
+        legacy = by_id["ssh_sess_legacy"]
+        assert legacy.capabilities == ("typing",)
+        assert legacy.owner_agent_type == "CustomLead"
+        assert legacy.delegated_agent_type is None
+        assert legacy.is_active is True
+
+        cmd = by_id["ssh_sess_cmd"]
+        assert cmd.capabilities == ("commands", "broker_sudo")
+        assert cmd.expires_at_utc == earlier_connect.isoformat()
+
+        empty = by_id["ssh_sess_empty"]
+        assert empty.capabilities == ()
+        assert empty.owner_agent_type == "TeamArchitect"
+    finally:
+        person_changes.close()
+
+
+@pytest.mark.asyncio
+async def test_f12_gateway_to_broker_live_revocation_and_manager_403_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """F12: Real GatewayExecutionSSH -> HttpGatewaySecureBroker -> SecureToolBrokerService terminates live non-PTY work and refuses CALLER_MANAGER with 403."""
+
+    import sys
+    from access_control.caller_tokens import (
+        CALLER_GATEWAY,
+        CALLER_MANAGER,
+        derive_caller_token,
+    )
+    from access_control.entities import PersonPrincipal
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        GrantLifetime,
+        GrantV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
+    from runtime_hosting.ssh import (
+        ConfiguredSSHCredentialMaterialProvider,
+        SSHCommandStatus,
+        SSHCredentialMaterial,
+    )
+    from runtime_hosting.authorization import SSHCallerContext
+    from runtime_hosting.ssh_network import SSHNetworkPolicy, ssh_host_key_alias
+    from secure_tool_broker.access_gate import build_broker_access_gate
+    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
+    from secure_tool_broker.service import SecureToolBrokerService
+
+    now = datetime.now(timezone.utc)
+    config = _make_config(tmp_path, authorization_enabled=True, ssh_enabled=True)
+    _, person_changes = _make_person_changes(config, roles_by_person={"usr_admin": ("admin",)})
+    repo = create_execution_control_repository(config.manager_storage_settings)
+
+    # Create a fake ssh executable that sleeps until terminated by stdin EOF / SIGTERM.
+    fake_ssh = tmp_path / "fake_ssh_sleep.py"
+    fake_ssh.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, time\n"
+        "print('cmd-started', flush=True)\n"
+        "try:\n"
+        "    sys.stdin.read()\n"
+        "except KeyboardInterrupt:\n"
+        "    pass\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    config.execution_control.ssh.ssh_executable = str(fake_ssh)
+    config.save(config.config_path)
+
+    # Seed two enrolled targets and two command-capable PENDING sessions (no PTY open!).
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_live_1",
+        session_id="ssh_sess_live_1",
+        session_status=InteractiveSessionStatus.PENDING,
+        delegated_agent_type="TeamArchitect",
+        delegated_task_id="req_f12",
+        allow_commands=True,
+        person_roles=("admin",),
+    )
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_live_2",
+        session_id="ssh_sess_live_2",
+        session_status=InteractiveSessionStatus.PENDING,
+        delegated_agent_type="TeamArchitect",
+        delegated_task_id="req_f12",
+        allow_commands=True,
+        person_roles=("admin",),
+    )
+
+    root_token = "f12-broker-root-token"
+    gateway_token = derive_caller_token(root_token, CALLER_GATEWAY)
+    manager_token = derive_caller_token(root_token, CALLER_MANAGER)
+
+    gate = build_broker_access_gate(
+        instance_root=config.instance_root_path,
+        team_id=config.manager.team_id,
+        authorization_enabled=True,
+        storage_settings=config.manager_storage_settings,
+        cedar_binary=str(CEDAR_BINARY),
+        lead_agent_type="TeamArchitect",
+    )
+    assert gate.access is not None
+    gate.access.grant_by_person(
+        PersonPrincipal("usr_admin", config.manager.team_id, ("admin",)),
+        GrantV1(
+            grant_id="new",
+            team_id=config.manager.team_id,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{config.manager.team_id}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="fn:execution_control"),
+            level=AccessLevel.WRITE,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id="usr_admin"),
+            created_at_utc=now,
+        ),
+    )
+    ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
+        instance_root_path=str(config.instance_root_path),
+        instance_name=config.instance_name,
+        storage_settings=config.manager_storage_settings,
+        ssh=config.execution_control.ssh,
+        execution_enabled=config.execution_control.enabled,
+        config_path=config.config_path,
+    )
+    broker_service = SecureToolBrokerService(
+        token=root_token,
+        access_gate=gate,
+        execution_ssh_config=ssh_cfg,
+    )
+    app = broker_service.build_app()
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        base_url = f"http://{server.host}:{server.port}"
+        rt = broker_service._execution_ssh
+        assert rt is not None
+        live_broker = await rt._active_broker()
+        # Use a simple configured material provider + permissive loopback/test resolver so commands start immediately.
+        key_file = tmp_path / "dummy_id"
+        key_file.write_text("dummy", encoding="utf-8")
+        key_file.chmod(0o600)
+        kh_shared = tmp_path / "kh_shared"
+        t1 = repo.get_ssh_target(team_id=config.manager.team_id, target_id="ssh_tgt_live_1")
+        t2 = repo.get_ssh_target(team_id=config.manager.team_id, target_id="ssh_tgt_live_2")
+        assert t1 is not None and t2 is not None
+        kh_shared.write_text(
+            f"{ssh_host_key_alias(t1.host, t1.port)} {t1.host_key_public_key}\n"
+            f"{ssh_host_key_alias(t2.host, t2.port)} {t2.host_key_public_key}\n",
+            encoding="utf-8",
+        )
+        live_broker.material_provider = ConfiguredSSHCredentialMaterialProvider(
+            {
+                f"catalog:{t1.credential_key}": SSHCredentialMaterial(
+                    identity_file=key_file,
+                    known_hosts_file=kh_shared,
+                ),
+            }
+        )
+        live_broker._checked_material_provider = live_broker.material_provider
+        live_broker.network_policy = SSHNetworkPolicy(denied_cidrs=())
+        live_broker._checked_network_policy = live_broker.network_policy
+        live_broker.resolver = lambda host, port: ["198.51.100.55"]
+        live_broker.local_address_checker = lambda ip: False
+        caller = SSHCallerContext(
+            agent_type="TeamArchitect",
+            task_id="req_f12",
+            person_id="usr_admin",
+        )
+
+        # Start non-PTY command on session 1 (no PTY open!).
+        cmd1 = await live_broker.run_command(
+            session_id="ssh_sess_live_1",
+            command="sleep 30",
+            caller=caller,
+            timeout_seconds=30.0,
+            wait_seconds=0.3,
+        )
+        assert cmd1.status == SSHCommandStatus.RUNNING
+        assert "ssh_sess_live_1" not in live_broker._sessions
+
+        # Start non-PTY command on session 2 (no PTY open!).
+        cmd2 = await live_broker.run_command(
+            session_id="ssh_sess_live_2",
+            command="sleep 30",
+            caller=caller,
+            timeout_seconds=30.0,
+            wait_seconds=0.3,
+        )
+        assert cmd2.status == SSHCommandStatus.RUNNING
+        assert "ssh_sess_live_2" not in live_broker._sessions
+
+        # 1) CALLER_MANAGER must be refused with 403 on both gateway-only revocation routes.
+        import aiohttp
+
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"{base_url}{EXECUTION_SSH_ROUTE_PREFIX}sessions/ssh_sess_live_1/revoke",
+                json={"revoked_by": "usr_admin"},
+                headers={"Authorization": f"Bearer {manager_token}"},
+            ) as resp_sess:
+                assert resp_sess.status == 403
+            async with client.post(
+                f"{base_url}{EXECUTION_SSH_ROUTE_PREFIX}targets/ssh_tgt_live_2/revoke",
+                json={"revoked_by": "usr_admin"},
+                headers={"Authorization": f"Bearer {manager_token}"},
+            ) as resp_tgt:
+                assert resp_tgt.status == 403
+
+        # 2) Real GatewayExecutionSSH -> HttpGatewaySecureBroker -> SecureToolBrokerService.
+        http_broker = HttpGatewaySecureBroker(
+            internal_base_url=base_url,
+            public_base_url=None,
+            token=gateway_token,
+        )
+        gateway_ssh = GatewayExecutionSSH(
+            team_id=config.manager.team_id,
+            config_path=config.config_path,
+            repository=repo,
+            person_changes=person_changes,
+            broker=http_broker,
+            default_ssh_enabled=True,
+        )
+
+        # Revoke session 1 (non-PTY command running) -> terminated_live=True!
+        sess_res = await gateway_ssh.revoke_session(
+            person_id="usr_admin",
+            session_id="ssh_sess_live_1",
+        )
+        assert sess_res.revoked is True
+        assert sess_res.broker_notified is True
+        assert sess_res.terminated_live is True
+        cmd1_after = await live_broker.get_command(
+            session_id="ssh_sess_live_1",
+            command_id=cmd1.command_id,
+            caller=caller,
+        )
+        assert cmd1_after.status == SSHCommandStatus.REVOKED
+
+        # Revoke target 2 (non-PTY command running) -> terminated_live=True!
+        tgt_res = await gateway_ssh.revoke_target(
+            person_id="usr_admin",
+            target_id="ssh_tgt_live_2",
+        )
+        assert tgt_res.revoked is True
+        assert tgt_res.broker_notified is True
+        assert tgt_res.terminated_live is True
+        cmd2_after = await live_broker.get_command(
+            session_id="ssh_sess_live_2",
+            command_id=cmd2.command_id,
+            caller=caller,
+        )
+        assert cmd2_after.status == SSHCommandStatus.REVOKED
+    finally:
+        await server.close()
+        person_changes.close()

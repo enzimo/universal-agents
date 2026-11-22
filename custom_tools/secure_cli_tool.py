@@ -103,7 +103,13 @@ def _secure_cli_impl(
     if provider_impl is None:
         return _tool_result(
             "error",
-            f"Unknown secure_cli provider: {provider}. Available providers: {', '.join(list_providers())}",
+            f"Unknown secure_cli provider: {provider}. Available providers: {', '.join(list_providers(secure_cli_only=True))}",
+        )
+    if not getattr(provider_impl, "secure_cli_callable", True):
+        return _tool_result(
+            "error",
+            f"Provider {provider_impl.name!r} is reached only through its dedicated function tools, "
+            "not through secure_cli.",
         )
     try:
         validated = provider_impl.validate(action, params or {})

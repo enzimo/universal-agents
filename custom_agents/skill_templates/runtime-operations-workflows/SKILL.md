@@ -1162,10 +1162,14 @@ Who decides what:
   checks the access again before every run, so a revoked grant stops the next run
   (`authorization_expired`). Do not imply that a completed creation workflow
   guarantees a later run.
-- Managed services and typing into an SSH session are exact changes a person approves
-  in the Inbox (an administrator). Your task waits in `apply_change` until they
-  decide. If the service, revision, profile, or session changes first, the plan is
-  refused; stage it again.
+- Managed services, enrolling a Sealbox-backed SSH host
+  (`execution_ssh_target_enroll`), and delegating SSH session capabilities
+  (`execution_ssh_interaction`) are exact changes an administrator approves in
+  the Inbox. Your task waits in `apply_change` until they decide. If the
+  service, revision, profile, target, or session changes first, the plan is
+  refused; stage it again. Administrators can review enrolled SSH hosts and
+  active delegated sessions and revoke or terminate them immediately in
+  **Settings → Tasks → Brokered SSH**.
 - With authorization off, explain the exact revision, schedule, service, or session,
   get the person's agreement, and pass `confirmed=true` (to `create_execution_job`
   with `activate=true`, `set_execution_job_enabled`, `create_execution_ssh_session`,
@@ -1183,20 +1187,45 @@ write into the promoted source or build artifact.
 
 For SSH:
 
-1. Call `list_execution_ssh_targets`; never accept a host, username, key path, or host
-   key from model-authored input as a substitute for an installed target.
+1. Call `list_execution_ssh_targets` to inspect installed or enrolled targets; never
+   treat an agent-typed host key as trusted. To enroll a new Sealbox-backed host,
+   TeamLead calls `probe_execution_ssh_host_key` (optional preview) and
+   `plan_execution_ssh_target` (which probes the host key in the secure tool broker
+   at staging), then `apply_change` for administrator approval in the Inbox.
 2. Call `create_execution_ssh_session` and explain the pinned target, then
-   `open_execution_ssh_session`. You can read and resize at once.
-3. Before typing, call `plan_execution_ssh_interaction` for that session and
-   `apply_change`; a person approves typing into that one session. Then use
-   `write_execution_ssh_session`. Close the session when the task ends and inspect
-   `list_execution_ssh_sessions` for `typing_approved`, terminal state, and
-   transcript references.
+   `open_execution_ssh_session` (for interactive PTY work) or proceed directly to
+   delegation for command-only bootstrap work.
+3. Before typing, running remote commands, running one-time password key bootstrap,
+   running broker sudo/secret recipes, or uploading workspace bundles, call
+   `plan_execution_ssh_interaction` with a mandatory time bound (`ttl_seconds` /
+   `expires_at_utc`) and explicit capability flags (`allow_commands`, `allow_typing`,
+   `allow_password_bootstrap`, `allow_broker_sudo`, `allow_workspace_transfer`,
+   `allowed_secret_recipes_json`), then `apply_change` for administrator approval.
+4. Delegating a session to a worker type (`delegated_agent_type`): workers hold no
+   lasting access of their own. TeamLead must hold delegable `fn:execution_control`
+   access for the person's work (via `request_access` with `hand_on=True` if not
+   already held), so the delegated worker receives `fn:execution_control` for that
+   single task automatically (or by calling `request_access`) when it invokes the
+   operational SSH tools. Both the broker access gate and `ExecutionAccessGuard`
+   still enforce the exact delegated worker type, request, expiry, and approved
+   capabilities on every call.
+5. For `run_execution_ssh_command` and `run_execution_ssh_sudo`, poll long-running
+   work with `get_execution_ssh_command`. On Linux/macOS, anything still running
+   2 seconds after a command script exits is stopped (including slow output helper
+   pipelines, so scripts logging through a helper should close output descriptors
+   and wait for the helper before exiting); start intentional long-lived daemons
+   in a new session (`setsid` on Linux, `launchctl` or a system service on macOS).
+   Close the session when the task ends and inspect `list_execution_ssh_sessions`
+   for `usable_in_this_request`, `typing_approved`, terminal state, and transcript
+   references.
 
-Tool results never expose the identity or known-hosts file. A local broker restart
-marks the PTY lost. When the target has an operator-configured remote persistent
-session name, creating and opening a new session reattaches to the remote `tmux`
-session; typing in it needs a new approval.
+All Sealbox-backed SSH credentials, ephemeral `ssh-agent` sockets, live sessions,
+and secret scrubbing stay inside the secure tool broker process; tool results never
+expose private keys, passphrases, admin passwords, or Tailscale auth keys. A broker
+restart marks live PTYs lost and sweeps leftover ephemeral directories at startup.
+When a target has an operator-configured remote persistent session name, creating
+and opening a new session reattaches to the remote `tmux` session; typing in it
+needs a new approval.
 
 ## Schedule Reads and Changes
 

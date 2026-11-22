@@ -147,8 +147,27 @@ class ManagedExecutionServiceChanges:
         return ManagedServiceChangeService(agent).apply(change_id, approval)
 
 
+class ExecutionSSHTargetEnrollChanges:
+    """Enrolling a pinned Sealbox-backed SSH target."""
+
+    kind = "execution_ssh_target_enroll"
+
+    def owns(self, change_id: str) -> bool:
+        return change_id.startswith("ssh_target_enr_")
+
+    def describe(self, agent: Any, change_id: str) -> ChangeProposalV1:
+        from custom_agents.execution_changes import SSHTargetEnrollChangeService
+
+        return SSHTargetEnrollChangeService(agent).describe(change_id)
+
+    def apply(self, agent: Any, change_id: str, approval: ChangeApproval) -> dict[str, Any]:
+        from custom_agents.execution_changes import SSHTargetEnrollChangeService
+
+        return SSHTargetEnrollChangeService(agent).apply(change_id, approval)
+
+
 class ExecutionSSHInteractionChanges:
-    """Typing into one SSH session."""
+    """Bounded delegation and interactive typing for one SSH session."""
 
     kind = "execution_ssh_interaction"
 
@@ -223,6 +242,7 @@ CHANGE_ADAPTERS: tuple[ChangeAdapter, ...] = (
     TeamSkillUninstallChanges(),
     HostedMCPServerChanges(),
     ManagedExecutionServiceChanges(),
+    ExecutionSSHTargetEnrollChanges(),
     ExecutionSSHInteractionChanges(),
     SystemScheduleChanges(),
     HistoryCleanupChanges(),

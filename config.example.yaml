@@ -786,7 +786,7 @@ assistant:
 # Immutable deterministic execution keeps source/build artifacts, exact activations,
 # schedule attempts, and managed-service desired state outside the agent process.
 execution_control:
-  enabled: true                                 # Master switch for immutable execution jobs and managed services.
+  enabled: true                                 # Master switch for immutable execution jobs, managed services, and brokered SSH.
   runner:
     enabled: true                               # Start the fenced execution controller in headless launch.
     tick_interval_seconds: 2                    # Schedule materialization and finite-run polling interval.
@@ -837,10 +837,15 @@ execution_control:
     kubectl_executable: "kubectl"               # Used only by profiles whose backend is kubernetes.
     network_policy_enforced: false              # Set true only when namespace policies enforce universal-agents.io/network labels.
   ssh:
-    enabled: false                              # Enable the brokered OpenSSH PTY surface.
+    enabled: false                              # Master kill-switch for brokered SSH sessions and host bootstrapping.
     ssh_executable: "ssh"                       # OpenSSH client; host keys and identity files remain broker-owned.
     lease_ttl_seconds: 300                      # Renewed on each PTY read, write, or resize.
     transcript_limit_bytes: 4194304             # Maximum captured remote-output transcript artifact.
+    allowed_cidrs: []                           # Optional CIDR allowlist; setting any entry in allowed_cidrs or allowed_domains switches SSH to allowlist-only mode (opening a special/local address needs both removal from denied_cidrs and an entry here).
+    allowed_domains: []                         # Optional domain allowlist (exact host or subdomain); when non-empty, hostnames must match before DNS lookup (without needing allowed_cidrs), and IP literals use allowed_cidrs.
+    denied_cidrs: ["127.0.0.0/8", "::1/128", "0.0.0.0/8", "::/128", "169.254.0.0/16", "fe80::/10", "fd00:ec2::254/128", "::ffff:127.0.0.0/104", "::ffff:0.0.0.0/104", "::ffff:169.254.0.0/112"]  # Denied CIDRs (replacing this list replaces the defaults; special/metadata/local-machine ranges stay blocked in code unless in allowed_cidrs; container installs should add their host gateway IP here).
+    max_delegation_ttl_seconds: 7200            # Maximum lifetime in seconds for an administrator-approved SSH session delegation.
+    allow_password_bootstrap: false             # Operator gate for one-time admin-approved password login to install an SSH key on a fresh target.
     targets: []                                 # Pinned hosts and identity paths; keep key files outside the agent workspace. Optional remote_persistent_session_name enables tmux reattachment.
 
 # Preferred user communication target and proactive delivery settings used for
