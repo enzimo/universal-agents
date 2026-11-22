@@ -1145,3 +1145,58 @@ test("F13: collapsing a folder while its initial listing is in flight hides the 
   assert.equal(group.hidden, false);
   assert.equal(openRequests(f.requests).length, 0);
 });
+
+test("C15: non-401 HEAD failure during auto-download consumes pending deep-link state and download=1", async () => {
+  for (const failureMode of ["http_503", "network_error"]) {
+    const f = treeFixture();
+    let deepLinkConsumed = 0;
+    let downloadConsumed = 0;
+    const loading = f.controls.load({
+      initialPath: "team/guides/handbook.pdf",
+      autoDownload: true,
+      onDeepLinkConsumed: () => { deepLinkConsumed += 1; },
+      onDownloadConsumed: () => { downloadConsumed += 1; },
+    });
+    await answer(f.requests, ROOT_LISTING, listing("", [entry("team")]));
+    await answer(f.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+    await answer(f.requests, "/api/web-chat/workspace?path=team", listing("team", [entry("team/guides")]));
+    await answer(
+      f.requests,
+      "/api/web-chat/workspace?path=team%2Fguides",
+      listing("team/guides", [entry("team/guides/handbook.pdf", "file", 8 * 1024 * 1024)]),
+    );
+    await answer(
+      f.requests,
+      "/api/web-chat/workspace/file?path=team%2Fguides%2Fhandbook.pdf",
+      fileReply("team/guides/handbook.pdf", "handbook.pdf", {
+        preview_kind: "too_large",
+        size_bytes: 8 * 1024 * 1024,
+      }),
+    );
+    if (failureMode === "http_503") {
+      await answer(
+        f.requests,
+        "/api/web-chat/workspace/download?path=team%2Fguides%2Fhandbook.pdf",
+        headResponse(503),
+      );
+    } else {
+      await settle();
+      const pending = f.requests.find(
+        req => !req.answered && req.path === "/api/web-chat/workspace/download?path=team%2Fguides%2Fhandbook.pdf",
+      );
+      assert.ok(pending, "expected HEAD download request");
+      pending.answered = true;
+      pending.respond(Promise.reject(new Error("Network error")));
+      await settle();
+    }
+    await loading;
+
+    assert.equal(deepLinkConsumed, 1, `onDeepLinkConsumed must run on ${failureMode}`);
+    assert.equal(downloadConsumed, 1, `onDownloadConsumed must run on ${failureMode}`);
+    assert.equal(f.downloads.length, 0, failureMode);
+    assert.equal(f.viewerTitle.textContent, "handbook.pdf", failureMode);
+    assert.deepEqual(actionLabels(f), [DOWNLOAD_ACTION_LABEL], failureMode);
+    assert.match(f.status.textContent, /Could not download "handbook\.pdf"\./, failureMode);
+    assert.ok(f.status.classList.contains("is-error"), failureMode);
+  }
+});

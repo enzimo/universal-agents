@@ -963,10 +963,8 @@
             if (generation !== loadGeneration || (downloadResult && downloadResult.unauthorized)) {
               return;
             }
-            if (downloadResult && downloadResult.ok) {
-              consumeDeepLink();
-              consumeDownload();
-            }
+            consumeDeepLink();
+            consumeDownload();
           });
         });
       });
