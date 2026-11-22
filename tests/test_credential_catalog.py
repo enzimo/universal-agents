@@ -1372,7 +1372,10 @@ def _link(
 
 
 def _linked_context(
-    link: AccountLinkV1 | None, person_id: str = TEST_CANONICAL_USER_ID
+    link: AccountLinkV1 | None,
+    person_id: str = TEST_CANONICAL_USER_ID,
+    *,
+    gate_link: AccountLinkV1 | None = None,
 ) -> ToolContext:
     return ToolContext(
         agent_id="agent-1",
@@ -1380,6 +1383,7 @@ def _linked_context(
         principal_type="user",
         team_id=TEST_TEAM_ID,
         account_link=link,
+        gate_link=gate_link,
     )
 
 
@@ -1547,6 +1551,185 @@ def test_api_request_refuses_a_header_the_linked_account_sets(
     assert result.status == "error"
     assert result.content["error_code"] == "api_request_header_reserved"
     assert result.content["headers"] == ["authorization"]
+
+
+def test_api_request_injects_account_and_team_gate_credentials_and_redacts_both(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_messages.contracts.access_v2 import LinkPurpose
+
+    # Person holds their own API token; team holds the Cloudflare-style gate credentials.
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_OWNER_SCOPE,
+        token_env="GITEA_PERSON_TOKEN",
+        token="PERSON-GITEA-TOKEN",
+        credential_key="gitea_person",
+    )
+    monkeypatch.setenv("GATE_CLIENT_SECRET", "CF-GATE-SECRET-VALUE")
+    monkeypatch.setenv("GATE_QUERY_KEY", "GATE-QUERY-SECRET")
+    credential_catalog.save_catalog(
+        CredentialCatalog(
+            credentials={
+                "gitea_gate": CatalogCredential(
+                    display_name="Gitea Gate",
+                    purpose="Team gate credential.",
+                    fields={
+                        "client_secret": CatalogCredentialField(
+                            kind="secret",
+                            visibility="secret",
+                            resolution_order=[CatalogSourceRef(source="env", env_var="GATE_CLIENT_SECRET")],
+                        ),
+                        "gate_key": CatalogCredentialField(
+                            kind="api_key",
+                            visibility="secret",
+                            resolution_order=[CatalogSourceRef(source="env", env_var="GATE_QUERY_KEY")],
+                        ),
+                    },
+                )
+            }
+        ),
+        scope=TEST_TEAM_SCOPE,
+    )
+    account = _link(
+        _header("Authorization", template="token {value}"),
+        credential_key="gitea_person",
+        owner_kind=LinkOwnerKind.PERSON,
+    )
+    gate = AccountLinkV1(
+        link_id="account_link_team_gitea_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="gitea_gate",
+        injections=(
+            _header("CF-Access-Client-Secret", field="client_secret"),
+            _query("gate_token", field="gate_key"),
+        ),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+    sent = _capture_requests(
+        monkeypatch,
+        b'{"acct": "PERSON-GITEA-TOKEN", "gate": "CF-GATE-SECRET-VALUE", "q": "GATE-QUERY-SECRET"}',
+    )
+
+    result = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/repos", "params": {"page": "1"}},
+        context=_linked_context(account, gate_link=gate),
+    )
+
+    assert result.status == "success", result
+    headers = {key.lower(): value for key, value in sent[0].header_items()}
+    assert headers["authorization"] == "token PERSON-GITEA-TOKEN"
+    assert headers["cf-access-client-secret"] == "CF-GATE-SECRET-VALUE"
+    assert sent[0].full_url == "https://gitea.example.com/api/v1/repos?page=1&gate_token=GATE-QUERY-SECRET"
+    assert result.content["account_link_id"] == account.link_id
+    assert result.content["gate_link_id"] == gate.link_id
+    assert result.content["json"] == {"acct": "[REDACTED]", "gate": "[REDACTED]", "q": "[REDACTED]"}
+    dumped = json.dumps(result.content, sort_keys=True)
+    for secret in ("PERSON-GITEA-TOKEN", "CF-GATE-SECRET-VALUE", "GATE-QUERY-SECRET"):
+        assert secret not in dumped
+
+    # Gate-only tool (account_link=None) also injects and redacts the gate secret in URLError and redirect Location.
+    from urllib import error as urllib_error
+
+    def fail_url(_req, *, timeout):
+        raise urllib_error.URLError("dial failed for ?gate_token=GATE-QUERY-SECRET with CF-GATE-SECRET-VALUE")
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", fail_url)
+    err_result = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/public"},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert err_result.status == "error"
+    assert err_result.content["error_code"] == "api_request_failed"
+    assert "GATE-QUERY-SECRET" not in (err_result.error or "")
+    assert "CF-GATE-SECRET-VALUE" not in (err_result.error or "")
+
+    class _RedirectResponse(_JsonResponse):
+        def __init__(self) -> None:
+            super().__init__(b"moved CF-GATE-SECRET-VALUE", status=302)
+            self.headers = _JsonHeaders(
+                {"Content-Type": "text/plain", "Location": "https://other.example.com/?gate_token=GATE-QUERY-SECRET"}
+            )
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", lambda _req, *, timeout: _RedirectResponse())
+    redir = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/public"},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert redir.status == "success"
+    assert "GATE-QUERY-SECRET" not in redir.content["redirect_location"]
+    assert "CF-GATE-SECRET-VALUE" not in redir.content["text"]
+
+
+def test_api_request_refuses_agent_supplied_gate_header_query_and_injection_collisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_messages.contracts.access_v2 import LinkPurpose
+
+    _save_linked_credential(tmp_path, monkeypatch, scope=TEST_OWNER_SCOPE, token="ACCT-SECRET")
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_TEAM_SCOPE,
+        token_env="GATE_HEADER_SECRET",
+        token="GATE-SECRET",
+        credential_key="example_gate",
+    )
+    _refuse_network(monkeypatch)
+    gate = AccountLinkV1(
+        link_id="account_link_team_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="example_gate",
+        injections=(_header("CF-Access-Client-Secret"), _query("gate_key")),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+
+    bad_header = credential_catalog.api_request(
+        {"url": "https://api.example.test/items", "headers": {"cf-access-client-secret": "spoofed"}},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert bad_header.status == "error"
+    assert bad_header.content["error_code"] == "api_request_header_reserved"
+    assert bad_header.content["headers"] == ["cf-access-client-secret"]
+    assert "team gate credential" in (bad_header.error or "")
+
+    bad_query = credential_catalog.api_request(
+        {"url": "https://api.example.test/items?gate_key=spoofed"},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert bad_query.status == "error"
+    assert bad_query.content["error_code"] == "api_request_query_reserved"
+    assert bad_query.content["query_params"] == ["gate_key"]
+    assert "team gate credential" in (bad_query.error or "")
+
+    header_clash = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(_link(_header("cf-access-client-secret")), gate_link=gate),
+    )
+    assert header_clash.status == "error"
+    assert header_clash.content["error_code"] == "api_request_injection_collision"
+    assert header_clash.content["headers"] == ["cf-access-client-secret"]
+
+    query_clash = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(_link(_query("gate_key")), gate_link=gate),
+    )
+    assert query_clash.status == "error"
+    assert query_clash.content["error_code"] == "api_request_injection_collision"
+    assert query_clash.content["query_params"] == ["gate_key"]
 
 
 @pytest.mark.parametrize(

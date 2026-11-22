@@ -604,6 +604,152 @@ async def test_web_requests_carry_the_linked_credential_only_in_the_linked_heade
     assert placeholder_payload["content"]["error_code"] == "api_request_placeholders_unsupported"
 
 
+@pytest.mark.asyncio
+async def test_gated_web_request_requires_gate_link_sends_both_credentials_when_private_and_redacts_both(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from access_catalog.catalog import CatalogSource
+    from access_control.account_sharing import TeamAccountSharing
+    from custom_messages.contracts.access_v2 import AccountSharing
+    from secure_tool_broker.access_gate import REASON_GATE_LINK_MISSING
+
+    instance_root = tmp_path / "instance"
+    tools_dir = instance_root / "control" / "access" / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / "proposed-gitea.yaml").write_text(
+        """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    account: linked_credential
+    hosts: [gitea.example.com]
+    credential_injections:
+      - placement: header
+        name: Authorization
+        field: api_token
+        template: "token {value}"
+    gate_injections:
+      - placement: header
+        name: CF-Access-Client-Secret
+        field: client_secret
+    routes:
+      - name: repos.read
+        method: GET
+        path: /api/**
+        level: read
+""",
+        encoding="utf-8",
+    )
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    catalogs = CatalogSource(instance_root)
+    gate = BrokerAccessGate(
+        catalogs=catalogs,
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=store,
+    )
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "catalog.db"))
+    monkeypatch.setenv("GITEA_USER_TOKEN", "alice-gitea-secret")
+    monkeypatch.setenv("GITEA_GATE_SECRET", "team-cf-gate-secret")
+    save_credentials(CredentialOwnerScope.user("user-1"), alice_gitea=token_credential("GITEA_USER_TOKEN"))
+    save_credentials(
+        CredentialOwnerScope.team(TEST_TEAM),
+        team_gitea_gate=token_credential("GITEA_GATE_SECRET", field="client_secret"),
+    )
+    tool = catalogs.current().tools["http:gitea"]
+    TeamAccountSharing(store, TEST_TEAM).choose_tool(tool, AccountSharing.PRIVATE, by="user-1")
+    store.create_link(
+        AccountLinkV1(
+            link_id="account_link_person_gitea",
+            team_id=TEST_TEAM,
+            tool_id="http:gitea",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id="user-1",
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="alice_gitea",
+            injections=tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+            created_at_utc=NOW,
+        )
+    )
+
+    sent: list = []
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "application/json"}
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"token": "alice-gitea-secret", "gate": "team-cf-gate-secret"}'
+
+    def fake_send(request, *, timeout):
+        sent.append(request)
+        return Response()
+
+    monkeypatch.setattr("secure_tool_broker.credential_catalog._send_api_request", fake_send)
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate)
+    body = {
+        "provider": "secure_requests",
+        "action": "get",
+        "params": {"url": "https://gitea.example.com/api/v1/repos"},
+        "reason": "list repos",
+        "context": agent_context(task_id="task-gate-1"),
+    }
+
+    async with TestClient(TestServer(service.build_app())) as client:
+        # Without a gate link: refused before sending, naming /link http:gitea gate.
+        missing_resp = await client.post("/v1/tools/secure_requests", headers=caller_headers(), json=body)
+        missing_payload = json.loads(await missing_resp.text())
+        assert missing_resp.status == 403
+        assert missing_payload["reason_code"] == REASON_GATE_LINK_MISSING
+        assert "/link http:gitea gate" in missing_payload["next_step"]
+        assert sent == []
+
+        # Link the team gate credential: even with PRIVATE account sharing, both headers are sent and redacted.
+        store.create_link(
+            AccountLinkV1(
+                link_id="account_link_team_gitea_gate",
+                team_id=TEST_TEAM,
+                tool_id="http:gitea",
+                owner_kind=LinkOwnerKind.TEAM,
+                owner_id=TEST_TEAM,
+                purpose=LinkPurpose.GATE,
+                credential_key="team_gitea_gate",
+                injections=tool.gate_injections,
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+                created_at_utc=NOW,
+            )
+        )
+        ok_resp = await client.post("/v1/tools/secure_requests", headers=caller_headers(), json=body)
+        ok_payload = await ok_resp.json()
+        assert ok_resp.status == 200 and ok_payload["status"] == "success", ok_payload
+        assert len(sent) == 1
+        sent_headers = {key.lower(): value for key, value in sent[0].header_items()}
+        assert sent_headers["authorization"] == "token alice-gitea-secret"
+        assert sent_headers["cf-access-client-secret"] == "team-cf-gate-secret"
+        assert "alice-gitea-secret" not in str(ok_payload)
+        assert "team-cf-gate-secret" not in str(ok_payload)
+        assert ok_payload["content"]["account_link_id"] == "account_link_person_gitea"
+        assert ok_payload["content"]["gate_link_id"] == "account_link_team_gitea_gate"
+
+        # Agent-supplied gate header is refused without reaching the network.
+        spoof_resp = await client.post(
+            "/v1/tools/secure_requests",
+            headers=caller_headers(),
+            json={
+                **body,
+                "params": {**body["params"], "headers": {"CF-Access-Client-Secret": "agent-value"}},
+            },
+        )
+        spoof_payload = await spoof_resp.json()
+        assert spoof_payload["status"] == "error"
+        assert spoof_payload["content"]["error_code"] == "api_request_header_reserved"
+        assert len(sent) == 1
+
+
 def test_every_linked_account_tool_says_where_the_credential_goes() -> None:
     from access_catalog.catalog import load_catalog
     from custom_messages.contracts.access_v2 import AccountMode

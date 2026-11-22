@@ -353,18 +353,19 @@ class BrokerAccessGate:
             # A sign-in tool with a team fallback (X): the executor uses the
             # person's own sign-in first, and this team link (only while the
             # team shares the service) without one; it tells the person how to
-            # sign in when neither exists.
+            # sign in when neither exists. An outdated team fallback link is
+            # skipped rather than refusing callers who have their own sign-in.
             team_link = self.account_link_for(tool.tool_id, None)
             if team_link is not None and not injections_match(team_link.injections, tool.credential_injections):
-                note_link_missing(self.links, self.team_id, person_id, tool.tool_id)
-                return self._refuse(
-                    REASON_ACCOUNT_LINK_OUTDATED,
-                    f"The linked account for {tool.display_name} was made for an earlier tool definition, "
-                    "so the broker did not send the request.",
-                    context,
-                    next_step=outdated_link_next_step(tool, team_link),
-                    resolution=resolution,
+                logger.warning(
+                    "The team's fallback account link for a sign-in tool is outdated and will not be used. "
+                    "event=broker_team_link_outdated tool_id=%s link_id=%s person_id=%s next_step=%s",
+                    tool.tool_id,
+                    team_link.link_id,
+                    person_id,
+                    outdated_link_next_step(tool, team_link),
                 )
+                team_link = None
             return GateResult(
                 True, resolution=resolution, person_id=person_id, account_link=team_link, gate_link=gate_link
             )

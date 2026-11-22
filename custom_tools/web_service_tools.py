@@ -37,6 +37,7 @@ from custom_tools.broker_web_requests import (
     BROKER_MAX_TIMEOUT_SECONDS,
     REASON_ACCESS_DENIED,
     BrokerWebRequestError,
+    credential_setup_hint,
     is_missing_key,
     send_web_request,
 )
@@ -432,7 +433,10 @@ def _crawl4ai_post(path: str, payload: Dict[str, Any], settings: Dict[str, Any])
 def _crawl4ai_broker_failure(exc: BrokerWebRequestError) -> Dict[str, Any]:
     """Failure fields for a Crawl4AI request the broker refused or could not send."""
 
-    if is_missing_key(exc):
+    setup_hint = credential_setup_hint(exc)
+    if setup_hint is not None:
+        stage, hints = "authentication", [setup_hint]
+    elif is_missing_key(exc):
         stage, hints = "authentication", [
             f"a team administrator links the team's Crawl4AI token with /link {CRAWL4AI_TOOL_ID} team",
             f"the person links their own with /link {CRAWL4AI_TOOL_ID}",

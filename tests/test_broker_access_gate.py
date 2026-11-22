@@ -674,3 +674,75 @@ def test_outdated_account_links_refuse_without_falling_back_and_gate_ignores_acc
     )
     private_ok = call_gitea()
     assert private_ok.allowed and private_ok.account_link == person_valid and private_ok.gate_link == gate_link
+
+
+def test_sign_in_tool_skips_outdated_team_fallback_link_instead_of_blocking_sign_in(
+    tmp_path: Path, caplog
+) -> None:
+    import logging
+    from access_catalog.catalog import CatalogSource, ToolCatalog
+    from access_control.account_sharing import TeamAccountSharing
+    from access_control.identity import ContextVerifier
+    from custom_messages.contracts.access_v2 import AccountSharing, CredentialInjectionV1, InjectionPlacement
+    from secure_tool_broker.access_gate import BrokerAccessGate
+
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    base_catalog = CatalogSource(None).current()
+    base_x = base_catalog.tools["cli:x"]
+    updated_x = base_x.model_copy(
+        update={
+            "credential_injections": (
+                CredentialInjectionV1(placement=InjectionPlacement.ENV, name="X_API_TOKEN", field="api_token"),
+            )
+        }
+    )
+    TeamAccountSharing(store, TEST_TEAM).choose_tool(updated_x, AccountSharing.SHARED, by="user-1")
+    custom_catalog = ToolCatalog(
+        tools={**base_catalog.tools, "cli:x": updated_x},
+        tool_sets=base_catalog.tool_sets,
+        http_hosts=base_catalog.http_hosts,
+    )
+
+    class _StaticCatalogs:
+        def current(self) -> ToolCatalog:
+            return custom_catalog
+
+    gate = BrokerAccessGate(
+        catalogs=_StaticCatalogs(),  # type: ignore[arg-type]
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=store,
+    )
+    resolution = custom_catalog.resolve_broker_action("x", "me", {})
+
+    # Outdated team fallback link: gate allows with account_link=None and logs event=broker_team_link_outdated
+    # so people who have their own sign-in keep working and others receive sign-in guidance from the executor.
+    _make_link(
+        store,
+        link_id="x_team_old",
+        tool_id="cli:x",
+        owner_kind="team",
+        owner_id=TEST_TEAM,
+        injections=(CredentialInjectionV1(placement=InjectionPlacement.ENV, name="OLD_X_TOKEN", field="api_token"),),
+    )
+    with caplog.at_level(logging.WARNING, logger="secure_tool_broker.access_gate"):
+        skipped = gate.check(MANAGER, resolution, agent_context("user-1"))
+    assert skipped.allowed and skipped.account_link is None
+    assert "event=broker_team_link_outdated" in caplog.text
+    assert "link_id=x_team_old" in caplog.text
+    assert "/link cli:x team" in caplog.text
+
+    # Matching team fallback link: passed through for callers without a personal sign-in.
+    matching = _make_link(
+        store,
+        link_id="x_team_ok",
+        tool_id="cli:x",
+        owner_kind="team",
+        owner_id=TEST_TEAM,
+        injections=updated_x.credential_injections,
+    )
+    allowed = gate.check(MANAGER, resolution, agent_context("user-1"))
+    assert allowed.allowed and allowed.account_link == matching

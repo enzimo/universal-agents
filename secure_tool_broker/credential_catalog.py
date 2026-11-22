@@ -2082,6 +2082,106 @@ def _resolve_injections(
     return values, secrets_found
 
 
+class _ReservedQueryError(ValueError):
+    """Raised when an agent-supplied query parameter collides with a broker-managed injection."""
+
+    def __init__(self, message: str, *, query_params: list[str], source: str) -> None:
+        super().__init__(message)
+        self.query_params = query_params
+        self.source = source
+
+
+def _apply_api_injections(
+    headers: dict[str, str],
+    *,
+    account_link: AccountLinkV1 | None,
+    gate_link: AccountLinkV1 | None,
+    host: str,
+) -> tuple[dict[str, str], dict[str, str], list[str]] | ToolResult:
+    """Resolve account and gate injections, refuse reserved header overrides or overlaps, and return
+    ``(account_query, gate_query, secret_values)``."""
+
+    placements = frozenset({InjectionPlacement.HEADER, InjectionPlacement.QUERY})
+    agent_headers_lower = {name.lower() for name in headers}
+    injected_headers_by_lower: dict[str, tuple[str, str]] = {}
+    account_query: dict[str, str] = {}
+    gate_query: dict[str, str] = {}
+    secret_values: list[str] = []
+
+    sources: tuple[tuple[str, str, AccountLinkV1 | None], ...] = (
+        ("account", "linked account", account_link),
+        ("gate", "team gate credential", gate_link),
+    )
+    for source_tag, source_label, link in sources:
+        if link is None:
+            continue
+        resolved = _resolve_injections(link, placements)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        injected, secrets_found = resolved
+        secret_values.extend(secrets_found)
+        link_headers = {name: value for (place, name), value in injected.items() if place is InjectionPlacement.HEADER}
+        link_query = {name: value for (place, name), value in injected.items() if place is InjectionPlacement.QUERY}
+        reserved = {name.lower() for name in link_headers} & agent_headers_lower
+        if reserved:
+            reserved_sorted = sorted(reserved)
+            _LOGGER.warning(
+                "Refused web request that set a broker-managed header. "
+                "event=api_request_header_reserved source=%s host=%s link_id=%s headers=%s",
+                source_tag,
+                host,
+                link.link_id,
+                ",".join(reserved_sorted),
+            )
+            return ToolResult(
+                status="error",
+                error=f"The broker sets these headers from the {source_label}: {', '.join(reserved_sorted)}.",
+                content={"error_code": "api_request_header_reserved", "headers": reserved_sorted},
+            )
+        header_collisions = sorted(name.lower() for name in link_headers if name.lower() in injected_headers_by_lower)
+        if header_collisions:
+            _LOGGER.warning(
+                "Refused web request because account and gate links set the same header. "
+                "event=api_request_injection_collision placement=header host=%s headers=%s",
+                host,
+                ",".join(header_collisions),
+            )
+            return ToolResult(
+                status="error",
+                error=(
+                    "The linked account and team gate credential both set the same headers: "
+                    f"{', '.join(header_collisions)}."
+                ),
+                content={"error_code": "api_request_injection_collision", "headers": header_collisions},
+            )
+        for name, value in link_headers.items():
+            injected_headers_by_lower[name.lower()] = (name, value)
+        if source_tag == "account":
+            account_query = link_query
+        else:
+            query_collisions = sorted(set(account_query) & set(link_query))
+            if query_collisions:
+                _LOGGER.warning(
+                    "Refused web request because account and gate links set the same query parameter. "
+                    "event=api_request_injection_collision placement=query host=%s params=%s",
+                    host,
+                    ",".join(query_collisions),
+                )
+                return ToolResult(
+                    status="error",
+                    error=(
+                        "The linked account and team gate credential both set the same query values: "
+                        f"{', '.join(query_collisions)}."
+                    ),
+                    content={"error_code": "api_request_injection_collision", "query_params": query_collisions},
+                )
+            gate_query = link_query
+
+    for name, value in injected_headers_by_lower.values():
+        headers[name] = value
+    return account_query, gate_query, secret_values
+
+
 def api_request(
     params: Mapping[str, Any],
     *,
@@ -2091,11 +2191,14 @@ def api_request(
     """Send one web request for a web API tool (``http:*``).
 
     The broker's gate already matched the host to the tool, decided access, and
-    chose the account link; this adds the link's credential where the link
-    says (a header or query value). Requests carry no credential placeholders.
+    chose the account link and any team gate link; this adds both credentials
+    where their links say (headers or query values) and redacts every secret
+    value from the response and any error. Requests carry no credential
+    placeholders.
     """
 
-    del scope  # the account link, not the caller, chooses whose credential is used
+    del scope  # the account and gate links, not the caller, choose whose credentials are used
+    secret_values: list[str] = []
     try:
         method = _string(params.get("method") or "GET").upper()
         if method not in _ALLOWED_API_METHODS:
@@ -2133,23 +2236,11 @@ def api_request(
             )
         headers = _api_headers(raw_headers)
         link = context.account_link if context is not None else None
-        injected_query: dict[str, str] = {}
-        secret_values: list[str] = []
-        if link is not None:
-            resolved = _resolve_injections(link, frozenset({InjectionPlacement.HEADER, InjectionPlacement.QUERY}))
-            if isinstance(resolved, ToolResult):
-                return resolved
-            injected, secret_values = resolved
-            injected_headers = {name: value for (place, name), value in injected.items() if place is InjectionPlacement.HEADER}
-            injected_query = {name: value for (place, name), value in injected.items() if place is InjectionPlacement.QUERY}
-            reserved = {name.lower() for name in injected_headers} & {name.lower() for name in headers}
-            if reserved:
-                return ToolResult(
-                    status="error",
-                    error=f"The broker sets these headers from the linked account: {', '.join(sorted(reserved))}.",
-                    content={"error_code": "api_request_header_reserved", "headers": sorted(reserved)},
-                )
-            headers.update(injected_headers)
+        gate_link = context.gate_link if context is not None else None
+        applied = _apply_api_injections(headers, account_link=link, gate_link=gate_link, host=host)
+        if isinstance(applied, ToolResult):
+            return applied
+        account_query, gate_query, secret_values = applied
         if not any(name.lower() == "user-agent" for name in headers):
             user_agent = (
                 context.api_request_user_agent
@@ -2169,27 +2260,50 @@ def api_request(
                 error=f"credential.api_request does not send request bodies with {method}.",
                 content={"error_code": "api_request_body_method_invalid", "method": method},
             )
-        request_url = _url_with_query_params(url, raw_query, injected_query)
+        try:
+            request_url = _url_with_query_params(url, raw_query, account_query, gate_injected=gate_query)
+        except _ReservedQueryError as exc:
+            _LOGGER.warning(
+                "Refused web request that set a broker-managed query parameter. "
+                "event=api_request_query_reserved source=%s host=%s params=%s",
+                exc.source,
+                host,
+                ",".join(exc.query_params),
+            )
+            return ToolResult(
+                status="error",
+                error=str(exc),
+                content={"error_code": "api_request_query_reserved", "query_params": exc.query_params},
+            )
         timeout_seconds = _bounded_api_timeout(params.get("timeout_seconds") or params.get("timeout") or 30)
         max_bytes = _bounded_response_bytes(params.get("max_response_bytes"))
         request = urllib_request.Request(request_url, data=body_bytes, headers=headers, method=method)
         link_id = link.link_id if link is not None else ""
+        gate_link_id = gate_link.link_id if gate_link is not None else ""
         try:
             response = _send_api_request(request, timeout=timeout_seconds)
         except urllib_error.HTTPError as exc:
             return _api_response_result(
-                response=exc, link_id=link_id, method=method, host=host, secret_values=secret_values, max_bytes=max_bytes
+                response=exc,
+                link_id=link_id,
+                gate_link_id=gate_link_id,
+                method=method,
+                host=host,
+                secret_values=secret_values,
+                max_bytes=max_bytes,
             )
         except urllib_error.URLError as exc:
+            redacted = redact_text(_redact_known_secret_text(str(exc), secret_values))
             return ToolResult(
                 status="error",
-                error=f"credential.api_request failed: {redact_text(str(exc))}",
+                error=f"credential.api_request failed: {redacted}",
                 content={"error_code": "api_request_failed", "host": host},
             )
         try:
             return _api_response_result(
                 response=response,
                 link_id=link_id,
+                gate_link_id=gate_link_id,
                 method=method,
                 host=host,
                 secret_values=secret_values,
@@ -2200,7 +2314,8 @@ def api_request(
             if callable(close):
                 close()
     except Exception as exc:
-        return ToolResult(status="error", error=f"credential.api_request failed: {redact_text(str(exc))}")
+        redacted = redact_text(_redact_known_secret_text(str(exc), secret_values))
+        return ToolResult(status="error", error=f"credential.api_request failed: {redacted}")
 
 
 class _ReturnRedirects(urllib_request.HTTPRedirectHandler):
@@ -2250,8 +2365,14 @@ def _contains_credential_placeholder(value: Any) -> bool:
     return False
 
 
-def _url_with_query_params(url: str, raw_params: Any, injected: Mapping[str, str] | None = None) -> str:
-    if not raw_params and not injected:
+def _url_with_query_params(
+    url: str,
+    raw_params: Any,
+    injected: Mapping[str, str] | None = None,
+    *,
+    gate_injected: Mapping[str, str] | None = None,
+) -> str:
+    if not raw_params and not injected and not gate_injected:
         return url
     parsed = urllib_parse.urlparse(url)
     existing = urllib_parse.parse_qsl(parsed.query, keep_blank_values=True)
@@ -2263,11 +2384,24 @@ def _url_with_query_params(url: str, raw_params: Any, injected: Mapping[str, str
         query_items = raw_params
     else:
         raise ValueError("secure request params/query must be a mapping or list of key/value pairs.")
-    injected = dict(injected or {})
+    account_map = dict(injected or {})
+    gate_map = dict(gate_injected or {})
     supplied = {str(item[0]) for item in [*existing, *query_items]}
-    if supplied & set(injected):
-        raise ValueError(f"The broker sets these query values from the linked account: {', '.join(sorted(supplied & set(injected)))}.")
-    query = urllib_parse.urlencode([*existing, *query_items, *injected.items()], doseq=True)
+    account_overlap = sorted(supplied & set(account_map))
+    if account_overlap:
+        raise _ReservedQueryError(
+            f"The broker sets these query values from the linked account: {', '.join(account_overlap)}.",
+            query_params=account_overlap,
+            source="account",
+        )
+    gate_overlap = sorted(supplied & set(gate_map))
+    if gate_overlap:
+        raise _ReservedQueryError(
+            f"The broker sets these query values from the team gate credential: {', '.join(gate_overlap)}.",
+            query_params=gate_overlap,
+            source="gate",
+        )
+    query = urllib_parse.urlencode([*existing, *query_items, *account_map.items(), *gate_map.items()], doseq=True)
     return urllib_parse.urlunparse(parsed._replace(query=query))
 
 
@@ -2303,6 +2437,7 @@ def _api_response_result(
     *,
     response: Any,
     link_id: str,
+    gate_link_id: str = "",
     method: str,
     host: str,
     secret_values: list[str],
@@ -2330,11 +2465,13 @@ def _api_response_result(
     }
     if link_id:
         content["account_link_id"] = link_id
+    if gate_link_id:
+        content["gate_link_id"] = gate_link_id
     location = _string(headers.get("Location") if hasattr(headers, "get") else "")
     if 300 <= status_code < 400 and location:
         # Redirects are not followed (credentials must not reach another host);
         # the caller may make a new request, which is checked again.
-        content["redirect_location"] = location
+        content["redirect_location"] = redact_text(_redact_known_secret_text(location, secret_values))
     parsed_json: Any | None = None
     if "json" in content_type.lower() or text.lstrip().startswith(("{", "[")):
         try:
