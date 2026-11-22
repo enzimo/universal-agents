@@ -1035,6 +1035,104 @@ def test_tool_change_removing_or_renaming_blocked_route_adds_widened_block_row_a
     assert "a restriction that will block a whole tool" in summary
 
 
+def test_tool_change_moving_blocked_route_method_or_path_adds_block_moved_row_and_flag(tmp_path: Path) -> None:
+    """C24: keeping a blocked route's name while changing its method or path flags block_moved."""
+
+    from datetime import timedelta
+
+    from access_control.stale_blocks import active_operation_blocks_for_tool
+    from custom_messages.contracts.access_v2 import GrantKind, GrantLifetime, GrantV1
+
+    instance = tmp_path / "instance"
+    write_instance_tool(instance, _gitea_tool())
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    # Active block on issues.create (currently POST /api/v1/repos/{owner}/{repo}/issues).
+    moved = GrantV1(
+        grant_id="blk-issues-moved",
+        team_id=TEAM,
+        kind=GrantKind.BLOCK,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+        target=TargetRefV1(kind=TargetKind.OPERATION, id="http:gitea#route:issues.create"),
+        level=AccessLevel.FULL,
+        granted_by=ACTOR,
+        created_at_utc=NOW,
+    )
+    # Active block on repos.list (only re-levelled, same method and path) -> must NOT be flagged.
+    relevelled_only = GrantV1(
+        grant_id="blk-repos-relevelled",
+        team_id=TEAM,
+        kind=GrantKind.BLOCK,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+        target=TargetRefV1(kind=TargetKind.OPERATION, id="http:gitea#route:repos.list"),
+        level=AccessLevel.FULL,
+        granted_by=ACTOR,
+        created_at_utc=NOW,
+    )
+    # Expired block on issues.create -> must NOT be flagged.
+    expired = GrantV1(
+        grant_id="blk-issues-expired",
+        team_id=TEAM,
+        kind=GrantKind.BLOCK,
+        subject=SubjectRefV1(kind=SubjectKind.TEAM, id=TEAM),
+        target=TargetRefV1(kind=TargetKind.OPERATION, id="http:gitea#route:issues.create"),
+        level=AccessLevel.FULL,
+        lifetime=GrantLifetime.UNTIL,
+        expires_at_utc=NOW - timedelta(minutes=1),
+        granted_by=ACTOR,
+        created_at_utc=NOW - timedelta(hours=1),
+    )
+    for grant in (moved, relevelled_only, expired):
+        store.create(grant)
+
+    catalog = load_catalog(instance)
+    compiler = ProposalCompiler(
+        catalog=catalog,
+        team_id=TEAM,
+        holds=lambda _person, _target, _level: True,
+        account_sharing=TeamAccountSharing(store, TEAM),
+        instance_root=instance,
+        blocks_for_tool=lambda tool_id: active_operation_blocks_for_tool(store, TEAM, tool_id, now=NOW),
+    )
+    # Keep issues.create by name but point it at a harmless GET /api/v1/version, and add a new route for the old POST path.
+    change = _gitea_change(
+        routes=(
+            HttpRouteV1(name="repos.list", method="GET", path="/api/v1/user/repos", level=AccessLevel.WRITE),
+            HttpRouteV1(name="issues.create", method="GET", path="/api/v1/version", level=AccessLevel.READ),
+            HttpRouteV1(
+                name="issues.submit",
+                method="POST",
+                path="/api/v1/repos/{owner}/{repo}/issues",
+                level=AccessLevel.WRITE,
+            ),
+        ),
+    )
+    proposal = with_tool_change_baselines(
+        AccessProposalV1(title="Move issues route", reason="Reorganize routes.", tool_changes=(change,)),
+        instance_root=instance,
+        catalog=catalog,
+    )
+    compiled = compiler.compile(proposal, person=None, task_id="task-1")
+    moved_rows = [row for row in compiled.rows if "block_moved" in row.flags]
+    assert len(moved_rows) == 1
+    row = moved_rows[0]
+    assert row.item_id == "change-0-moved-block-0"
+    assert row.flags == ("block_moved",)
+    assert "blk-issues-moved" in row.text
+    assert "WebResearchAgent" in row.text
+    assert "route:issues.create" in row.text
+    assert "GET /api/v1/version" in row.text
+    assert "POST /api/v1/repos/{owner}/{repo}/issues" in row.text
+    assert "will no longer stop POST /api/v1/repos/{owner}/{repo}/issues" in row.text
+    assert "blk-repos-relevelled" not in row.text and "blk-issues-expired" not in row.text
+    assert not [r for r in compiled.rows if "block_widened" in r.flags]
+
+    summary = proposal_summary(compiled.rows)
+    assert "change 1 tool" in summary
+    assert "a restriction whose blocked route changes" in summary
+
+
 def test_tool_change_compiler_output_renders_under_tool_changes_section_in_inbox_mjs(tmp_path: Path) -> None:
     """F6 (R6): real ProposalCompiler output for tool_changes renders under 'Tool changes' in access_inbox.mjs."""
 
@@ -1066,6 +1164,18 @@ def test_tool_change_compiler_output_renders_under_tool_changes_section_in_inbox
             created_at_utc=NOW,
         )
     )
+    store.create(
+        GrantV1(
+            grant_id="blk-render-2",
+            team_id=TEAM,
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+            target=TargetRefV1(kind=TargetKind.OPERATION, id="http:gitea#route:repos.list"),
+            level=AccessLevel.FULL,
+            granted_by=ACTOR,
+            created_at_utc=NOW,
+        )
+    )
     catalog = load_catalog(instance)
     compiler = ProposalCompiler(
         catalog=catalog,
@@ -1080,7 +1190,7 @@ def test_tool_change_compiler_output_renders_under_tool_changes_section_in_inbox
     )
     change = _gitea_change(
         hosts=("gitea.example.com", "mirror.example.net"),
-        routes=(HttpRouteV1(name="repos.list", method="GET", path="/api/v1/user/repos", level=AccessLevel.READ),),
+        routes=(HttpRouteV1(name="repos.list", method="GET", path="/api/v1/orgs/repos", level=AccessLevel.READ),),
     )
     proposal = with_tool_change_baselines(
         AccessProposalV1(title="Add mirror and drop issues route", reason="Mirror reads only.", tool_changes=(change,)),
@@ -1149,4 +1259,9 @@ console.log(JSON.stringify({
     assert result["sections"] == ["Tool changes"]
     assert "New tools" not in result["sections"]
     assert result["rows"] == [row.text for row in compiled.rows]
-    assert set(result["flags"]) == {"New host", "Credentials to new host", "Block widens to whole tool"}
+    assert set(result["flags"]) == {
+        "New host",
+        "Credentials to new host",
+        "Block widens to whole tool",
+        "Blocked route changes",
+    }

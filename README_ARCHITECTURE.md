@@ -2760,7 +2760,9 @@ files, and files carrying operator-only settings `ProposedHttpToolV1` cannot
 express), and `access_control/tool_change_diffs.py` describes every field
 difference, flags `credential_to_new_host` when a new host would receive active
 linked credentials, flags `block_widened` when removing or renaming a route
-widens an active one-operation block to the whole tool, and names any account
+widens an active one-operation block to the whole tool, flags `block_moved`
+when changing a blocked route's method or path moves an active block off the
+request it was written for, and names any account
 or gate links that must be linked again. With authorization off, `apply_by_agreement` returns the same diff rows
 and an `agreement_digest` on `confirmed=false` and requires that matching
 digest on `confirmed=true`, refusing if the file changed in between. The

@@ -9,7 +9,9 @@ proposed replacement and writes every difference in its own words:
   ``credential_to_new_host`` whenever active links will remain valid and send
   their stored credentials to the added hosts immediately) and hosts removed;
 - routes added, removed, re-levelled, modified, or reordered (route matching
-  uses first match, so order affects access levels);
+  uses first match, so order affects access levels), plus active operation
+  blocks widened by route removal (``block_widened``) or moved to a different
+  method or path (``block_moved``);
 - account credential mode and injection changes, and team gate credential
   injection changes;
 - which existing links (team account, people's accounts, team gate credential)
@@ -777,6 +779,44 @@ def _policy_row(
     ]
 
 
+@dataclass(frozen=True)
+class MovedBlock:
+    """An active operation block whose route keeps its name but changes method or path."""
+
+    block: GrantV1
+    previous_route: HttpRouteV1
+    proposed_route: HttpRouteV1
+
+
+def _active_tool_operation_blocks(
+    tool_id: str,
+    active_blocks: Iterable[GrantV1],
+    *,
+    now: datetime | None = None,
+) -> list[tuple[GrantV1, str]]:
+    """Active, unexpired operation blocks targeting ``tool_id``, in stable review order."""
+
+    prefix = f"{tool_id}#"
+    matched: list[tuple[GrantV1, str]] = []
+    for block in active_blocks:
+        if block.kind is not GrantKind.BLOCK or block.status is not GrantStatus.ACTIVE:
+            continue
+        if now is not None and block.expires_at_utc is not None and block.expires_at_utc <= now:
+            continue
+        if block.target.kind is not TargetKind.OPERATION or not block.target.id.startswith(prefix):
+            continue
+        matched.append((block, block.target.id.partition("#")[2]))
+    matched.sort(
+        key=lambda pair: (
+            pair[1],
+            pair[0].subject.kind.value,
+            pair[0].subject.id,
+            pair[0].grant_id,
+        )
+    )
+    return matched
+
+
 def widened_blocks(
     current: ToolDefinitionV1,
     proposed: ToolDefinitionV1,
@@ -786,27 +826,33 @@ def widened_blocks(
 ) -> list[GrantV1]:
     """Active operation blocks on ``current`` whose operation ``proposed`` removes (so they widen to the whole tool)."""
 
-    prefix = f"{proposed.tool_id}#"
-    affected: list[GrantV1] = []
-    for block in active_blocks:
-        if block.kind is not GrantKind.BLOCK or block.status is not GrantStatus.ACTIVE:
+    return [
+        block
+        for block, operation in _active_tool_operation_blocks(proposed.tool_id, active_blocks, now=now)
+        if current.operation(operation) is not None and proposed.operation(operation) is None
+    ]
+
+
+def moved_blocks(
+    current: ToolDefinitionV1,
+    proposed: ToolDefinitionV1,
+    active_blocks: Iterable[GrantV1],
+    *,
+    now: datetime | None = None,
+) -> list[MovedBlock]:
+    """Active operation blocks whose route keeps its name in ``proposed`` but changes method or path."""
+
+    current_routes = {f"route:{route.name}": route for route in current.routes}
+    proposed_routes = {f"route:{route.name}": route for route in proposed.routes}
+    moved: list[MovedBlock] = []
+    for block, operation in _active_tool_operation_blocks(proposed.tool_id, active_blocks, now=now):
+        old_route = current_routes.get(operation)
+        new_route = proposed_routes.get(operation)
+        if old_route is None or new_route is None:
             continue
-        if now is not None and block.expires_at_utc is not None and block.expires_at_utc <= now:
-            continue
-        if block.target.kind is not TargetKind.OPERATION or not block.target.id.startswith(prefix):
-            continue
-        operation = block.target.id.partition("#")[2]
-        if current.operation(operation) is not None and proposed.operation(operation) is None:
-            affected.append(block)
-    affected.sort(
-        key=lambda block: (
-            block.target.id.partition("#")[2],
-            block.subject.kind.value,
-            block.subject.id,
-            block.grant_id,
-        )
-    )
-    return affected
+        if old_route.method != new_route.method or old_route.path != new_route.path:
+            moved.append(MovedBlock(block=block, previous_route=old_route, proposed_route=new_route))
+    return moved
 
 
 def _widened_block_rows(
@@ -834,6 +880,34 @@ def _widened_block_rows(
     return rows
 
 
+def _moved_block_rows(
+    index: int,
+    current: ToolDefinitionV1,
+    proposed: ToolDefinitionV1,
+    diff: ToolChangeDiff,
+    active_blocks: Iterable[GrantV1],
+) -> list[ReviewItemV1]:
+    """One review row per active one-operation block whose route keeps its name but changes method or path."""
+
+    rows: list[ReviewItemV1] = []
+    for block_index, item in enumerate(moved_blocks(current, proposed, active_blocks)):
+        who = subject_name(item.block.subject)
+        operation = item.block.target.id.partition("#")[2]
+        old_route = item.previous_route
+        new_route = item.proposed_route
+        rows.append(
+            _review_row(
+                f"change-{index}-moved-block-{block_index}",
+                f"Block {item.block.grant_id} on {diff.proposed_name} ({diff.tool_id}) now covers "
+                f"{new_route.method} {new_route.path} instead of {old_route.method} {old_route.path} for {who}: "
+                f"it targets {operation}, whose method or path changes. Once approved, this block will no longer "
+                f"stop {old_route.method} {old_route.path}.",
+                flags=("block_moved",),
+            )
+        )
+    return rows
+
+
 def tool_change_rows(
     index: int,
     *,
@@ -853,6 +927,7 @@ def tool_change_rows(
         *_host_rows(index, diff, impact),
         *_route_rows(index, current, proposed, diff),
         *_widened_block_rows(index, current, proposed, diff, active_blocks),
+        *_moved_block_rows(index, current, proposed, diff, active_blocks),
         *_credential_rows(index, current, proposed, diff),
         *_relink_row(index, diff, impact),
         *_setup_rows(index, proposed, diff),
@@ -864,9 +939,12 @@ def tool_change_rows(
 
 __all__ = [
     "LinkImpact",
+    "MovedBlock",
     "ToolChangeDiff",
     "assess_link_impact",
     "describe_injections",
     "diff_tool_definition",
+    "moved_blocks",
     "tool_change_rows",
+    "widened_blocks",
 ]

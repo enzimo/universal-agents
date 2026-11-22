@@ -852,6 +852,7 @@ test("tool-change rows render under Tool changes (not New tools) with widened-bl
       { item_id: "change-0", section: "tool_change", text: "Change web API tool Gitea (http:gitea): updates hosts, routes.", flags: [] },
       { item_id: "change-0-host-added-0", section: "tool_change", text: "Add host to Gitea (http:gitea): mirror.example.net.", flags: ["new_host", "credential_to_new_host"] },
       { item_id: "change-0-widened-block-0", section: "tool_change", text: "Block blk-1 on Gitea (http:gitea) widens to the whole tool.", flags: ["block_widened"] },
+      { item_id: "change-0-moved-block-0", section: "tool_change", text: "Block blk-2 on Gitea (http:gitea) now covers GET /status instead of DELETE /repos/{x}.", flags: ["block_moved"] },
     ],
     choices: [{ choice: "approve", label: "Approve" }, { choice: "deny", label: "Deny" }],
   });
@@ -860,10 +861,11 @@ test("tool-change rows render under Tool changes (not New tools) with widened-bl
   assert.deepEqual(sections, ["Tool changes"]);
   assert.ok(!sections.includes("New tools"));
   const flags = byClass(card, "access-review-flag").map(node => node.textContent);
-  assert.deepEqual(flags, ["New host", "Credentials to new host", "Block widens to whole tool"]);
+  assert.deepEqual(flags, ["New host", "Credentials to new host", "Block widens to whole tool", "Blocked route changes"]);
 
   const compact = renderReviewCard(document, proposal, { formatTime, compact: true });
   const compactFlags = byClass(compact, "access-review-flag").map(node => node.textContent);
   assert.ok(compactFlags.includes("Credentials to new host"));
   assert.ok(compactFlags.includes("Block widens to whole tool"));
+  assert.ok(compactFlags.includes("Blocked route changes"));
 });

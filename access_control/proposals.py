@@ -344,6 +344,7 @@ _SUMMARY_FLAG_WORDS = {
     "credential_to_new_host": "stored credentials sent to a new host",
     "private_address": "a private address",
     "block_widened": "a restriction that will block a whole tool",
+    "block_moved": "a restriction whose blocked route changes",
     "full_access": "full access",
     "can_hand_on": "access that can be handed on",
     "runs_code": "code that runs",

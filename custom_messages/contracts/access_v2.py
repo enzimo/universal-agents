@@ -1042,6 +1042,7 @@ REVIEW_FLAGS = frozenset(
         "credential_to_new_host",
         "private_address",
         "block_widened",
+        "block_moved",
         "full_access",
         "can_hand_on",
         "runs_code",
