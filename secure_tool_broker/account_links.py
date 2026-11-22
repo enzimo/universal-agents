@@ -45,11 +45,14 @@ from custom_messages.contracts.access_v2 import (
     GrantV1,
     InjectionPlacement,
     LinkOwnerKind,
+    LinkPurpose,
     SubjectKind,
     SubjectRefV1,
     TargetKind,
     ToolDefinitionV1,
     ToolKind,
+    canonical_injections,
+    contract_digest,
 )
 from id_generation import new_id
 from secure_tool_broker.auth_pages import render_credential_input, render_session_countdown
@@ -57,6 +60,7 @@ from secure_tool_broker.credential_catalog import collect_credential, load_catal
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 from secure_tool_broker.redaction import redact_text
 from secure_tools.auth_methods import sign_in_instead_text, tool_sign_in
+from secure_tools.chat_commands import link_command
 from storage.access_repository import AccessRepository
 
 if TYPE_CHECKING:
@@ -79,8 +83,10 @@ FIXED_CLI_FIELDS = {"cli:huggingface": "api_token", "cli:x": "oauth_json"}
 # ``field__<name>`` value per credential field; the stored-credential part
 # sends ``credential_key`` instead.
 CREDENTIAL_SOURCE_FIELD = "credential_source"
+DEFINITION_DIGEST_FIELD = "definition_digest"
 NEW_CREDENTIAL = "new"
 NEW_FIELD_PREFIX = "field__"
+REASON_DEFINITION_CHANGED = "account_link_definition_changed"
 REASON_FIELDS_MISSING = "account_link_credential_fields_missing"
 REASON_KEY_UNAVAILABLE = "account_link_credential_key_unavailable"
 REASON_NOT_STORED = "account_link_credential_not_stored"
@@ -106,6 +112,35 @@ class AccountLinkRefused(ValueError):
         self.reason_code = reason_code
 
 
+@dataclass(frozen=True)
+class PinnedLinkDefinition:
+    """The tool hosts and canonical injections shown to the person on the link form."""
+
+    hosts: frozenset[str]
+    injections: frozenset[tuple[InjectionPlacement, str, str, str]]
+
+    @property
+    def digest(self) -> str:
+        return contract_digest(
+            {
+                "hosts": sorted(self.hosts),
+                "injections": sorted(
+                    (placement.value, name, field_name, template)
+                    for placement, name, field_name, template in self.injections
+                ),
+            }
+        )
+
+
+def pinned_link_definition(tool: ToolDefinitionV1, purpose: LinkPurpose) -> PinnedLinkDefinition:
+    """Canonical hosts and injections for ``purpose`` pinned while a link form is open."""
+
+    return PinnedLinkDefinition(
+        hosts=frozenset(tool.hosts),
+        injections=canonical_injections(_injections_for(tool, purpose)),
+    )
+
+
 @dataclass
 class AccountLinkSession:
     request: AccountLinkRequestV1
@@ -115,6 +150,7 @@ class AccountLinkSession:
     result: dict[str, object] | None = None
     used: bool = False
     submission_in_progress: bool = False
+    shown_definition: PinnedLinkDefinition | None = None
 
 
 def owner_scope(request: AccountLinkRequestV1) -> CredentialOwnerScope:
@@ -131,15 +167,21 @@ ACCESS_STORE_MISSING_TEXT = "The broker was started without the manager's access
 ACCESS_STORE_MISSING_NEXT_STEP = "An operator restarts the broker with the team's storage settings (state.storage)."
 
 
+def _injections_for(tool: ToolDefinitionV1, purpose: LinkPurpose) -> tuple[CredentialInjectionV1, ...]:
+    return tool.gate_injections if purpose is LinkPurpose.GATE else tool.credential_injections
+
+
 def linkable_tool(
     catalog: ToolCatalog, request: AccountLinkRequestV1, sharing: TeamAccountSharing | None
 ) -> ToolDefinitionV1:
-    """The tool to link, after checking the person may link for this owner.
+    """The tool to link, after checking the person may link for this owner and purpose.
 
     The team's account is linked only for a service the team shares
     (``access_control.account_sharing``): for a private one it would never
-    be used. ``sharing`` is None when the broker has no access store, which
-    also means it has nowhere to save the link.
+    be used. A team gate credential is team infrastructure and ignores account
+    sharing; it requires a web API tool with ``gate_injections`` and an
+    administrator. ``sharing`` is None when the broker has no access store,
+    which also means it has nowhere to save the link.
     """
 
     if sharing is None:
@@ -147,6 +189,18 @@ def linkable_tool(
     tool = catalog.tools.get(request.tool_id)
     if tool is None:
         raise AccountLinkRefused(f"{request.tool_id} is not in the tool catalog.", reason_code="account_link_unknown_tool")
+    if request.purpose is LinkPurpose.GATE:
+        if tool.kind is not ToolKind.HTTP or not tool.gate_injections:
+            raise AccountLinkRefused(
+                f"{tool.display_name} does not use a team gate credential, so there is nothing to link.",
+                reason_code="account_link_gate_not_needed",
+            )
+        if not is_administrator(request.person_roles):
+            raise AccountLinkRefused(
+                "Only a team administrator or owner can link a team gate credential.",
+                reason_code="account_link_team_admin_required",
+            )
+        return tool
     sign_in = tool_sign_in(tool.tool_id)
     if sign_in is not None and (request.owner_kind is LinkOwnerKind.PERSON or not sign_in.team_link):
         # A person's own account for a sign-in tool is their sign-in, never a link.
@@ -174,17 +228,22 @@ def linkable_tool(
     return tool
 
 
-def required_fields(tool: ToolDefinitionV1) -> set[str]:
-    fields = {injection.field for injection in tool.credential_injections}
-    if tool.tool_id in FIXED_CLI_FIELDS:
+def required_fields(tool: ToolDefinitionV1, *, purpose: LinkPurpose = LinkPurpose.ACCOUNT) -> set[str]:
+    fields = {injection.field for injection in _injections_for(tool, purpose)}
+    if purpose is LinkPurpose.ACCOUNT and tool.tool_id in FIXED_CLI_FIELDS:
         fields.add(FIXED_CLI_FIELDS[tool.tool_id])
     return fields
 
 
-def credential_choices(scope: CredentialOwnerScope, tool: ToolDefinitionV1) -> list[dict[str, str]]:
+def credential_choices(
+    scope: CredentialOwnerScope,
+    tool: ToolDefinitionV1,
+    *,
+    purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+) -> list[dict[str, str]]:
     """Stored credentials of the owner that have every field the tool uses."""
 
-    needed = required_fields(tool)
+    needed = required_fields(tool, purpose=purpose)
     catalog = load_catalog(scope=scope)
     return [
         {"credential_key": key, "display_name": credential.display_name, "purpose": credential.purpose}
@@ -267,12 +326,29 @@ def _plain_list(names: list[str]) -> str:
 
 
 def used_by_text(access: AccessService | None, tool: ToolDefinitionV1, request: AccountLinkRequestV1) -> str:
-    """The form's "Used by" line: who uses the linked account, for whose work.
+    """The form's "Used by" line: who uses the linked account or gate credential, for whose work.
 
     ``access`` is None when authorization is off; then every agent may call
     the tool, and the line says so instead of listing grants.
     """
 
+    if request.purpose is LinkPurpose.GATE:
+        if access is None:
+            return (
+                f"Every request any agent sends to {tool.display_name}, "
+                "because access checks are off for this team."
+            )
+        holders = agents_using(access, tool, request)
+        if not holders:
+            return (
+                f"No agent holds access to {tool.display_name} yet. Once agents have access, "
+                f"the broker adds this gate credential to every request to {tool.display_name} "
+                "for everyone in the team."
+            )
+        return (
+            f"{_plain_list(holders)}, on every request to {tool.display_name} "
+            "for everyone in the team with access, whichever account is used."
+        )
     if access is None:
         return f"Any agent that uses {tool.display_name}, because access checks are off for this team."
     holders = agents_using(access, tool, request)
@@ -325,7 +401,13 @@ def _confirmation(text: str) -> str:
     )
 
 
-def _stored_credential_form(tool: ToolDefinitionV1, choices: list[dict[str, str]]) -> str:
+def _stored_credential_form(
+    tool: ToolDefinitionV1,
+    choices: list[dict[str, str]],
+    *,
+    purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+    definition_digest: str = "",
+) -> str:
     """The part of the page that links a credential the owner already stored (only when one fits)."""
 
     if not choices:
@@ -335,19 +417,37 @@ def _stored_credential_form(tool: ToolDefinitionV1, choices: list[dict[str, str]
         f"{html.escape(item['display_name'])} — {html.escape(item['purpose'])}</option>"
         for item in choices
     )
+    gate = purpose is LinkPurpose.GATE
+    confirm_text = (
+        f"Link this gate credential to {tool.display_name} as described above."
+        if gate
+        else f"Link this credential to {tool.display_name} as described above."
+    )
+    submit_label = "Link gate credential" if gate else "Link account"
+    digest_input = (
+        f'<input type="hidden" name="{DEFINITION_DIGEST_FIELD}" value="{html.escape(definition_digest, quote=True)}">'
+        if definition_digest
+        else ""
+    )
     return (
         '<section class="content-panel"><h2>Use a stored credential</h2>'
         # No action: the form posts to the page's own address, query included,
         # so a card (?view=card) stays a card.
         '<form method="post">'
+        f"{digest_input}"
         '<label for="credential_key">Stored credential</label>'
         f'<select id="credential_key" name="credential_key" required>{options}</select>'
-        f"{_confirmation(f'Link this credential to {tool.display_name} as described above.')}"
-        '<p><button type="submit">Link account</button></p></form></section>'
+        f"{_confirmation(confirm_text)}"
+        f'<p><button type="submit">{submit_label}</button></p></form></section>'
     )
 
 
-def _new_credential_form(tool: ToolDefinitionV1, request: AccountLinkRequestV1) -> str:
+def _new_credential_form(
+    tool: ToolDefinitionV1,
+    request: AccountLinkRequestV1,
+    *,
+    definition_digest: str = "",
+) -> str:
     """The part of the page that stores a new credential and links it in the same submission.
 
     A separate form, so its required inputs do not block linking a stored
@@ -355,7 +455,7 @@ def _new_credential_form(tool: ToolDefinitionV1, request: AccountLinkRequestV1) 
     button (ui/DESIGN.md, Controls); values are never put back into a page.
     """
 
-    names = sorted(required_fields(tool))
+    names = sorted(required_fields(tool, purpose=request.purpose))
     if not names:
         return ""
     inputs = "".join(
@@ -367,15 +467,34 @@ def _new_credential_form(tool: ToolDefinitionV1, request: AccountLinkRequestV1) 
         + "</div>"
         for name in names
     )
+    gate = request.purpose is LinkPurpose.GATE
+    intro = (
+        f"Type the gate values {html.escape(tool.display_name)} needs. The broker saves them in "
+        f"{_collection_words(request)} and links them in the same step. Nothing already stored is replaced."
+        if gate
+        else f"Type the values {html.escape(tool.display_name)} needs. The broker saves them in "
+        f"{_collection_words(request)} and links them in the same step. Nothing already stored is replaced."
+    )
+    confirm_text = (
+        f"Save this gate credential and link it to {tool.display_name} as described above."
+        if gate
+        else f"Save this credential and link it to {tool.display_name} as described above."
+    )
+    submit_label = "Save and link gate credential" if gate else "Save and link account"
+    digest_input = (
+        f'<input type="hidden" name="{DEFINITION_DIGEST_FIELD}" value="{html.escape(definition_digest, quote=True)}">'
+        if definition_digest
+        else ""
+    )
     return (
         '<section class="content-panel"><h2>Add a new credential</h2>'
-        f"<p>Type the values {html.escape(tool.display_name)} needs. The broker saves them in "
-        f"{_collection_words(request)} and links them in the same step. Nothing already stored is replaced.</p>"
+        f"<p>{intro}</p>"
         '<form method="post">'
         f'<input type="hidden" name="{CREDENTIAL_SOURCE_FIELD}" value="{NEW_CREDENTIAL}">'
+        f"{digest_input}"
         f"{inputs}"
-        f"{_confirmation(f'Save this credential and link it to {tool.display_name} as described above.')}"
-        '<p><button type="submit">Save and link account</button></p></form></section>'
+        f"{_confirmation(confirm_text)}"
+        f'<p><button type="submit">{submit_label}</button></p></form></section>'
     )
 
 
@@ -389,29 +508,50 @@ def render_form(
     """The labeled form: what the link does, then the stored choices and the new-credential form."""
 
     request = session.request
-    own = "signed in with their own account" if tool_sign_in(tool.tool_id) is not None else "linked their own"
-    whose = (
-        "<strong>The team's account.</strong> Agents use it for anyone in the team who has access to "
-        f"{html.escape(tool.display_name)}, unless that person {own}."
-        if request.owner_kind is LinkOwnerKind.TEAM
-        else "<strong>Your own account.</strong> Agents use it only when they work for you."
-    )
-    how = "".join(f"<li>{_describe_injection(item)}</li>" for item in tool.credential_injections)
-    if tool.tool_id in FIXED_CLI_FIELDS:
-        how += f"<li>The <code>{FIXED_CLI_FIELDS[tool.tool_id]}</code> field, used by the broker only</li>"
+    gate = request.purpose is LinkPurpose.GATE
+    if gate:
+        eyebrow = "Team gate credential"
+        heading = f"Link a team gate credential to {html.escape(tool.display_name)}?"
+        whose = (
+            "<strong>The team's gate credential.</strong> The broker adds this value to every request to "
+            f"{html.escape(tool.display_name)}'s hosts for everyone in the team who has access, "
+            "whichever account is used."
+        )
+        how = "".join(f"<li>{_describe_injection(item)}</li>" for item in tool.gate_injections)
+        no_access_note = (
+            "Linking a gate credential gives nobody access. People and agents still need access to "
+            f"{html.escape(tool.display_name)} to use it, and the credential value never leaves the broker."
+        )
+    else:
+        eyebrow = "Account link"
+        heading = f"Link an account to {html.escape(tool.display_name)}?"
+        own = "signed in with their own account" if tool_sign_in(tool.tool_id) is not None else "linked their own"
+        whose = (
+            "<strong>The team's account.</strong> Agents use it for anyone in the team who has access to "
+            f"{html.escape(tool.display_name)}, unless that person {own}."
+            if request.owner_kind is LinkOwnerKind.TEAM
+            else "<strong>Your own account.</strong> Agents use it only when they work for you."
+        )
+        how = "".join(f"<li>{_describe_injection(item)}</li>" for item in tool.credential_injections)
+        if tool.tool_id in FIXED_CLI_FIELDS:
+            how += f"<li>The <code>{FIXED_CLI_FIELDS[tool.tool_id]}</code> field, used by the broker only</li>"
+        no_access_note = (
+            "Linking an account gives nobody access. People and agents still need access to "
+            f"{html.escape(tool.display_name)} to use it, and the credential value never leaves the broker."
+        )
+    definition_digest = pinned_link_definition(tool, request.purpose).digest
     return (
-        '<section class="content-panel"><p class="eyebrow">Account link</p>'
-        f"<h1>Link an account to {html.escape(tool.display_name)}?</h1>"
+        f'<section class="content-panel"><p class="eyebrow">{eyebrow}</p>'
+        f"<h1>{heading}</h1>"
         f"<p>{whose}</p>"
         f"<p><strong>Used by:</strong> {html.escape(used_by)}</p>"
         f"<p><strong>Where it goes:</strong> {_where(tool)}.</p>"
         f"<p><strong>How it is sent:</strong></p><ul>{how}</ul>"
         f"<p><strong>Reason:</strong> {html.escape(request.reason or 'Not given')}</p>"
-        "<p>Linking an account gives nobody access. People and agents still need access to "
-        f"{html.escape(tool.display_name)} to use it, and the credential value never leaves the broker.</p>"
+        f"<p>{no_access_note}</p>"
         f"{render_session_countdown(session.expires_at, label='This form expires in')}</section>"
-        f"{_stored_credential_form(tool, choices)}"
-        f"{_new_credential_form(tool, request)}"
+        f"{_stored_credential_form(tool, choices, purpose=request.purpose, definition_digest=definition_digest)}"
+        f"{_new_credential_form(tool, request, definition_digest=definition_digest)}"
     )
 
 
@@ -423,7 +563,7 @@ def create_link(
     *,
     now: datetime,
 ) -> AccountLinkV1:
-    choices = {item["credential_key"] for item in credential_choices(owner_scope(request), tool)}
+    choices = {item["credential_key"] for item in credential_choices(owner_scope(request), tool, purpose=request.purpose)}
     if credential_key not in choices:
         raise AccountLinkRefused(
             "That credential is not one of the stored credentials offered for this tool.",
@@ -436,17 +576,19 @@ def create_link(
             tool_id=tool.tool_id,
             owner_kind=request.owner_kind,
             owner_id=request.team_id if request.owner_kind is LinkOwnerKind.TEAM else request.person_id,
+            purpose=request.purpose,
             credential_key=credential_key,
-            injections=tool.credential_injections,
+            injections=_injections_for(tool, request.purpose),
             created_by=SubjectRefV1(kind=SubjectKind.USER, id=request.person_id),
             created_at_utc=now,
         )
     )
     logger.info(
-        "Account link created. event=account_link_created link_id=%s tool_id=%s owner_kind=%s person_id=%s",
+        "Account link created. event=account_link_created link_id=%s tool_id=%s owner_kind=%s purpose=%s person_id=%s",
         link.link_id,
         link.tool_id,
         link.owner_kind.value,
+        link.purpose.value,
         request.person_id,
     )
     return link
@@ -460,39 +602,52 @@ class LinkChoice:
     """What the person sent: a stored credential's key, or the values of a new credential.
 
     ``new_values`` holds secret values; it is kept out of ``repr`` and is never
-    logged or put into a page.
+    logged or put into a page. ``definition_digest`` pins the tool definition
+    shown in the rendered form when present.
     """
 
     credential_key: str = ""
     new_values: dict[str, str] | None = field(default=None, repr=False)
+    definition_digest: str | None = None
 
 
 def read_choice(form: Mapping[str, Any]) -> LinkChoice:
     """The person's choice from the submitted form fields."""
 
+    definition_digest = str(form.get(DEFINITION_DIGEST_FIELD) or "").strip() or None
     if str(form.get(CREDENTIAL_SOURCE_FIELD) or "") != NEW_CREDENTIAL:
-        return LinkChoice(credential_key=str(form.get("credential_key") or "").strip())
+        return LinkChoice(
+            credential_key=str(form.get("credential_key") or "").strip(),
+            definition_digest=definition_digest,
+        )
     return LinkChoice(
         new_values={
             str(key).removeprefix(NEW_FIELD_PREFIX): value
             for key, value in form.items()
             if str(key).startswith(NEW_FIELD_PREFIX) and isinstance(value, str)
-        }
+        },
+        definition_digest=definition_digest,
     )
 
 
 def new_credential_key(tool: ToolDefinitionV1, request: AccountLinkRequestV1, taken: Collection[str]) -> str:
-    """A free key for a credential added in the form, derived from the tool and owner.
+    """A free key for a credential added in the form, derived from the tool, owner and purpose.
 
-    ``http:portainer`` gives ``http-portainer-team`` for the team's account and
+    ``http:portainer`` gives ``http-portainer-team`` for the team's account,
+    ``http-portainer-gate`` for the team's gate credential, and
     ``http-portainer-personal`` for a person's (each owner has its own
     collection). A key already taken gets a number (``-2``, ``-3``, ...), so
     adding a credential never replaces a stored one. Keys follow the account
     link key rule (``CREDENTIAL_KEY_PATTERN``).
     """
 
-    owner = "team" if request.owner_kind is LinkOwnerKind.TEAM else "personal"
-    base = f"{_KEY_UNSAFE.sub('-', tool.tool_id).strip('-._')[:100]}-{owner}"
+    if request.purpose is LinkPurpose.GATE:
+        suffix = "gate"
+    elif request.owner_kind is LinkOwnerKind.TEAM:
+        suffix = "team"
+    else:
+        suffix = "personal"
+    base = f"{_KEY_UNSAFE.sub('-', tool.tool_id).strip('-._')[:100]}-{suffix}"
     candidates = (base if number == 1 else f"{base}-{number}" for number in range(1, _MAX_KEY_ATTEMPTS + 1))
     for key in candidates:
         if CREDENTIAL_KEY_PATTERN.fullmatch(key) and key not in taken:
@@ -522,7 +677,7 @@ def add_credential(request: AccountLinkRequestV1, tool: ToolDefinitionV1, values
     the tool needs are stored.
     """
 
-    names = sorted(required_fields(tool))
+    names = sorted(required_fields(tool, purpose=request.purpose))
     missing = [name for name in names if not str(values.get(name) or "").strip()]
     if not names or missing:
         raise AccountLinkRefused(
@@ -531,14 +686,24 @@ def add_credential(request: AccountLinkRequestV1, tool: ToolDefinitionV1, values
         )
     scope = owner_scope(request)
     typed = {name: values[name] for name in names}
-    owner_words = "team account" if request.owner_kind is LinkOwnerKind.TEAM else "personal account"
+    gate = request.purpose is LinkPurpose.GATE
+    owner_words = (
+        "team gate"
+        if gate
+        else ("team account" if request.owner_kind is LinkOwnerKind.TEAM else "personal account")
+    )
+    purpose_text = (
+        f"Team gate credential for {tool.display_name}; added in the account link form."
+        if gate
+        else f"Used by {tool.display_name}; added in the account link form."
+    )
     with _NEW_CREDENTIAL_LOCK:
         key = new_credential_key(tool, request, taken=load_catalog(scope=scope).credentials)
         result = collect_credential(
             {
                 "credential_key": key,
                 "display_name": f"{tool.display_name} ({owner_words})",
-                "purpose": f"Used by {tool.display_name}; added in the account link form.",
+                "purpose": purpose_text,
                 "fields": [
                     {"name": name, "kind": "secret", "visibility": "secret", "value_source": "user_input"}
                     for name in names
@@ -551,9 +716,10 @@ def add_credential(request: AccountLinkRequestV1, tool: ToolDefinitionV1, values
         detail = _without_values(result.error or "The credential store did not say why.", typed)
         logger.warning(
             "New credential for an account link was not stored. event=account_link_credential_not_stored "
-            "tool_id=%s owner_kind=%s person_id=%s error_code=%s error=%s",
+            "tool_id=%s owner_kind=%s purpose=%s person_id=%s error_code=%s error=%s",
             tool.tool_id,
             request.owner_kind.value,
+            request.purpose.value,
             request.person_id,
             (result.content or {}).get("error_code"),
             detail,
@@ -564,10 +730,11 @@ def add_credential(request: AccountLinkRequestV1, tool: ToolDefinitionV1, values
         )
     logger.info(
         "Stored a new credential for an account link. event=account_link_credential_added credential_key=%s "
-        "tool_id=%s owner_kind=%s person_id=%s",
+        "tool_id=%s owner_kind=%s purpose=%s person_id=%s",
         key,
         tool.tool_id,
         request.owner_kind.value,
+        request.purpose.value,
         request.person_id,
     )
     return key
@@ -584,12 +751,43 @@ class LinkOutcome:
     def sentence(self, request: AccountLinkRequestV1) -> str:
         """What happened, for the person's result page (the agent never gets the key)."""
 
+        noun = "gate credential" if request.purpose is LinkPurpose.GATE else "credential"
         if self.added_key:
             return (
-                f"The broker saved the new credential as {self.added_key} in {_collection_words(request)} "
+                f"The broker saved the new {noun} as {self.added_key} in {_collection_words(request)} "
                 f"and linked it to {self.tool.display_name}."
             )
-        return f"The chosen credential is now linked to {self.tool.display_name}."
+        return f"The chosen {noun} is now linked to {self.tool.display_name}."
+
+
+def _check_pinned_definition(
+    tool: ToolDefinitionV1,
+    request: AccountLinkRequestV1,
+    *,
+    expected_definition: PinnedLinkDefinition | None,
+    submitted_digest: str | None,
+) -> None:
+    """Refuse to link when the tool's hosts or injections changed after the form was shown."""
+
+    current = pinned_link_definition(tool, request.purpose)
+    session_mismatch = expected_definition is not None and current != expected_definition
+    form_mismatch = submitted_digest is not None and submitted_digest != current.digest
+    if not (session_mismatch or form_mismatch):
+        return
+    command = link_command(tool.tool_id, request.owner_kind, purpose=request.purpose)
+    logger.warning(
+        "Refused account link because the tool definition changed while the form was open. "
+        "event=account_link_definition_changed tool_id=%s owner_kind=%s purpose=%s person_id=%s",
+        tool.tool_id,
+        request.owner_kind.value,
+        request.purpose.value,
+        request.person_id,
+    )
+    raise AccountLinkRefused(
+        f"{tool.display_name}'s definition changed while this form was open, so nothing was linked. "
+        f"Open the form again with {command} to review the updated hosts and credential settings.",
+        reason_code=REASON_DEFINITION_CHANGED,
+    )
 
 
 def link_account(
@@ -599,14 +797,22 @@ def link_account(
     choice: LinkChoice,
     *,
     now: datetime,
+    expected_definition: PinnedLinkDefinition | None = None,
 ) -> LinkOutcome:
     """Link the chosen credential, storing it first when the person typed a new one.
 
-    ``linkable_tool`` runs first, so nothing is stored for someone who may not
-    link for this owner.
+    ``linkable_tool`` and the pinned-definition check run first, so nothing is
+    stored for someone who may not link for this owner or when the tool changed
+    after the form was shown.
     """
 
     tool = linkable_tool(catalog, request, TeamAccountSharing(store, request.team_id))
+    _check_pinned_definition(
+        tool,
+        request,
+        expected_definition=expected_definition,
+        submitted_digest=choice.definition_digest,
+    )
     if choice.new_values is None:
         return LinkOutcome(create_link(store, request, tool, choice.credential_key, now=now), tool)
     added = add_credential(request, tool, choice.new_values)
@@ -624,21 +830,37 @@ def finish_account_link(
     """
 
     link_request = session.request
+    gate = link_request.purpose is LinkPurpose.GATE
     if not confirmed:
         session.status = STATUS_DECLINED
-        session.result = {"status": session.status, "message": "The person did not confirm the account link."}
+        session.result = {
+            "status": session.status,
+            "message": (
+                "The person did not confirm the team gate credential link."
+                if gate
+                else "The person did not confirm the account link."
+            ),
+        }
         return "Nothing was linked."
     try:
-        outcome = link_account(store, catalog, link_request, choice, now=datetime.now(timezone.utc))
+        outcome = link_account(
+            store,
+            catalog,
+            link_request,
+            choice,
+            now=datetime.now(timezone.utc),
+            expected_definition=session.shown_definition,
+        )
     except AccountLinkRefused as exc:
         session.status = STATUS_UNAVAILABLE
         session.result = {"status": session.status, "error": str(exc), "reason_code": exc.reason_code}
         return str(exc)
     except Exception:
         logger.exception(
-            "Account link could not be finished. event=account_link_failed tool_id=%s owner_kind=%s person_id=%s",
+            "Account link could not be finished. event=account_link_failed tool_id=%s owner_kind=%s purpose=%s person_id=%s",
             link_request.tool_id,
             link_request.owner_kind.value,
+            link_request.purpose.value,
             link_request.person_id,
         )
         session.status = STATUS_UNAVAILABLE
@@ -649,16 +871,25 @@ def finish_account_link(
         }
         return "The broker could not finish the account link. Nothing was linked."
     session.status = STATUS_CREATED
+    if gate:
+        message = (
+            "A new gate credential was saved and linked; no credential value was returned."
+            if outcome.added_key
+            else "Team gate credential linked; no credential value was returned."
+        )
+    else:
+        message = (
+            "A new credential was saved and linked; no credential value was returned."
+            if outcome.added_key
+            else "Account linked; no credential value was returned."
+        )
     session.result = {
         "status": session.status,
         "link_id": outcome.link.link_id,
         "tool_id": outcome.link.tool_id,
         "owner_kind": outcome.link.owner_kind.value,
-        "message": (
-            "A new credential was saved and linked; no credential value was returned."
-            if outcome.added_key
-            else "Account linked; no credential value was returned."
-        ),
+        "purpose": outcome.link.purpose.value,
+        "message": message,
     }
     return outcome.sentence(link_request)
 
@@ -668,10 +899,13 @@ __all__ = [
     "AccountLinkRefused",
     "AccountLinkSession",
     "CREDENTIAL_SOURCE_FIELD",
+    "DEFINITION_DIGEST_FIELD",
     "LinkChoice",
     "LinkOutcome",
     "NEW_CREDENTIAL",
     "NEW_FIELD_PREFIX",
+    "PinnedLinkDefinition",
+    "REASON_DEFINITION_CHANGED",
     "REASON_FIELDS_MISSING",
     "REASON_KEY_UNAVAILABLE",
     "REASON_NOT_STORED",
@@ -688,6 +922,7 @@ __all__ = [
     "linkable_tool",
     "new_credential_key",
     "owner_scope",
+    "pinned_link_definition",
     "read_choice",
     "render_form",
     "required_fields",

@@ -87,6 +87,7 @@ credential available; grants decide who may use the tool.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -98,11 +99,14 @@ from pydantic import ValidationError
 from access_control.people import is_administrator
 from assistant_gateway.application.account_links import (
     ACCOUNT_LINK_NO_ACCESS_NOTE,
+    ACCOUNT_LINK_PURPOSE_ACCOUNT,
+    ACCOUNT_LINK_PURPOSE_GATE,
     ACCOUNT_LINK_STATUS_CREATED,
     ACCOUNT_LINK_STATUS_DECLINED,
     REASON_SESSION_EXPIRED,
     REASON_TEAM_ADMIN_REQUIRED,
     AccountLinkForm,
+    AccountLinkPurpose,
     AccountLinkUnavailable,
     GatewayAccountLinks,
     account_link_status_is_final,
@@ -284,6 +288,13 @@ def _form_expired(what: str) -> str:
     return f"The form for {what} expired before it was used."
 
 
+def account_link_form_expired(tool_name: str) -> str:
+    """Plain expiry sentence for one account-link form (shared with proposal follow-up tracking)."""
+
+    name = " ".join(str(tool_name or "").split()) or "this tool"
+    return _form_expired(_what(TOOL_SETUP_ACCOUNT_LINK, name))
+
+
 @dataclass(frozen=True)
 class ResendPass:
     """What one pass over the kept results did (``GatewayToolSetups.resend_kept_results``).
@@ -380,9 +391,14 @@ def sign_in_page_ending(outcome: BrokerSessionOutcome, *, what: str) -> PageEndi
 
 
 def account_link_page_ending(
-    outcome: BrokerSessionOutcome, *, what: str, tool_id: str, owner: str
+    outcome: BrokerSessionOutcome,
+    *,
+    what: str,
+    tool_id: str,
+    owner: str,
+    purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
 ) -> PageEnding:
-    """An account link form's ending; a created link for another tool or owner is never reported as linked."""
+    """An account or gate link form's ending; a created link for another tool, owner or purpose is never reported as linked."""
 
     if outcome.ending == WATCH_EXPIRED:
         return PageEnding(TOOL_SETUP_EXPIRED, _form_expired(what))
@@ -393,7 +409,13 @@ def account_link_page_ending(
     status = str(result.get("status") or outcome.payload.get("status") or "")
     if status == ACCOUNT_LINK_STATUS_CREATED:
         link_id = str(result.get("link_id") or "") or None
-        if link_id and result.get("tool_id") == tool_id and result.get("owner_kind") == owner:
+        result_purpose = str(result.get("purpose") or ACCOUNT_LINK_PURPOSE_ACCOUNT)
+        if (
+            link_id
+            and result.get("tool_id") == tool_id
+            and result.get("owner_kind") == owner
+            and result_purpose == purpose
+        ):
             return PageEnding(TOOL_SETUP_COMPLETED, _is_done(what), link_id=link_id)
         return PageEnding(TOOL_SETUP_UNAVAILABLE, _unconfirmed(what), reason_code=REASON_LINK_MISMATCH)
     if status == ACCOUNT_LINK_STATUS_DECLINED:
@@ -784,8 +806,19 @@ class GatewayToolSetups:
             raise SetupRefused(message, exc.reason_code, needs_administrator=admin) from exc
         return self._account_link_page(request.tool_id, request.owner, form)
 
-    def _account_link_page(self, tool_id: str, owner: str, form: AccountLinkForm) -> _OpenedPage:
-        what = _what(TOOL_SETUP_ACCOUNT_LINK, form.tool_display_name)
+    def _account_link_page(
+        self,
+        tool_id: str,
+        owner: str,
+        form: AccountLinkForm,
+        *,
+        purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
+    ) -> _OpenedPage:
+        what = (
+            f"the team gate credential for {form.tool_display_name}"
+            if purpose == ACCOUNT_LINK_PURPOSE_GATE
+            else _what(TOOL_SETUP_ACCOUNT_LINK, form.tool_display_name)
+        )
 
         async def watch() -> PageEnding:
             outcome = await watch_broker_session(
@@ -798,9 +831,13 @@ class GatewayToolSetups:
                 poll_interval_seconds=self._poll_interval_seconds(),
                 on_read_failed=lambda error: self._log_read_failed(what, error),
             )
-            return account_link_page_ending(outcome, what=what, tool_id=tool_id, owner=owner)
+            return account_link_page_ending(outcome, what=what, tool_id=tool_id, owner=owner, purpose=purpose)
 
-        whose = "the team's account" if owner == "team" else "your account"
+        whose = (
+            "the team's gate credential"
+            if purpose == ACCOUNT_LINK_PURPOSE_GATE
+            else ("the team's account" if owner == "team" else "your account")
+        )
         return _OpenedPage(
             label=f"Choose {whose} for {form.tool_display_name}",
             receipt=f"Account link form opened for {form.tool_display_name} ({whose}).",
@@ -820,8 +857,9 @@ class GatewayToolSetups:
         tool_id: str,
         owner: str,
         reason: str,
+        purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
     ) -> AccountLinkForm:
-        """Open one account link form an approved proposal asks for, for the approver."""
+        """Open one account or gate link form an approved proposal asks for, for the approver."""
 
         return await self._account_links.open_form(
             request_id=request_id,
@@ -830,37 +868,98 @@ class GatewayToolSetups:
             tool_id=tool_id,
             owner=owner,  # type: ignore[arg-type]
             reason=reason,
+            purpose=purpose,
         )
 
     def after_proposal_links(
         self,
         *,
         request_id: str,
-        forms: list[tuple[AccountLinkForm, str, str]],
+        forms: list[tuple[AccountLinkForm, str, str, AccountLinkPurpose]],
         then: Callable[[], Awaitable[None]],
+        on_form_ended: Callable[[AccountLinkForm, str, str, PageEnding], Awaitable[None] | None] | None = None,
     ) -> None:
-        """Watch an approved proposal's forms ``(form, tool_id, owner)``; run ``then`` once all ended.
+        """Watch an approved proposal's forms ``(form, tool_id, owner, purpose)``; run ``then`` once all ended.
 
-        The proposal's task waits inside ``propose_access_change``; ``then``
-        sends its decision notice, and the tool reads which links exist.
+        When ``on_form_ended`` is given, it runs as each individual form ends
+        with ``(form, tool_id, owner, ending)`` so the gateway can dismiss that
+        form's link immediately while sibling forms stay open. The proposal's
+        task waits inside ``propose_access_change``; ``then`` sends its decision
+        notice after every form has ended, and the tool reads which links exist.
         """
 
-        pages = [self._account_link_page(tool_id, owner, form) for form, tool_id, owner in forms]
+        watched = [
+            (form, tool_id, owner, self._account_link_page(tool_id, owner, form, purpose=purpose))
+            for form, tool_id, owner, purpose in forms
+        ]
         self._watches.start(
-            self._after_pages(request_id, pages, then),
+            self._after_pages(request_id, watched, then, on_form_ended),
             name=f"gateway_proposal_links_{request_id[:24]}",
         )
 
+    async def _watch_proposal_form(
+        self,
+        request_id: str,
+        form: AccountLinkForm,
+        tool_id: str,
+        owner: str,
+        page: _OpenedPage,
+        on_form_ended: Callable[[AccountLinkForm, str, str, PageEnding], Awaitable[None] | None] | None,
+    ) -> PageEnding:
+        what = _what(TOOL_SETUP_ACCOUNT_LINK, form.tool_display_name)
+        try:
+            ending = await page.watch()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - report an unconfirmed ending so the link clears and siblings finish
+            self._logger.exception(
+                "Could not watch an approved proposal's account link form. "
+                "event=gateway_proposal_link_watch_failed request_id=%s tool_id=%s",
+                request_id,
+                tool_id,
+            )
+            ending = PageEnding(
+                TOOL_SETUP_UNAVAILABLE,
+                _unconfirmed(what),
+                reason_code=REASON_PAGE_UNCONFIRMED,
+            )
+        if on_form_ended is not None:
+            try:
+                callback_result = on_form_ended(form, tool_id, owner, ending)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one callback error must not disrupt sibling forms or release
+                self._logger.exception(
+                    "Could not record an approved proposal's account link form ending. "
+                    "event=gateway_proposal_link_callback_failed request_id=%s tool_id=%s",
+                    request_id,
+                    tool_id,
+                )
+        return ending
+
     async def _after_pages(
-        self, request_id: str, pages: list[_OpenedPage], then: Callable[[], Awaitable[None]]
+        self,
+        request_id: str,
+        watched: list[tuple[AccountLinkForm, str, str, _OpenedPage]],
+        then: Callable[[], Awaitable[None]],
+        on_form_ended: Callable[[AccountLinkForm, str, str, PageEnding], Awaitable[None] | None] | None = None,
     ) -> None:
         try:
-            endings = await asyncio.gather(*(page.watch() for page in pages))
+            results = await asyncio.gather(
+                *(
+                    self._watch_proposal_form(request_id, form, tool_id, owner, page, on_form_ended)
+                    for form, tool_id, owner, page in watched
+                ),
+                return_exceptions=True,
+            )
+            statuses = [result.status if isinstance(result, PageEnding) else "error" for result in results]
             self._logger.info(
                 "An approved proposal's account link forms ended. event=gateway_proposal_links_ended "
                 "request_id=%s statuses=%s",
                 request_id,
-                ",".join(ending.status for ending in endings),
+                ",".join(statuses),
             )
         finally:
             await then()
@@ -1490,6 +1589,7 @@ __all__ = [
     "REASON_OFFER_LIMIT",
     "REASON_PAGE_NOT_WATCHED",
     "SETUP_STATUS_WAITING",
+    "account_link_form_expired",
     "account_link_page_ending",
     "sign_in_page_ending",
 ]

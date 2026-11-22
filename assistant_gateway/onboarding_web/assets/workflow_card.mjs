@@ -20,17 +20,22 @@ export function mountWorkflowCard(bubble, { lifecycle, requestClient, isCurrent,
   const id = new URL(link.href).pathname.split("/").at(-1);
   const card = document.createElement("section");
   card.className = "workflow-inline-card";
+  const header = document.createElement("header");
+  header.className = "workflow-inline-header";
   const heading = document.createElement("h3");
+  heading.className = "workflow-inline-title";
   heading.textContent = "Your Access Plan";
+  const open = document.createElement("a");
+  open.href = link.href;
+  open.textContent = "Open workflow";
+  open.className = "button primary small workflow-inline-open";
+  header.append(heading, open);
   const status = document.createElement("p");
+  status.className = "workflow-inline-status";
   status.textContent = "Loading the current workflow…";
   const map = document.createElement("div");
   map.className = "workflow-map";
-  const open = document.createElement("a");
-  open.href = link.href;
-  open.textContent = "Open Full Workflow";
-  open.className = "button primary";
-  card.append(heading, status, map, open);
+  card.append(header, status, map);
   bubble.append(card);
   const show = (record) => {
     heading.textContent = record.title;

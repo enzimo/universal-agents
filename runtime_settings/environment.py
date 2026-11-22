@@ -322,6 +322,8 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
         config["security_layer"]["broker_bind_port"] = env_value
     if env_value := os.getenv("SECURE_TOOL_BROKER_CREDENTIALS_DIR"):
         config["security_layer"]["broker_credentials_dir"] = env_value
+    if env_value := os.getenv("SECURE_TOOL_BROKER_API_REQUEST_USER_AGENT"):
+        config["security_layer"]["api_request_user_agent"] = env_value
     credential_state_backend = dict(
         config["security_layer"].get("credential_state_backend") or {}
     )

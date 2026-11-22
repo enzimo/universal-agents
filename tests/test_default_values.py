@@ -37,6 +37,7 @@ from default_values import (
     GATEWAY_DEFAULTS,
     INTERACTIVE_APP_DEFAULTS,
     LLM_DEFAULTS,
+    SECURITY_LAYER_DEFAULTS,
     STORAGE_DEFAULTS,
     TRANSPORT_DEFAULTS,
     WEB_SERVICES_DEFAULTS,
@@ -284,6 +285,10 @@ def test_config_models_match_example_defaults_except_approved_exceptions() -> No
         # the shared agent model has no instance_root field. Its default lives in
         # WORKSPACE_DEFAULTS and is checked below.
         "agent.instance_root",
+        # config.example.yaml leaves api_request_user_agent empty ("") so copied
+        # configs track future release updates to DEFAULT_API_REQUEST_USER_AGENT
+        # instead of freezing one browser version; empty normalizes to the default.
+        "security_layer.api_request_user_agent",
     }
 
     for path, model in sections.items():
@@ -297,6 +302,13 @@ def test_config_models_match_example_defaults_except_approved_exceptions() -> No
     assert AgentRuntimeDefaultsSettings().external_mcp_servers == []
     assert example["agent"]["external_mcp_servers"]
     assert example["agent"]["instance_root"] == WORKSPACE_DEFAULTS.instance_root.value
+    assert example["security_layer"]["api_request_user_agent"] == ""
+    assert (
+        SecurityLayerSettings(
+            api_request_user_agent=example["security_layer"]["api_request_user_agent"]
+        ).api_request_user_agent
+        == SECURITY_LAYER_DEFAULTS.api_request_user_agent.value
+    )
     assert AgentRuntimeDefaultsSettings().memory["plugins"]["order"] == [
         "coremem",
         "usermem",

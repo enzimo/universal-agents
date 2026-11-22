@@ -37,7 +37,7 @@ from assistant_gateway.gateway import UserGateway
 from assistant_gateway.http_secure_broker import HttpGatewaySecureBroker
 from assistant_gateway.runtime_ports import SystemGatewayClock
 from assistant_gateway.store import GatewayStateStore
-from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkOwnerKind
+from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkOwnerKind, LinkPurpose
 from access_control.caller_tokens import CALLER_GATEWAY
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 from secure_tool_broker.service import SecureToolBrokerService
@@ -134,6 +134,7 @@ class FakeAccountLinkBroker:
                 "link_id": link_id,
                 "tool_id": request["tool_id"],
                 "owner_kind": request["owner_kind"],
+                "purpose": request.get("purpose", "account"),
                 "message": "Account linked; no credential value was returned.",
             },
         )
@@ -386,6 +387,7 @@ async def test_link_command_opens_the_persons_own_form(linked_gateway) -> None:
             "team_id": gateway.config.manager.team_id,
             "tool_id": "http:portainer",
             "owner_kind": "person",
+            "purpose": "account",
             "person_id": owner,
             "person_roles": list(gateway._request_context_service.team_roles(owner)),
             "reason": "You asked for this with /link.",
@@ -474,9 +476,9 @@ async def test_link_command_reports_broker_refusals_for_unusable_tools(
 @pytest.mark.parametrize(
     ("command", "expected_start"),
     [
-        ("/link", "Usage: /link <tool_id> [me|team]"),
-        ("/link help", "Usage: /link <tool_id> [me|team]"),
-        ("/link http:portainer everyone", "Usage: /link <tool_id> [me|team]"),
+        ("/link", "Usage: /link <tool_id> [me|team|gate]"),
+        ("/link help", "Usage: /link <tool_id> [me|team|gate]"),
+        ("/link http:portainer everyone", "Usage: /link <tool_id> [me|team|gate]"),
         ("/link cli:github everyone", "Usage: /link cli:github [token | web | web-all]"),
         ("/link cli:x token", "Usage: /link cli:x [web]"),
         (
@@ -527,8 +529,8 @@ def test_link_command_is_listed_in_help() -> None:
         build_web_chat_help,
     )
 
-    assert "/link <tool_id> [me|team]" in build_interactive_session_help()
-    assert "/link <tool_id> [ me | team ]" in build_web_chat_help()
+    assert "/link <tool_id> [me|team|gate]" in build_interactive_session_help()
+    assert "/link <tool_id> [ me | team | gate ]" in build_web_chat_help()
 
 
 # /link for tools a person signs in to ---------------------------------------
@@ -702,7 +704,9 @@ async def test_gateway_opener_links_an_account_through_the_real_broker(
     finally:
         await server.close()
 
-    stored = store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1")
+    stored = store.active_link(
+        TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1", purpose=LinkPurpose.ACCOUNT
+    )
     assert stored is not None
     assert status["status"] == "account_link_created"
     assert status["result"]["link_id"] == stored.link_id
@@ -1052,4 +1056,44 @@ async def test_link_result_is_posted_after_linking_with_the_real_broker(
     for secret_or_key in ("portainer-secret", "portainer_token", form.session_id):
         assert secret_or_key not in event.text
     assert "portainer-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_slash_link_gate_opens_gate_form_for_admin_refuses_member_and_posts_gate_result(
+    chat_gateway,
+) -> None:
+    gateway, broker, events, _transport = chat_gateway
+
+    help_result = await _link_in_chat(gateway, "/link help")
+    assert "[me|team|gate]" in help_result.text
+
+    # Owner runs /link http:portainer gate: gateway sends owner_kind=team, purpose=gate.
+    opened = await _link_in_chat(gateway, "/link http:portainer gate")
+    assert opened.transient_action is not None
+    assert opened.transient_action.label == "Open gate link form"
+    assert opened.transient_action.receipt == "Team gate link form opened for http:portainer."
+    assert broker.requests[-1]["owner_kind"] == "team"
+    assert broker.requests[-1]["purpose"] == "gate"
+
+    broker.complete("link_session_1")
+    event = await _posted(events)
+    assert event.text == (
+        "Linked the team's gate credential to Portainer (http:portainer). "
+        "Settings → Access → By Tool lists it. "
+        "Linking a gate credential gives nobody access by itself."
+    )
+
+    # A sign-in tool with 'gate' goes to the broker as a gate link request, not a sign-in method.
+    sign_in_gate = await _link_in_chat(gateway, "/link cli:x gate")
+    assert sign_in_gate.transient_action is not None
+    assert broker.requests[-1]["tool_id"] == "cli:x"
+    assert broker.requests[-1]["purpose"] == "gate"
+    assert broker.sign_ins == []
+
+    # A non-admin member is refused by the broker.
+    member_id = _member(gateway, role="member")
+    refused = await _run_link_command(gateway, "/link http:portainer gate", person=member_id)
+    assert refused.transient_action is None
+    assert "Could not open the team gate link form for http:portainer." in refused.text
+    assert "administrator" in refused.text.lower()
 

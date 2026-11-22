@@ -48,3 +48,13 @@ def test_broker_pages_embed_the_single_dark_renderer_and_its_settings(monkeypatc
     assert page.index(appearance) < page.index(light_mesh) < page.index(renderer)
     assert "--ua-dark-facet-size: 300;" in page
     assert "--ua-dark-detail: basic;" in page
+
+
+def test_broker_auth_theme_sets_dark_secondary_action_background():
+    """Dark broker pages use --surface-soft on .secondary-action for readable contrast."""
+
+    from secure_tool_broker.auth_pages import BROKER_AUTH_THEME, render_broker_auth_page
+
+    assert ':root[data-color-mode="dark"] .secondary-action' in BROKER_AUTH_THEME
+    page = render_broker_auth_page("Model keys", '<button type="button" class="secondary-action">Close</button>')
+    assert ':root[data-color-mode="dark"] .secondary-action {\n    background: var(--surface-soft);\n  }' in page

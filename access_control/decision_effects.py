@@ -7,6 +7,7 @@ leave delivered data or a program without a durable recovery record.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import os
@@ -19,6 +20,19 @@ from access_control import safe_open
 from storage.access_repository import AccessRepository, DecisionRecovery
 
 logger = logging.getLogger(__name__)
+
+
+def _read_bounded_sha256(descriptor: int, limit: int) -> tuple[int, str, bool]:
+    """Read up to ``limit + 1`` bytes from ``descriptor``; return ``(count, sha256, exceeded)``."""
+
+    digest = hashlib.sha256()
+    remaining = limit + 1
+    total = 0
+    while remaining and (chunk := os.read(descriptor, min(remaining, 1024 * 1024))):
+        digest.update(chunk)
+        total += len(chunk)
+        remaining -= len(chunk)
+    return total, digest.hexdigest(), remaining == 0
 
 
 class OwnedFile(BaseModel):
@@ -78,6 +92,103 @@ class OwnedFile(BaseModel):
             raise
 
 
+class ReplacedFile(BaseModel):
+    """A journaled atomic replacement of an existing file, storing the exact bytes to restore."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    parts: tuple[str, ...]
+    device: int
+    inode: int
+    sha256: str
+    size: int
+    previous_sha256: str
+    previous_b64: str
+    staging_parts: tuple[str, ...] | None = None
+
+    @classmethod
+    def prepared(
+        cls,
+        parts: tuple[str, ...],
+        descriptor: int,
+        data: bytes,
+        previous_data: bytes,
+        staging_parts: tuple[str, ...] | None = None,
+    ) -> ReplacedFile:
+        info = os.fstat(descriptor)
+        return cls(
+            parts=parts,
+            device=info.st_dev,
+            inode=info.st_ino,
+            sha256=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+            previous_sha256=hashlib.sha256(previous_data).hexdigest(),
+            previous_b64=base64.b64encode(previous_data).decode("ascii"),
+            staging_parts=staging_parts,
+        )
+
+    def previous_bytes(self) -> bytes:
+        return base64.b64decode(self.previous_b64.encode("ascii"))
+
+    def restore(self, root: Path, restore: Callable[[bytes], None] | None = None) -> None:
+        """Restore the previous bytes if our replacement is on disk; clean up staging if never replaced.
+
+        - If the process stopped before ``os.replace``, the target still holds
+          ``previous_sha256`` and the staging file is removed quietly without
+          logging ``access_decision_artifact_changed``.
+        - If the target holds our exact replacement ``(device, inode, size, sha256)``,
+          the previous bytes are restored atomically.
+        - If the target was edited, replaced, or deleted externally, it is left
+          untouched and ``access_decision_artifact_changed`` is logged.
+        """
+
+        if self.staging_parts is not None:
+            staging = safe_open.entry_status(root, self.staging_parts)
+            if staging is not None and (staging.st_dev, staging.st_ino) == (self.device, self.inode):
+                safe_open.remove_file(root, self.staging_parts)
+        previous = self.previous_bytes()
+        try:
+            with safe_open.opened_file(root, self.parts) as (descriptor, info):
+                if info.st_size not in (self.size, len(previous)):
+                    logger.warning(
+                        "A decision's replaced artifact was modified or replaced externally; the current file is kept. "
+                        "event=access_decision_artifact_changed path=%s",
+                        "/".join(self.parts),
+                    )
+                    return
+                count, digest, exceeded = _read_bounded_sha256(descriptor, max(self.size, len(previous)))
+                if not exceeded and count == len(previous) and digest == self.previous_sha256:
+                    # Never replaced (stopped before os.replace) or already restored.
+                    return
+                matches_replacement = (
+                    not exceeded
+                    and (info.st_dev, info.st_ino) == (self.device, self.inode)
+                    and info.st_size == self.size
+                    and count == self.size
+                    and digest == self.sha256
+                )
+                if not matches_replacement:
+                    logger.warning(
+                        "A decision's replaced artifact was modified or replaced externally; the current file is kept. "
+                        "event=access_decision_artifact_changed path=%s",
+                        "/".join(self.parts),
+                    )
+                    return
+        except safe_open.UnsafePath as exc:
+            if exc.reason == safe_open.REASON_NOT_FOUND:
+                logger.warning(
+                    "A decision's replaced artifact was removed externally; it is not recreated. "
+                    "event=access_decision_artifact_changed path=%s",
+                    "/".join(self.parts),
+                )
+                return
+            raise
+        if restore is None:
+            safe_open.write_bytes(root, self.parts, previous)
+        else:
+            restore(previous)
+
+
 class EffectJournal:
     def __init__(self, store: AccessRepository, recovery: DecisionRecovery) -> None:
         self.store = store
@@ -96,3 +207,25 @@ class EffectJournal:
             # leave an unrecorded copy; a committed update just finds it gone.
             owned.remove(root)
             raise
+
+    def prepare_replacement(
+        self,
+        category: str,
+        root: Path,
+        parts: tuple[str, ...],
+        descriptor: int,
+        data: bytes,
+        previous_data: bytes,
+        *,
+        staging_parts: tuple[str, ...] | None = None,
+    ) -> ReplacedFile:
+        replaced = ReplacedFile.prepared(parts, descriptor, data, previous_data, staging_parts)
+        self.recovery.effects[category].append(replaced.model_dump(mode="json"))
+        try:
+            self.store.save_decision_recovery(self.recovery)
+        except BaseException:
+            # No data has been written or replaced yet. Remove the empty
+            # staging file; the target file still holds previous_data.
+            replaced.restore(root)
+            raise
+        return replaced

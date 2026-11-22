@@ -16,6 +16,7 @@ from custom_messages.contracts.runtime_v1 import (
     TRANSPORT_NATS,
 )
 from secure_tool_broker.defaults import (
+    DEFAULT_API_REQUEST_USER_AGENT,
     DEFAULT_BIND_HOST,
     DEFAULT_BIND_PORT,
     DEFAULT_CREDENTIALS_DIR_NAME,
@@ -1733,6 +1734,12 @@ class SecurityLayerDefaultValues:
         30,
         "Days after which the broker re-checks a person's tool that is ready (signed in or linked) but "
         "was not used or checked since; 0 turns the re-check off.",
+        onboarding_overridable=False,
+    )
+    api_request_user_agent: DefaultValue[str] = default_value(
+        DEFAULT_API_REQUEST_USER_AGENT,
+        "Default User-Agent header sent on brokered web API requests (credential.api_request) when "
+        "the request sets none.",
         onboarding_overridable=False,
     )
     mode: DefaultValue[str] = default_value(

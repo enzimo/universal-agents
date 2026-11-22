@@ -64,18 +64,20 @@ from secure_tool_broker.account_links import (
     credential_choices,
     linkable_tool,
     owner_scope,
+    pinned_link_definition,
     read_choice,
     render_form,
     required_fields,
     finish_account_link,
     used_by_text,
 )
-from custom_messages.contracts.access_v2 import AccountLinkRequestV1, PersonCredentialDeletionV1
+from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkPurpose, PersonCredentialDeletionV1
 from custom_messages.contracts.credentials_v1 import CREDENTIAL_DECLINED
 from secure_tool_broker.credential_transfer_api import add_transfer_routes
 from secure_tool_broker.team_export_page import add_team_export_routes
 from secure_tool_broker.defaults import (
     AUTH_PAGE_STATUS_ROUTE,
+    DEFAULT_API_REQUEST_USER_AGENT,
     EXECUTION_SSH_ROUTE_PREFIX,
     is_decline,
     ONBOARDING_ACCOUNT_KEYS_ROUTE,
@@ -630,6 +632,7 @@ class SecureToolBrokerService:
         mcp_config: BrokerMCPConfig | None = None,
         execution_ssh_config: BrokerExecutionSSHConfig | None = None,
         web_chat_origin: str | None = None,
+        api_request_user_agent: str = DEFAULT_API_REQUEST_USER_AGENT,
     ) -> None:
         if not token:
             raise ValueError(
@@ -661,6 +664,7 @@ class SecureToolBrokerService:
         # The only address that may show these pages inside the chat (secure_tool_broker.page_view);
         # None turns the card view off.
         self._web_chat_origin = web_chat_origin
+        self._api_request_user_agent = api_request_user_agent or DEFAULT_API_REQUEST_USER_AGENT
 
     def build_app(self) -> web.Application:
         app = web.Application(
@@ -1042,7 +1046,7 @@ class SecureToolBrokerService:
         if caller.is_gateway:
             if (validated.provider, validated.action) not in GATEWAY_DIRECT_ACTIONS:
                 raise web.HTTPForbidden(text="The gateway runs only actions a person approved directly.")
-            return context
+            return dataclasses.replace(context, api_request_user_agent=self._api_request_user_agent)
         gate = self._access_gate.check_broker_action(
             caller, validated.provider, validated.action, validated.params, trusted_context
         )
@@ -1053,6 +1057,8 @@ class SecureToolBrokerService:
             team_id=self._access_gate.team_id,
             work_id=gate.work_id,
             account_link=gate.account_link,
+            gate_link=gate.gate_link,
+            api_request_user_agent=self._api_request_user_agent,
         )
 
     async def _handle_execute(self, request: web.Request) -> web.Response:
@@ -1273,14 +1279,16 @@ class SecureToolBrokerService:
                 now + timedelta(seconds=self._credential_collection_ttl_seconds()),
                 now + timedelta(minutes=30),
             ),
+            shown_definition=pinned_link_definition(tool, link_request.purpose),
         )
         self._account_link_sessions[session_id] = session
         self._account_link_session_by_request[link_request.request_id] = session_id
         self._logger.info(
             "Created account link session. event=account_link_session_created tool_id=%s owner_kind=%s "
-            "person_id=%s session_id_prefix=%s",
+            "purpose=%s person_id=%s session_id_prefix=%s",
             link_request.tool_id,
             link_request.owner_kind.value,
+            link_request.purpose.value,
             link_request.person_id,
             session_id[:12],
         )
@@ -1337,8 +1345,8 @@ class SecureToolBrokerService:
             tool = linkable_tool(self._access_gate.catalog, session.request, self._access_gate.account_sharing())
         except AccountLinkRefused as exc:
             return _account_link_page("Account link unavailable", "Account link unavailable", str(exc), status=409)
-        choices = credential_choices(owner_scope(session.request), tool)
-        if not choices and not required_fields(tool):
+        choices = credential_choices(owner_scope(session.request), tool, purpose=session.request.purpose)
+        if not choices and not required_fields(tool, purpose=session.request.purpose):
             # Nothing to pick and no fields to type: the tool names no credential fields.
             return _account_link_page(
                 "Account link unavailable",
@@ -1347,9 +1355,15 @@ class SecureToolBrokerService:
                 status=409,
             )
         used_by = used_by_text(self._access_gate.access, tool, session.request)
+        session.shown_definition = pinned_link_definition(tool, session.request.purpose)
+        page_title = (
+            "Link a team gate credential"
+            if session.request.purpose is LinkPurpose.GATE
+            else "Link an account"
+        )
         return web.Response(
             text=render_broker_auth_page(
-                "Link an account",
+                page_title,
                 render_form(session, tool, choices, used_by=used_by),
                 script=SECRET_INPUT_TOGGLE_SCRIPT,
                 decline=True,
@@ -1376,18 +1390,23 @@ class SecureToolBrokerService:
         sentence = await run_claimed_form_thread(
             session, finish_account_link, session, store, catalog, confirmed=confirmed, choice=choice
         )
+        is_gate = session.request.purpose is LinkPurpose.GATE
         if declined:
             self._logger.info(
                 "A person declined an account link form. event=account_link_declined tool_id=%s owner_kind=%s "
-                "person_id=%s session_id_prefix=%s",
+                "purpose=%s person_id=%s session_id_prefix=%s",
                 session.request.tool_id,
                 session.request.owner_kind.value,
+                session.request.purpose.value,
                 session.request.person_id,
                 session_id[:12],
             )
-            return web.Response(text=declined_page("Account link"), content_type="text/html")
+            return web.Response(
+                text=declined_page("Team gate credential" if is_gate else "Account link"),
+                content_type="text/html",
+            )
         return _account_link_page(
-            "Account link result",
+            "Team gate credential result" if is_gate else "Account link result",
             session.status.replace("_", " ").capitalize(),
             f"{sentence} {ACCOUNT_LINK_CLOSE_TEXT}",
             card_outcome=_ACCOUNT_LINK_CARD_OUTCOMES.get(session.status),
@@ -2978,6 +2997,7 @@ async def run_secure_tool_broker(
     execution_ssh_config: BrokerExecutionSSHConfig | None = None,
     tool_setup_recheck_days: int = 0,
     web_chat_origin: str | None = None,
+    api_request_user_agent: str = DEFAULT_API_REQUEST_USER_AGENT,
 ) -> None:
     # A token left in the environment would be a team-wide credential for a
     # per-person tool; refuse to start and name the sign-in that replaces it.
@@ -3042,6 +3062,7 @@ async def run_secure_tool_broker(
         mcp_config=mcp_config,
         execution_ssh_config=execution_ssh_config,
         web_chat_origin=web_chat_origin,
+        api_request_user_agent=api_request_user_agent,
     )
     if web_chat_origin:
         LOGGER.info(

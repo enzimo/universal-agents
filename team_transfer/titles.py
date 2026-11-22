@@ -142,6 +142,8 @@ def _access(_key: str, raw: Mapping[str, Any], archive: Archive) -> str:
             return f"Block on {target} for {who}"
         return f"{str(document.get('level', '')).capitalize()} access to {target} for {who}".strip()
     if kind == "account_link":
+        if document.get("purpose") == "gate":
+            return f"{document['tool_id']} team gate"
         owner = _person(archive, document["owner_id"]) if document["owner_kind"] == "person" else "the team"
         return f"{document['tool_id']} account of {owner}"
     if kind == "person_settings":

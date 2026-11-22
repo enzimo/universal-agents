@@ -26,6 +26,11 @@ from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from custom_messages.contracts.access_v2 import (
+    REASON_ACCOUNT_LINK_MISSING,
+    REASON_ACCOUNT_LINK_OUTDATED,
+    REASON_GATE_LINK_MISSING,
+)
 from id_generation import new_id
 
 logger = logging.getLogger(__name__)
@@ -42,7 +47,6 @@ REASON_NO_TASK_CONTEXT = "web_request_task_context_missing"
 REASON_BROKER_ERROR = "web_request_broker_error"
 REASON_REQUEST_FAILED = "web_request_failed"
 # Reasons the broker gives (secure_tool_broker.access_gate), kept as they are.
-REASON_ACCOUNT_LINK_MISSING = "account_link_missing"
 REASON_ACCESS_DENIED = "access_denied"
 
 
@@ -74,12 +78,14 @@ class BrokerWebRequestError(Exception):
         reason_code: str,
         retryable: bool = False,
         tool_id: str = "",
+        next_step: str = "",
     ) -> None:
         super().__init__(message)
         self.message = message
         self.reason_code = reason_code
         self.retryable = retryable
         self.tool_id = tool_id
+        self.next_step = next_step
 
 
 def send_web_request(
@@ -175,9 +181,8 @@ def _refusal(status: int, detail: str) -> BrokerWebRequestError:
     payload = payload if isinstance(payload, dict) else {}
     reason_code = str(payload.get("reason_code") or REASON_BROKER_ERROR)
     tool_id = str(payload.get("tool_id") or "")
-    message = " ".join(
-        part for part in (str(payload.get("error") or detail[:500]).strip(), str(payload.get("next_step") or "").strip()) if part
-    )
+    next_step = str(payload.get("next_step") or "").strip()
+    message = " ".join(part for part in (str(payload.get("error") or detail[:500]).strip(), next_step) if part)
     logger.warning(
         "The broker refused a web request. event=broker_web_request_refused http_status=%s reason_code=%s tool_id=%s",
         status,
@@ -188,6 +193,7 @@ def _refusal(status: int, detail: str) -> BrokerWebRequestError:
         message or f"The secure tool broker refused the request (HTTP {status}).",
         reason_code=reason_code,
         tool_id=tool_id,
+        next_step=next_step,
     )
 
 
@@ -215,12 +221,31 @@ def is_missing_key(error: BrokerWebRequestError) -> bool:
     return error.reason_code == REASON_ACCOUNT_LINK_MISSING
 
 
+def credential_setup_hint(error: BrokerWebRequestError) -> str | None:
+    """Actionable hint for an outdated link or missing team gate refusal, or None for other errors."""
+
+    if error.reason_code == REASON_ACCOUNT_LINK_OUTDATED:
+        return (
+            error.next_step
+            or "the linked key was made for an earlier tool definition; link it again with the command in the message"
+        )
+    if error.reason_code == REASON_GATE_LINK_MISSING:
+        return (
+            error.next_step
+            or "a team administrator links the team's gate credential with the /link command in the message"
+        )
+    return None
+
+
 __all__ = [
     "BROKER_MAX_TIMEOUT_SECONDS",
     "BrokerWebRequestError",
     "BrokerWebResponse",
     "REASON_ACCESS_DENIED",
     "REASON_ACCOUNT_LINK_MISSING",
+    "REASON_ACCOUNT_LINK_OUTDATED",
+    "REASON_GATE_LINK_MISSING",
+    "credential_setup_hint",
     "is_missing_key",
     "send_web_request",
 ]

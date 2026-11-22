@@ -83,6 +83,9 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
             # The block names an operation by its catalog id, which this version still has.
             [block] = [record for record in converted if record["kind"] == "grant"]
             assert block["document"]["target"]["id"] == "fn:tool_loading#find_tools"
+            # Version 3 account links had no purpose field; version 4 stamps them as account links.
+            [link] = [record for record in converted if record["kind"] == "account_link"]
+            assert link["document"]["purpose"] == "account"
         if name == "schedules":
             [schedule] = [
                 section.record_model.model_validate(record)
@@ -177,7 +180,7 @@ def test_an_unsupported_export_is_refused_before_anything_is_written(
     source_sections, expected_problem = {
         "0.8.5": (
             (SettingsAsV085(), PeopleSection(), AccessAsV085()),
-            "This file's settings section is version 3, but this version of Universal Agents reads versions 5, 6, 7, 8, 9, 10, 11, 12 and 13.",
+            "This file's settings section is version 3, but this version of Universal Agents reads versions 5, 6, 7, 8, 9, 10, 11, 12, 13 and 14.",
         ),
         "0.9.0": (
             (SettingsSection(), PeopleSection(), AccessSection(), KnowledgeAsV090()),

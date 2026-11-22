@@ -511,19 +511,276 @@ async def test_an_approved_proposals_forms_are_watched_until_they_end(setup_gate
         released.set()
 
     form = await setups.open_proposal_link(
-        request_id="access_req_1:http:portainer",
+        request_id="access_req_1:http:portainer:account",
         person_id=owner,
         person_roles=gateway._request_context_service.team_roles(owner),
         tool_id="http:portainer",
         owner="team",
         reason="Restart the stack",
+        purpose="account",
     )
-    setups.after_proposal_links(request_id="access_req_1", forms=[(form, "http:portainer", "team")], then=release)
+    setups.after_proposal_links(
+        request_id="access_req_1",
+        forms=[(form, "http:portainer", "team", "account")],
+        then=release,
+    )
     await asyncio.sleep(0.05)
     assert not released.is_set(), "the task waits while the approver's form is open"
 
     broker.complete(form.session_id)
     await asyncio.wait_for(released.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_an_approved_proposals_gate_form_passes_gate_purpose_and_verifies_result(setup_gateway) -> None:
+    gateway, broker, _transport = setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    setups = gateway._credential_workflow.tool_setups
+    released = asyncio.Event()
+
+    async def release() -> None:
+        released.set()
+
+    form = await setups.open_proposal_link(
+        request_id="access_req_gate:http:portainer:gate",
+        person_id=owner,
+        person_roles=gateway._request_context_service.team_roles(owner),
+        tool_id="http:portainer",
+        owner="team",
+        reason="Pass the Cloudflare gate",
+        purpose="gate",
+    )
+    assert broker.requests[-1]["purpose"] == "gate"
+    setups.after_proposal_links(
+        request_id="access_req_gate",
+        forms=[(form, "http:portainer", "team", "gate")],
+        then=release,
+    )
+    broker.complete(form.session_id)
+    await asyncio.wait_for(released.wait(), timeout=5)
+
+    # A gate form whose broker result claims purpose="account" is rejected as a mismatch.
+    wrong = account_link_page_ending(
+        BrokerSessionOutcome(
+            ending=WATCH_FINISHED,
+            payload={
+                "status": "account_link_created",
+                "result": {
+                    "status": "account_link_created",
+                    "link_id": "link-1",
+                    "tool_id": "http:portainer",
+                    "owner_kind": "team",
+                    "purpose": "account",
+                },
+            },
+        ),
+        what="the team gate credential for Portainer",
+        tool_id="http:portainer",
+        owner="team",
+        purpose="gate",
+    )
+    assert (wrong.status, wrong.reason_code) == ("unavailable", "tool_setup_link_mismatch")
+
+
+@pytest.mark.asyncio
+async def test_after_proposal_links_reports_each_form_ending_as_it_finishes(setup_gateway) -> None:
+    gateway, broker, _transport = setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    roles = gateway._request_context_service.team_roles(owner)
+    setups = gateway._credential_workflow.tool_setups
+    released = asyncio.Event()
+    first_ended = asyncio.Event()
+    recorded: list[tuple[str, str, str]] = []
+
+    async def release() -> None:
+        released.set()
+
+    async def on_form_ended(form, tool_id: str, owner_kind: str, ending) -> None:
+        recorded.append((form.session_id, tool_id, ending.status))
+        if form.session_id == form_one.session_id:
+            first_ended.set()
+
+    form_one = await setups.open_proposal_link(
+        request_id="access_req_2:http:portainer",
+        person_id=owner,
+        person_roles=roles,
+        tool_id="http:portainer",
+        owner="team",
+        reason="Restart the stack",
+    )
+    form_two = await setups.open_proposal_link(
+        request_id="access_req_2:cli:x",
+        person_id=owner,
+        person_roles=roles,
+        tool_id="cli:x",
+        owner="team",
+        reason="Post updates",
+    )
+    setups.after_proposal_links(
+        request_id="access_req_2",
+        forms=[(form_one, "http:portainer", "team", "account"), (form_two, "cli:x", "team", "account")],
+        then=release,
+        on_form_ended=on_form_ended,
+    )
+
+    broker.complete(form_one.session_id)
+    await asyncio.wait_for(first_ended.wait(), timeout=5)
+    assert recorded == [(form_one.session_id, "http:portainer", "completed")]
+    assert not released.is_set(), "the agent still waits for the second form"
+
+    broker.complete(form_two.session_id)
+    await asyncio.wait_for(released.wait(), timeout=5)
+    assert len(recorded) == 2
+
+
+@pytest.mark.asyncio
+async def test_after_proposal_links_watch_failure_clears_link_and_waits_for_siblings(
+    setup_gateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A watch that raises still reports an unconfirmed ending and does not wake the agent early."""
+
+    from assistant_gateway.application.tool_setup import REASON_PAGE_UNCONFIRMED, _OpenedPage
+
+    gateway, broker, _transport = setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    roles = gateway._request_context_service.team_roles(owner)
+    setups = gateway._credential_workflow.tool_setups
+    released = asyncio.Event()
+    failed_recorded = asyncio.Event()
+    recorded: list[tuple[str, str, str | None, str]] = []
+
+    async def release() -> None:
+        released.set()
+
+    def on_form_ended(form, tool_id: str, owner_kind: str, ending) -> None:
+        recorded.append((tool_id, ending.status, ending.reason_code, ending.message))
+        if tool_id == "http:portainer":
+            failed_recorded.set()
+
+    form_one = await setups.open_proposal_link(
+        request_id="access_req_3:http:portainer",
+        person_id=owner,
+        person_roles=roles,
+        tool_id="http:portainer",
+        owner="team",
+        reason="Restart the stack",
+    )
+    form_two = await setups.open_proposal_link(
+        request_id="access_req_3:cli:x",
+        person_id=owner,
+        person_roles=roles,
+        tool_id="cli:x",
+        owner="team",
+        reason="Post updates",
+    )
+
+    real_page = setups._account_link_page
+
+    def patched_page(tool_id: str, owner_kind: str, form, *, purpose: str = "account"):
+        if tool_id == "http:portainer":
+            async def boom():
+                raise ValueError("malformed expires_at_utc")
+
+            return _OpenedPage(
+                label="Choose the team's account for Portainer",
+                receipt="opened",
+                url=form.form_url,
+                expires_at_utc=form.expires_at_utc,
+                watch=boom,
+            )
+        return real_page(tool_id, owner_kind, form, purpose=purpose)
+
+    monkeypatch.setattr(setups, "_account_link_page", patched_page)
+    setups.after_proposal_links(
+        request_id="access_req_3",
+        forms=[(form_one, "http:portainer", "team", "account"), (form_two, "cli:x", "team", "account")],
+        then=release,
+        on_form_ended=on_form_ended,
+    )
+
+    await asyncio.wait_for(failed_recorded.wait(), timeout=5)
+    assert recorded == [
+        (
+            "http:portainer",
+            "unavailable",
+            REASON_PAGE_UNCONFIRMED,
+            "Nobody could confirm whether the account link for Portainer finished.",
+        )
+    ]
+    await asyncio.sleep(0.05)
+    assert not released.is_set(), "then() must wait until the sibling form finishes"
+
+    broker.complete(form_two.session_id)
+    await asyncio.wait_for(released.wait(), timeout=5)
+    assert [entry[0] for entry in recorded] == ["http:portainer", "cli:x"]
+
+
+@pytest.mark.asyncio
+async def test_inbox_follow_up_links_dismiss_through_real_tool_setups_watch(setup_gateway) -> None:
+    """End-to-end: GatewayAccessInbox + real GatewayToolSetups.after_proposal_links + FakeBroker (C07)."""
+
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        AccessRequestKind,
+        AccessRequestV1,
+        ProposedAccountLinkV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
+
+    gateway, broker, _transport = setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    inbox = gateway.access_inbox
+    requests = inbox.requests()
+    request = AccessRequestV1(
+        request_id="access_req_e2e_follow_ups",
+        team_id=gateway.config.manager.team_id,
+        kind=AccessRequestKind.ACCESS,
+        requester_agent_id=None,
+        person_id=owner,
+        requested_by_person_id=owner,
+        subject=SubjectRefV1(kind=SubjectKind.USER, id=owner),
+        target=TargetRefV1(kind=TargetKind.TOOL, id="cli:x"),
+        level=AccessLevel.WRITE,
+        reason="Approve account links end-to-end",
+        created_at_utc=requests.service.clock(),
+    )
+    requests.service.store.create_request(request)
+    inbox.proposals.account_links[request.request_id] = [
+        ProposedAccountLinkV1(tool_id="http:portainer", owner="team", purpose="Restart the stack"),
+        ProposedAccountLinkV1(tool_id="cli:x", owner="team", purpose="Post updates"),
+    ]
+
+    decided = await inbox.decide(owner, request.request_id, "approve")
+    assert len(decided["follow_up_links"]) == 2
+    assert decided["follow_up_outcomes"] == []
+
+    # Broker opened two real sessions; complete the first and check review() drops only that link.
+    broker.complete("link_session_1")
+    await _until(
+        lambda: len(inbox._follow_ups.snapshot(request.request_id, viewer_id=owner, now=requests.service.clock()).links)
+        == 1
+    )
+    after_first = await inbox.review(owner, request.request_id)
+    assert after_first is not None
+    assert len(after_first["follow_up_links"]) == 1
+    assert "X" in after_first["follow_up_links"][0]["label"]
+    assert after_first["follow_up_outcomes"] == ["The account link for Portainer is done."]
+    assert after_first["follow_up_settling"] is False
+
+    # Decline the second form and check both links clear with both plain outcomes kept.
+    broker.decline("link_session_2")
+    await _settle(gateway)
+    after_second = await inbox.review(owner, request.request_id)
+    assert after_second is not None
+    assert after_second["follow_up_links"] == []
+    assert after_second["follow_up_settling"] is False
+    assert after_second["follow_up_outcomes"] == [
+        "The account link for Portainer is done.",
+        "The form for the account link for X (xurl) was closed without linking anything.",
+    ]
 
 
 # Steps done outside Universal Agents (set_up_tools external steps) ----------------------

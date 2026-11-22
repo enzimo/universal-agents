@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  DETAILS_LABEL, FOLLOW_UP_AFTER_REVIEW, FOLLOW_UP_PAGES_BELOW, NEEDS_DECISION, WAITING_FOR_ADMINISTRATOR, decisionRequestBody, localTimeFormatter,
+  DETAILS_LABEL, FOLLOW_UP_AFTER_REVIEW, FOLLOW_UP_EXPIRY_GRACE_MS, FOLLOW_UP_PAGES_BELOW, FOLLOW_UP_POLL_MS,
+  FOLLOW_UP_SETTLING_TEXT, NEEDS_DECISION, WAITING_FOR_ADMINISTRATOR, decisionRequestBody, localTimeFormatter,
   storedDecisionOutcome,
 } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
 import {
@@ -43,18 +44,42 @@ function message(id = "req-1") {
   return { role: "system", messageType: "access_review", accessRequestId: id, content: "announcement" };
 }
 
-function harness({ reviews = { "req-1": changeReview() }, decide, readError, onFollowUpPages } = {}) {
+function harness({ reviews = { "req-1": changeReview() }, decide, readError, onFollowUpPages, startClock = 1_000_000 } = {}) {
   const document = fakeDocument();
+  document.hidden = false;
+  const docListeners = new Map();
+  document.addEventListener = (type, fn) => {
+    if (!docListeners.has(type)) docListeners.set(type, []);
+    docListeners.get(type).push(fn);
+  };
+  const winListeners = new Map();
+  const intervals = new Map();
+  let nextTimerId = 0;
   const calls = { gets: [], posts: [], opened: [], decided: [] };
-  let clock = 1_000_000;
+  let clock = startClock;
   const reviews_ = { ...reviews };
+  let currentReadError = readError;
+  const browser = {
+    document,
+    console: { warn() {} },
+    addEventListener(type, fn) {
+      if (!winListeners.has(type)) winListeners.set(type, []);
+      winListeners.get(type).push(fn);
+    },
+    setInterval(callback, delay) {
+      nextTimerId += 1;
+      intervals.set(nextTimerId, { callback, delay });
+      return nextTimerId;
+    },
+    clearInterval(id) { intervals.delete(id); },
+  };
   const reviewer = createChatAccessReviews({
-    browser: { document, console: { warn() {} } },
+    browser,
     formatTime,
     now: () => clock,
     get: path => {
       calls.gets.push(path);
-      if (readError) return Promise.reject(readError);
+      if (currentReadError) return Promise.reject(currentReadError);
       const id = decodeURIComponent(path.split("/").at(-1));
       return Promise.resolve({ status: "ok", review: reviews_[id] });
     },
@@ -73,7 +98,13 @@ function harness({ reviews = { "req-1": changeReview() }, decide, readError, onF
   });
   const bubble = document.createElement("article");
   document.body.append(bubble);
-  return { document, reviewer, bubble, calls, reviews: reviews_, advance: ms => { clock += ms; } };
+  return {
+    document, browser, reviewer, bubble, calls, reviews: reviews_, intervals,
+    advance: ms => { clock += ms; },
+    setReadError: err => { currentReadError = err; },
+    fireDoc: type => (docListeners.get(type) || []).forEach(fn => fn()),
+    fireWin: type => (winListeners.get(type) || []).forEach(fn => fn()),
+  };
 }
 
 test("only system access review messages with a request id get a card", () => {
@@ -241,7 +272,6 @@ test("the decision body is shared with the Inbox: keep for access requests, kept
   { choice: "approve", note: "ok", kept_item_ids: ["r1"], hand_on: true });
 });
 
-
 // An approved proposal's credential forms (review finding F2).
 const FORMS = [{ label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/a",
   frame_url: "http://127.0.0.1:18600/account-link/a?view=card", expires_at_utc: "2026-11-20T10:15:00Z" }];
@@ -277,4 +307,390 @@ test("forms the conversation cannot show as cards stay links", async () => {
   const decided = byClass(slot, "access-review-card")[0];
   assert.deepEqual(byTag(decided, "a").map(anchor => anchor.getAttribute("href")), [FORMS[0].url]);
   assert.equal(byClass(decided, "access-review-follow-up-note").length, 0);
+});
+
+test("compact card combines status and flags in one row, folds choice help in Details before buttons, and keeps aria-describedby", async () => {
+  const choice_effects = {
+    approve: { task: "Coder can use it for this task.", kept: "TeamLead keeps it for you." },
+    approve_read: { task: "Read only for this task.", kept: "Read only kept." },
+    deny: { any: "Nothing is given." },
+  };
+  const { reviewer, bubble } = harness({ reviews: { "req-1": accessReview({ choice_effects, choice_effects_default: "kept" }) } });
+  const slot = reviewer.mount(bubble, message());
+  await settle();
+  const card = byClass(slot, "access-review-card")[0];
+  const heading = byClass(card, "permission-request-heading")[0];
+  assert.equal(byClass(heading, "access-inbox-status").length, 0, "status pill moves out of the heading in compact mode");
+
+  const statusRow = byClass(card, "access-review-status-row")[0];
+  assert.ok(statusRow, "status pill and warning chips share one inline row");
+  assert.equal(byClass(statusRow, "access-inbox-status")[0].textContent, NEEDS_DECISION);
+  assert.deepEqual(byClass(statusRow, "access-review-flag").map(chip => chip.textContent), ["Full access", "Runs code"]);
+
+  const fold = byTag(card, "details")[0];
+  const decision = byClass(card, "access-review-decision")[0];
+  assert.ok(card.children.indexOf(fold) < card.children.indexOf(decision),
+    "Details (with Keep/Note/choice help) precedes the decision buttons in DOM and keyboard order");
+  assert.equal(byTag(fold, "textarea")[0].rows, 1);
+
+  const helpList = byClass(fold, "access-review-choice-help")[0];
+  assert.ok(helpList, "What each choice does is folded inside Details on compact chat cards");
+  assert.equal(byClass(decision, "access-review-choice-help").length, 0);
+  const approveBtn = byTag(decision, "button").find(btn => btn.textContent === "Approve");
+  const approveHelp = byClass(helpList, "access-review-choice-help-item").find(li => li.getAttribute("data-choice") === "approve");
+  assert.equal(approveBtn.getAttribute("aria-describedby"), approveHelp.id);
+  approveBtn.dispatchEvent(new Event("focus"));
+  assert.equal(approveHelp.classList.contains("is-active"), true);
+  approveBtn.dispatchEvent(new Event("blur"));
+  assert.equal(approveHelp.classList.contains("is-active"), false);
+});
+
+test("decided chat cards are compact and dismiss local-decision follow-up links across 50 transcript redraws", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const withLink = changeReview({
+    status: "granted", decision: "approve", can_decide: false, choices: [],
+    follow_up_links: [{ label: "Choose the credential for Portainer", url: "https://broker.example/link/1", expires_at_utc: expires }],
+    follow_up_outcomes: [],
+  });
+  const h = harness({
+    startClock: start,
+    decide: () => Promise.resolve({ status: "ok", review: withLink }),
+  });
+  let slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+  byTag(slot, "button").find(btn => btn.textContent === "Approve").click();
+  await settle();
+
+  let card = byClass(slot, "access-review-card")[0];
+  assert.ok(card.classList.contains("is-compact") && card.classList.contains("is-decided"));
+  assert.deepEqual(byTag(card, "a").map(a => a.textContent), ["Choose the credential for Portainer"]);
+  assert.equal(h.intervals.size, 1, "bounded poll starts while a follow-up link is visible");
+  assert.equal([...h.intervals.values()][0].delay, FOLLOW_UP_POLL_MS);
+
+  // Simulate 50 transcript redraws in chat.js renderMessages order: clear list,
+  // build each bubble detached, call mount, then append bubble to the document.
+  for (let i = 0; i < 50; i += 1) {
+    h.document.body.replaceChildren();
+    const detached = h.document.createElement("article");
+    slot = h.reviewer.mount(detached, message());
+    h.document.body.append(detached);
+  }
+  await settle();
+  assert.equal(byTag(slot, "a").length, 1);
+  assert.equal(h.intervals.size, 1, "poll timer stays running after detached-bubble transcript redraws");
+
+  // Form finishes on the server: focus/poll refreshes and clears the button on the connected slot.
+  h.reviews["req-1"] = {
+    ...withLink,
+    follow_up_links: [],
+    follow_up_outcomes: ["The account link for Portainer is done."],
+  };
+  h.fireWin("focus");
+  await settle();
+
+  card = byClass(slot, "access-review-card")[0];
+  assert.ok(card.classList.contains("is-compact") && card.classList.contains("is-decided"));
+  assert.equal(byTag(card, "a").length, 0, "credential button disappears once the form finishes");
+  const statusLine = byClass(card, "access-review-follow-up-outcomes")[0];
+  assert.equal(statusLine.getAttribute("role"), "status");
+  assert.equal(statusLine.textContent, "The account link for Portainer is done.");
+  assert.equal(h.intervals.size, 0, "poll timer stops immediately once no pending links remain");
+});
+
+test("reloaded decided card hides expired follow-up link client-side, stops after expiry+grace, pauses when hidden, and stops on sign-out or 403", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const reloaded = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [{ label: "Choose the credential for Portainer", url: "https://broker.example/link/1", expires_at_utc: expires }],
+    follow_up_outcomes: [],
+  });
+  const h = harness({ startClock: start, reviews: { "req-1": reloaded } });
+  const slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+
+  assert.ok(byClass(slot, "access-review-card")[0].classList.contains("is-compact"));
+  assert.equal(byTag(slot, "a").length, 1);
+  assert.equal(h.intervals.size, 1);
+
+  // Hidden tab stops polling; becoming visible triggers a refresh and resumes polling.
+  h.document.hidden = true;
+  h.fireDoc("visibilitychange");
+  assert.equal(h.intervals.size, 0, "no polling while tab is hidden");
+
+  const getsBefore = h.calls.gets.length;
+  h.document.hidden = false;
+  h.fireDoc("visibilitychange");
+  await settle();
+  assert.equal(h.calls.gets.length, getsBefore + 1, "visibilitychange refreshes immediately");
+  assert.equal(h.intervals.size, 1);
+
+  // Passing expires_at_utc hides the link button immediately client-side, while staying active in grace.
+  h.advance(15 * 60 * 1000);
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(byTag(slot, "a").length, 0, "expired link is hidden client-side immediately");
+  assert.equal(h.intervals.size, 1, "watcher stays active during grace for final server outcome");
+
+  // Past expiry + grace: watcher stops polling automatically, yet returning
+  // focus still reads the server once so the expired outcome line appears.
+  h.advance(FOLLOW_UP_EXPIRY_GRACE_MS + 1000);
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(h.intervals.size, 0, "watcher stops after expiry + grace");
+
+  h.reviews["req-1"] = {
+    ...reloaded,
+    follow_up_links: [],
+    follow_up_outcomes: ["The account link for Portainer expired."],
+  };
+  h.fireWin("focus");
+  await settle();
+  assert.equal(byTag(slot, "a").length, 0);
+  assert.match(byClass(slot, "access-review-follow-up-outcomes")[0].textContent,
+    /The account link for Portainer expired\./);
+  assert.equal(h.intervals.size, 0);
+
+  // 403/404 during follow-up refresh stops polling without replacing the decided card with an error card.
+  const h403 = harness({ startClock: start, reviews: { "req-1": reloaded } });
+  const slot403 = h403.reviewer.mount(h403.bubble, message());
+  await settle();
+  assert.equal(h403.intervals.size, 1);
+  h403.setReadError(Object.assign(new Error("Forbidden"), { status: 403 }));
+  await h403.reviewer.refreshFollowUps();
+  await settle();
+  assert.equal(h403.intervals.size, 0, "403 stops follow-up polling");
+  assert.ok(byClass(slot403, "access-review-card")[0].classList.contains("is-decided"),
+    "decided card is kept intact on follow-up refresh error");
+
+  // Sign-out stops polling immediately.
+  const hSignOut = harness({ startClock: start, reviews: { "req-1": reloaded } });
+  hSignOut.reviewer.mount(hSignOut.bubble, message());
+  await settle();
+  assert.equal(hSignOut.intervals.size, 1);
+  hSignOut.reviewer.clear();
+  assert.equal(hSignOut.intervals.size, 0);
+});
+
+test("Web Chat card keeps polling while a form is settling in watch grace and replaces settling with completion (F3)", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const settlingUntil = "2026-11-21T12:16:00+00:00";
+  const withLink = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [{ label: "Choose the credential for Portainer", url: "https://broker.example/link/1", expires_at_utc: expires }],
+    follow_up_outcomes: [],
+    follow_up_settling: false,
+    follow_up_settling_until_utc: null,
+  });
+  const h = harness({ startClock: start, reviews: { "req-1": withLink } });
+  const slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+  assert.equal(byTag(slot, "a").length, 1);
+  assert.equal(h.intervals.size, 1);
+
+  // Clock crosses expires_at_utc; server reports settling during WATCH_GRACE instead of premature expiry.
+  h.advance(15 * 60 * 1000 + 2000);
+  h.reviews["req-1"] = {
+    ...withLink,
+    follow_up_links: [],
+    follow_up_outcomes: [],
+    follow_up_settling: true,
+    follow_up_settling_until_utc: settlingUntil,
+  };
+  [...h.intervals.values()][0].callback();
+  await settle();
+
+  assert.equal(byTag(slot, "a").length, 0, "expired link button is hidden while settling");
+  assert.equal(byClass(slot, "access-review-follow-up-outcomes")[0].textContent, FOLLOW_UP_SETTLING_TEXT);
+  assert.equal(h.intervals.size, 1, "watcher keeps polling while follow_up_settling is true");
+
+  // Late submission finishes during WATCH_GRACE: next poll replaces settling text with completion and stops polling.
+  h.advance(4000);
+  h.reviews["req-1"] = {
+    ...withLink,
+    follow_up_links: [],
+    follow_up_outcomes: ["The account link for Portainer is done."],
+    follow_up_settling: false,
+    follow_up_settling_until_utc: null,
+  };
+  [...h.intervals.values()][0].callback();
+  await settle();
+
+  assert.equal(byTag(slot, "a").length, 0);
+  assert.equal(byClass(slot, "access-review-follow-up-outcomes")[0].textContent,
+    "The account link for Portainer is done.");
+  assert.equal(h.intervals.size, 0, "watcher stops once settling finishes");
+
+  // Reloading directly into the settling window also renders the settling state and polls until completion.
+  const hReload = harness({
+    startClock: Date.parse("2026-11-21T12:15:10Z"),
+    reviews: {
+      "req-1": {
+        ...withLink,
+        follow_up_links: [],
+        follow_up_outcomes: [],
+        follow_up_settling: true,
+        follow_up_settling_until_utc: settlingUntil,
+      },
+    },
+  });
+  const reloadSlot = hReload.reviewer.mount(hReload.bubble, message());
+  await settle();
+  assert.equal(byClass(reloadSlot, "access-review-follow-up-outcomes")[0].textContent, FOLLOW_UP_SETTLING_TEXT);
+  assert.equal(hReload.intervals.size, 1, "reloaded settling card starts follow-up watcher");
+});
+
+test("reloaded decided card hands off active framed forms once, clears pages prompt when finished while keeping non-handed-off link, and ignores non-approver empty links", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const framedForm = {
+    label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/a",
+    frame_url: "http://127.0.0.1:18600/account-link/a?view=card", expires_at_utc: expires,
+  };
+  const plainForm = {
+    label: "Choose the credential for Gitea", url: "http://127.0.0.1:18600/account-link/b",
+    expires_at_utc: expires,
+  };
+  const handed = [];
+  const h = harness({
+    startClock: start,
+    reviews: {
+      "req-1": changeReview({
+        status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+        follow_up_links: [framedForm, plainForm], follow_up_outcomes: [],
+      }),
+    },
+    onFollowUpPages: (id, links, placement) => {
+      handed.push({ id, urls: links.map(link => link.url), placement });
+      return links;
+    },
+  });
+
+  const slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+
+  assert.deepEqual(handed, [{ id: "req-1", urls: [framedForm.url], placement: FOLLOW_UP_AFTER_REVIEW }],
+    "reload hands off framed link once");
+  assert.equal(byClass(slot, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_BELOW);
+  assert.deepEqual(byTag(slot, "a").map(a => a.textContent), ["Choose the credential for Gitea"]);
+
+  // Re-mounting during transcript re-renders never calls onFollowUpPages inside render.
+  h.reviewer.mount(h.bubble, message());
+  await settle();
+  assert.equal(handed.length, 1);
+
+  // Framed form finishes on the server: pages prompt clears while plain link remains a button.
+  h.reviews["req-1"] = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [plainForm], follow_up_outcomes: ["The account link for Portainer is done."],
+  });
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(byClass(slot, "access-review-follow-up-note").length, 0, "pages prompt clears once handed-off form finishes");
+  assert.deepEqual(byTag(slot, "a").map(a => a.textContent), ["Choose the credential for Gitea"]);
+  assert.match(byClass(slot, "access-review-follow-up-outcomes")[0].textContent, /Portainer is done\./);
+
+  // Plain form finishes too: button disappears and watcher stops.
+  h.reviews["req-1"] = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [], follow_up_outcomes: ["The account link for Portainer is done.", "The account link for Gitea is done."],
+  });
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(byTag(slot, "a").length, 0);
+  assert.equal(byClass(slot, "access-review-follow-up-note").length, 0);
+  assert.equal(h.intervals.size, 0);
+
+  // Non-approver reload (server returns empty follow_up_links): no hand-off, no prompt, no buttons.
+  const otherHanded = [];
+  const hOther = harness({
+    startClock: start,
+    reviews: {
+      "req-1": changeReview({
+        status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+        follow_up_links: [], follow_up_outcomes: [],
+      }),
+    },
+    onFollowUpPages: (id, links) => { otherHanded.push({ id, links }); return links; },
+  });
+  const otherSlot = hOther.reviewer.mount(hOther.bubble, message());
+  await settle();
+  assert.equal(otherHanded.length, 0);
+  assert.equal(byClass(otherSlot, "access-review-follow-up-note").length, 0);
+  assert.equal(byTag(otherSlot, "a").length, 0);
+});
+
+test("waiting-to-decided re-read hands off remaining subset after one form finished and clears prompt on client-side expiry", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const formB = {
+    label: "Choose the credential for Gitea", url: "http://127.0.0.1:18600/account-link/b",
+    frame_url: "http://127.0.0.1:18600/account-link/b?view=card", expires_at_utc: expires,
+  };
+  const handed = [];
+  const h = harness({
+    startClock: start,
+    onFollowUpPages: (id, links, placement) => {
+      handed.push({ id, urls: links.map(link => link.url), placement });
+      return links;
+    },
+  });
+
+  // Initial mount sees waiting request.
+  h.reviewer.mount(h.bubble, message());
+  await settle();
+  assert.equal(handed.length, 0);
+
+  // Approved elsewhere and form A already finished, leaving partial subset [formB].
+  h.reviews["req-1"] = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [formB], follow_up_outcomes: ["The account link for Portainer is done."],
+  });
+  h.advance(REFRESH_WAITING_AFTER_MS);
+  const slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+
+  assert.deepEqual(handed, [{ id: "req-1", urls: [formB.url], placement: FOLLOW_UP_AFTER_REVIEW }]);
+  assert.equal(byClass(slot, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_BELOW);
+  assert.equal(byTag(slot, "a").length, 0);
+  assert.equal(h.intervals.size, 1);
+
+  // Crossing expiry hides the pages prompt client-side immediately.
+  h.advance(15 * 60 * 1000);
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(byClass(slot, "access-review-follow-up-note").length, 0, "expired handed-off form clears pages prompt client-side");
+});
+
+test("refreshFollowUps redraws the decided card when a hand-off succeeds with an unchanged followUpSignature", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const formA = {
+    label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/a",
+    frame_url: "http://127.0.0.1:18600/account-link/a?view=card", expires_at_utc: expires,
+  };
+  let allowHandOff = false;
+  const decidedReview = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [formA], follow_up_outcomes: [],
+  });
+  const h = harness({
+    startClock: start,
+    reviews: { "req-1": decidedReview },
+    onFollowUpPages: (_id, links) => (allowHandOff ? links : []),
+  });
+
+  const slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+  assert.equal(byTag(slot, "a").length, 1, "starts as fallback button when initial hand-off returns empty");
+  assert.equal(byClass(slot, "access-review-follow-up-note").length, 0);
+
+  // Next poll returns the identical review (same followUpSignature), but hand-off now succeeds.
+  allowHandOff = true;
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(byTag(slot, "a").length, 0, "card redraws to remove fallback button");
+  assert.equal(byClass(slot, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_BELOW);
 });

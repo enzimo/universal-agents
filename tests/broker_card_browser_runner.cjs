@@ -38,9 +38,138 @@ async function openChat(browser, base) {
   return page;
 }
 
-async function openPreviewConversation(page, base) {
+async function openPreviewConversation(page, base, colorMode) {
   await page.goto(`${base}/webchat`);
+  if (colorMode) {
+    await page.evaluate((mode) => {
+      document.documentElement.setAttribute("data-color-mode", mode);
+    }, colorMode);
+  }
   await page.locator(PREVIEW_THREAD_ROW).click();
+}
+
+function parseRgba(value) {
+  const match = String(value || "").match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)/i);
+  if (!match) return null;
+  return {
+    r: Number(match[1]),
+    g: Number(match[2]),
+    b: Number(match[3]),
+    a: match[4] === undefined ? 1 : Number(match[4]),
+  };
+}
+
+function blendColor(fg, bg) {
+  const alpha = Math.max(0, Math.min(1, fg.a));
+  return {
+    r: fg.r * alpha + bg.r * (1 - alpha),
+    g: fg.g * alpha + bg.g * (1 - alpha),
+    b: fg.b * alpha + bg.b * (1 - alpha),
+    a: 1,
+  };
+}
+
+function relativeLuminance({r, g, b}) {
+  const channel = (v) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+}
+
+function contrastRatio(fg, bg) {
+  const l1 = relativeLuminance(fg);
+  const l2 = relativeLuminance(bg);
+  return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+}
+
+async function checkCardColorMode(page, cardSelector, mode, expectedBg, check) {
+  await page.frameLocator(`${cardSelector} ${FRAME}`).locator("input[type=password]").waitFor({timeout: 15000});
+  const outer = await page.evaluate(([selector, frameSelector]) => {
+    const card = document.querySelector(selector);
+    const frame = document.querySelector(`${selector} ${frameSelector}`);
+    return {
+      pageMode: document.documentElement.getAttribute("data-color-mode"),
+      cardBg: card ? getComputedStyle(card).backgroundColor : "",
+      frameSrc: frame ? frame.getAttribute("src") || "" : "",
+    };
+  }, [cardSelector, FRAME]);
+  const srcMode = outer.frameSrc ? new URL(outer.frameSrc).searchParams.get("mode") : "";
+  const handle = await page.$(`${cardSelector} ${FRAME}`);
+  const contentFrame = handle ? await handle.contentFrame() : null;
+  const frame = contentFrame ? page.frames().find((candidate) => candidate === contentFrame) : null;
+  if (!frame) throw new Error(`failed: could not locate ${mode} broker frame in page.frames()`);
+  const inner = await frame.evaluate(() => {
+    const sample = (selector) => {
+      const node = document.querySelector(selector);
+      if (!node) return null;
+      const st = getComputedStyle(node);
+      return {selector, color: st.color, bg: st.backgroundColor};
+    };
+    return {
+      frameMode: document.documentElement.getAttribute("data-color-mode"),
+      bodyBg: getComputedStyle(document.body).backgroundColor,
+      samples: [
+        sample("h1"),
+        sample("label"),
+        sample(".page-footer"),
+        sample("button.decline-action"),
+      ].filter(Boolean),
+    };
+  });
+  check(
+    outer.pageMode === mode
+      && srcMode === mode
+      && inner.frameMode === mode
+      && outer.cardBg === expectedBg
+      && inner.bodyBg === expectedBg,
+    `${mode} mode broker frame matches outer card background (${expectedBg})`,
+  );
+  const bgRgb = parseRgba(expectedBg);
+  const minContrast = inner.samples.reduce((lowest, item) => {
+    const fgRgb = parseRgba(item.color);
+    const itemBg = parseRgba(item.bg);
+    const effectiveBg = itemBg && itemBg.a > 0 ? blendColor(itemBg, bgRgb) : bgRgb;
+    const ratio = contrastRatio(blendColor(fgRgb, effectiveBg), effectiveBg);
+    return Math.min(lowest, ratio);
+  }, Infinity);
+  const contrastOk = inner.samples.length >= 4 && minContrast >= 4.5;
+  check(
+    contrastOk,
+    `${mode} mode broker frame text meets WCAG contrast${contrastOk ? "" : ` (${minContrast.toFixed(2)}:1)`}`,
+  );
+}
+
+async function checkDarkSecondaryAction(context, secondaryPage, check) {
+  const page = await context.newPage();
+  try {
+    await page.goto(secondaryPage);
+    await page.locator("button.secondary-action").waitFor({timeout: 15000});
+    await page.waitForFunction(() => document.documentElement.getAttribute("data-color-mode") === "dark", null, {timeout: 15000});
+    const style = await page.evaluate(() => {
+      const btn = document.querySelector("button.secondary-action");
+      const main = document.querySelector("main");
+      const btnStyle = getComputedStyle(btn);
+      const mainStyle = main ? getComputedStyle(main) : null;
+      return {
+        mode: document.documentElement.getAttribute("data-color-mode"),
+        color: btnStyle.color,
+        bg: btnStyle.backgroundColor,
+        mainBg: mainStyle ? mainStyle.backgroundColor : "rgb(17, 23, 27)",
+      };
+    });
+    const canvas = parseRgba("rgb(3, 2, 2)");
+    const mainBg = blendColor(parseRgba(style.mainBg), canvas);
+    const btnBg = blendColor(parseRgba(style.bg), mainBg);
+    const btnFg = blendColor(parseRgba(style.color), btnBg);
+    const ratio = contrastRatio(btnFg, btnBg);
+    check(
+      style.mode === "dark" && ratio >= 4.5,
+      `dark broker page .secondary-action meets WCAG contrast`,
+    );
+  } finally {
+    await page.close();
+  }
 }
 
 const isActive = (page, selector) =>
@@ -92,12 +221,13 @@ function inboxRoutes(page, followUp) {
   });
 }
 
-async function cards(browser, {base, typed, follow_up: followUp}) {
+async function cards(browser, {base, typed, follow_up: followUp, secondary_page: secondaryPage}) {
   const {passed, check} = checker();
   const page = await openChat(browser, base);
   await inboxRoutes(page, followUp);
-  await openPreviewConversation(page, base);
+  await openPreviewConversation(page, base, "dark");
   await page.waitForFunction((frame) => document.querySelectorAll(frame).length === 4, FRAME, {timeout: 30000});
+  await checkCardColorMode(page, CARD(1), "dark", "rgb(17, 23, 27)", check);
 
   const sandboxes = await page.$$eval(FRAME, (frames) => frames.map((frame) => frame.getAttribute("sandbox")));
   check(
@@ -226,7 +356,7 @@ async function cards(browser, {base, typed, follow_up: followUp}) {
   const decidedLinks = await inbox.locator('[data-request-id="req-proposal"] a').count();
   check(decidedLinks === 0, "approving a proposal in the Inbox panel says its forms are in the conversation");
   await inbox.locator("button", {hasText: "Show in the conversation"}).click();
-  const followUpCard = '[data-item-id="account_link:req-proposal:1"]';
+  const followUpCard = '[data-item-id^="account_link:req-proposal:"]';
   await page.waitForFunction(
     ([selector, frame]) => Boolean(document.querySelector(`${selector} ${frame}`)), [followUpCard, FRAME], {timeout: 15000},
   );
@@ -263,12 +393,19 @@ async function cards(browser, {base, typed, follow_up: followUp}) {
   await page.waitForFunction((frame) => document.querySelectorAll(frame).length === 0, FRAME, {timeout: 15000});
   check(true, "a thread switch removed the remaining frames");
 
+  await page.evaluate(() => {
+    document.documentElement.setAttribute("data-color-mode", "light");
+  });
   await page.locator(PREVIEW_THREAD_ROW).click();
   await page.waitForFunction((frame) => document.querySelectorAll(frame).length === 2, FRAME, {timeout: 15000});
+  await checkCardColorMode(page, CARD(1), "light", "rgb(255, 255, 255)", check);
   await page.locator("#settings-button").click();
   await page.locator("#settings-logout-button").click();
   await page.waitForFunction((frame) => document.querySelectorAll(frame).length === 0, FRAME, {timeout: 15000});
   check(true, "sign-out removed every frame");
+  if (secondaryPage) {
+    await checkDarkSecondaryAction(page.context(), secondaryPage, check);
+  }
   return passed;
 }
 

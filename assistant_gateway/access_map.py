@@ -82,6 +82,7 @@ from assistant_gateway.application.access_map_ports import (
 from assistant_gateway.file_sharing import GatewayFileSharing, share_view
 from custom_agents.history_cleanup import HISTORY_CLEANUP_TOOL_ID
 from secure_tools.auth_methods import tool_sign_in
+from secure_tools.chat_commands import link_command
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccountLinkV1,
@@ -93,6 +94,7 @@ from custom_messages.contracts.access_v2 import (
     GrantStatus,
     GrantV1,
     LinkOwnerKind,
+    LinkPurpose,
     SubjectKind,
     SubjectRefV1,
     TargetKind,
@@ -155,26 +157,31 @@ ACCOUNT_WORDS = {
 
 
 def account_words(tool: ToolDefinitionV1, sharing: TeamAccountSharing) -> str:
-    """Which account the tool uses for this team (``access_control.account_sharing``), naming the command that sets it up."""
+    """Which account (and any team gate credential) the tool uses for this team, naming the command that sets it up."""
 
     sign_in = tool_sign_in(tool.tool_id)
     team_used = sharing.team_account_used(tool)
     private_note = " (the team keeps it private)" if tool.sharing_choice and not team_used else ""
     if sign_in is not None and team_used:
-        return (
+        base = (
             f"Uses the sign-in of the person the task works for ({sign_in.command}), "
             f"else the team's linked account ({sign_in.command} team), which the team shares"
         )
-    if sign_in is not None:
+    elif sign_in is not None:
         # A sign-in tool uses the person's sign-in whatever its account mode (X keeps a team link).
-        return f"{ACCOUNT_WORDS[AccountMode.PERSONAL_LOGIN]} ({sign_in.command}){private_note}"
-    if tool.account is not AccountMode.LINKED_CREDENTIAL:
-        return ACCOUNT_WORDS[tool.account]
-    if not team_used:
-        return f"Uses only the linked account of the person the task works for{private_note}"
-    if "person" not in tool.link_owners:
-        return "Uses the team's linked account"
-    return "Uses the linked account of the person the task works for, else the team's, which the team shares"
+        base = f"{ACCOUNT_WORDS[AccountMode.PERSONAL_LOGIN]} ({sign_in.command}){private_note}"
+    elif tool.account is not AccountMode.LINKED_CREDENTIAL:
+        base = ACCOUNT_WORDS[tool.account]
+    elif not team_used:
+        base = f"Uses only the linked account of the person the task works for{private_note}"
+    elif "person" not in tool.link_owners:
+        base = "Uses the team's linked account"
+    else:
+        base = "Uses the linked account of the person the task works for, else the team's, which the team shares"
+    if tool.gate_injections:
+        gate_cmd = link_command(tool.tool_id, LinkOwnerKind.TEAM, purpose=LinkPurpose.GATE)
+        return f"{base}; uses a team gate credential ({gate_cmd})"
+    return base
 
 
 # The Block form's subject kinds, as operator_commands.parse_subject spells them.
@@ -503,9 +510,11 @@ class _MapRead:
         )
 
     def link_view(self, link: AccountLinkV1, *, team_unused_reason: str | None) -> dict[str, Any]:
-        """One linked account; ``team_unused_reason`` says why the team's account is not used, None when it is."""
+        """One linked account or team gate credential; ``team_unused_reason`` applies only to team account links."""
 
-        if link.owner_kind is LinkOwnerKind.TEAM:
+        if link.purpose is LinkPurpose.GATE:
+            owner = "The team's gate credential"
+        elif link.owner_kind is LinkOwnerKind.TEAM:
             owner = "The team's account" + (f" (not used: {team_unused_reason})" if team_unused_reason else "")
         elif link.owner_id == self.person.person_id:
             owner = "Your account"
@@ -514,6 +523,7 @@ class _MapRead:
         return {
             "link_id": link.link_id,
             "owner_kind": link.owner_kind.value,
+            "purpose": link.purpose.value,
             "owner_words": owner,
             "linked_by": self.who(link.created_by),
             "created_at_utc": link.created_at_utc.isoformat(),
@@ -771,14 +781,19 @@ class GatewayAccessMap:
         page, meta = _page(tools, offset)
         shown = {tool.tool_id for tool in page}
         links: dict[str, list[AccountLinkV1]] = {}
-        for link in read.service.store.list_links(read.service.team_id):
+        for link in read.service.store.list_links(read.service.team_id, purpose=None):
             if link.tool_id in shown and read.link_visible(link):
                 links.setdefault(link.tool_id, []).append(link)
 
-        def link_order(link: AccountLinkV1) -> tuple[bool, bool, str]:
-            # The team's account, then the person's own, then others by name.
+        def link_order(link: AccountLinkV1) -> tuple[bool, bool, bool, str]:
+            # The team's gate credential and account, then the person's own, then others by name.
             mine = link.owner_kind is LinkOwnerKind.PERSON and link.owner_id == read.person.person_id
-            return link.owner_kind is not LinkOwnerKind.TEAM, not mine, read.person_name(link.owner_id).lower()
+            return (
+                link.owner_kind is not LinkOwnerKind.TEAM,
+                link.purpose is not LinkPurpose.GATE,
+                not mine,
+                read.person_name(link.owner_id).lower(),
+            )
 
         return {
             **meta,
@@ -802,7 +817,7 @@ class GatewayAccessMap:
             "description": tool.description,
             "kind_words": TOOL_KIND_WORDS[tool.kind],
             "account_words": account_words(tool, sharing),
-            "uses_accounts": tool.account is not AccountMode.NONE,
+            "uses_accounts": tool.account is not AccountMode.NONE or bool(tool.gate_injections),
             "tool_sets": [tool_sets[item].display_name if item in tool_sets else item for item in tool.tool_sets],
             "operation_count": len(tool.operations),
             "operations_words": _operations_words(tool),

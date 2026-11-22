@@ -62,6 +62,15 @@
       "title": "LinkOwnerKind",
       "type": "string"
     },
+    "LinkPurpose": {
+      "description": "What a stored credential link is used for.",
+      "enum": [
+        "account",
+        "gate"
+      ],
+      "title": "LinkPurpose",
+      "type": "string"
+    },
     "SubjectKind": {
       "description": "Who a grant is for. A grant to a type, role, or team covers its members.\n\nA schedule holds the access of one scheduled job (owner's decision\n2026-09-30, \"access follows the work\"): every agent in one of its runs is\nin it, whatever agent type runs it. Its id is ``<team>/<schedule id>``.",
       "enum": [
@@ -99,7 +108,7 @@
   "$id": "https://universal-agents.dev/schemas/team-transfer/v1/AccountLinkV1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "The stored credential a tool uses for a team or a person, and where it goes.\n\nLinks grant nothing: access to the tool comes from grants. The broker uses\nthe person's own link first and the team's link otherwise, and sends the\ncredential only to the hosts of the tool's definition.",
+  "description": "The stored credential a tool uses for a team or a person, and where it goes.\n\nLinks grant nothing: access to the tool comes from grants. For account links\nthe broker uses the person's own link first and the team's link otherwise;\nfor gate links the broker always uses the team's active gate link regardless\nof account sharing, and sends credentials only to the tool's hosts.",
   "properties": {
     "created_at_utc": {
       "format": "date-time",
@@ -135,6 +144,10 @@
     },
     "owner_kind": {
       "$ref": "#/$defs/LinkOwnerKind"
+    },
+    "purpose": {
+      "$ref": "#/$defs/LinkPurpose",
+      "default": "account"
     },
     "revoked_at_utc": {
       "anyOf": [

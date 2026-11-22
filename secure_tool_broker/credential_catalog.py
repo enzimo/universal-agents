@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ from custom_messages.contracts.access_v2 import (
     AccountLinkV1,
     InjectionPlacement,
     LinkOwnerKind,
+    LinkPurpose,
 )
 from env_secrets import get_env_with_file_fallback
 from secure_tool_broker.bitwarden_cli import ensure_bitwarden_server_configured_from_env
@@ -58,7 +60,8 @@ from secure_tool_broker.credential_templates import (
     render_credential_template_request,
     save_approved_template_variant,
 )
-from secure_tool_broker.redaction import redact_json, redact_text
+from secure_tool_broker.defaults import DEFAULT_API_REQUEST_USER_AGENT
+from secure_tool_broker.redaction import SECRET_VALUE_RE, redact_json, redact_text
 from secure_tool_broker.sealbox_cli import (
     first_json_value,
     is_auth_required as sealbox_is_auth_required,
@@ -2139,9 +2142,111 @@ def _resolve_injections(
             return resolved
         rendered = injection.render(resolved.value)
         values[(injection.placement, injection.name)] = rendered
-        if resolved.secret and resolved.value:
+        # Team gate credentials are always redacted from responses and errors,
+        # even when stored in a field not marked secret.
+        if resolved.value and (resolved.secret or link.purpose is LinkPurpose.GATE):
             secrets_found += [resolved.value, rendered]
     return values, secrets_found
+
+
+class _ReservedQueryError(ValueError):
+    """Raised when an agent-supplied query parameter collides with a broker-managed injection."""
+
+    def __init__(self, message: str, *, query_params: list[str], source: str) -> None:
+        super().__init__(message)
+        self.query_params = query_params
+        self.source = source
+
+
+def _apply_api_injections(
+    headers: dict[str, str],
+    *,
+    account_link: AccountLinkV1 | None,
+    gate_link: AccountLinkV1 | None,
+    host: str,
+) -> tuple[dict[str, str], dict[str, str], list[str]] | ToolResult:
+    """Resolve account and gate injections, refuse reserved header overrides or overlaps, and return
+    ``(account_query, gate_query, secret_values)``."""
+
+    placements = frozenset({InjectionPlacement.HEADER, InjectionPlacement.QUERY})
+    agent_headers_lower = {name.lower() for name in headers}
+    injected_headers_by_lower: dict[str, tuple[str, str]] = {}
+    account_query: dict[str, str] = {}
+    gate_query: dict[str, str] = {}
+    secret_values: list[str] = []
+
+    sources: tuple[tuple[str, str, AccountLinkV1 | None], ...] = (
+        ("account", "linked account", account_link),
+        ("gate", "team gate credential", gate_link),
+    )
+    for source_tag, source_label, link in sources:
+        if link is None:
+            continue
+        resolved = _resolve_injections(link, placements)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        injected, secrets_found = resolved
+        secret_values.extend(secrets_found)
+        link_headers = {name: value for (place, name), value in injected.items() if place is InjectionPlacement.HEADER}
+        link_query = {name: value for (place, name), value in injected.items() if place is InjectionPlacement.QUERY}
+        reserved = {name.lower() for name in link_headers} & agent_headers_lower
+        if reserved:
+            reserved_sorted = sorted(reserved)
+            _LOGGER.warning(
+                "Refused web request that set a broker-managed header. "
+                "event=api_request_header_reserved source=%s host=%s link_id=%s headers=%s",
+                source_tag,
+                host,
+                link.link_id,
+                ",".join(reserved_sorted),
+            )
+            return ToolResult(
+                status="error",
+                error=f"The broker sets these headers from the {source_label}: {', '.join(reserved_sorted)}.",
+                content={"error_code": "api_request_header_reserved", "headers": reserved_sorted},
+            )
+        header_collisions = sorted(name.lower() for name in link_headers if name.lower() in injected_headers_by_lower)
+        if header_collisions:
+            _LOGGER.warning(
+                "Refused web request because account and gate links set the same header. "
+                "event=api_request_injection_collision placement=header host=%s headers=%s",
+                host,
+                ",".join(header_collisions),
+            )
+            return ToolResult(
+                status="error",
+                error=(
+                    "The linked account and team gate credential both set the same headers: "
+                    f"{', '.join(header_collisions)}."
+                ),
+                content={"error_code": "api_request_injection_collision", "headers": header_collisions},
+            )
+        for name, value in link_headers.items():
+            injected_headers_by_lower[name.lower()] = (name, value)
+        if source_tag == "account":
+            account_query = link_query
+        else:
+            query_collisions = sorted(set(account_query) & set(link_query))
+            if query_collisions:
+                _LOGGER.warning(
+                    "Refused web request because account and gate links set the same query parameter. "
+                    "event=api_request_injection_collision placement=query host=%s params=%s",
+                    host,
+                    ",".join(query_collisions),
+                )
+                return ToolResult(
+                    status="error",
+                    error=(
+                        "The linked account and team gate credential both set the same query values: "
+                        f"{', '.join(query_collisions)}."
+                    ),
+                    content={"error_code": "api_request_injection_collision", "query_params": query_collisions},
+                )
+            gate_query = link_query
+
+    for name, value in injected_headers_by_lower.values():
+        headers[name] = value
+    return account_query, gate_query, secret_values
 
 
 def api_request(
@@ -2153,11 +2258,14 @@ def api_request(
     """Send one web request for a web API tool (``http:*``).
 
     The broker's gate already matched the host to the tool, decided access, and
-    chose the account link; this adds the link's credential where the link
-    says (a header or query value). Requests carry no credential placeholders.
+    chose the account link and any team gate link; this adds both credentials
+    where their links say (headers or query values) and redacts every secret
+    value from the response and any error. Requests carry no credential
+    placeholders.
     """
 
-    del scope  # the account link, not the caller, chooses whose credential is used
+    del scope  # the account and gate links, not the caller, choose whose credentials are used
+    secret_values: list[str] = []
     try:
         method = _string(params.get("method") or "GET").upper()
         if method not in _ALLOWED_API_METHODS:
@@ -2195,23 +2303,18 @@ def api_request(
             )
         headers = _api_headers(raw_headers)
         link = context.account_link if context is not None else None
-        injected_query: dict[str, str] = {}
-        secret_values: list[str] = []
-        if link is not None:
-            resolved = _resolve_injections(link, frozenset({InjectionPlacement.HEADER, InjectionPlacement.QUERY}))
-            if isinstance(resolved, ToolResult):
-                return resolved
-            injected, secret_values = resolved
-            injected_headers = {name: value for (place, name), value in injected.items() if place is InjectionPlacement.HEADER}
-            injected_query = {name: value for (place, name), value in injected.items() if place is InjectionPlacement.QUERY}
-            reserved = {name.lower() for name in injected_headers} & {name.lower() for name in headers}
-            if reserved:
-                return ToolResult(
-                    status="error",
-                    error=f"The broker sets these headers from the linked account: {', '.join(sorted(reserved))}.",
-                    content={"error_code": "api_request_header_reserved", "headers": sorted(reserved)},
-                )
-            headers.update(injected_headers)
+        gate_link = context.gate_link if context is not None else None
+        applied = _apply_api_injections(headers, account_link=link, gate_link=gate_link, host=host)
+        if isinstance(applied, ToolResult):
+            return applied
+        account_query, gate_query, secret_values = applied
+        if not any(name.lower() == "user-agent" for name in headers):
+            user_agent = (
+                context.api_request_user_agent
+                if context is not None and context.api_request_user_agent
+                else DEFAULT_API_REQUEST_USER_AGENT
+            )
+            headers["User-Agent"] = user_agent
         body_bytes: bytes | None = None
         if json_payload is not None:
             body_bytes = json.dumps(json_payload).encode("utf-8")
@@ -2224,27 +2327,50 @@ def api_request(
                 error=f"credential.api_request does not send request bodies with {method}.",
                 content={"error_code": "api_request_body_method_invalid", "method": method},
             )
-        request_url = _url_with_query_params(url, raw_query, injected_query)
+        try:
+            request_url = _url_with_query_params(url, raw_query, account_query, gate_injected=gate_query)
+        except _ReservedQueryError as exc:
+            _LOGGER.warning(
+                "Refused web request that set a broker-managed query parameter. "
+                "event=api_request_query_reserved source=%s host=%s params=%s",
+                exc.source,
+                host,
+                ",".join(exc.query_params),
+            )
+            return ToolResult(
+                status="error",
+                error=str(exc),
+                content={"error_code": "api_request_query_reserved", "query_params": exc.query_params},
+            )
         timeout_seconds = _bounded_api_timeout(params.get("timeout_seconds") or params.get("timeout") or 30)
         max_bytes = _bounded_response_bytes(params.get("max_response_bytes"))
         request = urllib_request.Request(request_url, data=body_bytes, headers=headers, method=method)
         link_id = link.link_id if link is not None else ""
+        gate_link_id = gate_link.link_id if gate_link is not None else ""
         try:
             response = _send_api_request(request, timeout=timeout_seconds)
         except urllib_error.HTTPError as exc:
             return _api_response_result(
-                response=exc, link_id=link_id, method=method, host=host, secret_values=secret_values, max_bytes=max_bytes
+                response=exc,
+                link_id=link_id,
+                gate_link_id=gate_link_id,
+                method=method,
+                host=host,
+                secret_values=secret_values,
+                max_bytes=max_bytes,
             )
         except urllib_error.URLError as exc:
+            redacted = redact_text(_redact_known_secret_text(str(exc), secret_values))
             return ToolResult(
                 status="error",
-                error=f"credential.api_request failed: {redact_text(str(exc))}",
+                error=f"credential.api_request failed: {redacted}",
                 content={"error_code": "api_request_failed", "host": host},
             )
         try:
             return _api_response_result(
                 response=response,
                 link_id=link_id,
+                gate_link_id=gate_link_id,
                 method=method,
                 host=host,
                 secret_values=secret_values,
@@ -2255,7 +2381,8 @@ def api_request(
             if callable(close):
                 close()
     except Exception as exc:
-        return ToolResult(status="error", error=f"credential.api_request failed: {redact_text(str(exc))}")
+        redacted = redact_text(_redact_known_secret_text(str(exc), secret_values))
+        return ToolResult(status="error", error=f"credential.api_request failed: {redacted}")
 
 
 class _ReturnRedirects(urllib_request.HTTPRedirectHandler):
@@ -2305,8 +2432,14 @@ def _contains_credential_placeholder(value: Any) -> bool:
     return False
 
 
-def _url_with_query_params(url: str, raw_params: Any, injected: Mapping[str, str] | None = None) -> str:
-    if not raw_params and not injected:
+def _url_with_query_params(
+    url: str,
+    raw_params: Any,
+    injected: Mapping[str, str] | None = None,
+    *,
+    gate_injected: Mapping[str, str] | None = None,
+) -> str:
+    if not raw_params and not injected and not gate_injected:
         return url
     parsed = urllib_parse.urlparse(url)
     existing = urllib_parse.parse_qsl(parsed.query, keep_blank_values=True)
@@ -2318,11 +2451,24 @@ def _url_with_query_params(url: str, raw_params: Any, injected: Mapping[str, str
         query_items = raw_params
     else:
         raise ValueError("secure request params/query must be a mapping or list of key/value pairs.")
-    injected = dict(injected or {})
+    account_map = dict(injected or {})
+    gate_map = dict(gate_injected or {})
     supplied = {str(item[0]) for item in [*existing, *query_items]}
-    if supplied & set(injected):
-        raise ValueError(f"The broker sets these query values from the linked account: {', '.join(sorted(supplied & set(injected)))}.")
-    query = urllib_parse.urlencode([*existing, *query_items, *injected.items()], doseq=True)
+    account_overlap = sorted(supplied & set(account_map))
+    if account_overlap:
+        raise _ReservedQueryError(
+            f"The broker sets these query values from the linked account: {', '.join(account_overlap)}.",
+            query_params=account_overlap,
+            source="account",
+        )
+    gate_overlap = sorted(supplied & set(gate_map))
+    if gate_overlap:
+        raise _ReservedQueryError(
+            f"The broker sets these query values from the team gate credential: {', '.join(gate_overlap)}.",
+            query_params=gate_overlap,
+            source="gate",
+        )
+    query = urllib_parse.urlencode([*existing, *query_items, *account_map.items(), *gate_map.items()], doseq=True)
     return urllib_parse.urlunparse(parsed._replace(query=query))
 
 
@@ -2354,10 +2500,17 @@ def _bounded_response_bytes(value: Any) -> int:
         return _DEFAULT_API_RESPONSE_BYTES
 
 
+# Minimum lookahead past max_bytes when a response is truncated, so pattern-matched
+# secrets (such as JWTs or API keys) that cross the byte cut are redacted completely.
+_REDACTION_LOOKAHEAD_MIN_BYTES = 1024
+_PERCENT_HEX_RE = re.compile(r"%[0-9A-F]{2}")
+
+
 def _api_response_result(
     *,
     response: Any,
     link_id: str,
+    gate_link_id: str = "",
     method: str,
     host: str,
     secret_values: list[str],
@@ -2366,15 +2519,16 @@ def _api_response_result(
     status_code = int(getattr(response, "status", None) or getattr(response, "code", None) or response.getcode())
     headers = getattr(response, "headers", {}) or {}
     content_type = _string(headers.get("Content-Type") if hasattr(headers, "get") else "")
-    body = response.read(max_bytes + 1)
-    truncated = len(body) > max_bytes
-    if truncated:
-        body = body[:max_bytes]
     charset = "utf-8"
     get_charset = getattr(headers, "get_content_charset", None)
     if callable(get_charset):
         charset = get_charset() or charset
-    text = body.decode(charset, errors="replace")
+    text, truncated, already_redacted = _read_api_response_text(
+        response,
+        charset=charset,
+        max_bytes=max_bytes,
+        secret_values=secret_values,
+    )
     content: dict[str, Any] = {
         "status": "api_request_completed",
         "method": method,
@@ -2385,11 +2539,13 @@ def _api_response_result(
     }
     if link_id:
         content["account_link_id"] = link_id
+    if gate_link_id:
+        content["gate_link_id"] = gate_link_id
     location = _string(headers.get("Location") if hasattr(headers, "get") else "")
     if 300 <= status_code < 400 and location:
         # Redirects are not followed (credentials must not reach another host);
         # the caller may make a new request, which is checked again.
-        content["redirect_location"] = location
+        content["redirect_location"] = redact_text(_redact_known_secret_text(location, secret_values))
     parsed_json: Any | None = None
     if "json" in content_type.lower() or text.lstrip().startswith(("{", "[")):
         try:
@@ -2398,26 +2554,145 @@ def _api_response_result(
             parsed_json = None
     if parsed_json is not None:
         content["json"] = redact_json(_redact_known_secret_values(parsed_json, secret_values))
+    elif already_redacted:
+        content["text"] = text
     else:
         content["text"] = redact_text(_redact_known_secret_text(text, secret_values))
     return ToolResult(status="success", content=content)
 
 
-def _redact_known_secret_values(value: Any, secret_values: list[str]) -> Any:
+def _expand_secret_variants(secret_values: list[str]) -> tuple[str, ...]:
+    """Raw, URL-encoded (``quote_plus``, ``quote``, lowercase percent-hex), and JSON-escaped forms to redact."""
+
+    variants: set[str] = set()
+    for raw in secret_values:
+        if not raw:
+            continue
+        candidates = [
+            raw,
+            urllib_parse.quote_plus(raw),
+            urllib_parse.quote(raw, safe=""),
+            urllib_parse.quote(raw),
+            json.dumps(raw)[1:-1],
+        ]
+        for candidate in candidates:
+            if len(candidate) >= 4:
+                variants.add(candidate)
+            if "%" in candidate:
+                lowered = _PERCENT_HEX_RE.sub(lambda match: match.group(0).lower(), candidate)
+                if len(lowered) >= 4:
+                    variants.add(lowered)
+    return tuple(sorted(variants, key=lambda item: (-len(item), item)))
+
+
+def _known_secret_pattern(variants: tuple[str, ...]) -> re.Pattern[str] | None:
+    if not variants:
+        return None
+    return re.compile("|".join(re.escape(item) for item in variants))
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    spans.sort(key=lambda span: (span[0], -span[1]))
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _redact_text_before_cut(full_text: str, *, cut_index: int, variants: tuple[str, ...]) -> str:
+    """Redact known secrets and pattern-matched tokens on ``full_text``, then cut at ``cut_index``.
+
+    Any match starting before ``cut_index`` (even if it extends past ``cut_index``)
+    is replaced with ``[REDACTED]`` and nothing past ``cut_index`` is emitted, so
+    an agent-chosen ``max_response_bytes`` cannot slice an echoed secret in half.
+    """
+
+    spans: list[tuple[int, int]] = []
+    known_pattern = _known_secret_pattern(variants)
+    if known_pattern is not None:
+        spans.extend(match.span() for match in known_pattern.finditer(full_text))
+    spans.extend(match.span() for match in SECRET_VALUE_RE.finditer(full_text))
+    if not spans:
+        return full_text[:cut_index]
+    parts: list[str] = []
+    cursor = 0
+    for start, end in _merge_spans(spans):
+        if start >= cut_index:
+            break
+        if start > cursor:
+            parts.append(full_text[cursor:start])
+        parts.append("[REDACTED]")
+        cursor = end
+        if cursor >= cut_index:
+            break
+    if cursor < cut_index:
+        parts.append(full_text[cursor:cut_index])
+    return "".join(parts)
+
+
+def _read_api_response_text(
+    response: Any,
+    *,
+    charset: str,
+    max_bytes: int,
+    secret_values: list[str],
+) -> tuple[str, bool, bool]:
+    """Read up to ``max_bytes`` plus a secret-sized lookahead; redact before cutting when truncated."""
+
+    try:
+        decoder_factory = codecs.getincrementaldecoder(charset)
+        encoding = charset
+    except LookupError:
+        decoder_factory = codecs.getincrementaldecoder("utf-8")
+        encoding = "utf-8"
+    variants = _expand_secret_variants(secret_values)
+    max_secret_bytes = max((len(item.encode(encoding, errors="ignore")) for item in variants), default=0)
+    lookahead_bytes = max(max_secret_bytes, _REDACTION_LOOKAHEAD_MIN_BYTES)
+    raw = response.read(max_bytes + lookahead_bytes)
+    truncated = len(raw) > max_bytes
+    if not truncated:
+        return raw.decode(encoding, errors="replace"), False, False
+    bounded = raw[: max_bytes + lookahead_bytes]
+    decoder = decoder_factory(errors="replace")
+    prefix_text = decoder.decode(bounded[:max_bytes], final=False)
+    suffix_text = decoder.decode(bounded[max_bytes:], final=True)
+    full_text = prefix_text + suffix_text
+    redacted = _redact_text_before_cut(full_text, cut_index=len(prefix_text), variants=variants)
+    return redacted, True, True
+
+
+def _redact_known_secret_values(
+    value: Any,
+    secret_values: list[str],
+    *,
+    _pattern: re.Pattern[str] | None = None,
+    _prepared: bool = False,
+) -> Any:
+    pattern = _pattern if _prepared else _known_secret_pattern(_expand_secret_variants(secret_values))
+    if pattern is None:
+        return value
     if isinstance(value, str):
-        return _redact_known_secret_text(value, secret_values)
+        return pattern.sub("[REDACTED]", value)
     if isinstance(value, list):
-        return [_redact_known_secret_values(item, secret_values) for item in value]
+        return [_redact_known_secret_values(item, secret_values, _pattern=pattern, _prepared=True) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_known_secret_values(child, secret_values) for key, child in value.items()}
+        return {
+            (pattern.sub("[REDACTED]", key) if isinstance(key, str) else key): _redact_known_secret_values(
+                child, secret_values, _pattern=pattern, _prepared=True
+            )
+            for key, child in value.items()
+        }
     return value
 
 
 def _redact_known_secret_text(value: str, secret_values: list[str]) -> str:
-    rendered = value
-    for secret in sorted({item for item in secret_values if len(item) >= 4}, key=len, reverse=True):
-        rendered = rendered.replace(secret, "[REDACTED]")
-    return rendered
+    pattern = _known_secret_pattern(_expand_secret_variants(secret_values))
+    if pattern is None:
+        return value
+    return pattern.sub("[REDACTED]", value)
 
 
 def signup_prepare(params: Mapping[str, Any]) -> ToolResult:

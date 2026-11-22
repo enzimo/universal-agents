@@ -73,11 +73,12 @@ from typing import Any, Callable, ClassVar
 import yaml
 from pydantic import BaseModel, Field, JsonValue
 
-from custom_messages.contracts.access_v2 import MODEL_KEYS_SHARING_SUBJECT, LinkOwnerKind, SubjectKind
+from custom_messages.contracts.access_v2 import MODEL_KEYS_SHARING_SUBJECT, LinkOwnerKind, LinkPurpose, SubjectKind
 from secure_tools.chat_commands import ACCOUNTS_SHARE, accounts_command
 from team_transfer.format import TransferModel
 from team_transfer.errors import TransferError
 from team_transfer.sections import (
+    SECTION_UPGRADES,
     TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
@@ -192,7 +193,8 @@ class AccessSection:
     name: ClassVar[str] = "access"
     # 2: the team's sharing choices (AccountSharingV1) travel.
     # 3: blocks name the operations as this version calls them (RENAMED_OPERATIONS).
-    schema_version: ClassVar[int] = 3
+    # 4: account links carry purpose (account or gate).
+    schema_version: ClassVar[int] = 4
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = AccessRecordV1
@@ -216,7 +218,7 @@ class AccessSection:
                 continue
             if _lasting(grant, now):
                 records.append(_record(AccessKind.GRANT, grant.grant_id, grant))
-        for link in store.list_links(team):
+        for link in store.list_links(team, purpose=None):
             records.append(_record(AccessKind.ACCOUNT_LINK, link.link_id, link))
         for settings in store.team_person_settings(team):
             records.append(
@@ -596,6 +598,11 @@ def _check_link(document: dict[str, Any], known: _Known) -> str:
         return f"the tool {link.tool_id} does not exist in the new instance"
     if link.owner_kind is LinkOwnerKind.PERSON and link.owner_id not in known.people:
         return f"it belongs to {link.owner_id}, who is not imported"
+    if link.purpose is LinkPurpose.GATE:
+        tool = known.tool_definitions.get(link.tool_id)
+        if tool is not None and not tool.gate_injections:
+            return f"this version defines no gate injections for {tool.display_name}, so the gate link would never be used"
+        return ""
     tool = known.release_tools.get(link.tool_id)
     if tool is not None and link.owner_kind.value not in tool.link_owners:
         # This version would never use it (the GitHub API takes only each person's own account).
@@ -604,17 +611,23 @@ def _check_link(document: dict[str, Any], known: _Known) -> str:
     return ""
 
 
-def _link_owner_key(document: dict[str, Any]) -> tuple[str, str, str, str]:
+def _link_owner_key(document: dict[str, Any]) -> tuple[str, str, str, str, str]:
     def text(name: str) -> str:
         return str(document.get(name) or "")
 
-    return text("team_id"), text("tool_id"), text("owner_kind"), text("owner_id")
+    return (
+        text("team_id"),
+        text("tool_id"),
+        text("owner_kind"),
+        text("owner_id"),
+        text("purpose"),
+    )
 
 
-def _newest_links(records: SectionRecords) -> dict[tuple[str, str, str, str], str]:
-    """The newest account link in the file for each tool and owner: the one in use (``AccessRepository.active_link``)."""
+def _newest_links(records: SectionRecords) -> dict[tuple[str, str, str, str, str], str]:
+    """The newest link in the file for each tool, owner and purpose (``AccessRepository.active_link``)."""
 
-    newest: dict[tuple[str, str, str, str], tuple[datetime, str]] = {}
+    newest: dict[tuple[str, str, str, str, str], tuple[datetime, str]] = {}
     for raw in records:
         document = raw.get("document")
         if raw.get("kind") != AccessKind.ACCOUNT_LINK.value or not isinstance(document, dict):
@@ -630,16 +643,17 @@ def _newest_links(records: SectionRecords) -> dict[tuple[str, str, str, str], st
     return {key: record_id for key, (_created, record_id) in newest.items()}
 
 
-def _older_link(record: AccessRecordV1, newest: dict[tuple[str, str, str, str], str]) -> str:
-    """Refuse an account link a newer one for the same tool and owner replaces (one active link each)."""
+def _older_link(record: AccessRecordV1, newest: dict[tuple[str, str, str, str, str], str]) -> str:
+    """Refuse a link a newer one for the same tool, owner and purpose replaces (one active link each)."""
 
     if record.kind is not AccessKind.ACCOUNT_LINK:
         return ""
     kept = newest.get(_link_owner_key(record.document))
     if kept is None or kept == record.record_id:
         return ""
+    kind_words = "gate link" if record.document.get("purpose") == LinkPurpose.GATE.value else "account link"
     return (
-        f"the newer account link {kept} for the same tool and owner replaces it (one link per tool and owner "
+        f"the newer {kind_words} {kept} for the same tool and owner replaces it (one link per tool and owner "
         "is in use, and the newer one was)"
     )
 
@@ -662,7 +676,9 @@ def _unused_team_link(record: AccessRecordV1, known: _Known, chosen: dict[str, s
     ``/accounts`` keeps one, so sharing the service again uses it; the review
     names the command. ``chosen`` holds this batch's sharing records. A later
     batch (``fresh`` False) without one for the tool cannot know what the
-    destination chose since, so it says nothing rather than guess.
+    destination chose since, so it says nothing rather than guess. Team gate
+    links are team infrastructure used regardless of account sharing, so they
+    are never marked unused.
     """
 
     from access_control.account_sharing import default_sharing
@@ -671,6 +687,8 @@ def _unused_team_link(record: AccessRecordV1, known: _Known, chosen: dict[str, s
     if record.kind is not AccessKind.ACCOUNT_LINK:
         return ""
     link = AccountLinkV1.model_validate(record.document)
+    if link.purpose is LinkPurpose.GATE:
+        return ""
     tool = known.release_tools.get(link.tool_id)
     if link.owner_kind is not LinkOwnerKind.TEAM or tool is None or not tool.sharing_choice:
         return ""
@@ -863,6 +881,23 @@ def _renamed_access(records: SectionRecords, team_ids: TeamIds) -> SectionRecord
     return renamed
 
 
+def _upgrade_v3_to_v4(records: SectionRecords) -> SectionRecords:
+    """Convert version 3 access records to version 4: stamp ``purpose="account"`` on earlier links and rename operations."""
+
+    converted: SectionRecords = []
+    for raw in _rename_operations(records):
+        document = raw.get("document")
+        if (
+            raw.get("kind") == AccessKind.ACCOUNT_LINK.value
+            and isinstance(document, dict)
+            and "purpose" not in document
+        ):
+            raw = {**raw, "document": {**document, "purpose": LinkPurpose.ACCOUNT.value}}
+        converted.append(raw)
+    return converted
+
+
+SECTION_UPGRADES[(AccessSection.name, 3, AccessSection.schema_version)] = _upgrade_v3_to_v4
 TEAM_ID_RENAMES[AccessSection.name] = _renamed_access
 
 __all__ = ["AccessKind", "AccessRecordV1", "AccessSection", "RENAMED_OPERATIONS", "known_agent_types"]

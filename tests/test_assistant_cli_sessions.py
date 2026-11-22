@@ -904,6 +904,7 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
         "token": "test-token",
         "authorization_keys": (
             "access_gate",
+            "api_request_user_agent",
             "execution_ssh_config",
             "mcp_config",
             "tool_setup_recheck_days",

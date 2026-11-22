@@ -37,6 +37,9 @@ class ToolContext:
     # broker's access gate, never by request fields.
     work_id: str | None = None
     account_link: AccountLinkV1 | None = None
+    gate_link: AccountLinkV1 | None = None
+    # Configured by the operator (security_layer.api_request_user_agent); never by the request.
+    api_request_user_agent: str | None = None
 
     def require_user(self) -> str:
         user_id = str(self.canonical_user_id or "").strip()

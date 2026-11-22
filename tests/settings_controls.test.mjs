@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  FOLLOW_UP_POLL_MS, SHOW_CONVERSATION_LABEL,
+} from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
+import {
   NEEDS_CONVERSATION_MESSAGE, SETTINGS_VIEWS, createSettingsControls,
 } from "../assistant_gateway/onboarding_web/assets/settings_controls.mjs";
 import { CSRF_HEADER } from "../assistant_gateway/onboarding_web/assets/settings_support.mjs";
@@ -23,7 +26,7 @@ function pageFromChatHtml(skip = []) {
   return env;
 }
 
-function fixture() {
+function fixture(options = {}) {
   const env = pageFromChatHtml();
   const node = id => env.document.getElementById(id);
   const tasks = [], maps = [], closes = [], appearance = [];
@@ -39,6 +42,7 @@ function fixture() {
     browser: env.browser, returnFocus, teamActivity,
     onClose: () => closes.push(true),
     onAppearanceOpen: () => appearance.push(true),
+    ...options,
     createMap: () => ({
       load() { maps.push(["load"]); return Promise.resolve(); },
       open(agentType) { maps.push(["open", agentType]); return Promise.resolve(); },
@@ -346,4 +350,280 @@ test("sign-out forgets the CSRF token, so later writes are refused locally", asy
   await settle();
   assert.equal(f.requests.filter(request => request.method === "POST").length, 0);
   assert.match(f.node("settings-access-inbox").textContent, /sign-in session expired/);
+});
+
+test("noteAgentMessage refreshes both chat review and Settings Inbox follow-up links", async () => {
+  let openPages = [];
+  const closedPages = [];
+  const f = fixture({
+    onFollowUpPages: (id, links) => {
+      links.forEach(link => openPages.push({ requestId: id, url: link.url, expiresAtUtc: link.expiresAtUtc }));
+      return links;
+    },
+    getOpenFollowUpPages: () => openPages,
+    onCloseFollowUpPages: (id, urls) => {
+      closedPages.push({ id, urls });
+      openPages = openPages.filter(page => !(page.requestId === id && urls.includes(page.url)));
+    },
+  });
+  const bubble = f.document.createElement("article");
+  f.document.body.append(bubble);
+  f.settings.mountAccessReview(bubble, {
+    role: "system", messageType: "access_review", accessRequestId: "req-follow", content: "announcement",
+  });
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-follow", jsonResponse({
+    review: review({
+      request_id: "req-follow", status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [
+        {
+          label: "Choose the credential for Portainer",
+          url: "https://broker.example/link/1",
+          frame_url: "https://broker.example/link/1?view=card",
+          expires_at_utc: "2099-01-01T00:15:00+00:00",
+        },
+        {
+          label: "Choose the credential for Gitea",
+          url: "https://broker.example/link/2",
+          expires_at_utc: "2099-01-01T00:15:00+00:00",
+        },
+      ],
+      follow_up_outcomes: [],
+    }),
+  }));
+  assert.equal(bubble.querySelectorAll("a").length, 1);
+
+  assert.equal(closedPages.length, 0);
+  // 1) Firing every 4s follow-up poll tick while the chat review card is on screen issues
+  //    only one read and updates both the decided card and the inline broker card together (C16).
+  const requestsBeforePoll = f.requests.length;
+  [...f.intervals.values()]
+    .filter(timer => timer.delay === FOLLOW_UP_POLL_MS)
+    .forEach(timer => timer.callback());
+  await settle();
+  assert.equal(
+    f.requests.slice(requestsBeforePoll).filter(req => req.path === "/api/web-chat/access-inbox/requests/req-follow").length,
+    1,
+    "page watcher skips polling while the chat review card is actively watching the same request",
+  );
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-follow", jsonResponse({
+    review: review({
+      request_id: "req-follow", status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [
+        {
+          label: "Choose the credential for Gitea",
+          url: "https://broker.example/link/2",
+          expires_at_utc: "2099-01-01T00:15:00+00:00",
+        },
+      ],
+      follow_up_outcomes: ["The account link for Portainer is done."],
+    }),
+  }));
+  assert.equal(bubble.querySelectorAll("a").length, 1);
+  assert.match(bubble.textContent, /The account link for Portainer is done\./);
+  assert.deepEqual(closedPages, [{ id: "req-follow", urls: ["https://broker.example/link/1"] }]);
+
+  // 2) noteAgentMessage also refreshes the remaining follow-up link and clears it.
+  const requestsBefore = f.requests.length;
+  f.settings.noteAgentMessage();
+  await settle();
+  assert.equal(
+    f.requests.slice(requestsBefore).filter(req => req.path === "/api/web-chat/access-inbox/requests/req-follow").length,
+    1,
+    "noteAgentMessage issues one request read",
+  );
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-follow", jsonResponse({
+    review: review({
+      request_id: "req-follow", status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [],
+      follow_up_outcomes: ["The account link for Portainer is done.", "The account link for Gitea is done."],
+    }),
+  }));
+  assert.equal(bubble.querySelectorAll("a").length, 0);
+  assert.match(bubble.textContent, /The account link for Gitea is done\./);
+});
+
+test("approving in Settings Inbox keeps watching its inline card after closing Settings and reopening the Inbox (C14)", async () => {
+  let openPages = [];
+  const closedPages = [];
+  const shownRequests = [];
+  const f = fixture({
+    onFollowUpPages: (id, links) => {
+      links.forEach(link => openPages.push({ requestId: id, url: link.url, expiresAtUtc: link.expiresAtUtc }));
+      return links;
+    },
+    getOpenFollowUpPages: () => openPages,
+    onCloseFollowUpPages: (id, urls) => {
+      closedPages.push({ id, urls });
+      openPages = openPages.filter(page => !(page.requestId === id && urls.includes(page.url)));
+    },
+    onShowFollowUpPages: id => shownRequests.push(id),
+  });
+  const framedLink = {
+    label: "Choose the credential for Portainer",
+    url: "https://broker.example/link/inbox-1",
+    frame_url: "https://broker.example/link/inbox-1?view=card",
+    expires_at_utc: "2099-01-01T00:15:00+00:00",
+  };
+  const proposal = review({ request_id: "req-inbox", title: "Connect Portainer" });
+
+  // 1) Open Settings -> Inbox (with no chat review card mounted) and approve the proposal.
+  const opened = f.settings.open("inbox", "session-1");
+  await answer(f.requests, "/api/web-chat/access-inbox", jsonResponse({ reviews: [proposal], notices: [] }));
+  await opened;
+  const inbox = f.node("settings-access-inbox");
+  byClass(inbox, "permission-choice-button").find(btn => btn.textContent === "Approve").click();
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-inbox/decision", jsonResponse({
+    review: {
+      ...proposal, status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [framedLink], follow_up_outcomes: [],
+    },
+  }));
+  await answer(f.requests, "/api/web-chat/access-inbox", jsonResponse({ reviews: [], notices: [] }));
+  assert.equal(openPages.length, 1, "framed form was handed off as an inline card");
+
+  // 2) Click "Show in the conversation", which closes Settings.
+  byClass(inbox, "permission-choice-button").find(btn => btn.textContent === SHOW_CONVERSATION_LABEL).click();
+  assert.equal(f.overlay.hidden, true, "Settings is closed");
+  assert.deepEqual(shownRequests, ["req-inbox"]);
+  const followUpPolls = () => [...f.intervals.values()].filter(timer => timer.delay === FOLLOW_UP_POLL_MS);
+  assert.equal(followUpPolls().length, 1, "inline follow-up watcher stays active after Settings closes");
+
+  // 3) Reopening Settings -> Inbox reloads and clears Inbox outcomes, then closing Settings again keeps watching.
+  const reopened = f.settings.open("inbox", "session-1");
+  await answer(f.requests, "/api/web-chat/access-inbox", jsonResponse({ reviews: [], notices: [] }));
+  await reopened;
+  f.settings.close();
+  assert.equal(f.overlay.hidden, true);
+  assert.equal(followUpPolls().length, 1, "inline follow-up watcher survives Inbox reload and close");
+
+  // 4) Next review read drops the link (finished or declined in its own tab): inline card closes and polling stops.
+  followUpPolls()[0].callback();
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-inbox", jsonResponse({
+    review: {
+      ...proposal, status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [], follow_up_outcomes: ["The account link for Portainer was declined."],
+      follow_up_settling: false,
+    },
+  }));
+  assert.deepEqual(closedPages, [{ id: "req-inbox", urls: [framedLink.url] }]);
+  assert.equal(openPages.length, 0);
+  assert.equal(followUpPolls().length, 0, "watcher stops once the inline card is closed");
+});
+
+test("review reads begun before an approval do not close newly handed-off inline cards, including shared watcher reads and granted-before-register responses (C18)", async () => {
+  let openPages = [];
+  const closedPages = [];
+  const f = fixture({
+    onFollowUpPages: (id, links) => {
+      links.forEach(link => openPages.push({ requestId: id, url: link.url, expiresAtUtc: link.expiresAtUtc }));
+      return links;
+    },
+    getOpenFollowUpPages: () => openPages,
+    onCloseFollowUpPages: (id, urls) => {
+      closedPages.push({ id, urls });
+      openPages = openPages.filter(page => !(page.requestId === id && urls.includes(page.url)));
+    },
+  });
+  const waitingRace = review({ request_id: "req-race", title: "Connect Portainer" });
+  const waitingWindow = review({ request_id: "req-window", title: "Connect Gitea" });
+  const raceLink = {
+    label: "Choose the credential for Portainer",
+    url: "https://broker.example/link/race",
+    frame_url: "https://broker.example/link/race?view=card",
+    expires_at_utc: "2099-01-01T00:15:00+00:00",
+  };
+  const windowLink = {
+    label: "Choose the credential for Gitea",
+    url: "https://broker.example/link/window",
+    frame_url: "https://broker.example/link/window?view=card",
+    expires_at_utc: "2099-01-01T00:15:00+00:00",
+  };
+
+  // 1) Settings Inbox shows both waiting proposals.
+  const opened = f.settings.open("inbox", "session-1");
+  await answer(f.requests, "/api/web-chat/access-inbox", jsonResponse({
+    reviews: [waitingRace, waitingWindow],
+    notices: [],
+  }));
+  await opened;
+
+  // 2) Chat review cards mount and begin GET reads before either approval happens.
+  const bubble1 = f.document.createElement("article");
+  const bubble2 = f.document.createElement("article");
+  f.document.body.append(bubble1, bubble2);
+  f.settings.mountAccessReview(bubble1, {
+    role: "system", messageType: "access_review", accessRequestId: "req-race", content: "race",
+  });
+  f.settings.mountAccessReview(bubble2, {
+    role: "system", messageType: "access_review", accessRequestId: "req-window", content: "window",
+  });
+
+  // 3) Person approves both in Settings Inbox; decision responses hand off both inline cards.
+  const approveButtons = byClass(f.node("settings-access-inbox"), "permission-choice-button")
+    .filter(button => button.textContent === "Approve");
+  approveButtons[0].click();
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-race/decision", jsonResponse({
+    review: {
+      ...waitingRace, status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [raceLink], follow_up_outcomes: [],
+    },
+  }));
+  await answer(f.requests, "/api/web-chat/access-inbox?", jsonResponse({ reviews: [waitingWindow], notices: [] }));
+  byClass(f.node("settings-access-inbox"), "permission-choice-button")
+    .find(button => button.textContent === "Approve")
+    .click();
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-window/decision", jsonResponse({
+    review: {
+      ...waitingWindow, status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [windowLink], follow_up_outcomes: [],
+    },
+  }));
+  await answer(f.requests, "/api/web-chat/access-inbox?", jsonResponse({ reviews: [], notices: [] }));
+  assert.equal(openPages.length, 2, "both forms were handed off as inline cards");
+
+  // 4) Close Settings and trigger the page watcher while the earlier chat reads are still in flight,
+  //    so the page watcher shares those older in-flight reads through readAccessReview's dedupe.
+  f.settings.close();
+  const requestsBeforePoll = f.requests.length;
+  const followUpPolls = () => [...f.intervals.values()].filter(timer => timer.delay === FOLLOW_UP_POLL_MS);
+  followUpPolls().forEach(timer => timer.callback());
+  await settle();
+  assert.equal(
+    f.requests.slice(requestsBeforePoll).filter(req => req.path.startsWith("/api/web-chat/access-inbox/requests/")).length,
+    0,
+    "page watcher shares the in-flight reads instead of opening duplicate requests",
+  );
+
+  // 5) Earlier reads arrive: one pre-decision ('waiting') and one from the server's
+  //    decided-but-not-yet-registered window ('granted' with empty follow_up_links).
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-race", jsonResponse({ review: waitingRace }));
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-window", jsonResponse({
+    review: {
+      ...waitingWindow, status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [], follow_up_outcomes: [],
+    },
+  }));
+  assert.deepEqual(closedPages, [], "stale pre-hand-off reads do not close newly handed-off inline cards");
+  assert.equal(openPages.length, 2);
+
+  // 6) A subsequent poll started after hand-off reporting the links gone closes both cards.
+  followUpPolls().forEach(timer => timer.callback());
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-race", jsonResponse({
+    review: {
+      ...waitingRace, status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [], follow_up_outcomes: ["The account link for Portainer is done."],
+    },
+  }));
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-window", jsonResponse({
+    review: {
+      ...waitingWindow, status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [], follow_up_outcomes: ["The account link for Gitea is done."],
+    },
+  }));
+  assert.deepEqual(closedPages, [
+    { id: "req-race", urls: [raceLink.url] },
+    { id: "req-window", urls: [windowLink.url] },
+  ]);
+  assert.equal(openPages.length, 0);
+  assert.equal(followUpPolls().length, 0);
 });

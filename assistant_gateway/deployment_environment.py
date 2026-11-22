@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Mapping
 
 from env_secrets import get_env_with_file_fallback
 from runtime_settings.network import reject_removed_public_url_env_vars
+from runtime_settings.security import normalize_api_request_user_agent
 
 if TYPE_CHECKING:
     from assistant_gateway.config import GatewayInstanceConfig
@@ -89,6 +90,10 @@ def apply_deployment_environment(
     _apply_transport(config, env)
     if env.get("SECURE_TOOL_BROKER_INTERNAL_BASE_URL"):
         config.security_layer.broker_internal_base_url = env["SECURE_TOOL_BROKER_INTERNAL_BASE_URL"]
+    if env.get("SECURE_TOOL_BROKER_API_REQUEST_USER_AGENT"):
+        config.security_layer.api_request_user_agent = normalize_api_request_user_agent(
+            env["SECURE_TOOL_BROKER_API_REQUEST_USER_AGENT"]
+        )
     if env.get("NETWORK_PUBLIC_ORIGIN"):
         config.network.public_origin = env["NETWORK_PUBLIC_ORIGIN"]
     _apply_website(config, env)
