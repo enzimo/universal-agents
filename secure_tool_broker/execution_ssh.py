@@ -43,6 +43,7 @@ from aiohttp import web
 import yaml
 
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from default_values import EXECUTION_CONTROL_DEFAULTS
 from id_generation import new_id
 from runtime_hosting.artifacts import FilesystemArtifactStore
 from runtime_hosting.authorization import (
@@ -60,6 +61,7 @@ from runtime_hosting.ssh import (
     CatalogSSHCredentialMaterialProvider,
     CompositeSSHCredentialMaterialProvider,
     ConfiguredSSHCredentialMaterialProvider,
+    PinnedSSHTargetKey,
     SSHCredentialMaterial,
     SSHSessionBroker,
     SSHSessionUnavailable,
@@ -119,15 +121,19 @@ class BrokerExecutionSSHConfig:
         instance_name: str,
         storage_settings: StorageSettings,
         ssh: ExecutionSSHSettings,
+        execution_enabled: bool = EXECUTION_CONTROL_DEFAULTS.enabled.value,
         lead_agent_type: str = TEAM_ARCHITECT_AGENT_TYPE,
         config_path: str | Path | None = None,
         config_source_revision: str | None = None,
     ) -> "BrokerExecutionSSHConfig":
+        effective_ssh = ssh.model_copy(deep=True)
+        if not execution_enabled and effective_ssh.enabled:
+            effective_ssh = effective_ssh.model_copy(update={"enabled": False})
         return cls(
             instance_root_path=str(instance_root_path),
             instance_name=str(instance_name or "universal-agents"),
             storage_settings=storage_settings,
-            ssh=ssh.model_copy(deep=True),
+            ssh=effective_ssh,
             lead_agent_type=str(lead_agent_type or TEAM_ARCHITECT_AGENT_TYPE),
             config_path=str(config_path) if config_path is not None else None,
             config_source_revision=config_source_revision,
@@ -152,7 +158,7 @@ def _unusable_settings_message(snapshot: ExecutionSSHSettingsSnapshot) -> str:
 
 def _pinned_target_keys(
     ssh_settings: ExecutionSSHSettings,
-) -> frozenset[tuple[str, int, str, str, str, str]]:
+) -> frozenset[PinnedSSHTargetKey]:
     return frozenset(
         (
             target.host,
@@ -205,7 +211,7 @@ class ExecutionSSHSettingsSource:
         # Never stamp the current disk fingerprint at construction: the file may have
         # changed between process config loading and constructing this source.
         self._last_checked_fp: Any = _UNCHECKED_FINGERPRINT
-        self._existed = self._stat_fingerprint() is not None
+        self._existed = self._initial_revision is not None or self._stat_fingerprint() is not None
         self._unusable_since: float | None = None
         self._unusable_error: str | None = None
         self._failed_closed_logged = False
@@ -245,9 +251,14 @@ class ExecutionSSHSettingsSource:
         if "schema_version" not in parsed or parsed["schema_version"] is None:
             raise ValueError("instance_config.yaml must declare schema_version.")
         execution_raw = parsed.get("execution_control")
+        execution_enabled = EXECUTION_CONTROL_DEFAULTS.enabled.value
         if execution_raw is None:
             ssh_raw: Mapping[str, Any] = {}
         elif isinstance(execution_raw, Mapping):
+            raw_exec_enabled = execution_raw.get("enabled", execution_enabled)
+            if not isinstance(raw_exec_enabled, bool):
+                raise ValueError("execution_control.enabled must be a boolean.")
+            execution_enabled = raw_exec_enabled
             raw_ssh_section = execution_raw.get("ssh")
             if raw_ssh_section is None:
                 ssh_raw = {}
@@ -258,6 +269,8 @@ class ExecutionSSHSettingsSource:
         else:
             raise ValueError("execution_control must be a YAML mapping.")
         reloaded = ExecutionSSHSettings.model_validate(ssh_raw)
+        if not execution_enabled and reloaded.enabled:
+            reloaded = reloaded.model_copy(update={"enabled": False})
         materials = (
             _build_configured_materials(self._layout, reloaded)
             if self._layout is not None
@@ -518,7 +531,7 @@ class BrokerExecutionSSHRuntime:
     def _apply_settings_sync(
         self,
         snapshot: ExecutionSSHSettingsSnapshot,
-    ) -> tuple[bool, bool, frozenset[tuple[str, int, str, str, str, str]]]:
+    ) -> tuple[bool, bool]:
         ssh_settings = snapshot.settings
         materials = dict(snapshot.materials)
         if (
@@ -528,7 +541,7 @@ class BrokerExecutionSSHRuntime:
                 and self._applied_materials == materials
             )
         ):
-            return False, False, frozenset()
+            return False, False
         new_policy = SSHNetworkPolicy.from_settings(ssh_settings)
         old_policy = (
             SSHNetworkPolicy.from_settings(self._applied_settings)
@@ -552,20 +565,27 @@ class BrokerExecutionSSHRuntime:
                 configured_provider=ConfiguredSSHCredentialMaterialProvider(materials),
                 catalog_provider=self._catalog_provider,
             )
+            self._broker.allowed_pinned_targets = _pinned_target_keys(ssh_settings)
         self._applied_settings = ssh_settings.model_copy(deep=True)
         self._applied_materials = materials
-        return network_changed, pinned_changed, _pinned_target_keys(ssh_settings)
+        return network_changed, pinned_changed
 
     async def _apply_settings_and_enforce(self, snapshot: ExecutionSSHSettingsSnapshot) -> None:
         async with self._settings_lock:
             if self._broker is None:
                 return
-            network_changed, pinned_changed, pinned_keys = self._apply_settings_sync(snapshot)
-            if network_changed or pinned_changed:
-                await self._broker.enforce_settings_on_live_work(
-                    check_network=network_changed,
-                    check_pinned_targets=pinned_changed,
-                    allowed_pinned_targets=pinned_keys,
+            network_changed, pinned_changed = self._apply_settings_sync(snapshot)
+            broker = self._broker
+            need_network = network_changed or broker.network_policy != broker._checked_network_policy
+            need_pinned = (
+                pinned_changed
+                or broker.material_provider is not broker._checked_material_provider
+                or broker.allowed_pinned_targets != broker._checked_allowed_pinned_targets
+            )
+            if need_network or need_pinned:
+                await broker.enforce_settings_on_live_work(
+                    check_network=need_network,
+                    check_pinned_targets=need_pinned,
                 )
 
     async def _refresh_settings_for_monitor(self) -> SSHSettingsSyncOutcome:
@@ -629,6 +649,7 @@ class BrokerExecutionSSHRuntime:
             lease_ttl_seconds=ssh_settings.lease_ttl_seconds,
             transcript_limit_bytes=ssh_settings.transcript_limit_bytes,
             network_policy=SSHNetworkPolicy.from_settings(ssh_settings),
+            allowed_pinned_targets=_pinned_target_keys(ssh_settings),
             allow_password_bootstrap=ssh_settings.allow_password_bootstrap,
             settings_sync=self._refresh_settings_for_monitor,
             logger=self._logger,

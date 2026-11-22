@@ -552,11 +552,12 @@ async def plan_execution_ssh_target(
     expires_at_utc) or 'persistent'.
     """
     try:
-        agent, error = _manager_agent("plan_execution_ssh_target")
+        service, error = _manager_service("plan_execution_ssh_target")
         if error:
             return json.dumps({"error": error})
+        assert service is not None
         staged = await asyncio.to_thread(
-            SSHTargetEnrollChangeService(agent).stage,
+            SSHTargetEnrollChangeService(service.agent, execution=service).stage,
             host=host,
             port=port,
             username=username,
@@ -644,10 +645,11 @@ def plan_execution_ssh_interaction(
     the exact bounds in the Inbox.
     """
     try:
-        agent, error = _manager_agent("plan_execution_ssh_interaction")
+        service, error = _manager_service("plan_execution_ssh_interaction")
         if error:
             return json.dumps({"error": error})
-        staged = SSHInteractionChangeService(agent).stage(
+        assert service is not None
+        staged = SSHInteractionChangeService(service.agent, execution=service).stage(
             session_id=session_id,
             reason=reason,
             expires_at_utc=(

@@ -240,9 +240,9 @@ class _ExecutionChanges:
     kind: str
     label: str
 
-    def __init__(self, agent: Any) -> None:
+    def __init__(self, agent: Any, *, execution: ExecutionControlService | None = None) -> None:
         self.agent = agent
-        self.execution = ExecutionControlService(agent)
+        self.execution = execution if execution is not None else ExecutionControlService(agent)
         self.audit = LoggingGovernanceAuditSink()
 
     def _plans_dir(self, name: str) -> Path:
@@ -764,11 +764,12 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
         self,
         agent: Any,
         *,
+        execution: ExecutionControlService | None = None,
         resolver: SSHHostResolver | None = None,
         local_address_checker: LocalAddressChecker | None = None,
         host_key_prober: Callable[[str, int, int], Mapping[str, Any] | Any] | None = None,
     ) -> None:
-        super().__init__(agent)
+        super().__init__(agent, execution=execution)
         self._resolver = resolver
         self._local_address_checker = local_address_checker
         self._host_key_prober = host_key_prober

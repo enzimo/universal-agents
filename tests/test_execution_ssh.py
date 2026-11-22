@@ -356,6 +356,7 @@ async def _running_ssh_broker(
         instance_name=instance.config.instance_name,
         storage_settings=instance.config.manager_storage_settings,
         ssh=instance.config.execution_control.ssh,
+        execution_enabled=instance.config.execution_control.enabled,
         lead_agent_type="TeamArchitect",
         config_path=str(instance.config_path),
         config_source_revision=instance.config.source_revision,
@@ -3465,13 +3466,20 @@ async def test_c77_live_killswitch_and_settings_reload_without_restarting_broker
         assert agent_refused["error_code"] == "ssh_disabled", agent_refused
         assert "execution_control.ssh.enabled is false." in agent_refused["error"]
 
-        # Even if an older agent process still thinks ssh.enabled is True, the broker itself refuses with ssh_disabled!
+        # Even if an older agent process still thinks ssh.enabled is True (bypassing local preflight),
+        # the broker itself refuses over HTTP with ssh_disabled!
+        from custom_tools.broker_execution_ssh import ExecutionSSHBrokerError, call_execution_ssh_broker
+        from runtime_hosting.authorization import SSH_DISABLED_NEXT_STEP
+
         set_agent_ref(lead)
-        broker_refused = json.loads(
-            await tools.read_execution_ssh_session._tool_func(session_id=session_id, timeout_seconds=0)
-        )
-        assert broker_refused["error_code"] == "ssh_disabled", broker_refused
-        assert "next_step" in broker_refused
+        with pytest.raises(ExecutionSSHBrokerError) as broker_exc:
+            await call_execution_ssh_broker(
+                "read_execution_ssh_session",
+                {"session_id": session_id, "maximum_bytes": 1024, "timeout_seconds": 0},
+                reason="Verify broker HTTP route itself refuses with ssh_disabled.",
+            )
+        assert broker_exc.value.error_code == "ssh_disabled", broker_exc.value.to_payload()
+        assert broker_exc.value.to_payload()["next_step"] == SSH_DISABLED_NEXT_STEP
 
         # Flip SSH back ON, tighten denied_cidrs to block 198.51.100.0/24, disable password bootstrap,
         # and add a new pinned target — all take effect live without restarting the broker!
@@ -3692,6 +3700,7 @@ async def test_c80_smaller_fixes_secure_cli_case_lazy_init_body_limit_unknown_re
         instance_name=instance.config.instance_name,
         storage_settings=instance.config.manager_storage_settings,
         ssh=instance.config.execution_control.ssh,
+        execution_enabled=instance.config.execution_control.enabled,
         lead_agent_type="TeamArchitect",
         config_path=str(instance.config_path),
         config_source_revision=instance.config.source_revision,
@@ -4423,5 +4432,643 @@ def test_c83_startup_revision_race_shared_strings_and_removed_unused_helper(
 
     # (c) Unused helper removed.
     assert not hasattr(broker_client, "broker_execution_ssh_available")
+
+
+@pytest.mark.asyncio
+async def test_c84_shared_binding_pinned_target_enforcement_and_inflight_open_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C84: Removed/edited pinned targets with a shared binding are refused on open/run/upload and live work, and in-flight open() re-checks changed policy/targets."""
+
+    import base64
+    import threading
+    import time
+    from custom_agents.execution_control_service import ExecutionControlService
+    from custom_tools.providers import _execution_ssh as tools
+    from runtime_hosting.execution_contracts import (
+        EnrolledSSHTargetV1,
+        SSHTargetLifecycle,
+        SSHTargetPlatform,
+        ssh_public_key_sha256_fingerprint,
+    )
+    from runtime_hosting.ssh import ConfiguredSSHCredentialMaterialProvider
+    from runtime_hosting.ssh_network import SSHNetworkPolicy
+    from runtime_settings.execution import ExecutionSSHSettings, ExecutionSSHTargetSettings
+
+    use_signed_contexts(monkeypatch)
+    key_bytes = b"c84-shared-binding-key"
+    instance = execution_instance(tmp_path, authorization_enabled=False)
+    identity, known_hosts = write_ssh_material(
+        instance.root / "broker_credentials" / "shared",
+        key_bytes=key_bytes,
+    )
+    # Add a second host entry to the same known_hosts file so both targets share identical key paths & binding id.
+    key_b64 = base64.b64encode(key_bytes).decode("ascii")
+    known_hosts.write_text(
+        f"ops-a.internal ssh-ed25519 {key_b64}\nops-b.internal ssh-ed25519 {key_b64}\n",
+        encoding="utf-8",
+    )
+    fake_ssh_bin = _write_fake_tool_ssh(
+        tmp_path / "c84_bin",
+        extract_root=tmp_path / "c84_extract",
+        state_dir=tmp_path / "c84_state",
+    )
+    fp = host_key_fingerprint(key_bytes)
+    target_a = ExecutionSSHTargetSettings(
+        target_id="ops.a",
+        host="ops-a.internal",
+        port=22,
+        username="automation",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=fp,
+        credential_binding_id="shared_binding",
+        identity_file=str(identity),
+        known_hosts_file=str(known_hosts),
+    )
+    target_b = ExecutionSSHTargetSettings(
+        target_id="ops.b",
+        host="ops-b.internal",
+        port=22,
+        username="automation",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=fp,
+        credential_binding_id="shared_binding",
+        identity_file=str(identity),
+        known_hosts_file=str(known_hosts),
+    )
+    instance.config.execution_control.ssh.enabled = True
+    instance.config.execution_control.ssh.ssh_executable = str(fake_ssh_bin)
+    instance.config.execution_control.ssh.targets = (target_a, target_b)
+    instance.config.save(instance.config_path)
+
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+
+    # (a) Shared binding: removing ops.b stops live work (even after sync runtime.broker access)
+    # and refuses open(), run_command(), and upload_bundle() on previously created CREATED sessions.
+    async with _running_ssh_broker(
+        instance,
+        lead,
+        monkeypatch,
+        root_token="c84-broker-root",
+    ) as (broker_service, _server, _tok):
+        rt = broker_service._execution_ssh
+        assert rt is not None
+        rt.broker.revocation_poll_interval_seconds = 0.05
+
+        sess_a = json.loads(tools.create_execution_ssh_session._tool_func(target_id="ops.a", confirmed=True))
+        sess_b_live = json.loads(tools.create_execution_ssh_session._tool_func(target_id="ops.b", confirmed=True))
+        sess_b_created = json.loads(tools.create_execution_ssh_session._tool_func(target_id="ops.b", confirmed=True))
+        sid_a = sess_a["session_id"]
+        sid_b_live = sess_b_live["session_id"]
+        sid_b_created = sess_b_created["session_id"]
+
+        for idx, sid in enumerate((sid_a, sid_b_created), start=1):
+            staged_int = json.loads(
+                tools.plan_execution_ssh_interaction._tool_func(
+                    session_id=sid,
+                    reason="C84 shared binding check",
+                    ttl_seconds=600,
+                    allow_commands=True,
+                    allow_workspace_transfer=True,
+                )
+            )
+            applied_int = await _apply(staged_int["change_id"], ToolCall(f"tooluse_c84_{idx}"), confirmed=True)
+            assert applied_int["status"] == "applied", applied_int
+
+        assert json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid_a))["status"] == "open"
+        assert json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid_b_live))["status"] == "open"
+
+        # Remove ops.b while ops.a keeps shared_binding.
+        instance.config.execution_control.ssh.targets = (target_a,)
+        instance.config.save(instance.config_path)
+
+        # Trigger synchronous runtime.broker property access BEFORE a monitor tick runs.
+        _ = rt.broker
+
+        # Monitor tick must still detect allowed_pinned_targets changed and stop live ops.b while keeping ops.a open.
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if sid_b_live not in rt._broker._sessions and sid_b_live not in rt._broker._closing_tasks:
+                break
+            await asyncio.sleep(0.05)
+        assert sid_b_live not in rt._broker._sessions
+        assert sid_a in rt._broker._sessions
+
+        # Previously created CREATED session for removed ops.b is refused on run_command(), upload_bundle(), and open().
+        exec_service = ExecutionControlService(lead)
+        caller = SSHCallerContext(
+            agent_type="TeamArchitect",
+            task_id=exec_service.actor.task_id,
+            person_id=exec_service.actor.person_id,
+        )
+        with pytest.raises(ExecutionAuthorizationDenied, match="execution_control.ssh.targets"):
+            await rt.broker.run_command(
+                session_id=sid_b_created,
+                command="echo should-not-run",
+                caller=caller,
+            )
+        with pytest.raises(ExecutionAuthorizationDenied, match="execution_control.ssh.targets"):
+            await rt.broker.upload_bundle(
+                session_id=sid_b_created,
+                entries=[("hello.txt", b"hi")],
+                remote_destination="~/c84-dest",
+                caller=caller,
+            )
+        open_refused = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid_b_created))
+        assert open_refused["error_code"] == "execution_access_refused", open_refused
+        assert "execution_control.ssh.targets" in open_refused["error"]
+
+        # Sibling ops.a sharing shared_binding continues working cleanly.
+        run_a = await rt.broker.run_command(
+            session_id=sid_a,
+            command="echo still-allowed",
+            caller=caller,
+            wait_seconds=3.0,
+        )
+        assert run_a.status.value == "completed", run_a
+        await rt.broker.close(session_id=sid_a, caller=caller)
+    set_agent_ref(None)
+
+    # (b) In-flight open() race: tightening network_policy OR removing a pinned target during
+    # await _enter_context_safely must abort open() before spawning ssh.
+    repo = SqliteExecutionControlRepository(str(tmp_path / "c84-race.db"))
+    artifacts = FilesystemArtifactStore(tmp_path / "c84-artifacts")
+    spawn_marker = tmp_path / "ssh-spawned.flag"
+    marker_ssh = tmp_path / "marker-ssh"
+    marker_ssh.write_text(
+        f"#!/bin/sh\ntouch {spawn_marker}\nsleep 1\n",
+        encoding="utf-8",
+    )
+    marker_ssh.chmod(0o755)
+
+    entered_prepare = threading.Event()
+    release_prepare = threading.Event()
+    exited_prepare = threading.Event()
+
+    class _PausingMaterialProvider:
+        def __init__(self, inner: ConfiguredSSHCredentialMaterialProvider) -> None:
+            self._inner = inner
+
+        @contextmanager
+        def prepare(self, session: InteractiveSessionV1):
+            entered_prepare.set()
+            assert release_prepare.wait(timeout=5.0)
+            with self._inner.prepare(session) as mat:
+                try:
+                    yield mat
+                finally:
+                    exited_prepare.set()
+
+    # Case 1: Enrolled target whose network_policy tightens during await _enter_context_safely.
+    host_pub = _framed_ed25519_pub(b"\x84" * 32)
+    enrolled_algo, enrolled_fp = ssh_public_key_sha256_fingerprint(host_pub)
+    enrolled_key_bytes = base64.b64decode(host_pub.split()[1])
+    owner_scope = team_owner()
+    enrolled_seed = {
+        "target_id": "c84_race_enrolled",
+        "owner": owner_scope,
+        "host": "race.example.com",
+        "port": 22,
+        "username": "deploy",
+        "platform": SSHTargetPlatform.LINUX,
+        "host_key_algorithm": enrolled_algo,
+        "host_key_fingerprint": enrolled_fp,
+        "host_key_public_key": host_pub,
+        "credential_key": "race_ssh_key",
+        "credential_owner_scope": owner_scope,
+        "credential_public_key_fingerprint": enrolled_fp,
+        "lifecycle": SSHTargetLifecycle.PERSISTENT,
+        "expires_at_utc": None,
+        "reason": "C84 in-flight open race test",
+    }
+    placeholder = build_activation(
+        ExecutionActivationKind.SSH_TARGET_ENROLL,
+        resource_id="c84_race_enrolled",
+        resource_digest="0" * 64,
+        owner_scope=owner_scope,
+        mode=ChangeApprovalMode.AGREEMENT,
+        function="change:execution_ssh_target_enroll",
+    )
+    enrolled_digest = EnrolledSSHTargetV1.model_construct(activation=placeholder, **enrolled_seed).enrollment_digest()
+    enrolled = EnrolledSSHTargetV1(
+        activation=build_activation(
+            ExecutionActivationKind.SSH_TARGET_ENROLL,
+            resource_id="c84_race_enrolled",
+            resource_digest=enrolled_digest,
+            owner_scope=owner_scope,
+            mode=ChangeApprovalMode.AGREEMENT,
+            function="change:execution_ssh_target_enroll",
+        ),
+        **enrolled_seed,
+    )
+    repo.put_ssh_target(enrolled)
+    race_id, race_kh = write_ssh_material(
+        tmp_path / "race-enrolled-mat",
+        key_bytes=enrolled_key_bytes,
+    )
+    race_kh.write_text(
+        f"race.example.com {enrolled_algo} {base64.b64encode(enrolled_key_bytes).decode('ascii')}\n",
+        encoding="utf-8",
+    )
+    enrolled_conn_target = enrolled.to_connection_target()
+    enrolled_target_digest = enrolled_conn_target.calculate_digest()
+    enrolled_session = InteractiveSessionV1(
+        session_id="ssh_sess_c84_race_enrolled",
+        owner=owner_scope,
+        target=enrolled_conn_target,
+        target_digest=enrolled_target_digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_c84_race_enrolled",
+            resource_digest=enrolled_target_digest,
+            owner_scope=owner_scope,
+            mode=ChangeApprovalMode.AGREEMENT,
+            function="create_execution_ssh_session",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        ),
+    )
+    repo.create_interactive_session(enrolled_session)
+
+    enrolled_broker = SSHSessionBroker(
+        repository=repo,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=_PausingMaterialProvider(
+            ConfiguredSSHCredentialMaterialProvider(
+                {
+                    enrolled_conn_target.credential_binding_id: SSHCredentialMaterial(
+                        identity_file=race_id, known_hosts_file=race_kh
+                    )
+                }
+            )
+        ),
+        artifact_store=artifacts,
+        team_id=owner_scope.team_id,
+        broker_id="broker-c84-race",
+        ssh_executable=str(marker_ssh),
+        network_policy=SSHNetworkPolicy(denied_cidrs=()),
+        resolver=lambda host, port: ["198.51.100.77"],
+        local_address_checker=lambda ip: False,
+    )
+    open_task = asyncio.create_task(
+        enrolled_broker.open(
+            session_id=enrolled_session.session_id,
+            lease_token="lease-c84-1",
+            caller=_DEFAULT_CALLER,
+        )
+    )
+    assert await asyncio.to_thread(entered_prepare.wait, 5.0)
+    # Tighten policy AND run enforce_settings_on_live_work (updating _checked_network_policy) while open() is suspended!
+    enrolled_broker.network_policy = SSHNetworkPolicy.from_settings(
+        ExecutionSSHSettings(denied_cidrs=("198.51.100.0/24",))
+    )
+    await enrolled_broker.enforce_settings_on_live_work(check_network=True)
+    release_prepare.set()
+
+    with pytest.raises(PermissionError, match="denied_cidrs"):
+        await open_task
+    assert not spawn_marker.exists()
+    assert enrolled_session.session_id not in enrolled_broker._sessions
+    assert exited_prepare.is_set()
+    stored_failed = repo.get_interactive_session(team_id=owner_scope.team_id, session_id=enrolled_session.session_id)
+    assert stored_failed is not None and stored_failed.status is InteractiveSessionStatus.FAILED
+
+    # Case 2: Pinned target removed from allowed_pinned_targets (keeping binding) during await _enter_context_safely.
+    entered_prepare.clear()
+    release_prepare.clear()
+    exited_prepare.clear()
+    pinned_conn_target = SSHConnectionTargetV1(
+        host="ops-b.internal",
+        port=22,
+        username="automation",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=fp,
+        credential_binding_id="shared_binding",
+    )
+    pinned_digest = pinned_conn_target.calculate_digest()
+    pinned_session = InteractiveSessionV1(
+        session_id="ssh_sess_c84_race_pinned",
+        owner=owner_scope,
+        target=pinned_conn_target,
+        target_digest=pinned_digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_c84_race_pinned",
+            resource_digest=pinned_digest,
+            owner_scope=owner_scope,
+            mode=ChangeApprovalMode.AGREEMENT,
+            function="create_execution_ssh_session",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        ),
+    )
+    repo.create_interactive_session(pinned_session)
+    key_a = ("ops-a.internal", 22, "automation", "ssh-ed25519", fp, "shared_binding")
+    key_b = ("ops-b.internal", 22, "automation", "ssh-ed25519", fp, "shared_binding")
+    pinned_broker = SSHSessionBroker(
+        repository=repo,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=_PausingMaterialProvider(
+            ConfiguredSSHCredentialMaterialProvider(
+                {"shared_binding": SSHCredentialMaterial(identity_file=identity, known_hosts_file=known_hosts)}
+            )
+        ),
+        artifact_store=artifacts,
+        team_id=owner_scope.team_id,
+        broker_id="broker-c84-race-pinned",
+        ssh_executable=str(marker_ssh),
+        allowed_pinned_targets=frozenset({key_a, key_b}),
+    )
+    open_pinned_task = asyncio.create_task(
+        pinned_broker.open(
+            session_id=pinned_session.session_id,
+            lease_token="lease-c84-2",
+            caller=_DEFAULT_CALLER,
+        )
+    )
+    assert await asyncio.to_thread(entered_prepare.wait, 5.0)
+    pinned_broker.allowed_pinned_targets = frozenset({key_a})
+    await pinned_broker.enforce_settings_on_live_work(check_pinned_targets=True)
+    release_prepare.set()
+
+    with pytest.raises(ExecutionAuthorizationDenied, match="execution_control.ssh.targets"):
+        await open_pinned_task
+    assert not spawn_marker.exists()
+    assert pinned_session.session_id not in pinned_broker._sessions
+    assert exited_prepare.is_set()
+    await enrolled_broker.shutdown()
+    await pinned_broker.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_c85_plan_unusable_config_startup_delete_and_start_disabled_enable_live(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C85: plan_* classifies unusable config as ssh_settings_unusable, startup deletion fails closed, and starting with enabled=False then enabling live works."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_tools.broker_execution_ssh import ExecutionSSHBrokerError, call_execution_ssh_broker
+    from custom_tools.providers import _execution_ssh as tools
+    from runtime_hosting.authorization import SSH_DISABLED_NEXT_STEP
+    from runtime_settings.instance_layout import InstanceLayout
+    from secure_tool_broker.execution_ssh import ExecutionSSHSettingsSource
+
+    use_signed_contexts(monkeypatch)
+    instance = execution_instance(tmp_path, authorization_enabled=False)
+    instance.config.execution_control.ssh.enabled = True
+    instance.config.save(instance.config_path)
+    original_yaml = instance.config_path.read_text(encoding="utf-8")
+
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+
+    # (a) Corrupt instance_config.yaml with invalid YAML and bad CIDR: plan_execution_ssh_target
+    # and plan_execution_ssh_interaction both return error_code='ssh_settings_unusable' + next_step.
+    for broken_text in (
+        "schema_version: 2\nexecution_control: [unterminated\n",
+        original_yaml.replace("denied_cidrs:", "denied_cidrs:\n      - not-a-cidr"),
+    ):
+        instance.config_path.write_text(broken_text, encoding="utf-8")
+        target_res = json.loads(
+            await tools.plan_execution_ssh_target._tool_func(
+                host="198.51.100.10",
+                username="deploy",
+                platform="linux",
+                credential_key="host-key",
+                reason="Check unusable settings classification",
+                lifecycle="persistent",
+            )
+        )
+        assert target_res["error_code"] == "ssh_settings_unusable", target_res
+        assert "instance_config.yaml" in target_res["next_step"]
+
+        interaction_res = json.loads(
+            tools.plan_execution_ssh_interaction._tool_func(
+                session_id="ssh_sess_missing",
+                reason="Check unusable settings classification",
+                ttl_seconds=300,
+                allow_commands=True,
+            )
+        )
+        assert interaction_res["error_code"] == "ssh_settings_unusable", interaction_res
+        assert "instance_config.yaml" in interaction_res["next_step"]
+
+    instance.config_path.write_text(original_yaml, encoding="utf-8")
+
+    # (b) File deleted between GatewayInstanceConfig.load and ExecutionSSHSettingsSource.__init__
+    # must still recognize _existed=True and fail closed after grace period.
+    loaded = GatewayInstanceConfig.load(instance.config_path)
+    assert loaded.source_revision is not None
+    instance.config_path.unlink()
+    now = [100.0]
+    source = ExecutionSSHSettingsSource(
+        loaded.execution_control.ssh,
+        config_path=instance.config_path,
+        layout=InstanceLayout(instance.root),
+        initial_revision=loaded.source_revision,
+        unusable_grace_seconds=2.0,
+        clock=lambda: now[0],
+    )
+    snap_grace = source.snapshot()
+    assert snap_grace.unusable_error is None
+    assert snap_grace.settings.enabled is True
+    now[0] = 102.5
+    snap_closed = source.snapshot()
+    assert snap_closed.settings.enabled is False
+    assert snap_closed.unusable_error is not None and "missing" in snap_closed.unusable_error.lower()
+
+    # (c) Starting broker with enabled=False refuses HTTP calls with ssh_disabled without touching
+    # execution storage/artifacts, then flipping enabled=True live enables SSH without restart.
+    instance.config_path.write_text(original_yaml, encoding="utf-8")
+    instance2 = execution_instance(tmp_path / "start-disabled", authorization_enabled=False)
+    fake_ssh_bin = _write_fake_tool_ssh(
+        tmp_path / "c85_bin",
+        extract_root=tmp_path / "c85_extract",
+        state_dir=tmp_path / "c85_state",
+    )
+    instance2.config.execution_control.ssh.enabled = False
+    instance2.config.execution_control.ssh.ssh_executable = str(fake_ssh_bin)
+    instance2.config.save(instance2.config_path)
+    lead2 = execution_lead(instance2)
+    set_agent_ref(lead2)
+    artifacts_dir2 = instance2.root / "runtime" / "execution-artifacts"
+
+    async with _running_ssh_broker(
+        instance2,
+        lead2,
+        monkeypatch,
+        root_token="c85-broker-root",
+    ) as (broker_service, _server, _tok):
+        rt = broker_service._execution_ssh
+        assert rt is not None
+        assert rt._repository is None
+        assert not artifacts_dir2.exists()
+
+        with pytest.raises(ExecutionSSHBrokerError) as disabled_exc:
+            await call_execution_ssh_broker(
+                "probe_execution_ssh_host_key",
+                {"host": "198.51.100.10", "port": 22},
+                reason="Verify disabled-at-startup broker refuses via HTTP.",
+            )
+        assert disabled_exc.value.error_code == "ssh_disabled"
+        assert disabled_exc.value.to_payload()["next_step"] == SSH_DISABLED_NEXT_STEP
+        assert rt._repository is None
+        assert not artifacts_dir2.exists()
+
+        # Flip enabled=True live on disk; broker now lazily initializes and opens a session.
+        instance2.config.execution_control.ssh.enabled = True
+        instance2.config.save(instance2.config_path)
+
+        sess = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID, confirmed=True))
+        opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sess["session_id"]))
+        assert opened["status"] == "open", opened
+        closed = json.loads(await tools.close_execution_ssh_session._tool_func(session_id=sess["session_id"]))
+        assert closed["status"] == "closed", closed
+    set_agent_ref(None)
+
+
+@pytest.mark.asyncio
+async def test_c86_execution_control_enabled_false_disables_broker_ssh_live_and_at_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C86: execution_control.enabled: false disables broker SSH at startup and during live reload, and non-boolean values fail closed."""
+
+    import time
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_tools.broker_execution_ssh import ExecutionSSHBrokerError, call_execution_ssh_broker
+    from custom_tools.providers import _execution_ssh as tools
+    from runtime_settings.instance_layout import InstanceLayout
+    from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig, ExecutionSSHSettingsSource
+
+    use_signed_contexts(monkeypatch)
+    instance = execution_instance(tmp_path, authorization_enabled=False)
+    fake_ssh_bin = _write_fake_tool_ssh(
+        tmp_path / "c86_bin",
+        extract_root=tmp_path / "c86_extract",
+        state_dir=tmp_path / "c86_state",
+    )
+    instance.config.execution_control.enabled = False
+    instance.config.execution_control.ssh.enabled = True
+    instance.config.execution_control.ssh.ssh_executable = str(fake_ssh_bin)
+    instance.config.save(instance.config_path)
+
+    # (a) Startup: execution_control.enabled=False forces broker SSH off even if ssh.enabled=True.
+    loaded_disabled = GatewayInstanceConfig.load(instance.config_path)
+    cfg = BrokerExecutionSSHConfig.from_runtime_settings(
+        instance_root_path=str(instance.root),
+        instance_name=loaded_disabled.instance_name,
+        storage_settings=loaded_disabled.manager_storage_settings,
+        ssh=loaded_disabled.execution_control.ssh,
+        execution_enabled=loaded_disabled.execution_control.enabled,
+        config_path=str(instance.config_path),
+        config_source_revision=loaded_disabled.source_revision,
+    )
+    assert cfg.ssh.enabled is False
+    src = ExecutionSSHSettingsSource(
+        cfg.ssh,
+        config_path=instance.config_path,
+        layout=InstanceLayout(instance.root),
+        initial_revision=loaded_disabled.source_revision,
+        unusable_grace_seconds=1.0,
+    )
+    assert src.current().enabled is False
+
+    # (b) Non-boolean execution_control.enabled is rejected as unusable settings and fails closed.
+    import yaml
+
+    now = [200.0]
+    src_bad = ExecutionSSHSettingsSource(
+        instance.config.execution_control.ssh,
+        config_path=instance.config_path,
+        layout=InstanceLayout(instance.root),
+        unusable_grace_seconds=1.0,
+        clock=lambda: now[0],
+    )
+    original_yaml_c86 = instance.config_path.read_text(encoding="utf-8")
+    parsed_bad = yaml.safe_load(original_yaml_c86)
+    parsed_bad["execution_control"]["enabled"] = "nope"
+    instance.config_path.write_text(yaml.safe_dump(parsed_bad, sort_keys=False), encoding="utf-8")
+    _ = src_bad.snapshot()
+    now[0] = 201.5
+    snap_bad = src_bad.snapshot()
+    assert snap_bad.settings.enabled is False
+    assert snap_bad.unusable_error is not None and "execution_control.enabled" in snap_bad.unusable_error
+
+    # (c) Live toggle: flip execution_control.enabled from True to False (leaving ssh.enabled=True)
+    # stops live SSH sessions and running commands and refuses direct broker calls with ssh_disabled.
+    instance.config_path.write_text(original_yaml_c86, encoding="utf-8")
+    instance.config.execution_control.enabled = True
+    instance.config.execution_control.ssh.enabled = True
+    instance.config.save(instance.config_path)
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+
+    async with _running_ssh_broker(
+        instance,
+        lead,
+        monkeypatch,
+        root_token="c86-broker-root",
+    ) as (broker_service, _server, _tok):
+        rt = broker_service._execution_ssh
+        assert rt is not None
+        rt.broker.revocation_poll_interval_seconds = 0.05
+
+        sess = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID, confirmed=True))
+        sid = sess["session_id"]
+        staged_int = json.loads(
+            tools.plan_execution_ssh_interaction._tool_func(
+                session_id=sid,
+                reason="C86 live toggle test",
+                ttl_seconds=600,
+                allow_commands=True,
+            )
+        )
+        applied_int = await _apply(staged_int["change_id"], ToolCall("tooluse_c86_int"), confirmed=True)
+        assert applied_int["status"] == "applied", applied_int
+
+        assert json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sid))["status"] == "open"
+        cmd = json.loads(
+            await tools.run_execution_ssh_command._tool_func(
+                session_id=sid, command="sleep 30", timeout_seconds=30.0, wait_seconds=0.1
+            )
+        )
+        assert cmd["status"] == "running", cmd
+        cmd_id = cmd["command_id"]
+
+        instance.config.execution_control.enabled = False
+        instance.config.execution_control.ssh.enabled = True
+        instance.config.save(instance.config_path)
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if (
+                sid not in rt._broker._sessions
+                and sid not in rt._broker._closing_tasks
+                and rt._broker._commands[cmd_id].status.value != "running"
+            ):
+                break
+            await asyncio.sleep(0.05)
+        assert sid not in rt._broker._sessions
+        assert rt._broker._commands[cmd_id].status.value == "revoked"
+
+        with pytest.raises(ExecutionSSHBrokerError) as refused_exc:
+            await call_execution_ssh_broker(
+                "read_execution_ssh_session",
+                {"session_id": sid, "maximum_bytes": 1024, "timeout_seconds": 0},
+                reason="Verify broker refuses when execution_control.enabled is false.",
+            )
+        assert refused_exc.value.error_code == "ssh_disabled"
+
+        # Re-enabling execution_control.enabled restores broker SSH live.
+        instance.config.execution_control.enabled = True
+        instance.config.save(instance.config_path)
+        sess2 = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID, confirmed=True))
+        opened2 = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=sess2["session_id"]))
+        assert opened2["status"] == "open", opened2
+        closed2 = json.loads(await tools.close_execution_ssh_session._tool_func(session_id=sess2["session_id"]))
+        assert closed2["status"] == "closed", closed2
+    set_agent_ref(None)
 
 

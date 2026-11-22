@@ -97,6 +97,7 @@ from storage.execution_control_repository import (
 )
 
 _T = TypeVar("_T")
+PinnedSSHTargetKey = tuple[str, int, str, str, str, str]
 
 _TERMINAL_SESSION_STATUSES = frozenset(
     {
@@ -446,6 +447,7 @@ class SSHSessionBroker:
     max_concurrent_commands_per_session: int = _DEFAULT_MAX_CONCURRENT_COMMANDS_PER_SESSION
     max_concurrent_commands_per_broker: int = _DEFAULT_MAX_CONCURRENT_COMMANDS_PER_BROKER
     network_policy: SSHNetworkPolicy | None = None
+    allowed_pinned_targets: frozenset[PinnedSSHTargetKey] | None = None
     resolver: SSHHostResolver | None = None
     local_address_checker: LocalAddressChecker | None = None
     allow_password_bootstrap: bool = False
@@ -467,10 +469,14 @@ class SSHSessionBroker:
     _checked_material_provider: SSHCredentialMaterialProvider | None = field(
         default=None, init=False, repr=False
     )
+    _checked_allowed_pinned_targets: frozenset[PinnedSSHTargetKey] | None = field(
+        default=None, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._checked_network_policy = self.network_policy
         self._checked_material_provider = self.material_provider
+        self._checked_allowed_pinned_targets = self.allowed_pinned_targets
 
     def _require_not_shutting_down(self) -> None:
         if self._shutting_down:
@@ -558,10 +564,35 @@ class SSHSessionBroker:
         )
         return enrolled_target, interaction
 
+    @staticmethod
+    def _pinned_target_key(session: InteractiveSessionV1) -> PinnedSSHTargetKey:
+        target = session.target
+        return (
+            target.host,
+            target.port,
+            target.username,
+            target.host_key_algorithm,
+            target.host_key_fingerprint,
+            target.credential_binding_id,
+        )
+
+    def _require_pinned_target_allowed(self, session: InteractiveSessionV1) -> None:
+        if session.target.target_id is not None:
+            return
+        if (
+            self.allowed_pinned_targets is not None
+            and self._pinned_target_key(session) not in self.allowed_pinned_targets
+        ):
+            raise ExecutionAuthorizationDenied(
+                "SSH target was removed or changed in execution_control.ssh.targets."
+            )
+
     def _validate_target_network(self, session: InteractiveSessionV1) -> ValidatedSSHHost | None:
         if session.target.target_id is None:
             # Operator-pinned static targets from execution_control.ssh.targets connect
-            # directly as in 0.9 without dynamic network-policy checks or IP pinning.
+            # directly as in 0.9 without dynamic network-policy checks or IP pinning,
+            # while still requiring the exact pinned target entry to remain active.
+            self._require_pinned_target_allowed(session)
             return None
         policy = self.network_policy or SSHNetworkPolicy.default()
         return validate_ssh_host(
@@ -657,6 +688,8 @@ class SSHSessionBroker:
             _enrolled, interaction = self._authorize_session(
                 claimed, capability=SSHCapability.CONNECT, caller=caller
             )
+            policy_snapshot = self.network_policy
+            provider_snapshot = self.material_provider
             validated_host = self._validate_target_network(claimed)
             open_key_lifetime: int | None = None
             if interaction is not None and interaction.activation.expires_at_utc is not None:
@@ -695,8 +728,33 @@ class SSHSessionBroker:
                 ),
                 verify=lambda mat: self._verify_material(claimed, mat),
             )
-            self._require_not_shutting_down()
-            self._authorize_session(claimed, capability=SSHCapability.CONNECT, caller=caller)
+            while True:
+                self._require_not_shutting_down()
+                self._authorize_session(claimed, capability=SSHCapability.CONNECT, caller=caller)
+                if claimed.target.target_id is None:
+                    self._require_pinned_target_allowed(claimed)
+                    if self.material_provider is not provider_snapshot:
+                        configured_bindings = self._configured_binding_ids(self.material_provider)
+                        if (
+                            configured_bindings is not None
+                            and claimed.target.credential_binding_id not in configured_bindings
+                        ):
+                            raise ExecutionAuthorizationDenied(
+                                "SSH target credential binding was removed from execution_control.ssh.targets."
+                            )
+                    break
+                current_policy = self.network_policy
+                if current_policy == policy_snapshot:
+                    break
+                policy_snapshot = current_policy
+                validated_host = await asyncio.to_thread(
+                    validate_ssh_host,
+                    claimed.target.host,
+                    claimed.target.port,
+                    current_policy or SSHNetworkPolicy.default(),
+                    resolver=self.resolver,
+                    local_address_checker=self.local_address_checker,
+                )
             scrubber = SessionSecretScrubber(material.touched_secrets, logger=self.logger)
             stream_scrubber = scrubber.new_stream_scrubber()
             master_fd, slave_fd = pty.openpty()
@@ -1816,12 +1874,14 @@ class SSHSessionBroker:
         self._prune_completed_commands()
         self._commands[command_id] = cmd
         self._session_commands.setdefault(session.session_id, set()).add(command_id)
+        policy_snapshot = self.network_policy
         cmd.runner_task = asyncio.create_task(
             self._run_tracked_command(
                 cmd=cmd,
                 session=session,
                 remote_argv=remote_argv,
                 validated_host=validated_host,
+                policy_snapshot=policy_snapshot,
                 stdin_payload=stdin_payload,
                 keep_stdin_open=keep_stdin_open,
                 timeout_seconds=timeout_seconds,
@@ -1869,6 +1929,7 @@ class SSHSessionBroker:
         session: InteractiveSessionV1,
         remote_argv: tuple[str, ...],
         validated_host: ValidatedSSHHost | None,
+        policy_snapshot: SSHNetworkPolicy | None,
         stdin_payload: bytes | None,
         keep_stdin_open: bool,
         timeout_seconds: float,
@@ -1892,20 +1953,39 @@ class SSHSessionBroker:
             )
             cmd.scrubber.register_many(material.touched_secrets)
 
-            # Re-verify authorization immediately before starting ssh or sending stdin secrets.
-            if self._shutting_down:
-                raise SSHSessionUnavailable("SSH session broker is shutting down.")
-            if cmd.revoked_event.is_set():
-                raise ExecutionAuthorizationDenied(
-                    cmd.invalidation_reason
-                    or "SSH command was terminated because the session or target was revoked."
+            # Re-verify authorization and active settings immediately before starting ssh or sending stdin secrets.
+            while True:
+                if self._shutting_down:
+                    raise SSHSessionUnavailable("SSH session broker is shutting down.")
+                if cmd.revoked_event.is_set():
+                    raise ExecutionAuthorizationDenied(
+                        cmd.invalidation_reason
+                        or "SSH command was terminated because the session or target was revoked."
+                    )
+                self._authorize_session(
+                    session,
+                    capability=cmd.capability,
+                    caller=cmd.caller,
+                    secret_recipe=cmd.secret_recipe,
                 )
-            self._authorize_session(
-                session,
-                capability=cmd.capability,
-                caller=cmd.caller,
-                secret_recipe=cmd.secret_recipe,
-            )
+                if session.target.target_id is None:
+                    self._require_pinned_target_allowed(session)
+                    break
+                current_policy = self.network_policy
+                if current_policy == policy_snapshot:
+                    break
+                policy_snapshot = current_policy
+                try:
+                    validated_host = await asyncio.to_thread(
+                        validate_ssh_host,
+                        session.target.host,
+                        session.target.port,
+                        current_policy or SSHNetworkPolicy.default(),
+                        resolver=self.resolver,
+                        local_address_checker=self.local_address_checker,
+                    )
+                except PermissionError as exc:
+                    raise ExecutionAuthorizationDenied(str(exc)) from exc
 
             argv = self._ssh_command_argv(
                 session,
@@ -2584,14 +2664,21 @@ class SSHSessionBroker:
         *,
         check_network: bool = False,
         check_pinned_targets: bool = False,
-        allowed_pinned_targets: frozenset[tuple[str, int, str, str, str, str]] | None = None,
+        allowed_pinned_targets: frozenset[PinnedSSHTargetKey] | None = None,
     ) -> None:
         """Re-check live sessions, running commands, and steps once after a settings change."""
 
         policy_snapshot = self.network_policy
         provider_snapshot = self.material_provider
+        broker_allowed_pinned = self.allowed_pinned_targets
+        effective_allowed_pinned = (
+            allowed_pinned_targets
+            if allowed_pinned_targets is not None
+            else broker_allowed_pinned
+        )
         self._checked_network_policy = policy_snapshot
         self._checked_material_provider = provider_snapshot
+        self._checked_allowed_pinned_targets = broker_allowed_pinned
         if (not check_network and not check_pinned_targets) or not self._has_monitored_work():
             return
 
@@ -2632,22 +2719,17 @@ class SSHSessionBroker:
                             network_cache[host_key] = None
                     invalidation_reason = network_cache[host_key]
             elif check_pinned_targets:
-                target = session.target
-                pinned_key = (
-                    target.host,
-                    target.port,
-                    target.username,
-                    target.host_key_algorithm,
-                    target.host_key_fingerprint,
-                    target.credential_binding_id,
-                )
-                if allowed_pinned_targets is not None and pinned_key not in allowed_pinned_targets:
+                pinned_key = self._pinned_target_key(session)
+                if (
+                    effective_allowed_pinned is not None
+                    and pinned_key not in effective_allowed_pinned
+                ):
                     invalidation_reason = (
                         "SSH target was removed or changed in execution_control.ssh.targets."
                     )
                 elif (
                     configured_bindings is not None
-                    and target.credential_binding_id not in configured_bindings
+                    and session.target.credential_binding_id not in configured_bindings
                 ):
                     invalidation_reason = (
                         "SSH target credential binding was removed from execution_control.ssh.targets."
@@ -2749,10 +2831,11 @@ class SSHSessionBroker:
                 return
         network_changed = self.network_policy != self._checked_network_policy
         provider_changed = self.material_provider is not self._checked_material_provider
-        if network_changed or provider_changed:
+        pinned_changed = self.allowed_pinned_targets != self._checked_allowed_pinned_targets
+        if network_changed or provider_changed or pinned_changed:
             await self.enforce_settings_on_live_work(
                 check_network=network_changed,
-                check_pinned_targets=provider_changed,
+                check_pinned_targets=provider_changed or pinned_changed,
             )
             if not self._has_monitored_work():
                 return
@@ -3287,6 +3370,7 @@ __all__ = [
     "CompositeSSHCredentialMaterialProvider",
     "ConfiguredSSHCredentialMaterialProvider",
     "MAX_PTY_WRITE_BYTES",
+    "PinnedSSHTargetKey",
     "SSHBundleUploadResult",
     "SSHCommandResult",
     "SSHCommandStatus",
