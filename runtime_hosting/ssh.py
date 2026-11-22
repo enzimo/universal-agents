@@ -1940,15 +1940,17 @@ class SSHSessionBroker:
             "exit 0; fi; done; exit 127"
         )
         scrubber = SessionSecretScrubber(logger=self.logger)
-        mat_ctx, material = await _enter_context_safely(
-            lambda: self._prepare_material_context(
-                session,
-                key_lifetime_seconds=max(15, int(timeout_seconds) + 10),
-                scrubber=scrubber,
-            ),
-            verify=lambda mat: self._verify_material(session, mat),
-        )
+        mat_ctx: AbstractContextManager[SSHCredentialMaterial] | None = None
         try:
+            mat_ctx, material = await _enter_context_safely(
+                lambda: self._prepare_material_context(
+                    session,
+                    key_lifetime_seconds=max(15, int(timeout_seconds) + 10),
+                    scrubber=scrubber,
+                ),
+                verify=lambda mat: self._verify_material(session, mat),
+            )
+            scrubber.register_many(material.touched_secrets)
             validated_host, policy_snapshot, current_provider, _, _ = (
                 await self._recheck_before_spawn(
                     session=session,
@@ -1960,7 +1962,6 @@ class SSHSessionBroker:
                     provider_snapshot=provider_snapshot,
                 )
             )
-            scrubber.register_many(material.touched_secrets)
             argv = self._ssh_command_argv(
                 session,
                 material,
@@ -2001,10 +2002,11 @@ class SSHSessionBroker:
                 raise scrubbed_exc from None
             raise
         finally:
-            await _await_shielded(
-                asyncio.to_thread(mat_ctx.__exit__, None, None, None),
-                reraise_on_caller_cancel=False,
-            )
+            if mat_ctx is not None:
+                await _await_shielded(
+                    asyncio.to_thread(mat_ctx.__exit__, None, None, None),
+                    reraise_on_caller_cancel=False,
+                )
 
     async def upload_bundle(
         self,
@@ -3295,6 +3297,7 @@ class SSHSessionBroker:
         for sid, live in list(self._sessions.items()):
             session = live.session
             has_active_work = self._has_active_non_pty_work_for_session(sid)
+            failure_reason = "authorization_check_failed"
             try:
                 revocation = _get_revocation(sid)
                 interaction = _get_interaction(sid)
@@ -3307,7 +3310,19 @@ class SSHSessionBroker:
                     now=now,
                     check_lease=not has_active_work,
                 )
+                if reason is None and has_active_work:
+                    expires_at = live.session.lease_expires_at_utc
+                    renew_threshold = timedelta(
+                        seconds=max(1.0, float(self.lease_ttl_seconds) / 2.0)
+                    )
+                    if expires_at is not None and now >= expires_at - renew_threshold:
+                        failure_reason = "lease_renewal_failed"
+                        await self._touch(live)
                 live.monitor_failures = 0
+            except ExecutionAuthorizationDenied:
+                # _touch() already closed the session on a stale fence or revocation.
+                live.monitor_failures = 0
+                continue
             except Exception as exc:
                 live.monitor_failures, fail_closed = self._record_monitor_failure(
                     current_failures=live.monitor_failures,
@@ -3317,15 +3332,7 @@ class SSHSessionBroker:
                 )
                 if not fail_closed:
                     continue
-                reason = "authorization_check_failed"
-            if reason is None and has_active_work:
-                expires_at = live.session.lease_expires_at_utc
-                renew_threshold = timedelta(seconds=max(1.0, float(self.lease_ttl_seconds) / 2.0))
-                if expires_at is not None and now >= expires_at - renew_threshold:
-                    try:
-                        await self._touch(live)
-                    except ExecutionAuthorizationDenied:
-                        continue
+                reason = failure_reason
             if reason is not None:
                 self.logger.info(
                     "Terminating live SSH session after revocation or expiry. "

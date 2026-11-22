@@ -6838,7 +6838,7 @@ async def test_f11_long_running_command_renews_live_pty_lease_and_expiry_reason(
         "if '-tt' in sys.argv:\n"
         "    time.sleep(30)\n"
         "else:\n"
-        "    time.sleep(2.2)\n"
+        "    time.sleep(2.6)\n"
         "    print('long-cmd-done', flush=True)\n",
         encoding="utf-8",
     )
@@ -6858,7 +6858,7 @@ async def test_f11_long_running_command_renews_live_pty_lease_and_expiry_reason(
         team_id="team_alpha",
         broker_id="broker-f11",
         ssh_executable=str(fake_ssh_bin),
-        lease_ttl_seconds=1,
+        lease_ttl_seconds=2,
         revocation_poll_interval_seconds=0.1,
     )
     try:
@@ -6872,18 +6872,18 @@ async def test_f11_long_running_command_renews_live_pty_lease_and_expiry_reason(
 
         cmd = await broker.run_command(
             session_id=session.session_id,
-            command="sleep 2 && echo long-cmd-done",
+            command="sleep 2.6 && echo long-cmd-done",
             caller=_DEFAULT_CALLER,
             timeout_seconds=10.0,
             wait_seconds=0.2,
         )
         assert cmd.status == SSHCommandStatus.RUNNING
 
-        # Poll past lease_ttl_seconds (1s) while the 2.2s command runs.
+        # Poll past lease_ttl_seconds (2s) while the 2.6s command runs.
         deadline = time.monotonic() + 8.0
         result = cmd
         while result.status == SSHCommandStatus.RUNNING and time.monotonic() < deadline:
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.2)
             result = await broker.get_command(
                 session_id=session.session_id,
                 command_id=cmd.command_id,
@@ -6902,6 +6902,225 @@ async def test_f11_long_running_command_renews_live_pty_lease_and_expiry_reason(
         assert "revoked" not in expiry_msg.lower()
     finally:
         await broker.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_c94_monitor_tick_isolates_lease_renewal_storage_errors(
+    tmp_path: Path,
+) -> None:
+    """C94: A transient storage error renewing one session's lease must not abort checks for remaining sessions, and fails closed on that session after consecutive failures."""
+
+    import sys
+    from runtime_hosting.execution_contracts import (
+        SSHDelegationBoundsV1,
+        ssh_interaction_resource_digest,
+    )
+    from runtime_hosting.ssh import (
+        ConfiguredSSHCredentialMaterialProvider,
+        SSHCommandStatus,
+        SSHCredentialMaterial,
+        SSHSessionBroker,
+        _MONITOR_MAX_CONSECUTIVE_FAILURES,
+    )
+
+    repository = SqliteExecutionControlRepository(str(tmp_path / "c94.db"))
+    session_a = _session(b"c94-host-key", session_id="ssh_c94_a")
+    session_b = _session(b"c94-host-key", session_id="ssh_c94_b")
+    session_c = _session(b"c94-host-key", session_id="ssh_c94_c")
+    bounds = SSHDelegationBoundsV1(allow_commands=True, allow_typing=True)
+    for sess in (session_a, session_b, session_c):
+        repository.create_interactive_session(sess)
+        repository.put_ssh_interaction(
+            build_activation(
+                ExecutionActivationKind.SSH_INTERACT,
+                resource_id=sess.session_id,
+                resource_digest=ssh_interaction_resource_digest(
+                    target_digest=sess.target_digest, bounds=bounds
+                ),
+                function="plan_execution_ssh_interaction",
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            ),
+            bounds=bounds,
+        )
+
+    fake_ssh_bin = tmp_path / "c94_ssh.py"
+    fake_ssh_bin.write_text(
+        f"#!{sys.executable}\n"
+        "import time\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    fake_ssh_bin.chmod(0o755)
+    id_a, kh_a = write_ssh_material(tmp_path / "c94_a", key_bytes=b"c94-host-key")
+    broker = SSHSessionBroker(
+        repository=repository,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=ConfiguredSSHCredentialMaterialProvider(
+            {
+                session_a.target.credential_binding_id: SSHCredentialMaterial(
+                    identity_file=id_a, known_hosts_file=kh_a
+                ),
+            }
+        ),
+        artifact_store=FilesystemArtifactStore(tmp_path / "c94_artifacts"),
+        team_id="team_alpha",
+        broker_id="broker-c94",
+        ssh_executable=str(fake_ssh_bin),
+        lease_ttl_seconds=60,
+        revocation_poll_interval_seconds=60.0,  # drive _monitor_tick() explicitly
+    )
+    try:
+        for sess in (session_a, session_b, session_c):
+            await broker.open(
+                session_id=sess.session_id,
+                lease_token=f"lease-{sess.session_id}",
+                caller=_DEFAULT_CALLER,
+            )
+
+        # Start an active non-PTY command on session_a so _monitor_tick tries to renew its lease.
+        cmd = await broker.run_command(
+            session_id=session_a.session_id,
+            command="sleep 30",
+            caller=_DEFAULT_CALLER,
+            timeout_seconds=30.0,
+            wait_seconds=0.1,
+        )
+        assert cmd.status == SSHCommandStatus.RUNNING
+
+        # Force session_a into the renewal window and revoke session_b (checked after session_a).
+        live_a = broker._sessions[session_a.session_id]
+        live_a.session = live_a.session.model_copy(
+            update={"lease_expires_at_utc": datetime.now(timezone.utc) + timedelta(seconds=5)}
+        )
+        repository.revoke_interactive_session(
+            team_id="team_alpha",
+            session_id=session_b.session_id,
+            revoked_by="person_admin",
+            revoked_at_utc=datetime.now(timezone.utc),
+        )
+
+        # Simulate transient storage failure during _touch() for session_a only.
+        orig_touch = broker._touch
+        fail_a = True
+
+        async def _flaky_touch(live: Any) -> None:
+            if fail_a and live.session.session_id == session_a.session_id:
+                raise RuntimeError("transient database is locked")
+            await orig_touch(live)
+
+        broker._touch = _flaky_touch  # type: ignore[method-assign]
+
+        # Tick 1: session_a lease renewal fails once, does NOT escape _monitor_tick(),
+        # and session_b is still revoked and closed in the same tick.
+        await broker._monitor_tick()
+        assert session_b.session_id not in broker._sessions
+        assert session_a.session_id in broker._sessions
+        assert session_c.session_id in broker._sessions
+        assert broker._sessions[session_a.session_id].monitor_failures == 1
+
+        # Recovery resets monitor_failures to 0.
+        fail_a = False
+        await broker._monitor_tick()
+        assert broker._sessions[session_a.session_id].monitor_failures == 0
+
+        # Force back into renewal window and trigger _MONITOR_MAX_CONSECUTIVE_FAILURES
+        # consecutive failures on session_a; session_a must fail closed while session_c stays open.
+        fail_a = True
+        live_a = broker._sessions[session_a.session_id]
+        live_a.session = live_a.session.model_copy(
+            update={"lease_expires_at_utc": datetime.now(timezone.utc) + timedelta(seconds=5)}
+        )
+        for attempt in range(1, _MONITOR_MAX_CONSECUTIVE_FAILURES):
+            await broker._monitor_tick()
+            assert session_a.session_id in broker._sessions
+            assert broker._sessions[session_a.session_id].monitor_failures == attempt
+            assert session_c.session_id in broker._sessions
+
+        await broker._monitor_tick()
+        assert session_a.session_id not in broker._sessions
+        assert session_c.session_id in broker._sessions
+        final_cmd = await broker.get_command(
+            session_id=session_a.session_id,
+            command_id=cmd.command_id,
+            caller=_DEFAULT_CALLER,
+            wait_seconds=2.0,
+        )
+        assert final_cmd.status == SSHCommandStatus.REVOKED
+        assert "lease_renewal_failed" in (final_cmd.error or "")
+    finally:
+        await broker.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_c95_probe_remote_sudo_scrubs_prepare_errors(tmp_path: Path) -> None:
+    """C95: _probe_remote_sudo() scrubs secrets registered in scrubber even when _enter_context_safely fails during prepare() or _verify_material()."""
+
+    from contextlib import contextmanager
+    from runtime_hosting.ssh import CatalogSSHCredentialMaterialProvider
+
+    repository = SqliteExecutionControlRepository(str(tmp_path / "c95.db"))
+    session = _session(b"c95-host-key", session_id="ssh_c95")
+    repository.create_interactive_session(session)
+    secret_val = "ULTRA_SECRET_SUDO_PROBE_C95_776655"
+    identity, known_hosts = write_ssh_material(tmp_path / "c95_mat", key_bytes=b"c95-host-key")
+
+    class _FailingPrepareCatalogProvider(CatalogSSHCredentialMaterialProvider):
+        def __init__(self, *, fail_in_prepare: bool) -> None:
+            self._fail_in_prepare = fail_in_prepare
+
+        @contextmanager
+        def prepare(self, sess: InteractiveSessionV1, **kwargs: Any):
+            del sess
+            scrubber = kwargs.get("scrubber")
+            assert scrubber is not None
+            scrubber.register(secret_val)
+            if self._fail_in_prepare:
+                raise RuntimeError(f"prepare blew up carrying {secret_val}")
+            yield SSHCredentialMaterial(
+                identity_file=identity,
+                known_hosts_file=known_hosts,
+                touched_secrets=(secret_val,),
+            )
+
+    # 1) Failure during prepare() after secret registration is scrubbed and finally skips mat_ctx.__exit__.
+    broker_prepare = _broker(
+        tmp_path / "p1",
+        repository,
+        material_provider=_FailingPrepareCatalogProvider(fail_in_prepare=True),
+    )
+    with pytest.raises(RuntimeError) as caught_prepare:
+        await broker_prepare._probe_remote_sudo(
+            session=session,
+            caller=_DEFAULT_CALLER,
+            validated_host=None,
+            policy_snapshot=None,
+            provider_snapshot=broker_prepare.material_provider,
+            timeout_seconds=10.0,
+        )
+    assert secret_val not in str(caught_prepare.value)
+    assert "[REDACTED]" in str(caught_prepare.value)
+
+    # 2) Failure during _verify_material() inside _enter_context_safely() is also scrubbed.
+    broker_verify = _broker(
+        tmp_path / "p2",
+        repository,
+        material_provider=_FailingPrepareCatalogProvider(fail_in_prepare=False),
+    )
+    broker_verify._verify_material = lambda *_args, **_kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        PermissionError(f"host verify failed carrying {secret_val}")
+    )
+    with pytest.raises(PermissionError) as caught_verify:
+        await broker_verify._probe_remote_sudo(
+            session=session,
+            caller=_DEFAULT_CALLER,
+            validated_host=None,
+            policy_snapshot=None,
+            provider_snapshot=broker_verify.material_provider,
+            timeout_seconds=10.0,
+        )
+    assert secret_val not in str(caught_verify.value)
+    assert "[REDACTED]" in str(caught_verify.value)
+
 
 
 
