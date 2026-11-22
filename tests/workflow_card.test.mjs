@@ -30,10 +30,28 @@ function harness() {
     document.body.append(bubble);
     mountWorkflowCard(bubble, { lifecycle: { listen() {} }, requestClient, isCurrent, loaded });
     const card = byClass(bubble, "workflow-inline-card")[0];
-    return { bubble, card, heading: card.children[0], status: card.children[1], nodes: () => byClass(card, "workflow-node") };
+    const header = byClass(card, "workflow-inline-header")[0];
+    const heading = byClass(header, "workflow-inline-title")[0];
+    const open = byClass(header, "workflow-inline-open")[0];
+    const status = byClass(card, "workflow-inline-status")[0];
+    return { bubble, card, header, heading, open, status, nodes: () => byClass(card, "workflow-node") };
   };
   return { reads, answer, mount };
 }
+
+test("inline workflow card aligns title and compact Open workflow button in one header row", () => {
+  const { mount } = harness();
+  const { card, header, heading, open, status } = mount();
+  assert.equal(card.children[0], header);
+  assert.equal(header.tagName, "HEADER");
+  assert.equal(heading.tagName, "H3");
+  assert.equal(heading.textContent, "Your Access Plan");
+  assert.equal(open.tagName, "A");
+  assert.equal(open.textContent, "Open workflow");
+  assert.equal(open.href, `${ORIGIN}/workflows/${WORKFLOW_ID}`);
+  assert.ok(open.classList.contains("button") && open.classList.contains("primary") && open.classList.contains("small"));
+  assert.equal(card.children[1], status);
+});
 
 test("a re-rendered card shows the last loaded workflow at once, then its current status", async () => {
   const { reads, answer, mount } = harness();

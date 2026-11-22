@@ -1006,10 +1006,15 @@ that leads to it (owner's request 2026-10-12).
   **Refresh**. The panel has two parts: **Access requests**, introduced with a
   sentence saying that nothing is approved until someone chooses, and
   **Notices**. Opening a request never approves it.
-- Every card uses one layout: a title sentence with a status badge on the right,
-  a details list of label and value rows, optional sections, the decision area,
-  and a message line for results and errors. Render all server and agent text
-  as text, never as HTML.
+- Every Settings Inbox request card uses one compact layout (`12px 14px`
+  padding, tighter vertical spacing): a title sentence with a status badge on
+  the right, an inline wrapping metadata strip of label/value pairs
+  (`.access-review-details`), optional sections, a compact decision area with
+  ~30px shadow-free action buttons scoped to `.access-review-card` (leaving
+  Workspace, Access map, and File Retention buttons at their standard 40px
+  height), and a message line for results and errors. Anchor buttons
+  (`a.button`) set `text-decoration: none` so link buttons never show
+  underlines. Render all server and agent text as text, never as HTML.
 - There are four kinds of request card: access requests, proposals, delivery
   requests, and staged changes. The badge reads **Needs your decision** when this
   person can decide, or **Waiting for <who>** naming the person or role who can,
@@ -1058,24 +1063,30 @@ that leads to it (owner's request 2026-10-12).
 - Next to the Keep checkbox, a **How long** select (disabled until Keep is
   ticked) offers **Until I remove it** (the default), **For 1 day**, **For 7
   days** and **For 30 days**, so a person can give access for this task, for a
-  while, or permanently.
+  while, or permanently. The Keep bar uses a three-column grid (checkbox,
+  wrapping label, inline select, with muted helper text aligned under the label)
+  so checkboxes stay beside the first line of their labels even on narrow
+  screens.
 - On TeamLead's own requests the row has a second checkbox, **TeamLead may hand
   this on to workers without asking you**, ticked from the start, because
   workers get access only from TeamLead. It is how a person delegates authority
   to TeamLead for their own work; lasting hand-downs appear as notices, access
   added to one worker task does not.
-- The decision area has a **Note (optional)** field and the buttons
+- The decision area has a single-line initial **Note (optional)** field
+  (`rows = 1`, vertically resizable) and compact (~30px) buttons:
   **Approve** (primary), **Approve reading only** (secondary, shown only when
   more than read access was asked), and **Deny** (danger). Each grant's Keep
   setting, and the hand-on box when present, is sent with the decision.
-- **What each choice does** follows the buttons, always visible in both the
-  Inbox and the compact Web Chat card: one line per button, "<Label>: <what it
-  does>", written by the gateway (`assistant_gateway/access_choice_effects.py`)
-  from the request's own fields, never from the agent's reason. The lines say
-  who ends up holding what, for how long, whether TeamLead may hand it on, and
-  what Deny does, and change as the Keep and hand-on boxes change. Each button
-  points to its line (`aria-describedby`); hovering or focusing a button marks
-  the line with the Ember edge. No native `title` tooltip.
+- **What each choice does** follows the buttons as a condensed list, always
+  visible on full Settings Inbox cards and folded inside **Details** on compact
+  Web Chat cards: one line per button, "<Label>: <what it does>", written by
+  the gateway (`assistant_gateway/access_choice_effects.py`) from the request's
+  own fields, never from the agent's reason. The lines say who ends up holding
+  what, for how long, whether TeamLead may hand it on, and what Deny does, and
+  change as the Keep and hand-on boxes change. Each button points to its line
+  (`aria-describedby`, wired even while **Details** is closed on compact Web
+  Chat cards); hovering or focusing a button marks the line with the Ember
+  edge. No native `title` tooltip.
 - **What this changes** includes what approving does to access the holder
   already has on the same tool, such as "TeamArchitect now has read access to
   Schedules until someone removes it. Approving replaces it." or "... keeps its
@@ -1108,10 +1119,30 @@ that leads to it (owner's request 2026-10-12).
   says "The secure pages to choose the credentials are in the conversation."
   with a secondary **Show in the conversation** button that closes Settings
   and brings the first card into view. The credential is chosen only on the
-  broker's page. A form the chat cannot show as a card keeps a **Choose the
-  credential** link button that opens the form in a new tab. The standalone
-  workflow page's decided card shows no follow-up today: the approver reaches
-  the forms through the Inbox notice (a proposed follow-up).
+  broker's page. A form the chat cannot show as a card keeps a compact
+  un-underlined **Choose the credential** link button that opens the form in a
+  new tab. The gateway tracks active opened forms per `request_id` scoped
+  strictly to the approving person (`approver_person_id`), keeping `frame_url`
+  and `expires_at_utc` across reloads so only still-pending non-expired
+  `follow_up_links` appear for that approver (never for other viewers). As soon
+  as each broker form finishes (via `GatewayToolSetups.after_proposal_links`),
+  the gateway removes that link and returns a plain-language
+  `follow_up_outcomes` line in its place. If a form's `expires_at_utc` passes
+  before the broker watch reports an ending, the link or inline-card prompt is
+  hidden immediately, the card shows **"Checking whether the credential form
+  finished…"** in the status list (`role="status"`), and the gateway reports
+  `follow_up_settling: true` with `follow_up_settling_until_utc`
+  (`expires_at_utc` plus the 60 s broker watch grace and a 15 s backup buffer)
+  so a submission started just before expiry can still settle to its real
+  outcome. Both Web Chat and Settings Inbox refresh decided cards that have
+  pending or settling follow-up forms on focus/visibility change, incoming agent
+  messages, and a bounded short poll—stopping immediately once every form
+  reports its ending or the settling deadline passes (or on sign-out, or when
+  Settings Inbox is hidden)—clearing both fallback link buttons and inline-card
+  prompts and showing the final plain-language `follow_up_outcomes` lines
+  (`role="status"`). The standalone workflow page's decided card shows no
+  follow-up today: the approver reaches the forms through the Inbox notice (a
+  proposed follow-up).
 
 ### Delivery Request Cards
 
@@ -1541,10 +1572,12 @@ its history. Steps with linked requests cannot use this correction.
   Rejection stops unstarted work for this request; it does not revoke unrelated
   existing access.
 - Chat and Inbox open the same workflow and revision. The compact chat card
-  (**Your Access Plan**) shows the plan's title, the agent type it is for, its
-  goal, and the dependency map, with **Open Full Workflow**. Keep 20-row server
-  pagination and bound graph size; group large plans by service with counts and
-  a paged list. Every selected effect must be inspectable before approval.
+  (**Your Access Plan**, `.workflow-inline-card`) aligns the plan title and a
+  compact `.button.primary.small` **Open workflow** button in one
+  `.workflow-inline-header` row, followed by tighter status and step spacing for
+  the agent type, goal, and dependency map. Keep 20-row server pagination and
+  bound graph size; group large plans by service with counts and a paged list.
+  Every selected effect must be inspectable before approval.
 - The dedicated page keeps the same dependency map with the current step,
   upcoming steps, activity, **Other Requests From This Task**, **Review Ready
   Requests**, and **Download Diagnostic Logs**. It has no conversation and no
@@ -2148,10 +2181,15 @@ its history. Steps with linked requests cannot use this correction.
   "You finished the account link for Portainer yourself, so this page is no
   longer needed.", or after **Mark Done** "You marked the Gitea setup step
   'Create a Gitea token' done." A page offered again gets a new card that this
-  line never closes. A step outside Universal Agents (a vendor's website)
-  keeps an explicit frosted **Open** link card; a broker page shows as the card
-  described above. Place either in the same ordered chat timeline as durable
-  messages. Use the
+  line never closes. A step outside Universal Agents (a vendor's website) or a
+  non-framed link keeps a compact `.message-transient-notice.is-link-card` with
+  a `.message-transient-header` flex row pairing a status pill (**Action
+  needed**, switching to **Expired** on expiry) with the working `m:ss` broker
+  expiry countdown, clean descriptive copy, a compact un-underlined primary
+  action link (`.button.primary.small`), and a subtle transparent ghost
+  **Dismiss** button (`.button.ghost.small`); a broker page shows as the
+  neutral broker card described above. Place either in the same ordered chat
+  timeline as durable messages. Use the
   gateway-owned `session_sequence` plus an in-memory subsequence so the action
   follows the safe System receipt created with it and remains before every
   later message. Do not use displayed wall-clock timestamps as the canonical
@@ -2159,8 +2197,9 @@ its history. Steps with linked requests cannot use this correction.
   link; never print the bearer URL as text. Open a link card's page in a
   separate tab with `noopener noreferrer`, and display a working `m:ss`
   countdown from the broker expiry. At expiry, remove the Open action and
-  countdown, show a clear local expired status, and keep manual Dismiss
-  available on link cards (broker page cards have none). Keep the inert card until a
+  countdown, switch the badge to **Expired**, show a clear local expired
+  status, and keep manual Dismiss available on link cards (broker page cards
+  have none). Keep the inert card until a
   correlated terminal result arrives because a submission claimed before expiry
   may still finish. Remove the card after either a successful or failed terminal
   result. Multiple pending actions retain independent positions, countdowns, and
@@ -2657,28 +2696,47 @@ Keep keyboard activation, nested panes, rapid toggles, and deep links usable.
 ### Access Review Cards in Web Chat
 
 - An access review announcement in Web Chat shows the Inbox's review card in
-  its compact form inside the System message, in place of the announcement
-  text (**Copy raw message** still copies that text). The card sits inside the
-  bubble without its own card surface, separated by a thin top rule, so cards
-  never nest.
-- The heading is the request's one-line summary, with the status badge on the
-  right: **Needs your decision** when this person can decide, otherwise
-  **Waiting for an administrator** and no buttons or note.
-- Warning chips (**Full access**, **Runs code**, **New host**, ...) and the
-  lacks-access warning stay visible under the heading. Everything else is
-  folded under a **Details** toggle, closed by default: the full title, the
-  details list, the rows with their **Keep for later tasks** boxes and **How
-  long** selects, **What this changes**, **Why (from <agent>)** and **Note
-  (optional)**.
-- The buttons are the Inbox card's, with the same server labels, busy states
-  and request body, and they decide through the Inbox decide API with the
-  signed-in session and CSRF header. After a saved decision the card collapses
-  to the decided line with the outcome, as in the Inbox.
+  its compact form (`is-compact`) inside the System message, in place
+  of the announcement text (**Copy raw message** still copies that text). Both
+  pending and decided compact cards drop their own card surface and borders
+  (`0px` border, transparent background) so cards never nest; a thin top
+  divider on `.chat-access-review` separates the card from the bubble header.
+- The heading is the request's one-line summary (without a right-side badge).
+  Directly beneath it, one combined inline status row
+  (`.access-review-status-row`) pairs the status pill (**Needs your decision**
+  when this person can decide, otherwise **Waiting for an administrator** with
+  no buttons or note) with any warning chips (**Full access**, **Runs code**,
+  **New host**, **Can hand on**, ...). The lacks-access warning stays visible
+  below the status row when present.
+- Everything else is folded under a button-styled **Details** toggle
+  (`.access-review-more-toggle`, >=30px click height) placed above the compact
+  (~30px) action buttons, closed by default: the full title, inline metadata
+  strip, rows with their **Keep for later tasks** boxes, **How long** selects,
+  and **May hand on** checkboxes, **What this changes**, **Why (from <agent>)**,
+  single-line **Note (optional)**, and **What each choice does**. Opening
+  **Details** keeps the toggle anchored in place and puts Keep/Note before
+  **Approve** in reading and focus order; `aria-describedby` stays wired from
+  each choice button to its explanation line even while **Details** is closed.
+- The buttons are the Inbox card's compact (~30px, shadow-free) buttons, with
+  the same server labels, busy states and request body, and they decide through
+  the Inbox decide API with the signed-in session and CSRF header. After a
+  saved decision the card collapses to the compact decided form (`is-compact
+  is-decided`): concise summary + inline outcome pill, compact muted
+  explanation, any active un-underlined follow-up credential link buttons, and
+  plain completion status lines (`role="status"`) as each form finishes.
 - The card reads its request from the gateway by id, so after a reload or a
   decision made elsewhere it shows the stored outcome and who decided, such as
   **Approved for this task** with "Decided by Dana on <local time>.". A request
   still waiting is read again at most every 15 seconds when the transcript
-  redraws; a decided one is never read again.
+  redraws. A decided card with no pending or settling follow-up forms is never
+  read again; one with active `follow_up_links` or `follow_up_settling`
+  refreshes on tab focus/visibility change, incoming agent messages, and a
+  bounded short poll. When a link reaches `expires_at_utc` before the broker
+  watch finishes, the button is hidden and the card shows **"Checking whether
+  the credential form finished…"** (`role="status"`) while polling continues
+  until the form's ending arrives or `follow_up_settling_until_utc` (expiry plus
+  the 60 s watch grace and 15 s backup buffer) passes (or on sign-out), then
+  replaces it with the final compact completion or expiry line.
 - While the request loads, the card says "Loading this request…". When it
   cannot be read, it says why in plain words and offers **Open Inbox**
   (secondary), which opens Settings at that request.

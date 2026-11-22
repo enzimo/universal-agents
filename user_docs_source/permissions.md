@@ -446,7 +446,13 @@ chooses the credential straight away. In Web Chat the broker's form, such as
 conversation: under the request's card when you approved it there, or after
 the latest message when you approved it in the Inbox (its **Show in the
 conversation** button takes you there). A notice with the same link waits in
-the Inbox, so the form can also be opened from there. The broker's form
+the Inbox, so the form can also be opened from there. Only the administrator
+who approved sees the inline form or fallback link; it stays available across
+reloads while the form is open, and once each form is used, closed or expires
+the approved card clears the prompt (or fallback button) and shows a short line
+saying what happened (if the form's time runs out while the gateway is still
+checking with the broker, the card briefly says it is checking whether the form
+finished for up to about a minute first). The broker's form
 can also take a new credential in the same step
 ([Account links](#account-links)). TeamLead's task keeps waiting until those
 forms are used, closed or expired, and then learns which accounts were linked,
@@ -1265,7 +1271,14 @@ open it:
 - When an administrator approves an [access proposal](#access-proposals) that
   asks for an account link, the form opens for that administrator: in Web Chat
   as a secure card in the conversation (**Choose the credential for
-  Portainer**), and as a link in an Inbox notice.
+  Portainer**), and as a link in an Inbox notice. Only the administrator who
+  approved sees that form or fallback link; it stays available across reloads
+  while the form is open (while the Inbox notice keeps the link in Settings),
+  and once each form is used, closed or expires the approved card clears the
+  prompt (or fallback button) and shows a short line saying what happened (if
+  its time runs out while the gateway is still checking with the broker, the
+  card briefly says it is checking whether the form finished for up to about a
+  minute first).
 
 The form shows whose account it is, which agents use it (**Used by**: the agent
 types holding access to the tool for your work, or for anyone's work for a team
@@ -1496,8 +1509,8 @@ review card:
   asked, **Deny**);
 - warnings such as **Full access** or **Runs code**, which always stay visible;
 - **Details**, which opens the full title, the rows with their **Keep for
-  later tasks** boxes, what the change does, the agent's reason and an
-  optional note.
+  later tasks** boxes, what the change does, the agent's reason, an optional
+  note and **What each choice does**.
 
 The card decides through the Inbox as the signed-in person, with the same
 rules. Once decided, it shows the outcome and who decided, also after a reload

@@ -2776,13 +2776,33 @@ works; if the first stalls past its limit and the second takes over, the
 first keeps the programs the second may rely on (see "Each request is decided
 once"). A tool with no
 grants gives nobody anything, which is why writing its file first is safe. Afterwards the gateway opens the broker's
-account link form for the approver, watches it with the tool setup watcher
-(`GatewayToolSetups.after_proposal_links`), and holds the decision message to
+account link form for the approver, tracks each opened form in memory by
+`request_id` scoped strictly to that approver (`assistant_gateway/proposal_follow_ups.py`,
+`ProposalFollowUpTracker`), watches it with the tool setup watcher
+(`GatewayToolSetups.after_proposal_links`, which reports each form's ending via
+`on_form_ended`), and holds the decision message to
 the waiting task until every form ended; the resumed `propose_access_change`
-then reports which links exist. Rationale: the task resumed before the link
-existed and called a tool still refused for a missing account. The hold lives
-in gateway memory; after a restart the Inbox loop sends the message and the
-tool reports the links as they are.
+then reports which links exist. While any form is open and unexpired,
+`GatewayAccessInbox.review_view` returns only those active `follow_up_links`
+for the approving person (never for other viewers) so reloading mid-flow keeps
+the button, and replaces each finished form with plain-language
+`follow_up_outcomes` text so Web Chat and Settings Inbox automatically dismiss
+completed credential buttons. When a form passes `expires_at_utc` before the
+broker watch reports an ending, `ProposalFollowUpTracker` hides the link from
+`follow_up_links` and returns `follow_up_settling: true` with
+`follow_up_settling_until_utc` (`expires_at_utc + WATCH_GRACE + SETTLING_BACKUP_BUFFER`,
+sharing `broker_session_watch.WATCH_GRACE` (60 s) plus a 15 s backup buffer covering
+`watch_broker_session`'s 2 s default poll interval and
+`HttpSecureBroker.get_account_link_status`'s 10 s read timeout so the final poll
+finishes before the tracker's backup expiry runs). Rationale: a submission claimed just before expiry may still finish while
+the broker watch is still checking, so both pages show "Checking whether the
+credential form finished…" and keep polling until `on_form_ended` records the
+real outcome; only if the backup deadline passes without a watch report does the
+tracker record the plain expiry line and log a warning. Also, the waiting task
+previously resumed before the link existed and called a tool still refused for a
+missing account, and finished broker links otherwise stayed visible on decided
+cards. The hold and follow-up tracker live in gateway memory; after a restart
+the Inbox loop sends the message and the tool reports the links as they are.
 
 People hold one team role each (`owner`, `admin` or `member`) in the gateway's
 membership records, read again at every decision, so a role change applies at
