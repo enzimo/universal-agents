@@ -43,12 +43,16 @@ from assistant_gateway.application.ports import (
     GatewaySecureBrokerRefusal,
 )
 from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkOwnerKind, LinkPurpose
+from secure_tools.chat_commands import link_command
 
 
 AccountLinkOwner = Literal["team", "person"]
+AccountLinkPurpose = Literal["account", "gate"]
 
 ACCOUNT_LINK_OWNER_TEAM: AccountLinkOwner = "team"
 ACCOUNT_LINK_OWNER_PERSON: AccountLinkOwner = "person"
+ACCOUNT_LINK_PURPOSE_ACCOUNT: AccountLinkPurpose = "account"
+ACCOUNT_LINK_PURPOSE_GATE: AccountLinkPurpose = "gate"
 
 ACCOUNT_LINK_STATUS_CREATED = "account_link_created"
 ACCOUNT_LINK_STATUS_DECLINED = "account_link_declined"
@@ -78,12 +82,25 @@ ACCOUNT_LINK_FORM_ACTION_LABEL = "Open account link form"
 GATE_LINK_FORM_ACTION_LABEL = "Open gate link form"
 
 
-def account_link_owner_label(owner: str, *, purpose: LinkPurpose = LinkPurpose.ACCOUNT) -> str:
+def account_link_owner_label(
+    owner: str, *, purpose: LinkPurpose | AccountLinkPurpose = LinkPurpose.ACCOUNT
+) -> str:
     """Name whose account or gate credential the link is for, from the person's point of view."""
 
-    if purpose is LinkPurpose.GATE:
+    if LinkPurpose(purpose) is LinkPurpose.GATE:
         return "the team's gate credential"
     return "the team's account" if owner == ACCOUNT_LINK_OWNER_TEAM else "your own account"
+
+
+def account_link_restart_command(
+    tool_id: str,
+    owner: AccountLinkOwner,
+    *,
+    purpose: LinkPurpose | AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
+) -> str:
+    """The ``/link`` command that re-opens this form."""
+
+    return link_command(tool_id, LinkOwnerKind(owner), purpose=LinkPurpose(purpose))
 
 
 def account_link_status_is_final(payload: dict[str, Any]) -> bool:
@@ -155,7 +172,7 @@ class GatewayAccountLinks:
         tool_id: str,
         owner: AccountLinkOwner,
         reason: str,
-        purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+        purpose: LinkPurpose | AccountLinkPurpose = LinkPurpose.ACCOUNT,
     ) -> AccountLinkForm:
         """Open the form for ``person_id``; raise ``AccountLinkUnavailable`` if refused."""
 
@@ -167,13 +184,14 @@ class GatewayAccountLinks:
                 f"Account link forms are unavailable. {detail}",
                 reason_code=REASON_BROKER_UNAVAILABLE,
             )
+        resolved_purpose = LinkPurpose(purpose)
         try:
             request = AccountLinkRequestV1(
                 request_id=request_id,
                 team_id=self._team_id,
                 tool_id=tool_id,
                 owner_kind=LinkOwnerKind(owner),
-                purpose=purpose,
+                purpose=resolved_purpose,
                 person_id=person_id,
                 person_roles=person_roles,
                 reason=reason,
@@ -186,7 +204,7 @@ class GatewayAccountLinks:
                 request_id,
                 tool_id,
                 owner,
-                purpose.value,
+                resolved_purpose.value,
                 exc,
             )
             raise AccountLinkUnavailable(
@@ -221,7 +239,7 @@ class GatewayAccountLinks:
             request_id,
             tool_id,
             owner,
-            purpose.value,
+            resolved_purpose.value,
             person_id,
             session.session_id[:12],
         )

@@ -438,6 +438,7 @@ class AccessRepository:
         self._approval_id_column()
         self._one_active_link_per_owner()
         self._people_references()
+        self._proposal_recovery_effects()
 
     def _connect(self) -> Any:
         joined = _OPEN_WRITE.get()
@@ -547,6 +548,49 @@ class AccessRepository:
         if rows:
             logger.info("Gave the people copy's records their opaque references. event=access_people_references_added "
                         "people=%s", len(rows))
+
+    def _proposal_recovery_effects(self) -> None:
+        """Add ``replaced_tool_files`` to pre-upgrade proposal recovery rows on open.
+
+        Proposal recovery rows saved before tool replacement existed carry
+        ``tool_files`` without ``replaced_tool_files``. Adding the empty list
+        once at open keeps reconciliation reading each effect category directly
+        without fallback keys or ``KeyError`` loops. Later opens find nothing
+        to update with a read and take no write lock.
+        """
+
+        def _needs_upgrade(raw: str) -> dict[str, Any] | None:
+            effects = json.loads(raw)
+            if isinstance(effects, dict) and "tool_files" in effects and "replaced_tool_files" not in effects:
+                effects["replaced_tool_files"] = []
+                return effects
+            return None
+
+        with self._connect() as conn:
+            rows = conn.execute("SELECT claim_id, effects_json FROM access_decision_recoveries").fetchall()
+            if not any(_needs_upgrade(row["effects_json"]) is not None for row in rows):
+                return
+        p = self.dialect.bind
+        upgraded = 0
+        with self._connect() as conn:
+            conn.begin_write()
+            rows = conn.execute("SELECT claim_id, effects_json FROM access_decision_recoveries").fetchall()
+            for row in rows:
+                updated = _needs_upgrade(row["effects_json"])
+                if updated is None:
+                    continue
+                conn.execute(
+                    f"UPDATE access_decision_recoveries SET effects_json={p} WHERE claim_id={p}",
+                    (json.dumps(updated), str(row["claim_id"])),
+                )
+                upgraded += 1
+            conn.commit()
+        if upgraded:
+            logger.info(
+                "Upgraded proposal decision recovery rows with replaced_tool_files. "
+                "event=access_decision_recoveries_upgraded rows=%s",
+                upgraded,
+            )
 
     def _index_exists(self, conn: Any, name: str) -> bool:
         p = self.dialect.bind

@@ -40,6 +40,7 @@ from assistant_gateway.application.account_links import (
     REASON_SESSION_EXPIRED,
     AccountLinkForm,
     AccountLinkOwner,
+    AccountLinkPurpose,
     account_link_owner_label,
     account_link_status_is_final,
 )
@@ -126,7 +127,7 @@ class GatewayLinkResultWatches(Protocol):
         owner: AccountLinkOwner,
         restart_command: str,
         target: LinkResultTarget,
-        purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+        purpose: LinkPurpose | AccountLinkPurpose = LinkPurpose.ACCOUNT,
     ) -> None:
         """Watch one account or gate link form until it is used or expires."""
 
@@ -307,10 +308,10 @@ class GatewayLinkResults:
         owner: AccountLinkOwner,
         restart_command: str,
         target: LinkResultTarget,
-        purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+        purpose: LinkPurpose | AccountLinkPurpose = LinkPurpose.ACCOUNT,
     ) -> None:
         self._watches.start(
-            self._finish_account_link(form, tool_id, owner, restart_command, target, purpose),
+            self._finish_account_link(form, tool_id, owner, restart_command, target, LinkPurpose(purpose)),
             name=f"gateway_link_result_{form.session_id[:12]}",
         )
 

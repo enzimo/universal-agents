@@ -70,7 +70,7 @@ from secure_tool_broker.account_links import (
     finish_account_link,
     used_by_text,
 )
-from custom_messages.contracts.access_v2 import AccountLinkRequestV1, PersonCredentialDeletionV1
+from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkPurpose, PersonCredentialDeletionV1
 from custom_messages.contracts.credentials_v1 import CREDENTIAL_DECLINED
 from secure_tool_broker.credential_transfer_api import add_transfer_routes
 from secure_tool_broker.team_export_page import add_team_export_routes
@@ -1325,7 +1325,7 @@ class SecureToolBrokerService:
         used_by = used_by_text(self._access_gate.access, tool, session.request)
         page_title = (
             "Link a team gate credential"
-            if session.request.purpose.value == "gate"
+            if session.request.purpose is LinkPurpose.GATE
             else "Link an account"
         )
         return web.Response(
@@ -1357,7 +1357,7 @@ class SecureToolBrokerService:
         sentence = await run_claimed_form_thread(
             session, finish_account_link, session, store, catalog, confirmed=confirmed, choice=choice
         )
-        is_gate = session.request.purpose.value == "gate"
+        is_gate = session.request.purpose is LinkPurpose.GATE
         if declined:
             self._logger.info(
                 "A person declined an account link form. event=account_link_declined tool_id=%s owner_kind=%s "

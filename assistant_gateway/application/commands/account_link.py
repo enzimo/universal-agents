@@ -36,12 +36,16 @@ from assistant_gateway.application.account_links import (
     ACCOUNT_LINK_NO_ACCESS_NOTE,
     ACCOUNT_LINK_OWNER_PERSON,
     ACCOUNT_LINK_OWNER_TEAM,
+    ACCOUNT_LINK_PURPOSE_ACCOUNT,
+    ACCOUNT_LINK_PURPOSE_GATE,
     GATE_LINK_FORM_ACTION_LABEL,
     GATE_LINK_NO_ACCESS_NOTE,
     AccountLinkOwner,
+    AccountLinkPurpose,
     AccountLinkUnavailable,
     GatewayAccountLinks,
     account_link_owner_label,
+    account_link_restart_command,
 )
 from assistant_gateway.application.broker_sign_in import BrokerSignInPage, GatewayBrokerSignIns
 from assistant_gateway.application.commands.context import (
@@ -57,10 +61,8 @@ from assistant_gateway.application.transient_presentation import (
     ACCOUNT_LINK_COMMAND_ACTION_KIND,
     GatewayTransientAction,
 )
-from custom_messages.contracts.access_v2 import LinkOwnerKind, LinkPurpose
 from id_generation import new_id
 from secure_tools.auth_methods import ToolSignIn, sign_in_instead_text, tool_sign_in
-from secure_tools.chat_commands import link_command
 
 LOGGER = logging.getLogger(__name__)
 
@@ -156,13 +158,13 @@ class AccountLinkCommandHandler:
         person_id = resolve_actor_canonical_user_id(request.actor, self._identity)
         if not person_id:
             return "Account links are available only to registered users."
-        if option == LinkPurpose.GATE.value:
+        if option == ACCOUNT_LINK_PURPOSE_GATE:
             return await self._open_link_form(
                 tool_id,
                 ACCOUNT_LINK_OWNER_TEAM,
                 person_id,
                 request,
-                purpose=LinkPurpose.GATE,
+                purpose=ACCOUNT_LINK_PURPOSE_GATE,
             )
         sign_in = tool_sign_in(tool_id)
         if sign_in is not None and option != "team":
@@ -207,36 +209,32 @@ class AccountLinkCommandHandler:
         person_id: str,
         request: AccountLinkCommandRequest,
         *,
-        purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+        purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
     ) -> str | GatewayTransientAction:
-        gate = purpose is LinkPurpose.GATE
+        gate = purpose == ACCOUNT_LINK_PURPOSE_GATE
         try:
-            open_kwargs: dict[str, Any] = {
-                "request_id": new_id("acct_link_cmd"),
-                "person_id": person_id,
-                "person_roles": self._identity.team_roles_for_person(person_id),
-                "tool_id": tool_id,
-                "owner": owner,
-                "reason": _COMMAND_REASON,
-            }
-            if gate:
-                open_kwargs["purpose"] = purpose
-            form = await self._account_links.open_form(**open_kwargs)
+            form = await self._account_links.open_form(
+                request_id=new_id("acct_link_cmd"),
+                person_id=person_id,
+                person_roles=self._identity.team_roles_for_person(person_id),
+                tool_id=tool_id,
+                owner=owner,
+                reason=_COMMAND_REASON,
+                purpose=purpose,
+            )
         except AccountLinkUnavailable as exc:
             kind_words = "team gate link form" if gate else "account link form"
             return f"Could not open the {kind_words} for {tool_id}. {exc.message}"
         target = result_target(request, person_id)
         if target is not None:
-            watch_kwargs: dict[str, Any] = {
-                "form": form,
-                "tool_id": tool_id,
-                "owner": owner,
-                "restart_command": link_command(tool_id, LinkOwnerKind(owner), purpose=purpose),
-                "target": target,
-            }
-            if gate:
-                watch_kwargs["purpose"] = purpose
-            self._link_results.watch_account_link(**watch_kwargs)
+            self._link_results.watch_account_link(
+                form=form,
+                tool_id=tool_id,
+                owner=owner,
+                restart_command=account_link_restart_command(tool_id, owner, purpose=purpose),
+                target=target,
+                purpose=purpose,
+            )
         if gate:
             return GatewayTransientAction(
                 kind=ACCOUNT_LINK_COMMAND_ACTION_KIND,
