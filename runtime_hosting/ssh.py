@@ -29,6 +29,7 @@ from runtime_hosting.execution_contracts import (
     InteractiveSessionStatus,
     InteractiveSessionV1,
 )
+from runtime_hosting.ssh_network import ssh_host_key_alias
 from storage.execution_control_repository import ExecutionControlRepository
 
 
@@ -395,6 +396,8 @@ class SSHSessionBroker:
         self,
         session: InteractiveSessionV1,
         material: SSHCredentialMaterial,
+        *,
+        resolved_ip: str | None = None,
     ) -> tuple[str, ...]:
         target = session.target
         remote_command = (
@@ -406,6 +409,16 @@ class SSHSessionBroker:
                 target.remote_persistent_session_name,
             )
             if target.remote_persistent_session_name
+            else ()
+        )
+        host_pinning_args: tuple[str, ...] = (
+            (
+                "-o",
+                f"HostName={resolved_ip}",
+                "-o",
+                f"HostKeyAlias={ssh_host_key_alias(target.host, target.port)}",
+            )
+            if resolved_ip
             else ()
         )
         return (
@@ -439,6 +452,7 @@ class SSHSessionBroker:
             "CanonicalizeHostname=no",
             "-o",
             "CheckHostIP=yes",
+            *host_pinning_args,
             "-o",
             "ConnectTimeout=15",
             "-o",
@@ -464,11 +478,7 @@ class SSHSessionBroker:
         file_stat = known_hosts.lstat()
         if not stat.S_ISREG(file_stat.st_mode):
             raise PermissionError("SSH known-hosts material must be a regular file.")
-        expected_host = (
-            session.target.host
-            if session.target.port == 22
-            else f"[{session.target.host}]:{session.target.port}"
-        )
+        expected_host = ssh_host_key_alias(session.target.host, session.target.port)
         for raw_line in known_hosts.read_text(encoding="utf-8").splitlines():
             fields = raw_line.strip().split()
             if len(fields) < 3 or raw_line.lstrip().startswith("#"):

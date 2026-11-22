@@ -491,3 +491,30 @@ def test_a_0_9_instance_exports_no_retired_setting_and_a_reviewed_import_refuses
     with TransferReader.open(out, PASSPHRASE) as reader:
         plan = import_team(reader, tmp_path / "new", dry_run=False, sections=(SettingsSection(),), require_valid=True)
     assert plan.records == [] and not plan.by_outcome(RecordOutcome.REFUSED)
+
+
+def test_version_12_export_imports_with_ssh_guardrail_defaults(tmp_path: Path) -> None:
+    """A version 12 export has no execution_control.ssh guardrail fields; version 13 fills defaults."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+    from default_values import DEFAULT_SSH_DENIED_CIDRS
+
+    class ExportedAsV12(SettingsSection):
+        schema_version = 12
+
+        def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
+            record = SettingV1(path=("execution_control", "ssh", "enabled"), value=True)
+            return SectionExport(records=[record.model_dump(mode="json")])
+
+    path, _config = _old_instance(tmp_path)
+    target = tmp_path / "new"
+    plan = _import(_export(tmp_path, path, ExportedAsV12()), target, dry_run=False)
+
+    assert not plan.by_outcome(RecordOutcome.REFUSED)
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert imported.execution_control.ssh.enabled is True
+    assert imported.execution_control.ssh.allowed_cidrs == ()
+    assert imported.execution_control.ssh.allowed_domains == ()
+    assert imported.execution_control.ssh.denied_cidrs == DEFAULT_SSH_DENIED_CIDRS
+    assert imported.execution_control.ssh.max_delegation_ttl_seconds == 7200
+    assert imported.execution_control.ssh.allow_password_bootstrap is False

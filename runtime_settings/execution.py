@@ -1,10 +1,14 @@
 """Execution configuration and contracts."""
 
 from __future__ import annotations
+import ipaddress
+import re
 from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 from default_values import EXECUTION_CONTROL_DEFAULTS
 from runtime_hosting.execution_contracts import ExecutionProfileV1
+
+_SSH_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 class ExecutionControlRunnerSettings(BaseModel):
@@ -73,15 +77,110 @@ class ExecutionSSHSettings(BaseModel):
     transcript_limit_bytes: int = EXECUTION_CONTROL_DEFAULTS.ssh.value[
         "transcript_limit_bytes"
     ]
+    allowed_cidrs: tuple[str, ...] = Field(
+        default_factory=lambda: tuple(
+            EXECUTION_CONTROL_DEFAULTS.ssh.value["allowed_cidrs"]
+        )
+    )
+    allowed_domains: tuple[str, ...] = Field(
+        default_factory=lambda: tuple(
+            EXECUTION_CONTROL_DEFAULTS.ssh.value["allowed_domains"]
+        )
+    )
+    denied_cidrs: tuple[str, ...] = Field(
+        default_factory=lambda: tuple(
+            EXECUTION_CONTROL_DEFAULTS.ssh.value["denied_cidrs"]
+        )
+    )
+    max_delegation_ttl_seconds: int = EXECUTION_CONTROL_DEFAULTS.ssh.value[
+        "max_delegation_ttl_seconds"
+    ]
+    allow_password_bootstrap: bool = EXECUTION_CONTROL_DEFAULTS.ssh.value[
+        "allow_password_bootstrap"
+    ]
     targets: tuple["ExecutionSSHTargetSettings", ...] = ()
 
-    @field_validator("lease_ttl_seconds", "transcript_limit_bytes", mode="before")
+    @field_validator(
+        "lease_ttl_seconds",
+        "transcript_limit_bytes",
+        "max_delegation_ttl_seconds",
+        mode="before",
+    )
     @classmethod
     def _normalize_positive_int(cls, value: Any, info: Any) -> int:
+        if isinstance(value, bool):
+            raise ValueError(
+                f"execution_control.ssh.{info.field_name} must be a positive integer."
+            )
         parsed = int(value)
         if parsed <= 0:
             raise ValueError(f"execution_control.ssh.{info.field_name} must be > 0.")
         return parsed
+
+    @field_validator("allowed_cidrs", "denied_cidrs", mode="before")
+    @classmethod
+    def _normalize_cidrs(cls, value: Any, info: Any) -> tuple[str, ...]:
+        if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+            raise ValueError(
+                f"execution_control.ssh.{info.field_name} must be a list of CIDR strings."
+            )
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    f"execution_control.ssh.{info.field_name} entries must be non-empty CIDR strings."
+                )
+            try:
+                network = ipaddress.ip_network(item.strip(), strict=False)
+            except ValueError as exc:
+                raise ValueError(
+                    f"execution_control.ssh.{info.field_name} contains invalid CIDR {item!r}."
+                ) from exc
+            canonical = str(network)
+            if canonical not in seen:
+                seen.add(canonical)
+                normalized.append(canonical)
+        return tuple(normalized)
+
+    @field_validator("allowed_domains", mode="before")
+    @classmethod
+    def _normalize_domains(cls, value: Any) -> tuple[str, ...]:
+        if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+            raise ValueError(
+                "execution_control.ssh.allowed_domains must be a list of domain names."
+            )
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError(
+                    "execution_control.ssh.allowed_domains entries must be domain strings."
+                )
+            candidate = item.strip().lower()
+            if candidate.endswith("."):
+                candidate = candidate[:-1]
+            if not candidate or len(candidate) > 253:
+                raise ValueError(
+                    f"execution_control.ssh.allowed_domains contains invalid domain {item!r}."
+                )
+            try:
+                ipaddress.ip_address(candidate)
+            except ValueError:
+                pass
+            else:
+                raise ValueError(
+                    f"execution_control.ssh.allowed_domains entry {item!r} is an IP address; use allowed_cidrs instead."
+                )
+            labels = candidate.split(".")
+            if any(not _SSH_DOMAIN_LABEL_RE.match(label) for label in labels):
+                raise ValueError(
+                    f"execution_control.ssh.allowed_domains contains invalid domain {item!r}."
+                )
+            if candidate not in seen:
+                seen.add(candidate)
+                normalized.append(candidate)
+        return tuple(normalized)
 
     @model_validator(mode="after")
     def _validate_unique_targets(self) -> "ExecutionSSHSettings":
