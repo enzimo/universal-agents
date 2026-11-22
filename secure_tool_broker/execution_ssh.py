@@ -588,8 +588,8 @@ class BrokerExecutionSSHRuntime:
                     check_pinned_targets=need_pinned,
                 )
 
-    async def _refresh_settings_for_monitor(self) -> SSHSettingsSyncOutcome:
-        """Called on every broker monitor tick to apply live setting changes and enforce fail-closed rules."""
+    def _sync_broker_settings(self) -> SSHSettingsSyncOutcome:
+        """Reload operator settings and sync broker attributes without awaiting teardowns."""
 
         snapshot = self._settings_source.snapshot()
         if snapshot.unusable_error is not None:
@@ -597,6 +597,8 @@ class BrokerExecutionSSHRuntime:
                 enabled=False,
                 stop_reason=_unusable_settings_message(snapshot),
                 stop_event="ssh_broker_settings_unusable_fail_closed",
+                unusable=True,
+                config_path=snapshot.config_path,
             )
         if not snapshot.settings.enabled:
             return SSHSettingsSyncOutcome(
@@ -604,7 +606,7 @@ class BrokerExecutionSSHRuntime:
                 stop_reason=SSH_DISABLED_MESSAGE,
                 stop_event="ssh_broker_disabled_killswitch",
             )
-        await self._apply_settings_and_enforce(snapshot)
+        self._apply_settings_sync(snapshot)
         return SSHSettingsSyncOutcome(enabled=True)
 
     @property
@@ -651,7 +653,7 @@ class BrokerExecutionSSHRuntime:
             network_policy=SSHNetworkPolicy.from_settings(ssh_settings),
             allowed_pinned_targets=_pinned_target_keys(ssh_settings),
             allow_password_bootstrap=ssh_settings.allow_password_bootstrap,
-            settings_sync=self._refresh_settings_for_monitor,
+            settings_sync=self._sync_broker_settings,
             logger=self._logger,
         )
 

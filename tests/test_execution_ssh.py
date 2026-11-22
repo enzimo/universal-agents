@@ -5072,3 +5072,677 @@ async def test_c86_execution_control_enabled_false_disables_broker_ssh_live_and_
     set_agent_ref(None)
 
 
+@pytest.mark.asyncio
+async def test_c87_inflight_recheck_run_sudo_enroll_key_and_unmonitored_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C87: Policy tightening and kill-switch/unusable config changes stop in-flight run_sudo, enroll_ssh_key, and unmonitored open before spawning ssh or resolving secrets."""
+
+    import base64
+    from contextlib import contextmanager
+    import subprocess
+    import threading
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_tools.providers import _execution_ssh as tools
+    from runtime_hosting.authorization import ExecutionAuthorizationDenied
+    from runtime_hosting.execution_contracts import (
+        EnrolledSSHTargetV1,
+        ExecutionActivationKind,
+        InteractiveSessionStatus,
+        InteractiveSessionV1,
+        SSHDelegationBoundsV1,
+        SSHTargetLifecycle,
+        SSHTargetPlatform,
+        ssh_interaction_resource_digest,
+        ssh_public_key_sha256_fingerprint,
+    )
+    from runtime_hosting.ssh import (
+        CatalogSSHCredentialMaterialProvider,
+        SSHCredentialMaterial,
+        SSHSessionBroker,
+    )
+    from runtime_hosting.ssh_network import SSHNetworkPolicy
+    from runtime_settings.execution import ExecutionSSHSettings, ExecutionSSHTargetSettings
+    from storage.execution_control_repository import SqliteExecutionControlRepository
+
+    use_signed_contexts(monkeypatch)
+    owner_scope = team_owner()
+    host_pub = _framed_ed25519_pub(b"\x87" * 32)
+    host_algo, host_fp = ssh_public_key_sha256_fingerprint(host_pub)
+    user_key_path = tmp_path / "c87_user_ed25519"
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(user_key_path)],
+        check=True,
+    )
+    user_pub = user_key_path.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    priv_pem = user_key_path.read_text(encoding="utf-8")
+    _user_algo, user_fp = ssh_public_key_sha256_fingerprint(user_pub)
+
+    def _make_enrolled_and_session(
+        repo: SqliteExecutionControlRepository,
+        *,
+        target_id: str,
+        session_id: str,
+        allow_broker_sudo: bool = False,
+        allow_password_bootstrap: bool = False,
+        scope: Any = None,
+    ) -> tuple[EnrolledSSHTargetV1, InteractiveSessionV1]:
+        active_scope = scope or owner_scope
+        seed = {
+            "target_id": target_id,
+            "owner": active_scope,
+            "host": "race87.example.com",
+            "port": 22,
+            "username": "deploy",
+            "platform": SSHTargetPlatform.LINUX,
+            "host_key_algorithm": host_algo,
+            "host_key_fingerprint": host_fp,
+            "host_key_public_key": host_pub,
+            "credential_key": "race87_ssh_key",
+            "credential_owner_scope": active_scope,
+            "credential_public_key_fingerprint": user_fp,
+            "bootstrap_credential_key": "race87_boot_cred",
+            "bootstrap_credential_owner_scope": active_scope,
+            "lifecycle": SSHTargetLifecycle.PERSISTENT,
+            "expires_at_utc": None,
+            "reason": "C87 in-flight recheck test",
+        }
+        placeholder = build_activation(
+            ExecutionActivationKind.SSH_TARGET_ENROLL,
+            resource_id=target_id,
+            resource_digest="0" * 64,
+            owner_scope=active_scope,
+            mode=ChangeApprovalMode.AGREEMENT,
+            function="change:execution_ssh_target_enroll",
+        )
+        digest = EnrolledSSHTargetV1.model_construct(activation=placeholder, **seed).enrollment_digest()
+        enrolled = EnrolledSSHTargetV1(
+            activation=build_activation(
+                ExecutionActivationKind.SSH_TARGET_ENROLL,
+                resource_id=target_id,
+                resource_digest=digest,
+                owner_scope=active_scope,
+                mode=ChangeApprovalMode.AGREEMENT,
+                function="change:execution_ssh_target_enroll",
+            ),
+            **seed,
+        )
+        repo.put_ssh_target(enrolled)
+        conn_target = enrolled.to_connection_target()
+        target_digest = conn_target.calculate_digest()
+        session = InteractiveSessionV1(
+            session_id=session_id,
+            owner=active_scope,
+            target=conn_target,
+            target_digest=target_digest,
+            connect_activation=build_activation(
+                ExecutionActivationKind.SSH_CONNECT,
+                resource_id=session_id,
+                resource_digest=target_digest,
+                owner_scope=active_scope,
+                mode=ChangeApprovalMode.AGREEMENT,
+                function="create_execution_ssh_session",
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            ),
+        )
+        repo.create_interactive_session(session)
+        bounds = SSHDelegationBoundsV1(
+            allow_broker_sudo=allow_broker_sudo,
+            allow_password_bootstrap=allow_password_bootstrap,
+        )
+        repo.put_ssh_interaction(
+            build_activation(
+                ExecutionActivationKind.SSH_INTERACT,
+                resource_id=session_id,
+                resource_digest=ssh_interaction_resource_digest(
+                    target_digest=target_digest,
+                    bounds=bounds,
+                ),
+                owner_scope=active_scope,
+                mode=ChangeApprovalMode.AGREEMENT,
+                function="change:execution_ssh_interaction",
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            ),
+            bounds=bounds,
+        )
+        return enrolled, session
+
+    # (a) run_sudo(): policy tightened (1) during _probe_remote_sudo prepare AND (2) during probe exit
+    # after _active_steps.discard() with enforce_settings_on_live_work() already marking _checked_network_policy.
+    repo = SqliteExecutionControlRepository(str(tmp_path / "c87.db"))
+    artifacts = FilesystemArtifactStore(tmp_path / "c87-artifacts")
+    _enrolled_sudo, sess_sudo = _make_enrolled_and_session(
+        repo,
+        target_id="c87_sudo_target",
+        session_id="ssh_sess_c87_sudo",
+        allow_broker_sudo=True,
+    )
+    sudo_spawn_log = tmp_path / "c87-sudo-spawns.log"
+    fake_sudo_ssh = tmp_path / "fake-sudo-ssh"
+    fake_sudo_ssh.write_text(
+        f"""#!/bin/sh
+case "$*" in
+  *UA_SUDO_BIN*)
+    printf 'SPAWN:probe\\n' >> "{sudo_spawn_log}"
+    printf 'UA_SUDO_BIN:/usr/bin/sudo\\nUA_SUDO_NOPASSWD:0\\n'
+    exit 0
+    ;;
+esac
+printf 'SPAWN:sudo\\n' >> "{sudo_spawn_log}"
+cat >/dev/null
+echo "SUDO_RAN"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_sudo_ssh.chmod(0o755)
+
+    secret_lookups: list[tuple[str, str]] = []
+
+    def _secret_resolver(key: str, field_name: str, _scope: Any) -> str | None:
+        secret_lookups.append((key, field_name))
+        if key == "race87_ssh_key":
+            return {"ssh_public_key": user_pub, "ssh_private_key": priv_pem}.get(field_name)
+        if key == "race87_boot_cred":
+            return {
+                "username": "deploy",
+                "admin_password": "C87-ADMIN-PASSWORD-NEVER-SENT",
+            }.get(field_name)
+        return None
+
+    base_catalog = CatalogSSHCredentialMaterialProvider(
+        ephemeral_base_dir=tmp_path / "c87-ephemeral",
+        secret_resolver=_secret_resolver,
+    )
+    pause_on_prepare = threading.Event()
+    entered_prepare = threading.Event()
+    release_prepare = threading.Event()
+    pause_on_exit = threading.Event()
+    entered_exit = threading.Event()
+    release_exit = threading.Event()
+
+    class _HookedCatalogProvider(CatalogSSHCredentialMaterialProvider):
+        def __init__(self, inner: CatalogSSHCredentialMaterialProvider) -> None:
+            super().__init__(
+                ephemeral_base_dir=inner.ephemeral_base_dir,
+                secret_resolver=inner.secret_resolver,
+                logger=inner.logger,
+            )
+            self._inner = inner
+
+        @contextmanager
+        def prepare(self, session: InteractiveSessionV1, **kwargs: Any):
+            if pause_on_prepare.is_set():
+                entered_prepare.set()
+                assert release_prepare.wait(timeout=5.0)
+            with self._inner.prepare(session, **kwargs) as mat:
+                try:
+                    yield mat
+                finally:
+                    if pause_on_exit.is_set():
+                        entered_exit.set()
+                        assert release_exit.wait(timeout=5.0)
+
+        @contextmanager
+        def prepare_password_askpass(self, **kwargs: Any):
+            if pause_on_prepare.is_set():
+                entered_prepare.set()
+                assert release_prepare.wait(timeout=5.0)
+            with self._inner.prepare_password_askpass(**kwargs) as askpass:
+                try:
+                    yield askpass
+                finally:
+                    if pause_on_exit.is_set():
+                        entered_exit.set()
+                        assert release_exit.wait(timeout=5.0)
+
+    sudo_broker = SSHSessionBroker(
+        repository=repo,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=_HookedCatalogProvider(base_catalog),
+        artifact_store=artifacts,
+        team_id=owner_scope.team_id,
+        broker_id="broker-c87-sudo",
+        ssh_executable=str(fake_sudo_ssh),
+        network_policy=SSHNetworkPolicy(denied_cidrs=()),
+        resolver=lambda host, port: ["198.51.100.87"],
+        local_address_checker=lambda ip: False,
+    )
+
+    # (a1) Tighten network_policy while _probe_remote_sudo is suspended in prepare().
+    pause_on_prepare.set()
+    sudo_task_1 = asyncio.create_task(
+        sudo_broker.run_sudo(
+            session_id=sess_sudo.session_id,
+            caller=_DEFAULT_CALLER,
+            command="id",
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+    )
+    assert await asyncio.to_thread(entered_prepare.wait, 5.0)
+    sudo_broker.network_policy = SSHNetworkPolicy.from_settings(
+        ExecutionSSHSettings(denied_cidrs=("198.51.100.0/24",))
+    )
+    await sudo_broker.enforce_settings_on_live_work(check_network=True)
+    release_prepare.set()
+    with pytest.raises(ExecutionAuthorizationDenied, match="denied_cidrs"):
+        await sudo_task_1
+    assert not sudo_spawn_log.exists()
+    assert not any(key == "race87_boot_cred" for key, _ in secret_lookups)
+
+    # (a2) Tighten network_policy during _probe_remote_sudo's mat_ctx.__exit__() (after _active_steps.discard())
+    # and mark _checked_network_policy updated via enforce_settings_on_live_work().
+    pause_on_prepare.clear()
+    entered_prepare.clear()
+    release_prepare.clear()
+    pause_on_exit.set()
+    sudo_broker.network_policy = SSHNetworkPolicy(denied_cidrs=())
+    await sudo_broker.enforce_settings_on_live_work(check_network=True)
+    secret_lookups.clear()
+
+    sudo_task_2 = asyncio.create_task(
+        sudo_broker.run_sudo(
+            session_id=sess_sudo.session_id,
+            caller=_DEFAULT_CALLER,
+            command="id",
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+    )
+    assert await asyncio.to_thread(entered_exit.wait, 5.0)
+    sudo_broker.network_policy = SSHNetworkPolicy.from_settings(
+        ExecutionSSHSettings(denied_cidrs=("198.51.100.0/24",))
+    )
+    await sudo_broker.enforce_settings_on_live_work(check_network=True)
+    release_exit.set()
+    with pytest.raises(ExecutionAuthorizationDenied, match="denied_cidrs"):
+        await sudo_task_2
+    # Probe ran once, sudo command NEVER spawned, and admin_password was NEVER resolved.
+    spawn_lines = sudo_spawn_log.read_text(encoding="utf-8").splitlines()
+    assert spawn_lines == ["SPAWN:probe"], spawn_lines
+    assert not any(key == "race87_boot_cred" for key, _ in secret_lookups)
+    await sudo_broker.shutdown()
+
+    # (b) enroll_ssh_key(): policy tightened during askpass_ctx.__exit__() (between install and verify).
+    _enrolled_boot, sess_boot = _make_enrolled_and_session(
+        repo,
+        target_id="c87_boot_target",
+        session_id="ssh_sess_c87_boot",
+        allow_password_bootstrap=True,
+    )
+    boot_spawn_log = tmp_path / "c87-boot-spawns.log"
+    fake_boot_ssh = tmp_path / "fake-boot-ssh"
+    fake_boot_ssh.write_text(
+        f"""#!/bin/sh
+printf 'BOOT_SPAWN\\n' >> "{boot_spawn_log}"
+cat >/dev/null
+printf 'UA_SSH_KEY_AUTH_OK\\n'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_boot_ssh.chmod(0o755)
+    pause_on_prepare.clear()
+    entered_prepare.clear()
+    release_prepare.clear()
+    pause_on_exit.set()
+    entered_exit.clear()
+    release_exit.clear()
+    boot_broker = SSHSessionBroker(
+        repository=repo,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=_HookedCatalogProvider(base_catalog),
+        artifact_store=artifacts,
+        team_id=owner_scope.team_id,
+        broker_id="broker-c87-boot",
+        ssh_executable=str(fake_boot_ssh),
+        allow_password_bootstrap=True,
+        network_policy=SSHNetworkPolicy(denied_cidrs=()),
+        resolver=lambda host, port: ["198.51.100.88"],
+        local_address_checker=lambda ip: False,
+    )
+    boot_task = asyncio.create_task(
+        boot_broker.enroll_ssh_key(
+            session_id=sess_boot.session_id,
+            caller=_DEFAULT_CALLER,
+            timeout_seconds=15.0,
+        )
+    )
+    # First exit hook triggers on askpass_ctx.__exit__() right after install step finishes.
+    assert await asyncio.to_thread(entered_exit.wait, 5.0)
+    boot_broker.network_policy = SSHNetworkPolicy.from_settings(
+        ExecutionSSHSettings(denied_cidrs=("198.51.100.0/24",))
+    )
+    await boot_broker.enforce_settings_on_live_work(check_network=True)
+    pause_on_exit.clear()
+    release_exit.set()
+    with pytest.raises(ExecutionAuthorizationDenied, match="denied_cidrs"):
+        await boot_task
+    # Only install ran; verify step never spawned and bootstrap latch was NOT set.
+    boot_lines = boot_spawn_log.read_text(encoding="utf-8").splitlines()
+    assert len(boot_lines) == 1, boot_lines
+    refreshed_target = repo.get_ssh_target(team_id=owner_scope.team_id, target_id="c87_boot_target")
+    assert refreshed_target is not None and refreshed_target.password_bootstrap_completed_at_utc is None
+    await boot_broker.shutdown()
+
+    # (c) Unmonitored open() through BrokerExecutionSSHRuntime: while open() is the broker's only work
+    # (no _monitor_task running), on-disk kill-switch (ssh.enabled=false, execution_control.enabled=false),
+    # unusable config past grace period, pinned-target removal, and denied_cidrs tightening all abort open().
+    instance = execution_instance(tmp_path / "c87-inst", authorization_enabled=False)
+    marker_flag = tmp_path / "c87-open-spawned.flag"
+    marker_open_ssh = tmp_path / "c87-open-ssh"
+    marker_open_ssh.write_text(
+        f"#!/bin/sh\ntouch {marker_flag}\nsleep 1\n",
+        encoding="utf-8",
+    )
+    marker_open_ssh.chmod(0o755)
+    pinned_key_bytes = b"c87-pinned-host-key"
+    identity, known_hosts = write_ssh_material(
+        instance.root / "broker_credentials" / "c87",
+        key_bytes=pinned_key_bytes,
+    )
+    pinned_key_b64 = base64.b64encode(pinned_key_bytes).decode("ascii")
+    known_hosts.write_text(f"pinned87.internal ssh-ed25519 {pinned_key_b64}\n", encoding="utf-8")
+    pinned_fp = host_key_fingerprint(pinned_key_bytes)
+    pinned_target = ExecutionSSHTargetSettings(
+        target_id="c87.pinned",
+        host="pinned87.internal",
+        port=22,
+        username="automation",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=pinned_fp,
+        credential_binding_id="c87_binding",
+        identity_file=str(identity),
+        known_hosts_file=str(known_hosts),
+    )
+    instance.config.execution_control.enabled = True
+    instance.config.execution_control.ssh.enabled = True
+    instance.config.execution_control.ssh.ssh_executable = str(marker_open_ssh)
+    instance.config.execution_control.ssh.denied_cidrs = ()
+    instance.config.execution_control.ssh.targets = (pinned_target,)
+    instance.config.save(instance.config_path)
+    baseline_yaml = instance.config_path.read_text(encoding="utf-8")
+
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+    open_entered = threading.Event()
+    open_release = threading.Event()
+
+    class _PausingMaterialProvider:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        @contextmanager
+        def prepare(self, session: InteractiveSessionV1, **kwargs: Any):
+            open_entered.set()
+            assert open_release.wait(timeout=5.0)
+            with self._inner.prepare(session) as mat:
+                yield mat
+
+    async with _running_ssh_broker(
+        instance,
+        lead,
+        monkeypatch,
+        root_token="c87-broker-root",
+    ) as (broker_service, _server, _tok):
+        rt = broker_service._execution_ssh
+        assert rt is not None
+        rt._settings_source._unusable_grace_seconds = 0.0
+
+        async def _run_inflight_open_case(mutate_disk: Any, expected_error_code: str) -> None:
+            instance.config_path.write_text(baseline_yaml, encoding="utf-8")
+            instance.config = GatewayInstanceConfig.load(instance.config_path)
+            _ = rt.broker  # reload clean baseline before creating/opening
+            assert rt._broker is not None
+            assert not rt._broker._has_monitored_work()
+            assert rt._broker._monitor_task is None or rt._broker._monitor_task.done()
+
+            created = json.loads(
+                tools.create_execution_ssh_session._tool_func(target_id="c87.pinned", confirmed=True)
+            )
+            sid = created["session_id"]
+            open_entered.clear()
+            open_release.clear()
+            real_provider = rt._broker.material_provider
+            wrapper = _PausingMaterialProvider(real_provider)
+            rt._broker.material_provider = wrapper
+            try:
+                open_task = asyncio.create_task(tools.open_execution_ssh_session._tool_func(session_id=sid))
+                assert await asyncio.to_thread(open_entered.wait, 5.0)
+                assert rt._broker._monitor_task is None or rt._broker._monitor_task.done()
+                mutate_disk()
+                open_release.set()
+                result = json.loads(await open_task)
+            finally:
+                if rt._broker.material_provider is wrapper:
+                    rt._broker.material_provider = real_provider
+            assert result["error_code"] == expected_error_code, result
+            assert not marker_flag.exists()
+            assert sid not in rt._broker._sessions
+            stored = rt._broker.repository.get_interactive_session(
+                team_id=rt._broker.team_id, session_id=sid
+            )
+            assert stored is not None and stored.status is InteractiveSessionStatus.FAILED
+
+        # Case 1: execution_control.ssh.enabled = False
+        await _run_inflight_open_case(
+            lambda: (
+                setattr(instance.config.execution_control, "enabled", True),
+                setattr(instance.config.execution_control.ssh, "enabled", False),
+                setattr(instance.config.execution_control.ssh, "targets", (pinned_target,)),
+                instance.config.save(instance.config_path),
+            ),
+            "ssh_disabled",
+        )
+        # Case 2: execution_control.enabled = False (ssh.enabled still True)
+        await _run_inflight_open_case(
+            lambda: (
+                setattr(instance.config.execution_control, "enabled", False),
+                setattr(instance.config.execution_control.ssh, "enabled", True),
+                setattr(instance.config.execution_control.ssh, "targets", (pinned_target,)),
+                instance.config.save(instance.config_path),
+            ),
+            "ssh_disabled",
+        )
+        # Case 3: Corrupt config past grace period
+        await _run_inflight_open_case(
+            lambda: instance.config_path.write_text(
+                "schema_version: 2\nexecution_control: [broken\n", encoding="utf-8"
+            ),
+            "ssh_settings_unusable",
+        )
+        # Case 4: Remove pinned target from instance_config.yaml
+        await _run_inflight_open_case(
+            lambda: (
+                setattr(instance.config.execution_control, "enabled", True),
+                setattr(instance.config.execution_control.ssh, "enabled", True),
+                setattr(instance.config.execution_control.ssh, "targets", ()),
+                instance.config.save(instance.config_path),
+            ),
+            "execution_access_refused",
+        )
+        # Case 5: Tighten denied_cidrs on disk for an enrolled target during unmonitored open().
+        instance.config_path.write_text(baseline_yaml, encoding="utf-8")
+        instance.config = GatewayInstanceConfig.load(instance.config_path)
+        _ = rt.broker
+        assert rt._broker is not None
+        inst_scope = team_owner().model_copy(update={"team_id": rt._broker.team_id})
+        _make_enrolled_and_session(
+            rt._broker.repository,
+            target_id="c87_enrolled_disk",
+            session_id="ssh_sess_c87_enrolled_unused",
+            scope=inst_scope,
+        )
+        created_enrolled = json.loads(
+            tools.create_execution_ssh_session._tool_func(
+                target_id="c87_enrolled_disk", confirmed=True
+            )
+        )
+        enrolled_sid = created_enrolled["session_id"]
+        rt._broker.resolver = lambda host, port: ["198.51.100.89"]
+        rt._broker.local_address_checker = lambda ip: False
+        enrolled_key_bytes = base64.b64decode(host_pub.split()[1])
+        enrolled_id_file, enrolled_kh_file = write_ssh_material(
+            tmp_path / "c87-enrolled-disk-mat", key_bytes=enrolled_key_bytes
+        )
+        enrolled_kh_file.write_text(
+            f"race87.example.com {host_algo} {base64.b64encode(enrolled_key_bytes).decode('ascii')}\n",
+            encoding="utf-8",
+        )
+        open_entered.clear()
+        open_release.clear()
+        real_provider = rt._broker.material_provider
+
+        class _PausingEnrolledProvider:
+            @contextmanager
+            def prepare(self, session: InteractiveSessionV1, **kwargs: Any):
+                open_entered.set()
+                assert open_release.wait(timeout=5.0)
+                yield SSHCredentialMaterial(
+                    identity_file=enrolled_id_file, known_hosts_file=enrolled_kh_file
+                )
+
+        enrolled_wrapper = _PausingEnrolledProvider()
+        rt._broker.material_provider = enrolled_wrapper
+        try:
+            open_enrolled_task = asyncio.create_task(
+                tools.open_execution_ssh_session._tool_func(session_id=enrolled_sid)
+            )
+            assert await asyncio.to_thread(open_entered.wait, 5.0)
+            assert rt._broker._monitor_task is None or rt._broker._monitor_task.done()
+            instance.config.execution_control.enabled = True
+            instance.config.execution_control.ssh.enabled = True
+            instance.config.execution_control.ssh.denied_cidrs = ("198.51.100.0/24",)
+            instance.config.execution_control.ssh.targets = (pinned_target,)
+            instance.config.save(instance.config_path)
+            open_release.set()
+            enrolled_res = json.loads(await open_enrolled_task)
+        finally:
+            if rt._broker.material_provider is enrolled_wrapper:
+                rt._broker.material_provider = real_provider
+        assert enrolled_res["error_code"] == "execution_access_refused", enrolled_res
+        assert "denied_cidrs" in enrolled_res["error"], enrolled_res
+        assert not marker_flag.exists()
+        assert enrolled_sid not in rt._broker._sessions
+    set_agent_ref(None)
+
+
+@pytest.mark.asyncio
+async def test_c88_enforce_settings_partial_flag_preserves_unchecked_axes(tmp_path: Path) -> None:
+    """C88: enforce_settings_on_live_work updates only the _checked_* axes that were actually checked."""
+
+    from runtime_hosting.execution_contracts import (
+        ExecutionActivationKind,
+        InteractiveSessionV1,
+        SSHConnectionTargetV1,
+    )
+    from runtime_hosting.ssh import (
+        ConfiguredSSHCredentialMaterialProvider,
+        SSHCredentialMaterial,
+        SSHSessionBroker,
+    )
+    from runtime_hosting.ssh_network import SSHNetworkPolicy
+    from runtime_settings.execution import ExecutionSSHSettings
+    from storage.execution_control_repository import SqliteExecutionControlRepository
+
+    import base64
+
+    repo = SqliteExecutionControlRepository(str(tmp_path / "c88.db"))
+    artifacts = FilesystemArtifactStore(tmp_path / "c88-artifacts")
+    fake_ssh = tmp_path / "c88-fake-ssh"
+    fake_ssh.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    fake_ssh.chmod(0o755)
+    c88_key_bytes = b"c88-shared-host-key"
+    identity, known_hosts = write_ssh_material(tmp_path / "c88-mat", key_bytes=c88_key_bytes)
+    c88_key_b64 = base64.b64encode(c88_key_bytes).decode("ascii")
+    known_hosts.write_text(
+        f"ops-a.internal ssh-ed25519 {c88_key_b64}\nops-b.internal ssh-ed25519 {c88_key_b64}\n",
+        encoding="utf-8",
+    )
+    fp = host_key_fingerprint(c88_key_bytes)
+    owner_scope = team_owner()
+
+    def _create_pinned_session(session_id: str, host: str) -> InteractiveSessionV1:
+        target = SSHConnectionTargetV1(
+            host=host,
+            port=22,
+            username="automation",
+            host_key_algorithm="ssh-ed25519",
+            host_key_fingerprint=fp,
+            credential_binding_id="shared_c88",
+        )
+        digest = target.calculate_digest()
+        sess = InteractiveSessionV1(
+            session_id=session_id,
+            owner=owner_scope,
+            target=target,
+            target_digest=digest,
+            connect_activation=build_activation(
+                ExecutionActivationKind.SSH_CONNECT,
+                resource_id=session_id,
+                resource_digest=digest,
+                owner_scope=owner_scope,
+                mode=ChangeApprovalMode.AGREEMENT,
+                function="create_execution_ssh_session",
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            ),
+        )
+        repo.create_interactive_session(sess)
+        return sess
+
+    sess_a = _create_pinned_session("ssh_sess_c88_a", "ops-a.internal")
+    sess_b = _create_pinned_session("ssh_sess_c88_b", "ops-b.internal")
+    key_a = ("ops-a.internal", 22, "automation", "ssh-ed25519", fp, "shared_c88")
+    key_b = ("ops-b.internal", 22, "automation", "ssh-ed25519", fp, "shared_c88")
+    initial_policy = SSHNetworkPolicy(denied_cidrs=())
+    initial_provider = ConfiguredSSHCredentialMaterialProvider(
+        {"shared_c88": SSHCredentialMaterial(identity_file=identity, known_hosts_file=known_hosts)}
+    )
+    broker = SSHSessionBroker(
+        repository=repo,
+        authorization_guard=ExecutionAccessGuard(authorization_enabled=False),
+        material_provider=initial_provider,
+        artifact_store=artifacts,
+        team_id=owner_scope.team_id,
+        broker_id="broker-c88",
+        ssh_executable=str(fake_ssh),
+        network_policy=initial_policy,
+        allowed_pinned_targets=frozenset({key_a, key_b}),
+        revocation_poll_interval_seconds=60.0,
+    )
+    try:
+        await broker.open(session_id=sess_a.session_id, lease_token="lease-a", caller=_DEFAULT_CALLER)
+        await broker.open(session_id=sess_b.session_id, lease_token="lease-b", caller=_DEFAULT_CALLER)
+        assert sess_a.session_id in broker._sessions and sess_b.session_id in broker._sessions
+
+        # Mutate BOTH network_policy and allowed_pinned_targets, then enforce ONLY check_network=True.
+        tighter_policy = SSHNetworkPolicy.from_settings(
+            ExecutionSSHSettings(denied_cidrs=("198.51.100.0/24",))
+        )
+        broker.network_policy = tighter_policy
+        broker.allowed_pinned_targets = frozenset({key_a})
+        await broker.enforce_settings_on_live_work(check_network=True, check_pinned_targets=False)
+
+        assert broker._checked_network_policy == tighter_policy
+        assert broker._checked_allowed_pinned_targets == frozenset({key_a, key_b})
+        assert sess_b.session_id in broker._sessions
+
+        # Subsequent monitor tick must still see the unchecked allowed_pinned_targets drift and stop sess_b.
+        await broker._monitor_tick()
+        assert sess_b.session_id not in broker._sessions
+        assert sess_a.session_id in broker._sessions
+        assert broker._checked_allowed_pinned_targets == frozenset({key_a})
+
+        # Symmetric check: mutating network_policy and calling check_pinned_targets=True keeps _checked_network_policy stale.
+        even_tighter = SSHNetworkPolicy.from_settings(
+            ExecutionSSHSettings(denied_cidrs=("198.51.100.0/24", "203.0.113.0/24"))
+        )
+        broker.network_policy = even_tighter
+        await broker.enforce_settings_on_live_work(check_network=False, check_pinned_targets=True)
+        assert broker._checked_network_policy == tighter_policy
+    finally:
+        await broker.shutdown()
+
+
