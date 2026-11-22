@@ -698,12 +698,25 @@ class ProposalCompiler:
         return rows
 
     def _account_rows(self, catalog: ToolCatalog, proposal: AccessProposalV1) -> list[ReviewItemV1]:
-        return [
-            self._gate_link_row(index, catalog, link)
-            if link.link_purpose is LinkPurpose.GATE
-            else self._account_link_row(index, catalog, link)
-            for index, link in enumerate(proposal.account_links)
-        ]
+        rows: list[ReviewItemV1] = []
+        for index, link in enumerate(proposal.account_links):
+            if link.purpose.strip().lower() in {"gate", "account"}:
+                logger.warning(
+                    "Refused a proposed account link whose purpose text looks like link_purpose. "
+                    "event=proposal_account_link_purpose_ambiguous tool_id=%s purpose=%s",
+                    link.tool_id,
+                    link.purpose.strip().lower(),
+                )
+                raise ProposalRefused(
+                    'purpose is your reason in plain words; set link_purpose to "gate" for the team gate credential '
+                    'or "account" for an account credential.'
+                )
+            rows.append(
+                self._gate_link_row(index, catalog, link)
+                if link.link_purpose is LinkPurpose.GATE
+                else self._account_link_row(index, catalog, link)
+            )
+        return rows
 
     @staticmethod
     def _gate_link_row(index: int, catalog: ToolCatalog, link: ProposedAccountLinkV1) -> ReviewItemV1:

@@ -687,3 +687,25 @@ def test_read_proposed_tool_file_refuses_tool_sets_and_reached_through(tmp_path:
     )
     with pytest.raises(CatalogError, match="cannot name a function tool"):
         read_proposed_tool_file(instance, "http:bad")
+
+
+@pytest.mark.parametrize("bad_purpose", ["gate", "account", " Gate ", "ACCOUNT"])
+def test_account_link_refuses_literal_gate_or_account_as_purpose_text(
+    tmp_path: Path, caplog, bad_purpose: str
+) -> None:
+    """C12/C22: typing 'gate' or 'account' into account_links[].purpose is refused with a pointer to link_purpose."""
+
+    instance = tmp_path / "instance"
+    write_instance_tool(instance, _gitea_tool())
+    compiler, _ = _compiler(tmp_path, instance)
+    proposal = AccessProposalV1(
+        title="Link Gitea",
+        reason="Need a gate link",
+        account_links=(
+            ProposedAccountLinkV1(tool_id="http:gitea", owner="team", purpose=bad_purpose),
+        ),
+    )
+    caplog.set_level("WARNING")
+    with pytest.raises(ProposalRefused, match='set link_purpose to "gate"'):
+        compiler.compile(proposal, person=None, task_id="task-1")
+    assert "event=proposal_account_link_purpose_ambiguous" in caplog.text

@@ -588,7 +588,7 @@ def test_tool_change_with_authorization_off_applies_with_confirmed_and_rolls_bac
         tool_file = instance / "control" / "access" / "tools" / "proposed-http-portainer.yaml"
         original_bytes = tool_file.read_bytes()
 
-        # 2. Propose a tool change with confirmed=False -> agreement_needed with trusted diff rows, file untouched.
+        # 2. Propose a tool change with confirmed=False -> agreement_needed with trusted diff rows and agreement_digest, file untouched.
         updated = {
             **PORTAINER,
             "hosts": ["portainer.example.test", "portainer-extra.example.test"],
@@ -596,30 +596,59 @@ def test_tool_change_with_authorization_off_applies_with_confirmed_and_rolls_bac
         }
         preview = _propose_tool_change(Context("tooluse-auth-off-2"), updated, confirmed=False)
         assert preview["status"] == "agreement_needed"
+        digest = preview["agreement_digest"]
+        assert isinstance(digest, str) and len(digest) == 64
         assert any("portainer-extra.example.test" in line for line in preview["changes"])
         assert any("Team gate credential added" in line for line in preview["changes"])
         assert tool_file.read_bytes() == original_bytes
+
+        # 2b. Calling confirmed=True without agreement_digest is refused (C21).
+        missing_digest = _propose_tool_change(Context("tooluse-auth-off-missing-digest"), updated, confirmed=True)
+        assert missing_digest["status"] == "refused" and "agreement_digest" in missing_digest["reason"]
+        assert tool_file.read_bytes() == original_bytes
+
+        # 2c. If the file changes between confirmed=False and confirmed=True, the old agreement_digest is refused (C21).
+        edited_bytes = original_bytes + b"# edited after agreement\n"
+        tool_file.write_bytes(edited_bytes)
+        stale_digest = _propose_tool_change(
+            Context("tooluse-auth-off-stale-digest"), updated, confirmed=True, agreement_digest=digest
+        )
+        assert stale_digest["status"] == "refused" and "changed since the person agreed" in stale_digest["reason"]
+        assert tool_file.read_bytes() == edited_bytes
+        # Restore original file so the digest matches again for subsequent steps.
+        tool_file.write_bytes(original_bytes)
 
         # 3. Built-in tool is still refused with authorization off.
         refused = _propose_tool_change(
             Context("tooluse-auth-off-builtin"),
             {**PORTAINER, "tool_id": "http:github", "hosts": ["api.github.com"]},
             confirmed=True,
+            agreement_digest=digest,
         )
         assert refused["status"] == "refused" and "built-in tool" in refused["reason"]
 
         # 4. A failure after replacing the file (e.g. protected data folder) restores the original file!
+        failed_preview = _propose_tool_change(
+            Context("tooluse-auth-off-rollback-preview"),
+            updated,
+            data_folders=[{"name": "bad_folder", "path": str(instance), "writable": False}],
+            confirmed=False,
+        )
+        assert failed_preview["status"] == "agreement_needed"
         failed = _propose_tool_change(
             Context("tooluse-auth-off-rollback"),
             updated,
             data_folders=[{"name": "bad_folder", "path": str(instance), "writable": False}],
             confirmed=True,
+            agreement_digest=failed_preview["agreement_digest"],
         )
         assert failed["status"] == "refused"
         assert tool_file.read_bytes() == original_bytes
 
-        # 5. confirmed=True applies the replacement cleanly.
-        applied = _propose_tool_change(Context("tooluse-auth-off-3"), updated, confirmed=True)
+        # 5. confirmed=True with the matching agreement_digest applies the replacement cleanly.
+        applied = _propose_tool_change(
+            Context("tooluse-auth-off-3"), updated, confirmed=True, agreement_digest=digest
+        )
         assert applied["status"] == "applied"
         assert b"portainer-extra.example.test" in tool_file.read_bytes()
         assert b"X-Gate" in tool_file.read_bytes()

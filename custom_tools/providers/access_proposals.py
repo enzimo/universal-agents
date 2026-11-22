@@ -60,6 +60,7 @@ from access_control.proposals import (
     ProposalCompiler,
     ProposalRefused,
     load_changeable_tool_file,
+    proposal_digest,
     proposal_summary,
     with_mcp_defaults,
     with_tool_change_baselines,
@@ -74,6 +75,7 @@ from custom_messages.contracts.access_v2 import (
     ChangeProposalV1,
     LinkOwnerKind,
     LinkPurpose,
+    contract_digest,
 )
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.task_v1 import ACCESS_REQUEST_INTERRUPT_KIND
@@ -291,7 +293,19 @@ def _when_tools_appear(agent: Any, installed: list[Any]) -> dict[str, str]:
     }
 
 
-def apply_by_agreement(agent: Any, proposal: AccessProposalV1, confirmed: bool) -> dict[str, Any]:
+def _agreement_digest(proposal: AccessProposalV1, change_rows: list[str]) -> str:
+    """Digest of the pinned proposal and trusted diff rows shown on ``confirmed=false``."""
+
+    return contract_digest({"proposal_digest": proposal_digest(proposal), "change_rows": change_rows})
+
+
+def apply_by_agreement(
+    agent: Any,
+    proposal: AccessProposalV1,
+    confirmed: bool,
+    *,
+    agreement_digest: str | None = None,
+) -> dict[str, Any]:
     """Single-person mode (D8): add or change tools, MCP servers and data folders after the person's agreement."""
 
     from custom_tools.workspace_scope import _protected, runtime_layout
@@ -299,13 +313,46 @@ def apply_by_agreement(agent: Any, proposal: AccessProposalV1, confirmed: bool) 
     layout = runtime_layout(agent)
     proposal, change_rows = _prepare_agreement_tool_changes(agent, layout.root, proposal)
     rows = _agreement_rows(agent, proposal, change_rows)
+    digest = _agreement_digest(proposal, change_rows) if proposal.tool_changes else None
     if not confirmed:
+        if digest is not None:
+            return {
+                "status": "agreement_needed",
+                "changes": rows,
+                "agreement_digest": digest,
+                "message": (
+                    "Authorization is off. Explain these changes to the person, get their agreement in the "
+                    f"conversation, and call again with confirmed=true and agreement_digest={digest!r}. "
+                    "Grants and restrictions are not needed."
+                ),
+            }
         return {
             "status": "agreement_needed",
             "changes": rows,
             "message": "Authorization is off. Explain these changes to the person, get their agreement in the "
             "conversation, and call again with confirmed=true. Grants and restrictions are not needed.",
         }
+    if digest is not None:
+        supplied = (agreement_digest or "").strip()
+        if not supplied:
+            logger.warning(
+                "Refused applying a tool change by agreement without an agreement digest. "
+                "event=proposal_agreement_digest_missing tool_changes=%s",
+                ",".join(changed.tool_id for changed in proposal.tool_changes),
+            )
+            raise ProposalRefused(
+                "Show the person the tool changes first (confirmed=false) and pass the returned "
+                "agreement_digest with confirmed=true."
+            )
+        if supplied != digest:
+            logger.warning(
+                "Refused applying a tool change by agreement because the tool changed since agreement. "
+                "event=proposal_agreement_digest_mismatch tool_changes=%s",
+                ",".join(changed.tool_id for changed in proposal.tool_changes),
+            )
+            raise ProposalRefused(
+                "The tool changed since the person agreed; show the changes again with confirmed=false before applying."
+            )
     programs: list[tuple[Path, OwnedFile]] = []
     written_tools: list[Path] = []
     replaced_tools: list[ReplacedFile] = []
@@ -491,14 +538,19 @@ def submit_and_wait(agent: Any, build: Callable[[], AccessProposalV1], tool_cont
     return _result(request, runtime_requests(agent).service.store)
 
 
-def _propose(proposal: AccessProposalV1, tool_context: ToolContext, confirmed: bool) -> dict[str, Any]:
+def _propose(
+    proposal: AccessProposalV1,
+    tool_context: ToolContext,
+    confirmed: bool,
+    agreement_digest: str | None = None,
+) -> dict[str, Any]:
     from custom_agents.access_runtime import runtime_access
 
     agent = get_agent_ref()
     if agent is None:
         raise RuntimeError("No agent is running this tool.")
     if not runtime_access(agent).enabled:
-        return apply_by_agreement(agent, proposal, confirmed)
+        return apply_by_agreement(agent, proposal, confirmed, agreement_digest=agreement_digest)
     return submit_and_wait(agent, lambda: proposal, tool_context)
 
 
@@ -517,6 +569,7 @@ async def propose_access_change(
     data_folders: list[dict[str, Any]] | None = None,
     revoke_grant_ids: list[str] | None = None,
     confirmed: bool = False,
+    agreement_digest: str | None = None,
 ) -> str:
     """Propose several access changes for one review by an administrator; your task waits.
 
@@ -571,16 +624,18 @@ async def propose_access_change(
       "until_revoked"|"task", "delegation_depth": 0|1, "reason"}. They serve
       the work of the person your task works for.
     - blocks: {"agent_type", "target", "reason"} to restrict a worker.
-    - account_links: {"tool_id", "owner": "team"|"person", "purpose",
-      "link_purpose": "account"|"gate"}: after approval the approver chooses
-      the credential in a form, and your task waits until the forms end; the
-      result says which links exist. For link_purpose "gate", owner must be
-      "team".
+    - account_links: {"tool_id", "owner": "team"|"person", "purpose" (your
+      reason in plain words), "link_purpose": "account"|"gate"}: after approval
+      the approver chooses the credential in a form, and your task waits until
+      the forms end; the result says which links exist. For link_purpose "gate",
+      owner must be "team".
     - data_folders: {"name", "path" (absolute host path), "writable"}.
     - revoke_grant_ids: grants to remove.
     Say plainly why in `reason`; the card shows trusted code's own summary of
     each item. With authorization off, get the person's agreement in the
-    conversation and call with confirmed=true.
+    conversation and call with confirmed=true; for `tool_changes`, first call
+    with confirmed=false to receive the diff summary and `agreement_digest`,
+    then pass that `agreement_digest` back with confirmed=true.
     """
 
     from custom_agents.access_runtime import AuthorizationOff
@@ -599,7 +654,7 @@ async def propose_access_change(
             clis,
             tool_changes,
         )
-        outcome = await asyncio.to_thread(_propose, proposal, tool_context, confirmed)
+        outcome = await asyncio.to_thread(_propose, proposal, tool_context, confirmed, agreement_digest)
     except InterruptException:
         raise
     except ValidationError as exc:
