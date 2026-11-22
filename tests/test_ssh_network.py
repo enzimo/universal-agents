@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import getpass
+import ipaddress
 from pathlib import Path
 import shutil
 import socket
@@ -32,6 +33,7 @@ from runtime_hosting.ssh import (
 from runtime_hosting.ssh_network import (
     SSHNetworkPolicy,
     SSHNetworkPolicyError,
+    ValidatedSSHHost,
     ssh_host_key_alias,
     validate_ssh_host,
 )
@@ -68,6 +70,28 @@ def _example_ssh_lines() -> dict[str, tuple[str, str]]:
     return entries
 
 
+def _first_local_non_loopback_ip() -> str | None:
+    """Return one non-loopback address assigned to this machine, if any."""
+
+    try:
+        output = subprocess.check_output(["hostname", "-I"], text=True, timeout=3).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for token in output.split():
+        try:
+            parsed = ipaddress.ip_address(token)
+        except ValueError:
+            continue
+        if not (
+            parsed.is_loopback
+            or parsed.is_link_local
+            or parsed.is_unspecified
+            or parsed.is_multicast
+        ):
+            return str(parsed)
+    return None
+
+
 def test_ssh_settings_defaults_and_config_schema_parity() -> None:
     settings = ExecutionSSHSettings()
 
@@ -77,6 +101,7 @@ def test_ssh_settings_defaults_and_config_schema_parity() -> None:
     assert settings.allowed_cidrs == ()
     assert settings.allowed_domains == ()
     assert settings.denied_cidrs == DEFAULT_SSH_DENIED_CIDRS
+    assert "fd00:ec2::254/128" in settings.denied_cidrs
 
     example = yaml.safe_load(EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8"))
     example_ssh = example["execution_control"]["ssh"]
@@ -142,6 +167,12 @@ def test_ssh_settings_validation_normalizes_and_rejects_bad_inputs() -> None:
         with pytest.raises(ValueError):
             ExecutionSSHSettings.model_validate(invalid)
 
+    # C20: empty/None and non-whole numbers raise clear ValueErrors naming the setting.
+    for field_name in ("lease_ttl_seconds", "transcript_limit_bytes", "max_delegation_ttl_seconds"):
+        for bad_value in (None, 3.9, "3.9", "abc"):
+            with pytest.raises(ValueError, match=rf"execution_control\.ssh\.{field_name}"):
+                ExecutionSSHSettings.model_validate({field_name: bad_value})
+
 
 @pytest.mark.parametrize(
     "host",
@@ -156,6 +187,8 @@ def test_ssh_settings_validation_normalizes_and_rejects_bad_inputs() -> None:
         "169.254.169.254",
         "fe80::1",
         "fe80::1%eth0",
+        "fd00:ec2::254",
+        "[fd00:ec2::254]",
         "::ffff:127.0.0.1",
         "::ffff:0.0.0.0",
         "::ffff:169.254.169.254",
@@ -172,12 +205,16 @@ def test_default_network_policy_refuses_loopback_unspecified_link_local_metadata
         validate_ssh_host(host, 22, policy)
 
 
-def test_network_policy_checks_resolved_ips_and_special_ranges_even_when_denied_cidrs_empty() -> None:
+def test_network_policy_checks_resolved_ips_special_ranges_and_scoped_ipv6() -> None:
+    def _never_resolve(host: str, port: int) -> tuple[str, ...]:
+        pytest.fail(f"DNS resolver must not be called for refused host {host!r}:{port}")
+
     policy = SSHNetworkPolicy.default()
+    # C16: localhost refused before DNS when allowed_cidrs is empty.
     with pytest.raises(SSHNetworkPolicyError):
-        validate_ssh_host("localhost", 22, policy, resolver=lambda _h, _p: ("127.0.0.1",))
+        validate_ssh_host("localhost", 22, policy, resolver=_never_resolve)
     with pytest.raises(SSHNetworkPolicyError):
-        validate_ssh_host("sub.localhost", 22, policy, resolver=lambda _h, _p: ("10.0.0.5",))
+        validate_ssh_host("sub.localhost", 22, policy, resolver=_never_resolve)
     with pytest.raises(SSHNetworkPolicyError):
         validate_ssh_host(
             "rebind.example.com",
@@ -186,13 +223,13 @@ def test_network_policy_checks_resolved_ips_and_special_ranges_even_when_denied_
             resolver=lambda _h, _p: ("203.0.113.10", "169.254.169.254"),
         )
 
-    # Even with denied_cidrs cleared, special ranges stay blocked unless explicitly in allowed_cidrs.
+    # C18: Even with denied_cidrs cleared, special ranges including IPv6 metadata stay blocked.
     open_policy = SSHNetworkPolicy(allowed_cidrs=(), allowed_domains=(), denied_cidrs=())
-    for special in ("127.0.0.1", "0.0.0.0", "::", "169.254.169.254", "224.0.0.1"):
+    for special in ("127.0.0.1", "0.0.0.0", "::", "169.254.169.254", "fd00:ec2::254", "224.0.0.1"):
         with pytest.raises(SSHNetworkPolicyError):
             validate_ssh_host(special, 22, open_policy)
 
-    # Explicit operator opt-in (removed from denied_cidrs and listed in allowed_cidrs) permits it.
+    # C19: Explicit operator opt-in permits 127.0.0.1/32 and switches other hosts to allowlist-only.
     explicit_loopback = SSHNetworkPolicy.from_settings(
         ExecutionSSHSettings.model_validate(
             {"denied_cidrs": [], "allowed_cidrs": ["127.0.0.1/32"]}
@@ -201,10 +238,43 @@ def test_network_policy_checks_resolved_ips_and_special_ranges_even_when_denied_
     validated = validate_ssh_host("127.0.0.1", 2222, explicit_loopback)
     assert validated.resolved_ip == "127.0.0.1"
     assert validated.host_key_alias == "[127.0.0.1]:2222"
+    with pytest.raises(SSHNetworkPolicyError):
+        validate_ssh_host("203.0.113.20", 22, explicit_loopback)
+
+    # C20: Explicitly allowed link-local literal preserves its IPv6 interface scope_id.
+    explicit_link_local = SSHNetworkPolicy.from_settings(
+        ExecutionSSHSettings.model_validate(
+            {"denied_cidrs": [], "allowed_cidrs": ["fe80::/10"]}
+        )
+    )
+    scoped = validate_ssh_host(
+        "fe80::1%eth0",
+        22,
+        explicit_link_local,
+        local_address_checker=lambda _ip: False,
+    )
+    assert scoped.resolved_ip == "fe80::1%eth0"
+    assert scoped.host == "fe80::1%eth0"
 
 
-def test_network_policy_enforces_allowed_domains_allowed_cidrs_and_denied_precedence() -> None:
-    policy = SSHNetworkPolicy.from_settings(
+def test_network_policy_refuses_unmatched_hostnames_before_dns_and_pins_either_list_rule() -> None:
+    def _fail_resolver(host: str, port: int) -> tuple[str, ...]:
+        pytest.fail(f"DNS lookup must not run before domain allowlist check for {host!r}:{port}")
+
+    # Domain-only allowlist refuses unrelated domains AND IP literals without resolving.
+    domain_only = SSHNetworkPolicy.from_settings(
+        ExecutionSSHSettings.model_validate({"allowed_domains": ["ops.example.com"]})
+    )
+    with pytest.raises(SSHNetworkPolicyError):
+        validate_ssh_host("exfil.attacker.example", 22, domain_only, resolver=_fail_resolver)
+    with pytest.raises(SSHNetworkPolicyError):
+        validate_ssh_host("203.0.113.10", 22, domain_only, resolver=_fail_resolver)
+
+    # Combined allowlists (C16 + C19):
+    # - Unmatched hostnames are refused BEFORE DNS even when allowed_cidrs is non-empty.
+    # - Matched allowed_domains hostnames pass even when resolving outside allowed_cidrs (either-list).
+    # - IP literals are checked against allowed_cidrs.
+    combined = SSHNetworkPolicy.from_settings(
         ExecutionSSHSettings.model_validate(
             {
                 "allowed_domains": ["ops.example.com"],
@@ -213,39 +283,44 @@ def test_network_policy_enforces_allowed_domains_allowed_cidrs_and_denied_preced
             }
         )
     )
+    with pytest.raises(SSHNetworkPolicyError):
+        validate_ssh_host("evilops.example.com", 22, combined, resolver=_fail_resolver)
 
-    ok_domain = validate_ssh_host(
+    ok_domain_outside_cidr = validate_ssh_host(
         "box1.ops.example.com",
         22,
-        policy,
-        resolver=lambda _h, _p: ("192.168.10.20",),
+        combined,
+        resolver=lambda _h, _p: ("2001:db8::10", "192.168.10.20"),
+        local_address_checker=lambda _ip: False,
     )
-    assert ok_domain.host == "box1.ops.example.com"
-    assert ok_domain.resolved_ip == "192.168.10.20"
-    assert ok_domain.host_key_alias == "box1.ops.example.com"
+    assert ok_domain_outside_cidr.host == "box1.ops.example.com"
+    assert ok_domain_outside_cidr.resolved_ip == "2001:db8::10"
+    assert ok_domain_outside_cidr.resolved_ips == ("2001:db8::10", "192.168.10.20")
+    fallback_host = ok_domain_outside_cidr.with_resolved_ip("192.168.10.20")
+    assert fallback_host.resolved_ip == "192.168.10.20"
+    assert fallback_host.host_key_alias == "box1.ops.example.com"
+    with pytest.raises(ValueError):
+        ok_domain_outside_cidr.with_resolved_ip("203.0.113.99")
 
-    ok_cidr = validate_ssh_host("100.64.1.5", 2222, policy)
+    ok_cidr = validate_ssh_host(
+        "100.64.1.5",
+        2222,
+        combined,
+        local_address_checker=lambda _ip: False,
+    )
     assert ok_cidr.resolved_ip == "100.64.1.5"
     assert ok_cidr.host_key_alias == "[100.64.1.5]:2222"
 
-    # Partial suffix must not match allowed_domains.
-    with pytest.raises(SSHNetworkPolicyError):
-        validate_ssh_host(
-            "evilops.example.com",
-            22,
-            policy,
-            resolver=lambda _h, _p: ("192.168.10.20",),
-        )
-
     # Denied CIDR overrides both allowed_cidrs and allowed_domains.
     with pytest.raises(SSHNetworkPolicyError):
-        validate_ssh_host("100.64.99.5", 22, policy)
+        validate_ssh_host("100.64.99.5", 22, combined, local_address_checker=lambda _ip: False)
     with pytest.raises(SSHNetworkPolicyError):
         validate_ssh_host(
             "box2.ops.example.com",
             22,
-            policy,
+            combined,
             resolver=lambda _h, _p: ("100.64.99.5",),
+            local_address_checker=lambda _ip: False,
         )
 
     # DNS failure and option-injection hostnames fail closed.
@@ -253,11 +328,37 @@ def test_network_policy_enforces_allowed_domains_allowed_cidrs_and_denied_preced
         raise socket.gaierror("Name or service not known")
 
     with pytest.raises(SSHNetworkPolicyError):
-        validate_ssh_host("missing.ops.example.com", 22, policy, resolver=_dns_fail)
+        validate_ssh_host("missing.ops.example.com", 22, combined, resolver=_dns_fail)
     with pytest.raises(SSHNetworkPolicyError):
-        validate_ssh_host("-oProxyCommand=id", 22, policy)
+        validate_ssh_host("-oProxyCommand=id", 22, combined, resolver=_fail_resolver)
     with pytest.raises(SSHNetworkPolicyError):
-        validate_ssh_host("box1.ops.example.com", 0, policy)
+        validate_ssh_host("box1.ops.example.com", 0, combined, resolver=_fail_resolver)
+
+
+def test_network_policy_refuses_this_machines_own_non_loopback_address() -> None:
+    local_ip = _first_local_non_loopback_ip()
+    if local_ip is None:
+        pytest.skip("Test machine has no non-loopback network address assigned.")
+
+    policy = SSHNetworkPolicy.default()
+    with pytest.raises(SSHNetworkPolicyError, match="assigned to this machine"):
+        validate_ssh_host(local_ip, 22, policy)
+    with pytest.raises(SSHNetworkPolicyError, match="assigned to this machine"):
+        validate_ssh_host(
+            "self-host.example.test",
+            22,
+            policy,
+            resolver=lambda _h, _p: (local_ip,),
+        )
+
+    # Explicitly allowing this machine's CIDR permits it.
+    explicit = SSHNetworkPolicy.from_settings(
+        ExecutionSSHSettings.model_validate(
+            {"allowed_cidrs": [f"{local_ip}/32" if ":" not in local_ip else f"{local_ip}/128"]}
+        )
+    )
+    allowed = validate_ssh_host(local_ip, 22, explicit)
+    assert allowed.resolved_ip == local_ip
 
 
 def test_ssh_host_key_alias_formats_default_and_non_default_ports() -> None:
@@ -339,7 +440,8 @@ def test_real_openssh_pinned_ip_with_host_key_alias_on_non_default_port(
     alias = ssh_host_key_alias("ops.internal", port)
     assert alias == f"[ops.internal]:{port}"
     known_hosts = tmp_path / "known_hosts"
-    known_hosts.write_text(f"{alias} {algorithm} {encoded_key}\n", encoding="utf-8")
+    initial_known_hosts_bytes = f"{alias} {algorithm} {encoded_key}\n".encode("utf-8")
+    known_hosts.write_bytes(initial_known_hosts_bytes)
 
     key_bytes = base64.b64decode(encoded_key)
     target = SSHConnectionTargetV1(
@@ -375,12 +477,54 @@ def test_real_openssh_pinned_ip_with_host_key_alias_on_non_default_port(
     )
     broker._verify_material(session, material)
 
-    argv = list(broker._ssh_argv(session, material, resolved_ip="127.0.0.1"))
-    assert "HostName=127.0.0.1" in argv
+    # Unpinned operator-configured path keeps CheckHostIP=yes.
+    unpinned_argv = broker._ssh_argv(session, material)
+    assert "CheckHostIP=yes" in unpinned_argv
+    assert "CheckHostIP=no" not in unpinned_argv
+
+    # C15 + C20: Pinned path takes ValidatedSSHHost and replaces CheckHostIP=yes with CheckHostIP=no.
+    # Using ::ffff:127.0.0.1 exercises OpenSSH's non-loopback CheckHostIP code path.
+    validated = ValidatedSSHHost(
+        host="ops.internal",
+        port=port,
+        resolved_ip="::ffff:127.0.0.1",
+        resolved_ips=("::ffff:127.0.0.1",),
+        host_key_alias=alias,
+    )
+    with pytest.raises(ValueError, match="port"):
+        broker._ssh_argv(
+            session,
+            material,
+            validated_host=ValidatedSSHHost(
+                host="ops.internal",
+                port=port + 1,
+                resolved_ip="127.0.0.1",
+                resolved_ips=("127.0.0.1",),
+                host_key_alias=ssh_host_key_alias("ops.internal", port + 1),
+            ),
+        )
+
+    argv = list(broker._ssh_argv(session, material, validated_host=validated))
+    assert "CheckHostIP=no" in argv
+    assert "CheckHostIP=yes" not in argv
+    assert "HostName=::ffff:127.0.0.1" in argv
     assert f"HostKeyAlias={alias}" in argv
-    # Replace -tt with -T for non-interactive command verification against real sshd.
     argv[argv.index("-tt")] = "-T"
     argv.append("echo pinned-ok")
+
+    # C15: Refusal case when known_hosts holds the right key under a different name.
+    wrong_name_known_hosts = tmp_path / "wrong_known_hosts"
+    wrong_name_known_hosts.write_text(
+        f"[other.internal]:{port} {algorithm} {encoded_key}\n",
+        encoding="utf-8",
+    )
+    wrong_material = SSHCredentialMaterial(
+        identity_file=client_key,
+        known_hosts_file=wrong_name_known_hosts,
+    )
+    wrong_argv = list(broker._ssh_argv(session, wrong_material, validated_host=validated))
+    wrong_argv[wrong_argv.index("-tt")] = "-T"
+    wrong_argv.append("echo should-not-run")
 
     sshd = subprocess.Popen(
         [sshd_bin, "-D", "-e", "-f", str(sshd_config)],
@@ -399,6 +543,19 @@ def test_real_openssh_pinned_ip_with_host_key_alias_on_non_default_port(
         )
         assert result.returncode == 0, f"ssh failed: stdout={result.stdout!r} stderr={result.stderr!r}"
         assert "pinned-ok" in result.stdout
+        assert "Permanently added" not in result.stderr
+        assert known_hosts.read_bytes() == initial_known_hosts_bytes
+
+        wrong_result = subprocess.run(
+            wrong_argv,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert wrong_result.returncode != 0
+        assert "Host key verification failed" in wrong_result.stderr
+        assert "should-not-run" not in wrong_result.stdout
     finally:
         sshd.terminate()
         try:

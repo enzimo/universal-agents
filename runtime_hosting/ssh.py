@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import timedelta
 import fcntl
@@ -20,7 +20,6 @@ import stat
 import struct
 import subprocess
 import termios
-from typing import Protocol
 
 from runtime_hosting.artifacts import ArtifactStore
 from runtime_hosting.authorization import ExecutionAccessGuard
@@ -29,35 +28,18 @@ from runtime_hosting.execution_contracts import (
     InteractiveSessionStatus,
     InteractiveSessionV1,
 )
-from runtime_hosting.ssh_network import ssh_host_key_alias
+from runtime_hosting.ssh_credentials import (
+    CatalogSSHCredentialMaterialProvider,
+    CompositeSSHCredentialMaterialProvider,
+    ConfiguredSSHCredentialMaterialProvider,
+    SSHCredentialMaterial,
+    SSHCredentialMaterialProvider,
+    SessionSecretScrubber,
+    StreamSecretScrubber,
+    sweep_stale_ssh_ephemeral_dirs,
+)
+from runtime_hosting.ssh_network import ValidatedSSHHost, ssh_host_key_alias
 from storage.execution_control_repository import ExecutionControlRepository
-
-
-@dataclass(frozen=True)
-class SSHCredentialMaterial:
-    identity_file: Path
-    known_hosts_file: Path
-
-
-class SSHCredentialMaterialProvider(Protocol):
-    def prepare(
-        self, session: InteractiveSessionV1
-    ) -> AbstractContextManager[SSHCredentialMaterial]: ...
-
-
-@dataclass(frozen=True)
-class ConfiguredSSHCredentialMaterialProvider:
-    """Resolve only operator-configured binding ids to broker-owned key paths."""
-
-    materials: dict[str, SSHCredentialMaterial]
-
-    def prepare(
-        self, session: InteractiveSessionV1
-    ) -> AbstractContextManager[SSHCredentialMaterial]:
-        material = self.materials.get(session.target.credential_binding_id)
-        if material is None:
-            raise PermissionError("SSH credential binding is not installed in this broker.")
-        return nullcontext(material)
 
 
 @dataclass
@@ -136,11 +118,14 @@ class SSHSessionBroker:
                 rows=claimed.terminal_rows,
                 columns=claimed.terminal_columns,
             )
+            child_env = self._ssh_env(material)
             process = subprocess.Popen(
                 self._ssh_argv(claimed, material),
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
+                cwd=str(material.working_dir) if material.working_dir is not None else None,
+                env=child_env,
                 close_fds=True,
                 start_new_session=True,
             )
@@ -392,12 +377,21 @@ class SSHSessionBroker:
             raise SSHSessionUnavailable(f"SSH session {session_id!r} is not live in this broker.")
         return live
 
+    @staticmethod
+    def _ssh_env(material: SSHCredentialMaterial) -> dict[str, str]:
+        env = dict(os.environ)
+        if material.ssh_auth_sock:
+            env["SSH_AUTH_SOCK"] = material.ssh_auth_sock
+        else:
+            env.pop("SSH_AUTH_SOCK", None)
+        return env
+
     def _ssh_argv(
         self,
         session: InteractiveSessionV1,
         material: SSHCredentialMaterial,
         *,
-        resolved_ip: str | None = None,
+        validated_host: ValidatedSSHHost | None = None,
     ) -> tuple[str, ...]:
         target = session.target
         remote_command = (
@@ -411,16 +405,29 @@ class SSHSessionBroker:
             if target.remote_persistent_session_name
             else ()
         )
-        host_pinning_args: tuple[str, ...] = (
-            (
+        if validated_host is not None:
+            if validated_host.port != target.port:
+                raise ValueError(
+                    f"Validated SSH host port {validated_host.port} does not match target port {target.port}."
+                )
+            # OpenSSH applies the first value of an option. When pinning to a
+            # validated IP with HostKeyAlias, disable CheckHostIP so ssh pins
+            # strictly to the [host]:port entry without mutating known_hosts or
+            # refusing on unrelated historical IP lines.
+            host_pinning_args: tuple[str, ...] = (
                 "-o",
-                f"HostName={resolved_ip}",
+                "CheckHostIP=no",
                 "-o",
-                f"HostKeyAlias={ssh_host_key_alias(target.host, target.port)}",
+                f"HostName={validated_host.resolved_ip}",
+                "-o",
+                f"HostKeyAlias={validated_host.host_key_alias}",
             )
-            if resolved_ip
-            else ()
-        )
+        else:
+            host_pinning_args = (
+                "-o",
+                "CheckHostIP=yes",
+            )
+        identity_agent = "SSH_AUTH_SOCK" if material.ssh_auth_sock else "none"
         return (
             self.ssh_executable,
             "-tt",
@@ -437,7 +444,7 @@ class SSHSessionBroker:
             "-o",
             "IdentitiesOnly=yes",
             "-o",
-            "IdentityAgent=none",
+            f"IdentityAgent={identity_agent}",
             "-o",
             "ForwardAgent=no",
             "-o",
@@ -450,8 +457,6 @@ class SSHSessionBroker:
             "ProxyCommand=none",
             "-o",
             "CanonicalizeHostname=no",
-            "-o",
-            "CheckHostIP=yes",
             *host_pinning_args,
             "-o",
             "ConnectTimeout=15",
@@ -516,9 +521,14 @@ class SSHSessionBroker:
 
 
 __all__ = [
+    "CatalogSSHCredentialMaterialProvider",
+    "CompositeSSHCredentialMaterialProvider",
+    "ConfiguredSSHCredentialMaterialProvider",
     "SSHCredentialMaterial",
     "SSHCredentialMaterialProvider",
-    "ConfiguredSSHCredentialMaterialProvider",
     "SSHSessionBroker",
     "SSHSessionUnavailable",
+    "SessionSecretScrubber",
+    "StreamSecretScrubber",
+    "sweep_stale_ssh_ephemeral_dirs",
 ]

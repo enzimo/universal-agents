@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import ipaddress
+from pathlib import Path
 import re
 import socket
+import sys
 from typing import TYPE_CHECKING
 
 from default_values import DEFAULT_SSH_DENIED_CIDRS
@@ -17,8 +19,16 @@ if TYPE_CHECKING:
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 SSHHostResolver = Callable[[str, int], Sequence[str]]
+LocalAddressChecker = Callable[[IPAddress], bool]
 
 _HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_IPV6_SCOPE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+# Cloud instance metadata addresses outside 169.254.0.0/16 that remain blocked
+# in code even if an existing instance_config.yaml carries an older denied_cidrs list.
+_ALWAYS_BLOCKED_METADATA_NETWORKS: tuple[IPNetwork, ...] = (
+    ipaddress.ip_network("fd00:ec2::254/128"),
+)
 
 
 class SSHNetworkPolicyError(PermissionError):
@@ -64,6 +74,19 @@ class ValidatedSSHHost:
     resolved_ips: tuple[str, ...]
     host_key_alias: str
 
+    def with_resolved_ip(self, ip: str) -> "ValidatedSSHHost":
+        """Return a copy pinned to another validated address from ``resolved_ips``."""
+
+        if ip not in self.resolved_ips:
+            raise ValueError(f"Address {ip!r} is not in this target's validated addresses.")
+        return ValidatedSSHHost(
+            host=self.host,
+            port=self.port,
+            resolved_ip=ip,
+            resolved_ips=self.resolved_ips,
+            host_key_alias=self.host_key_alias,
+        )
+
 
 def ssh_host_key_alias(host: str, port: int) -> str:
     """Return the OpenSSH known_hosts / HostKeyAlias entry name for host and port."""
@@ -71,10 +94,51 @@ def ssh_host_key_alias(host: str, port: int) -> str:
     return host if port == 22 else f"[{host}]:{port}"
 
 
-def default_ssh_host_resolver(host: str, port: int) -> tuple[str, ...]:
-    """Resolve an SSH hostname to deduplicated IP strings via system getaddrinfo."""
+def normalize_ssh_hostname(raw_host: str) -> str:
+    """Validate and normalize an SSH hostname or domain (lowercase, no trailing dot).
 
-    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    Shared by both runtime settings validation (``allowed_domains``) and
+    ``validate_ssh_host`` so domain matching rules cannot drift apart.
+    """
+
+    if not isinstance(raw_host, str):
+        raise ValueError("SSH hostname must be a non-empty string.")
+    candidate = raw_host.strip().lower()
+    if candidate.endswith("."):
+        candidate = candidate[:-1]
+    if not candidate or len(candidate) > 253:
+        raise ValueError(f"Invalid SSH hostname {raw_host!r}.")
+    if candidate.startswith("-") or any(ord(ch) <= 32 or ord(ch) == 127 for ch in candidate):
+        raise ValueError(f"Invalid SSH hostname {raw_host!r}.")
+    labels = candidate.split(".")
+    if any(not _HOST_LABEL_RE.match(label) for label in labels):
+        raise ValueError(f"Invalid SSH hostname {raw_host!r}.")
+    return candidate
+
+
+def default_ssh_host_resolver(host: str, port: int) -> tuple[str, ...]:
+    """Resolve an SSH hostname to deduplicated IP strings via system getaddrinfo.
+
+    Prefers ``AI_ADDRCONFIG`` so machines without IPv6 routing receive routable
+    addresses first, falling back to unfiltered resolution when ``AI_ADDRCONFIG``
+    returns nothing (for example loopback-only setups).
+    """
+
+    infos: list[tuple[socket.AddressFamily, socket.SocketKind, int, str, tuple[object, ...]]] = []
+    if hasattr(socket, "AI_ADDRCONFIG"):
+        try:
+            infos = list(
+                socket.getaddrinfo(
+                    host,
+                    port,
+                    type=socket.SOCK_STREAM,
+                    flags=socket.AI_ADDRCONFIG,
+                )
+            )
+        except OSError:
+            infos = []
+    if not infos:
+        infos = list(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
     resolved: list[str] = []
     seen: set[str] = set()
     for _family, _socktype, _proto, _canonname, sockaddr in infos:
@@ -85,37 +149,114 @@ def default_ssh_host_resolver(host: str, port: int) -> tuple[str, ...]:
     return tuple(resolved)
 
 
+def _ipv_nonlocal_bind_enabled(family: socket.AddressFamily) -> bool:
+    """Return True on Linux when the kernel allows binding arbitrary non-local IPs."""
+
+    if sys.platform != "linux":
+        return False
+    sysctl_path = (
+        Path("/proc/sys/net/ipv6/ip_nonlocal_bind")
+        if family == socket.AF_INET6
+        else Path("/proc/sys/net/ipv4/ip_nonlocal_bind")
+    )
+    try:
+        return sysctl_path.read_text(encoding="utf-8").strip() == "1"
+    except OSError:
+        return False
+
+
+def is_local_machine_address(ip: IPAddress) -> bool:
+    """Return True if ``ip`` (or its IPv4-mapped form) is assigned to this machine.
+
+    Uses a cheap ephemeral UDP bind on port 0, which succeeds only for addresses
+    assigned to a local interface (unless Linux ``ip_nonlocal_bind`` is enabled).
+    """
+
+    for candidate in _candidate_addresses(ip):
+        family = (
+            socket.AF_INET6
+            if isinstance(candidate, ipaddress.IPv6Address)
+            else socket.AF_INET
+        )
+        if _ipv_nonlocal_bind_enabled(family):
+            continue
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                sock.bind((str(candidate), 0))
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def _domain_matches(hostname: str, allowed_domains: tuple[str, ...]) -> bool:
+    return any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in allowed_domains
+    )
+
+
 def validate_ssh_host(
     host: str,
     port: int,
     policy: SSHNetworkPolicy,
     *,
     resolver: SSHHostResolver | None = None,
+    local_address_checker: LocalAddressChecker | None = None,
 ) -> ValidatedSSHHost:
     """Validate a host and port against operator SSH network policy.
 
-    Always evaluates resolved IP addresses (never only typed hostname text),
-    refuses denied CIDRs unconditionally, refuses special ranges (loopback,
-    link-local, unspecified, multicast, including IPv4-mapped IPv6 forms)
-    unless explicitly allowed in ``policy.allowed_cidrs``, and returns the
-    validated IP and ``HostKeyAlias`` for DNS-rebinding-safe pinning.
+    Evaluation order prevents DNS exfiltration and DNS rebinding:
+    1. Reject invalid ports/host syntax without resolving.
+    2. When ``allowed_domains`` is non-empty, refuse any hostname outside
+       ``allowed_domains`` *before* calling DNS; IP literals are judged by
+       ``allowed_cidrs`` alone.
+    3. Refuse ``localhost`` / ``*.localhost`` before calling DNS when
+       ``allowed_cidrs`` is empty.
+    4. Resolve hostnames and validate every resolved IP against ``denied_cidrs``,
+       built-in special/metadata ranges, and this machine's own addresses
+       (all refused unless explicitly covered by ``allowed_cidrs``).
+    5. Return a ``ValidatedSSHHost`` carrying the validated IP(s) and exact
+       OpenSSH ``HostKeyAlias`` for DNS-rebinding-safe pinning.
     """
 
     if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
         raise SSHNetworkPolicyError("SSH target port must be an integer between 1 and 65535.")
 
     normalized_host, ip_literal = _normalize_host(host)
+    is_ip_literal = ip_literal is not None
+    allowlist_active = bool(policy.allowed_cidrs or policy.allowed_domains)
+
+    # Decide by host/name before any DNS lookup wherever the name alone settles it.
+    if is_ip_literal:
+        if allowlist_active and not policy.allowed_cidrs:
+            raise SSHNetworkPolicyError(
+                "SSH target IP literal is not permitted when only execution_control.ssh.allowed_domains is set."
+            )
+    else:
+        if (
+            normalized_host == "localhost" or normalized_host.endswith(".localhost")
+        ) and not policy.allowed_cidrs:
+            raise SSHNetworkPolicyError(
+                "SSH target hostname localhost is refused unless its resolved address is explicitly allowed."
+            )
+        if policy.allowed_domains and not _domain_matches(
+            normalized_host, policy.allowed_domains
+        ):
+            raise SSHNetworkPolicyError(
+                "SSH target hostname is not permitted by execution_control.ssh.allowed_domains."
+            )
+
     if ip_literal is not None:
         resolved_ips: tuple[IPAddress, ...] = (ip_literal,)
-        is_ip_literal = True
     else:
         resolved_ips = _resolve_host_ips(
             normalized_host,
             port,
             resolver=resolver or default_ssh_host_resolver,
         )
-        is_ip_literal = False
 
+    check_local = local_address_checker or is_local_machine_address
     for ip in resolved_ips:
         if _ip_in_networks(ip, policy.denied_cidrs):
             raise SSHNetworkPolicyError(
@@ -123,8 +264,13 @@ def validate_ssh_host(
             )
         if _is_special_address(ip) and not _ip_in_networks(ip, policy.allowed_cidrs):
             raise SSHNetworkPolicyError(
-                "SSH target resolves to a loopback, link-local, unspecified, or multicast "
-                "address that is not explicitly allowed in execution_control.ssh.allowed_cidrs."
+                "SSH target resolves to a loopback, link-local, unspecified, cloud metadata, "
+                "or multicast address that is not explicitly allowed in execution_control.ssh.allowed_cidrs."
+            )
+        if check_local(ip) and not _ip_in_networks(ip, policy.allowed_cidrs):
+            raise SSHNetworkPolicyError(
+                "SSH target resolves to an address assigned to this machine, which is refused "
+                "unless explicitly allowed in execution_control.ssh.allowed_cidrs."
             )
 
     if (
@@ -139,19 +285,19 @@ def validate_ssh_host(
             "SSH target hostname localhost is refused unless its resolved address is explicitly allowed."
         )
 
-    if policy.allowed_cidrs or policy.allowed_domains:
-        domain_allowed = (not is_ip_literal) and any(
-            normalized_host == domain or normalized_host.endswith(f".{domain}")
-            for domain in policy.allowed_domains
-        )
-        cidrs_allowed = bool(policy.allowed_cidrs) and all(
-            _ip_in_networks(ip, policy.allowed_cidrs) for ip in resolved_ips
-        )
-        if not (domain_allowed or cidrs_allowed):
-            raise SSHNetworkPolicyError(
-                "SSH target is not permitted by execution_control.ssh.allowed_cidrs "
-                "or execution_control.ssh.allowed_domains."
-            )
+    if allowlist_active:
+        if is_ip_literal:
+            if not all(_ip_in_networks(ip, policy.allowed_cidrs) for ip in resolved_ips):
+                raise SSHNetworkPolicyError(
+                    "SSH target is not permitted by execution_control.ssh.allowed_cidrs."
+                )
+        elif not policy.allowed_domains:
+            # Only allowed_cidrs is configured; hostnames must resolve inside allowed_cidrs.
+            if not all(_ip_in_networks(ip, policy.allowed_cidrs) for ip in resolved_ips):
+                raise SSHNetworkPolicyError(
+                    "SSH target is not permitted by execution_control.ssh.allowed_cidrs "
+                    "or execution_control.ssh.allowed_domains."
+                )
 
     canonical_ips = tuple(_canonical_ip_text(ip) for ip in resolved_ips)
     canonical_host = canonical_ips[0] if is_ip_literal else normalized_host
@@ -183,21 +329,26 @@ def _normalize_host(raw_host: str) -> tuple[str, IPAddress | None]:
             raise SSHNetworkPolicyError("Bracketed SSH target host must be a valid IPv6 address.") from exc
         if not isinstance(parsed_v6, ipaddress.IPv6Address):
             raise SSHNetworkPolicyError("Bracketed SSH target host must be an IPv6 address.")
+        _validate_ipv6_scope_id(parsed_v6)
         return _canonical_ip_text(parsed_v6), parsed_v6
 
     ip_literal = _parse_ip_literal(candidate)
     if ip_literal is not None:
+        if isinstance(ip_literal, ipaddress.IPv6Address):
+            _validate_ipv6_scope_id(ip_literal)
         return _canonical_ip_text(ip_literal), ip_literal
 
-    lowered = candidate.lower()
-    if lowered.endswith("."):
-        lowered = lowered[:-1]
-    if not lowered or len(lowered) > 253:
-        raise SSHNetworkPolicyError("SSH target hostname is invalid.")
-    labels = lowered.split(".")
-    if any(not _HOST_LABEL_RE.match(label) for label in labels):
-        raise SSHNetworkPolicyError("SSH target hostname is invalid.")
-    return lowered, None
+    try:
+        normalized = normalize_ssh_hostname(candidate)
+    except ValueError as exc:
+        raise SSHNetworkPolicyError("SSH target hostname is invalid.") from exc
+    return normalized, None
+
+
+def _validate_ipv6_scope_id(ip: ipaddress.IPv6Address) -> None:
+    scope_id = ip.scope_id
+    if scope_id is not None and not _IPV6_SCOPE_ID_RE.fullmatch(scope_id):
+        raise SSHNetworkPolicyError("SSH target IPv6 zone identifier is invalid.")
 
 
 def _parse_ip_literal(text: str) -> IPAddress | None:
@@ -235,6 +386,8 @@ def _resolve_host_ips(
             raise SSHNetworkPolicyError(
                 f"DNS resolver returned invalid IP address for SSH target host {host!r}."
             ) from exc
+        if isinstance(parsed, ipaddress.IPv6Address):
+            _validate_ipv6_scope_id(parsed)
         key = _canonical_ip_text(parsed)
         if key not in seen:
             seen.add(key)
@@ -254,7 +407,10 @@ def _candidate_addresses(ip: IPAddress) -> tuple[IPAddress, ...]:
 
 def _canonical_ip_text(ip: IPAddress) -> str:
     if isinstance(ip, ipaddress.IPv6Address):
-        return str(ipaddress.IPv6Address(ip.packed))
+        base = str(ipaddress.IPv6Address(ip.packed))
+        if ip.scope_id:
+            return f"{base}%{ip.scope_id}"
+        return base
     return str(ip)
 
 
@@ -268,6 +424,8 @@ def _ip_in_networks(ip: IPAddress, networks: tuple[IPNetwork, ...]) -> bool:
 
 
 def _is_special_address(ip: IPAddress) -> bool:
+    if _ip_in_networks(ip, _ALWAYS_BLOCKED_METADATA_NETWORKS):
+        return True
     return any(
         candidate.is_loopback
         or candidate.is_link_local
@@ -278,11 +436,14 @@ def _is_special_address(ip: IPAddress) -> bool:
 
 
 __all__ = [
+    "LocalAddressChecker",
     "SSHHostResolver",
     "SSHNetworkPolicy",
     "SSHNetworkPolicyError",
     "ValidatedSSHHost",
     "default_ssh_host_resolver",
+    "is_local_machine_address",
+    "normalize_ssh_hostname",
     "ssh_host_key_alias",
     "validate_ssh_host",
 ]

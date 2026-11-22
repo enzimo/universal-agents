@@ -81,6 +81,7 @@ def test_fixed_locations_outside_the_agent_areas(tmp_path):
         # /upgrade: the exports and the supervisor's requests.
         layout.exports_dir: root / "exports",
         layout.team_export_requests_dir: root / "runtime" / "team-export" / "requests",
+        layout.ssh_ephemeral_dir: root / "runtime" / "ssh-ephemeral",
     }
     for actual, wanted in expected.items():
         assert actual == wanted

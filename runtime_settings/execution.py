@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 import ipaddress
-import re
 from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 from default_values import EXECUTION_CONTROL_DEFAULTS
 from runtime_hosting.execution_contracts import ExecutionProfileV1
-
-_SSH_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+from runtime_hosting.ssh_network import normalize_ssh_hostname
 
 
 class ExecutionControlRunnerSettings(BaseModel):
@@ -108,11 +106,23 @@ class ExecutionSSHSettings(BaseModel):
     )
     @classmethod
     def _normalize_positive_int(cls, value: Any, info: Any) -> int:
-        if isinstance(value, bool):
+        if value is None or isinstance(value, (bool, float)):
             raise ValueError(
                 f"execution_control.ssh.{info.field_name} must be a positive integer."
             )
-        parsed = int(value)
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or not stripped.lstrip("+-").isdigit():
+                raise ValueError(
+                    f"execution_control.ssh.{info.field_name} must be a positive integer."
+                )
+            parsed = int(stripped)
+        else:
+            raise ValueError(
+                f"execution_control.ssh.{info.field_name} must be a positive integer."
+            )
         if parsed <= 0:
             raise ValueError(f"execution_control.ssh.{info.field_name} must be > 0.")
         return parsed
@@ -157,26 +167,21 @@ class ExecutionSSHSettings(BaseModel):
                 raise ValueError(
                     "execution_control.ssh.allowed_domains entries must be domain strings."
                 )
-            candidate = item.strip().lower()
-            if candidate.endswith("."):
-                candidate = candidate[:-1]
-            if not candidate or len(candidate) > 253:
-                raise ValueError(
-                    f"execution_control.ssh.allowed_domains contains invalid domain {item!r}."
-                )
+            stripped = item.strip().rstrip(".")
             try:
-                ipaddress.ip_address(candidate)
+                ipaddress.ip_address(stripped)
             except ValueError:
                 pass
             else:
                 raise ValueError(
                     f"execution_control.ssh.allowed_domains entry {item!r} is an IP address; use allowed_cidrs instead."
                 )
-            labels = candidate.split(".")
-            if any(not _SSH_DOMAIN_LABEL_RE.match(label) for label in labels):
+            try:
+                candidate = normalize_ssh_hostname(item)
+            except ValueError as exc:
                 raise ValueError(
                     f"execution_control.ssh.allowed_domains contains invalid domain {item!r}."
-                )
+                ) from exc
             if candidate not in seen:
                 seen.add(candidate)
                 normalized.append(candidate)
